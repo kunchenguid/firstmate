@@ -2048,7 +2048,10 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # --auto is required on OpenCode v2: the v1-shaped OPENCODE_CONFIG_CONTENT
+  # permission object is not honored there, so without --auto a worker stalls on
+  # an interactive external-directory prompt (verified live on 2.0.18).
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode --auto __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -4570,33 +4573,64 @@ const busyEvent = (state, event) =>
   });
 export const FmBusyState = async () => {
   let activeSession = null;
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.status") {
-        const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
-        if (statusType === "busy" || statusType === "retry") {
-          if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-          return;
-        }
-        if (statusType === "idle" && sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-status-idle");
-        }
+  const handle = async (event) => {
+    if (event.type === "session.status") {
+      const props = event.properties || {};
+      const sessionID = props.sessionID;
+      const statusType = props.status && props.status.type;
+      if (statusType === "busy" || statusType === "retry") {
+        if (activeSession === null) activeSession = sessionID;
+        if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
         return;
       }
-      if (event.type === "session.idle") {
-        if (event.properties.sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-idle");
-        }
-        await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
-        });
+      if (statusType === "idle" && sessionID === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-status-idle");
       }
-    },
+      return;
+    }
+    if (event.type === "session.idle") {
+      if ((event.properties || {}).sessionID === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-idle");
+      }
+      await new Promise((resolve) => {
+        execFile("touch", ["$TURNEND"], () => resolve());
+      });
+    }
   };
+  return { event: async ({ event }) => handle(event) };
+};
+
+// OpenCode v2 loads a default export with an id and a setup function; the
+// v1 hook object above is reused by subscribing to the v2 event stream.
+// v2 events carry their payload under data; the v1 hooks read properties.
+// v2 publishes neither session.status nor session.idle: a turn starts with
+// session.execution.started (mapped to a busy status) and ends with a
+// terminal session.execution.* event (mapped to session.idle).
+const V2_TURN_END = ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"];
+const v1Event = (event) => {
+  const properties = event.data || {};
+  if (event.type === "session.execution.started") {
+    return { type: "session.status", properties: { sessionID: properties.sessionID, status: { type: "busy" } } };
+  }
+  if (V2_TURN_END.includes(event.type)) return { type: "session.idle", properties };
+  return { type: event.type, properties };
+};
+export default {
+  id: "fm-busy-state",
+  async setup(ctx) {
+    const hooks = await FmBusyState();
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        try {
+          await hooks.event({ event: v1Event(event) });
+        } catch {}
+      }
+    })().catch(() => {});
+    return () => controller.abort();
+  },
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'

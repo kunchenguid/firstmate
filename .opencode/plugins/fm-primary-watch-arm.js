@@ -559,3 +559,46 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
     },
   };
 };
+
+// OpenCode v2 default export. The v2 loader requires `{ id, setup(ctx) }`, v2
+// events arrive from `ctx.event.subscribe()`, and wakes are delivered with
+// `ctx.session.prompt`. The v1 hook object above is reused through a `client`
+// shim so both APIs share one implementation, and the coordinator entry it
+// installs keeps serving the v2 turn-end guard.
+function clientFromCtx(ctx) {
+  return {
+    session: {
+      promptAsync: ({ path, body }) =>
+        ctx.session.prompt({ sessionID: path?.id, text: body?.parts?.[0]?.text ?? "" }),
+    },
+  };
+}
+
+// v2 events carry their payload under `data`; the v1 hooks read `properties`.
+// v2 publishes no `session.idle`: a turn ends with a terminal
+// `session.execution.*` event, which is mapped onto the v1 idle event.
+const V2_TURN_END = ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"];
+function v1Event(event) {
+  const properties = event.data ?? {};
+  if (V2_TURN_END.includes(event.type)) return { type: "session.idle", properties };
+  return { type: event.type, properties };
+}
+
+export default {
+  id: "fm-primary-watch-arm",
+  async setup(ctx) {
+    const hooks = await FmPrimaryWatchArm({
+      client: clientFromCtx(ctx),
+      directory: ctx.location?.directory,
+    });
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        try {
+          await hooks.event({ event: v1Event(event) });
+        } catch {}
+      }
+    })().catch(() => {});
+    return () => controller.abort();
+  },
+};

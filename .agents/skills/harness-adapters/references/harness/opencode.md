@@ -6,13 +6,14 @@ Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue be
 
 | Fact | Value |
 |---|---|
-| Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
+| Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. OpenCode v2 publishes no `session.status`, so the plugin maps `session.execution.started` to `busy` and a terminal `session.execution.*` event to idle. |
 | Exit command | `/exit`. |
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
 | Resume | Relaunch with `--continue` to resume the most recent session for the current directory, then send the next instruction after the TUI is ready because `--prompt` does not auto-submit alongside `--continue`. |
 | Model flag | `--model <provider/model>`. |
 | Effort flag | None for Firstmate's interactive `opencode --prompt` launch; `opencode run` has `--variant`, but that is not this path. The effort instead rides the launch's `OPENCODE_CONFIG_CONTENT` JSON as the `build` agent's `variant` keyed to the resolved model, the config schema's per-model reasoning-effort field verified on 1.18.32. It is emitted only when the resolved model's provider is known to expose that effort as a variant (`anthropic/*`: high, max; `openai/*`: low, medium, high, xhigh); with no model resolved, another provider, or an effort outside its family's list, the variant is omitted and the permission-only launch is unchanged. |
+| Permission flag | `--auto`. OpenCode v2 does not honor the launch's `OPENCODE_CONFIG_CONTENT` permission object, so without `--auto` a worker stalls on an interactive external-directory prompt; verified on 2.0.18. |
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
 | Trust dialog | None. |
 | Marker | None; OpenCode publishes no identity marker, so `../../../bin/fm-harness.sh` identifies it from process ancestry. |
@@ -33,13 +34,17 @@ The live Herdr guard is `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 ../../../tests/fm-herdr-
 
 ## Primary integration
 
-The primary integration was verified on 2026-07-08 with OpenCode 1.17.6.
+The primary integration was verified on 2026-07-08 with OpenCode 1.17.6, and the plugins were ported to the OpenCode v2 plugin contract on 2026-09-27 against 2.0.18.
+Each primary plugin, and the busy-state plugin `../../../bin/fm-spawn.sh` generates for workers, exports both a v1 named function and a v2 `export default { id, setup(ctx) }`, so one file serves the v1 hook API (`client.session.promptAsync`, `tool.execute.before`, the returned `event` hook) and the v2 API (`ctx.session.prompt`, `ctx.tool.hook("execute.before")`, `ctx.event.subscribe()`).
+On v2 the loader requires the default export; a module with only a v1 named export fails to load with "Plugin must export a default definition with an id and an effect or setup function", so the default export must stay in place.
+v2 events carry their payload under `data` rather than `properties`, and v2 publishes no `session.idle`; the default export maps both onto the v1 shape, treating a terminal `session.execution.succeeded`, `failed`, or `interrupted` event as `session.idle`.
 `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
-Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and uses `client.session.promptAsync` to force one follow-up turn when `../../../bin/fm-turnend-guard.sh` returns 2.
+Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and forces one follow-up turn when `../../../bin/fm-turnend-guard.sh` returns 2, through `client.session.promptAsync` on v1 and `ctx.session.prompt` on v2.
 The follow-up was verified in the interactive TUI.
 In a home with `config/supervision-host` and no `config/supervision-host-off` the watch-arm plugin spawns the supervision host instead of `../../../bin/fm-watch-arm.sh`, with Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md) owns the host.
 `opencode run` can exit before displaying a queued follow-up, so the adapter steps aside in headless mode.
 On native Windows, the operational-input adapter runs its Bash helper through `bash`; macOS and Linux invoke it directly.
 
-The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `client.session.promptAsync`, and coordinates with the guard before a blind-turn follow-up.
-The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from `tool.execute.before`.
+The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it through the same prompt call, and coordinates with the guard before a blind-turn follow-up.
+The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing, from `tool.execute.before` on v1 and from `ctx.tool.hook("execute.before", ...)` on v2.
+The v2 shell tool is named `shell` in `event.tool`, where the v1 API named it `bash`; the seatbelt plugins accept both names.

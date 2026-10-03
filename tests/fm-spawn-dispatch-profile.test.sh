@@ -761,7 +761,7 @@ test_opencode_threads_model_and_effort_variant() {
   # the launch already writes, keyed to the resolved model on the default
   # build agent, never as a launch flag.
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --auto --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not write the effort as the build agent's variant in its config"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
@@ -781,7 +781,7 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch without effort must keep the permission-only config byte-identical"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
   pass "opencode without an effort keeps its launch config unchanged"
@@ -799,7 +799,7 @@ test_opencode_emits_variant_for_openai_family_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --model 'openai/gpt-5.6-sol' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --auto --model 'openai/gpt-5.6-sol' --prompt" \
     "opencode launch did not write the openai family effort as the build agent's variant"
   pass "opencode emits the variant for an effort the openai family exposes"
 }
@@ -816,7 +816,7 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode must keep the permission-only config when the model family lacks the effort"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
   pass "opencode omits the variant for an effort outside the model family's list"
