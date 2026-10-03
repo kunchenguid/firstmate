@@ -2351,7 +2351,8 @@ collect_local_firstmate_states() {
     i=$((i + 1))
     known=0
     for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
+      # Identity, not spelling: a symlinked $FM_HOME is the same state dir.
+      [ "$existing" != "$home/state" ] && ! [ "$existing" -ef "$home/state" ] || known=1
     done
     [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
     reg="$home/data/secondmates.md"

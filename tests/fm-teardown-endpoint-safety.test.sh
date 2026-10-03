@@ -1209,6 +1209,21 @@ SH
   pass "fm-teardown: records-only release accepts merged-PR and local-main landing and refuses unlanded branch work"
 }
 
+# A symlinked $FM_HOME (macOS /var -> /private/var) reaches the same state dir
+# as the canonical root home; it must be scanned once, not count the live owner twice.
+test_records_only_release_through_symlinked_home() {
+  local dir
+  dir=$(stage_unclaimed_duplicate duplicate-symlinked-home ship "branch=fm/stale-task")
+  git -C "$dir/project" branch fm/stale-task
+  ln -s "$dir" "$dir.link"
+  FM_HOME="$dir.link/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" stale-task --release-duplicate-claim \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "records-only release through a symlinked FM_HOME refused: $(cat "$dir/stderr")"
+  assert_released_leaving_live_slot "$dir" stale-task "release through symlinked FM_HOME"
+  pass "fm-teardown: records-only release works when FM_HOME is reached through a symlink"
+}
+
 test_records_only_release_of_stale_scout() {
   local dir
   dir=$(stage_unclaimed_duplicate duplicate-scout scout)
@@ -1649,6 +1664,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_unclaimed_duplicate_requires_records_only_release
 test_records_only_release_uses_landed_work_proofs
+test_records_only_release_through_symlinked_home
 test_records_only_release_of_stale_scout
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
