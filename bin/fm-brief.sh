@@ -99,6 +99,8 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Ship and scout scaffolds name bin/fm-task-inbox.sh take and ack as the
+# batched way to do that, keeping the manual sequence only as its fallback.
 # Ship tasks include a project-memory section bounding crewmate edits to a
 # project's AGENTS.md/CLAUDE.md: only corrections of factually wrong
 # information, including wrong information the task itself introduced - never
@@ -367,6 +369,27 @@ if [ -e "$CONFIG/wait-no-turns" ]; then
 fi
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+# Ship and scout workers read the whole inbox with one bin/fm-task-inbox.sh
+# take and, after acting, acknowledge it with one ack, which makes the same
+# handled/ move. The manual sequence stays as the fallback for a worker that
+# cannot run it. A
+# secondmate charter keeps the manual sequence: its remote copy rewrites only
+# state paths (bin/fm-remote-home-seed.sh), so a local code-root path would not
+# resolve on the remote host.
+INBOX_TAKE=$(shell_quote "$SCRIPT_DIR/fm-task-inbox.sh")
+IFS= read -r -d '' WORKER_INBOX_SECTION <<EOF || true
+# Firstmate instruction inbox
+Firstmate steers you through durable message files in $INBOX_DIR.
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - run \`$INBOX_TAKE take $INBOX_DIR\` once: it prints every waiting message in numeric order and ends with the sequence to acknowledge.
+Act on every message it printed, then acknowledge them all in one call: \`$INBOX_TAKE ack --through NNN $INBOX_DIR\`, with the NNN that take named.
+Only if those commands cannot run, list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
+The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
+EOF
+if [ -e "$CONFIG/wait-no-turns" ]; then
+  WORKER_INBOX_SECTION+="Do not poll or list the inbox while waiting; a waiting instruction rings."$'\n'
+fi
+WORKER_INBOX_SECTION=${WORKER_INBOX_SECTION%$'\n'}
+
 # How a crewmate or scout waits. Every model turn resends the whole context, so
 # a wait must cost no turns: a decision wait ends the turn, and an external
 # wait sleeps in one bounded blocking shell command sized to the harness.
@@ -607,7 +630,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 
-$WAIT_BLOCK$INBOX_SECTION
+$WAIT_BLOCK$WORKER_INBOX_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -685,7 +708,7 @@ $ASK_USER_BLOCK
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 
-$WAIT_BLOCK$INBOX_SECTION
+$WAIT_BLOCK$WORKER_INBOX_SECTION
 
 # Project memory
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.

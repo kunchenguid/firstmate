@@ -1095,6 +1095,46 @@ test_wait_no_turns_absent_keeps_the_previous_brief() {
   pass "fm-brief: without config/wait-no-turns the brief and drive text stay as they were"
 }
 
+# Ship and scout briefs name a batched inbox take and ack; running the exact
+# commands the brief names prints every waiting message, leaves it waiting
+# until the ack, and then acknowledges it. A secondmate charter keeps the
+# manual sequence its remote copy can resolve.
+test_worker_briefs_take_and_ack_the_inbox_in_batches() {
+  local home id brief take ack out
+  home="$TMP_ROOT/inbox-take"
+  mkdir -p "$home/data" "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-take-ship some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-take-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  for id in brief-take-ship brief-take-scout; do
+    brief="$home/data/$id/brief.md"
+    # shellcheck disable=SC2016  # literal backticks delimit the brief's command
+    take=$(sed -n 's/.* run `\(.*fm-task-inbox\.sh. take [^`]*\)` once:.*/\1/p' "$brief")
+    # shellcheck disable=SC2016  # literal backticks delimit the brief's command
+    ack=$(sed -n 's/.*acknowledge them all in one call: `\(.*fm-task-inbox\.sh. ack --through NNN [^`]*\)`.*/\1/p' "$brief")
+    [ -n "$take" ] || fail "$id: the brief does not name the batched inbox take"
+    [ -n "$ack" ] || fail "$id: the brief does not name the batched inbox ack"
+    bash -c '. "$1"; fm_task_inbox_write "$2" "$3" "steer for $3"' _ \
+      "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state" "$id" >/dev/null \
+      || fail "$id: fixture steer write failed"
+    out=$(bash -c "$take") || fail "$id: the brief's take command failed"
+    assert_contains "$out" "steer for $id" "$id: the take command did not print the waiting message"
+    assert_contains "$out" "ack --through 001" "$id: the take command did not name the sequence to acknowledge"
+    [ -f "$home/state/$id.inbox/001.msg" ] || fail "$id: take must leave the message waiting until the ack"
+    bash -c "${ack/NNN/001}" >/dev/null || fail "$id: the brief's ack command failed"
+    [ -f "$home/state/$id.inbox/handled/001.msg" ] \
+      || fail "$id: the ack command did not acknowledge the message into handled/"
+    assert_grep "Only if those commands cannot run" "$brief" "$id: the manual fallback is missing"
+  done
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-take-sm --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  assert_no_grep "fm-task-inbox.sh" "$home/data/brief-take-sm/brief.md" \
+    "secondmate: the charter must keep the manual inbox sequence"
+  pass "fm-brief: ship and scout briefs take and acknowledge the inbox in two calls"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -1329,6 +1369,7 @@ test_branch_prefix_command_is_shell_safe() {
 }
 
 test_worker_role_scope
+test_worker_briefs_take_and_ack_the_inbox_in_batches
 
 # Rule 2 governs file edits rather than pool administration, so every crewmate
 # scaffold must prohibit the administrative act itself. The rule is emitted from
