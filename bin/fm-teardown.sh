@@ -277,10 +277,15 @@
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     grace period to any survivor whose process identity still matches. The
+#     worktree and the current uid-namespaced tasktmp are unique per task and
+#     never shared, so this cannot reach another task's or the primary's
+#     processes. A recorded tasktmp_prior (an older-formula root left by a
+#     relaunch) or any recorded tasktmp without the uid-namespaced name is
+#     account- and home-agnostic, so it is reaped and removed only when it is
+#     this user's real directory holding the .fm-task-owner marker that
+#     fm-spawn wrote for this home and task id; otherwise it is left alone with
+#     a warning. Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1128,8 +1133,47 @@ fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
+# (/tmp/fm-<id>+uid<uid>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+# tasktmp_prior is an older-formula root that a relaunch superseded; absent otherwise.
+TASK_TMP_PRIOR=$(grep '^tasktmp_prior=' "$META" | tail -1 | cut -d= -f2- || true)
+# The full home-identity hash also names this home's owner marker (below).
+teardown_launch_home_token() {
+  local home=$1 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
+  else
+    return 1
+  fi
+  case "$hash" in
+    *[!0-9a-fA-F]*|'') return 1 ;;
+  esac
+  printf '%s' "$hash"
+}
+# Reap and remove a recorded temp root only when it is provably this task's own:
+# this user's real directory AND either this task's uid-namespaced name, or an
+# owner marker naming this home and this task id (fm-spawn writes it when a
+# relaunch supersedes an older-formula root). A legacy /tmp/fm-<id> root can be
+# shared by every local account and by other homes of this account, so ownership
+# alone cannot tell them apart.
+teardown_task_tmp_is_own() {  # <dir>
+  local dir=$1 token
+  if [ -L "$dir" ] || [ ! -d "$dir" ] || [ ! -O "$dir" ]; then
+    return 1
+  fi
+  [ "${dir##*/}" != "fm-$ID+uid$(id -u)" ] || return 0
+  token=$(teardown_launch_home_token "$FM_HOME") || token=
+  if [ -n "$token" ] && [ "$(cat "$dir/.fm-task-owner" 2>/dev/null)" = "$token $ID" ]; then
+    return 0
+  fi
+  echo "warning: leaving temp root $dir alone: it carries no owner marker for this home and task $ID" >&2
+  return 1
+}
+[ -n "$TASK_TMP" ] && ! teardown_task_tmp_is_own "$TASK_TMP" && TASK_TMP=
+[ -n "$TASK_TMP_PRIOR" ] && ! teardown_task_tmp_is_own "$TASK_TMP_PRIOR" && TASK_TMP_PRIOR=
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -2171,7 +2215,7 @@ reap_task_backend_process_group() {  # <label>
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
-# - both unique per task and never shared - before either is removed. TERM
+# (and a superseded tasktmp_prior, see Fix 2) before any is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
@@ -3560,9 +3604,9 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" "$TASK_TMP_PRIOR"
 elif [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes tasktmp "$TASK_TMP"
+  reap_task_worktree_processes tasktmp "$TASK_TMP" "$TASK_TMP_PRIOR"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -3745,26 +3789,13 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
+# Remove the per-task temp root (/tmp/fm-<id>+uid<uid>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# A superseded older-formula root; both roots were ownership-checked when read.
+[ -n "$TASK_TMP_PRIOR" ] && rm -rf "$TASK_TMP_PRIOR"
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
-teardown_launch_home_token() {
-  local home=$1 root hash
-  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
-  if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
-  elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
-  else
-    return 1
-  fi
-  case "$hash" in
-    *[!0-9a-fA-F]*|'') return 1 ;;
-  esac
-  printf '%s' "$hash"
-}
 LAUNCH_HOME_TOKEN=$(teardown_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
 if [ -n "$LAUNCH_HOME_TOKEN" ]; then
   rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"

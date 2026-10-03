@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
-# fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
-# gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
-# meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
+# fm-spawn gives each task a temp root /tmp/fm-<id>+uid<uid>/ with Go's build temp nested
+# at gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the
+# task's meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
 #
 # These tests exercise fm-teardown directly as a subprocess against a fake FM_HOME/FM_ROOT
 # built so the real script resolves into it, with stub helper scripts.
@@ -138,8 +138,8 @@ META
 # --- fm-teardown side (real subprocess) ---
 
 test_teardown_removes_tasktmp_dir() {
-  local id=td-rm-z2
-  local task_tmp="$TMP_ROOT/fm-$id"
+  local id=td-rm-z2 task_tmp
+  task_tmp="$TMP_ROOT/fm-$id+uid$(id -u)"
   mkdir -p "$task_tmp/gotmp"
   printf 'leftover\n' > "$task_tmp/gotmp/build-artifact"
   local fake
@@ -152,6 +152,131 @@ test_teardown_removes_tasktmp_dir() {
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
+}
+
+test_teardown_leaves_a_legacy_named_tasktmp_alone() {
+  # A legacy /tmp/fm-<id> root has no uid namespace, so another account or home
+  # can hold the same path; even an owned real directory there is not this
+  # task's to reap or remove.
+  local id=td-legacy-z5 task_tmp fake
+  task_tmp="$TMP_ROOT/fm-$id"
+  mkdir -p "$task_tmp/gotmp"
+  printf 'keep\n' > "$task_tmp/gotmp/precious"
+  fake=$(make_fake_root "$id" "$task_tmp")
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+    || fail "teardown exited non-zero with a legacy-named tasktmp"
+  [ -f "$task_tmp/gotmp/precious" ] \
+    || fail "teardown removed a legacy-named tasktmp ($task_tmp)"
+  pass "fm-teardown leaves a legacy-named tasktmp= root alone"
+}
+
+# The home identity fm-spawn writes into a superseded root's owner marker: the
+# sha256 of the home's physical path, then the task id.
+owner_marker_for() {  # <home> <id>
+  local root hash
+  root=$(cd "$1" && pwd -P)
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
+  else
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
+  fi
+  printf '%s %s\n' "$hash" "$2"
+}
+
+# Teardown of a task whose meta records a superseded root as tasktmp_prior=.
+# <marker> is none, home (this home and task), other-home, or other-task;
+# prints the prior root.
+run_prior_teardown() {  # <id> <marker>
+  local id=$1 marker=$2 task_tmp prior_tmp fake
+  task_tmp="$TMP_ROOT/fm-$id+uid$(id -u)"
+  prior_tmp="$TMP_ROOT/fm-$id"
+  mkdir -p "$task_tmp/gotmp" "$prior_tmp/gotmp"
+  printf 'leftover\n' > "$prior_tmp/gotmp/build-artifact"
+  fake=$(make_fake_root "$id" "$task_tmp")
+  printf 'tasktmp_prior=%s\n' "$prior_tmp" >> "$fake/state/$id.meta"
+  case "$marker" in
+    none) ;;
+    home) owner_marker_for "$fake" "$id" > "$prior_tmp/.fm-task-owner" ;;
+    other-home) printf '%064d %s\n' 0 "$id" > "$prior_tmp/.fm-task-owner" ;;
+    other-task) owner_marker_for "$fake" "$id-other" > "$prior_tmp/.fm-task-owner" ;;
+  esac
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>"$TMP_ROOT/$id.err" \
+    || fail "teardown exited non-zero with a tasktmp_prior"
+  [ ! -e "$task_tmp" ] || fail "teardown did not remove the current tasktmp ($task_tmp)"
+  printf '%s' "$prior_tmp"
+}
+
+test_teardown_removes_a_marked_superseded_tasktmp_prior() {
+  # A relaunch across a temp-root formula change records the older root as
+  # tasktmp_prior= and marks it as this home's and task's; teardown removes it.
+  local id=td-prior-z5 prior_tmp
+  prior_tmp=$(run_prior_teardown "$id" home)
+  [ ! -e "$prior_tmp" ] \
+    || fail "teardown did not remove the marked tasktmp_prior ($prior_tmp still exists)"
+  pass "fm-teardown removes a tasktmp_prior= root that carries this home's and task's marker"
+}
+
+test_teardown_leaves_an_unmarked_tasktmp_prior_alone() {
+  # A pre-existing legacy /tmp/fm-<id> with no marker may belong to another home
+  # of this account, so ownership alone does not make it this task's.
+  local id=td-prior-z7 prior_tmp
+  prior_tmp=$(run_prior_teardown "$id" none)
+  [ -f "$prior_tmp/gotmp/build-artifact" ] \
+    || fail "teardown removed an unmarked tasktmp_prior ($prior_tmp)"
+  grep -q "owner marker" "$TMP_ROOT/$id.err" \
+    || fail "teardown must warn when it leaves an unmarked tasktmp_prior alone"
+  pass "fm-teardown leaves an unmarked tasktmp_prior= root alone and warns"
+}
+
+test_teardown_leaves_a_tasktmp_prior_marked_for_another_owner_alone() {
+  local id=td-prior-z8 marker prior_tmp
+  for marker in other-home other-task; do
+    prior_tmp=$(run_prior_teardown "$id-$marker" "$marker")
+    [ -f "$prior_tmp/gotmp/build-artifact" ] \
+      || fail "teardown removed a tasktmp_prior with a $marker marker ($prior_tmp)"
+  done
+  pass "fm-teardown leaves a tasktmp_prior= root marked for another home or task alone"
+}
+
+test_teardown_does_not_reap_processes_in_an_unmarked_tasktmp_prior() {
+  # The reap selects processes by working directory alone, so it must not see an
+  # unmarked root: a live process there belongs to whoever else shares it.
+  local id=td-prior-z10 task_tmp prior_tmp fake pid
+  command -v lsof >/dev/null 2>&1 || { pass "fm-teardown reap check skipped (no lsof)"; return; }
+  task_tmp="$TMP_ROOT/fm-$id+uid$(id -u)"
+  prior_tmp="$TMP_ROOT/fm-$id"
+  mkdir -p "$task_tmp/gotmp" "$prior_tmp"
+  fake=$(make_fake_root "$id" "$task_tmp")
+  printf 'tasktmp_prior=%s\n' "$prior_tmp" >> "$fake/state/$id.meta"
+  (cd "$prior_tmp" && exec sleep 60) &
+  pid=$!
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+    || { kill "$pid" 2>/dev/null; fail "teardown exited non-zero with an unmarked tasktmp_prior"; }
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null || true
+  else
+    fail "teardown killed a process whose cwd is in an unmarked tasktmp_prior"
+  fi
+  pass "fm-teardown does not reap processes rooted in an unmarked tasktmp_prior= root"
+}
+
+test_teardown_ignores_symlinked_tasktmp() {
+  # A recorded root that is a symlink (as another local account could plant at
+  # the predictable path) must be neither followed nor removed.
+  local id=td-link-z6 target task_tmp fake
+  target="$TMP_ROOT/$id-target"
+  task_tmp="$TMP_ROOT/fm-$id+uid$(id -u)"
+  mkdir -p "$target/gotmp"
+  printf 'keep\n' > "$target/gotmp/precious"
+  ln -s "$target" "$task_tmp"
+  fake=$(make_fake_root "$id" "$task_tmp")
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+    || fail "teardown exited non-zero with a symlinked tasktmp"
+  [ -f "$target/gotmp/precious" ] \
+    || fail "teardown followed a symlinked tasktmp and removed its target"
+  [ -L "$task_tmp" ] || fail "teardown removed the symlinked tasktmp ($task_tmp)"
+  pass "fm-teardown leaves a symlinked tasktmp= root alone"
 }
 
 test_teardown_skips_gracefully_without_tasktmp() {
@@ -248,5 +373,11 @@ test_teardown_skips_gracefully_when_dir_missing() {
 }
 
 test_teardown_removes_tasktmp_dir
+test_teardown_leaves_a_legacy_named_tasktmp_alone
+test_teardown_removes_a_marked_superseded_tasktmp_prior
+test_teardown_leaves_an_unmarked_tasktmp_prior_alone
+test_teardown_leaves_a_tasktmp_prior_marked_for_another_owner_alone
+test_teardown_does_not_reap_processes_in_an_unmarked_tasktmp_prior
+test_teardown_ignores_symlinked_tasktmp
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing
