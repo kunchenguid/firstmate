@@ -829,7 +829,7 @@ FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" bash -c '
   . "$1/bin/fm-wake-lib.sh"
   fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
   : > "$3"
-  sleep 30
+  while :; do sleep 1; done
 ' _ "$ROOT" "$RESTART_HOME" "$RESTART_LOCK_MARKER" &
 LOCK_HOLDER_PID=$!
 i=0
@@ -839,45 +839,47 @@ while [ ! -e "$RESTART_LOCK_MARKER" ] && [ "$i" -lt 100 ]; do
   i=$((i + 1))
 done
 [ -e "$RESTART_LOCK_MARKER" ] || fail "could not hold the publication lock for restart coverage"
+# The signal exists before the watcher starts, so its first scan must surface it
+# and the watcher exits on that wake. Restart waits poll for that event under a
+# bound far above a loaded watcher cycle, so a slow machine does not read as a
+# missed signal while a watcher that never gets there still fails here.
+RESTART_WAIT_SECS=120
+restart_wait() {  # <failure> <command...>: poll until command succeeds or fail
+  local failure=$1 deadline=$((SECONDS + RESTART_WAIT_SECS))
+  shift
+  until "$@"; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "$failure within ${RESTART_WAIT_SECS}s"
+    sleep 0.05
+  done
+}
+restart_watcher_exited() { ! kill -0 "$WATCH_PID" 2>/dev/null; }
+restart_watcher_beat_or_exited() {
+  [ -e "$RESTART_HOME/state/.last-watcher-beat" ] || restart_watcher_exited
+}
+printf 'needs-decision [key=restart-gate]: restart the watcher\n' \
+  > "$RESTART_HOME/state/restart-task.status"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
   FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 FM_HOME_SUMMARY_TIMEOUT=2 \
   FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
   "$WATCH" > "$TMP_ROOT/restart-watch-one.out" 2> "$TMP_ROOT/restart-watch-one.err" &
 WATCH_PID=$!
-i=0
-while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
-  kill -0 "$WATCH_PID" 2>/dev/null || break
-  sleep 0.05
-  i=$((i + 1))
-done
-[ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
-  || fail "the first restart watcher did not begin polling"
-printf 'needs-decision [key=restart-gate]: restart the watcher\n' \
-  > "$RESTART_HOME/state/restart-task.status"
-i=0
-while kill -0 "$WATCH_PID" 2>/dev/null && [ "$i" -lt 100 ]; do
-  sleep 0.05
-  i=$((i + 1))
-done
-kill -0 "$WATCH_PID" 2>/dev/null \
-  && fail "the first restart watcher did not surface its actionable signal"
+restart_wait "the first restart watcher did not exit on its actionable signal" restart_watcher_exited
 wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
+assert_grep "signal: $RESTART_HOME/state/restart-task.status" "$TMP_ROOT/restart-watch-one.out" \
+  "the first restart watcher did not surface its actionable signal: $(cat "$TMP_ROOT/restart-watch-one.out" "$TMP_ROOT/restart-watch-one.err" 2>/dev/null)"
 rm -f "$RESTART_HOME/state/.last-watcher-beat"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
   FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 FM_HOME_SUMMARY_TIMEOUT=2 \
   FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
   "$WATCH" > "$TMP_ROOT/restart-watch-two.out" 2> "$TMP_ROOT/restart-watch-two.err" &
 WATCH_PID=$!
-i=0
-while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
-  kill -0 "$WATCH_PID" 2>/dev/null || break
-  sleep 0.05
-  i=$((i + 1))
-done
+restart_wait "the restart watcher neither began polling nor exited" restart_watcher_beat_or_exited
 [ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
   || fail "the replacement restart watcher did not begin polling"
 sleep 4
+kill -0 "$LOCK_HOLDER_PID" 2>/dev/null \
+  || fail "the publication lock holder exited before the single-flight check"
 [ ! -s "$RESTART_HOME/state/.home-summary-refresh.log" ] \
   || fail "watcher restart queued refreshes behind a live publication lock: $(cat "$RESTART_HOME/state/.home-summary-refresh.log")"
 if ! kill -0 "$WATCH_PID" 2>/dev/null; then
@@ -888,12 +890,7 @@ if ! kill -0 "$WATCH_PID" 2>/dev/null; then
     FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
     "$WATCH" > "$TMP_ROOT/restart-watch-three.out" 2> "$TMP_ROOT/restart-watch-three.err" &
   WATCH_PID=$!
-  i=0
-  while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
-    kill -0 "$WATCH_PID" 2>/dev/null || break
-    sleep 0.05
-    i=$((i + 1))
-  done
+  restart_wait "the restart watcher neither began polling nor exited" restart_watcher_beat_or_exited
   [ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
     || fail "the recovery replacement watcher did not begin polling"
 fi
