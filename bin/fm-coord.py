@@ -9,6 +9,7 @@ from pathlib import Path
 import pwd
 import re
 import sqlite3
+import socket
 import subprocess
 import sys
 import time
@@ -18,7 +19,7 @@ from datetime import datetime, timezone
 
 
 SCHEMA_DIR = Path(__file__).with_name("fm-coord-migrations")
-MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort"}
+MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort", "queue-wrapper-exited"}
 PATH_KINDS = {"file", "directory", "dependency-manifest", "generated-output"}
 NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
@@ -50,6 +51,10 @@ def boot_id():
         result = subprocess.run(["sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True, check=True)
         return result.stdout.strip()
     raise Refusal("boot identity unavailable; only macOS and Linux are supported")
+
+
+def local_host_id():
+    return token(socket.gethostname(), "coordinator host_id")
 
 
 def process_start(pid):
@@ -344,7 +349,7 @@ def queue_operation(db, op, p):
         priority = p.get("priority", 0)
         require(type(priority) is int and 0 <= priority <= 9, "priority must be 0..9")
         require(predecessors(db, intent, json.loads(intent["predecessors_json"])) == sorted(json.loads(intent["predecessors_json"])), "invalid predecessors")
-        db.execute("INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,priority,ready_epoch,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(intent_id) DO UPDATE SET head_oid=excluded.head_oid,state='ready',priority=excluded.priority,ready_epoch=excluded.ready_epoch,base_oid=NULL,validation_id=NULL,manifest_version=NULL,attempt_event_id=NULL,updated_at=excluded.updated_at", (intent_id, intent["repo"], intent["base_ref"], head, "ready", priority, int(time.time()), stamp()))
+        db.execute("INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,priority,ready_epoch,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(intent_id) DO UPDATE SET head_oid=excluded.head_oid,state='ready',priority=excluded.priority,ready_epoch=excluded.ready_epoch,base_oid=NULL,validation_id=NULL,manifest_version=NULL,attempt_event_id=NULL,attempt_epoch=NULL,wrapper_pid=NULL,wrapper_start=NULL,wrapper_boot=NULL,wrapper_home_id=NULL,wrapper_host_id=NULL,wrapper_local=NULL,wrapper_exit_attested_at=NULL,updated_at=excluded.updated_at", (intent_id, intent["repo"], intent["base_ref"], head, "ready", priority, int(time.time()), stamp()))
         event_id = emit(db, "queue-ready", request_id, {"intent_id": intent_id, "head_oid": head, "priority": priority})
         return {"ok": True, "state": "ready", "event_id": event_id}
     if op == "queue-next":
@@ -372,7 +377,7 @@ def queue_operation(db, op, p):
         db.execute("UPDATE queue_items SET state='syncing',updated_at=? WHERE intent_id=?", (stamp(), chosen["intent_id"]))
         event_id = emit(db, "sync-requested", request_id, {"intent_id": chosen["intent_id"], "generation": generation, "head_oid": chosen["head_oid"]})
         return {"ok": True, "intent_id": chosen["intent_id"], "generation": generation, "state": "syncing", "event_id": event_id}
-    item, intent = queue_item(db, p, owner=op not in {"queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort"})
+    item, intent = queue_item(db, p, owner=op not in {"queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort", "queue-wrapper-exited"})
     slot = occupied_slot(db, item)
     require(p.get("generation") == slot["generation"] if op in {"queue-result", "queue-reconcile", "queue-operator-abort"} else p.get("slot_generation") == slot["generation"], "integration generation mismatch")
     if op == "queue-abort":
@@ -386,6 +391,19 @@ def queue_operation(db, op, p):
         db.execute("UPDATE queue_items SET state='repair-needed',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
         event_id = emit(db, "slot-operator-aborted", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "operator": p["_authority_actor"], "reason": reason})
         return {"ok": True, "state": "repair-needed", "event_id": event_id}
+    if op == "queue-wrapper-exited":
+        require(item["state"] in {"attempting", "outcome-unknown"} and item["wrapper_local"] == 0, "remote wrapper exit attestation requires an unsettled remote attempt")
+        participant(db, p, intent["repo"])
+        require(p.get("home_id") == item["wrapper_home_id"] and p.get("generation") == intent["generation"], "wrapper exit must come from the owning participant session")
+        owner = db.execute("SELECT host_id FROM participants WHERE home_id=?", (p["home_id"],)).fetchone()
+        require(owner is not None and owner["host_id"] == item["wrapper_host_id"], "participant host changed")
+        require(p.get("attempt_event_id") == item["attempt_event_id"], "wrapper exit attempt identity mismatch")
+        require(p.get("wrapper_host_id") == item["wrapper_host_id"] and p.get("wrapper_pid") == item["wrapper_pid"] and p.get("wrapper_start") == item["wrapper_start"], "wrapper exit process identity mismatch")
+        require(item["wrapper_exit_attested_at"] is None, "wrapper exit is already attested")
+        exited_at = int(time.time())
+        db.execute("UPDATE queue_items SET wrapper_exit_attested_at=?,updated_at=? WHERE intent_id=?", (exited_at, stamp(), item["intent_id"]))
+        event_id = emit(db, "wrapper-exit-attested", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "home_id": p["home_id"], "host_id": item["wrapper_host_id"], "pid": item["wrapper_pid"], "start": item["wrapper_start"], "exited_at": exited_at})
+        return {"ok": True, "state": item["state"], "event_id": event_id}
     if op == "queue-synced":
         require(item["state"] == "syncing", "slot is not syncing")
         current_head = oid(p.get("current_head_oid"), "current_head_oid")
@@ -435,10 +453,18 @@ def queue_operation(db, op, p):
         require(p.get("head_contains_base") is True, "current head no longer contains current base")
         wrapper_pid = p.get("wrapper_pid")
         require(type(wrapper_pid) is int and wrapper_pid > 0, "wrapper_pid must be a positive integer")
-        wrapper_start = process_start(wrapper_pid)
-        require(wrapper_start is not None, "wrapper process is not running")
-        event_id = emit(db, "merge-attempted", request_id, {"intent_id": item["intent_id"], "head_oid": item["head_oid"], "base_oid": item["base_oid"], "pr_url": intent["pr_url"], "wrapper": "bin/fm-pr-merge.sh"})
-        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,attempt_epoch=?,wrapper_pid=?,wrapper_start=?,wrapper_boot=?,updated_at=? WHERE intent_id=?", (event_id, int(time.time()), wrapper_pid, wrapper_start, boot_id(), stamp(), item["intent_id"]))
+        owner = db.execute("SELECT host_id FROM participants WHERE home_id=?", (intent["home_id"],)).fetchone()
+        require(owner is not None and owner["host_id"] is not None, "participant host_id must be enrolled before a merge attempt")
+        wrapper_host_id = owner["host_id"]
+        local_wrapper = wrapper_host_id == local_host_id()
+        if local_wrapper:
+            wrapper_start = process_start(wrapper_pid)
+            require(wrapper_start is not None, "wrapper process is not running")
+            require(p.get("wrapper_start") is None or p["wrapper_start"] == wrapper_start, "wrapper start time mismatch")
+        else:
+            wrapper_start = token(p.get("wrapper_start"), "wrapper_start")
+        event_id = emit(db, "merge-attempted", request_id, {"intent_id": item["intent_id"], "head_oid": item["head_oid"], "base_oid": item["base_oid"], "pr_url": intent["pr_url"], "wrapper": "bin/fm-pr-merge.sh", "wrapper_home_id": intent["home_id"], "wrapper_host_id": wrapper_host_id, "wrapper_pid": wrapper_pid, "wrapper_start": wrapper_start})
+        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,attempt_epoch=?,wrapper_pid=?,wrapper_start=?,wrapper_boot=?,wrapper_home_id=?,wrapper_host_id=?,wrapper_local=?,wrapper_exit_attested_at=NULL,updated_at=? WHERE intent_id=?", (event_id, int(time.time()), wrapper_pid, wrapper_start, boot_id() if local_wrapper else None, intent["home_id"], wrapper_host_id, 1 if local_wrapper else 0, stamp(), item["intent_id"]))
         db.execute("UPDATE integration_slots SET state='attempting' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
         return {"ok": True, "state": "attempting", "attempt_event_id": event_id, "event_id": event_id, "merge_command": ["bin/fm-pr-merge.sh", intent["task_id"], intent["pr_url"]]}
     if op == "queue-result":
@@ -457,6 +483,9 @@ def queue_operation(db, op, p):
 def wrapper_settled(item):
     quiet = int(os.environ.get("FM_COORD_QUIET_SECONDS", "600"))
     require(quiet >= 0, "quiet period must be nonnegative")
+    if item["wrapper_local"] == 0:
+        exited_at = item["wrapper_exit_attested_at"]
+        return exited_at is not None and int(time.time()) - max(item["attempt_epoch"], exited_at) >= quiet
     gone = item["wrapper_pid"] is not None and (item["wrapper_boot"] != boot_id() or process_start(item["wrapper_pid"]) != item["wrapper_start"])
     return gone and int(time.time()) - item["attempt_epoch"] >= quiet
 
@@ -508,12 +537,20 @@ def run_operation(db, op, p):
         repos = p.get("repos")
         require(isinstance(repos, list) and repos and all(isinstance(r, str) and r for r in repos), "repos must be a nonempty string array")
         require(len(repos) == len(set(repos)), "duplicate repository scope")
+        requested_host = p.get("host_id")
+        if requested_host is not None:
+            requested_host = token(requested_host, "host_id")
         existing = db.execute("SELECT * FROM participants WHERE home_id=?", (home,)).fetchone()
         if existing:
             require(json.loads(existing["repos_json"]) == sorted(repos), "existing enrollment has different repository scope")
+            require(requested_host is None or existing["host_id"] is None or existing["host_id"] == requested_host, "enrolled host_id cannot change")
+            if existing["host_id"] is None and requested_host is not None:
+                db.execute("UPDATE participants SET host_id=? WHERE home_id=?", (requested_host, home))
+            host_id = requested_host or existing["host_id"]
         else:
-            db.execute("INSERT INTO participants(home_id,repos_json) VALUES(?,?)", (home, compact(sorted(repos))))
-        event_id = emit(db, "participant-enrolled", request_id, {"home_id": home, "repos": sorted(repos)})
+            host_id = requested_host or local_host_id()
+            db.execute("INSERT INTO participants(home_id,repos_json,host_id) VALUES(?,?,?)", (home, compact(sorted(repos)), host_id))
+        event_id = emit(db, "participant-enrolled", request_id, {"home_id": home, "repos": sorted(repos), "host_id": host_id})
         return {"ok": True, "home_id": home, "event_id": event_id}
     if op == "session":
         home = token(p.get("home_id"), "home_id")
@@ -680,7 +717,7 @@ def run_operation(db, op, p):
         db.execute("UPDATE outbox SET acknowledged_at=COALESCE(acknowledged_at,?) WHERE event_id=?", (stamp(), event_id))
         return {"ok": True, "event_id": event_id}
     if op == "inspect":
-        return {"ok": True, "schema_version": db.execute("PRAGMA user_version").fetchone()[0], "participants": [dict(r) for r in db.execute("SELECT home_id,repos_json,generation,session_id FROM participants ORDER BY home_id")], "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,branch,pr_url,version,state FROM intents ORDER BY created_at")], "claims": [dict(r) for r in db.execute("SELECT claim_id,intent_id,home_id,generation,fence,version,state,expires_mono_ns FROM claims ORDER BY fence")], "allocations": [dict(r) for r in db.execute("SELECT allocation_id,repo,namespace,number,intent_id,state FROM allocations ORDER BY repo,namespace,number")], "queue": [dict(r) for r in db.execute("SELECT * FROM queue_items ORDER BY ready_epoch,intent_id")], "slots": [dict(r) for r in db.execute("SELECT * FROM integration_slots ORDER BY repo,base_ref")], "outcomes": [dict(r) for r in db.execute("SELECT * FROM merge_outcomes ORDER BY recorded_at")]}
+        return {"ok": True, "schema_version": db.execute("PRAGMA user_version").fetchone()[0], "participants": [dict(r) for r in db.execute("SELECT home_id,repos_json,host_id,generation,session_id FROM participants ORDER BY home_id")], "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,branch,pr_url,version,state FROM intents ORDER BY created_at")], "claims": [dict(r) for r in db.execute("SELECT claim_id,intent_id,home_id,generation,fence,version,state,expires_mono_ns FROM claims ORDER BY fence")], "allocations": [dict(r) for r in db.execute("SELECT allocation_id,repo,namespace,number,intent_id,state FROM allocations ORDER BY repo,namespace,number")], "queue": [dict(r) for r in db.execute("SELECT * FROM queue_items ORDER BY ready_epoch,intent_id")], "slots": [dict(r) for r in db.execute("SELECT * FROM integration_slots ORDER BY repo,base_ref")], "outcomes": [dict(r) for r in db.execute("SELECT * FROM merge_outcomes ORDER BY recorded_at")]}
     raise Refusal("unknown operation")
 
 
@@ -701,12 +738,12 @@ def main():
         db.execute("PRAGMA foreign_keys=ON")
         if op == "init":
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            require(version <= 3, f"unsupported future schema version: {version}")
+            require(version <= 4, f"unsupported future schema version: {version}")
             credential = authority_hash()
-            if version < 3:
+            if version < 4:
                 db.execute("BEGIN IMMEDIATE")
                 try:
-                    for target in range(version + 1, 4):
+                    for target in range(version + 1, 5):
                         schema = SCHEMA_DIR / f"{target:03}.sql"
                         if target == 3:
                             expected = {"attempt_epoch": "INTEGER", "wrapper_pid": "INTEGER", "wrapper_start": "TEXT", "wrapper_boot": "TEXT"}
@@ -742,9 +779,9 @@ def main():
                 except Exception:
                     db.execute("ROLLBACK")
                     raise
-            print(compact({"ok": True, "schema_version": 3, "db": db_path, "mode": "shadow-advisory"}))
+            print(compact({"ok": True, "schema_version": 4, "db": db_path, "mode": "shadow-advisory"}))
             return
-        require(db.execute("PRAGMA user_version").fetchone()[0] == 3, "unsupported or uninitialized schema version; run init")
+        require(db.execute("PRAGMA user_version").fetchone()[0] == 4, "unsupported or uninitialized schema version; run init")
         db.execute("BEGIN IMMEDIATE")
         try:
             reconcile_clock(db, boot_id())
@@ -754,6 +791,8 @@ def main():
             raise
         if op in MUTATIONS:
             request_id = token(payload.get("request_id"), "request_id")
+            if op == "queue-wrapper-exited":
+                participant(db, payload)
             actor = authority_actor(db, payload) if op == "queue-operator-abort" else payload.get("home_id", "@authority")
             if op == "queue-operator-abort":
                 payload["_authority_actor"] = actor

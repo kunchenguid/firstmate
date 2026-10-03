@@ -97,8 +97,11 @@ A timeout or lost reply goes to `outcome-unknown`, retaining the slot across pro
 A merged PR at the recorded head releases an unknown slot as `merged`.
 An open or closed-unmerged PR that is neither in the merge queue nor armed for auto-merge releases it as `refused` only when the forge compare of the current base with the recorded head reports `ahead` or `diverged`, so the attempted head is not on base.
 The PR is read again after the compare, and a changed state, merge flag, head, or base keeps the slot unknown.
-Before any forge read toward a not-merged release, the recorded wrapper process must be proven gone, by a changed boot, an absent PID, or a changed process start time, and at least 10 minutes since the attempt; `FM_COORD_QUIET_SECONDS` changes that period for deterministic testing.
-An attempt whose recorded wrapper identity cannot be checked never leaves `outcome-unknown` as not merged.
+Before any forge read toward a not-merged release, a same-host wrapper must be proven gone by a changed boot, an absent PID, or a changed process start time, and at least 10 minutes must have passed since the attempt; `FM_COORD_QUIET_SECONDS` changes that period for deterministic testing.
+A remote wrapper needs a `queue-wrapper-exited` event from its owning participant and the same quiet period after that exit attestation; the coordinator never checks a foreign host's PID locally.
+The exit event must match the recorded attempt, home, host ID, PID, and start time, and the later forge read must still prove non-landing.
+Without the attestation or an authority-only operator abort, a remote attempt remains `outcome-unknown`.
+The shadow command verifies the enrolled participant session for the exit event; an authenticated transport adapter must bind the remote caller to that home before forwarding it in step 3.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
 `queue-operator-abort` is the only other way out of `outcome-unknown`: the enrolled authority actor records a reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.
 The command requires the authority credential before looking up a replay receipt, refuses participant identities and caller-supplied operator names, and records the process's authenticated local account and effective UID as `@authority:<account>:<uid>`.
@@ -115,11 +118,14 @@ Replaying an unacknowledged event retains its original identity, while request r
 An inbox acknowledgment by a future transport means delivery, not a grant.
 The database is authoritative; unrestricted status prose and notification cursors are projections.
 
-Schema versions 1 through 3 live in the corresponding numbered files under `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
+Schema versions 1 through 4 live in the corresponding numbered files under `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
 The tables are `meta` for boot identity and the authority credential digest; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
 Version 2 adds required-check manifests, queue items, one-slot records, integration generations, and unique terminal outcomes.
 Version 3 adds recorded wrapper identity and attempt time to queue items.
 It also recognizes the complete set of those columns in previously patched version-2 databases, while refusing a partial or incompatible set for manual repair.
+Version 4 binds participant homes to host IDs and records whether a wrapper was local or remote, plus any remote exit attestation.
+Earlier active attempts are classified as local because all prior attempts required a coordinator-local PID.
+Existing participants without a host ID must bind one through `enroll` before a new attempt; a bound host ID cannot change.
 A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.
 The command refuses a database with a newer or uninitialized schema.
 SQLite's single-writer transaction lock serializes concurrent claim requests on this one local database.
@@ -135,6 +141,7 @@ Initialize with `FM_COORD_AUTHORITY_TOKEN=<private-random-token> bin/fm-coord.sh
 The database stores only its SHA-256 digest; keep the token private to the authority host and supply the same environment variable for `queue-operator-abort`.
 An initialization without the token leaves operator abort disabled until a later `init` with the token enrolls it once and records an `authority-enrolled` event with the local account identity; repeating `init` with the same token changes nothing, and a different token is refused rather than replacing the enrolled one.
 Then use `enroll {"request_id":"enroll-a","home_id":"home-a","repos":["owner/repo"]}` and `session {"request_id":"session-a","home_id":"home-a"}`.
+An enrollment without `host_id` uses the coordinator host for a same-host home; a remote home supplies a unique `host_id` that remains bound to that participant.
 An administrative area definition uses `area-set {"request_id":"area-a","repo":"owner/repo","name":"api","paths":["src/api"],"aliases":["server-api"]}`.
 An intent uses `submit {"request_id":"submit-a","intent_id":"task-a","home_id":"home-a","generation":1,"repo":"owner/repo","base":"main","base_oid":"0000000000000000000000000000000000000000","branch":"task/a","task_id":"a","goal":"Update API","resources":[{"type":"area","name":"api"}]}`.
 Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`, and `version`.
@@ -150,7 +157,9 @@ Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`,
 Payload fields starting with `_` are reserved for those forge observations and are refused.
 `queue-abort` includes the slot generation and a reason, and is limited to the pre-attempt phases.
 `queue-operator-abort` includes the integration `generation` and `reason`; its actor comes from the enrolled authority credential rather than the payload.
-`queue-attempt` requires `wrapper_pid`: the live process on the coordinator host that then `exec`s `bin/fm-pr-merge.sh`, so its PID and start time identify the wrapper; a missing PID or one whose start time cannot be read refuses the attempt.
+`queue-attempt` requires `wrapper_pid` and records the enrolled participant home and host ID; for a same-host home it reads the live process start time before returning the existing `bin/fm-pr-merge.sh` command.
+For a remote home, the authenticated adapter supplies `wrapper_start` along with `wrapper_pid`, and the coordinator records that identity without inspecting the PID locally.
+`queue-wrapper-exited` includes `request_id`, `intent_id`, `home_id`, participant `generation`, `slot_generation`, `attempt_event_id`, `wrapper_host_id`, `wrapper_pid`, and `wrapper_start` from that remote attempt.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `inspect` gives a small state summary for operators.
 

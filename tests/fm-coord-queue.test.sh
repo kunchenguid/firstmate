@@ -26,7 +26,16 @@ sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 3 ] || fail 'existing v2 database must upgrade to a numbered v3 migration'
+[ "$(field "$upgraded" schema_version)" = 4 ] || fail 'existing v2 database must upgrade through numbered migrations'
+db=$tmp/upgrade-v3.sqlite3
+sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
+sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
+sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/003.sql"
+sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json) VALUES('legacy','[\"owner/repo\"]'); PRAGMA user_version=3;"
+upgraded=$(coord init)
+[ "$(field "$upgraded" schema_version)" = 4 ] || fail 'existing v3 database must upgrade to host-aware schema'
+coord enroll '{"request_id":"bind-legacy-host","home_id":"legacy","repos":["owner/repo"],"host_id":"legacy-test-host"}' > /dev/null
+field "$(coord inspect '{}')" participants | python3 -c 'import ast,sys; assert any(p["home_id"]=="legacy" and p["host_id"]=="legacy-test-host" for p in ast.literal_eval(sys.stdin.read()))' || fail 'an existing participant must bind its host after v3 upgrade'
 db=$main_db
 
 authority_token=test-authority-credential-0123456789abcdef
@@ -431,5 +440,45 @@ sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" "ALTER TABLE queue_items ADD COLUMN attempt_epoch INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_pid INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_start TEXT; ALTER TABLE queue_items ADD COLUMN wrapper_boot TEXT; INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 3 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
+[ "$(field "$upgraded" schema_version)" = 4 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
 pass 'already patched v2 database upgrades without replaying its columns'
+
+db=$tmp/remote-wrapper.sqlite3
+coord init > /dev/null
+coord enroll '{"request_id":"enroll-remote","home_id":"remote","repos":["owner/repo"],"host_id":"remote-test-host"}' > /dev/null
+coord enroll '{"request_id":"enroll-other","home_id":"other","repos":["owner/repo"],"host_id":"other-test-host"}' > /dev/null
+remote_generation=$(field "$(coord session '{"request_id":"session-remote","home_id":"remote"}')" generation)
+other_generation=$(field "$(coord session '{"request_id":"session-other","home_id":"other"}')" generation)
+coord manifest-set '{"request_id":"manifest-remote","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+candidate a remote "$remote_generation" "$head_a"
+remote_claim=$claim_id remote_fence=$fence
+picked=$(coord queue-next '{"request_id":"next-remote","repo":"owner/repo","base":"main"}')
+slot=$(field "$picked" generation)
+remote_common=$(printf '"intent_id":"a","home_id":"remote","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s"' "$remote_generation" "$remote_claim" "$remote_fence" "$slot" "$head_a" "$base")
+coord queue-synced "{\"request_id\":\"sync-remote\",$remote_common,\"head_contains_base\":true}" > /dev/null
+coord queue-validated "{\"request_id\":\"validate-remote\",$remote_common,\"validation_passed\":true,\"validation_id\":\"v-remote\"}" > /dev/null
+coord queue-checks "{\"request_id\":\"checks-remote\",$remote_common,\"protection_available\":false,\"checks\":[{\"name\":\"Lint\",\"head_oid\":\"$head_a\",\"conclusion\":\"success\"}]}" > /dev/null
+remote_pid=2147483000
+remote_start=remote-start-1
+remote_attempt=$(coord queue-attempt "{\"request_id\":\"attempt-remote\",$remote_common,\"head_contains_base\":true,\"captain_hold_released\":true,\"away_merge_allowed\":true,\"merge_authorized\":true,\"wrapper_pid\":$remote_pid,\"wrapper_start\":\"$remote_start\"}")
+remote_attempt_id=$(field "$remote_attempt" attempt_event_id)
+[ "$(field "$remote_attempt" state)" = attempting ] || fail 'remote wrapper PID must not be checked on the coordinator host'
+coord queue-result "$(printf '{"request_id":"remote-refused","intent_id":"a","generation":%s,"outcome":"refused"}' "$slot")" > /dev/null
+if FM_COORD_QUIET_SECONDS=0 not_landed remote-unattested > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'a remote wrapper without attested exit must keep the slot outcome-unknown'
+fi
+still_unknown 'missing remote exit attestation must retain the slot'
+reject queue-wrapper-exited "$(printf '{"request_id":"exit-other","intent_id":"a","home_id":"other","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s"}' "$other_generation" "$slot" "$remote_attempt_id" "$remote_pid" "$remote_start")" 'another participant must not attest a remote wrapper exit'
+reject queue-wrapper-exited "$(printf '{"request_id":"exit-wrong-start","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"wrong-start"}' "$remote_generation" "$slot" "$remote_attempt_id" "$remote_pid")" 'remote exit attestation must match the exact wrapper start time'
+remote_exit_payload=$(printf '{"request_id":"exit-remote","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s"}' "$remote_generation" "$slot" "$remote_attempt_id" "$remote_pid" "$remote_start")
+remote_exit=$(coord queue-wrapper-exited "$remote_exit_payload")
+[ "$(field "$remote_exit" state)" = outcome-unknown ] || fail 'attested exit must retain the slot until forge non-landing proof'
+coord session '{"request_id":"session-remote-new","home_id":"remote"}' > /dev/null
+reject queue-wrapper-exited "$remote_exit_payload" 'a stale participant session must not replay an authenticated exit receipt'
+if not_landed remote-before-quiet > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'remote exit attestation must still observe the quiet period'
+fi
+released=$(FM_COORD_QUIET_SECONDS=0 not_landed remote-after-exit)
+[ "$(field "$released" state)" = refused ] || fail 'attested remote exit plus quiet period and forge non-landing must release the slot'
+[ "$(slot_count)" = 0 ] || fail 'reconciled remote refusal must free the integration slot'
+pass 'remote wrapper exit attestation and forge proof release an unknown slot'
