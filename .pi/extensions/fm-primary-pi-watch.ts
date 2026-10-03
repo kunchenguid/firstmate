@@ -685,11 +685,12 @@ export default function (pi: ExtensionAPI) {
     return "branch-settlement-failed";
   }
 
-  // Coordinate due routine rows at the existing tool boundary. The branch
-  // owner still classifies, claims, reports and acknowledges its exact rows;
+  // Admit due routine rows at the existing tool boundary. The branch owner
+  // still classifies, claims, reports and acknowledges its exact rows;
   // MAIN-only rows and failed/uncertain handling remain in the original queue.
-  // Await settlement before the requested mutation acquires a task lease.
-  pi.on("tool_call", async (event) => {
+  // Admission is synchronous, but unrelated branch/model settlement must not
+  // delay a task read or a task-specific guarded operation.
+  pi.on("tool_call", (event) => {
     if (event.toolName !== "fm_task_continuation" && event.toolName !== "bash") return;
     if (!activeGeneration || lockOwnership() !== "owned") return;
     const scope = scopeForUnreadWake(state, false);
@@ -699,7 +700,7 @@ export default function (pi: ExtensionAPI) {
       token: `operation-${process.pid}-${Date.now()}`, message: "signal:", predecessorArmPid: "" };
     try {
       const settlement = offerWakeToBranch(pending.message, pending);
-      if (settlement) await settlement;
+      if (settlement) void settlement.catch(() => {});
     } catch {
       // Ordinary watcher delivery retains the semantic decision or failure.
       // A bookkeeping failure is not a successful requested operation.

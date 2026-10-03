@@ -537,6 +537,112 @@ EOF
   pass "Pi dispatcher branch offer owns accepted wakes and falls back to main"
 }
 
+test_pi_task_continuation_bypasses_unrelated_branch_settlement() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-continuation-branch-bypass-root"
+  home="$TMP_ROOT/pi-continuation-branch-bypass-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" REAL_ROOT="$ROOT" node --input-type=module 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const order = [];
+let branchSettled = false;
+let releaseBranch = () => {};
+const branchSettlement = new Promise((resolve) => {
+  releaseBranch = () => {
+    branchSettled = true;
+    resolve();
+  };
+});
+const busHandlers = new Map();
+const bus = {
+  on(channel, handler) {
+    busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of busHandlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  order.push("branch-accepted");
+  offer.accept(branchSettlement);
+});
+const pi = {
+  on(event, handler) {
+    handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+  },
+  events: bus,
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+mkdirSync(`${process.env.FM_HOME}/data/target`, { recursive: true });
+writeFileSync(`${process.env.FM_HOME}/data/backlog.md`, "## In flight\n\n## Queued\n\n## Done\n");
+writeFileSync(`${process.env.FM_HOME}/.tasks.toml`, "backend=\"markdown\"\n[markdown]\npath=\"data/backlog.md\"\n");
+const commandEnv = { ...process.env, FM_DATA_OVERRIDE: `${process.env.FM_HOME}/data`,
+  FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state` };
+const added = spawnSync(`${process.env.REAL_ROOT}/bin/fm-tasks-axi.sh`,
+  ["add", "target", "Read target progress", "--kind", "ship", "--body", "Keep this task independent.", "--start"],
+  { env: commandEnv, encoding: "utf8" });
+if (added.status !== 0) throw new Error(`target fixture failed: ${added.stderr}`);
+writeFileSync(`${process.env.FM_HOME}/data/target/brief.md`, "Target task intent.\n");
+writeFileSync(`${process.env.FM_HOME}/state/target.meta`, "spawn_gen=target-g1\n");
+writeFileSync(`${process.env.FM_HOME}/state/unrelated.meta`, "project=/projects/unrelated\nwindow=fm-unrelated\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tunrelated.status\tsignal: unrelated branch turn\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const invokeContinuation = async () => {
+  order.push("before-tool");
+  for (const handler of handlers.get("tool_call") ?? []) {
+    await handler({ type: "tool_call", toolCallId: "continuation-read", toolName: "fm_task_continuation",
+      input: { action: "read", task: "target" } }, {});
+  }
+  order.push("continuation-read");
+  const read = spawnSync(`${process.env.REAL_ROOT}/bin/fm-task-state.sh`, ["progress", "target"],
+    { env: commandEnv, encoding: "utf8" });
+  if (read.status !== 0) throw new Error(`continuation read failed: ${read.stderr}`);
+  return JSON.parse(read.stdout);
+};
+const operation = invokeContinuation();
+const observed = await Promise.race([
+  operation.then((result) => ({ kind: "result", result })),
+  new Promise((resolve) => setTimeout(() => resolve({ kind: "deadline" }), 1500)),
+]);
+if (observed.kind !== "result") {
+  releaseBranch();
+  await operation;
+  throw new Error(`continuation remained behind the unrelated branch: ${order.join(" -> ")}`);
+}
+if (observed.result.task_id !== "target" || !/^[a-f0-9]{64}$/.test(observed.result.record_token)) {
+  throw new Error(`continuation result was lost: ${JSON.stringify(observed.result)}`);
+}
+if (branchSettled) throw new Error("fixture branch settled before the continuation read");
+if (order.join(",") !== "before-tool,branch-accepted,continuation-read") {
+  throw new Error(`unexpected event order: ${order.join(" -> ")}`);
+}
+releaseBranch();
+await branchSettlement;
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi continuation read must bypass an unrelated pending branch turn"
+  [ -z "$out" ] || fail "Pi continuation branch-bypass test printed output: $out"
+  pass "Pi continuation read bypasses an unrelated pending branch without dropping its offer"
+}
+
 test_pi_retired_row_does_not_veto_an_unrelated_live_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-retired-row-local-root"
@@ -3338,6 +3444,7 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_branch_offer_owns_actionable_wake
+test_pi_task_continuation_bypasses_unrelated_branch_settlement
 test_pi_retired_row_does_not_veto_an_unrelated_live_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
