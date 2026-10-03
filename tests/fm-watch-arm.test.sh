@@ -944,6 +944,52 @@ test_append_wakes_live_announced_watcher() {
   pass "watch-arm: appending work reopens an announced empty recovery"
 }
 
+test_append_wakes_handling_successor() {
+  local phase=$1 dir home state fakebin predecessor successor generation watcher_pid pair sequence
+  dir=$(make_case "append-handling-$phase")
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  append_wake "$state" check inbox:first 'check: captain inbox note first'
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "first inbox wake did not surface"
+  predecessor=$ARM_PID
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/successor.out" "$predecessor"
+  successor=$ARM_PID
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  watcher_pid=$(cat "$state/.watch.lock/pid")
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
+    --watcher-pid "$watcher_pid" || fail "could not confirm first notification delivery"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err"
+  pair=$(drain_ack_pair "$dir/drain.err") || fail "first drain supplied no acknowledgement"
+  sequence=${pair%%$'\t'*}
+  generation=${pair#*$'\t'}
+  # Outlast two real polls: the inherited row alone must not loop.
+  sleep 3
+  is_live_non_zombie "$successor" || fail "successor repeated the inherited notification"
+  if [ "$phase" = after-ack ]; then
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation"
+  fi
+  append_wake "$state" check inbox:second 'check: captain inbox note second'
+  if [ "$phase" = before-ack ]; then
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation"
+  fi
+  wait_for_exit "$successor" 100 || fail "handling successor stranded the second inbox wake ($phase)"
+  grep -F 'check: rearm-resurface' "$dir/successor.out" >/dev/null \
+    || fail "successor did not notify about new work"
+  grep "$(printf '\tcheck\tinbox:second\t')" "$state/.wake-queue" >/dev/null \
+    || fail "notification or old acknowledgement consumed the second message"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/next.out" "$successor"
+  ack_wakes "$state" || fail "could not acknowledge the second message"
+  sleep 3
+  is_live_non_zombie "$ARM_PID" || fail "next successor repeated already-handled work"
+  [ ! -s "$state/.wake-queue" ] || fail "handled queue was not drained"
+  kill -TERM "$ARM_PID"
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: handling successor delivers new inbox work $phase without consuming or looping"
+}
+
 # Exercise the handling-window recovery invariant owned by
 # docs/watcher-continuity.md through real watcher processes.
 test_handling_window_close_keeps_the_acknowledgement_valid() {
@@ -1713,6 +1759,8 @@ EOF
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
 }
 
+test_append_wakes_handling_successor after-ack
+test_append_wakes_handling_successor before-ack
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window

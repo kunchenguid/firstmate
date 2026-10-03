@@ -194,6 +194,8 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce the predecessor-delivered wake while its handling handoff remains open.
+An external durable append still republishes that episode as pending downtime, so the successor surfaces it whether the prior handling turn is still running or has acknowledged its rows.
+Notification never consumes rows; sequence-bound, per-actor acknowledgement remains the owner of consumption.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
 After the supervision host finishes a handled turn, it settles the successor handoff under the durable-queue and recovery-marker locks.
 Any row left for main then becomes a recoverable downtime episode, including one appended after the predecessor closed but before the successor initialized or the host confirmed its handoff.
