@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { clientFromCtx, v1Event } from "./lib/fm-opencode-v2-adapter.js";
 
 const handledSessions = new Set();
 
@@ -59,19 +60,6 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
   };
 };
 
-// OpenCode v2 default export. The v2 loader requires `{ id, setup(ctx) }`, v2
-// events arrive from `ctx.event.subscribe()`, and a follow-up turn is forced
-// with `ctx.session.prompt`. The v1 hook object above is reused through a
-// `client` shim so both APIs share one implementation.
-function clientFromCtx(ctx) {
-  return {
-    session: {
-      promptAsync: ({ path, body }) =>
-        ctx.session.prompt({ sessionID: path?.id, text: body?.parts?.[0]?.text ?? "" }),
-    },
-  };
-}
-
 export default {
   id: "fm-primary-sessionstart-nudge",
   async setup(ctx) {
@@ -82,9 +70,8 @@ export default {
     const controller = new AbortController();
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        // v2 events carry their payload under `data`; the v1 hooks read `properties`.
         try {
-          await hooks.event({ event: { type: event.type, properties: event.data } });
+          await hooks.event({ event: v1Event(event) });
         } catch {}
       }
     })().catch(() => {});

@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { clientFromCtx, v1Event } from "./lib/fm-opencode-v2-adapter.js";
 
 // Supervision host: a home opted in with config/supervision-host
 // (docs/configuration.md "Supervision host" owns the gate, which
@@ -560,30 +561,9 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   };
 };
 
-// OpenCode v2 default export. The v2 loader requires `{ id, setup(ctx) }`, v2
-// events arrive from `ctx.event.subscribe()`, and wakes are delivered with
-// `ctx.session.prompt`. The v1 hook object above is reused through a `client`
-// shim so both APIs share one implementation, and the coordinator entry it
-// installs keeps serving the v2 turn-end guard.
-function clientFromCtx(ctx) {
-  return {
-    session: {
-      promptAsync: ({ path, body }) =>
-        ctx.session.prompt({ sessionID: path?.id, text: body?.parts?.[0]?.text ?? "" }),
-    },
-  };
-}
-
-// v2 events carry their payload under `data`; the v1 hooks read `properties`.
-// v2 publishes no `session.idle`: a turn ends with a terminal
-// `session.execution.*` event, which is mapped onto the v1 idle event.
-const V2_TURN_END = ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"];
-function v1Event(event) {
-  const properties = event.data ?? {};
-  if (V2_TURN_END.includes(event.type)) return { type: "session.idle", properties };
-  return { type: event.type, properties };
-}
-
+// OpenCode v2 default export: the v2 loader requires `{ id, setup(ctx) }`, and
+// `clientFromCtx`/`v1Event` adapt v2 onto the v1 hook object above. The
+// coordinator entry the hooks install keeps serving the v2 turn-end guard.
 export default {
   id: "fm-primary-watch-arm",
   async setup(ctx) {
