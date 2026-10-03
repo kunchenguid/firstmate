@@ -157,4 +157,4 @@ Report BITS outcomes as project outcomes under `AGENTS.md` section 9 rather than
 Lead with the candidate that reached the dedicated PPE, whether the exact-candidate API or end-to-end test and final native review passed, and the next decision.
 Include the full `https://...` URL of any MR, Dev Task, deployment, or pipeline the captain needs to act on.
 Report a ready BITS delivery only when the candidate validated by final native review is still the exact code deployed and proven by the required PPE API or end-to-end test.
-Escalate for the separate MR merge, production deployment, release continuation, rollback, stage pass, another review fix round beyond the maximum of two, or a credential or permission the integration needs.
+Escalate for the separate MR merge, production deployment, release continuation, rollback, stage pass, an authority-bearing review finding, or a credential or permission the integration needs.

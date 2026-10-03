@@ -71,7 +71,7 @@
 # empty) check-run set at that head. bytedcli's supported merge operation binds
 # the request identity but has no source-head condition, so this path does not
 # claim GitHub/GitLab's atomic candidate guarantee. It holds the ordinary task
-# and away-authority locks across the immediate preflight and synchronous merge,
+# and accepted-authority locks across the immediate preflight and synchronous merge,
 # then independently reads the MR back. Only an exact identity, the same source
 # head observed again, merged status, and merge commit reaches the landed-outcome
 # owner; a concurrent source change or ambiguous readback is reported without
@@ -101,7 +101,7 @@
 # --remove-source-branch) are refused by default; --attended-override, parsed
 # before the optional -- separator, re-enables those forge flags for an
 # explicit captain instruction and never skips the live green check, the
-# away-grant check, or a captain hold.
+# accepted-authority check, or a captain hold.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
 #
@@ -1281,7 +1281,7 @@ require_released_captain_hold || exit 1
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its forge child lives,
 # stale-owner recovery can release the record for archive or replacement and
-# the orphaned forge child can still merge on the lapsed away authority.
+# the orphaned forge child can still merge on a lapsed accepted authority.
 FM_PR_MERGE_OUTCOME_ORIGIN=self
 case "$PROVIDER" in
   github)
@@ -1292,7 +1292,7 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     github_verify_mergeable || exit 1
-    # The away record is locked first, so this last presence and authority read
+    # The task authority record is locked first, so this last authority read
     # and the forge command below share one live-owner critical section.
     merge_status=0
     fm_short_owner_effect || exit 1
@@ -1341,7 +1341,7 @@ case "$PROVIDER" in
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
     # the conditions above are what authorize the merge.
-    # The away record is locked first, so this last presence and authority read
+    # The task authority record is locked first, so this last authority read
     # and the forge command below share one live-owner critical section.
     merge_status=0
     gitlab_merge_args=()

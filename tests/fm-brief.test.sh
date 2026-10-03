@@ -343,7 +343,9 @@ test_native_review_dod_wording() {
     "review-PR brief did not require the task contract in review"
   assert_grep "complete final diff again" "$brief" \
     "review-PR brief did not require final re-review after corrections"
-  bytes=$(wc -c < "$brief" | tr -d ' ')
+  # Generated commands contain the supervising checkout's absolute root. Strip
+  # that variable-length prefix before enforcing the stable wording budget.
+  bytes=$(sed "s|$ROOT|<FM_ROOT>|g" "$brief" | wc -c | tr -d ' ')
   [ "$bytes" -lt 7000 ] || fail "review-PR brief did not remain bounded: $bytes bytes"
   assert_present "$ROOT/bin/fm-native-review.sh" \
     "the generated trigger points to no executable review owner"

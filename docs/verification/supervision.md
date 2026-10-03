@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, turn-end, and watcher-continuity guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -289,36 +289,3 @@ tests/fm-watch-recovery-loop.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-turnend-guard.test.sh
 ```
-
-## Wedge-alarm channels
-
-The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
-Automated suites never execute these real notification commands.
-
-Argv-safe Notification Center command:
-
-```sh
-/usr/bin/osascript \
-  -e 'on run argv' \
-  -e 'display notification (item 1 of argv) with title "FIRSTMATE TEST - IGNORE" sound name "Basso"' \
-  -e 'end run' \
-  'FIRSTMATE TEST - IGNORE (wedge-alarm channel verification)'
-```
-
-Observed output: no stdout, exit 0, and one banner with the supplied body.
-
-Herdr command:
-
-```sh
-herdr notification show 'FIRSTMATE TEST - IGNORE' \
-  --body 'FIRSTMATE TEST - IGNORE (wedge-alarm channel verification)' \
-  --sound request
-```
-
-Observed output:
-
-```json
-{"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
-```
-
-The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.

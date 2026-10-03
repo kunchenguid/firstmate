@@ -11,6 +11,9 @@
 #   <path>
 #   <number>
 #   <authority>                 yolo | attended
+# Historical records may contain away-grant. Fresh resolution never produces
+# that value, but read/retirement compatibility prevents an already accepted
+# merge from losing its durable provenance during upgrade.
 # The identity comes from the merge run's immutable canonical URL parse;
 # persistence revalidates the task's current pr= metadata under its metadata
 # and lifecycle locks and refuses a mismatch. The file is atomically published,
