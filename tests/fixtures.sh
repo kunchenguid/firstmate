@@ -292,14 +292,54 @@ EOF
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
+# Creates <dir>/fakebin with the spawn tmux stub, a mock treehouse, and any
 # extra exit-0 tools. Echoes the fakebin path.
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
+  if [ "${FM_TEST_TREEHOUSE_STATUS_EXIT:-0}" -ne 0 ]; then
+    echo 'treehouse registry unavailable' >&2
+    exit "$FM_TEST_TREEHOUSE_STATUS_EXIT"
+  fi
+  pool=$(dirname "$(dirname "$(pwd -P)")")
+  if [ -f "$pool/treehouse-state.json" ]; then
+    # Translate test fixture format {"worktrees": [...]} to real output format [...]
+    # by just outputting the array part, or parsing it.
+    if grep -q '"worktrees":' "$pool/treehouse-state.json"; then
+      jq '.worktrees' "$pool/treehouse-state.json"
+    else
+      cat "$pool/treehouse-state.json"
+    fi
+    exit 0
+  fi
+  echo "[]"
+  exit 0
+fi
+if [ "$1" = "return" ] && [ "$2" = "--force" ]; then
+  [ "${FM_TEST_TREEHOUSE_STRICT_RETURN:-0}" -eq 1 ] || exit 0
+  pool=$(dirname "$(dirname "$(pwd -P)")")
+  if [ -f "$pool/treehouse-state.json" ] \
+    && jq -e --arg path "$3" '.worktrees[]? | select(.path == $path)' \
+      "$pool/treehouse-state.json" >/dev/null; then
+    printf 'returned %s\n' "$3"
+    exit 0
+  fi
+  echo "worktree $3 is not managed by treehouse" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+
+  if [ $# -gt 0 ]; then
+    fm_fake_exit0 "$fakebin" "$@"
+  fi
   printf '%s\n' "$fakebin"
 }
 

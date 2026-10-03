@@ -159,6 +159,16 @@
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
 #   the next spawn's claim replaces it.
+#   Before publishing that record, a Treehouse-backed spawn replaces the
+#   filesystem-resolved worktree spelling with the matching path from Treehouse's
+#   `treehouse-state.json` registry, proved by device and inode rather than a
+#   symlink-specific rule.
+#   This keeps Treehouse's string-keyed return operation aligned with `worktree=`
+#   when a pool root is symlinked. An unreadable registry and a slot missing from
+#   that registry refuse separately, so the operator can distinguish a registry
+#   read failure from an unmanaged slot. The refusal remains strict: recording an
+#   unresolved path would defer the fault to teardown, where it can leave an
+#   unmanaged process and lease dangling.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -4323,6 +4333,19 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    if WT_CANONICAL=$(fm_treehouse_canonical_path "$WT"); then
+      canon_status=0
+    else
+      canon_status=$?
+    fi
+    if [ "$canon_status" -eq 2 ]; then
+      echo "error: could not query Treehouse registry for $WT; refusing to launch to avoid teardown failure; inspect window $T" >&2
+      exit 1
+    elif [ "$canon_status" -ne 0 ]; then
+      echo "error: could not resolve Treehouse registry path for $WT; refusing to launch to avoid teardown failure; inspect window $T" >&2
+      exit 1
+    fi
+    WT="$WT_CANONICAL"
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
       exit 1
