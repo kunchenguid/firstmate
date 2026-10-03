@@ -731,6 +731,55 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
+test_matrix_grok_status_line_error_footer() {
+  # grok 1.0.30 on herdr, captured 2026-10-02 from two idle panes. The border
+  # title is aligned (no overhang) and carries a U+00B7 mode badge, and Grok's
+  # status-line failure sits flush under the box, above the shortcuts bar.
+  # Neither row is typed input. A script's own stdout and any other unclaimed
+  # row in that slot stay a refusal.
+  local idle typed activity script dialog timed killed nostart shortcuts ctrlx prefix_script dot_only
+  idle=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: exit 127]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
+  assert_screen "grok status-line exit footer on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "grok status-line exit footer on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "grok status-line exit footer on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "grok status-line exit footer on tmux" empty "$CAPS_TMUX" "$idle" 1
+  typed=$'  ╭────────────────────────────────────────╮\n  │ ❯ deploy the fix                       │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: exit 127]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
+  assert_screen "grok typed under a status-line exit footer" pending "$CAPS_STYLED" "$typed"
+  assert_screen "grok typed under a status-line exit footer on tmux" pending "$CAPS_TMUX" "$typed" 1
+  activity=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  Working on request...'
+  assert_screen "grok activity flush under the box" unknown "$CAPS_STYLED" "$activity"
+  script=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  repo │ Grok │ 25% ctx'
+  assert_screen "grok script status stdout is not furniture" unknown "$CAPS_STYLED" "$script"
+  dialog=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: exit 127]\n  Approve this deployment?'
+  assert_screen "grok dialog under a status-line error" unknown "$CAPS_STYLED" "$dialog"
+  timed=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: timed out]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
+  assert_screen "grok status-line timeout footer" empty "$CAPS_STYLED" "$timed"
+  # The other Grok-rendered status-line failures named by
+  # FM_COMPOSER_GROK_STATUS_ERROR_RE_DEFAULT must clear the same exit/relaunch
+  # gate: a killed or unstartable script is still furniture, not activity.
+  killed=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: killed by signal]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
+  assert_screen "grok status-line killed-by-signal footer" empty "$CAPS_STYLED" "$killed"
+  nostart=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: could not start the script: missing binary]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
+  assert_screen "grok status-line could-not-start footer" empty "$CAPS_STYLED" "$nostart"
+  shortcuts=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
+  assert_screen "grok shortcuts bar flush under the box" empty "$CAPS_STYLED" "$shortcuts"
+  # Grok's alternate shortcuts key chord (Ctrl+x) is the same complete bar
+  # under the middle-dot title path that blocked relaunch; both chords empty.
+  ctrlx=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: exit 127]\n  Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  assert_screen "grok status-line exit footer with Ctrl+x shortcuts" empty "$CAPS_STYLED" "$ctrlx"
+  ctrlx=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  assert_screen "grok Ctrl+x shortcuts bar flush under the box" empty "$CAPS_STYLED" "$ctrlx"
+  # A status-line script that only starts like the shortcuts bar is still its
+  # own stdout: the furniture pattern is the complete bar, not a prefix, so
+  # this row cannot authorize exit/relaunch on an unproven pane.
+  prefix_script=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  Shift+Tab:mode  │  Ctrl+.:shortcuts and deploy notes'
+  assert_screen "grok shortcuts-prefix script stdout is not furniture" unknown "$CAPS_STYLED" "$prefix_script"
+  assert_screen "grok shortcuts-prefix script stdout on plain" unknown "$CAPS_PLAIN" "$prefix_script"
+  dot_only=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯'
+  assert_screen "grok aligned middle-dot title alone" empty "$CAPS_STYLED" "$dot_only"
+  pass "matrix: grok's status-line error footer stays empty only when the composer itself is idle"
+}
+
 test_matrix_claude_titled_top_rule() {
   # A named Claude Code session draws its title into the composer's TOP rule
   # (issues #5601 and #5558; observed on herdr as
@@ -1035,6 +1084,7 @@ test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
+test_matrix_grok_status_line_error_footer
 test_matrix_claude_titled_top_rule
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
