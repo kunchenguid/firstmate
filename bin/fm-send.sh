@@ -128,13 +128,13 @@
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) that writes the message as a
 # durable record into the remote home's steering inbox and rings the remote
-# doorbell, best-effort. The remote record is the delivery, exactly as it is
-# locally: leg exit 0 means durably recorded (fm-send then exits 0, marks the
-# pending-reply expectation delivered, and closes any --resolve-key
+# doorbell. Leg exit 0 means durably recorded and notified or already handled
+# (fm-send then exits 0, marks the pending-reply expectation delivered,
+# and closes any --resolve-key
 # decisions), and any real remote failure fails loudly with the remote leg's
-# own stderr attached. Transport loss (ssh exit 255) means completion unknown,
-# so fm-send retries the identical leg once - safe because the remote write
-# deduplicates the same request onto the same record - and a still-lost
+# own stderr attached. Exit 75 means notification is still owed; transport
+# loss (ssh exit 255) means completion unknown. Either retries the identical
+# leg once - safe because the remote write deduplicates the same request onto the same record - and a still-lost
 # transport exits nonzero while preserving a reply-bearing marked request's
 # expectation, since the record may have landed. Its error prints the exact
 # FM_PENDING_REPLY_EXISTING_CORR=<id> resend command that preserves the body
@@ -894,8 +894,8 @@ else
   if [ "$INBOX_PLANE" = 1 ] && [ "$TARGET_BACKEND" = remote ]; then
     # Remote inbox leg: the message becomes a durable record in the remote
     # home's steering inbox, written idempotently by the host-local leg, then
-    # the remote doorbell rings, best-effort. One identical retry after ssh
-    # 255 is safe by that idempotence; a still-lost transport preserves a
+    # the remote doorbell rings. One identical retry after notification status
+    # 75 or ssh 255 is safe by that idempotence; a still-lost transport preserves a
     # reply-bearing request's expectation, while fire-and-forget reports the
     # delivery id that must be reused, because the record may have landed.
     # Every transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds
@@ -934,24 +934,25 @@ else
     fi
     remote_rc=0
     remote_completion_unknown=0
-    REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
-    [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
+    REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE" "")
+    [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS[2]=fire-and-forget
     # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds.
     # fm_run_timed's 124 means the attempt was killed at the bound with remote
     # completion unknown - the enqueue may have landed - so it exits through
     # the same unconfirmed-delivery contract as a lost transport, without a
     # retry that would only wait out the same busy remote queue again. (A
     # remote job's own timeout also relays as 124; treating it as unconfirmed
-    # stays safe because the remote enqueue deduplicates.)
+    # stays safe because the remote enqueue deduplicates.) Exit 75 likewise
+    # preserves the record's resend identity and retries notification once.
     fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-      fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" </dev/null || remote_rc=$?
+      fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" "$FM_SEND_REMOTE_BUDGET" </dev/null || remote_rc=$?
     if [ "$remote_rc" -eq 124 ]; then
       remote_completion_unknown=1
-    elif [ "$remote_rc" -eq 255 ]; then
+    elif [ "$remote_rc" -eq 255 ] || [ "$remote_rc" -eq 75 ]; then
       remote_completion_unknown=1
       remote_rc=0
       fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-        fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" </dev/null || remote_rc=$?
+        fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" "$FM_SEND_REMOTE_BUDGET" </dev/null || remote_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
@@ -962,7 +963,9 @@ else
       if [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      if [ "$remote_rc" -eq 255 ]; then
+      if [ "$remote_rc" -eq 75 ]; then
+        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (durably recorded, notification still owed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+      elif [ "$remote_rc" -eq 255 ]; then
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       elif [ "$remote_rc" -eq 124 ]; then
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the remote transport did not complete within its ${FM_SEND_REMOTE_BUDGET}s budget; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
