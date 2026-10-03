@@ -305,6 +305,31 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a non-HTTPS Landed PR URL was accepted"
 
+  # Optional milestone fields refuse unknown values like every other field.
+  local mutation
+  for mutation in \
+    '.projects = {}' \
+    '.projects = [{"release_goal":"no repo"}]' \
+    '.projects = [{"repo":"sample","health":"green"}]' \
+    '.projects = [{"repo":"sample","release_date":"next week"}]' \
+    '.projects = [{"repo":"sample","merges_today":-1}]' \
+    '.projects = [{"repo":"sample","wip_count":1.5}]' \
+    '.projects = [{"repo":"sample","release_goal":""}]' \
+    '.underway = [{"id":"t","repo":"sample","name":"T","state":"working","kind":"ship","doing":"x","health":"g"}]' \
+    '.underway = [{"id":"t","repo":"sample","name":"T","state":"working","kind":"ship","doing":"x","target":18}]' \
+    '.underway = [{"id":"t","repo":"sample","name":"T","state":"working","kind":"ship","doing":"x","evidence_url":"http://example.com"}]' \
+    '.captains_call[0].default_if_silent = "maybe"' \
+    '.captains_call[0].default_if_silent = "reconcile"' \
+    '.captains_call[0].decide_by = "soon"' \
+    '.captains_call[0].asked_at = "2026-10-03 09:00"' \
+    '.captains_call[0].reversible = "yes"' \
+    '.captains_call[0].evidence_url = "javascript:alert(1)"'; do
+    write_valid_payload "$data"
+    jq "$mutation" "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid milestone field was accepted: $mutation"
+  done
+
   assert_absent "$board" "a refused payload still produced a board"
   pass "build refuses malformed payloads before touching the board"
 }
