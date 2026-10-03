@@ -268,7 +268,7 @@ map_log_state() {  # <line>
 }
 
 LOG_LINE=$(status_current_line "$LOG" "$KIND")
-status_terminal_is_current "$LOG_LINE" "$META" || LOG_LINE=''
+status_terminal_is_current "$LOG_LINE" "$META" "$LOG" || LOG_LINE=''
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # --- remote secondmate: the true source is the remote endpoint ---------------

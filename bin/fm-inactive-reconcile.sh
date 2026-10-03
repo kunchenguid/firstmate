@@ -369,14 +369,14 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 # selected through the shared latest-event reader, so the ledger path owns a
 # terminal record whose continuation prose trails it, and an unfinished line of
 # ordinary prose withholds nothing.
-# A timestamped terminal event predating the sibling spawn generation is
-# historical, so it cannot be relayed or suppress the current-state scan.
+# A terminal event in the retained pre-spawn ledger prefix is historical, so it
+# cannot be relayed or suppress the current-state scan.
 child_terminal_ledger_line() { # <status>
   local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
   last=$(last_status_line "$status")
   case "$(status_line_verb "$last")" in done|failed) ;; *) return 1 ;; esac
-  status_terminal_is_current "$last" "${status%.status}.meta" || return 1
+  status_terminal_is_current "$last" "${status%.status}.meta" "$status" || return 1
   snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
   case "$snapshot" in
     *$'\n'"$marker") ;;

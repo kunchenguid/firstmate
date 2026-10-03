@@ -441,8 +441,7 @@ status_paused_until() {  # <status-line> -> epoch on stdout
 # their grammar. Missing, malformed, or duplicate time fields mean UNKNOWN time;
 # never infer emission time from file mtime, a wake, or observation time. Relays
 # preserve source tags and leave legacy source events unstamped. Time describes
-# event history only, not progress or decision closure; a known pre-spawn
-# terminal event is excluded from current-incarnation outcome attribution.
+# event history only and must never decide current state or decision closure.
 # This parser owns that grammar; every reader below is a thin adapter over it,
 # so no second spelling of "well-formed" can drift against this one.
 # Internals carry a reserved prefix: bash locals are dynamically scoped, so a
@@ -466,26 +465,24 @@ status_line_at_epoch() {  # <status-line> -> epoch; nonzero when unknown
   printf '%s' "$epoch"
 }
 
-# 0 unless a done/failed event provably predates the recorded spawn incarnation.
-# fm-spawn.sh owns spawn_gen=s<epoch>.<pid>.<random> on every backend/harness.
-# Unknown event time or a legacy/malformed generation preserves legacy reads;
-# never substitute metadata mtime, which also changes on ordinary bookkeeping.
-# Equal-second events remain valid because second-resolution time cannot order
-# them. Callers pass their selected metadata, including a fleet snapshot copy.
-status_terminal_is_current() {  # <status-line> <meta-file>
-  local line=$1 meta=$2 epoch generation='' field boundary
+# fm-spawn.sh records spawn_status_lines at the incarnation's publication
+# boundary on every backend/harness. A done/failed declaration must occur after
+# that retained ledger prefix; wall-clock time cannot order incarnations.
+# Missing/malformed boundaries preserve legacy reads. Callers pass their
+# selected metadata (including fleet snapshots) and the live status ledger.
+status_terminal_is_current() {  # <status-line> <meta-file> <status-file>
+  local line=$1 meta=$2 status=$3 field boundary='' candidate
   case "$(status_line_verb "$line")" in done|failed) ;; *) return 0 ;; esac
-  epoch=$(status_line_at_epoch "$line") || return 0
   [ -f "$meta" ] && [ -r "$meta" ] && [ ! -L "$meta" ] || return 0
   while IFS= read -r field || [ -n "$field" ]; do
-    case "$field" in spawn_gen=*) generation=${field#spawn_gen=} ;; esac
+    case "$field" in spawn_status_lines=*) boundary=${field#spawn_status_lines=} ;; esac
   done < "$meta"
-  if [[ "$generation" =~ ^s(0|[1-9][0-9]{0,11})\.[0-9]+\.[0-9]+$ ]]; then
-    boundary=${BASH_REMATCH[1]}
-    [ "$epoch" -ge "$boundary" ]
-  else
-    return 0
-  fi
+  [[ "$boundary" =~ ^(0|[1-9][0-9]{0,11})$ ]] || return 0
+  [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ] || return 1
+  while IFS= read -r candidate || [ -n "$candidate" ]; do
+    [ "$candidate" != "$line" ] || return 0
+  done < <(tail -n "+$((boundary + 1))" "$status")
+  return 1
 }
 
 # Stamp only a newly emitted event. Preserve an existing tag, even malformed,
