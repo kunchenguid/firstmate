@@ -8,7 +8,7 @@ firstmate's supervisor contract and routing index for conditional procedures is 
 
 ## Event-driven supervision
 
-The declared-wait vocabulary, including the legacy "external wait" label, is owned by [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh); worker declaration instructions are owned by [`bin/fm-brief.sh`](../bin/fm-brief.sh).
+The declared-wait vocabulary, including the legacy "external wait" label, is owned by [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh); worker declaration instructions and the ship worker's scratch-location and clean-worktree contract are owned by [`bin/fm-brief.sh`](../bin/fm-brief.sh).
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
 Actionable wakes include captain-relevant status signals, no-verb signals without positive evidence that their crew is still executing, authenticated check output such as PR merge polling or a Relay mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS` with no wait their own worker declared, no writes to their own task worktree, and - in a home that armed `config/wedge-defer-parked-gate` - no validation gate of their own awaiting an unanswered supervisor decision, declared external waits and attended captain-held transfers that remain declared past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
