@@ -839,30 +839,20 @@ while [ ! -e "$RESTART_LOCK_MARKER" ] && [ "$i" -lt 100 ]; do
   i=$((i + 1))
 done
 [ -e "$RESTART_LOCK_MARKER" ] || fail "could not hold the publication lock for restart coverage"
+# The signal exists before the watcher starts, so its first scan must surface it
+# and the watcher exits on that wake; waiting on the exit rather than a deadline
+# keeps a slow cycle on a loaded machine from reading as a missed signal.
+printf 'needs-decision [key=restart-gate]: restart the watcher\n' \
+  > "$RESTART_HOME/state/restart-task.status"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
   FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 FM_HOME_SUMMARY_TIMEOUT=2 \
   FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
   "$WATCH" > "$TMP_ROOT/restart-watch-one.out" 2> "$TMP_ROOT/restart-watch-one.err" &
 WATCH_PID=$!
-i=0
-while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
-  kill -0 "$WATCH_PID" 2>/dev/null || break
-  sleep 0.05
-  i=$((i + 1))
-done
-[ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
-  || fail "the first restart watcher did not begin polling"
-printf 'needs-decision [key=restart-gate]: restart the watcher\n' \
-  > "$RESTART_HOME/state/restart-task.status"
-i=0
-while kill -0 "$WATCH_PID" 2>/dev/null && [ "$i" -lt 100 ]; do
-  sleep 0.05
-  i=$((i + 1))
-done
-kill -0 "$WATCH_PID" 2>/dev/null \
-  && fail "the first restart watcher did not surface its actionable signal"
 wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
+assert_grep "signal: $RESTART_HOME/state/restart-task.status" "$TMP_ROOT/restart-watch-one.out" \
+  "the first restart watcher did not surface its actionable signal: $(cat "$TMP_ROOT/restart-watch-one.out" "$TMP_ROOT/restart-watch-one.err" 2>/dev/null)"
 rm -f "$RESTART_HOME/state/.last-watcher-beat"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
   FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 FM_HOME_SUMMARY_TIMEOUT=2 \
