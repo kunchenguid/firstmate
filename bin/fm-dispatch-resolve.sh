@@ -155,7 +155,13 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     elif $h == "grok" or $h == "agy" then (["low","medium","high"] | index($e)) != null
     elif $h == "pi" or $h == "pi-signed" or $h == "omp" or $h == "muse" then (["low","medium","high","xhigh","max"] | index($e)) != null
     elif $h == "rovo" then (["low","medium","high","max"] | index($e)) != null
-    elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
+    elif $h == "opencode" then
+      (($m | type) == "string") and (
+        (($m | startswith("anthropic/")) and (["high","max"] | index($e)) != null)
+        or (($m | startswith("openai/")) and (["low","medium","high","xhigh"] | index($e)) != null)
+        or (($m | startswith("github-copilot/")) and ($m | length) > 15
+          and (["low","medium","high","xhigh","max"] | index($e)) != null))
+    elif $h == "kimi" or $h == "cursor" then false
     else true end;
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def floor_bad($f; $need_provider):

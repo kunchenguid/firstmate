@@ -87,6 +87,11 @@
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
 #   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   A github-copilot/* model's variants differ per model, so the spawn reads
+#   them from `opencode models github-copilot --verbose --pure` under a hard
+#   bound, overlapped with worktree and endpoint provisioning, and writes the
+#   effort only when that model lists it; an unlisted effort or a failed lookup
+#   is recorded, omitted, and noticed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1370,6 +1375,7 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  [ -z "${OPENCODE_VARIANT_DIR:-}" ] || rm -rf "$OPENCODE_VARIANT_DIR" 2>/dev/null || true
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -1957,6 +1963,53 @@ agy_model_validate() {  # <agy-bin> <model>
   return 1
 }
 
+opencode_variant_read_notice() {
+  local model=$1 effort=$2 provider=${1%%/*}
+  echo "notice: could not read the variants of '$model' from 'opencode models $provider --verbose --pure'; effort=$effort is recorded but omitted from the launch" >&2
+}
+
+# OpenCode per-model variant lookup for the effort axis (effort_flag_for_harness).
+# A github-copilot/* model's reasoning variants differ per model, not per
+# provider (opencode 1.18.32 lists high|max for claude-haiku-4.5 but none
+# through max for gpt-6-sol), and OpenCode silently ignores a variant the model
+# lacks, so the effort is written only when OpenCode itself lists it.
+# `opencode models <provider> --verbose` prints each model as a
+# "<provider>/<id>" line followed by its JSON record, whose `variants` keys are
+# the names agent.<name>.variant selects; the record is matched on its own
+# providerID and id. The lookup runs from / with --pure because OpenCode
+# otherwise loads, and writes into, the .opencode/ of whatever directory it
+# runs in, a firstmate home or project included. Stdin is detached and the
+# shared hard bound (bin/fm-timeout-lib.sh) caps a stalled catalog fetch:
+# FM_OPENCODE_MODELS_TIMEOUT seconds, 10 by default, with a non-positive or
+# non-numeric value clamped back to that default. Prints <effort> when the
+# model lists it; otherwise prints nothing and a notice, so the caller records
+# the effort but omits it.
+opencode_listed_variant() {  # <provider/model> <effort>
+  local model=$1 effort=$2 provider=${1%%/*} bin listing variants rc=0 bound=${FM_OPENCODE_MODELS_TIMEOUT:-10}
+  case "$bound" in '' | *[!0-9]* | 0*) bound=10 ;; esac
+  if bin=$(command -v opencode); then
+    listing=$(cd / && fm_run_timed "$bound" "$bin" models "$provider" --verbose --pure 2>/dev/null </dev/null) || rc=$?
+  else
+    rc=127
+  fi
+  if [ "$rc" -eq 0 ] && variants=$(printf '%s\n' "$listing" | grep -v '^[^[:space:]{}]' |
+    jq -rs --arg provider "$provider" --arg id "${model#*/}" '
+      map(select(.providerID == $provider and .id == $id))
+      | if length == 1 then (.[0].variants // {}) | keys_unsorted | join(" ")
+        else error("no single record for the model") end' 2>/dev/null); then
+    case " $variants " in
+    *" $effort "*) printf '%s' "$effort" ;;
+    *) echo "notice: OpenCode lists no '$effort' variant for '$model' (its variants: ${variants:-none listed}); effort=$effort is recorded but omitted from the launch" >&2 ;;
+    esac
+    return 0
+  fi
+  if fm_timed_out "$rc"; then
+    echo "notice: 'opencode models $provider' did not answer within ${bound}s; effort=$effort for '$model' is recorded but omitted from the launch" >&2
+  else
+    opencode_variant_read_notice "$model" "$effort"
+  fi
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -2398,6 +2451,27 @@ fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
+# A github-copilot/* effort needs that model's variants from
+# opencode_listed_variant, one OpenCode start plus a live catalog fetch (about
+# three seconds on 1.18.32). It runs in the background while the worktree and
+# endpoint are provisioned and is collected before the task record exists. An
+# abort before then only removes its output directory; the lookup itself ends
+# at its own bound. If its output directory cannot be created, the lookup is
+# skipped and the effort is recorded but omitted with a failed-read notice.
+OPENCODE_VARIANT=
+OPENCODE_VARIANT_PID=
+OPENCODE_VARIANT_DIR=
+case "$HARNESS:$RAW_LAUNCH:${EFFORT:+effort}:$MODEL" in
+opencode:0:effort:github-copilot/?*)
+  if OPENCODE_VARIANT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-opencode-variant.XXXXXX"); then
+    opencode_listed_variant "$MODEL" "$EFFORT" >"$OPENCODE_VARIANT_DIR/variant" 2>"$OPENCODE_VARIANT_DIR/notice" </dev/null &
+    OPENCODE_VARIANT_PID=$!
+  else
+    OPENCODE_VARIANT_DIR=
+    opencode_variant_read_notice "$MODEL" "$EFFORT"
+  fi
+  ;;
+esac
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
@@ -2587,7 +2661,7 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2 model=${3:-}
+  local harness=$1 effort=$2 model=${3:-} listed_variant=${4:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
   claude)
@@ -2650,10 +2724,12 @@ effort_flag_for_harness() {
     # model)", so the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch
     # already writes: the default build agent is pinned to the resolved model
     # and the effort named as its variant, which OpenCode resolves against that
-    # model's own variant list. Those lists are per-provider (anthropic/* expose
-    # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
-    # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
+    # model's own variant list and silently ignores when the list lacks it.
+    # anthropic/* and openai/* lists are fixed per provider (high|max and
+    # low|medium|high|xhigh), but github-copilot/* lists differ per model, so a
+    # Copilot effort is emitted only as the listed_variant that
+    # opencode_listed_variant read from OpenCode's own catalog for that model.
+    # Any other provider, or an effort outside the model's list, keeps the
     # permission-only launch and omits the variant (record-and-omit, as codex
     # and grok do). Without a resolved model the variant has nothing to key to
     # and is likewise omitted. The fragment lands inside the launch's
@@ -2663,6 +2739,7 @@ effort_flag_for_harness() {
     case "${model%%/*}:$effort" in
     anthropic:high | anthropic:max) ;;
     openai:low | openai:medium | openai:high | openai:xhigh) ;;
+    github-copilot:*) [ "$listed_variant" = "$effort" ] || return 0 ;;
     *) return 0 ;;
     esac
     local model_json
@@ -4871,6 +4948,17 @@ else
   fi
 fi
 
+# Collect the background OpenCode variant lookup started at the harness
+# preflight, so its notice lands before the task record is published.
+if [ -n "$OPENCODE_VARIANT_PID" ]; then
+  wait "$OPENCODE_VARIANT_PID" || true
+  OPENCODE_VARIANT_PID=
+  OPENCODE_VARIANT=$(cat "$OPENCODE_VARIANT_DIR/variant" 2>/dev/null) || OPENCODE_VARIANT=
+  cat "$OPENCODE_VARIANT_DIR/notice" >&2 2>/dev/null || true
+  rm -rf "$OPENCODE_VARIANT_DIR" || true
+  OPENCODE_VARIANT_DIR=
+fi
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
@@ -5051,7 +5139,7 @@ sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL" "$OPENCODE_VARIANT") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
