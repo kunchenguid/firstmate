@@ -760,29 +760,53 @@ test_local_pending_reports_delivered_unconfirmed() {
   pass "fm-send local: an unconfirmed submit exits 3 with an honest non-error report"
 }
 
+# A --resolve-key answer has no typed plane at all, so the typed unconfirmed
+# ladder cannot govern one: even a harness-native answer rides the durable
+# record (bin/fm-send.sh's decision-closure contract). That moves this
+# guarantee - an answer that was NOT delivered must never close its decision -
+# from the composer read-back to the enqueue, which is the stronger place for
+# it: an enqueue either leaves a durable record or fails, with no unconfirmed
+# middle state to strand an answer in. Both halves are pinned here.
 test_local_pending_does_not_close_resolve_key() {
   local dir fb log home rc out
+
+  # An unconfirmed COMPOSER no longer withholds the close: the record is the
+  # delivery and the doorbell is best-effort. The answer text is harness-native
+  # precisely because that is the shape that used to ride the typed plane.
   dir="$TMP_ROOT/local-pending-key"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home local-pending-key)
   fm_write_meta "$home/state/t2.meta" "window=sess:fm-t2" "kind=ship"
   printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t2.status"
-
-  # A harness-native slash answer keeps the typed plane, so the unconfirmed
-  # ladder still governs it; a plain-text answer would close at enqueue instead.
   : > "$log"
   rc=0
   env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" t2 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1 || rc=$?
-  expect_code 3 "$rc" "an unconfirmed local answer must exit with the delivered-unconfirmed status"
-  if grep -F 'resolved' "$home/state/t2.status" >/dev/null; then
-    fail "an unconfirmed local answer must not close the decision: $(cat "$home/state/t2.status")"
+  expect_code 0 "$rc" "a durably recorded answer must not inherit the typed unconfirmed ladder"
+  grep -qF "/vault fetch deploy-token" "$home/state/t2.inbox/001.msg" \
+    || fail "the answer did not land as a durable record under an unconfirmed composer"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t2.status" | grep -qF 'resolved [key=creds]' \
+    || fail "a durably recorded answer did not close its blocker:"$'\n'"$(cat "$home/state/t2.status")"
+
+  # A failed ENQUEUE is the undelivered case, and it still closes nothing.
+  home=$(setup_home local-pending-key-undelivered)
+  fm_write_meta "$home/state/t3.meta" "window=sess:fm-t3" "kind=ship"
+  printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t3.status"
+  : > "$home/state/t3.inbox"   # a FILE where the inbox dir must go
+  : > "$log"
+  rc=0
+  env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t3 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "an undelivered answer must exit nonzero"
+  if grep -F 'resolved' "$home/state/t3.status" >/dev/null; then
+    fail "an undelivered answer closed the decision: $(cat "$home/state/t3.status")"
   fi
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=creds]' >/dev/null \
-    || fail "the blocker must stay open after an unconfirmed local answer: $out"
-  pass "fm-send local: an unconfirmed submit still never closes a --resolve-key decision"
+    || fail "the blocker must stay open after an undelivered answer: $out"
+  pass "fm-send local: an answer closes once durably recorded, and never when undelivered"
 }
 
 test_remote_steer_lands_in_remote_inbox

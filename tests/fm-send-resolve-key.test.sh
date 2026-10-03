@@ -905,8 +905,108 @@ test_decision_answer_partition_relocates_under_the_record() {
   pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
 }
 
+# Every accepted --resolve-key answer must leave a DURABLE record, because this
+# send closes the decision itself. The answer text used to pick the data plane,
+# so an answer that happened to start with "/" - or "$" to a codex target - rode
+# the typed plane: fm-send exited 0, appended the closing resolved line, and
+# wrote NO inbox record. The ledger then read answered while the only copy of
+# the answer was composer bytes a held composer can swallow. Asserted through
+# the real record and the real OPEN DECISIONS fold, for both parser-native
+# shapes. The same text WITHOUT the flag must still stay typed, so the carve-out
+# is lifted only for answers and ordinary parser-native steers are unchanged.
+# shellcheck disable=SC2016  # literal fixture text: "$Skill" is the codex
+# parser-native shape under test and must not expand.
+test_parser_native_answer_lands_durably() {
+  local dir fb log home rc out typed
+  dir="$TMP_ROOT/parser-native-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+
+  # A leading "/" to a claude target.
+  home=$(setup_home parser-native-slash)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t1.status"
+  run_send "$fb" "$home" "$log" t1 --resolve-key api-shape "/compact then go with REST"; rc=$?
+  expect_code 0 "$rc" "a slash-leading decision answer should succeed"
+  ls "$home/state/t1.inbox"/*.msg >/dev/null 2>&1 \
+    || fail "a slash-leading answer exited 0 with no durable inbox record"
+  grep -qF "/compact then go with REST" "$home/state/t1.inbox/001.msg" \
+    || fail "the slash-leading answer text is missing from its inbox record"
+  typed=$(cat "$log")
+  assert_contains "$typed" "Firstmate instruction waiting" \
+    "the slash-leading answer should ring the doorbell, not type the answer itself"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" \
+    | grep -qF 'resolved [key=api-shape]: answered: /compact then go with REST' \
+    || fail "the slash-leading answer did not close its decision"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null; then
+    fail "the slash-leading answer left the decision open: $out"
+  fi
+
+  # A leading "$" to a codex target: the other parser-native carve-out.
+  home=$(setup_home parser-native-dollar)
+  fm_write_meta "$home/state/t2.meta" "window=sess:fm-t2" "kind=ship" "harness=codex"
+  printf 'blocked [key=creds]: need the token\n' > "$home/state/t2.status"
+  run_send "$fb" "$home" "$log" t2 --resolve-key creds '$Skill refreshed the token'; rc=$?
+  expect_code 0 "$rc" "a codex dollar-leading decision answer should succeed"
+  ls "$home/state/t2.inbox"/*.msg >/dev/null 2>&1 \
+    || fail "a codex dollar-leading answer exited 0 with no durable inbox record"
+  grep -qF '$Skill refreshed the token' "$home/state/t2.inbox/001.msg" \
+    || fail "the dollar-leading answer text is missing from its inbox record"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t2.status" \
+    | grep -qF 'resolved [key=creds]: answered: $Skill refreshed the token' \
+    || fail "the dollar-leading answer did not close its blocker"
+
+  # Without the flag the very same parser-native text still rides the typed
+  # plane: this fix lifts the carve-out for answers only.
+  home=$(setup_home parser-native-noflag)
+  fm_write_meta "$home/state/t3.meta" "window=sess:fm-t3" "kind=ship" "harness=claude"
+  : > "$home/state/t3.status"
+  run_send "$fb" "$home" "$log" t3 "/compact then go with REST"; rc=$?
+  expect_code 0 "$rc" "an ordinary slash steer should still succeed"
+  if ls "$home/state/t3.inbox"/*.msg >/dev/null 2>&1; then
+    fail "an ordinary slash steer was diverted off the typed plane"
+  fi
+  assert_contains "$(cat "$log")" "/compact then go with REST" \
+    "an ordinary slash steer should still be typed at the harness parser"
+  pass "fm-send --resolve-key: a parser-native answer still lands as a durable record, while an unflagged one stays typed"
+}
+
+# The other half of the durability contract: a key that is not open must not
+# quietly deliver an answer whose decision stays open. It refuses BEFORE any
+# send, exits nonzero, makes no success claim, and leaves no record - so the
+# operator's `ls state/<task>.inbox/*.msg` zero reading is truthful rather than
+# ambiguous. (test_not_open_key_refuses_before_send covers the plain-text shape;
+# this pins the parser-native shape the plane fix newly routes through the
+# inbox, so the refusal cannot regress into an enqueue-anyway.)
+test_not_open_key_refuses_parser_native_answer() {
+  local dir fb log home rc err
+  dir="$TMP_ROOT/parser-native-badkey"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home parser-native-badkey)
+  fm_write_meta "$home/state/t4.meta" "window=sess:fm-t4" "kind=ship" "harness=claude"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t4.status"
+  err="$dir/err.txt"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 "$SEND" t4 --resolve-key mistyped "/compact then go with REST" \
+    >/dev/null 2>"$err"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fail "a mistyped key on a parser-native answer must not exit 0"
+  fi
+  assert_contains "$(cat "$err")" "nothing was sent" \
+    "the refusal should state that nothing was sent"
+  if ls "$home/state/t4.inbox"/*.msg >/dev/null 2>&1; then
+    fail "the refused answer still wrote an inbox record"
+  fi
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t4.status" | grep -qF 'resolved [key=' \
+    && fail "the refused answer closed something"
+  pass "fm-send --resolve-key: a not-open key on a parser-native answer refuses loudly and records nothing"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
+test_parser_native_answer_lands_durably
+test_not_open_key_refuses_parser_native_answer
 test_separate_resolve_key_answers_do_not_rewake
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans

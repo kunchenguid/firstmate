@@ -2880,9 +2880,11 @@ test_wake_queue_prune_task() {
   append_wake "$state" signal "task-a.status" "signal: $state/task-a.status"
   append_wake "$state" signal "task-a.turn-ended" "signal: $state/task-a.turn-ended"
   append_wake "$state" check "$state/task-a.check.sh" "check: $state/task-a.check.sh: merged: https://example.test/pr/1"
+  append_wake "$state" check "$state/task-a.doorbell-skip" "check: doorbell-skip: task=task-a consecutive=3 - inspect the endpoint"
   append_wake "$state" stale "test:window-b" "stale: test:window-b"
   append_wake "$state" signal "task-b.status" "signal: $state/task-b.status"
   append_wake "$state" check "$state/task-b.check.sh" "check: $state/task-b.check.sh: merged: https://example.test/pr/2"
+  append_wake "$state" check "$state/task-b.doorbell-skip" "check: doorbell-skip: task=task-b consecutive=3 - inspect the endpoint"
 
   FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_queue_prune_task "$1" "$2" "$3"' "$ROOT" "$state" "task-a" "test:window-a" \
     || fail "fm_wake_queue_prune_task returned non-zero"
@@ -2891,9 +2893,11 @@ test_wake_queue_prune_task() {
   grep -F 'task-a.status' "$queue" >/dev/null && fail "prune left status wake for task-a"
   grep -F 'task-a.turn-ended' "$queue" >/dev/null && fail "prune left turn-ended wake for task-a"
   grep -F 'task-a.check.sh' "$queue" >/dev/null && fail "prune left check wake for task-a"
+  grep -F 'task-a.doorbell-skip' "$queue" >/dev/null && fail "prune left doorbell-skip page for task-a"
   grep -F 'test:window-b' "$queue" >/dev/null || fail "prune removed stale wake for task-b"
   grep -F 'task-b.status' "$queue" >/dev/null || fail "prune removed status wake for task-b"
   grep -F 'task-b.check.sh' "$queue" >/dev/null || fail "prune removed check wake for task-b"
+  grep -F 'task-b.doorbell-skip' "$queue" >/dev/null || fail "prune removed doorbell-skip page for task-b"
 
   pass "fm_wake_queue_prune_task: prunes wakes for target task without touching other tasks"
 }
