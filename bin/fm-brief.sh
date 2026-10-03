@@ -651,7 +651,7 @@ case "$MODE" in
     ;;
   *)  # no-mistakes
     SETUP2="
-2. Run \`git remote get-url no-mistakes >/dev/null 2>&1 || no-mistakes init\`."
+2. Run \`if no-mistakes status 2>&1 | grep -q 'repo not initialized'; then no-mistakes init; fi\`."
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1

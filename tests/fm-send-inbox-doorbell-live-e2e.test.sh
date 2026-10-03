@@ -169,7 +169,19 @@ check_harness_doorbell() {  # <name>
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
-  wait_ready "$win" || note "$name ($version): composer not proven empty after the brief turn; steering as production does"
+  # The marker lands mid-turn, before the worker's reply: wait for that turn
+  # to end so the doorbell never interrupts it.
+  i=0
+  while fm_pane_is_busy "$SESSION:$win" "$name" && [ "$i" -lt "$TIMEOUT" ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if fm_pane_is_busy "$SESSION:$win" "$name" || ! wait_ready "$win"; then
+    FAILED=1
+    printf 'not ok - %s (%s): the brief-reading turn did not end with a proven-empty composer; not steering\n' "$name" "$version" >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
   if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
     "Firstmate live check: run exactly this shell command now: touch $acted - then acknowledge this message as your brief says. Reply with one short line." \
     >/dev/null 2>&1; then
