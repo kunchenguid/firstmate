@@ -43,8 +43,9 @@ Every path that provisions or launches one refuses a host that is not ready for 
 
 - On every call, it also disables agent forwarding, forwarding setup, and configured `SendEnv` patterns.
 - It arms bounded SSH dead-peer detection, so a vanished host (a reboot, a dropped link) fails within a bounded window instead of hanging indefinitely.
+- The watcher's own remote reads, the crew-state endpoint read, and the parent's reply listener also bound the whole exchange, including a connect timeout, so an overloaded host that stalls the SSH banner or the command reads as unreachable (exit 255) instead of stalling local supervision; other callers' long remote jobs are not cut short.
 
-Its [script header](../bin/fm-on.sh) owns the keepalive defaults and environment overrides.
+Its [script header](../bin/fm-on.sh) owns the keepalive defaults, environment overrides, and deadline behavior.
 
 ### Remote clone and entrypoint
 
@@ -695,6 +696,7 @@ bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh
 bin/fm-test-run.sh tests/fm-project-origin.test.sh
 bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
+bin/fm-test-run.sh tests/fm-secondmate-liveness.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh

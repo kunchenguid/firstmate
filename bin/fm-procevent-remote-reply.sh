@@ -79,6 +79,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CURSOR_DIR="$STATE/remote-replies"
 REMOTE_LOG='state/parent-replies.status'
 WAIT_SECONDS=${FM_REMOTE_REPLY_WAIT_SECONDS:-55}
+# Remote document transfers have a fixed 90s limit. The reply long-poll uses
+# its configured wait plus 35s for connection, staging, and scheduling overhead
+# instead, so a valid wait window can close normally before transport expires.
+REMOTE_DEADLINE=90
 MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 # fm-on.sh returns ssh's status unchanged, so 255 alone means unavailable
 # transport or unknown remote completion. Any other nonzero status is the remote
@@ -268,11 +272,14 @@ WINDOW_CLOSED_EMPTY=75
 JOB_PREEMPTED=76
 
 cmd_source() {
-  local id=${1:-} started rc=0
+  local id=${1:-} started rc=0 source_deadline
   validate_id "$id"
+  case "$WAIT_SECONDS" in ''|*[!0-9]*) die "reply wait-seconds must be a nonnegative integer" ;; esac
+  [ "$WAIT_SECONDS" -le 300 ] || die "reply wait-seconds exceeds the remote reader's 300-second safety bound"
+  source_deadline=$((10#$WAIT_SECONDS + 35))
   read_cursor "$id"
   started=$(fm_pending_reply_now)
-  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
+  FM_SSH_DEADLINE_SECONDS=$source_deadline "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
     "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
     fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
@@ -398,7 +405,8 @@ fetch_document() { # <id> <remote-relative> <result-var>
   [ ! -L "$destination" ] || return "$DOCUMENT_LOCAL_FAILURE"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-doc-reason.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
   tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; return "$DOCUMENT_LOCAL_FAILURE"; }
-  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2> "$err" || rc=$?
+  FM_SSH_DEADLINE_SECONDS=$REMOTE_DEADLINE \
+    "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2> "$err" || rc=$?
   if [ "$rc" -ne 0 ]; then
     FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
     rm -f -- "$tmp" "$err"

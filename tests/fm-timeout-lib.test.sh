@@ -300,6 +300,40 @@ test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace() {
   pass "fm_exec_timed's GNU timeout fallback kills a TERM-ignoring command once the grace has passed"
 }
 
+test_bash_fallback_outer_term_kills_ignoring_command() {
+  local dir="$TMP_ROOT/bash-outer-term" runner child rc=0 elapsed start
+  mkdir -p "$dir"
+  start=$(date +%s)
+  # shellcheck disable=SC2016 # The child bash expands its own positional args.
+  set -m
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '
+    . "$0/bin/fm-timeout-lib.sh"
+    fm_run_timed 60 bash -c '\''trap "" TERM; echo $$ > "$1"; exec sleep 300'\'' _ "$1"
+  ' "$ROOT" "$dir/child" > "$dir/out" 2>&1 &
+  runner=$!
+  set +m
+  for _ in $(seq 1 100); do
+    [ -s "$dir/child" ] && break
+    sleep 0.05
+  done
+  [ -s "$dir/child" ] || { kill "$runner" 2>/dev/null || true; fail "inner TERM-ignoring command never started"; }
+  child=$(cat "$dir/child")
+  kill -TERM -- "-$runner" || fail "could not deliver the outer bound's TERM"
+  wait "$runner" || rc=$?
+  elapsed=$(($(date +%s) - start))
+  [ "$rc" -ne 0 ] || fail "outer TERM reported success for a cancelled command"
+  [ "$elapsed" -lt 8 ] || fail "outer TERM did not end the inner bound promptly ($elapsed seconds)"
+  for _ in $(seq 1 20); do
+    kill -0 "$child" 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 "$child" 2>/dev/null; then
+    kill -KILL "$child" 2>/dev/null || true
+    fail "TERM-ignoring command survived its inner bound's interrupted watchdog"
+  fi
+  pass "fm_run_timed bash fallback reaps a TERM-ignoring command under an outer TERM"
+}
+
 test_timed_out_names_exactly_the_bound_statuses() {
   local status verdict
   for status in 124 137 0 1 125 127 143 ''; do
@@ -330,6 +364,7 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
 test_passes_the_command_status_and_output_through
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
+test_bash_fallback_outer_term_kills_ignoring_command
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
 test_the_bound_replaces_the_calling_shell
