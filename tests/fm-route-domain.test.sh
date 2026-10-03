@@ -331,6 +331,26 @@ LOCALBIG="$TDIR/local-big.md"
 rm -f "$TDIR/argv"
 "$DISPATCH" --brief "$LOCALBIG" --execute >/dev/null 2>&1 || fail "a brief over the remote cap to a local secondmate must be sent"
 [ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$LOCALBIG")" ] || fail "a brief over the remote cap must reach a local fm-send.sh whole"
+# A local send still passes the message as one fm-send.sh argument: a message
+# at the 131072-byte single-argument limit is refused unsent, one byte under
+# is delivered whole.
+LOCALMAX="$TDIR/local-max.md"
+{ printf 'seller leads\n'; head -c $((131071 - 13)) /dev/zero | tr '\0' 'm'; } > "$LOCALMAX"
+rm -f "$TDIR/argv"
+"$DISPATCH" --brief "$LOCALMAX" --execute >/dev/null 2>&1 || fail "a local brief one byte under the argument limit must be sent"
+[ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$LOCALMAX")" ] || fail "a local brief under the argument limit must arrive whole"
+printf 'm' >> "$LOCALMAX"
+for big in "$LOCALMAX" "$HUGE"; do
+  rm -f "$TDIR/argv"
+  code=0; err=$("$DISPATCH" --brief "$big" --execute 2>&1 >/dev/null) || code=$?
+  [ "$code" -eq 2 ] || fail "a local brief at or over the argument limit must exit 2, got $code"
+  assert_contains "$err" "not sent" "a local over-limit brief is refused unsent"
+  [ ! -e "$TDIR/argv" ] || fail "a local over-limit brief must not reach fm-send.sh"
+  code=0; json=$("$DISPATCH" --brief "$big" --json --execute 2>/dev/null) || code=$?
+  [ "$code" -eq 2 ] || fail "a local over-limit --json --execute brief must exit 2, got $code"
+  [ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "a local over-limit brief must be reported undispatched"
+  [ ! -e "$TDIR/argv" ] || fail "a local over-limit --json brief must not reach fm-send.sh"
+done
 # A remote secondmate's send rides one ssh argument, so it is capped.
 printf 'kind=secondmate\nremote_host=box\n' > "$FAKE/state/seller-outreach.meta"
 rm -f "$TDIR/argv"
