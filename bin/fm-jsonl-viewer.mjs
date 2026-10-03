@@ -367,11 +367,13 @@ function taskOverview(home, roots, codeRoot) {
     const lifecycle = item.lifecycleDisposition || "legacy";
     const terminalConflict = ["working", "blocked", "parked"].includes(item.currentState)
       && (["done", "archive_done"].includes(disposition) || ["accepted", "archived"].includes(lifecycle));
+    const remoteStatusUnconfirmed = lifecycle === "archived"
+      && !["done", "failed"].includes(item.currentState);
     const held = item.heldByDecision || item.openDecisionCount > 0 || item.currentState === "blocked" || item.currentState === "parked"
       || item.holdKind === "parked" || (item.blockedBy || []).length > 0 || terminalConflict;
     let category = "held";
     let status = "Needs reconciliation";
-    if (terminalConflict) {
+    if (terminalConflict && lifecycle !== "archived") {
       category = "held";
       status = "Completion conflict";
     } else if (lifecycle === "archived") {
@@ -405,6 +407,7 @@ function taskOverview(home, roots, codeRoot) {
       kind: item.kind || null,
       project: item.project || null,
       wait,
+      warning: remoteStatusUnconfirmed ? "Remote status unconfirmed; archive reflects business disposition only." : null,
       hasDocument: Boolean(item.hasDocument),
       documentType: item.documentType || null,
       documentModifiedAt: item.documentModifiedAt || null,

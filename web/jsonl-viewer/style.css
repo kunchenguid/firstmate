@@ -90,6 +90,7 @@ pre { max-height: 30rem; overflow: auto; padding: 0.75rem; border-radius: 0.45re
 .task-card.active { border-color: #70baff; box-shadow: 0 0 0 1px #70baff inset; }
 .task-card strong, .task-card small { display: block; overflow-wrap: anywhere; }
 .task-card small { margin-top: 0.28rem; color: #9bb0c7; }
+.task-card .task-warning, .task-warning { color: #f4d88a; }
 .task-card .task-state { display: inline-block; margin-bottom: 0.4rem; padding: 0.16rem 0.45rem; border-radius: 999px; background: #203c5c; color: #b9dcff; font-size: 0.72rem; }
 .task-card[data-category="processing"] { border-left: 4px solid #4aa8ff; }
 .task-card[data-category="held"] { border-left: 4px solid #e0a14c; }
