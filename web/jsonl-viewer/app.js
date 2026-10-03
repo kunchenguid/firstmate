@@ -604,6 +604,18 @@ function updateHistory(path, replace = false) {
   window.history[replace ? "replaceState" : "pushState"]({}, "", path);
 }
 
+function clearArtifactSelection(source) {
+  if (state.selected?.source === source) state.selectionGeneration += 1;
+  state.selected = null;
+  state.loading = false;
+  state.reportContent = null;
+  elements.sessionTitle.textContent = source === "report" ? "Choose a report" : source === "supervisor" ? "Choose a supervisor session" : "Choose a journal";
+  elements.reportRendered.replaceChildren();
+  elements.report.querySelector(".report-source pre").textContent = "";
+  elements.events.replaceChildren();
+  setStatus(source === "report" ? "Select a task report from the library." : "Select a work journal from the session list.");
+}
+
 function configurePage(source) {
   elements.source.value = source;
   const dashboard = source === "tasks";
@@ -615,25 +627,18 @@ function configurePage(source) {
   elements.sidebarTitle.textContent = dashboard ? "Task list" : report ? "Report library" : "Supervisor sessions";
   elements.sessionSearch.placeholder = dashboard ? "Search tasks" : report ? "Search reports" : "Search sessions";
   if (!dashboard && state.selected?.source !== source) {
-    state.selectionGeneration += 1;
-    state.selected = null;
-    state.loading = false;
-    elements.sessionTitle.textContent = report ? "Choose a report" : source === "supervisor" ? "Choose a supervisor session" : "Choose a journal";
-    elements.reportRendered.replaceChildren();
-    elements.report.querySelector(".report-source pre").textContent = "";
-    elements.events.replaceChildren();
-    setStatus(report ? "Select a task report from the library." : "Select a work journal from the session list.");
+    clearArtifactSelection(source);
   }
   setActiveNavigation(dashboard ? "dashboard" : report ? "reports" : "journal");
   selectDisplay(report);
   renderSessions();
 }
 
-async function applyLocation({ replace = false } = {}) {
+async function applyLocation() {
   if (!state.authenticated) return;
   const parts = window.location.pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (!parts.length || parts[0] === "login") {
-    updateHistory("/dashboard", replace);
+    updateHistory("/dashboard", true);
     configurePage("tasks");
     document.title = "Dashboard · Firstmate Viewer";
     return;
@@ -644,6 +649,12 @@ async function applyLocation({ replace = false } = {}) {
     const taskId = new URLSearchParams(window.location.search).get("task");
     const documentType = new URLSearchParams(window.location.search).get("document");
     if (taskId && state.tasks.some(task => task.id === taskId)) await selectTask(taskId, { updateRoute: false, documentType });
+    else {
+      state.selectedTaskId = null;
+      state.selectedTaskDocumentType = null;
+      state.taskSelectionGeneration += 1;
+      renderSessions();
+    }
     return;
   }
   if (parts[0] === "reports" || parts[0] === "report") {
@@ -654,7 +665,7 @@ async function applyLocation({ replace = false } = {}) {
       const report = state.sessions.find(item => item.source === "report" && item.id === reportId);
       if (report) await selectSession(report, { updateRoute: false });
       else setStatus(`Report ${reportId} is unavailable.`, true);
-    }
+    } else clearArtifactSelection("report");
     return;
   }
   if (parts[0] === "journal" && ["supervisor", "short"].includes(parts[1])) {
@@ -665,7 +676,7 @@ async function applyLocation({ replace = false } = {}) {
       const session = state.sessions.find(item => item.source === parts[1] && item.id === sessionId);
       if (session) await selectSession(session, { updateRoute: false });
       else setStatus(`Journal ${sessionId} is unavailable.`, true);
-    }
+    } else clearArtifactSelection(parts[1]);
     return;
   }
   updateHistory("/dashboard", true);
@@ -855,6 +866,7 @@ async function selectTask(id, { updateRoute = true, documentType = null } = {}) 
   const documentTypes = task?.documentTypes || (task?.documentType ? [task.documentType] : []);
   state.selectedTaskDocumentType = documentTypes.includes(documentType) ? documentType : documentTypes.includes("report") ? "report" : documentTypes[0] || null;
   if (updateRoute) updateHistory(`/dashboard?${new URLSearchParams({ task: id, ...(state.selectedTaskDocumentType ? { document: state.selectedTaskDocumentType } : {}) })}`);
+  else if (documentType && documentType !== state.selectedTaskDocumentType) updateHistory(`/dashboard?${new URLSearchParams({ task: id, ...(state.selectedTaskDocumentType ? { document: state.selectedTaskDocumentType } : {}) })}`, true);
   renderSessions();
   elements.taskDetail.scrollIntoView({ block: "start" });
   for (const event of ["keydown", "pointerdown", "touchstart", "wheel"]) window.addEventListener(event, cancelReveal, { passive: true });
@@ -1025,6 +1037,7 @@ elements.closeTask.addEventListener("click", () => {
   state.selectedTaskId = null;
   state.selectedTaskDocumentType = null;
   state.taskSelectionGeneration += 1;
+  updateHistory("/dashboard");
   renderTaskDashboard();
 });
 elements.taskDocumentBrief.addEventListener("click", () => selectTaskDocument("brief"));

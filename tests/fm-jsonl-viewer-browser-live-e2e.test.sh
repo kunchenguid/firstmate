@@ -113,7 +113,7 @@ printf '# Archived task brief\n\nVisible archived instructions.\n' > "$ARCHIVED_
 cat > "$SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1779999999000,"content":[{"type":"text","text":"oldest ordered record"}]}}
 {"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"first tied record"}]}}
-{"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"<img id=unsafe src=x onerror=alert(1)>"},{"type":"toolCall","name":"read_material","arguments":{"material":"m1"}}]}}
+{"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"<img id=unsafe src=x onerror=alert(1)>"},{"type":"toolCall","name":"read_material","arguments":{"material":"m1"}},{"type":"text","text":"journal line one\n  journal line two"}]}}
 JSONL
 for index in $(seq 1 201); do
   printf '{"type":"message_end","message":{"role":"assistant","timestamp":%s,"content":[{"type":"text","text":"dense-browser-event-%s"}]}}\n' "$((1780001000000 + index))" "$index"
@@ -335,9 +335,16 @@ try {
   await page.goForward();
   await page.locator("#report").getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   if (new URL(page.url()).pathname !== `/report/${process.env.VIEWER_REPORT_ID}`) throw new Error("browser Forward did not restore the Report route");
+  await page.getByRole("link", { name: "Reports", exact: true }).click();
+  if (new URL(page.url()).pathname !== "/reports" || await page.locator("#report-rendered").textContent()) throw new Error("identity-free Reports route retained the previously selected report");
+  if (await page.locator("#session-title").textContent() !== "Choose a report") throw new Error("identity-free Reports route did not expose its empty selection state");
   await page.locator("#source").selectOption("tasks");
   await page.getByRole("button", { name: /Held with task instructions/ }).first().waitFor({ state: "visible", timeout: 3000 });
   if (await page.getByText("This must not replace the report.", { exact: true }).count()) throw new Error("task brief took precedence over its report");
+  await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
+  await page.getByRole("heading", { name: "Brief-only instructions" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#close-task").click();
+  if (new URL(page.url()).pathname !== "/dashboard" || new URL(page.url()).search || await page.locator("#task-detail").isVisible()) throw new Error("closing a task did not synchronize the identity-free Dashboard route");
   await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
   await page.getByRole("heading", { name: "Brief-only instructions" }).waitFor({ state: "visible", timeout: 3000 });
   await page.locator("#task-document-type").filter({ hasText: "Task brief" }).waitFor({ state: "visible", timeout: 3000 });
@@ -376,6 +383,9 @@ try {
   await directPage.goto(`${new URL(process.env.VIEWER_URL).origin}/report/${process.env.VIEWER_REPORT_ID}`, { waitUntil: "domcontentloaded", timeout: 3000 });
   await directPage.locator("#report").getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 5000 });
   if (new URL(directPage.url()).pathname !== `/report/${process.env.VIEWER_REPORT_ID}`) throw new Error("remembered login did not preserve a direct Report link");
+  await directPage.goto(`${new URL(process.env.VIEWER_URL).origin}/dashboard?task=${process.env.VIEWER_FIRST_REPORT_ID}&document=brief`, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await directPage.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 5000 });
+  if (new URL(directPage.url()).searchParams.get("document") !== "report") throw new Error("unavailable brief deep link rendered a report without normalizing document identity");
   await directPage.close();
   directPage = null;
 
@@ -411,6 +421,8 @@ try {
   if (!literal.includes("<img id=unsafe")) throw new Error("log markup was not shown literally");
   if (await page.locator("#unsafe").count()) throw new Error("log markup executed as HTML");
   if (!await page.getByText("Tool call: read_material").count()) throw new Error("tool call was not expandable");
+  const multilineBlock = page.getByText("journal line one\n  journal line two", { exact: true });
+  if (await multilineBlock.evaluate(element => getComputedStyle(element).whiteSpace) !== "pre-wrap") throw new Error("journal line breaks and indentation were not preserved");
   await page.locator("#source").selectOption("supervisor");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SUPERVISOR_ID.replace(/\.jsonl$/, "") }).click();
   if (!new URL(page.url()).pathname.startsWith("/journal/supervisor/")) throw new Error(`Supervisor Work Journal did not use its dedicated route: ${page.url()}`);
