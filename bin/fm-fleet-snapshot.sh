@@ -152,7 +152,7 @@ esac
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-snapshot.sh --json [--task <task-id>]
+usage: fm-fleet-snapshot.sh --json [--unfinished] [--task <task-id>]
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
@@ -169,9 +169,12 @@ EOF
 }
 
 TARGET_TASK_ID=""
+UNFINISHED_ONLY=0
+UNFINISHED_TASK_IDS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) ;;
+    --unfinished) UNFINISHED_ONLY=1 ;;
     --task)
       [ $# -gt 1 ] || { echo "fm-fleet-snapshot: --task requires a task id" >&2; usage >&2; exit 2; }
       case "$2" in ''|-*) echo "fm-fleet-snapshot: --task requires a non-option task id" >&2; usage >&2; exit 2 ;; esac
@@ -278,6 +281,31 @@ first_pr_url_in_file() {  # <file>
 
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
+  if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
+    python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory | jq -c \
+      --arg path "$DATA" --arg today "$SNAPSHOT_TODAY" '{path:$path,present:true,
+        records:[.tasks[] | {
+          order:0,state:(if .state == "archived" then "done" else .state end),structured:true,
+          id:.id,checked:(.state == "done" or .state == "archived"),title:.title,
+          repo:(if .repo == "" then null else .repo end),kind:.kind,
+          priority:(if .priority == "" then null else .priority end),
+          hold_reason:(.hold.reason // null),hold_kind:(.hold.kind // null),hold_until:(.hold.until // null),
+          hold_set:null,blocked_by:(.blocked_by[0] // null),blocked_by_ids:.blocked_by,
+          unresolved_blocker_ids:.blocked_by,blocked_reason:null,since:.created,merged:null,reported:null,
+          done:.closed,completion:{verb:(if .closed then "done" else null end),date:.closed},
+          links:(.links|to_entries|map(.value)),pr_url:(.links.pr // null),report_path:(.links.report // null),
+          local_note:null,raw:null,body_lines:(.body|split("\n")),body_excerpt:(.body[:240]),
+          compact_progress:.progress,
+          current_role:(if .state == "in_flight" and .hold != null then "held"
+                        elif .state == "in_flight" and .kind == "program" then "program"
+                        elif .state == "in_flight" then "worker"
+                        elif .state == "queued" then "queued" else "done" end),
+          requires_child_metadata:(.state == "in_flight" and .hold == null and .kind != "program"),
+          hold_age_days:null,hold_bucket:(if .hold.kind == "captain" then "live" else null end),
+          captain_actionable:(.hold.kind == "captain")
+        }]}'
+    return $?
+  fi
   if [ ! -f "$backlog" ]; then
     jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
@@ -599,6 +627,12 @@ prefetch_task_current_states() {
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
     [ -z "$TARGET_TASK_ID" ] || [ "$id" = "$TARGET_TASK_ID" ] || continue
+    if [ "$UNFINISHED_ONLY" = 1 ]; then
+      case $'\n'"$UNFINISHED_TASK_IDS"$'\n' in
+        *$'\n'"$id"$'\n'*) ;;
+        *) continue ;;
+      esac
+    fi
     captured_meta="$SNAPSHOT_TASK_DIR/$id.meta"
     if ! cp -- "$meta" "$captured_meta" 2>"$captured_meta.copy-error"; then
       # Teardown may unlink a task after the glob selected it but before cp opens
@@ -887,6 +921,18 @@ scout_reports_json() {
     jq -n '[]'
     return 0
   fi
+  if [ "$UNFINISHED_ONLY" = 1 ]; then
+    {
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        [ -f "$DATA/$id/report.md" ] && [ ! -L "$DATA/$id/report.md" ] || continue
+        printf '%s\n' "$DATA/$id/report.md"
+      done <<EOF
+$UNFINISHED_TASK_IDS
+EOF
+    } | LC_ALL=C sort | jq -Rn '[inputs | {id:(split("/") | .[-2]),path:.}] | sort_by(.id)'
+    return "${PIPESTATUS[1]}"
+  fi
   # Feed every discovered path to one jq process. Large operational homes may
   # retain hundreds of reports, so starting one jq per report makes unrelated
   # task-overview reads scale with historical report count.
@@ -896,7 +942,15 @@ scout_reports_json() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
-TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
+if [ "$UNFINISHED_ONLY" = 1 ]; then
+  UNFINISHED_TASK_IDS=$(printf '%s' "$BACKLOG_JSON" | jq -r \
+    '.records[] | select(.structured and (.state == "queued" or .state == "in_flight")) | .id') || exit 1
+  BACKLOG_JSON=$(printf '%s' "$BACKLOG_JSON" | jq -c \
+    '.records |= map(select(.structured and (.state == "queued" or .state == "in_flight")))') || exit 1
+  TASK_DISPOSITIONS=$(printf '%s' "$BACKLOG_JSON" | jq -r '.records[] | [.id,.state] | @tsv') || exit 1
+else
+  TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
+fi
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
@@ -925,6 +979,7 @@ jq -n \
   --arg projects "$PROJECTS" \
   --arg task_dispositions "$TASK_DISPOSITIONS" \
   --arg task_filter "$TARGET_TASK_ID" \
+  --argjson unfinished_only "$UNFINISHED_ONLY" \
   --slurpfile backlog "$BACKLOG_JSON_FILE" \
   --slurpfile tasks "$TASKS_JSON_FILE" \
   --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
@@ -943,6 +998,7 @@ jq -n \
      generated:$generated,
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
+     query:{unfinished_only:($unfinished_only == 1)},
      backlog:($backlog | if $task_filter == "" then . else .records |= map(select(.id == $task_filter)) end),
      tasks:($tasks | map(.id as $id
        | . + {backlog:backlog_by_id($id)}

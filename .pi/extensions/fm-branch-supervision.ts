@@ -2056,8 +2056,8 @@ ${context.command}
     return delivery;
   }
 
-  // Compact continuations are original-task-record admissions, not wake queue
-  // rows and not rich lifecycle grants. Reuse branchChain so observation,
+  // Compact continuations read the ordinary task's one canonical business and
+  // progress record; they are not wake rows or rich lifecycle grants.
   // same-worker routing, and ordinary wake handling cannot overlap.
   function offerTaskContinuation(offer: TaskContinuationOffer): boolean {
     if (shuttingDown || resetInProgress || branchBroken || !generationOwnsLockSync(generation)) return false;
@@ -2115,7 +2115,7 @@ ${context.command}
       trace("prompt", "started");
       try {
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
-          `Admission ${offer.admission}. This is compact progress in the original task record, not a queue wake or a rich lifecycle grant.\n` +
+          `Admission ${offer.admission}. This reads the canonical per-task business and progress record; it is not a queue wake or a rich lifecycle grant.\n` +
           `Compare the goal and acceptance method with actual task artifacts and current executor state. The exact current MAIN-authored next_step may continue the same worker through fm-send --idempotent; any other same-task text remains unauthorized. Route cross-task work back to MAIN for the durable handoff owner. ` +
           `For an implementation checkpoint, inspect the same worker and its exact-candidate native-review evidence. If an exact continuation is required but no existing operation owner binds its payload, target, and executor generation, report that required effect to MAIN instead of sending it. ` +
           `The worker owns native review, corrections, tests, and branch custody; the review must bind the committed base and candidate plus the accepted intent. MAIN owns authority-bearing findings and final semantic acceptance. ` +

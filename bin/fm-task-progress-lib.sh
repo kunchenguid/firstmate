@@ -1,390 +1,80 @@
 # shellcheck shell=bash
-# Compact MAIN-owned continuation state embedded in the existing backlog row.
-# The task body is the only active progress store.  Its whole-body digest is a
-# read token for concurrent correction safety, not an evidence reference.
+# MAIN-owned goal continuation over the canonical data/<task>/task.json record.
+# Reads and updates are record-local.  Aggregated discovery scans all records in
+# one process and persists no index or snapshot.
 
 FM_TASK_PROGRESS_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# shellcheck source=bin/fm-tasks-axi-lib.sh
-. "$FM_TASK_PROGRESS_BIN/fm-tasks-axi-lib.sh"
-# shellcheck source=bin/fm-backlog-transition-lib.sh
-. "$FM_TASK_PROGRESS_BIN/fm-backlog-transition-lib.sh"
-
-fm_task_progress_decode_scalar() {
-  LC_ALL=C perl -MJSON::PP -e '
-    local $/;
-    my $shown = <STDIN>;
-    $shown =~ s/\s+\z//;
-    exit 0 if $shown eq "" || $shown eq "-";
-    my $encoded = $shown =~ /\A"/;
-    my $value = $encoded
-      ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
-    binmode STDOUT, ":raw";
-    utf8::encode($value) if utf8::is_utf8($value);
-    print $value if $encoded || $value ne "-";
-  '
-}
-
-fm_task_progress_sha256_file() { # <path>
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    echo 'REFUSED: shasum or sha256sum is required for task progress' >&2
-    return 1
-  fi
-}
-
-fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE/HELD/BLOCKED/LINKS
-  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} out status
-  FM_TASK_PROGRESS_BODY=
-  FM_TASK_PROGRESS_GOAL=
-  FM_TASK_PROGRESS_STATE=
-  FM_TASK_PROGRESS_HELD=
-  FM_TASK_PROGRESS_BLOCKED=
-  FM_TASK_PROGRESS_LINKS=
-  out=$(fm_backlog_row_show "$data" "$1" --full)
-  status=$?
-  [ "$status" -eq 0 ] || {
-    printf '%s\n' "${out:-task $1 is not present in the current backlog}" >&2
-    return "$status"
-  }
-  FM_TASK_PROGRESS_STATE=$(printf '%s\n' "$out" | sed -n 's/^  state: *//p' | head -1)
-  FM_TASK_PROGRESS_HELD=$(printf '%s\n' "$out" | sed -n 's/^  held: *//p' | head -1)
-  FM_TASK_PROGRESS_BLOCKED=$(printf '%s\n' "$out" | sed -n 's/^  blocked: *//p' | head -1)
-  FM_TASK_PROGRESS_GOAL=$(printf '%s\n' "$out" | sed -n 's/^  title: //p' | head -1 \
-    | fm_task_progress_decode_scalar) || {
-    echo "REFUSED: could not decode task $1 goal" >&2
-    return 1
-  }
-  FM_TASK_PROGRESS_LINKS=$(printf '%s\n' "$out" | sed -n 's/^  links: //p' | head -1 \
-    | fm_task_progress_decode_scalar) || {
-    echo "REFUSED: could not decode task $1 artifact links" >&2
-    return 1
-  }
-  FM_TASK_PROGRESS_BODY=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-    | fm_task_progress_decode_scalar) || {
-    echo "REFUSED: could not decode task $1 body" >&2
-    return 1
-  }
-  [ -n "$FM_TASK_PROGRESS_STATE" ] || {
-    echo "REFUSED: task $1 has no readable state" >&2
-    return 1
-  }
-  [ -n "$FM_TASK_PROGRESS_GOAL" ] || {
-    echo "REFUSED: task $1 has no readable goal" >&2
-    return 1
-  }
-  case "$FM_TASK_PROGRESS_HELD:$FM_TASK_PROGRESS_BLOCKED" in
-    yes:yes|yes:no|no:yes|no:no) ;;
-    *) echo "REFUSED: task $1 has unreadable hold or block state" >&2; return 1 ;;
+fm_task_progress_file() { # <task>
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*|.*) echo "REFUSED: invalid task id: $1" >&2; return 2 ;;
   esac
+  printf '%s/%s/task.json' "${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" "$1"
 }
 
-# Return 0 only when the configured task owner proves there is no current row,
-# 1 when a row exists, and 2 for every unreadable/ambiguous backend result.
-fm_task_progress_current_absent() { # <task>
-  local error status
-  error=$(mktemp "${TMPDIR:-/tmp}/fm-task-current.XXXXXX") || return 2
-  if fm_task_progress_detail "$1" 2>"$error"; then
-    rm -f "$error"
-    return 1
-  fi
-  status=$?
-  if grep -qx 'code: NOT_FOUND' "$error"; then
-    rm -f "$error"
-    return 0
-  fi
-  cat "$error" >&2
-  rm -f "$error"
-  [ "$status" -ne 0 ] || status=2
-  return 2
-}
-
-fm_task_progress_recover_goal() { # <task>
-  local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
-  local brief brief_digest='' generation='' artifacts
-  brief="$data/$id/brief.md"
-  if [ -f "$brief" ] && [ ! -L "$brief" ]; then
-    brief_digest=$(fm_task_progress_sha256_file "$brief") || return 1
-  fi
-  generation=$(fm_task_progress_execution_generation "$id") || return 1
-  artifacts=$(printf '%s' "$FM_TASK_PROGRESS_LINKS" | tr ',' '\n' | sed -n 's/^[[:space:]]*[^:]*://p' \
-    | jq -Rsc 'split("\n") | map(select(length > 0))') || return 1
-  FM_TASK_PROGRESS_GOAL=$(printf '%s' "$FM_TASK_PROGRESS_BODY" \
-    | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" recover-goal \
-      --task "$id" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
-      --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" \
-      --brief-sha256 "$brief_digest" --execution-generation "$generation" \
-      --artifacts-json "$artifacts") || return $?
+fm_task_progress_detail() { # <task>; sets task business and progress globals
+  local record
+  record=$(FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" \
+    "$FM_TASK_PROGRESS_BIN/fm-tasks-axi.sh" progress "$1") || return $?
+  FM_TASK_PROGRESS_RECORD=$record
+  FM_TASK_PROGRESS_GOAL=$(printf '%s' "$record" | jq -er '.title') || return 1
+  FM_TASK_PROGRESS_STATE=$(printf '%s' "$record" | jq -er '.state') || return 1
+  FM_TASK_PROGRESS_HELD=$(printf '%s' "$record" | jq -r 'if .hold == null then "no" else "yes" end') || return 1
+  FM_TASK_PROGRESS_BLOCKED=$(printf '%s' "$record" | jq -r 'if (.blocked_by|length) == 0 then "no" else "yes" end') || return 1
+  FM_TASK_PROGRESS_BODY=$(printf '%s' "$record" | jq -r '.body') || return 1
+  FM_TASK_PROGRESS_LINKS=$(printf '%s' "$record" | jq -r '.links | to_entries | map(.key+":"+.value) | join(",")') || return 1
 }
 
 fm_task_progress_read() ( # <task>
-  local context
-  # Keep configured-backend reads off the unbounded Pi event path.
-  # shellcheck disable=SC2030 # This reader is intentionally isolated in a subshell.
-  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
-  fm_task_progress_detail "$1" || return $?
-  fm_task_progress_recover_goal "$1" || return $?
-  context=$(fm_task_progress_context "$1") || return $?
-  printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
-    read --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
-    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" --context "$context"
+  FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" \
+    "$FM_TASK_PROGRESS_BIN/fm-tasks-axi.sh" progress-view "$1"
 )
 
-# Read only the four compact fields from the current task body. Unlike the
-# admission projection, this deliberately ignores the context digest so a Done
-# row can still prove that MAIN cleared its gap before the row moved sections.
-# Emits JSON null for historical rows that never adopted compact progress.
 fm_task_progress_values() ( # <task>
-  # shellcheck disable=SC2030,SC2031 # This reader is intentionally isolated in a subshell.
-  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   fm_task_progress_detail "$1" || return $?
-  printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
-    values --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
-    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED"
+  printf '%s' "$FM_TASK_PROGRESS_RECORD" | jq -c '.progress'
 )
 
-fm_task_progress_execution_generation() { # <task>
-  local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
-  local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} meta executor provider generation
-  meta="$state/$id.meta"
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  executor=$(sed -n 's/^executor=//p' "$meta" | tail -1)
-  case "${executor:-local-agent}" in
-    local-agent)
-      # Match the metadata owner's canonical last-value semantics without
-      # importing the wider backend surface into this focused helper.
-      generation=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
-      [ -n "$generation" ] || {
-        echo "REFUSED: task $id has no current local execution generation" >&2
-        return 1
-      }
-      printf '%s' "$generation"
-      ;;
-    cloud-worker)
-      provider=$(sed -n 's/^provider=//p' "$meta" | tail -1)
-      [ "$provider" = aime ] || {
-        echo "REFUSED: task $id has an unsupported cloud execution identity" >&2
-        return 1
-      }
-      (
-        STATE=$state DATA=$data
-        export STATE DATA
-        # shellcheck source=bin/fm-aime-cloud-lib.sh
-        . "$FM_TASK_PROGRESS_BIN/fm-aime-cloud-lib.sh"
-        if ! fm_aime_state_load "$id" || ! fm_aime_meta_validate "$id" "$AIME_STATE_RESULT_MODE"; then
-          echo "REFUSED: task $id has no validated cloud execution identity" >&2
-          exit 1
-        fi
-        generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
-        [ -n "$generation" ] || {
-          echo "REFUSED: task $id has no current cloud execution generation" >&2
-          exit 1
-        }
-        printf 'cloud-worker:aime:%s' "$generation"
-      )
-      ;;
-    remote-agent)
-      provider=$(sed -n 's/^provider=//p' "$meta" | tail -1)
-      case "$provider" in
-        aime)
-          (
-            STATE=$state DATA=$data
-            export STATE DATA
-            # shellcheck source=bin/fm-aime-cloud-lib.sh
-            . "$FM_TASK_PROGRESS_BIN/fm-aime-cloud-lib.sh"
-            if ! fm_aime_state_load "$id" || ! fm_aime_meta_validate "$id" "$AIME_STATE_RESULT_MODE"; then
-              echo "REFUSED: task $id has no validated remote execution identity" >&2
-              exit 1
-            fi
-            generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
-            [ -n "$generation" ] || {
-              echo "REFUSED: task $id has no current remote execution generation" >&2
-              exit 1
-            }
-            printf 'remote-agent:aime:%s' "$generation"
-          )
-          ;;
-        ida)
-          (
-            STATE=$state DATA=$data
-            export STATE DATA
-            # shellcheck source=bin/fm-remote-agent-lib.sh
-            . "$FM_TASK_PROGRESS_BIN/fm-remote-agent-lib.sh"
-            if ! fm_remote_state_load "$id" || ! fm_remote_meta_validate "$id" ida "$REMOTE_STATE_TASK_TYPE"; then
-              echo "REFUSED: task $id has no validated remote execution identity" >&2
-              exit 1
-            fi
-            generation=$(jq -r '.generation // 1' "$REMOTE_STATE_FILE")
-            printf 'remote-agent:ida:%s' "$generation"
-          )
-          ;;
-        *)
-          echo "REFUSED: task $id has an unsupported remote execution identity" >&2
-          return 1
-          ;;
-      esac
-      ;;
-    *)
-      echo "REFUSED: task $id has an unsupported executor identity" >&2
-      return 1
-      ;;
-  esac
-}
-
-# Bind a compact admission to the current task brief and executor identity
-# without persisting either in the task body. A later brief correction or
-# worker replacement invalidates the read token and forces MAIN to publish a
-# fresh material next step before Branch can act again.
-fm_task_progress_context() { # <task>
-  local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
-  local brief brief_digest='' generation=''
-  brief="$data/$id/brief.md"
-  if [ -f "$brief" ] && [ ! -L "$brief" ]; then
-    brief_digest=$(fm_task_progress_sha256_file "$brief") || return 1
-  fi
-  generation=$(fm_task_progress_execution_generation "$id") || return 1
-  jq -cn --arg goal "$FM_TASK_PROGRESS_GOAL" --arg brief_sha256 "$brief_digest" \
-    --arg execution_generation "$generation" --arg task_state "$FM_TASK_PROGRESS_STATE" \
-    --arg held "$FM_TASK_PROGRESS_HELD" \
-    --arg blocked "$FM_TASK_PROGRESS_BLOCKED" \
-    '{goal:$goal,brief_sha256:$brief_sha256,execution_generation:$execution_generation,task_state:$task_state,held:$held,blocked:$blocked}'
-}
-
-fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
-  local id=$1 expected=$2 progress=$3 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
-  local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} lock tmp current context rc=0
-  # shellcheck disable=SC2030,SC2031 # This mutator is intentionally isolated in a subshell.
-  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
+fm_task_progress_update() ( # <task> <inert-legacy-token> <progress-json>
+  local id=$1 progress=$3 record
   [ "${FM_SUPERVISION_ACTOR:-main}" = main ] || {
     echo 'REFUSED: task progress belongs to MAIN' >&2
     exit 6
   }
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$FM_TASK_PROGRESS_BIN/fm-wake-lib.sh"
-  # shellcheck source=bin/fm-lease-lib.sh
-  . "$FM_TASK_PROGRESS_BIN/fm-lease-lib.sh"
-  fm_lease_valid_id "$id" || exit 2
-  fm_lease_guard "$id" 'task progress update' || exit $?
-  lock=$(fm_meta_lock_path "$state/$id.meta") || exit 1
-  trap 'rc=$?; [ -z "${tmp:-}" ] || rm -f -- "$tmp"; fm_lock_release "$lock"; fm_lease_guard_release; exit "$rc"' EXIT
-  fm_lock_acquire_wait "$lock" || exit 1
-  fm_task_progress_detail "$id" || exit $?
-  fm_task_progress_recover_goal "$id" || exit $?
-  context=$(fm_task_progress_context "$id") || exit $?
-  [ "$FM_TASK_PROGRESS_STATE" != "done" ] || {
-    echo "REFUSED: completed task $id cannot receive progress updates" >&2
-    exit 6
-  }
-  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-task-progress.XXXXXX") || exit 1
-  printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
-    replace --task "$id" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
-    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" \
-    --context "$context" --expected-token "$expected" --progress-json "$progress" > "$tmp" || exit $?
-  current=$(mktemp "${TMPDIR:-/tmp}/fm-task-progress-current.XXXXXX") || exit 1
-  trap 'rc=$?; rm -f -- "$tmp" "$current"; fm_lock_release "$lock"; fm_lease_guard_release; exit "$rc"' EXIT
-  printf '%s\n' "$FM_TASK_PROGRESS_BODY" > "$current" || exit 1
-  if ! cmp -s "$current" "$tmp"; then
-    fm_backlog_mutate "$data" update "$id" --body-file "$tmp" || {
-      printf '%s\n' "${FM_BACKLOG_TRANSITION_ERROR:-task progress update failed}" >&2
-      exit 1
-    }
-  fi
-  fm_task_progress_read "$id"
+  record=$(FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" \
+    "$FM_TASK_PROGRESS_BIN/fm-tasks-axi.sh" update-progress-view "$id" --progress "$progress") || exit $?
+  # The record owner returns its validated in-memory value after atomic publish;
+  # no write-after-read confirmation or provider/backend query follows.
+  printf '%s\n' "$record"
 )
 
-fm_task_progress_list() ( # active task ids plus Done rows with an open compact gap
-  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} listing done_listing active_ids done_ids id values tmp
-  # shellcheck disable=SC2030,SC2031 # This reader is intentionally isolated in a subshell.
-  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
-  listing=$(fm_backlog_row_list "$data" --state in_flight --limit 10000) || return $?
-  done_listing=$(fm_backlog_row_list "$data" --state "done" --limit 10000) || return $?
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-task-progress-list.XXXXXX") || return 1
-  trap 'rm -f "$tmp"' EXIT
-  active_ids=$(printf '%s\n' "$listing" | awk '
-    /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
-    rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ {
-      line=$0; sub(/^  /,"",line); sub(/,.*/,"",line); print line; next
-    }
-    rows { rows=0 }
-    ')
-  done_ids=$(printf '%s\n' "$done_listing" | awk '
-      /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
-      rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ {
-        line=$0; sub(/^  /,"",line); sub(/,.*/,"",line); print line; next
-      }
-      rows { rows=0 }
-    ')
-  printf '%s\n' "$active_ids" >"$tmp" || return 1
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    values=$(fm_task_progress_values "$id") || return $?
-    if [ "$values" != null ] && printf '%s' "$values" | jq -e \
-        '.remaining_gap != "" and .next_step != ""' >/dev/null; then
-      printf '%s\n' "$id" >>"$tmp" || return 1
-    fi
-  done <<EOF
-$done_ids
-EOF
-  LC_ALL=C sort -u "$tmp" | jq -Rsc '{tasks:(split("\n") | map(select(length > 0)))}'
+fm_task_progress_list() ( # canonical in-flight records
+  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
+  python3 "$FM_TASK_PROGRESS_BIN/fm-task-record.py" --data "$data" progress-list
 )
 
-# Legacy teardown remains available for records that never adopted compact
-# continuation. Once the ordinary task body contains compact progress, cleanup
-# requires the exact current MAIN-owned satisfied state. Explicit archive state
-# is read by the cleanup owner rather than encoded into this progress block.
+fm_task_progress_current_absent() { # <task>
+  local file
+  file=$(fm_task_progress_file "$1") || return 2
+  [ ! -e "$file" ] && [ ! -L "$file" ] && return 0
+  [ -f "$file" ] && [ ! -L "$file" ] && return 1
+  echo "REFUSED: task record is not a regular file: $file" >&2
+  return 2
+}
+
 fm_task_progress_completion_guard() ( # <task>
-  local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
-  local context projection detail_error detail_status root backend file
-  # shellcheck disable=SC2031 # This guard is intentionally isolated in a subshell.
-  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
-  # config/backlog-backend=manual opts out of the ordinary task owner even if
-  # a markdown adapter is configured for paths and operator guidance.
-  fm_backlog_backend_manual "${FM_HOME:?}/config" && return 0
-  root=$(fm_backlog_root "$data") || {
-    echo "error: task $id cannot be torn down because its backlog data directory is inaccessible: $data" >&2
-    return 1
-  }
-  backend=$(fm_tasks_axi_backend "$root") || return $?
-  if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") || return $?
-    # Legacy teardown historically supports homes that keep no backlog. Do not
-    # introduce a tasks-axi runtime dependency when no ordinary record exists.
-    [ -e "$file" ] || [ -L "$file" ] || return 0
+  local projection file
+  file=$(fm_task_progress_file "$1") || return $?
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    # Historical homes that have not activated per-task records retain their
+    # existing cleanup compatibility until explicit import.
+    return 0
   fi
-  detail_error=$(mktemp "${TMPDIR:-/tmp}/fm-task-progress-guard.XXXXXX") || {
-    echo 'REFUSED: could not allocate compact progress guard state' >&2
-    return 1
-  }
-  trap 'rm -f "$detail_error"' EXIT
-  fm_task_progress_detail "$id" 2>"$detail_error"
-  detail_status=$?
-  if [ "$detail_status" -ne 0 ]; then
-    # A configured ordinary task source with no row cannot prove MAIN accepted
-    # the goal. Historical explicit terminal/archive compatibility belongs to
-    # fm_cleanup_completion_guard; this legacy teardown fallback must not turn
-    # a disappeared fresh row into implicit completion.
-    if grep -qx 'code: NOT_FOUND' "$detail_error"; then
-      echo "REFUSED: compact task $id is absent from its configured original-task source; explicit terminal or archive proof is required before cleanup" >&2
-      return 6
-    fi
-    cat "$detail_error" >&2
-    return "$detail_status"
-  fi
-  case "$FM_TASK_PROGRESS_BODY" in
-    *'<!-- firstmate-progress:v1'*|*'<!-- /firstmate-progress -->'*) ;;
-    *) return 0 ;;
-  esac
-  context=$(fm_task_progress_context "$id") || return $?
-  projection=$(printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
-    read --task "$id" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
-    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" --context "$context") || return $?
-  printf '%s' "$projection" | jq -e \
-    '.recorded == true and .task_state == "in_flight" and .task_held == "no" and
-     .task_blocked == "no" and .remaining_gap == "" and .next_step == ""' >/dev/null || {
-    echo "REFUSED: compact task $id is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup" >&2
+  projection=$(fm_task_progress_read "$1") || return $?
+  printf '%s' "$projection" | jq -e '
+    .task_state == "in_flight" and .task_held == "no" and .task_blocked == "no" and
+    .remaining_gap == "" and .next_step == ""' >/dev/null || {
+    echo "REFUSED: task $1 is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup" >&2
     return 6
   }
 )

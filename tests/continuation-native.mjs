@@ -1,6 +1,6 @@
 // Real installed SessionManager, isolated home, and public compact native tool.
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
@@ -14,11 +14,12 @@ const home = process.env.FM_HOME;
 mkdirSync(home + '/sessions', { recursive: true });
 mkdirSync(home + '/state', { recursive: true });
 mkdirSync(home + '/data/task', { recursive: true });
+mkdirSync(home + '/project', { recursive: true });
 writeFileSync(home + '/state/.lock', process.pid + '\n');
-writeFileSync(home + '/data/backlog.md', '## In flight\n\n## Queued\n\n## Done\n');
-writeFileSync(home + '/.tasks.toml', 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n');
 writeFileSync(home + '/data/task/brief.md', "# Task\n## Captain's intent\nDeliver the requested behavior\n\n## Firstmate spec\nVerify the public fixture\n");
-writeFileSync(home + '/state/task.meta', `spawn_gen=g1\nkind=ship\nexecutor=local-agent\nproject=${home}/project\nbackend=herdr\nwindow=backend-endpoint-not-task-id\nharness=pi\nendpoint_task_id=task\n`);
+writeFileSync(home + '/state/task.meta', `spawn_gen=g1\nkind=ship\nexecutor=local-agent\nproject=${home}/project\nworktree=${home}/project\nbackend=herdr\nwindow=fixture-session:fixture-pane\nherdr_session=fixture-session\nherdr_workspace_id=fixture-workspace\nherdr_tab_id=fixture-tab\nherdr_pane_id=fixture-pane\nharness=pi\nendpoint_task_id=task\n`);
+writeFileSync(home + '/state/task.busy-gen', 'g1\n');
+writeFileSync(home + '/state/task.busy-state', 'v1 gen=g1 seq=1 state=idle source=pi-ext event=turn-end ts=1\n');
 mkdirSync(home + '/fakebin');
 writeFileSync(home + '/fakebin/herdr', `#!/bin/sh
 case "$1 $2" in
@@ -114,9 +115,12 @@ continuation = await install();
 const resumed = await tool({ action: 'read', task: 'task' });
 assert.equal(resumed.next_step, progress.next_step, 'restart lost the authorized next step');
 
-const backlogBefore = readFileSync(home + '/data/backlog.md');
+const taskRecord = home + '/data/task/task.json';
+const recordBefore = readFileSync(taskRecord);
+const mtimeBefore = statSync(taskRecord).mtimeMs;
 const unchanged = await tool({ action: 'update', task: 'task', record_token: resumed.record_token, progress });
-assert.deepEqual(readFileSync(home + '/data/backlog.md'), backlogBefore, 'unchanged update rewrote progress');
+assert.deepEqual(readFileSync(taskRecord), recordBefore, 'unchanged update rewrote progress');
+assert.equal(statSync(taskRecord).mtimeMs, mtimeBefore, 'unchanged update replaced the task record');
 assert.equal(unchanged.record_token, resumed.record_token);
 
 const branch = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['update-progress', 'task',
@@ -127,12 +131,21 @@ const branch = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['upda
 assert.equal(branch.status, 6);
 assert.match(branch.stderr, /progress belongs to MAIN/);
 
+// Runtime completion is intermediate evidence, not semantic task acceptance.
+// The canonical business task remains in flight with exactly one identity.
+writeFileSync(home + '/state/task.status', 'done: worker returned an intermediate result\n');
+assert.match(command('fm-task-state.sh', ['--durable-only', 'task']).stdout, /^state: done /,
+  'fixture did not expose terminal runtime evidence');
 const settle = await fire('agent_before_settle');
 const reminder = settle.flatMap(value => value?.entries || []).find(entry => entry.customType === 'fm-task-continuation');
 assert.ok(reminder, 'unfinished intermediate result did not remind MAIN');
 assert.match(reminder.content, /task: goal: Deliver compact continuation/);
 assert.match(reminder.content, /acceptance: The public fixture passes/);
+assert.match(reminder.content, /next step: Restart the session, read the task row, and run the final checks/);
 assert.doesNotMatch(reminder.content, /backend-endpoint-not-task-id/);
+const afterRestartInventory = JSON.parse(command('fm-tasks-axi.sh', ['inventory']).stdout);
+assert.deepEqual(afterRestartInventory.tasks.map(item => item.id), ['task'],
+  'restart continuation created a duplicate business task');
 
 // A delivered reminder is pacing evidence, never a finite admission budget.
 // Keep advancing the public receiver clock without changing the task row and
@@ -174,58 +187,24 @@ assert.equal(completed.next_step, '');
 assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
   'accepted compact result remained an active reminder');
 
-const processedRequirement = '确认不要通过枚举逐项覆盖这些场景。\n\n### 验收\n使用行为测试证明开放式分类仍然成立。';
-const briefBeforeEdit = readFileSync(home + '/data/task/brief.md', 'utf8');
-const backlogBeforeBriefEdit = readFileSync(home + '/data/backlog.md');
-writeFileSync(home + '/data/task/brief.md', `# Task\n## Captain's intent\n${processedRequirement}\n\n## Firstmate spec\nVerify the public fixture\n`);
-const processedBrief = readFileSync(home + '/data/task/brief.md', 'utf8');
-assert.notEqual(processedBrief, briefBeforeEdit, 'ordinary brief edit did not change the task contract');
-assert.equal(processedBrief.split(processedRequirement).length, 2,
-  'ordinary brief edit did not store literal Chinese multiline processed requirements exactly once');
-assert.match(processedBrief, /## Firstmate spec\nVerify the public fixture/,
-  'ordinary brief edit lost the existing Firstmate specification');
-assert.deepEqual(readFileSync(home + '/data/backlog.md'), backlogBeforeBriefEdit,
-  'ordinary brief edit wrote task progress or lifecycle state');
-assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
-  'ordinary brief edit created a rich lifecycle record');
-const extractedIntent = spawnSync('bash', ['-c', '. "$1/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$2" "## Captain\'s intent"',
-  '_', process.env.REAL_ROOT, home + '/data/task/brief.md'], { encoding: 'utf8' });
-assert.equal(extractedIntent.status, 0, extractedIntent.stderr);
-assert.match(extractedIntent.stdout, /确认不要通过枚举逐项覆盖这些场景/,
-  'downstream review intent extraction did not see the processed requirement');
-await fire('session_shutdown', { reason: 'intent-recovery' });
-session = SessionManager.open(session.getSessionFile());
-continuation = await install();
-const correctedRead = await tool({ action: 'read', task: 'task' });
-assert.notEqual(correctedRead.record_token, completed.record_token,
-  'ordinary brief edit did not invalidate the old progress scope');
-assert.equal(correctedRead.recorded, false, 'ordinary brief edit left old progress active');
-assert.equal(correctedRead.context_relation, 'mismatch',
-  'ordinary brief edit did not expose the stale compact scope');
-assert.deepEqual({ acceptance: correctedRead.acceptance, current_state: correctedRead.current_state,
-  remaining_gap: correctedRead.remaining_gap, next_step: correctedRead.next_step },
-{ acceptance: finalProgress.acceptance, current_state: finalProgress.current_state,
-  remaining_gap: '', next_step: '' });
-const staleScope = await rawTool({ action: 'update', task: 'task', record_token: completed.record_token,
-  progress: { ...progress, current_state: 'Old scope attempted to continue',
-    remaining_gap: 'Old scope must remain refused', next_step: 'Do not execute this stale step' } });
-assert.equal(staleScope.isError, true, 'old progress scope remained writable after intent changed');
-assert.match(staleScope.content[0].text, /task record changed/);
-const correctedProgress = { ...progress, current_state: 'The ordinary brief correction is recorded',
-  remaining_gap: 'The clarified acceptance check remains', next_step: 'Run the explicitly permitted clarified check' };
-const repermitted = await tool({ action: 'update', task: 'task', record_token: correctedRead.record_token,
-  progress: correctedProgress });
-assert.equal(repermitted.next_step, correctedProgress.next_step,
-  'fresh MAIN scope did not permit the revised next step');
-assert.equal(repermitted.recorded, true, 'fresh MAIN progress did not restore the edited brief scope');
-assert.equal(repermitted.context_relation, 'exact', 'fresh MAIN progress did not bind the edited brief exactly');
-
 const compactRead = await rawTool({ action: 'read', task: 'task' });
 const compactResponseBytes = Buffer.byteLength(compactRead.content[0].text);
 assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
-  'fresh compact continuation created rich lifecycle state');
-assert.equal((await tool({ action: 'read', task: 'task' })).current_state, correctedProgress.current_state,
+  'compact continuation created rich lifecycle state');
+assert.equal((await tool({ action: 'read', task: 'task' })).current_state, finalProgress.current_state,
   'final compact read lost the active progress');
+
+// Archive is an explicit terminal boundary and must prevent later revival,
+// even if historical status and progress evidence remain on disk.
+command('fm-tasks-axi.sh', ['archive', 'task']);
+assert.deepEqual(JSON.parse(command('fm-task-state.sh', ['progress-list']).stdout).tasks, []);
+await fire('session_shutdown', { reason: 'archive-restart' });
+session = SessionManager.open(session.getSessionFile());
+continuation = await install();
+assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
+  'explicitly archived task revived after restart');
+assert.equal(JSON.parse(command('fm-tasks-axi.sh', ['inventory']).stdout).tasks.length, 1,
+  'archive recovery duplicated or deleted the canonical task record');
 
 await fire('session_shutdown', { reason: 'quit' });
 console.log('evidence - task continuation IO ' + JSON.stringify({
@@ -235,4 +214,4 @@ console.log('evidence - task continuation IO ' + JSON.stringify({
   continuedReminderAdmissions: offered.length + 1,
   progressWritesForUnchangedUpdate: 0,
 }));
-console.log('ok - installed Pi SDK compact workflow: original-row goal and acceptance survive restart; MAIN receives a canonical-id actionable reminder and accepts only after the gap is cleared');
+console.log('ok - installed Pi SDK canonical workflow: intermediate runtime completion remains discoverable after restart, routes the exact next step without duplication, and stops only after MAIN acceptance or explicit archive');

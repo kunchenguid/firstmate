@@ -71,9 +71,9 @@ For anything it tells you to escalate, or any failure that survives the playbook
 
 The durable task brief owns the intended outcome, acceptance evidence, scope and exclusions, and hard-block condition.
 For every material worker return, compare the current artifacts and verified state with that contract before deciding what the event means.
-For ordinary work, read the compact original-row progress supplied by the admission. MAIN alone writes that progress after a material change; do not create or reconstruct lifecycle JSON, evidence references, or a second progress record.
+For ordinary work, read the compact per-task progress supplied by the admission. MAIN alone writes that single progress record after a material change; do not create or reconstruct lifecycle JSON, evidence references, or another progress record.
 Route the recorded next step only through its existing owner and verify its receipt.
-The compact progress token binds the exact current MAIN-authored next_step and executor generation for idempotent same-worker inbox delivery; it authorizes no other text or target.
+The compact progress token binds the exact current MAIN-authored projection during one admission for idempotent same-worker inbox delivery; it authorizes no other text or target.
 Cross-task handoff returns to MAIN's durable handoff owner, and every missing authority must be reported to MAIN.
 The worker alone changes its branch and invokes native review for its exact committed candidate.
 If the record is accepted or archived, handle only late delivery, real decisions or residual cleanup; do not reconstruct old work from stale status text.
@@ -84,7 +84,7 @@ When that worker reports a native-review finding with its exact task-local snaps
 Project-required routine confirmations such as commit-message alignment may likewise be handled only when the proposed detail is fully within the authorized task and satisfies the current project owner; any scope or safety ambiguity stays MAIN-owned.
 For provider-terminal research whose report does not satisfy the research goal, keep the business task unfinished and use only the recorded provider's supported adoption or continuation lifecycle; never mutate terminal provider identity, create a duplicate session, bypass a one-create guard, or accept a compliance statement as evidence.
 When a report appears to satisfy the goal, submit its exact evidence as a candidate for MAIN final semantic acceptance; never accept or retire the task yourself.
-For a compact continuation admission, the restricted native `fm_task_continuation read` is read-only and bound to the admitted original-row token; a concurrent user correction invalidates it. Existing effect owners persist their exact receipts automatically, so do not call the native tool after every command or unchanged wait.
+For a compact continuation admission, the restricted native `fm_task_continuation read` is read-only and bound to the admitted projection token; a changed goal, progress value, or disposition invalidates it. Existing effect owners persist their exact receipts automatically, so do not call the native tool after every command or unchanged wait.
 Historical lifecycle v2 tasks admitted under an explicit task grant retain their restricted legacy operations for safety/effect reconciliation only; never make that record the active ordinary progress source.
 An explicit cancellation, archival state, or stop remains stopped and is never auto-resumed.
 Escalate as a hard blocker only for a real permission boundary, a decision MAIN must route to the captain, or an evidenced external failure after bounded retries and a genuinely different authorized recovery path are exhausted; name what completed, the remaining gap, the attempts, and the exact next input needed.

@@ -17,11 +17,9 @@
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
-# is retried by the next session start. The transition is skipped on a
-# config/backlog-backend=manual home and in a markdown home that keeps no
-# data/backlog.md; those cases print the manual follow-up. A configured
-# non-markdown adapter remains active without a markdown file; any active
-# automatic backend without compatible tasks-axi refuses before cleanup.
+# is retried by the next session start. The transition always addresses the
+# named canonical `data/<id>/task.json` record; legacy backlog configuration
+# neither redirects nor suppresses it, and retained backlog bytes stay inert.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
 # The original task must be MAIN-accepted through compact progress or explicitly
@@ -685,9 +683,9 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   exit 1
 }
 fm_control_require_recoverable_harness "$(fm_meta_get "$META" harness)" || exit 1
-# Ordinary compact continuation retains semantic acceptance in the existing
-# task body. Historical tasks without that block keep the prior landed-work
-# cleanup behavior below.
+# Ordinary compact continuation retains semantic acceptance in the canonical
+# per-task business and progress record. Historical tasks without that record
+# or an embedded legacy block keep the prior landed-work cleanup behavior below.
 # shellcheck source=bin/fm-task-progress-lib.sh
 . "$SCRIPT_DIR/fm-task-progress-lib.sh"
 fm_task_progress_completion_guard "$ID" || exit $?

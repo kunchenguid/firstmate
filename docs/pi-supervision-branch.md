@@ -51,11 +51,11 @@ The portable checks are `tests/fm-pi-branch-status.test.sh`; `tests/fm-pi-branch
 ## Live task continuation
 
 Presentation acknowledgement does not establish task acceptance.
-The original in-flight backlog row is the active continuation record.
-Its title is the task goal, and its compact `firstmate-progress:v1` body block records the acceptance method, current state, remaining gap and next step.
+The canonical `data/<task>/task.json` record owns task identity, disposition and progress.
+Its title is the task goal, and its progress fields store the acceptance method, current state, remaining gap and next step.
 MAIN reads and materially updates those fields with the native tool's `read` and `update` actions.
-The opaque record token binds the task row to the current task state, authenticated brief, backlog hold/block flags, and the generation from its existing local or remote execution owner.
-It rejects stale MAIN updates and continuation admissions when those changes are visible at token validation; the task owner's documented ordinary-writer publication window remains an accepted limitation.
+The opaque read token binds one Branch admission to the exact projected goal, progress values, and current backlog disposition.
+It rejects a continuation when that projection changes after admission, but it is not a MAIN update precondition or a persisted concurrency record.
 Together with the exact current MAIN-authored `next_step`, it permits only idempotent same-worker inbox continuation; all other effects remain with their existing authority owners.
 The branch can read only the exact token-bound compact admission while its original task remains unheld, unblocked and `in_flight`; it cannot write progress or make final semantic acceptance.
 
@@ -69,7 +69,7 @@ A healthy unchanged executor or wait is settled quietly in the branch session.
 Verified routine advancement is also settled quietly, and a changed executor observation admits the next bounded Branch turn without requiring MAIN to rewrite progress first.
 Only goal-ready evidence, genuine blockers and authority decisions reach MAIN through the durable sequence-bound processing and acknowledgement path; repeated unchanged or unsuccessful offers retain the bounded escalation path.
 The extension paces at most two unchanged offers and one visible coordination escalation in the session transcript.
-Those entries are delivery receipts only; reload and compaction recover task progress from the original row, not from transcript pacing.
+Those entries are delivery receipts only; reload and compaction recover task progress from the canonical task record, not from transcript pacing.
 
 Neither monitoring nor branch admission grants authority or replaces an effect owner.
 The branch may use that owner's existing interface for one in-scope routine step; MAIN owns progress writes, final artifact review, semantic acceptance, and genuine scope/product/architecture, destructive, security, merge or cleanup decisions.
@@ -84,10 +84,10 @@ Ordinary chat creates no progress record.
 When requirements change, MAIN uses its ordinary file tools to keep the original brief's `## Captain's intent` as the consolidated processed requirement while preserving the rest of the task contract.
 The canonical brief remains the only Intent record; there is no separate intent-update tool, source-message mapping, update receipt, or parallel history.
 Discovery stays in the heartbeat owner's `progress-list` call; it does not add another history or progress source to MAIN's daily read/update schema.
-The Branch registration exposes only `read` for the exact compact-progress task admitted from the original backlog.
+The Branch registration exposes only `read` for the exact compact-progress task admitted through the ordinary task owner.
 Historical rich-lifecycle records are neither admissions nor readable through this tool.
 No continuation path creates a second scheduler, task store or lifecycle progress record.
-[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) and `tests/continuation-native.mjs` cover original-row persistence, MAIN-only updates, canonical identity reminders, restart recovery, quiet unchanged execution and compact native calls.
+[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) and `tests/continuation-native.mjs` cover one-file task persistence, MAIN-only updates, restart recovery, quiet unchanged execution and compact native calls.
 
 ## Components and their owners
 
@@ -245,7 +245,7 @@ A home upgraded with outcomes already delivered treats those rows as processed o
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty, while deterministic entry delivery owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note.
 A token-bound compact continuation may also request `routine` with `silent=true`; the receipt stays only in the branch session when the task-owned resumable state is unchanged.
-A material task-owned resume-state change instead enters the existing outcome store and reaches MAIN so MAIN can update the original task record.
+A material task-owned resume-state change instead enters the existing outcome store and reaches MAIN so MAIN can update the canonical task record.
 Every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
 Its "Goal-directed acceptance" section owns semantic review of material task returns: intermediate and provider-terminal results continue through existing authorized task and effect owners when acceptance is incomplete, satisfied acceptance becomes a candidate for MAIN retirement, explicit stops remain stopped, and delivery or merge authority never expands.

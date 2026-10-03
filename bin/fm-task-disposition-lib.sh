@@ -1,12 +1,11 @@
 # shellcheck shell=bash
 # Read-only task-record dispositions shared by fleet and wake projections.
 #
-# The active markdown backlog is authoritative when it contains an id. Only
-# when no current row exists may tasks-axi's configured Done archive provide a
-# terminal disposition, with a unique checked row and any requested exact
-# artifact preserved on that row/body. Duplicate rows are ambiguous and deliberately
-# remain visible. A queued row held with the structured `hold-kind: parked`
-# metadata is an explicit parked disposition, not current execution.
+# Canonical per-task records are authoritative when present. This legacy
+# projection reads retained markdown backlog/archive evidence only for homes
+# that have not explicitly imported those rows yet. A unique checked archive
+# row can prove terminal disposition; duplicate rows remain ambiguous and
+# visible. A queued row with `hold-kind: parked` is parked, not executing.
 #
 # Output from fm_task_disposition_snapshot is sorted TSV:
 #   <task-id>\t<active|queued|done|archive_done|parked|ambiguous>
@@ -21,16 +20,29 @@ FM_TASK_DISPOSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_TASK_DISPOSITION_LIB_DIR/fm-tasks-axi-lib.sh"
 
 fm_task_disposition_snapshot() {  # <data-dir> [required-archive-artifact]
-  local data=$1 root backlog archive archive_input=/dev/null backend
+  local data=$1 root backlog archive archive_input=/dev/null backend canonical legacy
   while [ "$data" != / ] && [ "${data%/}" != "$data" ]; do data=${data%/}; done
+  canonical=$(python3 "$FM_TASK_DISPOSITION_LIB_DIR/fm-task-record.py" --data "$data" inventory \
+    | jq -r '.tasks[] | [.id,
+        (if .state == "in_flight" then "active"
+         elif .state == "queued" and .hold.kind == "parked" then "parked"
+         elif .state == "queued" then "queued"
+         elif .state == "done" then "done"
+         else "archive_done" end)] | @tsv') || return 1
   case "$data" in
     */*) root=${data%/*}; [ -n "$root" ] || root=/ ;;
     *) root=. ;;
   esac
-  # A different or unreadable backend means this markdown reader cannot prove
-  # any disposition. Emit no guesses so callers keep those records unknown.
-  backend=$(fm_tasks_axi_backend_resolve "$root" 2>/dev/null) || return 0
-  [ "$backend" = markdown ] || return 0
+  # A different or unreadable legacy backend contributes no fallback rows;
+  # canonical records remain readable and authoritative.
+  backend=$(fm_tasks_axi_backend_resolve "$root" 2>/dev/null) || {
+    printf '%s\n' "$canonical" | sed '/^$/d' | LC_ALL=C sort
+    return 0
+  }
+  if [ "$backend" != markdown ]; then
+    printf '%s\n' "$canonical" | sed '/^$/d' | LC_ALL=C sort
+    return 0
+  fi
   backlog="${data%/}/backlog.md"
   archive=$(fm_tasks_axi_markdown_archive_resolve "$root" "$data" 2>/dev/null) || archive=
   if [ -n "$archive" ] && [ -f "$archive" ] && [ -r "$archive" ] && [ ! -L "$archive" ]; then
@@ -42,7 +54,7 @@ fm_task_disposition_snapshot() {  # <data-dir> [required-archive-artifact]
     backlog=/dev/null
   fi
 
-  LC_ALL=C awk -v backlog="$backlog" -v archive="$archive_input" -v artifact="${2:-}" '
+  legacy=$(LC_ALL=C awk -v backlog="$backlog" -v archive="$archive_input" -v artifact="${2:-}" '
     function trim(value) {
       sub(/^[[:space:]]+/, "", value)
       sub(/[[:space:]]+$/, "", value)
@@ -123,7 +135,11 @@ fm_task_disposition_snapshot() {  # <data-dir> [required-archive-artifact]
         }
       }
     }
-  ' "$backlog" "$archive_input" | LC_ALL=C sort
+  ' "$backlog" "$archive_input") || return 1
+  # Legacy evidence fills only identities that have no canonical record.
+  printf '%s\n%s\n' "$legacy" "$canonical" | sed '/^$/d' \
+    | LC_ALL=C awk -F '\t' '{ disposition[$1]=$2 } END { for (id in disposition) print id "\t" disposition[id] }' \
+    | LC_ALL=C sort
 }
 
 fm_task_disposition_for() {  # <snapshot-tsv> <task-id>
@@ -143,25 +159,24 @@ EOF
 # can never gain a new steer, handoff, worker or provider effect merely because
 # its endpoint/resource record was retained for cleanup.
 fm_task_disposition_effect_guard() { # <data-dir> <task-id> [operation]
-  local data=$1 task=$2 operation=${3:-effect} snapshot disposition detail_error detail_rc values root backend
+  local data=$1 task=$2 operation=${3:-effect} snapshot disposition detail_error detail_rc root backend
   # Historical/manual homes with no ordinary task source keep their established
   # operability; absence of a data directory is not evidence of terminality.
   [ -d "$data" ] || return 0
-  # The backend-neutral exact row read wins over the markdown projection. A
-  # Done row whose sole compact record still has a gap remains unfinished and
-  # may receive the authorized continuation needed to repair its disposition.
+  # The canonical exact task-record read wins over the legacy markdown
+  # projection. Business completion is an effect boundary even when retained
+  # descriptive progress still names a gap; MAIN must explicitly reopen the
+  # task before any retained resource can resume effects.
   # shellcheck source=bin/fm-task-progress-lib.sh
   . "$FM_TASK_DISPOSITION_LIB_DIR/fm-task-progress-lib.sh"
   detail_error=$(mktemp "${TMPDIR:-/tmp}/fm-task-disposition.XXXXXX") || return 1
   if fm_task_progress_detail "$task" 2>"$detail_error"; then
     rm -f "$detail_error"
-    [ "$FM_TASK_PROGRESS_STATE" = "done" ] || return 0
-    values=$(fm_task_progress_values "$task") || return $?
-    if [ "$values" != null ] && printf '%s' "$values" | jq -e \
-        '.remaining_gap != "" and .next_step != ""' >/dev/null; then
-      return 0
-    fi
-    disposition="done"
+    case "$FM_TASK_PROGRESS_STATE" in
+      done) disposition="done" ;;
+      archived) disposition="archive_done" ;;
+      *) return 0 ;;
+    esac
   else
     detail_rc=$?
     if ! grep -qx 'code: NOT_FOUND' "$detail_error"; then
@@ -173,7 +188,11 @@ fm_task_disposition_effect_guard() { # <data-dir> <task-id> [operation]
     snapshot=$(fm_task_disposition_snapshot "$data") || return 1
     disposition=$(fm_task_disposition_for "$snapshot" "$task" 2>/dev/null || true)
     if [ -z "$disposition" ]; then
-      root=$(fm_backlog_root "$data") || return 1
+      while [ "$data" != / ] && [ "${data%/}" != "$data" ]; do data=${data%/}; done
+      case "$data" in
+        */*) root=${data%/*}; [ -n "$root" ] || root=/ ;;
+        *) root=. ;;
+      esac
       backend=$(fm_tasks_axi_backend_resolve "$root") || return 1
       if [ "$backend" != markdown ]; then
         printf 'REFUSED: task %s is absent from the backend-neutral current-task read; %s cannot assume it is nonterminal\n' \

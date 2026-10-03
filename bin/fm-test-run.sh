@@ -687,6 +687,7 @@ tests/fm-supervision-events.test.sh 719
 tests/fm-tangle-guard.test.sh 9662
 tests/fm-task-delivery.test.sh 5952
 tests/fm-task-inbox.test.sh 25369
+tests/fm-task-import.test.sh 3500
 tests/fm-task-progress.test.sh 2923
 tests/fm-tasks-axi.test.sh 1690
 tests/fm-teardown-endpoint-safety.test.sh 4620
@@ -1286,8 +1287,11 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-remote-agent.test.sh"
       [ "$path" != bin/fm-task-state.sh ] || printf '%s\n' "__script__:fm-task-progress.test.sh"
       ;;
-    bin/fm-task-progress.py|bin/fm-task-progress-lib.sh)
-      printf '%s\n' "__script__:fm-task-progress.test.sh"
+    bin/fm-task-import.sh)
+      printf '%s\n' "__script__:fm-task-import.test.sh"
+      ;;
+    bin/fm-task-record.py|bin/fm-task-progress-lib.sh)
+      printf '%s\n' "__script__:fm-task-progress.test.sh" "__script__:fm-task-import.test.sh"
       ;;
     tests/continuation-native.mjs)
       printf '%s\n' "__script__:fm-pi-branch-extension.test.sh"

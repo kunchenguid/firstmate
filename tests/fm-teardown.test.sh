@@ -200,6 +200,7 @@ write_meta() {
     "mode=$mode" \
     "spawn_gen=teardown-test-task-x1"
   configure_flat_herdr_teardown_case "$case_dir"
+  seed_backlog_in_flight "$case_dir" "$kind"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -672,22 +673,19 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
-# Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
-# has a row to close. Uses the real tasks-axi (the fixture's default fakebin has
-# no tasks-axi stub, so PATH resolves the installed one).
+# Seed the canonical task record carrying task-x1 as in flight, so teardown has
+# a business record to close without writing a shared backlog body.
 seed_backlog_in_flight() {
   local case_dir=$1 kind=${2:-ship}
   mkdir -p "$case_dir/data"
-  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
-    > "$case_dir/data/backlog.md"
-  tasks-axi add task-x1 "teardown fixture task" --kind "$kind" \
-    --file "$case_dir/data/backlog.md" >/dev/null
-  tasks-axi start task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+  [ ! -f "$case_dir/data/task-x1/task.json" ] || return 0
+  FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-tasks-axi.sh" add \
+    task-x1 "teardown fixture task" --kind "$kind" --start >/dev/null
 }
 
 backlog_row_state() {
   local case_dir=$1
-  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" 2>/dev/null |
+  FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-tasks-axi.sh" show task-x1 2>/dev/null |
     sed -n 's/^  state: *//p' | head -1
 }
 
@@ -751,8 +749,9 @@ test_teardown_closes_the_backlog_item_itself() {
   out=$(run_teardown "$case_dir") || fail "legacy teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
-  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
-    "closed backlog item did not record the task's PR"
+  [ "$(jq -r '.links.pr' "$case_dir/data/task-x1/task.json")" = \
+      'https://github.com/example/repo/pull/7' ] \
+    || fail "closed task record did not preserve the task's PR"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
     "a landed close left its pending-close record behind"
   printf '%s\n' "$out" | grep -F 'bin/fm-tasks-axi.sh ready' >/dev/null \
@@ -765,7 +764,7 @@ test_teardown_closes_the_backlog_item_itself() {
 }
 
 test_compact_progress_requires_main_acceptance_before_teardown() {
-  local case_dir initial open fresh accepted out rc malformed head
+  local case_dir initial open fresh accepted out rc head
   case_dir=$(make_case compact-acceptance)
   write_meta "$case_dir" local-only ship
   seed_backlog_in_flight "$case_dir"
@@ -792,29 +791,11 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
   rc=$?
   set -e
   expect_code 6 "$rc" "compact cleanup before MAIN acceptance"
-  assert_grep 'compact task task-x1 is not MAIN-accepted' "$case_dir/open.err" \
+  assert_grep 'task task-x1 is not MAIN-accepted' "$case_dir/open.err" \
     'compact cleanup refusal did not name missing MAIN acceptance'
   assert_present "$case_dir/state/task-x1.meta" 'compact cleanup refusal removed task metadata'
   [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail 'compact cleanup refusal closed the backlog row'
 
-  for malformed in \
-    'Damaged compact state <!-- /firstmate-progress -->' \
-    'Damaged compact state <!-- firstmate-progress:v1 broken -->'; do
-    tasks-axi update task-x1 --file "$case_dir/data/backlog.md" --body "$malformed" >/dev/null \
-      || fail 'malformed compact cleanup fixture update failed'
-    set +e
-    run_teardown "$case_dir" > "$case_dir/malformed.out" 2> "$case_dir/malformed.err"
-    rc=$?
-    set -e
-    expect_code 6 "$rc" "malformed compact marker before cleanup"
-    assert_grep 'malformed Firstmate progress block' "$case_dir/malformed.err" \
-      'malformed compact marker bypassed the existing parser'
-    assert_present "$case_dir/state/task-x1.meta" 'malformed compact marker allowed task cleanup'
-  done
-
-  tasks-axi update task-x1 --file "$case_dir/data/backlog.md" \
-    --body 'Complete the compact task before cleanup.' >/dev/null \
-    || fail 'compact cleanup fixture reset failed'
   fresh=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture reread failed'
   accepted=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
@@ -830,21 +811,25 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
   pass 'lifecycle-free compact teardown requires and preserves MAIN semantic acceptance'
 }
 
-test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
-  local case_dir out backlog_path
+test_teardown_ignores_legacy_manual_backend_for_canonical_record() {
+  local case_dir out legacy_before legacy_after
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
+  printf '# Retained legacy backlog\n\n- [ ] historical evidence\n' > "$case_dir/data/backlog.md"
   seed_backlog_in_flight "$case_dir"
+  legacy_before=$(sha256sum "$case_dir/data/backlog.md")
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "manual backlog backend was mutated by teardown anyway"
-  backlog_path=$(cd "$case_dir/data" && pwd -P)/backlog.md
-  printf '%s\n' "$out" | grep -F "Update $backlog_path - move task-x1 to Done" >/dev/null \
-    || fail "teardown did not prompt manual backlog update under opt-out: $out"
-  pass "teardown honors config/backlog-backend=manual and still finishes cleanly"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "legacy backend configuration prevented canonical teardown completion"
+  legacy_after=$(sha256sum "$case_dir/data/backlog.md")
+  [ "$legacy_before" = "$legacy_after" ] \
+    || fail "teardown rewrote retained legacy backlog evidence"
+  ! printf '%s\n' "$out" | grep -F 'move task-x1 to Done' >/dev/null \
+    || fail "teardown still delegated canonical completion to a legacy backend: $out"
+  pass "teardown closes the canonical record and preserves retained legacy backlog bytes"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -998,8 +983,9 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
-  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
-    "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
+  [ "$(jq -r '.links.pr' "$case_dir/data/task-x1/task.json")" = \
+      'https://github.com/example/repo/pull/7' ] \
+    || fail "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
@@ -3394,7 +3380,7 @@ EOF
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_compact_progress_requires_main_acceptance_before_teardown
-test_teardown_manual_backend_leaves_the_backlog_to_the_operator
+test_teardown_ignores_legacy_manual_backend_for_canonical_record
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

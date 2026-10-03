@@ -1,47 +1,31 @@
 # shellcheck shell=bash
-# Fused backlog transitions for the scripts that own a task's physical record.
-# Usage: . bin/fm-tasks-axi-lib.sh; . bin/fm-backlog-transition-lib.sh
-# (this library reads that one's backend gate and never sources it itself, so a
-# caller that already sourced it keeps its memoised compatibility verdict).
+# Paired canonical task-record transitions for scripts that own execution metadata.
 #
 # INVARIANT. During ordinary execution, `state/<id>.meta` exists
-# <=> this home's backlog row for <id> is In flight, except a validated terminal
+# <=> this home's canonical record for <id> is in flight, except a validated terminal
 # cleanup receipt may retain cleanup-only metadata without restarting work.
 # The cleanup owner owns generation validation; the teardown crash
 # window is represented by `state/<id>.backlog-close`. The script performing the
-# mechanical record change owns the paired backlog transition and runs it in the
+# mechanical record change owns the paired business transition and runs it in the
 # same process, under the per-task meta lock it already holds, before it reports
 # success. Nothing else - not a later agent turn, not a printed reminder - is
 # load-bearing for the pairing.
-#   bin/fm-spawn.sh      meta published => `tasks-axi start`
-#   bin/fm-teardown.sh   meta removed => `tasks-axi done`, or `tasks-axi reopen`
-#                        with the deliverable recorded when the row is still an
+#   bin/fm-spawn.sh      meta published => canonical `start`
+#   bin/fm-teardown.sh   meta removed => canonical `done`, or canonical `reopen`
+#                        with the deliverable recorded when the record is still an
 #                        open captain call (bin/fm-captain-hold.sh `open`), so
 #                        cleanup never retires the captain's own question
 #   bin/fm-bootstrap.sh  replays whatever a crash left behind, THIS HOME ONLY.
-# Remote-agent retirement closes (or retains) the backlog before removing its terminal
+# Remote-agent retirement closes (or retains) the business record before removing its terminal
 # provider record, through fm_backlog_remote_retire. Its caller holds both the
 # provider lock and the task meta lock after terminal/report/decision preflight.
 # A failed close preserves the complete execution record for retry; a crash after
-# close can retain a terminal record but never an in-flight row without evidence.
+# close can retain a terminal record but never an in-flight task without evidence.
 #
-# SCOPE. fm_backlog_transition_applies is the single gate. It excludes
-# historical persistent-home records,
-# homes whose configured backlog backend is manual and markdown homes that keep
-# no backlog file. Those return-1 exemptions are never errors; an
-# unresolvable configured data directory, a backend resolution error, or
-# incompatible tasks-axi instead returns 2 so callers refuse before mutation.
-#
-# ADDRESSING. Every call runs from the configured data directory's parent so
-# that home's `.tasks.toml` supplies the adapter selection, done_keep, and the
-# archive path. A markdown backlog also passes `--file <data>/backlog.md` so the
-# change lands in the home that owns the task regardless of the caller's working
-# directory. A configured non-markdown adapter is addressed by that root alone,
-# because `--file` would override the adapter's own workspace path. The parent of
-# the data directory is the addressing root rather than FM_HOME, so a home whose
-# data directory is relocated keeps its backlog and its archive together. A root
-# with no `.tasks.toml` gets tasks-axi's built-in defaults.
-# bin/fm-tasks-axi-lib.sh owns backend precedence and configuration failures.
+# SCOPE. fm_backlog_transition_applies is the retained compatibility gate. It
+# excludes historical persistent-home records; every ordinary transition
+# addresses `data/<id>/task.json` through fm-tasks-axi.sh. Legacy backend
+# selection does not gate or redirect canonical record mutations.
 #
 # CRASH RECOVERY. Only teardown needs a durable record: it removes the meta and
 # with it the completion links, so a process killed between the two halves would
@@ -51,7 +35,7 @@
 # that record before destructive cleanup, so it never publishes or acts on a close
 # replay would reject. The validator pins the data path to this home's configured
 # root before any recovery mutation, then re-runs exactly that close.
-# `tasks-axi done` on an already-closed task backfills links
+# Canonical `done` on an already-closed task backfills links
 # without moving the close date, so replay is idempotent. Spawn needs no marker:
 # it publishes the meta first, so a crash
 # leaves the meta itself as the evidence that the row is owed a start.
@@ -284,41 +268,21 @@ fm_backlog_tasks_axi_addressing() {  # <data-dir>
 }
 
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
-  local config=$1 data authorized_data=$2 kind=$3 file root backend authorized_root
+  local data authorized_data=$2 kind=$3
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
     FM_BACKLOG_TRANSITION_SKIP="historical persistent-home records are not backlog items"
-    return 1
-  fi
-  if fm_backlog_backend_manual "$config"; then
-    FM_BACKLOG_TRANSITION_SKIP="config/backlog-backend selects manual editing"
     return 1
   fi
   if ! data=$(fm_backlog_data_absolute "$2"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $2"
     return 2
   fi
-  root=$(fm_backlog_root "$data") || return 2
-  authorized_root=$(fm_backlog_authorized_root "$authorized_data")
-  fm_backlog_config_present "$root" "$authorized_root" || return 2
-  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
-    FM_BACKLOG_TRANSITION_ERROR=$backend
+  fm_backlog_record_parent_authorized "$data/task.json" "task data directory" "$authorized_data" parent-only || return 2
+  [ -x "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-tasks-axi.sh" ] || {
+    FM_BACKLOG_TRANSITION_ERROR="per-task record owner is unavailable"
     return 2
   }
-  if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") || return 2
-    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-      FM_BACKLOG_TRANSITION_SKIP="this home keeps no markdown backlog at $file"
-      return 1
-    fi
-  fi
-  if ! fm_backlog_source_present "$data" "$authorized_data" "$root" "$authorized_root"; then
-    return 2
-  fi
-  if ! fm_tasks_axi_compatible; then
-    FM_BACKLOG_TRANSITION_ERROR="automatic backlog transitions require tasks-axi update --archive-body and atomic multi-ID mv support"
-    return 2
-  fi
   return 0
 }
 
@@ -422,7 +386,7 @@ fm_tasks_axi() {
 # process-wide because these scripts are short-lived and a backend that wedged
 # once will wedge again within the same run.
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
-  local data=$1 id=$2 out status addressing_status secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
+  local data=$1 id=$2 out status secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
   shift 2
   # A non-positive bound is not a bound (fm-timeout-lib.sh), and a padded zero
   # such as 00 is still zero, so the digits test alone would let the very read
@@ -430,22 +394,12 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   # value too large for the shell to compare at all.
   case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
   [ "$secs" -gt 0 ] 2>/dev/null || secs=10
-  fm_backlog_tasks_axi_addressing "$data"
-  addressing_status=$?
-  if [ "$addressing_status" -ne 0 ]; then
-    [ -z "${FM_BACKLOG_TRANSITION_ERROR:-}" ] || printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
-    return "$addressing_status"
-  fi
   if [ "$FM_BACKLOG_ROW_SHOW_WEDGED" = 1 ]; then
     printf 'tasks-axi show %s skipped: the backlog backend already exceeded its %ss read bound\n' "$id" "$secs"
     return 124
   fi
-  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
-    set -- "$@" --file "$FM_BACKLOG_AXI_FILE"
-  fi
-  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
-  out=$(fm_run_timed "$secs" bash -c 'cd "$1" 2>/dev/null || exit 1; shift; exec tasks-axi show "$@"' \
-    _ "$FM_BACKLOG_AXI_ROOT" "$id" "$@" 2>&1)
+  out=$(FM_DATA_OVERRIDE="$data" fm_run_timed "$secs" \
+    "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-tasks-axi.sh" show "$id" "$@" 2>&1)
   status=$?
   # A backend that wrote a header or a progress line before wedging leaves that
   # fragment as the first output line, and every caller reads the first line as
@@ -460,23 +414,13 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
 }
 
 fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
-  local data=$1 addressing_status
+  local data=$1
   shift
-  fm_backlog_tasks_axi_addressing "$data"
-  addressing_status=$?
-  if [ "$addressing_status" -ne 0 ]; then
-    [ -z "${FM_BACKLOG_TRANSITION_ERROR:-}" ] || printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
-    return "$addressing_status"
-  fi
-  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
-    (cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi list "$@" --file "$FM_BACKLOG_AXI_FILE" 2>&1)
-  else
-    (cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi list "$@" 2>&1)
-  fi
+  FM_DATA_OVERRIDE="$data" "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-tasks-axi.sh" list "$@" 2>&1
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 id=$2 out state held blocked hold_kind command_status source_status
+  local data id=$2 out state held blocked hold_kind command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -487,12 +431,6 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   FM_BACKLOG_ROW_STATE=
   FM_BACKLOG_ROW_HOLD_KIND=
   FM_BACKLOG_ROW_ERROR=
-  fm_backlog_source_present "$data" "$authorized_data"
-  source_status=$?
-  if [ "$source_status" -ne 0 ]; then
-    FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
-    return "$source_status"
-  fi
   out=$(fm_backlog_row_show "$data" "$id")
   command_status=$?
   [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
@@ -533,24 +471,14 @@ fm_backlog_row_probe() {  # <data-dir> <id>
 # authorized through fm_backlog_source_present first; fm_backlog_tasks_axi owns
 # how the selected adapter is addressed (ADDRESSING above).
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
-  local data authorized_data=$1 verb=$2 id=$3 out command_status source_status
+  local data verb=$2 id=$3 out command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
   shift 3
   FM_BACKLOG_TRANSITION_ERROR=
-  fm_backlog_source_present "$data" "$authorized_data"
-  source_status=$?
-  [ "$source_status" -eq 0 ] || return "$source_status"
-  fm_backlog_tasks_axi_addressing "$data"
-  source_status=$?
-  [ "$source_status" -eq 0 ] || return "$source_status"
-  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
-    out=$(cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" --file "$FM_BACKLOG_AXI_FILE" 2>&1)
-  else
-    out=$(cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" 2>&1)
-  fi
+  out=$(FM_DATA_OVERRIDE="$data" "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-tasks-axi.sh" "$verb" "$id" "$@" 2>&1)
   command_status=$?
   [ "$command_status" -ne 0 ] || return 0
   FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
