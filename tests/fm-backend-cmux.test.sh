@@ -511,6 +511,20 @@ test_target_ready_fails_when_target_absent() {
   pass "fm_backend_cmux_target_ready: fails when the workspace/surface is not found (list-panes structural check)"
 }
 
+test_surface_exists_fails_on_empty_list_panes_output() {
+  local dir fb status
+  dir="$TMP_ROOT/surface-empty-output"; mkdir -p "$dir/responses"
+  # 1: list-panes --json --id-format uuids -> succeeds with wholly empty
+  # stdout (a missing response file means "succeed with empty stdout"), the
+  # case jq 1.6 and jq >=1.7 disagree on for a bare `jq -e` pipe.
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_surface_exists "aaaaaaaa-0000-0000-0000-000000000000" "bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "surface_exists should fail on wholly empty list-panes output, not read it as present"
+  pass "fm_backend_cmux_surface_exists: fails on wholly empty list-panes output regardless of installed jq version"
+}
+
 test_target_ready_checks_expected_label() {
   local dir fb title
   dir="$TMP_ROOT/ready-label-ok"; mkdir -p "$dir/responses"
@@ -1131,6 +1145,7 @@ test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_target_ready_fails_when_target_absent
+test_surface_exists_fails_on_empty_list_panes_output
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
 test_capture_trims_locally
