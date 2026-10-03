@@ -39,6 +39,7 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != -k ] || shift 2
 shift
 exec "$@"
 SH
@@ -761,7 +762,7 @@ test_opencode_threads_model_and_effort_variant() {
   # the launch already writes, keyed to the resolved model on the default
   # build agent, never as a launch flag.
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' '$FAKEBIN_DIR/opencode' --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not write the effort as the build agent's variant in its config"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
@@ -781,7 +782,7 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' '$FAKEBIN_DIR/opencode' --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch without effort must keep the permission-only config byte-identical"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
   pass "opencode without an effort keeps its launch config unchanged"
@@ -799,7 +800,7 @@ test_opencode_emits_variant_for_openai_family_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --model 'openai/gpt-5.6-sol' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' '$FAKEBIN_DIR/opencode' --model 'openai/gpt-5.6-sol' --prompt" \
     "opencode launch did not write the openai family effort as the build agent's variant"
   pass "opencode emits the variant for an effort the openai family exposes"
 }
@@ -816,10 +817,150 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' '$FAKEBIN_DIR/opencode' --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode must keep the permission-only config when the model family lacks the effort"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
   pass "opencode omits the variant for an effort outside the model family's list"
+}
+
+test_opencode_v2_launch_pins_model_and_submits_pointer() {
+  local rec id out status launch
+  id=profile-opencode-v2
+  rec=$(make_spawn_case profile-opencode-v2 opencode "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.18' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model nvidia/z-ai/glm-5.3 --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "OpenCode v2 native worker spawn should succeed: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode nvidia/z-ai/glm-5.3 xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" '"model":"nvidia/z-ai/glm-5.3"' "v2 config did not pin the exact requested model"
+  assert_contains "$launch" "'$FAKEBIN_DIR/opencode' --standalone --auto" "v2 did not isolate its server and approve permissions"
+  assert_not_contains "$launch" '--model' "v2 root cannot accept --model"
+  assert_not_contains "$launch" '--prompt' "v2 root only prefills --prompt"
+  assert_not_contains "$launch" '"variant"' "Nvidia effort must follow record-and-omit"
+  assert_contains "$launch" "Read the brief at $HOME_DIR/data/$id/launch-brief.md and follow it exactly." "v2 brief pointer was not delivered"
+  cat > "$FAKEBIN_DIR/opencode" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$OPENCODE_CONFIG_CONTENT" > '$CASE_DIR/config.json'
+SH
+  chmod +x "$FAKEBIN_DIR/opencode"
+  # Extract with a coreutil: ripgrep is not a repository test dependency, so a
+  # host without `rg` made this assignment empty and the executed command a
+  # no-op. The launch is the first literal the pane receives, so line one is it.
+  launch=$(head -n 1 "$LAUNCH_LOG")
+  [ -n "$launch" ] || fail "OpenCode v2 launch was not logged; nothing to execute"
+  PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+  jq -e '.model == "nvidia/z-ai/glm-5.3" and .agent.build.model == .model' "$CASE_DIR/config.json" >/dev/null \
+    || fail "executed v2 launch did not retain exact root and agent model selection"
+  if command -v node >/dev/null 2>&1; then
+    node --input-type=module - "$WT_DIR/.opencode/plugins/fm-busy-state.js" "$ROOT" "$HOME_DIR/state" "$id" <<'JS'
+import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+const [pluginPath, root, state, id] = process.argv.slice(2);
+const plugin = (await import(pathToFileURL(pluginPath))).default;
+const record = () => execFileSync("bash", ["-c", '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"', "fixture", root, state, id], {encoding:"utf8"});
+let complete = false;
+const cleanup = plugin.setup({event: {async *subscribe() {
+  yield {type:"session.execution.started", data:{sessionID:"main"}};
+  yield {type:"session.execution.started", data:{sessionID:"child"}};
+  yield {type:"session.execution.succeeded", data:{sessionID:"child"}};
+  if (!record().startsWith("busy opencode-plugin session.execution.started ")) throw new Error("child terminal cleared main busy state");
+  if (existsSync(`${state}/${id}.turn-ended`)) throw new Error("child terminal emitted main completion");
+  yield {type:"session.execution.succeeded", data:{sessionID:"main"}};
+  if (!record().startsWith("idle opencode-plugin session.execution.succeeded ")) throw new Error("main terminal did not settle busy state");
+  if (!existsSync(`${state}/${id}.turn-ended`)) throw new Error("main terminal did not notify completion");
+  complete = true;
+}}});
+for (let i=0; i<100 && !complete; i++) await new Promise(resolve => setTimeout(resolve, 100));
+cleanup();
+if (!complete) throw new Error("v2 plugin did not process the native execution stream");
+JS
+    expect_code 0 "$?" "v2 plugin must scope child execution and notify main completion"
+  fi
+  pass "OpenCode v2 pins the exact model and submits a durable brief pointer"
+}
+
+test_opencode_unverified_version_refuses_before_publication() {
+  local rec id out status
+  id=profile-opencode-unknown
+  rec=$(make_spawn_case profile-opencode-unknown opencode "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v3.0.0' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model nvidia/z-ai/glm-5.3)
+  status=$?
+  expect_code 1 "$status" "unknown OpenCode major must refuse"
+  assert_contains "$out" 'unsupported OpenCode version' "refusal must explain the incompatible CLI"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unknown OpenCode major published a task"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unknown OpenCode major delivered a launch"
+  pass "unknown OpenCode versions fail before endpoint and task publication"
+}
+
+test_raw_opencode_command_is_launched_as_given() {
+  local rec id out status launch
+  id=raw-opencode-z8
+  rec=$(make_spawn_case raw-opencode opencode "$id")
+  read_case_record "$rec"
+
+  # A raw command whose first word is `opencode` still resolves HARNESS to
+  # opencode, so a detected v2 major used to swap the caller's command for the
+  # stock template and deliver a version-dependent brief pointer. The
+  # unverified-adapter escape hatch must launch the caller's own command
+  # byte-for-byte, with neither substitution.
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.18' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'opencode --custom-raw-flag --no-stock-template')
+  status=$?
+  expect_code 0 "$status" "raw OpenCode launch should spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'opencode --custom-raw-flag --no-stock-template' "the raw OpenCode command was replaced"
+  assert_not_contains "$launch" 'OPENCODE_CONFIG_CONTENT' "the raw OpenCode command was replaced by the stock template"
+  assert_not_contains "$launch" '--standalone --auto' "the stock v2 template replaced the raw OpenCode command"
+  assert_not_contains "$launch" 'Read the brief at' "the raw escape hatch received the version-dependent brief pointer"
+  pass "a raw OpenCode command is launched exactly as given"
+}
+
+test_opencode_probe_and_pane_launch_use_the_same_executable() {
+  local rec id out status launch other
+  id=opencode-path-z8b
+  rec=$(make_spawn_case opencode-path opencode "$id")
+  read_case_record "$rec"
+
+  # The spawning PATH leads to a v2 `opencode` that records its own execution;
+  # a second directory holds a v1 `opencode` that records a different file. The
+  # launch must name the probed executable outright, so running it under the
+  # second directory's PATH still starts the probed v2 binary rather than the
+  # unchecked v1 one.
+  cat > "$FAKEBIN_DIR/opencode" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf '%s\n' "\${FM_FAKE_OPENCODE_VERSION:-1.18.32}"
+  exit 0
+fi
+printf '%s\n' "\$OPENCODE_CONFIG_CONTENT" > '$CASE_DIR/probed-executed.json'
+SH
+  chmod +x "$FAKEBIN_DIR/opencode"
+  other="$CASE_DIR/otherbin"
+  mkdir -p "$other"
+  cat > "$other/opencode" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf '%s\n' 'opencode v1.0.0'
+  exit 0
+fi
+printf '%s\n' "\$OPENCODE_CONFIG_CONTENT" > '$CASE_DIR/other-executed.json'
+SH
+  chmod +x "$other/opencode"
+
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.18' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model nvidia/z-ai/glm-5.3)
+  status=$?
+  expect_code 0 "$status" "OpenCode spawn with a divergent pane PATH should succeed: $out"
+  assert_contains "$(cat "$LAUNCH_LOG")" "'$FAKEBIN_DIR/opencode'" "the launch did not name the probed OpenCode executable"
+  launch=$(head -n 1 "$LAUNCH_LOG")
+  [ -n "$launch" ] || fail "OpenCode launch was not logged; nothing to execute"
+  PATH="$other:$PATH" bash -c "$launch"
+  [ -f "$CASE_DIR/probed-executed.json" ] || fail "the pane PATH did not start the probed OpenCode executable"
+  [ ! -f "$CASE_DIR/other-executed.json" ] || fail "the pane PATH started an executable the probe never checked"
+  pass "the version probe and the pane launch resolve the same OpenCode executable"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -1917,6 +2058,10 @@ test_opencode_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode_v2_launch_pins_model_and_submits_pointer
+test_opencode_unverified_version_refuses_before_publication
+test_raw_opencode_command_is_launched_as_given
+test_opencode_probe_and_pane_launch_use_the_same_executable
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra

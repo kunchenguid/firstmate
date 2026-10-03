@@ -676,6 +676,11 @@ test_matrix_opencode_leftbar_signals() {
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).
   local screen typed dim_screen captured_idle captured_pending out
+  local v2_idle v2_pending
+  v2_idle=$'┃\n┃  Ask anything… "Fix broken tests"\n┃\n┃  Build auto · GLM-5.3 Nvidia\n╹▀▀▀▀'
+  assert_screen "OpenCode v2 auto footer is composer furniture" empty "$CAPS_STYLED" "$v2_idle"
+  v2_pending=$'┃\n┃  Read the brief at /fixture/launch-brief.md\n┃\n┃  Build auto · GLM-5.3 Nvidia\n╹▀▀▀▀'
+  assert_screen "OpenCode v2 auto footer retains pending input" pending "$CAPS_STYLED" "$v2_pending"
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
