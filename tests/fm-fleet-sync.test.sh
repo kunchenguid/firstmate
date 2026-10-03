@@ -747,6 +747,41 @@ test_non_signature_fetch_failure_is_not_retried() {
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
 }
 
+test_stale_fork_ref_cannot_authorize_pruning() {
+  local home clone fork out
+  home=$(new_home)
+  clone=$(build_pair "$home" stalefork)
+  fork="$home/remotes/fork.git"
+  git clone -q --bare "$home/remotes/stalefork.git" "$fork"
+  git -C "$clone" remote add fork "$fork"
+
+  git -C "$clone" checkout -qb unpublished
+  commit_file "$clone" unpublished.txt unique unique
+  git -C "$clone" push -q fork unpublished
+  git -C "$clone" fetch -q fork
+  git --git-dir="$fork" update-ref -d refs/heads/unpublished
+  git -C "$clone" checkout -q main
+  git -C "$clone" config branch.unpublished.remote origin
+  git -C "$clone" config branch.unpublished.merge refs/heads/unpublished
+
+  git -C "$clone" branch landed origin/main
+  git -C "$clone" config branch.landed.remote origin
+  git -C "$clone" config branch.landed.merge refs/heads/landed
+  [ "$(git -C "$clone" for-each-ref --format='%(upstream:track)' refs/heads/unpublished)" = '[gone]' ] \
+    || fail "stale fork fixture lacks a gone upstream"
+  git -C "$clone" show-ref --verify --quiet refs/remotes/fork/unpublished \
+    || fail "stale fork fixture lacks the cached remote ref"
+
+  out=$(run_sync "$home" stalefork)
+
+  assert_contains "$out" 'pruned landed' "a branch contained by fetched origin was not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/unpublished \
+    || fail "a stale fork ref authorized deletion of unpublished work"
+  [ "$(git -C "$clone" show unpublished:unpublished.txt)" = unique ] \
+    || fail "fleet sync lost the unpublished commit"
+  pass "fleet pruning ignores stale refs from remotes it did not fetch"
+}
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
@@ -770,6 +805,7 @@ test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
+test_stale_fork_ref_cannot_authorize_pruning
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs

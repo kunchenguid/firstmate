@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refresh project clones: fast-forward the checked-out local default branch to
 # origin/<default> when safe, and prune local branches whose upstream tracking
-# branch is gone, no worktree still needs them, and a remote ref contains them.
+# branch is gone, no worktree still needs them, and a fetched origin ref contains them.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
@@ -19,7 +19,7 @@
 # repository (the firstmate checkout) and be synced under that directory's label.
 # Anything else is reported as "skipped: not a clone root" naming the repository
 # that would have been touched.
-# Pruning requires remote reachability and never deletes a checked-out branch
+# Pruning requires fetched origin reachability and never deletes a checked-out branch
 # or one with a worktree; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
@@ -237,7 +237,7 @@ prune_gone_branches() {
       continue
     fi
     if ! git -C "$PROJ" for-each-ref --contains="refs/heads/$branch" \
-        --format='%(refname)' refs/remotes 2>/dev/null | grep -q .; then
+        --format='%(refname)' refs/remotes/origin 2>/dev/null | grep -q .; then
       continue
     fi
     if git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1; then
