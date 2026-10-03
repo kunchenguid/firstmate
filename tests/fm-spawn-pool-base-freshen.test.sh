@@ -184,6 +184,9 @@ test_stale_pool_base_refreshes_before_branching() {
   fi
 
   id='pool-current-base-repeat-r1'
+  # The first task has finished and its record was retired before this slot
+  # becomes available to another task.
+  rm -f "$HOME_DIR/state/pool-current-base-r1.meta"
   fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -528,6 +531,9 @@ strand_submodule_pin_via_spawn() {  # <seed-id>
     || fail "the first spawn did not move the pooled base across the moved submodule pin"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
     || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+  # The seed worker is finished; only its filesystem residue is under test in
+  # the second allocation, so retire its active task record first.
+  rm -f "$HOME_DIR/state/$id.meta"
 }
 
 test_stale_submodule_pin_explains_itself() {
@@ -743,8 +749,44 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+test_pool_slot_already_recorded_by_another_task_refuses() {
+  local rec id=pool-duplicate-r1 out status prior_claim child
+  rec=$(make_case duplicate-claim "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  printf 'window=firstmate:fm-existing\nendpoint_task_id=existing\nworktree=%s\nproject=%s\nkind=ship\n' \
+    "$POOL_DIR" "$PROJECT_DIR" > "$HOME_DIR/state/existing.meta"
+  printf 'task=existing\nhome=%s\n' "$HOME_DIR" > "$SLOT_CLAIM"
+  prior_claim=$(cat "$SLOT_CLAIM")
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pool slot already recorded by another task"
+  assert_contains "$out" "existing" "duplicate-claim refusal did not name the existing task"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "duplicate spawn published a task record"
+  [ "$(cat "$SLOT_CLAIM")" = "$prior_claim" ] || fail "duplicate spawn replaced the live owner's slot claim"
+
+  id='pool-duplicate-cross-home-r1'
+  rec=$(make_case duplicate-cross-home "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child="$CASE_DIR/secondmate-home"
+  mkdir -p "$child/state" "$child/data"
+  printf '%s\n' "- mate - fixture (home: $child; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  printf 'window=firstmate:fm-existing\nendpoint_task_id=existing\nworktree=%s\nproject=%s\nkind=ship\n' \
+    "$POOL_DIR" "$PROJECT_DIR" > "$child/state/existing.meta"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a slot recorded by a locally registered home"
+  assert_contains "$out" "existing" "cross-home refusal did not name the existing task"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "cross-home duplicate spawn published a task record"
+  pass "spawn refuses a Treehouse slot recorded in this home or a locally registered home"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_pool_slot_already_recorded_by_another_task_refuses
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching

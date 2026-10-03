@@ -98,10 +98,9 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale. The one exception is a slot whose
-# owner claim (below) names another task: this teardown is then records-only and
-# touches nothing under the slot, so the scan is skipped rather than stranding
-# the stale record and, with it, the claimant's own teardown.
+# collision itself, whichever record is stale. A slot claim naming another
+# task skips slot cleanup only when no other record names the slot; two records
+# require the explicit --release-duplicate-claim branch and endpoint proof.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -110,16 +109,12 @@
 # reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
 # slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
 # owns the claim, its location, and its states. A claim naming another task is
-# proof of reassignment: the slot is no longer this task's, so teardown warns,
-# names the claimant, and then finishes only this task's own cleanup - endpoint,
-# status, records, checks, backlog - while every step that would read or touch
-# that slot is skipped: no process kill under it, no dirty or landed-work
-# inspection of it, no branch or hook removal in it, no Treehouse return, and
-# never the other task's claim. Skipping the inspection discards nothing of this
-# task's: whatever unlanded work it had in that slot was already destroyed when
-# the pool handed the slot on. Refusing instead would strand the record, because
-# bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
-# unconditionally, so there is no line an operator could clear to get past it.
+# proof of reassignment: the slot is no longer this task's. With no second
+# record, teardown finishes only this task's cleanup and skips every operation
+# on the slot. With a second record, ordinary teardown refuses and the explicit
+# records-only release proves the stale task's branch work first. Neither path
+# kills processes under the slot, inspects its checkout for the stale task's
+# work, removes hooks there, returns it, or removes the other task's claim.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
 # repair the claim file at the printed path and re-run - never remove it, since
 # an absent claim proceeds and would return a slot that may be another task's. An
@@ -177,6 +172,16 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+#        fm-teardown.sh <task-id> --release-duplicate-claim
+#   --release-duplicate-claim retires a stale ship record on a Treehouse slot
+#   also recorded by another local task. The slot claim must identify that
+#   other task, or its endpoint must be alive when the claim is absent. The
+#   stale endpoint must be dead or missing, and the stale task's own branch
+#   commits must be reachable from the other task's branch or a remote. It
+#   archives the stale record under data/<id>/,
+#   closes its exact endpoint and backlog item, and leaves the shared worktree,
+#   slot claim, and live processes untouched. It cannot combine with --force;
+#   missing or ambiguous proof refuses before cleanup.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -380,11 +385,13 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=
+RELEASE_DUPLICATE_CLAIM=0
 LEGACY_RECORD_GIVEN=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
+    --release-duplicate-claim) RELEASE_DUPLICATE_CLAIM=1 ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     *)
       echo "error: invalid teardown request" >&2
@@ -393,6 +400,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ] && [ "$FORCE" = --force ]; then
+  echo "error: --release-duplicate-claim cannot be combined with --force" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -2356,16 +2367,14 @@ collect_local_firstmate_states() {
   done
 }
 
-require_exclusive_worktree_slot_record() {
+find_other_record_for_slot() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
-  slot=$(canonical_existing_dir "$worktree") || return 0
-  # A slot whose owner claim names another task was reassigned, so this record's
-  # teardown is records-only and touches nothing under it; another record naming
-  # the slot is then no hazard, and refusing would strand this stale record and
-  # block the claimant's own teardown behind it.
-  fm_treehouse_slot_owner_state "$slot" "$record_id"
-  [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
+  TEARDOWN_DUPLICATE_META=
+  TEARDOWN_DUPLICATE_ID=
+  TEARDOWN_DUPLICATE_FIELD=
+  TEARDOWN_DUPLICATE_SCAN_OK=0
+  slot=$(canonical_existing_dir "$worktree") || return 1
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
@@ -2381,19 +2390,87 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        return 1
+        TEARDOWN_DUPLICATE_META=$other
+        TEARDOWN_DUPLICATE_ID=$other_id
+        TEARDOWN_DUPLICATE_FIELD=$field
+        TEARDOWN_DUPLICATE_SCAN_OK=1
+        return 0
       done
     done
   done
+  TEARDOWN_DUPLICATE_SCAN_OK=1
+  return 1
+}
+
+require_exclusive_worktree_slot_record() {
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4 slot
+  slot=$(canonical_existing_dir "$worktree") || return 0
+  # A claim naming another task proves reassignment, but a second surviving
+  # record needs the stricter records-only branch proof before retirement.
+  fm_treehouse_slot_owner_state "$slot" "$record_id"
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ]; then
+    if find_other_record_for_slot "$record_meta" "$record_id" "$record_state" "$slot"; then
+      echo "REFUSED: task $record_id's recorded worktree $slot is also task $TEARDOWN_DUPLICATE_ID's recorded $TEARDOWN_DUPLICATE_FIELD; use --release-duplicate-claim for the stale, agent-free task after its branch work lands." >&2
+      return 1
+    fi
+    [ "$TEARDOWN_DUPLICATE_SCAN_OK" = 1 ] || return 1
+    return 0
+  fi
+  if find_other_record_for_slot "$record_meta" "$record_id" "$record_state" "$slot"; then
+    echo "REFUSED: task $record_id's recorded worktree $slot is also task $TEARDOWN_DUPLICATE_ID's recorded $TEARDOWN_DUPLICATE_FIELD." >&2
+    echo "Returning that pool slot would kill $TEARDOWN_DUPLICATE_ID's processes and reset its copy, so nothing was changed - not even with --force." >&2
+    echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $TEARDOWN_DUPLICATE_ID), then re-run teardown." >&2
+    return 1
+  fi
+  [ "$TEARDOWN_DUPLICATE_SCAN_OK" = 1 ]
 }
 
 require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+}
+
+# The shared checkout now belongs to the other record. Check this task's own
+# branch ref in the project's git database, never HEAD or status in that slot.
+# Reachability from the other task's branch or any remote proves the commits
+# survive. A content-equivalent squash alone cannot prove a unique commit is
+# recoverable, so this stricter repair path refuses it.
+duplicate_claim_branch_is_landed() {
+  local branch owner_branch ref owner_ref remaining
+  branch=$(fm_meta_get "$META" branch)
+  if [ -z "$branch" ] || ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+    echo "REFUSED: task $ID has no valid recorded branch ref; its work cannot be proved landed without reading the live owner's checkout." >&2
+    return 1
+  fi
+  ref="refs/heads/$branch"
+  git -C "$PROJ" show-ref --verify --quiet "$ref" || {
+    echo "REFUSED: task $ID's branch ref $ref is missing; its commits cannot be checked." >&2
+    return 1
+  }
+  owner_branch=$(fm_meta_get "$TEARDOWN_DUPLICATE_META" branch)
+  owner_ref=
+  if [ -n "$owner_branch" ] && git check-ref-format --branch "$owner_branch" >/dev/null 2>&1 \
+    && git -C "$PROJ" show-ref --verify --quiet "refs/heads/$owner_branch"; then
+    owner_ref="refs/heads/$owner_branch"
+  fi
+  if [ -n "$owner_ref" ] && git -C "$PROJ" merge-base --is-ancestor "$ref" "$owner_ref" 2>/dev/null; then
+    return 0
+  fi
+  if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+    git -C "$PROJ" fetch --quiet origin >/dev/null 2>&1 || {
+      echo "REFUSED: task $ID's branch is not contained in the other task's branch and origin could not be fetched to verify remote reachability." >&2
+      return 1
+    }
+  fi
+  if [ -n "$owner_ref" ]; then
+    remaining=$(git -C "$PROJ" rev-list "$ref" --not "$owner_ref" --remotes 2>/dev/null) || remaining=unreadable
+  else
+    remaining=$(git -C "$PROJ" rev-list "$ref" --not --remotes 2>/dev/null) || remaining=unreadable
+  fi
+  [ -n "$remaining" ] || return 0
+  echo "REFUSED: task $ID's own branch $ref has unique unlanded commits; records-only release would lose the only task record naming them." >&2
+  return 1
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
@@ -3332,8 +3409,69 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
-require_owned_task_worktree_slot || exit 1
+if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
+  if [ "$KIND" != ship ] || [ "$BACKEND" = orca ] \
+    || ! fm_treehouse_pool_slot "$PROJ" "$WT"; then
+      echo "REFUSED: --release-duplicate-claim requires a ship task's recorded Treehouse pool slot." >&2
+      exit 1
+  fi
+  if ! find_other_record_for_slot "$META" "$ID" "$STATE" "$WT"; then
+    if [ "$TEARDOWN_DUPLICATE_SCAN_OK" = 1 ]; then
+      echo "REFUSED: no other task record claims $WT; records-only release is unavailable." >&2
+    else
+      echo "REFUSED: duplicate-claim records could not be inspected completely; records-only release left every record intact." >&2
+    fi
+    exit 1
+  fi
+  fm_treehouse_slot_owner_state "$WT" "$ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    other)
+      [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$TEARDOWN_DUPLICATE_ID" ] || {
+        echo "REFUSED: slot claim names task $FM_TREEHOUSE_SLOT_OWNER_ID, not the other recorded task $TEARDOWN_DUPLICATE_ID; ownership is ambiguous." >&2
+        exit 1
+      }
+      if [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ]; then
+        RELEASE_CLAIM_HOME=$(canonical_existing_dir "$FM_TREEHOUSE_SLOT_OWNER_HOME") || RELEASE_CLAIM_HOME=
+        RELEASE_RECORD_HOME=$(canonical_existing_dir "${TEARDOWN_DUPLICATE_META%/state/*}") || RELEASE_RECORD_HOME=
+        [ -n "$RELEASE_CLAIM_HOME" ] && [ "$RELEASE_CLAIM_HOME" = "$RELEASE_RECORD_HOME" ] || {
+          echo "REFUSED: slot claim and task $TEARDOWN_DUPLICATE_ID's record name different homes; ownership is ambiguous." >&2
+          exit 1
+        }
+      fi
+      ;;
+    absent)
+      fm_backend_validate_task_endpoint "$TEARDOWN_DUPLICATE_META" "$TEARDOWN_DUPLICATE_ID" || exit 1
+      RELEASE_OWNER_STATE=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
+      [ "$RELEASE_OWNER_STATE" = alive ] || {
+        echo "REFUSED: the slot has no owner claim and task $TEARDOWN_DUPLICATE_ID's endpoint reads '$RELEASE_OWNER_STATE'; the live owner cannot be identified." >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "REFUSED: the slot claim reads '$FM_TREEHOUSE_SLOT_OWNER'; task $ID cannot be proved the stale duplicate." >&2
+      exit 1
+      ;;
+  esac
+  if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
+    RELEASE_ENDPOINT_STATE=missing
+  else
+    RELEASE_ENDPOINT_STATE=$(fm_backend_agent_state "$BACKEND" "$T")
+  fi
+  case "$RELEASE_ENDPOINT_STATE" in
+    dead|missing) ;;
+    *)
+      echo "REFUSED: task $ID's endpoint $T reads '$RELEASE_ENDPOINT_STATE', not positively agent-free; records-only release left every record intact." >&2
+      exit 1
+      ;;
+  esac
+  duplicate_claim_branch_is_landed || exit 1
+  TEARDOWN_SLOT_REASSIGNED=1
+  TEARDOWN_SLOT_REASSIGNED_TO=$TEARDOWN_DUPLICATE_ID
+  TEARDOWN_SLOT_REASSIGNED_HOME=${TEARDOWN_DUPLICATE_META%/state/*}
+else
+  require_exclusive_task_worktree_slot || exit 1
+  require_owned_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3473,6 +3611,25 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
+if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
+  DUPLICATE_ARCHIVE_DIR="$DATA/$ID"
+  DUPLICATE_ARCHIVE="$DUPLICATE_ARCHIVE_DIR/retired-duplicate-claim.meta"
+  [ ! -L "$DUPLICATE_ARCHIVE_DIR" ] && [ ! -L "$DUPLICATE_ARCHIVE" ] || {
+    echo "REFUSED: duplicate-claim archive path is a symlink: $DUPLICATE_ARCHIVE" >&2
+    exit 1
+  }
+  mkdir -p "$DUPLICATE_ARCHIVE_DIR" || {
+    echo "REFUSED: cannot create duplicate-claim archive directory $DUPLICATE_ARCHIVE_DIR" >&2
+    exit 1
+  }
+  if ! cp "$META" "$DUPLICATE_ARCHIVE.tmp.$$" \
+    || ! mv -f "$DUPLICATE_ARCHIVE.tmp.$$" "$DUPLICATE_ARCHIVE"; then
+      rm -f "$DUPLICATE_ARCHIVE.tmp.$$"
+      echo "REFUSED: cannot archive task $ID's stale record at $DUPLICATE_ARCHIVE" >&2
+      exit 1
+  fi
+fi
+
 BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
@@ -3567,7 +3724,9 @@ fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
-"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+if [ "$RELEASE_DUPLICATE_CLAIM" != 1 ]; then
+  "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -3838,7 +3997,7 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+if [ "$RELEASE_DUPLICATE_CLAIM" != 1 ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 # A secondmate retirement may remove the home containing an overridden control

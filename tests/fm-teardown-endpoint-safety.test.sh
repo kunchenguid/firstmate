@@ -983,11 +983,9 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
-# The reuse collision where BOTH records survive: the stale task's record still
-# names the slot the pool handed on, and the claimant's own record names it too.
-# The claim proves the stale record's teardown is records-only, so the record
-# scan must not refuse it; once it is gone, the claimant tears down normally.
-test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
+# An ordinary teardown cannot prove the stale task's own branch work after the
+# slot has been reassigned. It must direct this case to the records-only path.
+test_stale_record_on_claimed_slot_requires_records_only_release() {
   local dir id=stale-task other=live-task rc
 
   dir=$(make_case slot-reassigned-both-records)
@@ -1004,20 +1002,132 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "records-only teardown of a stale record on a claimed slot failed: $(cat "$dir/stderr")"
-  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "stale record beside the claimant's record"
-  assert_present "$dir/worktree/sentinel" "records-only teardown reset the claimant's slot"
-  assert_present "$dir/home/state/$other.meta" "records-only teardown removed the claimant's record"
+  [ "$rc" -ne 0 ] || fail "ordinary teardown retired a duplicate without the branch-ref proof"
+  assert_present "$dir/home/state/$id.meta" "ordinary teardown removed the stale record"
+  assert_present "$dir/home/state/$other.meta" "ordinary teardown removed the claimant record"
+  assert_present "$dir/worktree/sentinel" "ordinary teardown reset the claimant's slot"
+  assert_contains "$(cat "$dir/stderr")" "--release-duplicate-claim" \
+    "ordinary teardown did not name the supported repair path"
 
-  : > "$dir/runtime.log"
-  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
-    || fail "claimant teardown failed after the stale record retired: $(cat "$dir/stderr")"
-  assert_absent "$dir/home/state/$other.meta" "claimant teardown left its record"
-  assert_absent "$dir/pool/1/.fm-slot-owner" "claimant teardown left its spent slot claim behind"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "claimant teardown did not return its pool slot: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: an ordinary duplicate teardown requires the records-only release"
+}
 
-  pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
+test_duplicate_claim_records_only_release() {
+  local dir id=stale-task other=live-task rc worker unique
+  dir=$(make_case duplicate-release)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/project" branch "fm/$id"
+  git -C "$dir/project" branch "fm/$other"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/$id" \
+    "spawn_gen=spawn-stale-duplicate"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/$other"
+  claim_pool_slot "$dir" "$other"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    cat > "$dir/home/.tasks.toml" <<'TOML'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+TOML
+    printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+      > "$dir/home/data/backlog.md"
+    tasks-axi add "$id" "stale duplicate" --kind ship --file "$dir/home/data/backlog.md" >/dev/null
+    tasks-axi start "$id" --file "$dir/home/data/backlog.md" >/dev/null
+  fi
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  cp "$dir/fakebin/tmux" "$dir/fakebin/tmux-agent-free"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) printf 'fm-stale-task\n' ;;
+  display-message) printf '%s\n' "${FM_TEST_TMUX_COMMAND:-codex}" ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux"
+  for verdict in codex sleep; do
+    set +e
+    FM_TEST_TMUX_COMMAND=$verdict FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --release-duplicate-claim > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "records-only release accepted an endpoint with command $verdict"
+    assert_present "$dir/home/state/$id.meta" "endpoint refusal removed stale metadata"
+    assert_contains "$(cat "$dir/stderr")" "not positively agent-free" \
+      "endpoint refusal did not explain its liveness verdict"
+  done
+  mv "$dir/fakebin/tmux-agent-free" "$dir/fakebin/tmux"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --release-duplicate-claim \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "records-only release refused an agent-free landed stale record: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "records-only release kept stale metadata"
+  assert_present "$dir/home/data/$id/retired-duplicate-claim.meta" \
+    "records-only release did not archive the stale record"
+  assert_present "$dir/home/state/$other.meta" "records-only release removed live owner metadata"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    tasks-axi show "$id" --file "$dir/home/data/backlog.md" \
+      | grep -Fq 'state: done' || fail "records-only release did not close the stale backlog item"
+  fi
+  assert_present "$dir/worktree/sentinel" "records-only release touched the live slot"
+  kill -0 "$worker" 2>/dev/null || fail "records-only release killed the live worker"
+  ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail "records-only release returned the live slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  dir=$(make_case duplicate-unlanded)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/project" branch "fm/$id"
+  git -C "$dir/project" branch "fm/$other"
+  unique=$(printf 'unique\n' | git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit-tree 'HEAD^{tree}' -p HEAD)
+  git -C "$dir/project" update-ref "refs/heads/fm/$id" "$unique"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/$id"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/$other"
+  claim_pool_slot "$dir" "$other"
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --release-duplicate-claim \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "records-only release discarded a unique unlanded commit"
+  assert_present "$dir/home/state/$id.meta" "unlanded refusal removed stale metadata"
+  assert_contains "$(cat "$dir/stderr")" "unlanded" "unique-commit refusal did not explain the cause"
+
+  claim_pool_slot "$dir" "$id"
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --release-duplicate-claim \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "records-only release retired the task currently holding the slot claim"
+  assert_contains "$(cat "$dir/stderr")" "cannot be proved the stale duplicate" \
+    "own-claim refusal did not explain the ownership contradiction"
+  claim_pool_slot "$dir" "$other"
+
+  rm -f "$dir/home/state/$other.meta"
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --release-duplicate-claim \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "records-only release accepted a slot with no other task record"
+  assert_contains "$(cat "$dir/stderr")" "no other task" "missing-duplicate refusal did not explain the cause"
+  pass "records-only duplicate release preserves the live slot and refuses unique commits or no duplicate"
 }
 
 # The two states that must never become a false refusal: the task's own claim,
@@ -1440,7 +1550,8 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
-test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_stale_record_on_claimed_slot_requires_records_only_release
+test_duplicate_claim_records_only_release
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
