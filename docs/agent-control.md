@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, which have no side effects, so they can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `relaunch`, `switch-model`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -35,6 +35,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
+| `switch-model` | Change a live Pi or Pi-signed ship or scout worker's provider, model, and/or thinking level in the same session. | The per-task extension read back the runtime selection, the task record names that confirmed profile, and the original dispatch snapshot is preserved. A busy worker is deferred rather than interrupted. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -171,6 +172,16 @@ The worktree and the task's records are unaffected either way.
   An `alive`, `ambiguous`, or `unreadable` verdict all refuse, and so does any endpoint whose absence is not provable, which on tmux is every `missing`; absence is claimed only from positive evidence of it.
   It also requires the shell to be in the recorded worktree: every backend but Orca (which owns its own task worktree with no current-path probe) gets one explicit `cd` to the recorded path, then a pre-launch path read that refuses before any harness starts unless it confirms the endpoint is sitting in the recorded copy.
 
+## Live Pi model switch
+
+`switch-model` is the Pi-family session verb, not a relaunch.
+It keeps the running process, the recorded endpoint, the isolated copy, and the conversation.
+[`bin/fm-pi-switch-lib.sh`](../bin/fm-pi-switch-lib.sh) owns the request/ack handshake the per-task `-e` extension already loaded at spawn implements, and [`bin/fm-profile-switch.sh`](../bin/fm-profile-switch.sh) owns checkpoint classification, cooldown, and the retry bound.
+A destination harness other than the current Pi adapter is still `relaunch`.
+Firstmate selects a capability-matched configured profile through [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md); the direct verb repeats quota and account checks (measured exhaustion refuses, and unmeasured quota refuses until the supervisor passes `--confirm-unmeasured-quota`) and the extension validates context and model-specific effort before applying it.
+A timeout records an unknown runtime until the bound acknowledgement reconciles; it never proves that the previous model remained active.
+The [Pi switch skill](../.agents/skills/pi-live-model-switch/SKILL.md) owns checkpoint judgment and selection, while the scripts' help owns exact arguments.
+
 ## Capability matrix
 
 Backend capability comes from each adapter's real surface, not from a policy choice.
@@ -189,5 +200,8 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
+- `tests/fm-pi-switch-model.test.sh` - the live Pi switch verb: capability refusals, catalog and auth gates, busy deferral, confirmation, partial-failure reconciliation, and restart recovery of the last confirmed profile.
+- `tests/fm-profile-switch.test.sh` - bounded checkpoint decisions, required task history, eligible profile selection, and quota refusals.
+- `FM_PI_SWITCH_LIVE=1 bash tests/fm-pi-switch-model-live-e2e.test.sh` - opt-in real Pi TUI smoke for same-provider effort and zai/openai-codex Luna switches, comparing runtime session IDs and testing conversation recall with tools disabled while preserving task identity, worktree, and edits.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

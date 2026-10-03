@@ -32,6 +32,7 @@ Popup, queued-input, and readiness handling belongs to `../../../bin/fm-composer
 
 Use the control plane so capabilities are checked first.
 Interrupt preserves the agent and work; exit stops only the agent and preserves its endpoint, isolated copy, and uncommitted changes.
+A live Pi model, effort, or provider change is `switch-model` and keeps the session; a harness change is `relaunch`.
 Cleanup and discard are not lifecycle verbs.
 The tool reference records repeat, acknowledgement, and clearing behavior, while the executable owner sends or refuses the sequence.
 
