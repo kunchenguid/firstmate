@@ -5703,6 +5703,48 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
 
 # --- triage debug log stays size capped -------------------------------------
 
+# A home-registered custom check whose capture fails (here: its output file
+# cannot be created) must be logged and skipped for that sweep, never take the
+# watcher down: each exit opens a recovery episode and wakes the primary.
+test_custom_check_capture_failure_skips_the_sweep_not_the_watcher() {
+  local dir state fakebin out pid real_mktemp i
+  dir=$(make_case custom-check-capture-failure); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  mkdir -p "$dir/data" "$dir/config"
+  cat > "$state/flaky.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo flaky output
+SH
+  chmod 0700 "$state/flaky.check.sh"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" flaky >/dev/null \
+    || fail "could not register the custom check"
+  real_mktemp=$(command -v mktemp)
+  cat > "$fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in *.fm-check-output.*) exit 1 ;; esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q 'custom check flaky could not be captured' "$state/.watch-triage.log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "a failed custom check capture took the watcher down: $(cat "$out")"
+  fi
+  grep -q 'custom check flaky could not be captured; skipped this sweep' "$state/.watch-triage.log" 2>/dev/null \
+    || { reap "$pid"; fail "the skipped custom check was not logged"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a skipped custom check still produced a wake: $(cat "$out")"
+  pass "a custom check whose capture fails is logged and skipped while the watcher keeps running"
+}
+
 test_triage_log_size_cap_accepts_spaced_wc_counts() {
   local dir state fakebin out status_file pid lines i
   dir=$(make_case triage-log-spaced-wc); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -6728,6 +6770,7 @@ test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts
+test_custom_check_capture_failure_skips_the_sweep_not_the_watcher
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
 test_procevent_marker_keys_are_injective

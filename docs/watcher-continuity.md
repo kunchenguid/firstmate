@@ -393,7 +393,15 @@ Each record includes:
 - Successor disposition.
 
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
-`state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
+`state/.watch-triage.log` remains only the watcher's bounded debug log (absorbed wakes, skipped custom checks) and carries no lifecycle semantics.
+
+### Watcher stderr log
+
+The arm layer appends the watcher's stderr to `state/.watch-stderr.log` while still passing it through to its own stderr.
+A handling successor's arm output is deleted once the watcher confirms, so without this log the last words of an unexpected exit are unrecoverable.
+The arm trims the log to its newest `FM_WATCH_STDERR_LOG_MAX_BYTES` (default 65536) each time it starts a watcher.
+
+A registered custom check whose capture fails is logged to `state/.watch-triage.log` and skipped for that sweep; it never exits the watcher, because each exit opens a recovery episode.
 
 ### Grace, beacon, and stop signals
 

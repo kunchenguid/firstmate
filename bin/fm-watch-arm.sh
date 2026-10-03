@@ -57,8 +57,8 @@
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
 # lock identity before and after close, and successor disposition. The separate
-# state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
-# log and is never written here.
+# state/.watch-triage.log remains exclusively the watcher's debug (absorbed wakes,
+# skipped custom checks) log and is never written here.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -665,6 +665,26 @@ trap 'handle_arm_signal HUP 129' HUP
 trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
+# The watcher's stderr carries its last words before an unexpected exit. The
+# hook that starts a handling successor deletes the arm's own output file once
+# the watcher confirms, so also append that stderr to a bounded durable log
+# (still passed through to the arm's own stderr). Trimming happens here, once
+# per arm; the watcher itself writes little.
+WATCH_STDERR_LOG="$STATE/.watch-stderr.log"
+WATCH_STDERR_LOG_MAX_BYTES=${FM_WATCH_STDERR_LOG_MAX_BYTES:-65536}
+case "$WATCH_STDERR_LOG_MAX_BYTES" in ''|*[!0-9]*|0) WATCH_STDERR_LOG_MAX_BYTES=65536 ;; esac
+stderr_size=$({ wc -c < "$WATCH_STDERR_LOG"; } 2>/dev/null | tr -d '[:space:]')
+case "$stderr_size" in
+  ''|*[!0-9]*) ;;
+  *)
+    if [ "$stderr_size" -gt "$WATCH_STDERR_LOG_MAX_BYTES" ]; then
+      tail -c "$WATCH_STDERR_LOG_MAX_BYTES" "$WATCH_STDERR_LOG" > "$WATCH_STDERR_LOG.tmp.$ARM_PID" 2>/dev/null \
+        && mv -f "$WATCH_STDERR_LOG.tmp.$ARM_PID" "$WATCH_STDERR_LOG" 2>/dev/null
+      rm -f "$WATCH_STDERR_LOG.tmp.$ARM_PID" 2>/dev/null || true
+    fi
+    ;;
+esac
+
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
@@ -673,9 +693,9 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 # collapsing when startup begins just before the next second boundary.
 deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
-  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
+  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" 2> >(tee -a "$WATCH_STDERR_LOG" >&2 2>/dev/null) &
 else
-  "$WATCH" >"$child_out" &
+  "$WATCH" >"$child_out" 2> >(tee -a "$WATCH_STDERR_LOG" >&2 2>/dev/null) &
 fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
