@@ -1150,6 +1150,54 @@ SH
   pass "fm-teardown: interrupted ship cleanup retains branch custody for a reassigned retry"
 }
 
+test_reassigned_ship_branch_survives_fleet_pruning() {
+  local dir id=stale-task other=live-task base branch_state
+  dir=$(make_case reassigned-ship-pruning)
+  mark_case_as_treehouse_pool "$dir"
+  base=$(git -C "$dir/project" symbolic-ref --short HEAD)
+  git clone -q --bare "$dir/project" "$dir/remote.git"
+  git -C "$dir/project" remote add origin "$dir/remote.git"
+  git -C "$dir/project" fetch -q origin
+  git -C "$dir/project" branch "fm/$id"
+  git -C "$dir/worktree" switch -q "fm/$id"
+  printf 'unpublished work\n' > "$dir/worktree/unpublished.txt"
+  git -C "$dir/worktree" add unpublished.txt
+  git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm unpublished
+  git -C "$dir/worktree" checkout --detach -q
+  git -C "$dir/project" branch fm/landed "$base"
+  for branch_state in "fm/$id" fm/landed; do
+    git -C "$dir/project" config "branch.$branch_state.remote" origin
+    git -C "$dir/project" config "branch.$branch_state.merge" "refs/heads/$branch_state"
+  done
+  [ "$(git -C "$dir/project" for-each-ref \
+      --format='%(upstream:track)' "refs/heads/fm/$id")" = '[gone]' ] \
+    || fail "unpublished branch fixture does not have a gone upstream"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "branch=fm/$id" "kind=ship"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+  : > "$dir/worktree/claimant-sentinel"
+
+  FM_PROJECTS_OVERRIDE="$dir" run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "records-only ship teardown failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "records-only teardown left the stale ship record"
+  assert_present "$dir/home/state/$other.meta" "records-only teardown removed the claimant record"
+  assert_present "$dir/worktree/claimant-sentinel" "records-only teardown reset the claimant slot"
+  assert_present "$dir/pool/1/.fm-slot-owner" "records-only teardown removed the claimant claim"
+  assert_contains "$(cat "$dir/stdout")" "pruned fm/landed" \
+    "records-only teardown did not exercise fleet branch pruning"
+  git -C "$dir/project" show-ref --verify --quiet "refs/heads/fm/$id" \
+    || fail "fleet pruning deleted the unpublished branch after record retirement"
+  [ "$(git -C "$dir/project" show "fm/$id:unpublished.txt")" = 'unpublished work' ] \
+    || fail "fleet pruning lost the unpublished commit"
+  pass "fm-teardown: fleet pruning preserves unpublished work after records-only cleanup"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1573,6 +1621,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_reassigned_ship_without_preserved_branch_refuses_even_with_force
 test_ship_retry_after_return_and_failed_record_removal
+test_reassigned_ship_branch_survives_fleet_pruning
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
