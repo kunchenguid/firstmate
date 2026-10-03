@@ -168,11 +168,23 @@ prime_turnend_seen() {  # <file>
   printf '%s' "$(seen_sig "$f")" > "$(dirname "$f")/.seen-$base"
 }
 
+# Busy-turn-age fixtures below age a turn through its completed-turn, progress,
+# or spawn markers, so the recorded busy turn is backdated to have opened long
+# ago and never supplies a fresher turn start than those markers.
 record_pi_busy() {  # <state-dir> <id>
   local state=$1 id=$2 gen
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
     --source pi-ext --event agent-start
+  backdate_busy_turn_start "$state" "$id" 946684800
+}
+
+# Rewrite the busy record's event time to <epoch>, modelling a turn that the
+# real writer opened at that time.
+backdate_busy_turn_start() {  # <state-dir> <id> <epoch>
+  local rec="$1/$2.busy-state" line
+  line=$(cat "$rec")
+  printf '%s\n' "${line% ts=*} ts=$3" > "$rec"
 }
 
 # Stop an owned watcher. TERM must end it through its EXIT cleanup, so one still
@@ -2398,6 +2410,94 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+# A healthy Claude worker in one long turn after a long idle gap: its previous
+# turn ended well over BUSY_TURN_MAX_SECS ago, and UserPromptSubmit just opened
+# the current turn through the real busy writer. The turn-age bound must be
+# measured from that turn's start, not from the previous turn's end, so the
+# pane stays exempt and a wedge timer left from earlier polls is cleared. A
+# turn that has itself been open past the bound still escalates, including one
+# whose adapter keeps re-reporting busy (OpenCode's session.status retry), and
+# an idle non-busy stale pane keeps the ordinary wedge escalation. A Claude
+# turn opened by UserPromptSubmit right after an interrupted turn (no Stop, so
+# the old busy record remains) is aged from its own start too.
+test_long_busy_turn_after_idle_gap_is_aged_from_turn_start() {
+  local variant dir state fakebin out capture_file window key gen pane pid now harness source
+  for variant in fresh-turn interrupted-turn over-age-turn repeated-busy-turn zero-padded-ts idle-pane; do
+    dir=$(make_case "long-turn-$variant"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-long-$variant"
+    harness=claude; source=claude-hook
+    [ "$variant" != repeated-busy-turn ] || { harness=opencode; source=opencode-plugin; }
+    pane='✻ Thinking… (9m 4s · esc to interrupt)'
+    [ "$variant" != idle-pane ] || pane='> '
+    printf '%s' "$pane" > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=%s\n' "$window" "$harness" > "$state/long-$variant.meta"
+    printf 'working: planning\n' > "$state/long-$variant.status"
+    printf '%s' "$(seen_sig "$state/long-$variant.status")" > "$state/.seen-long-${variant}_status"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "long-$variant")
+    if [ "$variant" = repeated-busy-turn ]; then
+      "$ROOT/bin/fm-busy-event.sh" apply "$state" "long-$variant" idle --gen "$gen" \
+        --source "$source" --event session-status-idle
+    else
+      "$ROOT/bin/fm-busy-event.sh" apply "$state" "long-$variant" idle --gen "$gen" \
+        --source "$source" --event stop
+    fi
+    touch "$state/long-$variant.turn-ended"
+    now=$(date +%s)
+    set_mtime $(( now - 7200 )) "$state/long-$variant.turn-ended"
+    set_mtime $(( now - 90000 )) "$state/long-$variant.meta"
+    prime_turnend_seen "$state/long-$variant.turn-ended"
+    if [ "$variant" != idle-pane ]; then
+      if [ "$variant" = repeated-busy-turn ]; then
+        "$ROOT/bin/fm-busy-event.sh" apply "$state" "long-$variant" busy --gen "$gen" \
+          --source "$source" --event session-busy
+      else
+        "$ROOT/bin/fm-busy-event.sh" apply "$state" "long-$variant" busy --gen "$gen" \
+          --source "$source" --event user-prompt-submit
+      fi
+    fi
+    case "$variant" in
+      interrupted-turn|over-age-turn|repeated-busy-turn)
+        backdate_busy_turn_start "$state" "long-$variant" $(( now - 3700 )) ;;
+    esac
+    case "$variant" in
+      repeated-busy-turn)
+        "$ROOT/bin/fm-busy-event.sh" apply "$state" "long-$variant" busy --gen "$gen" \
+          --source "$source" --event session-retry ;;
+      zero-padded-ts)
+        backdate_busy_turn_start "$state" "long-$variant" 08 ;;
+      interrupted-turn)
+        "$ROOT/bin/fm-busy-event.sh" apply "$state" "long-$variant" busy --gen "$gen" \
+          --source "$source" --event user-prompt-submit ;;
+    esac
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
+    echo $(( now - 500 )) > "$state/.stale-since-$key"
+    printf '1\n' > "$state/.wedge-escalations-$key"
+    export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+
+    watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" \
+      FM_FAKE_TMUX_CAPTURE="$capture_file" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240
+    pid=$!
+    if [ "$variant" = fresh-turn ] || [ "$variant" = interrupted-turn ]; then
+      if ! wait_poll_cycle "$state" "$pid"; then
+        reap "$pid"; fail "$variant: a fresh long Claude turn was wedge-escalated: $(cat "$out")"
+      fi
+      [ ! -s "$out" ] || fail "$variant: a fresh long Claude turn printed a wake reason: $(cat "$out")"
+      [ ! -e "$state/.stale-since-$key" ] || fail "$variant: a fresh long Claude turn kept the wedge timer"
+      [ ! -e "$state/.wedge-escalations-$key" ] || fail "$variant: a fresh long Claude turn kept the escalation count"
+      reap "$pid"
+    else
+      wait_for_exit "$pid" 100 || { reap "$pid"; fail "$variant did not wedge-escalate"; }
+      grep -F "stale: $window" "$out" | grep -F 'possible wedge' >/dev/null \
+        || fail "$variant lost its possible-wedge wake: $(cat "$out")"
+    fi
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "a long busy turn, including one opened after an interrupt, is aged from its own start, while over-age, repeatedly busy, and idle stale panes still escalate"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -6676,6 +6776,7 @@ test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_long_busy_turn_after_idle_gap_is_aged_from_turn_start
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_gone_endpoint_reports_once_instead_of_escalating_forever
