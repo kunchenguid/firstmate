@@ -3,7 +3,7 @@
 #
 # An ordinary text steer to a task recorded in this home no longer types its
 # payload: fm-send appends a durable sequenced record to state/<id>.inbox/ and
-# rings one constant self-describing doorbell line, best-effort. These tests
+# rings one constant doorbell line, best-effort. These tests
 # drive the real fm-send executable over a stubbed tmux and pin:
 #   1. The payload is durably recorded and never typed; only the doorbell
 #      crosses the terminal, and the send exits 0 at enqueue.

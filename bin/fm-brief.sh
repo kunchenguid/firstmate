@@ -358,16 +358,16 @@ INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 # config/wait-no-turns (docs/configuration.md) adds the line that a waiting
 # worker does not poll the inbox: checkpoint checks happen during active work,
 # so waiting still spends no turns.
-IFS= read -r -d '' INBOX_SECTION <<EOF || true
-# Firstmate instruction inbox
+INBOX_HEAD="# Firstmate instruction inbox
 Firstmate steers you through durable message files in $INBOX_DIR.
-When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
-The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
-EOF
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - "
+INBOX_MANUAL="list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`."
+INBOX_TAIL="The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action."
 if [ -e "$CONFIG/wait-no-turns" ]; then
-  INBOX_SECTION+="Do not poll or list the inbox while waiting; a waiting instruction rings."$'\n'
+  INBOX_TAIL+=$'\n'"Do not poll or list the inbox while waiting; a waiting instruction rings."
 fi
-INBOX_SECTION=${INBOX_SECTION%$'\n'}
+INBOX_SECTION="$INBOX_HEAD$INBOX_MANUAL
+$INBOX_TAIL"
 
 # Ship and scout workers read the whole inbox with one bin/fm-task-inbox.sh
 # take and, after acting, acknowledge it with one ack, which makes the same
@@ -377,18 +377,10 @@ INBOX_SECTION=${INBOX_SECTION%$'\n'}
 # state paths (bin/fm-remote-home-seed.sh), so a local code-root path would not
 # resolve on the remote host.
 INBOX_TAKE=$(shell_quote "$SCRIPT_DIR/fm-task-inbox.sh")
-IFS= read -r -d '' WORKER_INBOX_SECTION <<EOF || true
-# Firstmate instruction inbox
-Firstmate steers you through durable message files in $INBOX_DIR.
-When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - run \`$INBOX_TAKE take $INBOX_DIR\` once: it prints every waiting message in numeric order and ends with the sequence to acknowledge.
+WORKER_INBOX_SECTION="${INBOX_HEAD}run \`$INBOX_TAKE take $INBOX_DIR\` once: it prints every waiting message in numeric order and ends with the sequence to acknowledge.
 Act on every message it printed, then acknowledge them all in one call: \`$INBOX_TAKE ack --through NNN $INBOX_DIR\`, with the NNN that take named.
-Only if those commands cannot run, list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
-The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
-EOF
-if [ -e "$CONFIG/wait-no-turns" ]; then
-  WORKER_INBOX_SECTION+="Do not poll or list the inbox while waiting; a waiting instruction rings."$'\n'
-fi
-WORKER_INBOX_SECTION=${WORKER_INBOX_SECTION%$'\n'}
+Only if those commands cannot run, $INBOX_MANUAL
+$INBOX_TAIL"
 
 # How a crewmate or scout waits. Every model turn resends the whole context, so
 # a wait must cost no turns: a decision wait ends the turn, and an external

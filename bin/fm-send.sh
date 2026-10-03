@@ -22,7 +22,7 @@
 # the task's steering inbox (newlines are legal) - state/<id>.inbox/ for a
 # local task, or the remote home's host-local inbox reached through fm-on.sh
 # for a remote secondmate - and the terminal receives only one short constant
-# self-describing doorbell line plus Enter, best-effort. The durable record IS
+# constant doorbell line plus Enter, best-effort. The durable record IS
 # the delivery, so the record's fate alone governs the exit: 0 = the steer is
 # durably sent (recorded); nonzero = nothing was confirmed delivered and a
 # resend is appropriate (unresolvable target, an endpoint that cannot be

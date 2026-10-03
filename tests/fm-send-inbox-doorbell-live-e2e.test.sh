@@ -156,8 +156,20 @@ check_harness_doorbell() {  # <name>
   fi
   sed -n '/^# Firstmate instruction inbox$/,/^$/p' "$home/data/$task/brief.md" > "$home/brief-inbox.md"
   tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l \
-    "Your Firstmate brief is $home/brief-inbox.md: read it now and follow it whenever told an instruction is waiting. Reply with one short line."
+    "Your Firstmate brief is $home/brief-inbox.md: read it now and follow it whenever told an instruction is waiting. Then run exactly this shell command: touch $LAB/ready-$name - and reply with one short line."
   tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Enter
+  i=0
+  while [ ! -e "$LAB/ready-$name" ] && [ "$i" -lt "$TIMEOUT" ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ ! -e "$LAB/ready-$name" ]; then
+    FAILED=1
+    printf 'not ok - %s (%s): the worker never finished reading its brief inbox section within %ss\n' "$name" "$version" "$TIMEOUT" >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  wait_ready "$win" || note "$name ($version): composer not proven empty after the brief turn; steering as production does"
   if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
     "Firstmate live check: run exactly this shell command now: touch $acted - then acknowledge this message as your brief says. Reply with one short line." \
     >/dev/null 2>&1; then

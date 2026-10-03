@@ -179,7 +179,7 @@ test_write_is_durable_and_exact() {
   assert_contains "$doorbell" "handle it as the inbox section of your brief says." \
     "doorbell should defer reading and acknowledging to the brief's inbox section"
   assert_not_contains "$doorbell" "*.msg" "doorbell must not prescribe the manual list sequence"
-  assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
+  assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be a constant doorbell line"
   case "$doorbell" in
     *$'\n'*) fail "the doorbell must be a single line" ;;
   esac
@@ -188,7 +188,7 @@ test_write_is_durable_and_exact() {
   doorbell3=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$state/t1.inbox/handled/${rec2##*/}")
   [ "$doorbell3" = "$doorbell" ] \
     || fail "a record already acknowledged into handled/ must still ring its own inbox, got: $doorbell3"
-  pass "inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell"
+  pass "inbox: a steer is written durably and round-trips byte-exact with a constant doorbell line"
 }
 
 # The doorbell may land in a pane whose agent has exited, where it is a shell
