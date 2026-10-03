@@ -83,7 +83,13 @@ cat > "$tmp/bin/gh-axi" <<'EOF'
 #!/usr/bin/env bash
 [ "${FM_TEST_FAIL:-0}" = 1 ] && exit 1
 case "$3" in
-  */pulls/*) printf 'api_response:\n  body: "https://github.com/owner/repo/pull/%s|%s|%s|%s|main|%s"\n  truncated: false\n' "${3##*/}" "${FM_TEST_STATE:-closed}" "$FM_TEST_MERGED" "$FM_TEST_HEAD" "$FM_TEST_MERGE_OID" ;;
+  */pulls/*)
+    state=${FM_TEST_STATE:-closed} merged=$FM_TEST_MERGED
+    if [ -n "${FM_TEST_FLIP:-}" ]; then
+      [ -e "$FM_TEST_FLIP" ] && state=closed merged=true
+      : > "$FM_TEST_FLIP"
+    fi
+    printf 'api_response:\n  body: "https://github.com/owner/repo/pull/%s|%s|%s|%s|main|%s"\n  truncated: false\n' "${3##*/}" "$state" "$merged" "$FM_TEST_HEAD" "$FM_TEST_MERGE_OID" ;;
   graphql) printf 'api_response:\n  body: %s\n  truncated: false\n' "${FM_TEST_PENDING:-false|none}" ;;
   */git/ref/heads/main) printf 'api_response:\n  body: %s\n  truncated: false\n' "$FM_TEST_BASE_OID" ;;
   */compare/"$FM_TEST_BASE_OID...$FM_TEST_HEAD") printf 'api_response:\n  body: %s\n  truncated: false\n' "$FM_TEST_COMPARE" ;;
@@ -174,27 +180,66 @@ attempt_unknown() {
   coord queue-synced "{\"request_id\":\"sync-$id-$7\",$common,\"head_contains_base\":true}" > /dev/null
   coord queue-validated "{\"request_id\":\"validate-$id-$7\",$common,\"validation_passed\":true,\"validation_id\":\"v-$id-$7\"}" > /dev/null
   coord queue-checks "{\"request_id\":\"checks-$id-$7\",$common,\"protection_available\":false,\"checks\":[{\"name\":\"Lint\",\"head_oid\":\"$head\",\"conclusion\":\"success\"}]}" > /dev/null
-  coord queue-attempt "{\"request_id\":\"attempt-$id-$7\",$common,\"head_contains_base\":true,\"captain_hold_released\":true,\"away_merge_allowed\":true,\"merge_authorized\":true}" > /dev/null
+  coord queue-attempt "{\"request_id\":\"attempt-$id-$7\",$common,\"head_contains_base\":true,\"captain_hold_released\":true,\"away_merge_allowed\":true,\"merge_authorized\":true${8:+,\"wrapper_pid\":$8}}" > /dev/null
   coord queue-result "$(printf '{"request_id":"unknown-%s-%s","intent_id":"%s","generation":%s,"outcome":"unknown"}' "$id" "$7" "$id" "$slot")" > /dev/null
 }
 
-attempt_unknown a a "$ga" "$claim_a" "$fence_a" "$head_a" 1
-timeout_payload=$(printf '{"request_id":"reconcile-timeout","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "$slot" "$head_a")
+still_unknown() {
+  case "$(field "$(coord inspect '{}')" slots)" in *"'state': 'outcome-unknown'"*) ;; *) fail "$1" ;; esac
+}
+not_landed() {
+  PATH="$tmp/bin:$PATH" FM_TEST_STATE=open FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=ahead coord queue-reconcile "$(printf '{"request_id":"%s","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "$1" "$slot" "$head_a")"
+}
+sleep 600 &
+wrapper=$!
+attempt_unknown a a "$ga" "$claim_a" "$fence_a" "$head_a" 1 "$wrapper"
 for pending in 'true|none' 'false|armed'; do
-  if PATH="$tmp/bin:$PATH" FM_TEST_PENDING="$pending" FM_TEST_STATE=open FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=ahead coord queue-reconcile "$(printf '{"request_id":"reconcile-pending-%s","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "${pending%%|*}${pending##*|}" "$slot" "$head_a")" > "$tmp/unexpected" 2> "$tmp/error"; then
+  if FM_TEST_PENDING="$pending" FM_COORD_QUIET_SECONDS=0 not_landed "reconcile-pending-${pending%%|*}${pending##*|}" > "$tmp/unexpected" 2> "$tmp/error"; then
     fail "pending merge ($pending) must not release the unknown slot"
   fi
-  case "$(field "$(coord inspect '{}')" slots)" in *"'state': 'outcome-unknown'"*) ;; *) false ;; esac || fail "pending merge ($pending) must keep the slot outcome-unknown"
+  still_unknown "pending merge ($pending) must keep the slot outcome-unknown"
 done
 pass 'merge queue or armed auto-merge keeps the slot outcome-unknown'
-unlanded=$(PATH="$tmp/bin:$PATH" FM_TEST_STATE=open FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=ahead coord queue-reconcile "$timeout_payload")
+if FM_COORD_QUIET_SECONDS=0 not_landed reconcile-live-wrapper > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'a live merge wrapper must not release the unknown slot'
+fi
+still_unknown 'a live merge wrapper must keep the slot outcome-unknown'
+pass 'live merge wrapper keeps the slot outcome-unknown'
+kill "$wrapper"
+wait "$wrapper" 2> /dev/null || true
+if not_landed reconcile-too-soon > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'the default quiet period must not release a fresh attempt'
+fi
+still_unknown 'the quiet period must keep the slot outcome-unknown'
+if FM_TEST_FLIP="$tmp/flip" FM_COORD_QUIET_SECONDS=0 not_landed reconcile-flipped > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'a PR that merges during reconciliation must not be recorded as not merged'
+fi
+still_unknown 'a PR that merges during reconciliation must keep the slot outcome-unknown'
+pass 'PR merging during reconciliation keeps the slot outcome-unknown'
+unlanded=$(FM_COORD_QUIET_SECONDS=0 not_landed reconcile-timeout)
 [ "$(field "$unlanded" state)" = refused ] || fail 'open unmerged PR off base must record a not-merged outcome'
-pass 'timeout then not landed releases the slot with one terminal outcome'
+pass 'exited wrapper after the quiet period releases a not-landed slot with one terminal outcome'
 
 attempt_unknown b b "$gb" "$claim_b" "$fence_b" "$head_b" 1
+if PATH="$tmp/bin:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_MERGED=false FM_TEST_HEAD="$head_b" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=diverged coord queue-reconcile "$(printf '{"request_id":"reconcile-no-identity","intent_id":"b","generation":%s,"pr_url":"https://github.com/owner/repo/pull/2","base":"main","head_oid":"%s"}' "$slot" "$head_b")" > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'an attempt without wrapper identity must never auto-release as not merged'
+fi
+still_unknown 'an attempt without wrapper identity must keep the slot outcome-unknown'
+reject queue-operator-abort "$(printf '{"request_id":"operator-abort-anonymous","intent_id":"b","generation":%s,"reason":"wrapper lost"}' "$slot")" 'operator abort must name the operator'
+aborted=$(coord queue-operator-abort "$(printf '{"request_id":"operator-abort-b","intent_id":"b","generation":%s,"operator":"captain","reason":"wrapper lost"}' "$slot")")
+[ "$(field "$aborted" state)" = repair-needed ] || fail 'operator abort must release the slot to repair-needed'
+field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]=="captain" and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' || fail 'operator abort must record who aborted and why'
+pass 'unknown wrapper identity never auto-releases; only a named operator abort does'
+
+coord queue-ready "$(printf '{"request_id":"ready-b-retry","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" > /dev/null
+sleep 600 &
+wrapper=$!
+attempt_unknown b b "$gb" "$claim_b" "$fence_b" "$head_b" 2 "$wrapper"
+kill "$wrapper"
+wait "$wrapper" 2> /dev/null || true
 coord queue-ready "$(printf '{"request_id":"ready-a-2","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$ga" "$claim_a" "$fence_a" "$head_a")" > /dev/null
 refusal_payload=$(printf '{"request_id":"reconcile-lost-refusal","intent_id":"b","home_id":"b","generation":%s,"pr_url":"https://github.com/owner/repo/pull/2","base":"main","head_oid":"%s"}' "$slot" "$head_b")
-lost=$(PATH="$tmp/bin:$PATH" FM_TEST_MERGED=false FM_TEST_HEAD="$head_b" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=diverged coord queue-reconcile "$refusal_payload")
+lost=$(PATH="$tmp/bin:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_MERGED=false FM_TEST_HEAD="$head_b" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=diverged coord queue-reconcile "$refusal_payload")
 [ "$(field "$lost" state)" = refused ] || fail 'closed unmerged PR off base must record a not-merged outcome'
 [ "$(PATH="$tmp/bin:$PATH" FM_TEST_FAIL=1 coord queue-reconcile "$refusal_payload")" = "$lost" ] || fail 'reconciliation replay with home_id must return the stored receipt without a forge read'
 pass 'lost refusal reply releases the slot and replays its receipt'

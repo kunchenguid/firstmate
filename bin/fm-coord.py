@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 
 SCHEMA_DIR = Path(__file__).with_name("fm-coord-migrations")
-MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort"}
+MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort"}
 PATH_KINDS = {"file", "directory", "dependency-manifest", "generated-output"}
 NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
@@ -48,6 +48,18 @@ def boot_id():
         result = subprocess.run(["sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True, check=True)
         return result.stdout.strip()
     raise Refusal("boot identity unavailable; only macOS and Linux are supported")
+
+
+def process_start(pid):
+    if Path("/proc/self/stat").exists():
+        try:
+            return Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()[19]
+        except FileNotFoundError:
+            return None
+    result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    start = result.stdout.strip()
+    require(result.returncode == 0 or not start and not result.stderr.strip(), "process identity cannot be checked")
+    return start or None
 
 
 def token(value, field):
@@ -247,6 +259,9 @@ def terminal_outcome(db, item, request_id, outcome, p):
         require(observed_base != item["base_oid"], "merged base must advance")
     elif forge == "refused":
         require(p.get("_unlanded_head_oid") == item["head_oid"], "live forge read must prove the attempted head is not on base")
+        require(item["wrapper_pid"] is not None and (item["wrapper_boot"] != boot_id() or process_start(item["wrapper_pid"]) != item["wrapper_start"]), "merge wrapper is not proven to have exited")
+        quiet = int(os.environ.get("FM_COORD_QUIET_SECONDS", "600"))
+        require(quiet >= 0 and int(time.time()) - item["attempt_epoch"] >= quiet, "quiet period since the merge attempt has not elapsed")
     else:
         require(p.get("wrapper_refused") is True and p.get("pr_merged") is False, "refusal needs a definitive wrapper and forge result")
     db.execute("INSERT INTO merge_outcomes(attempt_event_id,intent_id,outcome,merge_oid,observed_base_oid,recorded_at) VALUES(?,?,?,?,?,?)", (attempt, item["intent_id"], outcome, merge_oid, observed_base, stamp()))
@@ -323,13 +338,21 @@ def queue_operation(db, op, p):
         db.execute("UPDATE queue_items SET state='syncing',updated_at=? WHERE intent_id=?", (stamp(), chosen["intent_id"]))
         event_id = emit(db, "sync-requested", request_id, {"intent_id": chosen["intent_id"], "generation": generation, "head_oid": chosen["head_oid"]})
         return {"ok": True, "intent_id": chosen["intent_id"], "generation": generation, "state": "syncing", "event_id": event_id}
-    item, intent = queue_item(db, p, owner=op not in {"queue-result", "queue-reconcile", "queue-abort"})
+    item, intent = queue_item(db, p, owner=op not in {"queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort"})
     slot = occupied_slot(db, item)
-    require(p.get("generation") == slot["generation"] if op in {"queue-result", "queue-reconcile"} else p.get("slot_generation") == slot["generation"], "integration generation mismatch")
+    require(p.get("generation") == slot["generation"] if op in {"queue-result", "queue-reconcile", "queue-operator-abort"} else p.get("slot_generation") == slot["generation"], "integration generation mismatch")
     if op == "queue-abort":
         require(item["state"] in {"syncing", "validating", "awaiting-checks"}, "forge attempt cannot be aborted")
         reason = token(p.get("reason"), "reason")
         return invalidate(db, item, request_id, reason, repair=p.get("repair_needed") is True)
+    if op == "queue-operator-abort":
+        require(item["state"] == "outcome-unknown", "operator abort is limited to an unknown forge outcome")
+        operator = token(p.get("operator"), "operator")
+        reason = token(p.get("reason"), "reason")
+        db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
+        db.execute("UPDATE queue_items SET state='repair-needed',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
+        event_id = emit(db, "slot-operator-aborted", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "operator": operator, "reason": reason})
+        return {"ok": True, "state": "repair-needed", "event_id": event_id}
     if op == "queue-synced":
         require(item["state"] == "syncing", "slot is not syncing")
         current_head = oid(p.get("current_head_oid"), "current_head_oid")
@@ -377,8 +400,14 @@ def queue_operation(db, op, p):
         require(manifest is not None and item["manifest_version"] == manifest[0], "required-check evidence is absent or stale")
         require(p.get("captain_hold_released") is True and p.get("away_merge_allowed") is True and p.get("merge_authorized") is True, "captain hold, away posture, or merge authority refuses attempt")
         require(p.get("head_contains_base") is True, "current head no longer contains current base")
+        wrapper_pid = p.get("wrapper_pid")
+        wrapper_start = None
+        if wrapper_pid is not None:
+            require(type(wrapper_pid) is int and wrapper_pid > 0, "wrapper_pid must be a positive integer")
+            wrapper_start = process_start(wrapper_pid)
+            require(wrapper_start is not None, "wrapper process is not running")
         event_id = emit(db, "merge-attempted", request_id, {"intent_id": item["intent_id"], "head_oid": item["head_oid"], "base_oid": item["base_oid"], "pr_url": intent["pr_url"], "wrapper": "bin/fm-pr-merge.sh"})
-        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,updated_at=? WHERE intent_id=?", (event_id, stamp(), item["intent_id"]))
+        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,attempt_epoch=?,wrapper_pid=?,wrapper_start=?,wrapper_boot=?,updated_at=? WHERE intent_id=?", (event_id, int(time.time()), wrapper_pid, wrapper_start, boot_id() if wrapper_pid is not None else None, stamp(), item["intent_id"]))
         db.execute("UPDATE integration_slots SET state='attempting' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
         return {"ok": True, "state": "attempting", "attempt_event_id": event_id, "event_id": event_id, "merge_command": ["bin/fm-pr-merge.sh", intent["task_id"], intent["pr_url"]]}
     if op == "queue-result":
@@ -410,8 +439,9 @@ def forge_landing(p):
         body = json.loads(raw_body) if raw_body.startswith('"') else raw_body
         require(isinstance(body, str), "forge response body is unreadable")
         return body
-    pull = read(f"repos/{repo}/pulls/{number}", "{{.html_url}}|{{.state}}|{{.merged}}|{{.head.sha}}|{{.base.ref}}|{{.merge_commit_sha}}")
-    fields = pull.split("|")
+    pull_path = f"repos/{repo}/pulls/{number}"
+    pull_template = "{{.html_url}}|{{.state}}|{{.merged}}|{{.head.sha}}|{{.base.ref}}|{{.merge_commit_sha}}"
+    fields = read(pull_path, pull_template).split("|")
     require(len(fields) == 6 and fields[0] == p["pr_url"] and fields[4] == base, "forge observation is for a different PR or base")
     observed_base = oid(read(f"repos/{repo}/git/ref/heads/{quote(base, safe='/')}", "{{.object.sha}}"), "current forge base")
     p["observed_base_oid"] = observed_base
@@ -427,6 +457,7 @@ def forge_landing(p):
     head = oid(p.get("head_oid"), "head_oid")
     status = read(f"repos/{repo}/compare/{observed_base}...{head}", "{{.status}}")
     require(status in {"ahead", "diverged"}, "forge does not prove the attempted head is off base")
+    require(read(pull_path, pull_template).split("|")[1:5] == fields[1:5], "PR changed during reconciliation")
     p["_forge_outcome"] = "refused"
     p["_unlanded_head_oid"] = head
 

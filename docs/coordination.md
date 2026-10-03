@@ -91,7 +91,11 @@ A timeout or lost reply goes to `outcome-unknown`, retaining the slot across pro
 `queue-reconcile` uses read-only `gh-axi api` calls outside the SQLite transaction to read the exact GitHub PR and the current base OID.
 A merged PR at the recorded head releases an unknown slot as `merged`.
 An open or closed-unmerged PR that is neither in the merge queue nor armed for auto-merge releases it as `refused` only when the forge compare of the current base with the recorded head reports `ahead` or `diverged`, so the attempted head is not on base.
+The PR is read again after the compare, and a changed state, merge flag, head, or base keeps the slot unknown.
+A not-merged release also requires the recorded wrapper process to be proven gone, by a changed boot, an absent PID, or a changed process start time, and at least 10 minutes since the attempt; `FM_COORD_QUIET_SECONDS` changes that period for deterministic testing.
+An attempt without a recorded wrapper identity, or whose identity cannot be checked, never leaves `outcome-unknown` as not merged.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
+`queue-operator-abort` is the only other way out of `outcome-unknown`: it records the named operator and reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.
 Replaying the same reconciliation request returns its stored receipt without another forge read.
 This increment's live outcome reconciliation supports GitHub PRs; other forges need an equivalent read adapter before they can leave `outcome-unknown`.
 The forge read and database transition are separate, so a direct external base update can still race this advisory decision until step-4 enforcement and repository protection are active.
@@ -135,6 +139,8 @@ Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`,
 `queue-reconcile` also includes the exact `pr_url` and `base`, plus the recorded `head_oid` to prove a non-landing; each is checked against the intent and queue item before accepting the live forge observation.
 Payload fields starting with `_` are reserved for those forge observations and are refused.
 `queue-abort` includes the slot generation and a reason, and is limited to the pre-attempt phases.
+`queue-operator-abort` includes the integration `generation`, `operator`, and `reason`.
+`queue-attempt` accepts an optional `wrapper_pid`: the live process on the coordinator host that then `exec`s `bin/fm-pr-merge.sh`, so its PID and start time identify the wrapper.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `inspect` gives a small state summary for operators.
 
