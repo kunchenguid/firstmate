@@ -730,15 +730,33 @@ test_verb_allowlist_is_closed() {
   expect_code 2 "$rc" "an unknown verb should be a usage error"
   assert_contains "$out" "is not a control verb" "the refusal should say so"
   assert_contains "$out" "interrupt" "the refusal should list the allowed verbs"
+  assert_contains "$out" "clear-registration" "the refusal should list the allowed verbs"
   out=$(run_control "$dir" t1 --key); rc=$?
   expect_code 2 "$rc" "a raw key is not a control verb"
   out=$(run_control "$dir" t1 clear); rc=$?
-  expect_code 2 "$rc" "clear is not a control verb"
+  expect_code 2 "$rc" "the bare clear shorthand is not a control verb"
   out=$(run_control "$dir" t1 "please stop what you are doing"); rc=$?
   expect_code 2 "$rc" "arbitrary text is not a control verb"
   [ -z "$(literals "$dir")" ] || fail "a refused verb must send nothing"
   [ -z "$(keys_sent "$dir")" ] || fail "a refused verb must send no keys"
-  pass "fm-control: the verb list is closed - no raw keys, arbitrary text, or clear verb"
+  pass "fm-control: the verb list is closed - no raw keys, arbitrary text, or bare clear shorthand"
+}
+
+# clear-registration's whole subject is a Herdr agent registration; a backend
+# whose liveness comes from the process table has nothing to clear, so the verb
+# reports that fact instead of improvising one or reaching for any endpoint.
+test_clear_registration_refuses_where_there_is_no_registration() {
+  local dir out rc
+  dir=$(new_case clear-no-registration)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 clear-registration); rc=$?
+  expect_code 1 "$rc" "clear-registration on tmux must refuse"$'\n'"$out"
+  assert_contains "$out" "holds no agent registration to clear" \
+    "the refusal should name the fact, got: $out"
+  [ -z "$(literals "$dir")" ] || fail "a refused clear must type nothing"
+  [ -z "$(keys_sent "$dir")" ] || fail "a refused clear must send no keys"
+  pass "fm-control: clear-registration on a backend with no agent registration reports nothing to clear"
 }
 
 test_resume_is_refused_with_its_reason() {
@@ -1092,6 +1110,7 @@ test_record_bound_to_another_task_is_refused
 test_remote_secondmate_is_refused_by_placement
 test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed
+test_clear_registration_refuses_where_there_is_no_registration
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent

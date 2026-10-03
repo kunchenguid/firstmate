@@ -7,6 +7,7 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> clear-registration
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -86,6 +87,40 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#   clear-registration
+#              Clear the lingering Herdr agent registration a pane keeps after
+#              its agent process exits - the stuck seat with no other
+#              sanctioned repair, because Herdr's CLI exposes no release or
+#              stop and `pane release-agent` is ignored for an official agent
+#              source. Postcondition: the pane's own process view proved an
+#              agent-less shell immediately before the request, and the
+#              follow-up read finds no registration. A pane holding a live
+#              agent, a foreground command, or an editor - or one whose
+#              process view cannot be read - is REFUSED, the same direction
+#              as exit's classifier safety: authority is never stripped from a
+#              registration status alone. Already-clear is idempotent success.
+#              A record Herdr's own process detection still holds (no API
+#              drops it) reports cleared-authority with detection-record=held
+#              and exits 0: the shell was proven agent-less, so exit and
+#              relaunch already read the agent dead.
+#              A follow-up read that fails or is unreadable reports unverified
+#              and exits nonzero: success is never claimed without a valid
+#              read. A registration that still reads present over a live agent
+#              is described from fresh reads of both: holding the same session
+#              as before the clear, the clear did not land; holding a
+#              different one, the racing agent registered after the clear and
+#              needs no recovery; holding none, the session ref is unknown and
+#              a plain relaunch would start a fresh session. All exit nonzero,
+#              and none hands back the old agent's session to resume. Direct
+#              pane input in that window cannot be locked; these verdicts are
+#              its documented outcome.
+#              HERDR-ONLY: every other backend reports no registration to
+#              clear. The reported outcome is the post-clear re-read, never
+#              the request's exit code. The verdict contract lives in
+#              bin/backends/herdr.sh's fm_backend_herdr_clear_agent_registration.
+#              The clear also drops the pane's bound session record, so a
+#              later relaunch of a Pi-family task starts a fresh Pi session
+#              instead of resuming the previous conversation.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -120,6 +155,9 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
+#   - `clear-registration` refuses unless the pane's process view proves an
+#     agent-less shell, so a live agent's status authority is never stripped
+#     from its registration status alone.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -1069,5 +1107,31 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  clear-registration)
+    result=$(fm_backend_clear_agent_registration "$BACKEND" "$T")
+    verdict=${result%%$'\t'*}
+    if [ "$result" = "$verdict" ]; then
+      reason=
+    else
+      reason=${result#*$'\t'}
+    fi
+    case "$verdict" in
+      cleared)
+        echo "cleared-registration $ID harness=$HARNESS backend=$BACKEND endpoint=$T"
+        ;;
+      already-clear)
+        echo "already-clear $ID harness=$HARNESS backend=$BACKEND endpoint=$T"
+        ;;
+      detection-held)
+        echo "cleared-authority $ID harness=$HARNESS backend=$BACKEND endpoint=$T detection-record=held: $reason"
+        ;;
+      refused) die "refusing to clear task $ID's agent registration: $reason" ;;
+      unsupported) die "task $ID's agent registration cannot be cleared from here: $reason" ;;
+      failed) die "clearing task $ID's agent registration did not take: $reason" ;;
+      unverified) die "task $ID's registration clear could not be verified: $reason" ;;
+      concurrently-started) die "task $ID's pane hosts an agent that started during the registration clear: $reason" ;;
+      *) die "task $ID's registration clear returned '$verdict' rather than a positively classified outcome; refusing to report an unproven clear" ;;
+    esac
     ;;
 esac

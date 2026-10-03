@@ -1007,6 +1007,29 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_clear_agent_registration: dispatch the control plane's ONE
+# clear-registration path (bin/fm-control.sh's `clear-registration` verb).
+# Prints the backend's own "<verdict>\t<reason>" line, split the same way as
+# fm_backend_agent_state's callers split their reasons. Herdr is the only
+# backend with an agent registration to clear; every other backend reports
+# `unsupported` naming that fact rather than being asked to improvise one -
+# tmux and the rest prove liveness from the process table and hold no
+# registration, so there is nothing there to clear. The verdict contract is
+# owned by fm_backend_herdr_clear_agent_registration (bin/backends/herdr.sh).
+fm_backend_clear_agent_registration() {  # <backend> <target>
+  local backend=$1 target=$2
+  case "$backend" in
+    herdr)
+      fm_backend_source herdr || {
+        printf 'unsupported\tbackend herdr could not be loaded to clear anything on it'
+        return 0
+      }
+      fm_backend_herdr_clear_agent_registration "$target"
+      ;;
+    *) printf 'unsupported\tbackend %s holds no agent registration to clear' "'$backend'" ;;
+  esac
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

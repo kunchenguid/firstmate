@@ -2448,6 +2448,204 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
+# --- clear-registration: the documented escape hatch for a stuck seat -------
+#
+# Herdr's own release is NOT an escape hatch for a STUCK registration:
+# `pane release-agent` is dropped for an official source/agent pair (herdr's
+# HookAgentReleased handler ignores a pair such as `herdr:pi` with `pi`
+# outright), and the
+# CLI exposes no stop/clear subcommand at all, so a registration that outlives
+# its process (docs/herdr-backend.md "Stale agent registrations") has no
+# sanctioned repair by hand. The socket API does expose exactly one:
+# `pane.clear_agent_authority`, which drops the pane's hook authority and its
+# bound session record - the CLI simply never grew a subcommand for it.
+#
+# This is the control plane's ONE clear-registration path (the
+# `clear-registration` verb in bin/fm-control.sh), and it is deliberately
+# fail-closed in the SAME direction as the recovery classifier's safety
+# property: the request is issued only when the pane's own process view proves
+# a provably agent-less shell, immediately before the request, never from the
+# registration's status alone. A pane holding a foreground command, an editor,
+# or any agent process is refused, because stripping ITS authority would
+# silence a live agent's status binding. The reported outcome is never the
+# request's exit code: it is the POST-CLEAR re-read of `agent get`, so a server
+# that accepts and then ignores the request reports failure, not success.
+
+# fm_backend_herdr_clear_agent_authority_capable: verify that one guarded raw
+# `pane.clear_agent_authority` request is possible in <session>: python3 for
+# the transport, plus the exact whitelisted method and parameter schema in the
+# server's OWN `api schema` read. The schema IS the floor here - a server that
+# advertises the method serves it - so there is no separate protocol-number
+# gate to guess at. Silent; each caller owns its own wording.
+# Return codes: 1 python3 missing, 4 schema unreadable, 5 method or parameter
+# schema unsupported.
+fm_backend_herdr_clear_agent_authority_capable() {  # <session>
+  local session=$1 schema
+  command -v python3 >/dev/null 2>&1 || return 1
+  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || return 4
+  printf '%s' "$schema" | jq -e '
+    any(.schemas.request.oneOf[]?; .properties.method.const == "pane.clear_agent_authority")
+    and .schemas.request["$defs"].PaneClearAgentAuthorityParams.required == ["pane_id"]
+    and .schemas.request["$defs"].PaneClearAgentAuthorityParams.properties.pane_id.type == "string"
+  ' >/dev/null 2>&1 || return 5
+}
+
+# fm_backend_herdr_clear_agent_registration: clear <target>'s lingering agent
+# registration, but only when the pane is provably an agent-less shell.
+# Prints "<verdict>\t<reason>" - always exactly ONE tab, split with
+# ${out%%$'\t'*} / ${out#*$'\t'} - and the reason is empty except on a refusal
+# or failure:
+#   cleared        - the request was accepted AND the follow-up `agent get`
+#                    now finds no registration.
+#   already-clear  - the pane holds no registration; nothing to clear.
+#   refused        - the pane is not PROVABLY an agent-less shell: it is not
+#                    present, it holds a live agent process, it holds a
+#                    foreground command or editor, or its process view could
+#                    not be read. Fail closed, in the same direction as the
+#                    recovery classifier's never-trust-registration-alone
+#                    rule (fm_backend_herdr_pane_agent_state).
+#   unsupported    - this seat cannot send the request: no python3 transport,
+#                    an unreadable schema, or a server that does not advertise
+#                    pane.clear_agent_authority.
+#   detection-held - the request was accepted and hook authority is gone, but
+#                    the record still read is Herdr's own process-detection
+#                    record (`agent explain` answers for it), which no API
+#                    drops. The pane was proven an agent-less shell, so the
+#                    recovery classifier already reads it dead and exit and
+#                    relaunch proceed; the seat is not stuck.
+#   failed         - the request could not be sent or errored, or - the case
+#                    that makes the post-clear re-read load-bearing - it was
+#                    accepted but the registration still reads present: over
+#                    the shell, or over a live agent while still holding the
+#                    same session it held before the clear (the clear did not
+#                    land).
+#   unverified     - the request was accepted but the outcome is not proven:
+#                    the follow-up `agent get` failed or was unreadable, the
+#                    pane process view is neither a shell nor a live agent, or
+#                    the pre-clear session ref was unreadable so a live
+#                    agent's registration cannot be compared. Observation only:
+#                    the reason names the inspection commands, never a resume.
+#   concurrently-started - the registration still reads present and the pane
+#                    now hosts a live agent, built from fresh reads of both.
+#                    A registration holding a DIFFERENT session than before the
+#                    clear is the racing agent's own binding, registered after
+#                    the clear and never cleared: no recovery needed for it.
+#                    One holding no readable session says the ref is unknown,
+#                    so no resume command is given, and warns that a plain
+#                    relaunch after a dropped binding starts a fresh session.
+#
+# The proof is the SAME process-level read the recovery classifier uses
+# (fm_backend_herdr_pane_process_state), taken immediately before the request,
+# so refusal and clear describe one pane state; the task's control lock
+# (bin/fm-control.sh) serializes lifecycle actions on this task while that
+# window holds. Residual window: direct input into the pane between that proof
+# and the request cannot be locked; it surfaces as concurrently-started or
+# failed, read from the pane and registration as they are after the clear.
+fm_backend_herdr_clear_agent_registration() {  # <target>
+  local target=$1 presence process_state out code capable socket clearer response bound current inspect
+  fm_backend_herdr_parse_target "$target" || {
+    printf 'refused\tthe target is not a session:pane endpoint'
+    return 0
+  }
+  presence=$(fm_backend_herdr_pane_presence_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  if [ "$presence" != present ]; then
+    printf 'refused\tthe pane is %s, so there is no agent-less shell here to clear' "$presence"
+    return 0
+  fi
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  [ "$code" = agent_not_found ] && {
+    printf 'already-clear\t'
+    return 0
+  }
+  if fm_backend_herdr_clear_agent_authority_capable "$FM_BACKEND_HERDR_SESSION"; then
+    capable=0
+  else
+    capable=$?
+  fi
+  case "$capable" in
+    0) ;;
+    1) printf 'unsupported\tpython3 is missing, so the clear request cannot be sent'; return 0 ;;
+    4) printf 'unsupported\tthe herdr API schema could not be read'; return 0 ;;
+    *) printf 'unsupported\tthis herdr server does not advertise pane.clear_agent_authority'; return 0 ;;
+  esac
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$FM_BACKEND_HERDR_SESSION") || {
+    printf 'failed\tthe socket of the recorded session could not be resolved unambiguously'
+    return 0
+  }
+  # Capture the session the registration holds before the clear, so the
+  # post-clear read can tell whether the clear landed (see below).
+  bound=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || bound=
+  # The agent-less proof is the immediate pre-clear gate: everything above this
+  # line is read-only, so the proof and the clear describe one pane state.
+  process_state=$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  case "$process_state" in
+    shell) ;;
+    agent) printf 'refused\ta live agent process is present in the pane'; return 0 ;;
+    other) printf 'refused\ta foreground command or editor is running in the pane'; return 0 ;;
+    *) printf 'refused\tthe pane process view could not be read, so an agent-less shell cannot be proven'; return 0 ;;
+  esac
+  clearer=${FM_BACKEND_HERDR_CLEAR_AGENT_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-clear-agent-authority.py}
+  if ! response=$("$clearer" "$socket" "$FM_BACKEND_HERDR_PANE" 2>&1); then
+    printf 'failed\tthe clear request could not be sent or was refused by the server: %s' \
+      "$(printf '%s' "$response" | tr '\t\r\n' '   ')"
+    return 0
+  fi
+  inspect='inspect with herdr agent get, herdr pane process-info, and herdr agent explain'
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ "$code" = agent_not_found ]; then
+    printf 'cleared\t'
+    return 0
+  fi
+  # Every other verdict needs a VALID read of a still-present registration;
+  # a failed or unreadable re-read proves nothing, so it never reports success.
+  case "$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)" in
+    working|idle|done|blocked) ;;
+    *)
+      printf 'unverified\tthe clear request was accepted but the follow-up registration read failed or was unreadable, so the outcome is unknown; %s' "$inspect"
+      return 0
+      ;;
+  esac
+  # The verdict is built from fresh reads of what the pane hosts NOW and, over
+  # a live agent, what the registration holds NOW. The session reference read
+  # before the clear is only compared against, never handed back as advice: it
+  # belongs to the old agent, not to whatever is running now.
+  case "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+    shell) ;;
+    agent)
+      current=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || current=
+      if [ -z "$current" ]; then
+        printf 'concurrently-started\tthe pane now hosts a live agent and the registration still reads present, but it holds no readable session ref (session ref unknown), so the live agent cannot be re-registered on its own session from here; a plain relaunch after a dropped binding starts a FRESH session and loses that conversation; %s' "$inspect"
+      elif [ -z "$bound" ]; then
+        printf 'unverified\tthe pane now hosts a live agent and the registration holds %s session %s, but the session ref before the clear was unreadable, so whether the clear landed is unknown; %s' \
+          "${current%%$'\t'*}" "${current#*$'\t'}" "$inspect"
+      elif [ "$current" = "$bound" ]; then
+        printf 'failed\tthe clear did not land: the registration still holds %s session %s, the same one it held before the clear, and the pane now hosts a live agent' \
+          "${current%%$'\t'*}" "${current#*$'\t'}"
+      else
+        printf 'concurrently-started\tthe racing agent registered after the clear: the registration now holds %s session %s, a different one than before the clear, and the pane hosts a live agent; its binding was never cleared; no recovery needed for it' \
+          "${current%%$'\t'*}" "${current#*$'\t'}"
+      fi
+      return 0
+      ;;
+    *)
+      printf 'unverified\tthe clear request was accepted but the registration still reads present and the pane process view is not a proven shell, so the outcome is unknown; %s' "$inspect"
+      return 0
+      ;;
+  esac
+  # Herdr's own process detection keeps a record no API drops (measured on
+  # 0.9.3: a nested shell holds it until that shell exits); `agent explain`
+  # answers only for a detected label, so a record it explains is detection,
+  # not the authority just cleared, over the shell read above.
+  if fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent explain "$FM_BACKEND_HERDR_PANE" --json 2>/dev/null \
+    | jq -e '.agent | type == "string"' >/dev/null 2>&1; then
+    printf 'detection-held\tthe hook authority was cleared, but Herdr process detection still holds a record over this agent-less shell until the pane'"'"'s nested shell exits; exit and relaunch already read the agent dead'
+  else
+    printf 'failed\tthe clear request was accepted but the registration still reads present afterwards'
+  fi
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate

@@ -1770,6 +1770,48 @@ ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi rea
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.
 
+### Clearing a stuck registration
+
+Measured 2026-10-03 on Linux x86_64, read-only, against the installed Herdr client 0.9.3 (protocol 22) talking to its 0.9.0 server: the socket API advertises `pane.clear_agent_authority` with exactly `{"pane_id"}` required, and the bundled CLI exposes no subcommand that sends it:
+
+```sh
+herdr api schema --json | jq -e '
+  any(.schemas.request.oneOf[]?; .properties.method.const == "pane.clear_agent_authority")
+  and .schemas.request["$defs"].PaneClearAgentAuthorityParams.required == ["pane_id"]
+  and .schemas.request["$defs"].PaneClearAgentAuthorityParams.properties.pane_id.type == "string"'
+bash -c '. bin/backends/herdr.sh; fm_backend_herdr_clear_agent_authority_capable firstmate; echo rc=$?'
+```
+
+```text
+true
+rc=0
+```
+
+The same read-only pass classified four live stuck-class registrations (a `done` record over a shell-only pane) as `stale-agent` recovering to `dead`, while a `done` record whose Pi foreground was still running classified `live`:
+
+```sh
+bash -c '. bin/backends/herdr.sh
+  for p in w21:p4 w94:p2 w1:p3X w6K:p2 w1G:p2; do
+    printf "%s %s %s\n" "$p" "$(fm_backend_herdr_pane_agent_state firstmate "$p")" "$(fm_backend_herdr_agent_state "firstmate:$p")"
+  done'
+```
+
+```text
+w21:p4 stale-agent dead
+w94:p2 stale-agent dead
+w1:p3X stale-agent dead
+w6K:p2 stale-agent dead
+w1G:p2 live alive
+```
+
+The clear request itself is deliberately NOT measured against a real server, because `pane.clear_agent_authority` mutates a pane's agent authority: it is fixture-verified only, in `tests/fm-backend-herdr.test.sh` and `tests/fm-control-herdr-stuck-registration.test.sh`.
+That gap is bounded by the verb's own contract: it never claims success from the request's exit code, only from the post-clear `agent get` re-read, so a server that accepts and ignores the request surfaces as `failed` rather than a false clear.
+The capability predicate above is the refresh command for the schema half; run it after every Herdr upgrade rather than trusting the version recorded here.
+
+Measured live 2026-10-03 against Herdr 0.9.3 with Pi 1.0.0 in isolated `fm-lab-` sessions: a `report-agent` registration over an agent-less shell clears, but after a real Pi `/quit` under a nested `bash -i` the `agent=pi idle` record is Herdr's own process detection (`agent explain` answers for it; a hook-only record returns `agent_explain_unavailable`), which neither `pane.clear_agent_authority` nor `pane.release_agent` drops.
+It clears only when the nested shell exits, and never appears when Pi runs directly under the pane's shell.
+The verb therefore reports `cleared-authority ... detection-record=held` with exit 0 there, while the classifier reads the pane dead and `exit` and `relaunch` both succeed.
+
 ### Pane status authority across a relaunch
 
 Measured 2026-09-21 on Linux x86_64 against Herdr 0.9.1 (client protocol 22) and Pi 0.86.1, in an isolated `fm-lab-` session (`bin/fm-herdr-lab.sh`), after the same freeze was observed live on a relaunched Pi crewmate whose pane read `idle` while its validation pipeline ran.
