@@ -16,16 +16,17 @@ This feature adds only that carrier seam.
 When enabled, for each spawn Firstmate resolves one W3C `traceparent` carrier for the task - minted as a fresh root on the task's first spawn and reused verbatim from the meta on relaunch - and:
 
 - forms it as `00-<32 hex trace id>-<16 hex span id>-<2 hex flags>`, with random ids for a new root;
-- injects it into the agent's pane shell as the `TRACEPARENT` environment variable immediately before launch, through the same `spawn_send_text_line` channel that already ships `GOTMPDIR`; and
+- delivers it as the `TRACEPARENT` environment variable immediately before launch, through the same backend-specific environment channel that already ships `GOTMPDIR`; and
 - records the identical value as `traceparent=` in `state/<id>.meta`.
 
 `TRACEPARENT` as an environment variable is a Firstmate convention carrying a W3C-formatted value: W3C Trace Context standardizes the `traceparent` HTTP header, not an env var, and OpenTelemetry SDKs do not read it from the environment automatically, so a downstream observer must explicitly read this env value or the `traceparent=` meta field.
 This feature parents no SDK span by itself.
 
 Because the injected carrier and the recorded carrier are the same string, an observer that reads the metadata reconstructs exactly the identity the child received.
-The injection sits at the unconditional pre-launch export site, so it covers ship and scout spawns across `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, `gemini`, `muse`, `rovo`, `agy`, and `devin`, plus Secondmate spawns across that same set except the deliberately crewmate-only `gemini`, `muse`, `rovo`, `agy`, and `devin` adapters.
+The delivery sits at the unconditional pre-launch environment site, so it covers ship and scout spawns across `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, `gemini`, `muse`, `rovo`, `agy`, and `devin`, plus Secondmate spawns across that same set except the deliberately crewmate-only `gemini`, `muse`, `rovo`, `agy`, and `devin` adapters.
 This is the same coverage `GOTMPDIR` already has and requires no trace-specific `launch_template()` behavior.
-Ship and scout spawns reach that site on every spawn backend (`tmux`, `herdr`, `zellij`, `orca`, `cmux`); a Secondmate reaches it on every backend that accepts a Secondmate spawn (`tmux`, `herdr`, `zellij`), because `bin/fm-spawn.sh` rejects a Secondmate on `orca` and `cmux`.
+Ship and scout spawns reach that site on every pane-typed spawn backend (`tmux`, `herdr`, `zellij`, `orca`, `cmux`); a Secondmate reaches it on every pane backend that accepts a Secondmate spawn (`tmux`, `herdr`, `zellij`), because `bin/fm-spawn.sh` rejects a Secondmate on `orca` and `cmux`.
+`t3code` has no pane, so its `claude` and `codex` ship, scout, and Secondmate spawns receive the same `TRACEPARENT` value under the same conditions through the backend's [per-directory harness environment](t3code-backend.md#per-directory-harness-environment) instead.
 
 ### Remote Secondmate routes
 

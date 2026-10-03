@@ -46,6 +46,8 @@
 # until `/quiet off`. A quiet `start` or `start-native` that fails while no
 # daemon runs ends quiet mode as `stop` does, so no quiet record outlives its
 # daemon to park a present captain's main.
+# On backend=t3code there is no terminal for `start` to create, so only a
+# harness with a tracked native background job can run `start-native` there.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -59,10 +61,10 @@
 # workspace with --no-focus, or a detached tmux session) that never touches the
 # captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
 #
-# Correct supervisor targeting: the daemon finds the captain pane to inject into
-# from its OWN inherited env (discover_supervisor_target). Running it in a
+# Correct supervisor targeting: the daemon finds the captain endpoint to inject
+# into from its OWN inherited env (discover_supervisor_target). Running it in a
 # separate terminal would make it discover its OWN pane, so this captures the
-# captain pane FIRST (from the pane this script runs in) and passes it in as
+# captain endpoint FIRST (from the pane this script runs in) and passes it as
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
 #
 # Usage:
@@ -98,7 +100,10 @@
 #                              only on a home that runs the host; exit 2 with one
 #                              line naming a live away record on that home.
 #
-# Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
+# Supported backends: herdr and tmux for `start`; t3code only through
+# `start-native` (T3 hosts no terminal to create, so the daemon runs as the
+# captain's own tracked background job, which means a Codex captain on t3code
+# has no away mode). Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
@@ -606,11 +611,13 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" || result=1
+    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$backup"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -705,13 +712,17 @@ fm_afk_launch_start() {
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
-  # Capture the captain pane FIRST, before creating anything.
+  # Capture the captain endpoint FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
     return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
     return 1; }
+  if [ "$captain_backend" = t3code ]; then
+    fm_afk_launch_log "backend t3code hosts no terminal to launch the daemon in; use 'fm-afk-launch.sh start-native' and run bin/fm-afk-start.sh through the harness's tracked background tool"
+    return 1
+  fi
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
@@ -730,7 +741,8 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -787,7 +799,8 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi

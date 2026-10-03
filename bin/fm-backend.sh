@@ -27,6 +27,8 @@
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
 # docs/cmux-backend.md for its empirical basis.
+# The experimental T3 Code adapter owns agent sessions over HTTP while
+# Treehouse owns task worktrees. It is selected explicitly only.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -34,7 +36,7 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently herdr, zellij, orca, or cmux, carries an
+# spawn-capable backend, currently herdr, zellij, orca, cmux, or t3code, carries an
 # explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
@@ -66,9 +68,12 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# t3code is EXPERIMENTAL and spawn-capable: T3 Code owns the
+# agent session over HTTP while Treehouse keeps the worktree
+# (docs/t3code-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux t3code"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux t3code"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -108,7 +113,7 @@ fm_backend_is_known() {  # <name>
 # CMUX_SOCKET_PATH is independently documented as a user-settable override for
 # pointing the CLI at a non-default socket, so its mere presence would not
 # reliably mean "running inside a cmux-spawned terminal" the way
-# CMUX_WORKSPACE_ID does. cmux is checked LAST because it is a terminal
+# CMUX_WORKSPACE_ID does. cmux is checked after tmux and herdr because it is a terminal
 # application (the outermost layer, like iTerm2/Terminal.app), not a session
 # multiplexer - both tmux and herdr can run nested inside a cmux-provided
 # shell, but cmux cannot run nested inside either of them, so a tmux or herdr
@@ -228,6 +233,26 @@ fm_backend_detect_cmux_app_is_ancestor() {
   return 1
 }
 
+# fm_backend_explicit_name: the explicitly selected backend, FM_BACKEND env
+# then config/backend; returns 1 when neither selects one. fm_backend_name and
+# the away-mode t3code discovery gate (bin/fm-supervisor-target-lib.sh) share it.
+fm_backend_explicit_name() {
+  local line v
+  if [ -n "${FM_BACKEND:-}" ]; then
+    printf '%s' "$FM_BACKEND"
+    return 0
+  fi
+  [ -f "$FM_BACKEND_CONFIG_DIR/backend" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    v=$(printf '%s' "$line" | tr -d '[:space:]')
+    if [ -n "$v" ]; then
+      printf '%s' "$v"
+      return 0
+    fi
+  done < "$FM_BACKEND_CONFIG_DIR/backend"
+  return 1
+}
+
 # fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
 # explicit per-task override. Precedence: FM_BACKEND env, then config/backend
 # (a single word on its first non-empty line, mirroring config/crew-harness),
@@ -235,26 +260,14 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
 # precedence over this resolution entirely; it is not read here. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
-# always wins. Auto-detected herdr stays silent like tmux. Selecting cmux via
-# auto-detect prints one loud stderr notice because cmux remains experimental;
-# the notice names the winning signal, so a fallback-detected cmux (bundle id or
-# ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
+# always wins. Auto-detected herdr stays silent like tmux. Auto-detected cmux
+# prints a loud stderr notice because it remains experimental. The
+# cmux notice names the winning signal, so a fallback-detected cmux (bundle id
+# or ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
 # distinct from the primary-marker case.
 fm_backend_name() {
-  local line v detected marker
-  if [ -n "${FM_BACKEND:-}" ]; then
-    printf '%s' "$FM_BACKEND"
-    return 0
-  fi
-  if [ -f "$FM_BACKEND_CONFIG_DIR/backend" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      v=$(printf '%s' "$line" | tr -d '[:space:]')
-      if [ -n "$v" ]; then
-        printf '%s' "$v"
-        return 0
-      fi
-    done < "$FM_BACKEND_CONFIG_DIR/backend"
-  fi
+  local detected marker
+  fm_backend_explicit_name && return 0
   # Called directly (not in a command substitution) so the detect signal
   # globals survive into the notice below.
   if fm_backend_detect >/dev/null; then
@@ -301,8 +314,9 @@ fm_backend_validate_spawn() {  # <name>
 #     paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
-#     so it drops both treehouse and any other backend's session CLI.
+#     (tmux, herdr, zellij, cmux, t3code); orca owns its own task worktree and
+#     terminal, so it drops both treehouse and any other backend's session CLI;
+#   - node for t3code, whose adapter speaks HTTP to the T3 server from node.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
@@ -312,6 +326,7 @@ fm_backend_required_tools() {  # <backend>
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
+    t3code) printf '%s' 'node treehouse' ;;
     *) return 1 ;;
   esac
 }
@@ -356,6 +371,10 @@ fm_backend_target_of_meta() {  # <meta-file>
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
+    [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+  fi
+  if [ "$backend" = t3code ]; then
+    terminal=$(fm_meta_get "$meta" t3_thread_id)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
   fi
   window=$(fm_meta_get "$meta" window)
@@ -406,7 +425,7 @@ fm_backend_orca_worktree_id_valid() {  # <value>
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
+  local session pane recorded_session workspace tab terminal worktree_id surface thread
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -544,6 +563,23 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
+    t3code)
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: T3 endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      thread=$(fm_backend_meta_exact_value "$meta" t3_thread_id) || thread=
+      [ -n "$thread" ] || {
+        echo "REFUSED: missing t3_thread_id in $meta; cannot stop the T3 thread; preserving task state." >&2
+        return 1
+      }
+      case "$thread" in *[!0-9a-fA-F-]*) thread= ;; esac
+      if [ "$window" != "fm-$id" ] || [ -z "$thread" ]; then
+        echo "REFUSED: T3 endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      window=$thread
+      ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_BACKEND=$backend
@@ -558,6 +594,7 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
     [ -e "$meta" ] || continue
     window=$(fm_meta_get "$meta" window)
     terminal=$(fm_meta_get "$meta" terminal)
+    [ -n "$terminal" ] || terminal=$(fm_meta_get "$meta" t3_thread_id)
     { [ -n "$window" ] && [ "$window" = "$target" ]; } || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } || continue
     printf '%s' "$meta"
     return 0
@@ -611,7 +648,7 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 
 # fm_backend_source: source the named backend's adapter file, once per shell.
 # Each adapter is an independently linted canonical root. The /dev/null source
-# boundaries keep runtime dispatch from importing all five adapter ASTs into
+# boundaries keep runtime dispatch from importing every adapter AST into
 # every dispatcher consumer while preserving the runtime source operations.
 # Bash 3.2 can enter an EXIT trap with status 0 after `set -e` aborts on a
 # missing or unreadable dot-sourced file, and a newer Bash can print that
@@ -642,6 +679,9 @@ fm_backend_source() {  # <name>
       ;;
     cmux)
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
+      ;;
+    t3code)
+      set -- fm-transition-lib.sh
       ;;
     *)
       return 1
@@ -688,6 +728,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    t3code)
+      if [ -z "${_FM_BACKEND_T3CODE_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$adapter" || return 1
+        _FM_BACKEND_T3CODE_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -696,7 +743,8 @@ fm_backend_source() {  # <name>
 #   target with ":"   used as-is (the escape hatch for a window/pane outside
 #                      this firstmate home) - backend-independent, a literal string.
 #   exact task id      routed through <state-dir>/<id>.meta's backend target
-#                      (`window=` normally, `terminal=` for Orca) -
+#                      (`window=` normally, `terminal=` for Orca,
+#                      `t3_thread_id=` for T3 Code) -
 #                      backend-independent, a stored value, NOT re-verified
 #                      against a live backend inventory (matches today's
 #                      behavior: tmux window names can be trusted from meta
@@ -704,7 +752,7 @@ fm_backend_source() {  # <name>
 #   "fm-<id>"          legacy task window label fallback routed through
 #                      <state-dir>/<id>.meta when no exact
 #                      <state-dir>/fm-<id>.meta exists.
-#   anything else      first matched against recorded `window=`/`terminal=`
+#   anything else      first matched against recorded backend endpoint fields
 #                      metadata, then treated as an ad hoc bare window name and
 #                      resolved by searching the legacy tmux live inventory.
 fm_backend_resolve_selector() {  # <raw-target> <state-dir>
@@ -759,6 +807,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    t3code) fm_backend_t3code_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -804,6 +853,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    t3code) fm_backend_t3code_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -821,6 +871,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    t3code) fm_backend_t3code_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -848,7 +899,24 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    t3code) fm_backend_t3code_kill "$1" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_agent_stop: stop the agent and keep its endpoint, on a backend
+# whose session is stopped through the backend itself rather than through the
+# harness's exit command typed into a composer (bin/fm-control-lib.sh's
+# fm_control_backend_native_exit names them). Every other backend refuses
+# here: its exit is the typed command the control plane owns.
+fm_backend_agent_stop() {  # <backend> <target>
+  local backend=$1
+  shift
+  [ -n "${1:-}" ] || { echo "error: refusing empty backend agent-stop target" >&2; return 1; }
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    t3code) fm_backend_t3code_agent_stop "$1" ;;
+    *) echo "error: backend '$backend' stops an agent through its harness exit command, not a native stop" >&2; return 1 ;;
   esac
 }
 
@@ -885,6 +953,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    t3code) fm_backend_t3code_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -911,6 +980,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
+    t3code) fm_backend_t3code_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -960,6 +1030,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
       ;;
+    t3code)
+      fm_backend_source t3code || return 1
+      fm_backend_t3code_target_exists "$target"
+      ;;
     *)
       return 1
       ;;
@@ -985,13 +1059,17 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # `dead` here (issue #4115) - then maps a positively stopped session server to
 # `missing` only in this recovery-grade view. Zellij remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
-# empirically validated. Orca and cmux do not support secondmate spawns.
+# empirically validated. Orca and cmux do not support secondmate spawns. The
+# t3code adapter uses its shared thread classification and status table
+# (bin/backends/t3code-thread-status.cjs and bin/backends/t3code.sh); there is
+# no process to attribute locally.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    t3code) fm_backend_t3code_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }
@@ -1014,15 +1092,15 @@ fm_backend_agent_alive() {  # <backend> <target>
 # and for those backends replaces its blind `sleep POLL` with a bounded wait on
 # fm_backend_wait_transition. Every push-capable backend reuses the shared
 # normalized-transition shape and policy table (bin/fm-transition-lib.sh); today
-# only herdr implements the surface (docs/herdr-backend.md "Native
-# pane.agent_status_changed push escalation"). A backend with no native push
+# herdr and t3code implement the surface (see their backend guides).
+# A backend with no native push
 # reports has-push false and returns 2 from the dispatchers below, so the
 # watcher falls back to its poll loop - the permanent fail-closed backstop.
 
 # fm_backend_has_push: 0 if <backend> exposes a native transition push stream.
 fm_backend_has_push() {  # <backend>
   case "$1" in
-    herdr) return 0 ;;
+    herdr|t3code) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1038,6 +1116,7 @@ fm_backend_events_capable() {  # <backend> <session>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_events_capable "$@" ;;
+    t3code) fm_backend_t3code_events_capable "$@" ;;
     *) return 1 ;;
   esac
 }
@@ -1055,6 +1134,7 @@ fm_backend_wait_transition() {  # <backend> <session> <timeout_secs> <state_dir>
   fm_backend_source "$backend" || return 2
   case "$backend" in
     herdr) fm_backend_herdr_wait_transition "$@" ;;
+    t3code) fm_backend_t3code_wait_transition "$@" ;;
     *) return 2 ;;
   esac
 }
@@ -1066,6 +1146,7 @@ fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_commit_transition "$@" ;;
+    t3code) fm_backend_t3code_commit_transition "$@" ;;
     *) return 1 ;;
   esac
 }
@@ -1077,6 +1158,36 @@ fm_backend_clear_transition() {  # <backend> <state_dir> <window>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_clear_transition "$@" ;;
+    t3code) fm_backend_t3code_clear_transition "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
+# Event connection grouping and record identity differ from pane target syntax.
+# T3 uses one configured server for all threads; pane backends retain session:id.
+fm_backend_event_session() {  # <backend> <target>
+  case "$1" in t3code) printf 'server' ;; *) printf '%s' "${2%%:*}" ;; esac
+}
+
+fm_backend_transition_target() {  # <backend> <session> <endpoint-id>
+  case "$1" in t3code) printf '%s' "$3" ;; *) printf '%s:%s' "$2" "$3" ;; esac
+}
+
+# Early spawn checks for API-owned sessions. Other backends keep their
+# existing admission checks in container_ensure at endpoint provisioning.
+fm_backend_runtime_check() {  # <backend>
+  fm_backend_source "$1" || return 1
+  case "$1" in
+    orca) fm_backend_orca_runtime_check ;;
+    t3code) fm_backend_t3code_runtime_check ;;
+    *) return 0 ;;
+  esac
+}
+
+fm_backend_validate_harness() {  # <backend> <harness>
+  fm_backend_source "$1" || return 1
+  case "$1" in
+    t3code) fm_backend_t3code_validate_harness "$2" ;;
     *) return 0 ;;
   esac
 }

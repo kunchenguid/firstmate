@@ -421,8 +421,9 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `zellij` | Experimental; no dedicated real-backend CI lane | [`docs/zellij-backend.md`](zellij-backend.md) |
 | `orca` | Experimental; no dedicated real-backend CI lane | [`docs/orca-backend.md`](orca-backend.md) |
 | `cmux` | Experimental; no dedicated real-backend CI lane | [`docs/cmux-backend.md`](cmux-backend.md) |
+| `t3code` | Experimental; no dedicated real-backend CI lane | [`docs/t3code-backend.md`](t3code-backend.md) |
 
-Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
+Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, and t3code, since herdr, zellij, cmux, and t3code are session providers only; Orca provides both the task worktree and terminal endpoint.
 
 ### Backend selection order
 
@@ -435,16 +436,16 @@ New spawns choose the backend in this order:
 4. Runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals.
 5. Default `tmux`.
 
-If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
+If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
 
-Auto-detected Herdr stays silent like tmux, while auto-detected cmux prints a stderr notice naming `config/backend` and `--backend tmux` because cmux remains experimental.
-Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
+Auto-detected Herdr stays silent like tmux, while auto-detected cmux prints a stderr notice naming `config/backend` and `--backend tmux` because it remains experimental.
+T3 Code, Zellij, and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 
 ### Accepted backends and secondmate limits
 
-Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
-`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
+Any value other than `tmux`, `herdr`, `zellij`, `orca`, `cmux`, or `t3code` is rejected until another adapter is implemented and verified.
+`fm-spawn.sh` accepts all six for ship and scout tasks; `backend=orca` and `backend=cmux` still refuse `--secondmate`, while `backend=t3code` supports secondmates and runs only the `claude` and `codex` harnesses.
 
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 
@@ -477,6 +478,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 - An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 
 - A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
+- A t3code task additionally records `t3_thread_id=` and `t3_project_id=`, with `window=fm-<id>` kept as the shared firstmate alias.
 
 ### Task selectors
 
@@ -484,7 +486,7 @@ Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve ce
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
 
 Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
-A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
+A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, `t3_thread_id=` for T3 Code, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These rules are the single owner of the task-selector vocabulary.
@@ -525,16 +527,17 @@ Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
-The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
-It currently supports only `tmux` and `herdr` supervisor panes.
+The `/afk` sub-supervisor injects escalation digests into firstmate's own endpoint independently of where new task endpoints are spawned.
+It supports `tmux` and `herdr` supervisor panes and `t3code` supervisor threads.
 
-Set `FM_SUPERVISOR_BACKEND=tmux|herdr` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`.
-Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then falls back to `tmux`.
+Set `FM_SUPERVISOR_BACKEND=tmux|herdr|t3code` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`, and for t3code it is the thread id.
+Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then a cwd match over the T3 shell snapshot only when T3 Code is explicitly selected, then falls back to `tmux`.
+T3 discovery requires explicit `FM_BACKEND=t3code` or `config/backend=t3code`, an origin (`FM_T3CODE_ORIGIN` or the runtime file described in [`t3code-backend.md`](t3code-backend.md#setup)), and a `config/t3code-token` file under the effective config directory before making an HTTP call.
 
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
-Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
+Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the T3 thread id, then the legacy `firstmate:0` tmux fallback with a warning.
 
-Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
+Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a different backend.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
@@ -810,7 +813,7 @@ For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-disco
 
 ## Claude permission mode (config/claude-permission-mode)
 
-The optional local, gitignored `config/claude-permission-mode` selects the permission flag for every Claude worker launch: crewmates, scouts, Claude secondmates, and control-plane relaunches.
+The optional local, gitignored `config/claude-permission-mode` selects the permission flag for Firstmate-built Claude command lines: crewmates, scouts, Claude secondmates, and control-plane relaunches.
 
 ### Accepted values and refusals
 
@@ -826,7 +829,7 @@ Auto is Claude Code's classifier-reviewed permission mode, for a captain who ref
 Only the permission flag changes between the two modes.
 The environment prefix, inline settings, model, effort flags, and the task-channel `--add-dir` grant below stay the same in both.
 
-Every Claude launch, in both modes, also passes `--add-dir` for exactly this task's Firstmate channel directories, resolved to real paths: a secondmate gets the parent home's `state/<id>.inbox` it reads its steers from; a ship or scout worker gets this home's `state/operational-inbox` (its launch record), `state/<id>.inbox` (its steers), `data/<id>` (its brief and report), and the code root's `.agents/skills`.
+Every Firstmate-built Claude command line, in both modes, also passes `--add-dir` for exactly this task's Firstmate channel directories, resolved to real paths: a secondmate gets the parent home's `state/<id>.inbox` it reads its steers from; a ship or scout worker gets this home's `state/operational-inbox` (its launch record), `state/<id>.inbox` (its steers), `data/<id>` (its brief and report), and the code root's `.agents/skills`.
 The grant exists because Claude Code path-checks the Read/Glob/Grep file tools against cwd plus `--add-dir`, and since 2.1.257 the first outside read in `auto` mode parks the pane on a one-time interactive question, while a "Block" answer there writes `permissions.blockReadsOutsideWorkingDirectories` into user settings and then refuses the same reads under bypass too.
 It never covers the whole `state/` or anything wider.
 
@@ -838,6 +841,7 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 
 `bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
+T3 Code owns its provider command and always uses `full-access`, so `backend=t3code` accepts the default `bypass` posture and refuses `auto` before mutation; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
 
@@ -869,6 +873,7 @@ An unqualified model, an undeclared provider, or a raw Pi launch command, which 
 ### Launch scope and sign-in checks
 
 When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+T3 Code selects the account through its provider instance instead, so `backend=t3code` refuses a worker account pin before mutation; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
 The assignment would override the pin.
 The refusal names the variable; remove that assignment from the raw command, or change or remove `config/claude-account`.
@@ -916,6 +921,7 @@ The text is static and never executed or expanded; secondmate charters never tak
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
+T3 Code starts the provider from the server's environment and cannot apply this command boundary, so `backend=t3code` refuses when the file exists; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
 
 Do not assume every worker inherits the invoking Firstmate process's current environment.
@@ -988,7 +994,8 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 ### Commit attribution
 
 The optional local, gitignored `config/keep-ai-trailers` presence flag opts this home into keeping AI co-author trailers on its launched workers.
-With the flag absent, every Claude launch's inline `--settings` JSON carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, every Devin worker config sets `"attribution": false`, and every fleet launch receives a pane-scoped `GIT_CONFIG` `core.hooksPath` pointing at `state/<id>.git-hooks`, where git's `commit-msg` hook strips known AI trailers even when a runtime injects them after the typed message.
+With the flag absent, every Claude command line Firstmate builds carries inline `--settings` JSON with `"attribution":{"commit":"","pr":"","sessionUrl":false}`, every Devin worker config sets `"attribution": false`, and every fleet launch receives a worker-scoped `GIT_CONFIG` `core.hooksPath` pointing at `state/<id>.git-hooks`, where git's `commit-msg` hook strips known AI trailers even when a runtime injects them after the typed message.
+T3 Code owns its provider command and cannot carry Claude's inline setting, but its per-worktree environment overlay selects the same Git hook; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 When the flag is present, Claude launches omit those attribution-off settings, Devin worker configs keep the user config's `attribution` setting (Devin's default is on), and fleet launches do not install or select the strip hooks, so Git uses the repository's configured hooks directly.
 `bin/fm-git-strip-ai-trailers.sh` owns the identities, the install, and chaining the hooks of whichever repository git is running in, including when `git -c core.hooksPath` supplies the pane's hook override, so a project hook such as husky still runs when stripping is enabled.
 A repository whose config sets `core.hooksPath` to the empty string runs no project hook, as in plain git; if the wrapper otherwise cannot resolve that repository's hooks directory, the git operation fails rather than silently skipping a project hook such as a pre-push guard.
@@ -1256,15 +1263,16 @@ The per-backend delta is required only for the backend resolved from `FM_BACKEND
 | `zellij` | `zellij`, `jq`, `treehouse` |
 | `orca` | `orca` |
 | `cmux` | `cmux`, `jq`, `treehouse` |
+| `t3code` | `node`, `treehouse` |
 
 The JSON-emitting adapters (`herdr`, `zellij`, `cmux`) need `jq` because their spawn and liveness paths parse backend JSON.
-Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`) uses `treehouse` for worktrees.
+Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`, `t3code`) uses `treehouse` for worktrees.
 
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
-A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
+A herdr, zellij, cmux, or t3code home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 
 **Feature-specific requirements**
 
@@ -2259,9 +2267,10 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
-FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
+FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/t3code support ship/scout spawns, codex-app is not accepted
+FM_T3CODE_ORIGIN=       # optional T3 Code server origin override for backend=t3code; the default is read from ~/.t3/userdata/server-runtime.json
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
-FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
+FM_TASK_ID=             # internal task-worker marker fm-spawn.sh delivers to ship and scout environments, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 FM_TASK_INBOX=          # internal: absolute path of the task's steering inbox (state/<id>.inbox) that fm-spawn.sh exports into every ship, scout, and secondmate launch, never set by hand; the steering doorbell names "$FM_TASK_INBOX"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
@@ -2294,7 +2303,7 @@ FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_INACTIVE_RECONCILE_SECS=900  # 60..1800-second watcher cadence and inactivity threshold; locked session start also requests an immediate scan in the deferred worker
 FM_INACTIVE_RECONCILE_BUDGET_SECS=10  # 1..30-second scan deadline; wedged-scan kill backstop follows one second later
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or Relay dispatch)
-FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle pane; also the minimum spacing between attempts
+FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle endpoint; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
@@ -2361,7 +2370,7 @@ FM_CLASSIFY_PAUSED_VERB=paused     # leading declared-wait status verb; bin/fm-c
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates, unless that pane's own worker declared a wait that has not elapsed, or, where config/wedge-defer-parked-gate arms it, that pane's crew is parked at a validation gate awaiting the supervisor's decision on it that the crew raised under that run's key and nobody has answered yet, either of which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn or explicit native-harness progress (bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified captain-held transfer, or - where config/wedge-defer-parked-gate arms it - a validation gate of the crew's own awaiting the supervisor's still-unanswered decision takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait or, where config/wedge-defer-parked-gate arms it, unanswered supervisor-owed validation gate defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; a captain-held transfer is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
-FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
+FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe endpoints keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
 FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint through bin/fm-secondmate-liveness-lib.sh, which relaunches only a positively `dead` or `missing` endpoint through the ordinary guarded fm-spawn.sh --secondmate path and emits exactly one check wake per relaunch; zero or invalid values use 60
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds bounding one watcher-driven relaunch, so a wedged spawn cannot stall the poll; zero or invalid values use 120
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
@@ -2391,15 +2400,15 @@ FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed-plane submit; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after the request turn completes without a correlated parent report before its one recovery repost is eligible, and after the recovery turn completes before the missed-report escalation is eligible; never counted from delivery
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
-FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
-FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
+FM_SUPERVISOR_BACKEND=             # optional supervisor endpoint backend override; tmux/herdr/t3code, otherwise detects $TMUX_PANE, HERDR_ENV/HERDR_PANE_ID, then an explicitly selected T3 thread before tmux fallback
+FM_SUPERVISOR_TARGET=              # optional supervisor endpoint target override; tmux target, herdr <session>:<pane-id>, or T3 thread id, otherwise auto-detected
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
-FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
+FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor endpoint is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
