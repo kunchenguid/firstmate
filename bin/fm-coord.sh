@@ -10,7 +10,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: fm-coord.sh [--db PATH] <init|recover|enroll|session|area-set|migration-seed|submit|claim|amend|renew|release|check|reserve|publish-head|attach-pr|manifest-set|predecessors-set|queue-ready|queue-next|queue-synced|queue-validated|queue-checks|queue-attempt|queue-result|queue-reconcile|queue-abort|queue-operator-abort|queue-wrapper-exited|merge-guard|pulse-batch|outbox|ack|inspect|view> [JSON]
+usage: fm-coord.sh [--db PATH] <init|recover|enroll|session|area-set|migration-seed|submit|claim|amend|renew|release|check|reserve|publish-head|attach-pr|manifest-set|predecessors-set|queue-ready|queue-next|queue-synced|queue-validated|queue-checks|queue-attempt|queue-result|queue-reconcile|queue-abort|queue-operator-abort|queue-wrapper-exited|merge-guard|pulse-batch|ci-capacity-set|ci-complete|outbox|ack|inspect|view> [JSON]
 Default database: $FM_HOME/state/fm-coord.sqlite3
 Contract and examples: docs/coordination.md
 EOF
@@ -39,7 +39,7 @@ else
 fi
 [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { usage >&2; exit 64; }
 case "$1" in
-  init|recover|enroll|session|area-set|migration-seed|submit|claim|amend|renew|release|check|reserve|publish-head|attach-pr|manifest-set|predecessors-set|queue-ready|queue-next|queue-synced|queue-validated|queue-checks|queue-attempt|queue-result|queue-reconcile|queue-abort|queue-operator-abort|queue-wrapper-exited|merge-guard|pulse-batch|outbox|ack|inspect|view) ;;
+  init|recover|enroll|session|area-set|migration-seed|submit|claim|amend|renew|release|check|reserve|publish-head|attach-pr|manifest-set|predecessors-set|queue-ready|queue-next|queue-synced|queue-validated|queue-checks|queue-attempt|queue-result|queue-reconcile|queue-abort|queue-operator-abort|queue-wrapper-exited|merge-guard|pulse-batch|ci-capacity-set|ci-complete|outbox|ack|inspect|view) ;;
   *) usage >&2; exit 64 ;;
 esac
 umask 077

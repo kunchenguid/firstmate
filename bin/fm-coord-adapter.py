@@ -610,12 +610,21 @@ class Adapter:
             raise Usage(f"{task_id}: pre-ci needs a WORKTREE argument; this task has no recorded worktree")
         key = f"{task_id}:pulse:{batch_id}"
         prior = self.state["requests"].get(key)
+        if prior is not None and prior.get("reply", {}).get("admitted") is False:
+            # A queued batch is polled with a fresh request; the coordinator hands its one authorization to the first poll after admission.
+            del self.state["requests"][key]
+            prior = None
         answered = prior is not None and "reply" in prior
+        if answered and prior["reply"].get("ok") is True and task.get("pending_ci") == batch_id:
+            # replay received this batch's authorization; hand it to the worker once.
+            task.pop("pending_ci")
+            self.save()
+            return
         self.required(task["repo"], not answered, f"batch {batch_id} pulse was already requested")
         if answered:
             return
         task["worktree"] = worktree
-        task["pending_ci"] = True
+        task["pending_ci"] = batch_id
         self.save()
         # The batch is authorized only for the head the worker is about to validate.
         live = self.ci_ready(task_id, worktree)
@@ -627,6 +636,10 @@ class Adapter:
         payload = {k: v for k, v in prior["payload"].items() if k != "request_id"} if prior else {**live, "intent_id": task["intent_id"], "head_oid": task["published_head"], "batch_id": batch_id}
         receipt = self.send(key, "pulse-batch", payload)
         self.required(task["repo"], receipt is not None and receipt.get("ok") is True, f"batch {batch_id} pulse is unconfirmed or already issued")
+        if receipt and receipt.get("admitted") is False:
+            warn(f"{task_id}: batch {batch_id} is queued for CI capacity at position {receipt['position']}; rerun pre-ci for this batch before requesting CI")
+            self.required(task["repo"], False, f"batch {batch_id} awaits a CI slot")
+            return
         if receipt and receipt.get("ok") is True:
             task.pop("pending_ci", None)
             self.save()

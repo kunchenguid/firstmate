@@ -126,7 +126,7 @@ Replaying an unacknowledged event retains its original identity, while request r
 An inbox acknowledgment by a future transport means delivery, not a grant.
 The database is authoritative; unrestricted status prose and notification cursors are projections.
 
-Schema versions 1 through 7 live in the corresponding numbered files under `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
+Schema versions 1 through 8 live in the corresponding numbered files under `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
 The tables are `meta` for boot identity and the authority credential digest; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
 Version 2 adds required-check manifests, queue items, one-slot records, integration generations, and unique terminal outcomes.
 Version 3 adds recorded wrapper identity and attempt time to queue items.
@@ -139,6 +139,7 @@ The migration rebinds a participant whose version-4 host ID equals the coordinat
 It leaves recorded attempts, including their local or remote classification and host ID, unchanged.
 Version 6 adds one CI pulse authorization per `(repo, base, batch_id)`.
 Version 7 adds fenced CI batch identities that manual recovery restores from the marker.
+Version 8 adds per-repository CI admission capacity and the queued or active CI heads it governs.
 A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.
 The command refuses a database with a newer or uninitialized schema.
 SQLite's single-writer transaction lock serializes concurrent claim requests on this one local database.
@@ -175,6 +176,10 @@ For a remote home, the authenticated adapter supplies `wrapper_start` along with
 `queue-wrapper-exited` includes `request_id`, `intent_id`, `home_id`, participant `generation`, `slot_generation`, `attempt_event_id`, `wrapper_host_id`, `wrapper_pid`, and `wrapper_start` from that remote attempt, plus `exit_verified_host_id` from the participant adapter.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `pulse-batch` accepts the current writer claim, `intent_id`, published `head_oid`, and a stable `batch_id`; a second request for that batch receives `batch-already-pulsed`.
+CI admission capacity is opt-in per repository and base and off by default: until `ci-capacity-set {"request_id":...,"repo":"owner/repo","base":"main","capacity":4}` is run, every `pulse-batch` is admitted at once.
+With a capacity, `pulse-batch` reserves an active-head slot for that immutable head before authorizing it; when every slot is taken it queues the head and replies `admitted:false` with its queue `position`, and a second batch for a head that already holds or awaits a slot receives `head-already-admitted`.
+A head keeps its slot, even after its run turns red or its claim ends, until `ci-complete {"request_id":...,"repo":...,"base":...,"head_oid":...,"conclusion":"success|failure|cancelled|timed_out"}` reports a terminal run; that releases the slot and admits the oldest queued heads into the free slots, each with one `ci-pulse-authorized` event.
+The first `pulse-batch` for a promoted batch returns that authorization with `admitted:true`; a lost reply replays it by request ID, and any later request receives `batch-already-pulsed`, so a duplicate never pulses twice.
 `merge-guard` accepts a PR URL and head OID and confirms an active attempting slot, current writer claim, and exact queued head.
 `inspect` gives a small state summary for operators.
 `view` projects active intents, active claims, recent scope conflicts, the integration queue, and pending central outbox events as one JSON object.
@@ -199,6 +204,7 @@ The launch brief of every ship task in a coordinated home gives the same `pre-pu
 While an amendment is refused or pending, the head stays unpublished and both `pre-push` and `scope-amend` remain pending in `view`.
 `pre-ci TASK [BATCH [WORKTREE]]` checks the same fence and records one authorization for the stable batch ID before a `ci:batch` request; omitting `BATCH` uses the task ID.
 It refuses to pulse, and keeps its pending checkpoint, while the worktree HEAD differs from the published head, so CI is never authorized for an older head.
+When the repository's CI capacity is full, `pre-ci` reports the batch's queue position and keeps the checkpoint pending (an enforced repository refuses); rerunning `pre-ci` for the same batch polls with a fresh request and clears the checkpoint once the batch is admitted.
 `check` returns the intent's latest central head, and the adapter refreshes its local published-head cache from it before comparing, so a lost `publish-head` reply cannot let an older worktree HEAD pass.
 `pre-ci` without a worktree uses the task's recorded worktree and refuses when none is recorded; `replay` skips a pending `pre-ci` with no recorded worktree and warns.
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
@@ -264,6 +270,6 @@ Do not lower or replace the marker to make a restore appear current.
 For manual recovery, first stop participant traffic and verify that no coordinator command or forge attempt is still active; preserve the current database, marker, outbox, and any unknown merge attempts before restoring.
 After restoring the selected backup to its original absolute path, run `bin/fm-coord.sh --db PATH recover '{"confirm":"FENCE_AND_REENROLL"}'` only under that fenced maintenance window.
 The marker also records high-water marks for migration allocation counters, integration slot generations, and authorized CI batch IDs.
-Recovery revokes all active claims, advances participant generations beyond the marker's recorded high-water generations, advances the event sequence, every allocation counter, and every slot generation past its recorded high-water mark plus a gap of ten, refuses every recorded CI batch ID, invalidates preparation slots, retains uncertain forge attempts as `outcome-unknown`, and creates a new authority identity and marker.
+Recovery revokes all active claims, advances participant generations beyond the marker's recorded high-water generations, advances the event sequence, every allocation counter, and every slot generation past its recorded high-water mark plus a gap of ten, refuses every recorded CI batch ID, drops queued CI heads whose batch the marker records as authorized after the backup so they are never promoted again, invalidates preparation slots, retains uncertain forge attempts as `outcome-unknown`, and creates a new authority identity and marker.
 Re-enroll participant sessions with new request IDs, replay the outbox by stable event ID, reconcile each unknown forge outcome against its exact PR and head, and re-admit intents before enabling integration.
 If the marker is missing or the restored database's authority identity differs, stop and investigate the backup lineage rather than creating a second live authority.

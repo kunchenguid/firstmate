@@ -39,14 +39,14 @@ sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 7 ] || fail 'existing v2 database must upgrade through numbered migrations'
+[ "$(field "$upgraded" schema_version)" = 8 ] || fail 'existing v2 database must upgrade through numbered migrations'
 db=$tmp/upgrade-v3.sqlite3
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/003.sql"
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json) VALUES('legacy','[\"owner/repo\"]'); PRAGMA user_version=3;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 7 ] || fail 'existing v3 database must upgrade to host-aware schema'
+[ "$(field "$upgraded" schema_version)" = 8 ] || fail 'existing v3 database must upgrade to host-aware schema'
 coord enroll '{"request_id":"bind-legacy-host","home_id":"legacy","repos":["owner/repo"],"host_id":"legacy-test-host"}' > /dev/null
 field "$(coord inspect '{}')" participants | python3 -c 'import ast,sys; assert any(p["home_id"]=="legacy" and p["host_id"]=="legacy-test-host" for p in ast.literal_eval(sys.stdin.read()))' || fail 'an existing participant must bind its host after v3 upgrade'
 
@@ -57,7 +57,7 @@ done
 legacy_host=$(python3 -c 'import socket; print(socket.gethostname())')
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json,host_id) VALUES('was-local','[\"owner/repo\"]','$legacy_host'),('was-remote','[\"owner/repo\"]','remote-test-host'),('renamed-local','[\"owner/repo\"]','old-name.local'); INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES('inflight','was-local',1,'owner/repo','main','$base','branch/inflight','inflight','test','[]','[]','[]','[]','2026-01-01T00:00:00+00:00'); INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,ready_epoch,updated_at,attempt_event_id,attempt_epoch,wrapper_pid,wrapper_start,wrapper_boot,wrapper_home_id,wrapper_host_id,wrapper_local) VALUES('inflight','owner/repo','main','$head_a','outcome-unknown',0,'2026-01-01T00:00:00+00:00','legacy-attempt',0,1,'legacy-start','synthetic-previous-boot','was-local','$legacy_host',1); PRAGMA user_version=4;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 7 ] || fail 'existing v4 database must upgrade to machine-bound host identity'
+[ "$(field "$upgraded" schema_version)" = 8 ] || fail 'existing v4 database must upgrade to machine-bound host identity'
 coord enroll '{"request_id":"enroll-fresh","home_id":"fresh","repos":["owner/repo"]}' > /dev/null
 v4_state() { coord inspect '{}' | python3 -c "import json,sys; s=json.load(sys.stdin); hosts={p['home_id']: p['host_id'] for p in s['participants']}; item=s['queue'][0]; $1"; }
 v4_state 'assert hosts["fresh"].startswith("machine:") and hosts["was-local"] == hosts["fresh"]' || fail 'a v4 participant bound to the coordinator hostname must keep same-host identity'
@@ -493,7 +493,7 @@ sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" "ALTER TABLE queue_items ADD COLUMN attempt_epoch INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_pid INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_start TEXT; ALTER TABLE queue_items ADD COLUMN wrapper_boot TEXT; INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 7 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
+[ "$(field "$upgraded" schema_version)" = 8 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
 pass 'already patched v2 database upgrades without replaying its columns'
 
 db=$tmp/remote-wrapper.sqlite3

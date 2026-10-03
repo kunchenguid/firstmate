@@ -558,7 +558,7 @@ make_brief upgraded upgraded 201
 adapter "$tmp/upgraded" dispatch upgraded "$repo" "$repo" "$tmp/upgraded.brief" branch/upgraded claude > /dev/null 2>&1 || fail 'pre-migration dispatch must complete'
 gates=$(prepare_slot upgraded 201)
 # Simulate a v4 database whose binding is not the coordinator hostname, then upgrade it: migration 005 clears that host ID.
-sqlite3 "$db" "UPDATE participants SET host_id='pre-migration-hostname' WHERE home_id='upgraded'; DROP TABLE fenced_ci_batches; DROP TABLE ci_batches; PRAGMA user_version=4;"
+sqlite3 "$db" "UPDATE participants SET host_id='pre-migration-hostname' WHERE home_id='upgraded'; DROP TABLE ci_heads; DROP TABLE ci_capacity; DROP TABLE fenced_ci_batches; DROP TABLE ci_batches; PRAGMA user_version=4;"
 coord init > /dev/null
 [ "$(host_of upgraded)" = None ] || fail 'migration must keep treating a non-hostname v4 binding as untrusted'
 sleep 600 &

@@ -50,6 +50,12 @@ subprocess.run([sys.argv[3],'--db',sys.argv[2],'release',json.dumps(p)],check=Tr
 PY
 adapter "$tmp/a" readmit a "$repo" > /dev/null 2> "$tmp/err" || fail "explicit amendment re-admission must pass after conflict clears: $(cat "$tmp/err")"
 adapter "$tmp/a" pre-push a "$repo" > /dev/null || fail 'admitted current writer must publish exact head'
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m newer
+if adapter "$tmp/a" pre-ci a batch-newer "$repo" > /dev/null 2> "$tmp/err"; then
+  fail 'an enforced CI pulse must refuse a worktree HEAD newer than the published head'
+fi
+grep -q 'not the published head' "$tmp/err" || fail "an unpublished HEAD refusal must say so: $(cat "$tmp/err")"
+git -C "$repo" reset -q --hard HEAD~1
 python3 - "$tmp/a/config/coordination.json" "$tmp/unreachable.sqlite3" <<'PY'
 import json,sys
 path=sys.argv[1]
