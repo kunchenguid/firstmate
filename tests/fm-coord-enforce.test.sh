@@ -243,6 +243,9 @@ mkdir -p "$tmp/fakebin"
 cat > "$tmp/fakebin/gh" <<SH
 #!/usr/bin/env bash
 [ "\$*" = "api repos/owner/repo/compare/$forge_base...$head_a --jq .status" ] || exit 1
+case \$(cat "$tmp/compare-status") in
+  HTTP*) cat "$tmp/compare-status" >&2; exit 1 ;;
+esac
 cat "$tmp/compare-status"
 SH
 cat > "$tmp/fakebin/gh-axi" <<SH
@@ -260,6 +263,18 @@ view_a=$(printf '{"baseRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun
 land() { PATH="$tmp/fakebin:$PATH" FM_PR_GITHUB_VIEW=$view_a FM_PR_GITHUB_REQUIRED='[{"context":"ci","app_id":null}]' adapter "$tmp/a" pre-merge a "$pr" "$head_a"; }
 result() { PATH="$tmp/fakebin:$PATH" FM_PR_GITHUB_VIEW=$view_a adapter "$tmp/a" merge-result a "$pr" "$1"; }
 slot_state() { python3 -c 'import json,sys; c=json.loads(sys.argv[1]); i=json.load(open(sys.argv[2]))["tasks"]["a"]["intent_id"]; print(" ".join([q["state"] for q in c["queue"] if q["intent_id"]==i]+["slot:"+s["state"] for s in c["slots"]]))' "$(coord inspect)" "$tmp/a/state/fm-coord-adapter.json"; }
+for forge_error in 'HTTP 403: API rate limit exceeded' 'HTTP 502: Bad Gateway'; do
+  printf '%s\n' "$forge_error" > "$tmp/compare-status"
+  if land > /dev/null 2> "$tmp/err"; then
+    fail "an unavailable forge comparison ($forge_error) must not let the merge through"
+  fi
+  grep -q 'queue synchronization paused: forge comparison .* unavailable' "$tmp/err" || fail "an unavailable forge comparison must pause with a visible reason: $(cat "$tmp/err")"
+  if grep -q 'must contain current base' "$tmp/err"; then
+    fail 'an unavailable forge comparison must not be reported as a head lacking the base'
+  fi
+  [ "$(slot_state)" = 'syncing slot:syncing' ] || fail "an unavailable forge comparison must keep the slot syncing for retry: $(slot_state)"
+done
+pass 'an unavailable forge comparison pauses queue synchronization instead of proving the head lacks the base'
 printf 'diverged\n' > "$tmp/compare-status"
 if land > /dev/null 2> "$tmp/err"; then
   fail 'a head the forge reports as not containing the current base must refuse the merge'

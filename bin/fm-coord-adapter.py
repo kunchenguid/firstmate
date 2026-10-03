@@ -355,8 +355,16 @@ class Adapter:
         view = json.loads(os.environ.get("FM_PR_GITHUB_VIEW") or "{}")
         required = json.loads(os.environ.get("FM_PR_GITHUB_REQUIRED") or "[]")
         base_oid = view.get("baseRefOid")
-        compare = subprocess.run(["gh", "api", f"repos/{task['repo']}/compare/{base_oid}...{head}", "--jq", ".status"], capture_output=True, text=True, timeout=30, check=False) if base_oid else None
-        contains = compare is not None and compare.returncode == 0 and compare.stdout.strip() in {"ahead", "identical"}
+        # Only the forge's answer decides containment; an unavailable comparison is unknown, never "lacks base".
+        status, reason = "", "pull request view has no base OID"
+        if base_oid:
+            try:
+                compare = subprocess.run(["gh", "api", f"repos/{task['repo']}/compare/{base_oid}...{head}", "--jq", ".status"], capture_output=True, text=True, timeout=30, check=False)
+                status = compare.stdout.strip() if compare.returncode == 0 else ""
+                reason = compare.stderr.strip() or f"status {compare.stdout.strip()!r}, exit {compare.returncode}"
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                reason = str(exc)
+        contains = {"ahead": True, "identical": True, "behind": False, "diverged": False}.get(status)
         # ponytail: the wrapper already judged reruns and waivers; any ok run of a name counts here.
         ok = {}
         for check in view.get("statusCheckRollup", []):
@@ -387,6 +395,9 @@ class Adapter:
                     return
                 continue
             elif slot is None:
+                return
+            elif contains is None:
+                warn(f"{task_id}: queue synchronization paused: forge comparison of {head} with base {base_oid} is unavailable ({reason}); retry the merge")
                 return
             elif state == "syncing":
                 step = ("queue-synced", {**owner, **evidence, "slot_generation": slot["generation"]})
