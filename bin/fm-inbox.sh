@@ -370,7 +370,10 @@ finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summ
     0) announced=1 ;;
     2) acknowledged=1 ;;
   esac
-  [ -f "$INBOX/handled/$id.note" ] && path="$INBOX/handled/$id.note"
+  if [ -f "$INBOX/handled/$id.note" ]; then
+    path="$INBOX/handled/$id.note"
+    acknowledged=1
+  fi
   if [ "$json" -eq 1 ]; then
     emit_note_json "$outcome" "$id" "$request_id" 1 "$announced" "$path" "$acknowledged"
   else
@@ -499,7 +502,7 @@ cmd_note() {
 }
 
 cmd_announce() {
-  local json=0 id summary path state rc=0
+  local json=0 id summary path state rc=0 acknowledged=0
   if [ "${1:-}" = "--json" ]; then
     json=1
     shift
@@ -510,13 +513,14 @@ cmd_announce() {
   path=$(note_path "$id") || die "no such note: $id"
   summary=$(note_summary_from_body "$(read_note_body "$path")")
   state=$(note_announce_state "$id" "$path")
+  [ -f "$INBOX/handled/$id.note" ] && acknowledged=1
   if [ "$state" != true ] && [ "$path" = "$INBOX/handled/$id.note" ]; then
     state=acknowledged
   fi
   case "$state" in
     true)
       if [ "$json" -eq 1 ]; then
-        emit_note_json replay "$id" "" 1 1 "$path"
+        emit_note_json replay "$id" "" 1 1 "$path" "$acknowledged"
       else
         printf 'already-announced %s\n' "$id"
       fi
