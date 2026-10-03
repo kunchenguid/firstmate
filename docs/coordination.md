@@ -98,7 +98,7 @@ A merged PR at the recorded head releases an unknown slot as `merged`.
 An open or closed-unmerged PR that is neither in the merge queue nor armed for auto-merge releases it as `refused` only when the forge compare of the current base with the recorded head reports `ahead` or `diverged`, so the attempted head is not on base.
 The PR is read again after the compare, and a changed state, merge flag, head, or base keeps the slot unknown.
 Before any forge read toward a not-merged release, the recorded wrapper process must be proven gone, by a changed boot, an absent PID, or a changed process start time, and at least 10 minutes since the attempt; `FM_COORD_QUIET_SECONDS` changes that period for deterministic testing.
-An attempt without a recorded wrapper identity, or whose identity cannot be checked, never leaves `outcome-unknown` as not merged.
+An attempt whose recorded wrapper identity cannot be checked never leaves `outcome-unknown` as not merged.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
 `queue-operator-abort` is the only other way out of `outcome-unknown`: the enrolled `@authority` actor records a reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.
 The command requires the authority credential before looking up a replay receipt, refuses participant identities and caller-supplied operator names, and records `@authority` as the operator.
@@ -133,7 +133,7 @@ Run `bin/fm-coord.sh --help` for the current command list.
 `--db PATH` selects an explicit local database for tests or one authority; otherwise set `FM_HOME` for `state/fm-coord.sqlite3`.
 Initialize with `FM_COORD_AUTHORITY_TOKEN=<private-random-token> bin/fm-coord.sh init` to enroll an authority credential of at least 32 characters.
 The database stores only its SHA-256 digest; keep the token private to the authority host and supply the same environment variable for `queue-operator-abort`.
-An initialization without the token leaves operator abort disabled for that database, and an already initialized version-3 database cannot enroll or replace a token through `init`.
+An initialization without the token leaves operator abort disabled until a later `init` with the token enrolls it once and records an `authority-enrolled` event; repeating `init` with the same token changes nothing, and a different token is refused rather than replacing the enrolled one.
 Then use `enroll {"request_id":"enroll-a","home_id":"home-a","repos":["owner/repo"]}` and `session {"request_id":"session-a","home_id":"home-a"}`.
 An administrative area definition uses `area-set {"request_id":"area-a","repo":"owner/repo","name":"api","paths":["src/api"],"aliases":["server-api"]}`.
 An intent uses `submit {"request_id":"submit-a","intent_id":"task-a","home_id":"home-a","generation":1,"repo":"owner/repo","base":"main","base_oid":"0000000000000000000000000000000000000000","branch":"task/a","task_id":"a","goal":"Update API","resources":[{"type":"area","name":"api"}]}`.
@@ -150,7 +150,7 @@ Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`,
 Payload fields starting with `_` are reserved for those forge observations and are refused.
 `queue-abort` includes the slot generation and a reason, and is limited to the pre-attempt phases.
 `queue-operator-abort` includes the integration `generation` and `reason`; its actor comes from the enrolled authority credential rather than the payload.
-`queue-attempt` accepts an optional `wrapper_pid`: the live process on the coordinator host that then `exec`s `bin/fm-pr-merge.sh`, so its PID and start time identify the wrapper.
+`queue-attempt` requires `wrapper_pid`: the live process on the coordinator host that then `exec`s `bin/fm-pr-merge.sh`, so its PID and start time identify the wrapper; a missing PID or one whose start time cannot be read refuses the attempt.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `inspect` gives a small state summary for operators.
 

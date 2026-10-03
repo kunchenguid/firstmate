@@ -80,11 +80,11 @@ coord queue-validated "$(printf '{"request_id":"validate-a-again","intent_id":"a
 reject queue-checks "$(printf '{"request_id":"checks-missing","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","protection_available":false,"checks":[]}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")" 'empty check rollup must not pass unavailable protection'
 reject queue-checks "$(printf '{"request_id":"checks-extra-missing","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","protection_available":true,"forge_required_checks":["Policy"],"checks":[{"name":"Lint","head_oid":"%s","conclusion":"success"},{"name":"Tests","head_oid":"%s","conclusion":"success"}]}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new" "$head_a" "$head_a")" 'forge-required check outside manifest must also be present'
 coord queue-checks "$(printf '{"request_id":"checks-green","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","protection_available":false,"checks":[{"name":"Lint","head_oid":"%s","conclusion":"success"},{"name":"Tests","head_oid":"%s","conclusion":"success"}]}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new" "$head_a" "$head_a")" > /dev/null
-reject queue-attempt "$(printf '{"request_id":"attempt-held","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":false,"away_merge_allowed":true,"merge_authorized":true}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")" 'captain hold must refuse attempt'
-reject queue-attempt "$(printf '{"request_id":"attempt-away","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":false,"merge_authorized":true}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")" 'away restriction must refuse attempt'
+reject queue-attempt "$(printf '{"request_id":"attempt-held","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":false,"away_merge_allowed":true,"merge_authorized":true,"wrapper_pid":'"$$"'}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")" 'captain hold must refuse attempt'
+reject queue-attempt "$(printf '{"request_id":"attempt-away","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":false,"merge_authorized":true,"wrapper_pid":'"$$"'}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")" 'away restriction must refuse attempt'
 pass 'repo manifest fails closed and holds refuse a merge decision'
 
-attempt=$(coord queue-attempt "$(printf '{"request_id":"attempt-a","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")")
+attempt=$(coord queue-attempt "$(printf '{"request_id":"attempt-a","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true,"wrapper_pid":'"$$"'}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")")
 attempt_id=$(field "$attempt" attempt_event_id)
 unknown=$(coord queue-result "$(printf '{"request_id":"result-forged-refusal","intent_id":"a","generation":%s,"outcome":"refused","wrapper_refused":true,"pr_merged":false,"observed_base_oid":"%s"}' "$gen3" "$base_new")")
 [ "$(field "$unknown" state)" = outcome-unknown ] || fail 'caller-supplied refusal and base OID must not settle a merge attempt'
@@ -135,7 +135,7 @@ coord queue-synced "$(printf '{"request_id":"sync-b-again","intent_id":"b","home
 coord queue-validated "$(printf '{"request_id":"validate-b-again","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","validation_passed":true,"validation_id":"sim-b-2"}' "$gb" "$claim_b" "$fence_b" "$gen4" "$head_b2" "$merge_oid")" > /dev/null
 coord queue-checks "$(printf '{"request_id":"checks-b-green","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","protection_available":false,"checks":[{"name":"Lint","head_oid":"%s","conclusion":"success"},{"name":"Tests","head_oid":"%s","conclusion":"success"}]}' "$gb" "$claim_b" "$fence_b" "$gen4" "$head_b2" "$merge_oid" "$head_b2" "$head_b2")" > /dev/null
 coord publish-head "$(printf '{"request_id":"head-b-3","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s","expected_previous_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b3" "$head_b2")" > /dev/null
-after_check_change=$(coord queue-attempt "$(printf '{"request_id":"attempt-b-stale","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true}' "$gb" "$claim_b" "$fence_b" "$gen4" "$head_b3" "$merge_oid")")
+after_check_change=$(coord queue-attempt "$(printf '{"request_id":"attempt-b-stale","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true,"wrapper_pid":'"$$"'}' "$gb" "$claim_b" "$fence_b" "$gen4" "$head_b3" "$merge_oid")")
 [ "$(field "$after_check_change" state)" = sync-needed ] || fail 'a head change after green checks must refuse the attempt'
 pass 'head change after remote green invalidates check evidence'
 
@@ -198,7 +198,7 @@ attempt() {
   coord queue-synced "{\"request_id\":\"sync-$id-$7\",$common,\"head_contains_base\":true}" > /dev/null
   coord queue-validated "{\"request_id\":\"validate-$id-$7\",$common,\"validation_passed\":true,\"validation_id\":\"v-$id-$7\"}" > /dev/null
   coord queue-checks "{\"request_id\":\"checks-$id-$7\",$common,\"protection_available\":false,\"checks\":[{\"name\":\"Lint\",\"head_oid\":\"$head\",\"conclusion\":\"success\"}]}" > /dev/null
-  coord queue-attempt "{\"request_id\":\"attempt-$id-$7\",$common,\"head_contains_base\":true,\"captain_hold_released\":true,\"away_merge_allowed\":true,\"merge_authorized\":true${8:+,\"wrapper_pid\":$8}}" > /dev/null
+  coord queue-attempt "{\"request_id\":\"attempt-$id-$7\",$common,\"head_contains_base\":true,\"captain_hold_released\":true,\"away_merge_allowed\":true,\"merge_authorized\":true,\"wrapper_pid\":${8:-$$}}" > /dev/null
 }
 attempt_unknown() {
   attempt "$@"
@@ -245,11 +245,29 @@ unlanded=$(FM_COORD_QUIET_SECONDS=0 not_landed reconcile-timeout)
 [ "$(field "$unlanded" state)" = refused ] || fail 'open unmerged PR off base must record a not-merged outcome'
 pass 'exited wrapper after the quiet period releases a not-landed slot with one terminal outcome'
 
-attempt_unknown b b "$gb" "$claim_b" "$fence_b" "$head_b" 1
-if PATH="$tmp/bin:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_MERGED=false FM_TEST_HEAD="$head_b" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=diverged coord queue-reconcile "$(printf '{"request_id":"reconcile-no-identity","intent_id":"b","generation":%s,"pr_url":"https://github.com/owner/repo/pull/2","base":"main","head_oid":"%s"}' "$slot" "$head_b")" > "$tmp/unexpected" 2> "$tmp/error"; then
-  fail 'an attempt without wrapper identity must never auto-release as not merged'
+pick=$(coord queue-next '{"request_id":"next-b-identity","repo":"owner/repo","base":"main"}')
+slot=$(field "$pick" generation)
+common=$(printf '"intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s"' "$gb" "$claim_b" "$fence_b" "$slot" "$head_b" "$base")
+coord queue-synced "{\"request_id\":\"sync-b-identity\",$common,\"head_contains_base\":true}" > /dev/null
+coord queue-validated "{\"request_id\":\"validate-b-identity\",$common,\"validation_passed\":true,\"validation_id\":\"v-b-identity\"}" > /dev/null
+coord queue-checks "{\"request_id\":\"checks-b-identity\",$common,\"protection_available\":false,\"checks\":[{\"name\":\"Lint\",\"head_oid\":\"$head_b\",\"conclusion\":\"success\"}]}" > /dev/null
+gates='"head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true'
+reject queue-attempt "{\"request_id\":\"attempt-b-no-identity\",$common,$gates}" 'an attempt without wrapper identity must be refused'
+sleep 0 &
+gone=$!
+wait "$gone"
+reject queue-attempt "{\"request_id\":\"attempt-b-dead-wrapper\",$common,$gates,\"wrapper_pid\":$gone}" 'an attempt whose wrapper start time cannot be proven must be refused'
+coord queue-abort "$(printf '{"request_id":"abort-b-identity","intent_id":"b","slot_generation":%s,"reason":"identity test"}' "$slot")" > /dev/null
+pass 'queue-attempt refuses missing or unverifiable wrapper identity'
+
+coord queue-ready "$(printf '{"request_id":"ready-b-live","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" > /dev/null
+sleep 600 &
+live_wrapper=$!
+attempt_unknown b b "$gb" "$claim_b" "$fence_b" "$head_b" 1 "$live_wrapper"
+if PATH="$tmp/bin:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_MERGED=false FM_TEST_HEAD="$head_b" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=diverged coord queue-reconcile "$(printf '{"request_id":"reconcile-live-b","intent_id":"b","generation":%s,"pr_url":"https://github.com/owner/repo/pull/2","base":"main","head_oid":"%s"}' "$slot" "$head_b")" > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'a stuck live wrapper must never auto-release as not merged'
 fi
-still_unknown 'an attempt without wrapper identity must keep the slot outcome-unknown'
+still_unknown 'a stuck live wrapper must keep the slot outcome-unknown'
 FM_COORD_AUTHORITY_TOKEN="$authority_token" reject queue-operator-abort "$(printf '{"request_id":"operator-abort-participant","intent_id":"b","home_id":"b","generation":%s,"operator":"captain","reason":"wrapper lost"}' "$slot")" 'a participant must not impersonate the authority even with its local token'
 FM_COORD_AUTHORITY_TOKEN="$authority_token" reject queue-operator-abort "$(printf '{"request_id":"operator-abort-forged-name","intent_id":"b","generation":%s,"operator":"captain","reason":"wrapper lost"}' "$slot")" 'operator identity must not come from caller text'
 abort_payload=$(printf '{"request_id":"operator-abort-b","intent_id":"b","generation":%s,"reason":"wrapper lost"}' "$slot")
@@ -258,7 +276,9 @@ aborted=$(FM_COORD_AUTHORITY_TOKEN="$authority_token" coord queue-operator-abort
 [ "$(field "$aborted" state)" = repair-needed ] || fail 'operator abort must release the slot to repair-needed'
 reject queue-operator-abort "$abort_payload" 'an unauthenticated replay must not return the authority receipt'
 field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]=="@authority" and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' || fail 'operator abort must record its authenticated actor and reason'
-pass 'unknown wrapper identity never auto-releases; only the enrolled authority can abort'
+kill "$live_wrapper"
+wait "$live_wrapper" 2> /dev/null || true
+pass 'a stuck wrapper never auto-releases; only the enrolled authority can abort'
 
 coord queue-ready "$(printf '{"request_id":"ready-b-retry","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" > /dev/null
 sleep 600 &
@@ -289,12 +309,41 @@ coord queue-abort "$(printf '{"request_id":"abort-b","intent_id":"b","slot_gener
 reject queue-ready "$(printf '{"request_id":"ready-b-legacy","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" 'queue-ready must refuse a stored PR URL that reconciliation cannot evaluate'
 pass 'queue-ready refuses an unevaluable PR URL'
 
+queue_state() { coord inspect '{}' | python3 -c 'import json,sys; print(next(q["state"] for q in json.load(sys.stdin)["queue"] if q["intent_id"]==sys.argv[1]))' "$1"; }
+slot_count() { coord inspect '{}' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["slots"]))'; }
+db=$tmp/untokened.sqlite3
+coord init > /dev/null
+coord enroll '{"request_id":"enroll-untokened","home_id":"a","repos":["owner/repo"]}' > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-untokened","home_id":"a"}')" generation)
+coord manifest-set '{"request_id":"manifest-untokened","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+candidate a a "$ga" "$head_a"
+sleep 600 &
+wrapper=$!
+attempt a a "$ga" "$claim_id" "$fence" "$head_a" untokened "$wrapper"
+kill "$wrapper"
+wait "$wrapper" 2> /dev/null || true
+refused=$(coord queue-result "$(printf '{"request_id":"refused-untokened","intent_id":"a","generation":%s,"outcome":"refused"}' "$slot")")
+[ "$(field "$refused" state)" = outcome-unknown ] || fail 'a wrapper refusal must leave the slot outcome-unknown'
+reject queue-operator-abort "$(printf '{"request_id":"abort-untokened","intent_id":"a","generation":%s,"reason":"no token"}' "$slot")" 'operator abort must stay disabled without an enrolled token'
+released=$(FM_COORD_QUIET_SECONDS=0 not_landed reconcile-untokened)
+[ "$(field "$released" state)" = refused ] || fail 'an exited wrapper refusal must release the slot without an authority token'
+[ "$(slot_count)" = 0 ] || fail 'a reconciled refusal must free the integration slot'
+pass 'refusal on a database without a token reconciles to a released slot'
+
+enrolled_events() { coord outbox '{"limit":1000}' | python3 -c 'import json,sys; print(sum(e["type"]=="authority-enrolled" for e in json.load(sys.stdin)["events"]))'; }
+[ "$(enrolled_events)" = 0 ] || fail 'init without a token must not record an enrollment'
+FM_COORD_AUTHORITY_TOKEN="$authority_token" coord init > /dev/null
+[ "$(enrolled_events)" = 1 ] || fail 'first token on an initialized v3 database must enroll with one event'
+FM_COORD_AUTHORITY_TOKEN="$authority_token" coord init > /dev/null
+[ "$(enrolled_events)" = 1 ] || fail 'repeating enrollment with the same token must be idempotent'
+FM_COORD_AUTHORITY_TOKEN=other-authority-credential-0123456789abcdef reject init '{}' 'init must never replace an enrolled token'
+FM_COORD_AUTHORITY_TOKEN=other-authority-credential-0123456789abcdef reject queue-operator-abort '{"request_id":"abort-wrong-token","intent_id":"a","generation":1,"reason":"x"}' 'a refused replacement token must not authorize operator abort'
+pass 'init enrolls an authority token once on an existing v3 database'
+
 db=$tmp/revocation.sqlite3
 coord init > /dev/null
 coord enroll '{"request_id":"enroll-recovery","home_id":"a","repos":["owner/repo"]}' > /dev/null
 ga=$(field "$(coord session '{"request_id":"session-recovery-1","home_id":"a"}')" generation)
-queue_state() { coord inspect '{}' | python3 -c 'import json,sys; print(next(q["state"] for q in json.load(sys.stdin)["queue"] if q["intent_id"]==sys.argv[1]))' "$1"; }
-slot_count() { coord inspect '{}' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["slots"]))'; }
 reclaim() {
   id=$1; generation=$2; head=$3
   grant=$(coord claim "$(printf '{"request_id":"reclaim-%s-%s","intent_id":"%s","home_id":"a","generation":%s,"version":1}' "$id" "$generation" "$id" "$generation")")

@@ -424,13 +424,11 @@ def queue_operation(db, op, p):
         require(p.get("captain_hold_released") is True and p.get("away_merge_allowed") is True and p.get("merge_authorized") is True, "captain hold, away posture, or merge authority refuses attempt")
         require(p.get("head_contains_base") is True, "current head no longer contains current base")
         wrapper_pid = p.get("wrapper_pid")
-        wrapper_start = None
-        if wrapper_pid is not None:
-            require(type(wrapper_pid) is int and wrapper_pid > 0, "wrapper_pid must be a positive integer")
-            wrapper_start = process_start(wrapper_pid)
-            require(wrapper_start is not None, "wrapper process is not running")
+        require(type(wrapper_pid) is int and wrapper_pid > 0, "wrapper_pid must be a positive integer")
+        wrapper_start = process_start(wrapper_pid)
+        require(wrapper_start is not None, "wrapper process is not running")
         event_id = emit(db, "merge-attempted", request_id, {"intent_id": item["intent_id"], "head_oid": item["head_oid"], "base_oid": item["base_oid"], "pr_url": intent["pr_url"], "wrapper": "bin/fm-pr-merge.sh"})
-        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,attempt_epoch=?,wrapper_pid=?,wrapper_start=?,wrapper_boot=?,updated_at=? WHERE intent_id=?", (event_id, int(time.time()), wrapper_pid, wrapper_start, boot_id() if wrapper_pid is not None else None, stamp(), item["intent_id"]))
+        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,attempt_epoch=?,wrapper_pid=?,wrapper_start=?,wrapper_boot=?,updated_at=? WHERE intent_id=?", (event_id, int(time.time()), wrapper_pid, wrapper_start, boot_id(), stamp(), item["intent_id"]))
         db.execute("UPDATE integration_slots SET state='attempting' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
         return {"ok": True, "state": "attempting", "attempt_event_id": event_id, "event_id": event_id, "merge_command": ["bin/fm-pr-merge.sh", intent["task_id"], intent["pr_url"]]}
     if op == "queue-result":
@@ -718,18 +716,22 @@ def main():
                         if target == 1:
                             db.execute("INSERT INTO meta(key,value) VALUES('boot_id',?)", (boot_id(),))
                         db.execute(f"PRAGMA user_version={target}")
-                    if credential is not None:
-                        enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
-                        require(enrolled is None or hmac.compare_digest(credential, enrolled[0]), "authority credential mismatch")
-                        if enrolled is None:
-                            db.execute("INSERT INTO meta(key,value) VALUES('authority_token_sha256',?)", (credential,))
                     db.execute("COMMIT")
                 except Exception:
                     db.execute("ROLLBACK")
                     raise
-            elif credential is not None:
-                enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
-                require(enrolled is not None and hmac.compare_digest(credential, enrolled[0]), "authority credential mismatch")
+            if credential is not None:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
+                    require(enrolled is None or hmac.compare_digest(credential, enrolled[0]), "authority credential mismatch")
+                    if enrolled is None:
+                        db.execute("INSERT INTO meta(key,value) VALUES('authority_token_sha256',?)", (credential,))
+                        emit(db, "authority-enrolled", None, {"actor": "@authority"})
+                    db.execute("COMMIT")
+                except Exception:
+                    db.execute("ROLLBACK")
+                    raise
             print(compact({"ok": True, "schema_version": 3, "db": db_path, "mode": "shadow-advisory"}))
             return
         require(db.execute("PRAGMA user_version").fetchone()[0] == 3, "unsupported or uninitialized schema version; run init")
