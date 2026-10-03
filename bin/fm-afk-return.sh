@@ -698,7 +698,7 @@ EOF
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained drain_ok=1 wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
+  local evidence blockers brief drain_err drained drain_ok=1 wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
   local archived_contract tag kind text retained_live restored_epoch
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
@@ -848,7 +848,11 @@ EOF
     append_evidence lifecycle "status file unreadable: $STATUS_SCAN_ERROR; catch-up stays gated" "$evidence"
     lifecycle_ok=0
   fi
-  render_return_brief "$evidence" "$blockers" "$since" "$drain_ok"
+  # Render to a file and publish through one external cat: a failed builtin
+  # write to stdout leaves bash 3.2's stdio buffer unflushed, and the next
+  # command substitution's subshell flushes it into the captured value.
+  brief=$(mktemp "$STATE/.afk-return-brief.XXXXXX") || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+  render_return_brief "$evidence" "$blockers" "$since" "$drain_ok" > "$brief"
   if [ "$HELD_READ_FAILED" -eq 1 ]; then
     append_evidence lifecycle "held set unreadable: $HELD_READ_PATH; catch-up stays gated" "$evidence"
     lifecycle_ok=0
@@ -856,33 +860,34 @@ EOF
     remove_evidence_prefix lifecycle 'held set unreadable:' "$evidence" || lifecycle_ok=0
   fi
   if [ "$lifecycle_ok" -ne 1 ] || grep -q "^blocker$(printf '\t')" "$blockers"; then
-    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    cat "$brief" || true
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err" "$brief"; return 1; }
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
     print_evidence "$GATE" >&2
     print_blockers "$GATE" >&2
     printf 'fm-afk-return: handle each blocker now, or close it with resolved [key=...] and append a durable reclassification reason, then run bin/fm-afk-return.sh check\n' >&2
-    rm -f "$evidence" "$blockers" "$drain_err"
+    rm -f "$evidence" "$blockers" "$drain_err" "$brief"
     return 3
   fi
 
-  if ! print_evidence "$evidence"; then
+  if ! print_evidence "$evidence" >> "$brief" || ! cat "$brief"; then
     append_evidence lifecycle 'recovery evidence publication failed; retry catch-up before ordinary work' "$evidence"
-    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err" "$brief"; return 1; }
     printf 'fm-afk-return: recovery evidence could not be published; catch-up remains pending\n' >&2
-    rm -f "$evidence" "$blockers" "$drain_err"
+    rm -f "$evidence" "$blockers" "$drain_err" "$brief"
     return 3
   fi
 
   if [ -n "$wake_ack_line" ] && ! printf '%s\n' "$wake_ack_line" >&2; then
     append_evidence lifecycle 'durable wake acknowledgement command publication failed; retry catch-up before ordinary work' "$evidence"
-    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
-    rm -f "$evidence" "$blockers" "$drain_err"
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err" "$brief"; return 1; }
+    rm -f "$evidence" "$blockers" "$drain_err" "$brief"
     return 3
   fi
 
   rm -f "$GATE"
   clear_delivery_artifacts
-  rm -f "$evidence" "$blockers" "$drain_err"
+  rm -f "$evidence" "$blockers" "$drain_err" "$brief"
   printf 'fm-afk-return: catch-up clear; ordinary captain work may proceed\n'
   return 0
 }
