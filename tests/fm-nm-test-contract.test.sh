@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract: parsed .no-mistakes.yaml must leave commands.test absent or empty.
+# Contracts for Firstmate's parsed no-mistakes repository configuration.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,4 +23,18 @@ puts (val.nil? || val == false || val == "") ? "" : val.inspect
   pass "no-mistakes does not configure commands.test"
 }
 
+test_nm_selects_pipeline_agent_dynamically() {
+  command -v ruby >/dev/null 2>&1 \
+    || fail "ruby is required to parse .no-mistakes.yaml for this contract"
+  local val
+  val=$(ruby -ryaml -e '
+doc = YAML.load_file(ARGV[0]) || {}
+puts doc["agent"]
+' "$NM") || fail "failed to parse .no-mistakes.yaml as YAML"
+  [ "$val" = auto ] \
+    || fail "agent must be auto so Firstmate does not inherit a machine-global fixed pipeline agent; got: $val"
+  pass "no-mistakes resolves Firstmate's pipeline agent dynamically"
+}
+
 test_nm_has_no_deterministic_test_command
+test_nm_selects_pipeline_agent_dynamically

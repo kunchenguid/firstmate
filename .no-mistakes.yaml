@@ -1,5 +1,10 @@
 # Per-repo no-mistakes overrides.
 
+# Resolve the pipeline agent from the runnable tools at each run instead of
+# inheriting one machine-global fixed agent selection.
+# This is no-mistakes availability routing; model tuning remains global.
+agent: auto
+
 # firstmate is an agent-orchestration repo: its AGENTS.md installs a fleet-captain
 # identity. Disable project-level agent settings/instructions for gate agents so a
 # no-mistakes review/fix/document/test/lint/pr/rebase/ci agent never adopts that
