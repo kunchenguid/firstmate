@@ -165,9 +165,35 @@ short_result=$(coord claim "$(printf '{"request_id":"claim-short-lease","intent_
 short_claim=$(field "$short_result" claim_id)
 short_fence=$(field "$short_result" fence)
 sleep 1.2
+assert_error renew "$(printf '{"request_id":"renew-expired","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s}' "$winner" "$new_generation" "$short_claim" "$short_fence")" 'expired lease must not renew'
+python3 - "$db" "$short_claim" <<'PY' || fail 'refused renewal must keep the committed expiry and its outbox event'
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+assert db.execute("SELECT state FROM claims WHERE claim_id=?", (sys.argv[2],)).fetchone()[0] == 'expired'
+events = db.execute("SELECT e.payload_json FROM events e JOIN outbox o ON o.event_id=e.event_id WHERE e.event_type='lease-expired'").fetchall()
+assert any(json.loads(r[0])['claim_id'] == sys.argv[2] for r in events)
+PY
 assert_error check "$(printf '{"home_id":"%s","generation":%s,"claim_id":"%s","fence":%s}' "$winner" "$new_generation" "$short_claim" "$short_fence")" 'expired lease must reject the old worker'
 submit fresh-lease "$loser" "$( [ "$loser" = a ] && printf '%s' "$ga" || printf '%s' "$gb" )" '[{"type":"file","name":"src/expiring.py"}]' > /dev/null
 fresh_result=$(claim fresh-lease "$loser" "$( [ "$loser" = a ] && printf '%s' "$ga" || printf '%s' "$gb" )")
 [ "$(field "$fresh_result" ok)" = True ] || fail 'expired resource should admit a fresh claimant'
 assert_error release "$(printf '{"request_id":"stale-release","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s}' "$winner" "$new_generation" "$short_claim" "$short_fence")" 'old claim cannot release the successor'
 pass 'lease expiry and successor fencing'
+
+assert_error enroll '{"request_id":"enroll-reserved","home_id":"@authority","repos":["owner/repo"]}' 'home_id must not take the administrative @authority actor'
+assert_error enroll '{"request_id":"enroll-reserved-other","home_id":"@ops","repos":["owner/repo"]}' 'home_id must not take any reserved @ actor'
+pass 'administrative actor namespace is reserved from enrollment'
+
+assert_error submit "$(printf '{"request_id":"submit-foreign-pr","intent_id":"foreign-pr","home_id":"%s","generation":%s,"repo":"owner/repo","base":"main","base_oid":"0000000000000000000000000000000000000000","branch":"branch/foreign-pr","task_id":"foreign-pr","goal":"test","pr_url":"https://github.com/other/repo/pull/1","resources":[{"type":"file","name":"src/foreign.py"}]}' "$winner" "$new_generation")" 'submit must reject a PR URL from another repository'
+coord submit "$(printf '{"request_id":"submit-amend-issue","intent_id":"amend-issue","home_id":"%s","generation":%s,"repo":"owner/repo","base":"main","base_oid":"0000000000000000000000000000000000000000","branch":"branch/amend-issue","task_id":"amend-issue","goal":"test","issue":"owner/repo#77","resources":[{"type":"file","name":"src/amend-a.py"}]}' "$winner" "$new_generation")" > /dev/null
+amend_grant=$(claim amend-issue "$winner" "$new_generation")
+amend_claim=$(field "$amend_grant" claim_id)
+amend_fence=$(field "$amend_grant" fence)
+amended=$(coord amend "$(printf '{"request_id":"amend-issue","intent_id":"amend-issue","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"version":1,"resources":[{"type":"file","name":"src/amend-a.py"},{"type":"file","name":"src/amend-b.py"}]}' "$winner" "$new_generation" "$amend_claim" "$amend_fence")") || fail 'amend must retain the implicit issue resource'
+[ "$(field "$amended" version)" -eq 2 ] || fail 'issue-backed amendment must advance the intent version'
+pass 'issue-backed scope amendment keeps implicit issue claim'
+
+assert_error attach-pr "$(printf '{"request_id":"attach-foreign-pr","intent_id":"amend-issue","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"pr_url":"https://github.com/other/repo/pull/1"}' "$winner" "$new_generation" "$amend_claim" "$amend_fence")" 'attach-pr must reject a PR URL from another repository'
+own_pr=$(coord attach-pr "$(printf '{"request_id":"attach-own-pr","intent_id":"amend-issue","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"pr_url":"https://github.com/owner/repo/pull/9"}' "$winner" "$new_generation" "$amend_claim" "$amend_fence")")
+[ "$(field "$own_pr" pr_url)" = 'https://github.com/owner/repo/pull/9' ] || fail 'rejected foreign PR must not block the intent repository PR'
+pass 'PR identity must match the intent repository'

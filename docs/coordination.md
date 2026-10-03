@@ -21,11 +21,11 @@ V1 has one active coordinator and no automatic standby takeover; fencing numbers
 
 `submit` records `intent.v1` with `intent_id`, `repo`, `base`, full `base_oid`, `home_id`, `generation`, `task_id`, `branch`, optional `issue` and `pr_url`, short `goal`, nonempty write `resources`, and optional `read_dependencies`, `predecessors`, and `expected_artifacts` arrays.
 Submit stores the canonical resource set and leaves the intent `submitted`; it never grants a claim.
-When `issue` is present, submission automatically includes an issue claim in the canonical set.
-The planned PR URL may be absent at submission; `attach-pr` records a full HTTPS URL under the current branch writer claim and does not permit replacement with a different URL.
+When `issue` is present, submission automatically includes an issue claim in the canonical set, and `amend` keeps it without the caller restating it.
+The planned PR URL may be absent at submission; `attach-pr` records a full HTTPS URL whose `owner/repo` path matches the intent `repo` under the current branch writer claim and does not permit replacement with a different URL.
 This increment has no integration queue record.
 Do not put raw prompts, credentials, secret projections, or full transcripts in a payload.
-`request_id` is a caller-generated stable idempotency key for every mutation, unique within its `home_id` or the administrative `@authority` actor.
+`request_id` is a caller-generated stable idempotency key for every mutation, unique within its `home_id` or the administrative `@authority` actor; a `home_id` cannot start with `@`, so the two namespaces never collide.
 Reusing the key with identical operation and payload returns the exact stored result; reusing it for different content fails.
 The prior grant receipt can be replayed after a lease expires, but it cannot revive the grant: use `check` with the live fence before acting.
 
@@ -53,6 +53,7 @@ Claims default to a 900-second lease, with a caller heartbeat recommended every 
 `renew` requires the exact active claim, participant generation, intent version and fence.
 `release` has the same fence checks and cannot delete a later holder's claim.
 Expiry and session replacement revoke authority and branch writer ownership, never local work.
+Lease expiry is committed with its outbox event before the requested operation runs, so a refused late `renew` still leaves the claim expired.
 The short lease does not erase a migration number reservation.
 Before a namespace's first `reserve`, the operator must inspect the repository's existing migration numbering and use `migration-seed` with the first unused number.
 Each reservation has a durable allocation ID and unique `(repo, namespace, number)`; numbers increase without reuse even after the claim expires.

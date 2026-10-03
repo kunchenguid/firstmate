@@ -62,10 +62,11 @@ def path(value):
     return "/".join(parts)
 
 
-def pr_url(value):
+def pr_url(value, repo):
     token(value, "pr_url")
     parsed = urlsplit(value)
     require(parsed.scheme == "https" and parsed.hostname and parsed.path and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment and " " not in value, "pr_url must be a canonical full HTTPS URL")
+    require(parsed.path.split("/")[1:3] == repo.split("/"), "pr_url must belong to the intent repository")
     return value
 
 
@@ -231,7 +232,7 @@ def run_operation(db, op, p):
         issue = p.get("issue")
         if issue is not None:
             canonical = sorted(set(canonical + [("issue", token(issue, "issue"))]))
-        url = pr_url(p["pr_url"]) if p.get("pr_url") is not None else None
+        url = pr_url(p["pr_url"], repo) if p.get("pr_url") is not None else None
         db.execute("INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,issue,pr_url,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (intent_id, p["home_id"], p["generation"], repo, token(p.get("base"), "base"), base_oid.lower(), token(p.get("branch"), "branch"), token(p.get("task_id"), "task_id"), issue, url, token(p.get("goal"), "goal"), compact(canonical), compact(p.get("read_dependencies", [])), compact(p.get("predecessors", [])), compact(p.get("expected_artifacts", [])), stamp()))
         event_id = emit(db, "intent-submitted", request_id, {"intent_id": intent_id, "home_id": p["home_id"], "repo": repo, "version": 1})
         return {"ok": True, "intent_id": intent_id, "version": 1, "resources": canonical, "event_id": event_id}
@@ -266,7 +267,7 @@ def run_operation(db, op, p):
             return {"ok": True, "claim_id": claim_id, "fence": fence, "expires_mono_ns": expires, "event_id": event_id}
         claim = active_claim(db, p, intent)
         if op == "attach-pr":
-            url = pr_url(p.get("pr_url"))
+            url = pr_url(p.get("pr_url"), intent["repo"])
             require(intent["pr_url"] is None or intent["pr_url"] == url, "PR URL cannot change for this intent")
             db.execute("UPDATE intents SET pr_url=? WHERE intent_id=?", (url, intent_id))
             event_id = emit(db, "pr-attached", request_id, {"intent_id": intent_id, "pr_url": url})
@@ -275,6 +276,8 @@ def run_operation(db, op, p):
             require(intent["version"] == p.get("version"), "intent version mismatch")
             old = set(tuple(x) for x in json.loads(intent["resources_json"]))
             updated = set(resources(db, intent["repo"], p.get("resources")))
+            if intent["issue"] is not None:
+                updated.add(("issue", intent["issue"]))
             require(old.issubset(updated), "scope amendment cannot silently drop resources")
             found = conflicts(db, intent["repo"], updated, claim["claim_id"])
             if found:
@@ -372,10 +375,17 @@ def main():
         db.execute("BEGIN IMMEDIATE")
         try:
             reconcile_clock(db, boot_id())
+            db.execute("COMMIT")
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("BEGIN IMMEDIATE")
+        try:
             if op in MUTATIONS:
                 request_id = token(payload.get("request_id"), "request_id")
                 actor = payload.get("home_id", "@authority")
                 token(actor, "actor")
+                require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
                 digest = hashlib.sha256(compact({"operation": op, "payload": payload}).encode()).hexdigest()
                 prior = db.execute("SELECT digest,result_json FROM requests WHERE actor=? AND request_id=?", (actor, request_id)).fetchone()
                 if prior:
