@@ -361,6 +361,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
@@ -708,6 +710,14 @@ if [ "$READ_ONLY" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
+  # Bind this home's operator session for away-mode delivery while the fleet
+  # lock is held: this locked session start is the one context guaranteed to
+  # run inside the operator pane/terminal, so the identity captured here is
+  # what fm_supervisor_resolve trusts when a later away daemon inherits a
+  # different terminal's env (kunchenguid/firstmate#1506). Best-effort: a
+  # context with no capturable pane or tty binds nothing, and the resolver
+  # then reports UNAVAILABLE rather than aiming a fallback constant.
+  fm_supervisor_session_write "$STATE" 2>/dev/null || true
   # A full locked start publishes this home's current structured summary.
   # Publication is side-band and best-effort, so it can never change the
   # session-start result. A context re-emit is not another session start.

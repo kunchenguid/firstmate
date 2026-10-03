@@ -209,8 +209,18 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # docs/herdr-backend.md and AGENTS.md section 4's
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
-# pane.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
+# pane. `tty` is the bound-operator-terminal channel from
+# bin/fm-supervisor-target-lib.sh's session record: a primary outside every
+# multiplexer still gets its escalations on its own terminal, delivered by a
+# device write rather than composer injection.
+FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr tty"
+# Where the armed supervisor identity came from, set by fm_super_main's
+# fm_supervisor_resolve call: FM_SUPERVISOR_TARGET (explicit), BOUND(<record>),
+# TMUX_PANE, HERDR_ENV(HERDR_PANE_ID), or UNAVAILABLE. The wedge alarm names it
+# instead of guessing "pane busy or wedged", and UNAVAILABLE is a real verdict:
+# pane escalation is OFF, never armed on the firstmate:0 fallback constant
+# (kunchenguid/firstmate#1506).
+FM_SUPERVISOR_TARGET_SOURCE=
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -1048,6 +1058,28 @@ wedge_alarm_via_herdr() {  # <summary>
   return 1
 }
 
+# Write the alarm text to the operator terminal the session-start binding
+# recorded (state/.supervisor-session): it fires only while the recorded
+# session leader still owns that same tty, so a recycled or dead terminal
+# fails closed. This is the channel independent of the failed pane path the
+# wedge alarm needs - no pane, composer, or multiplexer status-line sits
+# between the alarm and the captain (kunchenguid/firstmate#1506).
+# Best-effort: logs and returns 1 on failure.
+wedge_alarm_via_tty() {  # <summary> <state>
+  local summary=$1 state=$2 rc dev
+  wedge_alarm_os_notifier_override tty "$summary"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+  esac
+  dev=$(fm_supervisor_session_tty_device "$state" 2>/dev/null) || return 1
+  printf '\n*** firstmate away-mode escalations WEDGED ***\n%s\n\n' "$summary" > "$dev" 2>/dev/null \
+    && return 0
+  log "wedge alarm: bound tty write failed ($dev)"
+  return 1
+}
+
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
 # alert can reach a phone/pager (ntfy, Slack, SMS) even when the captain is away
 # from the machine entirely. Best-effort: logs and returns 1 on failure.
@@ -1082,6 +1114,7 @@ wedge_alarm_emit() {  # <channel> <summary>
     osascript) wedge_alarm_via_osascript "$summary" ;;
     herdr) wedge_alarm_via_herdr "$summary" ;;
     command) wedge_alarm_via_command "$cmd" "$summary" ;;
+    tty) wedge_alarm_via_tty "$summary" "$cmd" ;;
   esac
 }
 
@@ -1090,8 +1123,12 @@ wedge_alarm_emit() {  # <channel> <summary>
 # `off` directive disables the alert, regardless of position; an unresolvable
 # `auto` (no OS channel on this platform) logs that the durable marker is the
 # only signal. Every notifier routes through the test-forced recorder seam.
-wedge_alarm_notify() {  # <summary> <marker>
-  local summary=$1 marker=$2 ch
+# After the configured channels the bound operator terminal is always tried
+# too: it is the one channel that shares no code path with the pane delivery
+# that just failed, so it can still report the stall when the pane itself is
+# the problem.
+wedge_alarm_notify() {  # <summary> <marker> [state]
+  local summary=$1 marker=$2 state=${3:-} ch
   local -a channels=()
   while IFS= read -r ch; do
     [ -n "$ch" ] || continue
@@ -1109,6 +1146,7 @@ wedge_alarm_notify() {  # <summary> <marker>
       *) log "wedge alarm: unrecognized active-alert channel directive (redacted); marker still written" ;;
     esac
   done
+  [ -n "$state" ] && wedge_alarm_emit tty "$summary" "$state" || true
   return 0
 }
 
@@ -1136,19 +1174,26 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     WEDGE_ALARM_LAST_EPOCH=$now
     log "ERROR: away-mode escalation undelivered ${age}s; last delivery failure: ${INJECT_LAST_FAILURE:-not recorded}. Buffer + wake-queue preserved; alarm marker written."
   fi
+  # Name the armed identity and where it came from instead of guessing
+  # "pane busy or wedged": UNAVAILABLE means there is no pane to blame -
+  # the operator session itself could not be identified
+  # (kunchenguid/firstmate#1506).
+  target=${FM_SUPERVISOR_TARGET:-}
+  backend=${FM_SUPERVISOR_BACKEND:-}
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Supervisor: target=%s source=%s backend=%s\n' "${target:-none}" "${FM_SUPERVISOR_TARGET_SOURCE:-unspecified}" "${backend:-none}"
     printf 'Last delivery failure: %s\n' "${INJECT_LAST_FAILURE:-not recorded}"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+    printf 'The supervisor session could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
-  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
   # Best-effort status-line flash. tmux's display-message is a client-side OSD
   # with no herdr equivalent; the log line + durable marker above are already
   # the primary, backend-independent signal, so a non-tmux backend just skips
-  # this cosmetic extra rather than attempting an unsupported call.
-  if [ "$backend" = tmux ]; then
+  # this cosmetic extra rather than attempting an unsupported call. An
+  # UNAVAILABLE or non-tmux identity flashes nothing - the armed target is
+  # the only pane this may ever touch, never the firstmate:0 fallback.
+  if [ "$backend" = tmux ] && [ -n "$target" ]; then
     tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
@@ -1157,7 +1202,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker" "$state"
   fi
 }
 
@@ -1418,6 +1463,7 @@ window_for_task() {  # <task-key> [state]
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded bytes errf err='' body
+  local resolved_line bound bound_backend bound_target
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1434,13 +1480,73 @@ inject_msg() {  # <message> [state]
     || { INJECT_LAST_FAILURE="the digest could not be encoded"; log "inject failed: $INJECT_LAST_FAILURE"; return 1; }
   body=$msg
   msg=$encoded
-  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
-  # dispatches through bin/fm-backend.sh so a herdr supervisor pane is checked
-  # via the herdr adapter instead of always assuming tmux. Falls back to tmux
-  # when unset (sourced/test contexts that never ran fm_super_main's startup
-  # discovery), matching this function's pre-existing default assumption.
-  backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  target="${FM_SUPERVISOR_TARGET:-}"
+  backend="${FM_SUPERVISOR_BACKEND:-}"
+  if [ -z "$target" ]; then
+    # No armed identity: re-resolve the operator session through the single
+    # resolver (explicit > verified session-start binding > pane env). A
+    # binding written after this daemon started re-arms delivery; UNAVAILABLE
+    # stays a verdict - pane escalation is OFF, never armed on the
+    # firstmate:0 fallback constant (kunchenguid/firstmate#1506).
+    if resolved_line=$(fm_supervisor_resolve "$state" 2>/dev/null); then
+      IFS=$'\t' read -r backend target FM_SUPERVISOR_TARGET_SOURCE <<< "$resolved_line"
+      FM_SUPERVISOR_TARGET=$target
+      FM_SUPERVISOR_BACKEND=$backend
+    else
+      INJECT_LAST_FAILURE="supervisor session UNAVAILABLE: no bound or discovered operator session; pane escalation OFF (never firstmate:0)"
+      log "inject $INJECT_LAST_FAILURE"
+      return 1
+    fi
+  fi
+  # Falls back to tmux when unset (sourced/test contexts that never ran
+  # fm_super_main's startup resolution), matching this function's
+  # pre-existing default assumption.
+  [ -n "$backend" ] || backend=tmux
+  # A bound identity is re-verified against the live session record before
+  # EVERY injection: a recorded pane or terminal that now belongs to a
+  # different live session is a stale binding, not a target.
+  case "$FM_SUPERVISOR_TARGET_SOURCE" in
+    BOUND\(*)
+      if ! bound=$(fm_supervisor_session_verify "$state" 2>/dev/null) \
+        || { IFS=$'\t' read -r bound_backend bound_target <<< "$bound"; [ "$bound_backend" != "$backend" ] || [ "$bound_target" != "$target" ]; }; then
+        INJECT_LAST_FAILURE="bound supervisor identity no longer verifies ($FM_SUPERVISOR_TARGET_SOURCE -> $backend:$target); refusing delivery through a stale binding"
+        log "inject $INJECT_LAST_FAILURE"
+        # Disarm so the next call re-resolves instead of retrying this pane.
+        FM_SUPERVISOR_TARGET=
+        FM_SUPERVISOR_BACKEND=
+        FM_SUPERVISOR_TARGET_SOURCE=UNAVAILABLE
+        return 1
+      fi
+      ;;
+  esac
+  if [ "$backend" = tty ]; then
+    # Bound operator terminal: there is no composer to guard and no agent to
+    # submit to. A device write can only DISPLAY the digest - terminal output
+    # is never fed back as input - so the busy and composer guards that gate
+    # pane injection do not apply here.
+    case "$target" in
+      /dev/*) ;;
+      *)
+        INJECT_LAST_FAILURE="tty supervisor target is not a device path: $target"
+        log "inject failed: $INJECT_LAST_FAILURE"
+        return 1 ;;
+    esac
+    if [ ! -w "$target" ]; then
+      INJECT_LAST_FAILURE="tty supervisor terminal is not writable: $target"
+      log "inject $INJECT_LAST_FAILURE"
+      return 1
+    fi
+    if {
+      printf '\n=== firstmate away-mode escalation ===\n'
+      printf '%s\n' "$body"
+      printf '======================================\n\n'
+    } > "$target" 2>/dev/null; then
+      return 0
+    fi
+    INJECT_LAST_FAILURE="write to tty supervisor terminal $target failed"
+    log "inject failed: $INJECT_LAST_FAILURE"
+    return 1
+  fi
   fm_backend_target_exists "$backend" "$target" \
     || { INJECT_LAST_FAILURE="supervisor target $target not found on $backend"; return 1; }
   # (3) Busy-guard: never inject into an in-use supervisor pane.
@@ -1786,83 +1892,87 @@ fm_super_main() {
     log "warn: could not record this daemon's process identity; the turn-end guard cannot recognize away-mode supervision"
   fi
 
-  # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
-  # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
-  # (herdr) > tmux fallback. Resolved before the target below, since target
-  # discovery composes a herdr "<session>:<pane-id>" string using the same
-  # $HERDR_PANE_ID/$HERDR_SESSION markers this checks. Exporting the result
-  # into FM_SUPERVISOR_BACKEND makes inject_msg/pane_is_busy/pane_input_pending
-  # (which read that env var) dispatch through the right backend without an
-  # extra global thread-through.
-  local discovered_backend backend_source
-  backend_source="FM_SUPERVISOR_BACKEND"
-  if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
-    if [ -n "${TMUX_PANE:-}" ]; then
-      backend_source="TMUX_PANE"
-    elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
-      backend_source="HERDR_ENV"
-    else
-      backend_source="FALLBACK($FM_SUPERVISOR_BACKEND_DEFAULT)"
-    fi
-  fi
-  discovered_backend=$(discover_supervisor_backend) || true
-  FM_SUPERVISOR_BACKEND="$discovered_backend"
-  local BACKEND="$FM_SUPERVISOR_BACKEND"
-
-  # --- refuse an unsupported supervisor backend loudly, before ever trying a
-  # tmux/herdr-specific call against it (zellij, orca, and cmux have no verified
-  # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4
-  # harness-verification discipline). This is the clear refusal the task calls
-  # for, instead of a confusing "does not resolve to a tmux pane" error.
-  if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
-    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
-    log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
+  # --- resolve the supervisor session identity (operator pane/terminal) ----
+  # fm_supervisor_resolve (bin/fm-supervisor-target-lib.sh) is the single
+  # resolver every delivery path uses: FM_SUPERVISOR_TARGET > the
+  # state/.supervisor-session record bound at session start while it still
+  # names the same LIVE session > $TMUX_PANE > $HERDR_ENV/HERDR_PANE_ID >
+  # UNAVAILABLE. There is deliberately no firstmate:0 fallback here: a
+  # constant is not an identity, and arming pane delivery on it is exactly
+  # how the 3.16-day undelivered-escalation incident aimed a crew shell pane
+  # (kunchenguid/firstmate#1506). UNAVAILABLE = pane escalation OFF with the
+  # daemon still fully armed: the watcher, escalation buffer, housekeeping,
+  # and wedge alarm (bound tty / configured channels) all keep running, and
+  # a binding written later re-arms pane delivery without a restart.
+  local resolved_line r_backend r_target r_source r_alive
+  # A declared backend is a configuration fact independent of resolution: an
+  # explicit FM_SUPERVISOR_BACKEND name outside the supported set is a typo'd
+  # pin that must fail loudly even when no target resolves, never hide behind
+  # an UNAVAILABLE verdict and leave the daemon supervising degraded forever.
+  if [ -n "${FM_SUPERVISOR_BACKEND:-}" ] \
+      && ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$FM_SUPERVISOR_BACKEND"; then
+    echo "error: away-mode daemon does not support supervisor backend '$FM_SUPERVISOR_BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
+    log "startup failed: unsupported supervisor backend '$FM_SUPERVISOR_BACKEND' (explicit env)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
   fi
-
-  # --- auto-discover the supervisor target (the pane running firstmate) -----
-  # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
-  # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
-  # (which reads that env var) use the discovered pane without an extra global.
-  local discovered target_source
-  target_source="FM_SUPERVISOR_TARGET"
-  if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
-    if [ -n "${TMUX_PANE:-}" ]; then
-      target_source="TMUX_PANE"
-    elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
-      target_source="HERDR_ENV(HERDR_PANE_ID)"
-    else
-      target_source="FALLBACK(firstmate:0)"
-    fi
-  fi
-  if discovered=$(discover_supervisor_target); then
-    : # resolved cleanly
+  if resolved_line=$(fm_supervisor_resolve "$STATE"); then
+    IFS=$'\t' read -r r_backend r_target r_source <<< "$resolved_line"
   else
-    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
+    r_backend=""; r_target=""; r_source=UNAVAILABLE
   fi
-  FM_SUPERVISOR_TARGET="$discovered"
-  local TARGET="$FM_SUPERVISOR_TARGET"
+  # Exporting the resolved pair into FM_SUPERVISOR_BACKEND/FM_SUPERVISOR_TARGET
+  # makes inject_msg/pane_is_busy/pane_input_pending (which read those env
+  # vars) dispatch on the resolved identity without an extra thread-through.
+  # UNAVAILABLE exports NEITHER - an unset pair is what makes inject_msg
+  # re-resolve per call instead of defaulting to the constant.
+  FM_SUPERVISOR_BACKEND=$r_backend
+  FM_SUPERVISOR_TARGET=$r_target
+  FM_SUPERVISOR_TARGET_SOURCE=$r_source
+  local BACKEND=$r_backend TARGET=$r_target
 
-  # --- validate supervisor target at startup (a missing target is a typo) ---
-  # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`
-  # probe, so a herdr supervisor pane is checked via the herdr adapter; for
-  # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
-  # '#{pane_id}'` call as before.
-  if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
-    echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
-    log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
-    fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
-    exit 1
+  if [ "$r_source" != UNAVAILABLE ]; then
+    rm -f "$STATE/.subsuper-supervisor-unavailable" 2>/dev/null || true
+    # --- refuse an unsupported supervisor backend loudly, before ever trying
+    # a tmux/herdr-specific call against it (zellij, orca, and cmux have no
+    # verified composer/busy primitives wired up for this daemon yet -
+    # AGENTS.md section 4 harness-verification discipline).
+    if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
+      echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
+      log "startup failed: unsupported supervisor backend '$BACKEND' (source=$r_source)"
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    fi
+    # --- validate the resolved supervisor identity at startup. A bound
+    # record was already re-verified by the resolver; this catches the rest
+    # (an env-discovered or explicit pane typo, a tty device that closed
+    # between bind and now).
+    r_alive=0
+    if [ "$BACKEND" = tty ]; then
+      [ -w "$TARGET" ] && r_alive=1
+    elif fm_backend_target_exists "$BACKEND" "$TARGET" 2>/dev/null; then
+      r_alive=1
+    fi
+    if [ "$r_alive" -ne 1 ]; then
+      echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane/terminal; set FM_SUPERVISOR_TARGET" >&2
+      log "startup failed: target '$TARGET' not usable (backend=$BACKEND source=$r_source)"
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    fi
+  else
+    echo "warn: no supervisor session identity available (no FM_SUPERVISOR_TARGET, no verified $FM_SUPERVISOR_SESSION_NAME record, no TMUX_PANE/HERDR_ENV); pane escalation OFF - never armed on the firstmate:0 fallback (issue #1506); the wedge alarm still fires through bound/configured channels" >&2
+    log "supervisor UNAVAILABLE (record_state=${FM_SUPERVISOR_RECORD_STATE:-absent}); pane escalation OFF, buffer + wedge alarm armed"
+    printf 'supervisor session UNAVAILABLE as of %s (record_state=%s); pane escalation OFF - delivery re-arms when an identity resolves\n' \
+      "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${FM_SUPERVISOR_RECORD_STATE:-absent}" \
+      > "$STATE/.subsuper-supervisor-unavailable" 2>/dev/null || true
   fi
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  log "daemon starting (pid $$); target=${TARGET:-none}; target_source=$FM_SUPERVISOR_TARGET_SOURCE; backend=${BACKEND:-none}; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
@@ -1920,11 +2030,55 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
-      log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
-      # Flush is pointless with no pane; preserve any buffered escalations.
-      sleep "$INJECT_FAIL_SLEEP"
-      continue
+    # The UNAVAILABLE source is checked FIRST: inject_msg's stale-binding
+    # disarm clears the globals while the loop's local TARGET still holds the
+    # dead pane - if the pane-gone guard ran first it would sleep forever on
+    # that ghost and housekeeping (the wedge alarm) would never fire.
+    if [ "$FM_SUPERVISOR_TARGET_SOURCE" = UNAVAILABLE ]; then
+      TARGET=
+      BACKEND=
+      FM_SUPERVISOR_TARGET=
+      FM_SUPERVISOR_BACKEND=
+      # Degraded mode: pane escalation is OFF but housekeeping must still
+      # run below - it is what makes the wedge alarm fire. Re-resolve on a
+      # bounded cadence so a session-start binding or pane env appearing
+      # after daemon start re-arms delivery without a restart.
+      if [ "$(_file_age "$STATE/.subsuper-resolve-retry")" -ge "$INJECT_FAIL_SLEEP" ]; then
+        _now > "$STATE/.subsuper-resolve-retry"
+        if resolved_line=$(fm_supervisor_resolve "$STATE" 2>/dev/null); then
+          IFS=$'\t' read -r r_backend r_target r_source <<< "$resolved_line"
+          r_alive=0
+          if fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$r_backend"; then
+            if [ "$r_backend" = tty ]; then
+              [ -w "$r_target" ] && r_alive=1
+            elif fm_backend_target_exists "$r_backend" "$r_target" 2>/dev/null; then
+              r_alive=1
+            fi
+          fi
+          if [ "$r_alive" -eq 1 ]; then
+            FM_SUPERVISOR_BACKEND=$r_backend; BACKEND=$r_backend
+            FM_SUPERVISOR_TARGET=$r_target; TARGET=$r_target
+            FM_SUPERVISOR_TARGET_SOURCE=$r_source
+            rm -f "$STATE/.subsuper-supervisor-unavailable" 2>/dev/null || true
+            log "supervisor session armed: target=$TARGET source=$r_source backend=$BACKEND"
+          else
+            log "resolved supervisor '$r_backend:$r_target' ($r_source) is not deliverable; staying UNAVAILABLE"
+          fi
+        fi
+      fi
+    elif [ -n "$TARGET" ]; then
+      r_alive=0
+      if [ "$BACKEND" = tty ]; then
+        [ -w "$TARGET" ] && r_alive=1
+      elif fm_backend_target_exists "$BACKEND" "$TARGET" 2>/dev/null; then
+        r_alive=1
+      fi
+      if [ "$r_alive" -ne 1 ]; then
+        log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
+        # Flush is pointless with no pane; preserve any buffered escalations.
+        sleep "$INJECT_FAIL_SLEEP"
+        continue
+      fi
     fi
 
     # --- (re)start watcher if it has exited --------------------------------

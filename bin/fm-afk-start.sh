@@ -64,6 +64,8 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-inject-wedged" \
+        "$state/.subsuper-supervisor-unavailable" \
+        "$state/.subsuper-resolve-retry" \
         "$state/.subsuper-unknown-acked" 2>/dev/null
 }
 
