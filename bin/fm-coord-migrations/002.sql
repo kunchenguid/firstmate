@@ -17,10 +17,6 @@ CREATE TABLE queue_items (
   validation_id TEXT,
   manifest_version INTEGER,
   attempt_event_id TEXT UNIQUE,
-  attempt_epoch INTEGER,
-  wrapper_pid INTEGER,
-  wrapper_start TEXT,
-  wrapper_boot TEXT,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX queue_items_pick ON queue_items(repo,base_ref,state,ready_epoch);

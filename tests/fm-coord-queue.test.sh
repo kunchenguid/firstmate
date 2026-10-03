@@ -20,7 +20,17 @@ head_b2=5555555555555555555555555555555555555555
 base_new=3333333333333333333333333333333333333333
 merge_oid=4444444444444444444444444444444444444444
 
-coord init > /dev/null
+main_db=$db
+db=$tmp/upgrade-v2.sqlite3
+sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
+sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
+sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
+upgraded=$(coord init)
+[ "$(field "$upgraded" schema_version)" = 3 ] || fail 'existing v2 database must upgrade to a numbered v3 migration'
+db=$main_db
+
+authority_token=test-authority-credential-0123456789abcdef
+FM_COORD_AUTHORITY_TOKEN="$authority_token" coord init > /dev/null
 coord enroll '{"request_id":"enroll-a","home_id":"a","repos":["owner/repo"]}' > /dev/null
 coord enroll '{"request_id":"enroll-b","home_id":"b","repos":["owner/repo"]}' > /dev/null
 ga=$(field "$(coord session '{"request_id":"session-a","home_id":"a"}')" generation)
@@ -164,7 +174,7 @@ after_failure=$(coord queue-next '{"request_id":"next-after-failure","repo":"own
 pass 'one failing candidate yields its slot'
 
 db=$tmp/unlanded.sqlite3
-coord init > /dev/null
+FM_COORD_AUTHORITY_TOKEN="$authority_token" coord init > /dev/null
 coord enroll '{"request_id":"enroll-a","home_id":"a","repos":["owner/repo"]}' > /dev/null
 coord enroll '{"request_id":"enroll-b","home_id":"b","repos":["owner/repo"]}' > /dev/null
 ga=$(field "$(coord session '{"request_id":"session-a","home_id":"a"}')" generation)
@@ -240,11 +250,15 @@ if PATH="$tmp/bin:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_MERGED=false FM_TEST_H
   fail 'an attempt without wrapper identity must never auto-release as not merged'
 fi
 still_unknown 'an attempt without wrapper identity must keep the slot outcome-unknown'
-reject queue-operator-abort "$(printf '{"request_id":"operator-abort-anonymous","intent_id":"b","generation":%s,"reason":"wrapper lost"}' "$slot")" 'operator abort must name the operator'
-aborted=$(coord queue-operator-abort "$(printf '{"request_id":"operator-abort-b","intent_id":"b","generation":%s,"operator":"captain","reason":"wrapper lost"}' "$slot")")
+FM_COORD_AUTHORITY_TOKEN="$authority_token" reject queue-operator-abort "$(printf '{"request_id":"operator-abort-participant","intent_id":"b","home_id":"b","generation":%s,"operator":"captain","reason":"wrapper lost"}' "$slot")" 'a participant must not impersonate the authority even with its local token'
+FM_COORD_AUTHORITY_TOKEN="$authority_token" reject queue-operator-abort "$(printf '{"request_id":"operator-abort-forged-name","intent_id":"b","generation":%s,"operator":"captain","reason":"wrapper lost"}' "$slot")" 'operator identity must not come from caller text'
+abort_payload=$(printf '{"request_id":"operator-abort-b","intent_id":"b","generation":%s,"reason":"wrapper lost"}' "$slot")
+reject queue-operator-abort "$abort_payload" 'operator abort must require the enrolled authority credential'
+aborted=$(FM_COORD_AUTHORITY_TOKEN="$authority_token" coord queue-operator-abort "$abort_payload")
 [ "$(field "$aborted" state)" = repair-needed ] || fail 'operator abort must release the slot to repair-needed'
-field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]=="captain" and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' || fail 'operator abort must record who aborted and why'
-pass 'unknown wrapper identity never auto-releases; only a named operator abort does'
+reject queue-operator-abort "$abort_payload" 'an unauthenticated replay must not return the authority receipt'
+field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]=="@authority" and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' || fail 'operator abort must record its authenticated actor and reason'
+pass 'unknown wrapper identity never auto-releases; only the enrolled authority can abort'
 
 coord queue-ready "$(printf '{"request_id":"ready-b-retry","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" > /dev/null
 sleep 600 &
@@ -352,3 +366,20 @@ reclaim reboot "$ga" "$head_a"
 picked=$(coord queue-next '{"request_id":"next-reboot-reclaimed","repo":"owner/repo","base":"main"}')
 [ "$(field "$picked" intent_id)" = reboot ] || fail 'reboot-revoked intent must re-enter under the new session generation'
 pass 'coordinator reboot releases pre-attempt slot and permits fenced re-admission'
+
+db=$tmp/upgrade-v2.sqlite3
+coord enroll '{"request_id":"enroll-upgrade","home_id":"a","repos":["owner/repo"]}' > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-upgrade","home_id":"a"}')" generation)
+coord manifest-set '{"request_id":"manifest-upgrade","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+candidate upgraded a "$ga" "$head_a"
+attempt upgraded a "$ga" "$claim_id" "$fence" "$head_a" 1
+[ "$(queue_state upgraded)" = attempting ] || fail 'upgraded v2 database must support queue-attempt columns'
+pass 'legacy v2 database upgrades and can record a merge attempt'
+
+db=$tmp/upgrade-v2-with-columns.sqlite3
+sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
+sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
+sqlite3 "$db" "ALTER TABLE queue_items ADD COLUMN attempt_epoch INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_pid INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_start TEXT; ALTER TABLE queue_items ADD COLUMN wrapper_boot TEXT; INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
+upgraded=$(coord init)
+[ "$(field "$upgraded" schema_version)" = 3 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
+pass 'already patched v2 database upgrades without replaying its columns'

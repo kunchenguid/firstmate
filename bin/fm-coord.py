@@ -2,6 +2,7 @@
 """Local SQLite authority for the advisory coordination protocol in docs/coordination.md."""
 
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -65,6 +66,24 @@ def process_start(pid):
 def token(value, field):
     require(isinstance(value, str) and 0 < len(value) <= 256 and not any(ord(c) < 32 for c in value), f"{field} must be a nonempty printable string")
     return value
+
+
+def authority_hash():
+    value = os.environ.get("FM_COORD_AUTHORITY_TOKEN")
+    if value is None:
+        return None
+    token(value, "FM_COORD_AUTHORITY_TOKEN")
+    require(len(value) >= 32, "FM_COORD_AUTHORITY_TOKEN must be at least 32 characters")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def authority_actor(db, payload):
+    require("home_id" not in payload, "operator abort requires the @authority actor")
+    require("operator" not in payload, "operator identity comes from the authenticated actor")
+    credential = authority_hash()
+    enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
+    require(credential is not None and enrolled is not None and hmac.compare_digest(credential, enrolled[0]), "enrolled authority credential required")
+    return "@authority"
 
 
 def path(value):
@@ -352,11 +371,10 @@ def queue_operation(db, op, p):
         return invalidate(db, item, request_id, reason, repair=p.get("repair_needed") is True)
     if op == "queue-operator-abort":
         require(item["state"] == "outcome-unknown", "operator abort is limited to an unknown forge outcome")
-        operator = token(p.get("operator"), "operator")
         reason = token(p.get("reason"), "reason")
         db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
         db.execute("UPDATE queue_items SET state='repair-needed',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
-        event_id = emit(db, "slot-operator-aborted", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "operator": operator, "reason": reason})
+        event_id = emit(db, "slot-operator-aborted", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "operator": p["_authority_actor"], "reason": reason})
         return {"ok": True, "state": "repair-needed", "event_id": event_id}
     if op == "queue-synced":
         require(item["state"] == "syncing", "slot is not syncing")
@@ -675,25 +693,46 @@ def main():
         db.execute("PRAGMA foreign_keys=ON")
         if op == "init":
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            require(version <= 2, f"unsupported future schema version: {version}")
-            if version < 2:
+            require(version <= 3, f"unsupported future schema version: {version}")
+            credential = authority_hash()
+            if version < 3:
                 db.execute("BEGIN IMMEDIATE")
                 try:
-                    for target in range(version + 1, 3):
+                    for target in range(version + 1, 4):
                         schema = SCHEMA_DIR / f"{target:03}.sql"
-                        for statement in schema.read_text(encoding="utf-8").split(";"):
-                            if statement.strip():
-                                db.execute(statement)
+                        if target == 3:
+                            expected = {"attempt_epoch": "INTEGER", "wrapper_pid": "INTEGER", "wrapper_start": "TEXT", "wrapper_boot": "TEXT"}
+                            columns = {row["name"]: row["type"].upper() for row in db.execute("PRAGMA table_info(queue_items)")}
+                            present = set(expected) & set(columns)
+                            require(not present or present == set(expected), "partial v2 attempt columns; manual repair required")
+                            for name in present:
+                                require(columns[name] == expected[name], "incompatible v2 attempt column type")
+                            if not present:
+                                for statement in schema.read_text(encoding="utf-8").split(";"):
+                                    if statement.strip():
+                                        db.execute(statement)
+                        else:
+                            for statement in schema.read_text(encoding="utf-8").split(";"):
+                                if statement.strip():
+                                    db.execute(statement)
                         if target == 1:
                             db.execute("INSERT INTO meta(key,value) VALUES('boot_id',?)", (boot_id(),))
                         db.execute(f"PRAGMA user_version={target}")
+                    if credential is not None:
+                        enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
+                        require(enrolled is None or hmac.compare_digest(credential, enrolled[0]), "authority credential mismatch")
+                        if enrolled is None:
+                            db.execute("INSERT INTO meta(key,value) VALUES('authority_token_sha256',?)", (credential,))
                     db.execute("COMMIT")
                 except Exception:
                     db.execute("ROLLBACK")
                     raise
-            print(compact({"ok": True, "schema_version": 2, "db": db_path, "mode": "shadow-advisory"}))
+            elif credential is not None:
+                enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
+                require(enrolled is not None and hmac.compare_digest(credential, enrolled[0]), "authority credential mismatch")
+            print(compact({"ok": True, "schema_version": 3, "db": db_path, "mode": "shadow-advisory"}))
             return
-        require(db.execute("PRAGMA user_version").fetchone()[0] == 2, "unsupported or uninitialized schema version; run init")
+        require(db.execute("PRAGMA user_version").fetchone()[0] == 3, "unsupported or uninitialized schema version; run init")
         db.execute("BEGIN IMMEDIATE")
         try:
             reconcile_clock(db, boot_id())
@@ -703,7 +742,9 @@ def main():
             raise
         if op in MUTATIONS:
             request_id = token(payload.get("request_id"), "request_id")
-            actor = payload.get("home_id", "@authority")
+            actor = authority_actor(db, payload) if op == "queue-operator-abort" else payload.get("home_id", "@authority")
+            if op == "queue-operator-abort":
+                payload["_authority_actor"] = actor
             token(actor, "actor")
             require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
             digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()

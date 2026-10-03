@@ -100,7 +100,8 @@ The PR is read again after the compare, and a changed state, merge flag, head, o
 Before any forge read toward a not-merged release, the recorded wrapper process must be proven gone, by a changed boot, an absent PID, or a changed process start time, and at least 10 minutes since the attempt; `FM_COORD_QUIET_SECONDS` changes that period for deterministic testing.
 An attempt without a recorded wrapper identity, or whose identity cannot be checked, never leaves `outcome-unknown` as not merged.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
-`queue-operator-abort` is the only other way out of `outcome-unknown`: it records the named operator and reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.
+`queue-operator-abort` is the only other way out of `outcome-unknown`: the enrolled `@authority` actor records a reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.
+The command requires the authority credential before looking up a replay receipt, refuses participant identities and caller-supplied operator names, and records `@authority` as the operator.
 Replaying the same reconciliation request returns its stored receipt without another forge read.
 This increment's live outcome reconciliation supports GitHub PRs; other forges need an equivalent read adapter before they can leave `outcome-unknown`.
 The forge read and database transition are separate, so a direct external base update can still race this advisory decision until step-4 enforcement and repository protection are active.
@@ -114,9 +115,11 @@ Replaying an unacknowledged event retains its original identity, while request r
 An inbox acknowledgment by a future transport means delivery, not a grant.
 The database is authoritative; unrestricted status prose and notification cursors are projections.
 
-Schema versions 1 and 2 live in `bin/fm-coord-migrations/001.sql` and `002.sql` and are applied transactionally through SQLite `user_version`.
+Schema versions 1 through 3 live in the corresponding numbered files under `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
 The tables are `meta` for boot identity; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
 Version 2 adds required-check manifests, queue items, one-slot records, integration generations, and unique terminal outcomes.
+Version 3 adds recorded wrapper identity and attempt time to queue items.
+It also recognizes the complete set of those columns in previously patched version-2 databases, while refusing a partial or incompatible set for manual repair.
 A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.
 The command refuses a database with a newer or uninitialized schema.
 SQLite's single-writer transaction lock serializes concurrent claim requests on this one local database.
@@ -128,7 +131,9 @@ The `sqlite3` command and Python 3 standard library must be available on macOS o
 All commands emit one JSON object on stdout and an error on stderr with nonzero exit status for invalid requests.
 Run `bin/fm-coord.sh --help` for the current command list.
 `--db PATH` selects an explicit local database for tests or one authority; otherwise set `FM_HOME` for `state/fm-coord.sqlite3`.
-Initialize with `bin/fm-coord.sh init`.
+Initialize with `FM_COORD_AUTHORITY_TOKEN=<private-random-token> bin/fm-coord.sh init` to enroll an authority credential of at least 32 characters.
+The database stores only its SHA-256 digest; keep the token private to the authority host and supply the same environment variable for `queue-operator-abort`.
+An initialization without the token leaves operator abort disabled for that database, and an already initialized version-3 database cannot enroll or replace a token through `init`.
 Then use `enroll {"request_id":"enroll-a","home_id":"home-a","repos":["owner/repo"]}` and `session {"request_id":"session-a","home_id":"home-a"}`.
 An administrative area definition uses `area-set {"request_id":"area-a","repo":"owner/repo","name":"api","paths":["src/api"],"aliases":["server-api"]}`.
 An intent uses `submit {"request_id":"submit-a","intent_id":"task-a","home_id":"home-a","generation":1,"repo":"owner/repo","base":"main","base_oid":"0000000000000000000000000000000000000000","branch":"task/a","task_id":"a","goal":"Update API","resources":[{"type":"area","name":"api"}]}`.
@@ -144,7 +149,7 @@ Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`,
 `queue-reconcile` also includes the exact `pr_url` and `base`, plus the recorded `head_oid` to prove a non-landing; each is checked against the intent and queue item before accepting the live forge observation.
 Payload fields starting with `_` are reserved for those forge observations and are refused.
 `queue-abort` includes the slot generation and a reason, and is limited to the pre-attempt phases.
-`queue-operator-abort` includes the integration `generation`, `operator`, and `reason`.
+`queue-operator-abort` includes the integration `generation` and `reason`; its actor comes from the enrolled authority credential rather than the payload.
 `queue-attempt` accepts an optional `wrapper_pid`: the live process on the coordinator host that then `exec`s `bin/fm-pr-merge.sh`, so its PID and start time identify the wrapper.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `inspect` gives a small state summary for operators.
