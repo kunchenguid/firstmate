@@ -79,6 +79,20 @@
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
 #
+# Milestone fields are all OPTIONAL, and an absent field renders nothing, so
+# older payloads stay valid. Health is always "G", "Y", or "R"; dates use the
+# `filed` format; URLs must be https; counts are non-negative integers; every
+# other field is a non-empty string.
+#   projects[]     top strip, one row per repo: repo (required), release_goal,
+#                  release_date, health, merges_today, last_release,
+#                  next_release, wip_count.
+#   underway[]     target, range, age, health, evidence_url.
+#   captains_call  default_if_silent (must name one of the card's own option
+#                  values), decide_by, asked_at, reversible (boolean),
+#                  evidence_url.
+# The composer supplies these values; the board never computes health or
+# targets.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -133,6 +147,9 @@ validate_payload() {  # <data.json>
       or (.[$name]
         | type == "string"
           and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+    def optional($name; check): (has($name) | not) or (.[$name] | check);
+    def health: . == "G" or . == "Y" or . == "R";
+    def count: type == "number" and . >= 0 and floor == .;
     def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
     def optional_subject:
       (has("subject") | not)
@@ -168,10 +185,25 @@ validate_payload() {  # <data.json>
           and (.recommend_value as $recommend
             | ([.options[].value] | index($recommend) != null))))
       and ([.options[].value] | index("reconcile") == null)
+      and ((has("default_if_silent") | not)
+        or (.default_if_silent as $default | [.options[].value] | index($default) != null))
+      and optional("decide_by"; valid_filed)
+      and optional("asked_at"; valid_filed)
+      and optional("reversible"; type == "boolean")
+      and optional_https_url("evidence_url")
       and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
       type == "object" and repo_marker and name_marker and (.id | nonempty_string)
-      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
+      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string)
+      and optional("target"; nonempty_string) and optional("range"; nonempty_string)
+      and optional("age"; nonempty_string) and optional("health"; health)
+      and optional_https_url("evidence_url");
+    def project_item:
+      type == "object" and (.repo | nonempty_string)
+      and optional("release_goal"; nonempty_string) and optional("release_date"; valid_filed)
+      and optional("health"; health) and optional("merges_today"; count)
+      and optional("last_release"; nonempty_string) and optional("next_release"; nonempty_string)
+      and optional("wip_count"; count);
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
@@ -197,6 +229,7 @@ validate_payload() {  # <data.json>
       or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
     and ((has("charted_warning_more") | not)
       or ((.charted_warning_more | type == "number") and (.charted_warning_more >= 0) and (.charted_warning_more | floor == .)))
+    and ((has("projects") | not) or (.projects | type == "array" and ([.[] | project_item] | all)))
     and ([.captains_call[] | call_item] | all)
     and ([.underway[] | underway_item] | all)
     and ([.landed[] | landed_item] | all)

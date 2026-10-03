@@ -4,8 +4,11 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//   { projects:[{repo,goal,date,meta,badges}], stats:[{n,label}],
+//     underway:[{title,sub,badges,aside,links}],
+//     charted:[{title,sub,badges,pickable,aside,links}],
+//     calls:[{key,ctx:[{k,v}],options:[{value,markers}],links}],
+//     empty, more, error }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -27,6 +30,8 @@ class Node {
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((x) => x !== c).join(" "); },
+      toggle: (c, on) => { this.classList.remove(c); if (on) this.classList.add(c); },
     };
   }
   get textContent() {
@@ -89,6 +94,45 @@ const badgesOf = (row) =>
     .filter((c) => c.className.includes("fm-badge"))
     .map((c) => ({ tone: c.className.replace(/.*fm-badge--/, "").trim(), text: c.textContent }));
 
+const textOf = (node, cls) => node.children.find((c) => c.className.includes(cls))?.textContent ?? "";
+const linksOf = (node) => {
+  const out = [];
+  const walk = (n) => n.children.forEach((c) => { if (c.tagName === "a") out.push({ text: c.textContent, href: c.href }); walk(c); });
+  walk(node);
+  return out;
+};
+const findAll = (node, cls) => {
+  const out = [];
+  const walk = (n) => n.children.forEach((c) => { if (c.className.split(/\s+/).includes(cls)) out.push(c); walk(c); });
+  walk(node);
+  return out;
+};
+
+const projStrip = byId.get("bb-projects") || new Node("div");
+const projects = projStrip.children.map((p) => {
+  const top = p.children.find((c) => c.className.includes("bb-proj__top"));
+  return {
+    repo: textOf(top, "bb-proj__repo"),
+    goal: textOf(p, "bb-proj__goal"),
+    date: textOf(p, "bb-proj__date"),
+    meta: textOf(p, "bb-proj__meta"),
+    badges: badgesOf(top),
+  };
+});
+
+const deck = byId.get("bb-call") || new Node("div");
+const calls = deck.children
+  .filter((c) => c.className.includes("bb-decision"))
+  .map((card) => ({
+    key: findAll(card, "bb-opts")[0]?.parentNode.attributes["data-lavish-question"] ?? "",
+    ctx: findAll(card, "bb-ctx__row").map((r) => ({ k: textOf(r, "bb-ctx__k"), v: textOf(r, "bb-ctx__v") })),
+    options: findAll(card, "bb-opt").map((o) => ({
+      value: o.children.find((c) => c.tagName === "input")?.value ?? "",
+      markers: o.children.filter((c) => /bb-opt__(rec|default)/.test(c.className)).map((c) => c.textContent),
+    })),
+    links: linksOf(card),
+  }));
+
 const strip = byId.get("bb-stats") || new Node("div");
 const stats = strip.children.map((t) => ({
   n: Number(t.children.find((c) => c.className.includes("bb-stat__num"))?.textContent),
@@ -105,6 +149,8 @@ const rowsOf = (container) =>
         sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
         badges: badgesOf(row),
         pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
+        aside: findAll(row, "bb-row__aside").map((a) => a.children.map((c) => c.textContent)).flat(),
+        links: linksOf(row),
       };
     });
 
@@ -123,4 +169,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ projects, stats, calls, underway, charted, empty, more, error: errorText }) + "\n");
