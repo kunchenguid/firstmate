@@ -390,6 +390,213 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_secondmate_relaunch_uses_allowlisted_launcher_environment_not_the_reused_pane() {
+  local dir home smhome out rc launch result expected value snapshot_mode
+  local first_snapshot first_launch second_launch
+  dir=$(new_case allowlisted-env sm-env)
+  home="$dir/home"
+  smhome="$dir/smhome"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '%s\n' FM_TEST_ALLOWED FM_TEST_EMPTY FM_TEST_UNSET > "$home/config/launch-env-allowlist"
+  fm_git_worktree "$dir/proj" "$smhome" sm-env-branch
+  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin"
+  printf 'sm-env\n' > "$smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$smhome/AGENTS.md"
+  printf '# charter\n' > "$smhome/data/charter.md"
+  {
+    echo "window=fmses:fm-sm-env"
+    echo "endpoint_task_id=sm-env"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$smhome"
+    echo "projects="
+  } > "$home/state/sm-env.meta"
+  printf '%s\n' "fm-sm-env" > "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
+  # shellcheck disable=SC2016
+  value='source value; $(touch SHOULD_NOT_EXIST) `false` "quoted"'
+  cat > "$dir/fakebin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_ALLOWED-<unset>}" "${FM_TEST_EMPTY-<unset>}" \
+  "${FM_TEST_UNSET-<unset>}" "${FM_TEST_AMBIENT-<unset>}"
+SH
+  chmod +x "$dir/fakebin/claude"
+
+  out=$(FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' FM_TEST_AMBIENT=must-not-cross \
+    run_control "$dir" sm-env relaunch); rc=$?
+  expect_code 0 "$rc" "an allowlisted secondmate relaunch should succeed"$'\n'"$out"
+  set -- "$home/state/sm-env.launch-env".*
+  [ "$#" = 1 ] && [ -f "$1" ] || fail "the relaunch should publish exactly one launch snapshot: $*"
+  first_snapshot=$1
+  snapshot_mode=$(stat -c %a "$first_snapshot" 2>/dev/null || stat -f %Lp "$first_snapshot") \
+    || fail "could not read the secondmate launch snapshot mode"
+  [ "$snapshot_mode" = 600 ] || fail "the secondmate launch snapshot is not private"
+  first_launch=$(tail -n 1 "$dir/fake/literal")
+
+  # A later relaunch of the same id runs before the first pane has sourced its
+  # launch. The delayed first launch must still read only its own snapshot.
+  out=$(FM_TEST_ALLOWED=second-incarnation FM_TEST_EMPTY='' \
+    run_control "$dir" sm-env relaunch); rc=$?
+  expect_code 0 "$rc" "a second allowlisted secondmate relaunch should succeed"$'\n'"$out"
+  second_launch=$(tail -n 1 "$dir/fake/literal")
+  [ "$second_launch" != "$first_launch" ] || fail "the second relaunch did not send a new launch"
+  [ -f "$first_snapshot" ] || fail "a later relaunch removed the pending launch's snapshot"
+  set -- "$home/state/sm-env.launch-env".*
+  [ "$#" = 2 ] || fail "each incarnation should own its own launch snapshot: $*"
+
+  for launch in "$first_launch" "$second_launch"; do
+    result=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:/usr/bin:/bin" TERM=xterm \
+      TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp FM_TEST_ALLOWED=pane-value \
+      FM_TEST_EMPTY=pane-value FM_TEST_UNSET=pane-value FM_TEST_AMBIENT=pane-value \
+      /bin/sh -c "$launch") || fail "the relaunched secondmate command did not execute"
+    if [ "$launch" = "$first_launch" ]; then
+      expected=$(printf '%s\n' "$value" '' '<unset>' '<unset>')
+    else
+      expected=$(printf '%s\n' second-incarnation '' '<unset>' '<unset>')
+    fi
+    [ "$result" = "$expected" ] \
+      || fail "a relaunched secondmate did not receive exactly its own launcher allowlist: $result"
+  done
+  set -- "$home/state/sm-env.launch-env".*
+  [ "$#" = 1 ] && [ ! -e "$1" ] \
+    || fail "each one-launch environment snapshot must be removed before its secondmate starts: $*"
+  pass "fm-control relaunch: secondmate launcher values survive, bound to their own incarnation, without admitting pane variables"
+}
+
+test_remote_secondmate_relaunch_keeps_destination_pane_allowlist() {
+  local dir home smhome out rc launch result expected
+  dir=$(new_case remote-allowlisted-env remote-sm-env)
+  home="$dir/home"
+  smhome="$dir/smhome"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '%s\n' FM_TEST_ALLOWED FM_TEST_EMPTY FM_TEST_UNSET > "$home/config/launch-env-allowlist"
+  fm_git_worktree "$dir/proj" "$smhome" remote-sm-env-branch
+  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin"
+  printf 'remote-sm-env\n' > "$smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$smhome/AGENTS.md"
+  printf '# charter\n' > "$smhome/data/charter.md"
+  {
+    echo "window=fmses:fm-remote-sm-env"
+    echo "endpoint_task_id=remote-sm-env"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$smhome"
+    echo "projects="
+  } > "$home/state/remote-sm-env.meta"
+  printf '%s\n' "fm-remote-sm-env" > "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
+  cat > "$dir/fakebin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_ALLOWED-<unset>}" "${FM_TEST_EMPTY-<unset>}" \
+  "${FM_TEST_UNSET-<unset>}" "${FM_TEST_AMBIENT-<unset>}"
+SH
+  chmod +x "$dir/fakebin/claude"
+
+  out=$(FM_REMOTE_JOB_ACTIVE=1 FM_TEST_ALLOWED=launcher-value FM_TEST_EMPTY=launcher-value \
+    FM_TEST_AMBIENT=launcher-value run_control "$dir" remote-sm-env relaunch); rc=$?
+  expect_code 0 "$rc" "a remote secondmate relaunch should succeed"$'\n'"$out"
+  set -- "$home/state/remote-sm-env.launch-env".*
+  assert_absent "$1" \
+    "a remote secondmate relaunch must not snapshot the stripped remote command environment"
+  launch=$(tail -n 1 "$dir/fake/literal")
+  result=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:/usr/bin:/bin" TERM=xterm \
+    TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp FM_TEST_ALLOWED=pane-value \
+    FM_TEST_EMPTY='' FM_TEST_AMBIENT=pane-value /bin/sh -c "$launch") \
+    || fail "the remote secondmate relaunch command did not execute"
+  expected=$(printf '%s\n' pane-value '' '<unset>' '<unset>')
+  [ "$result" = "$expected" ] \
+    || fail "the remote secondmate did not receive exactly the destination-pane allowlist: $result"
+  pass "fm-control relaunch: remote secondmates retain destination-pane allowlist values"
+}
+
+test_secondmate_relaunch_allowlisted_traceparent_never_overrides_the_recorded_carrier() {
+  local dir home smhome out rc launch sent_tp meta_tp worker_tp worker_allowed
+  local launcher_traceparent snapshot snapshot_mode
+  dir=$(new_case allowlisted-traceparent sm-tp)
+  home="$dir/home"
+  smhome="$dir/smhome"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '%s\n' TRACEPARENT FM_TEST_ALLOWED > "$home/config/launch-env-allowlist"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  printf '%s on\n' "$$" > "$home/state/.trace-context-effective"
+  fm_git_worktree "$dir/proj" "$smhome" sm-tp-branch
+  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin"
+  printf 'sm-tp\n' > "$smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$smhome/AGENTS.md"
+  printf '# charter\n' > "$smhome/data/charter.md"
+  {
+    echo "window=fmses:fm-sm-tp"
+    echo "endpoint_task_id=sm-tp"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$smhome"
+    echo "projects="
+  } > "$home/state/sm-tp.meta"
+  printf '%s\n' "fm-sm-tp" > "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
+  cat > "$dir/fakebin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "${TRACEPARENT-<unset>}" "${FM_TEST_ALLOWED-<unset>}"
+SH
+  chmod +x "$dir/fakebin/claude"
+
+  launcher_traceparent='00-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-ffffffffffffffff-01'
+  out=$(TRACEPARENT="$launcher_traceparent" FM_TEST_ALLOWED=launcher-value \
+    run_control "$dir" sm-tp relaunch); rc=$?
+  expect_code 0 "$rc" "a traceparent-allowlisted secondmate relaunch should succeed"$'\n'"$out"
+
+  meta_tp=$(meta_field "$dir" sm-tp traceparent)
+  fm_trace_context_valid "$meta_tp" || fail "relaunch must record a valid traceparent in meta (got '$meta_tp')"
+  [ "$meta_tp" != "$launcher_traceparent" ] \
+    || fail "the recorded carrier must never be the launcher's own ambient TRACEPARENT"
+
+  set -- "$home/state/sm-tp.launch-env".*
+  snapshot=$1
+  [ "$#" = 1 ] && [ -f "$snapshot" ] || fail "the allowlisted FM_TEST_ALLOWED value should still produce a launch snapshot"
+  snapshot_mode=$(stat -c %a "$snapshot" 2>/dev/null || stat -f %Lp "$snapshot") \
+    || fail "could not read the secondmate launch snapshot mode"
+  [ "$snapshot_mode" = 600 ] || fail "the secondmate launch snapshot is not private"
+  ! grep -q '^export TRACEPARENT=' "$snapshot" \
+    || fail "the launch snapshot must never carry TRACEPARENT; the dedicated carrier path owns it"
+
+  sent_tp=$(grep '^export TRACEPARENT=' "$dir/fake/keys" | tail -1 | cut -d= -f2-)
+  [ "$sent_tp" = "$meta_tp" ] \
+    || fail "the pane's dedicated TRACEPARENT export must match the recorded carrier (sent='$sent_tp' meta='$meta_tp')"
+
+  launch=$(tail -n 1 "$dir/fake/literal")
+  out=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:/usr/bin:/bin" TERM=xterm \
+    TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp TRACEPARENT="$sent_tp" \
+    /bin/sh -c "$launch") || fail "the relaunched secondmate command did not execute"
+  worker_tp=$(printf '%s\n' "$out" | sed -n 1p)
+  worker_allowed=$(printf '%s\n' "$out" | sed -n 2p)
+  [ "$worker_tp" = "$meta_tp" ] \
+    || fail "the worker must receive the recorded carrier, not the launcher's allowlisted TRACEPARENT (got '$worker_tp')"
+  [ "$worker_allowed" = launcher-value ] \
+    || fail "the worker must still receive the other allowlisted launcher value (got '$worker_allowed')"
+  pass "fm-control relaunch: a local secondmate's allowlisted TRACEPARENT never overrides the recorded trace carrier"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -2387,6 +2594,9 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_secondmate_relaunch_uses_allowlisted_launcher_environment_not_the_reused_pane
+test_remote_secondmate_relaunch_keeps_destination_pane_allowlist
+test_secondmate_relaunch_allowlisted_traceparent_never_overrides_the_recorded_carrier
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
