@@ -25,7 +25,7 @@ fm_hold_reason_decode_stream() {
     binmode STDIN, ":encoding(UTF-8)";
     binmode STDOUT, ":encoding(UTF-8)";
     my $format = shift;
-    my $json = JSON::PP->new->allow_nonref;
+    my $json = JSON::PP->new->allow_nonref->canonical;
     sub decode_reason {
       my ($value) = @_;
       return $value unless defined($value) && $value =~ /^fm-hold-v1:(.*)\z/s;
