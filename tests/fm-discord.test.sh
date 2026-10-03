@@ -363,4 +363,35 @@ out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-poll.sh" 
 assert_contains "$out" "discord-message m-plain" "plain messages still route as messages"
 pass "relay-style outbound-only reply path"
 
+# 12. Outbound tap: exactly three classes send, routine stays silent,
+# one message per event (send-once dedup), owner mentioned, secrets redacted.
+export FAKE_SEND_MODE=record FAKE_SEND_CODE=200
+unset FAKE_SEND_CODES FAKE_SEND_HEADERS
+taphome="$TMP_ROOT/tap-home"; make_home "$taphome" >/dev/null
+printf 'DISCORD_CHANNEL_ID=c1\n' >> "$taphome/.env"
+export FAKE_POST_DIR="$TMP_ROOT/tap-posts" FAKE_SEQ_FILE="$TMP_ROOT/tap-seq"
+rm -rf "$FAKE_POST_DIR"; mkdir -p "$FAKE_POST_DIR"; printf '0' > "$FAKE_SEQ_FILE"
+FM_HOME="$taphome" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-notify.sh" --event tap-dec1 --class decision --text "Need your call on the shape" --decision-key nm-1-x >/dev/null || fail "tap decision send failed"
+FM_HOME="$taphome" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-notify.sh" --event tap-dec1 --class decision --text "Need your call on the shape" --decision-key nm-1-x >/dev/null || fail "tap repeat must be silent success"
+[ "$(find "$FAKE_POST_DIR" -maxdepth 1 -type f -name 'post-*.json' | wc -l | tr -d ' ')" = 1 ] || fail "re-wake for the same decision must not resend"
+python3 - "$FAKE_POST_DIR/post-0.json" <<'PY' || fail "tap message contract violated"
+import json, sys
+body = json.load(open(sys.argv[1]))
+assert "<@u9>" in body["content"], "owner mention pings the phone"
+assert "nm-1-x" in body["content"], "decision key rides along"
+assert body.get("allowed_mentions", {}).get("users") == ["u9"], "owner mention must parse so the phone pings"
+PY
+FM_HOME="$taphome" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-notify.sh" --event tap-r1 --wake-line "heartbeat: all quiet" --text "routine progress" >/dev/null || fail "routine wake failed"
+[ "$(find "$FAKE_POST_DIR" -maxdepth 1 -type f -name 'post-*.json' | wc -l | tr -d ' ')" = 1 ] || fail "routine progress must stay silent"
+FM_HOME="$taphome" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-notify.sh" --event tap-b1 --wake-line "task failed checks" --text "Build broke" --link "https://example.com/pr/5" >/dev/null || fail "tap blocker send failed"
+FM_HOME="$taphome" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-notify.sh" --event tap-c1 --wake-line "review ready for PR" --text "Fix ready for review" --link "https://example.com/pr/6" >/dev/null || fail "tap completion send failed"
+[ "$(find "$FAKE_POST_DIR" -maxdepth 1 -type f -name 'post-*.json' | wc -l | tr -d ' ')" = 3 ] || fail "blocker and completion classes must each send once"
+# Failed sends release the dedup marker so a retry can still deliver.
+export FAKE_SEND_CODE=403
+FM_HOME="$taphome" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-notify.sh" --event tap-retry --class blocker --text "Outage" 2>/dev/null && fail "failed send must exit non-zero"
+[ -e "$taphome/state/discord-notify/tap-retry" ] && fail "failed send must release the dedup marker"
+export FAKE_SEND_CODE=200
+FM_HOME="$taphome" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-notify.sh" --event tap-retry --class blocker --text "Outage" >/dev/null || fail "retry after failure must send"
+pass "outbound tap send-once owner-mention routine-silent"
+
 pass "fm-discord"

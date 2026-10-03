@@ -1758,6 +1758,7 @@ It is off unless the home's gitignored `.env` contains a non-empty `DISCORD_BOT_
 | `DISCORD_REDIRECT_URI` | setup | OAuth redirect URI, must match the Portal entry. |
 | `DISCORD_CHANNEL_ID` | no | REST fallback poll channel for the watcher shim. |
 | `DISCORD_CHANNEL_IDS` | no | Optional comma-separated inbound channel allowlist. |
+| `DISCORD_NOTIFY_CHANNEL_ID` | no | Outbound-tap notify channel; when unset the tap falls back to the send-channel behavior (see `docs/discord-integration.md` "Outbound tap"). |
 | `DISCORD_SEND_CHANNEL_IDS` | no | Optional comma-separated outbound channel allowlist. |
 | `DISCORD_MESSAGE_CONTENT` | no | Isolated privileged message-content intent opt-in (`1` to enable). |
 | `DISCORD_BOT_USER_ID` | no | Explicit bot user id override; `verify` persists the resolved one. |

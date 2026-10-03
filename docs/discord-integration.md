@@ -110,6 +110,7 @@ DISCORD_REDIRECT_URI=http://localhost:8787/discord/callback
 DISCORD_MESSAGE_CONTENT=
 DISCORD_CHANNEL_IDS=
 DISCORD_CHANNEL_ID=
+DISCORD_NOTIFY_CHANNEL_ID=
 DISCORD_SEND_CHANNEL_IDS=
 ```
 
@@ -118,6 +119,10 @@ every message is refused. `DISCORD_CHANNEL_IDS` is an optional
 comma-separated inbound channel allowlist (empty means any channel in the
 authorized guild). `DISCORD_CHANNEL_ID` names the REST fallback poll
 channel used by the watcher shim when the Gateway is unavailable.
+`DISCORD_NOTIFY_CHANNEL_ID` names the outbound-tap notify channel (see
+"Outbound tap" below); when unset, the tap falls back to the existing
+send-channel behavior (`DISCORD_CHANNEL_ID`, then the first entry of
+`DISCORD_CHANNEL_IDS`, then config `poll_channel_id`).
 `DISCORD_SEND_CHANNEL_IDS` is an optional outbound channel allowlist for
 `fm-discord-send.sh` (empty means any channel the bot can post to).
 
@@ -172,10 +177,25 @@ this integration.
   before anything is persisted. `verify` also resolves and persists the bot
   user id; polling refuses until that id is known, so a half-configured
   home can never loop on its own replies.
-- Outbound: `bin/fm-discord-send.sh <channel> [--reply-to <msg>] <text>`.
+- Outbound: `bin/fm-discord-send.sh <channel> [--reply-to <msg>] [--allow-user <user-id>] <text>` (repeat `--allow-user` to let named user mentions parse; without it mentions are suppressed).
   Long responses chunk (never truncate); multi-message replies carry
   ` (k/n)` thread suffixes like the Relay splitter; 429s honor
   Retry-After; 401/403/404 are structured failures.
+- Outbound tap: `bin/fm-discord-notify.sh --event <key>
+  --class decision|completion|blocker --text <summary> [--link <url>]
+  [--decision-key <key>]` posts one short plain-language message
+  mentioning the owner (`<@owner-id>`) so the phone pings, on exactly
+  three event classes: a decision waiting on the captain, finished work
+  (including review and merge calls), and blockers or failures. Routine
+  progress never sends. `--wake-line <line>` (or `--wake` on stdin)
+  classifies a watcher wake or supervision outcome reason line into one
+  of those classes so the supervision flow can pipe wakes through the
+  script; unrecognized lines stay silent. One message per event key:
+  repeats for the same key (re-wakes for the same open decision) are
+  silent, markers live in `state/discord-notify/`, and a failed send
+  releases its marker so a retry can still deliver. Delivery reuses the
+  `fm-discord-send.sh` authenticated path, so 429 Retry-After is
+  honored. Text is redacted for secret shapes before sending.
 - Inbound: `bin/fm-discord-gateway.py` (primary; reconnect + resume +
   dedup + self-filter) routes each MESSAGE_CREATE and each
   INTERACTION_CREATE through `bin/fm-discord-poll.sh --event-file`.
