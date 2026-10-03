@@ -1041,6 +1041,9 @@ printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 case "$1" in
+  kill-window)
+    [ -z "${FM_TEST_FAIL_KILL:-}" ] || exit 1
+    ;;
   list-windows)
     printf 'fm-live-task\n'
     [ -z "${FM_TEST_STALE_COMMAND:-}" ] || printf 'fm-stale-task\n'
@@ -1080,8 +1083,8 @@ expect_release_refused() {  # <case> <id> <stderr-fragment> <description>
 assert_released_leaving_live_slot() {  # <case> <id> <description>
   local dir=$1 id=$2 description=$3
   assert_absent "$dir/home/state/$id.meta" "$description: release kept stale metadata"
-  assert_present "$dir/home/data/$id/retired-duplicate-claim.meta" \
-    "$description: release did not archive the stale record"
+  compgen -G "$dir/home/data/$id/retired-duplicate-claim.*.meta" >/dev/null \
+    || fail "$description: release did not archive the stale record"
   assert_present "$dir/home/state/live-task.meta" "$description: release removed live owner metadata"
   assert_present "$dir/worktree/sentinel" "$description: release touched the live slot"
   ! grep -Fq 'treehouse <return>' "$dir/runtime.log" \
@@ -1177,23 +1180,37 @@ test_records_only_release_uses_landed_work_proofs() {
   git -C "$dir/project" update-ref refs/heads/fm/stale-task "$unique"
   expect_release_refused "$dir" stale-task "not landed" "unique unlanded commit"
 
+  # A merged PR proves only the commits up to its head, so a pruned branch is
+  # judged by the record's last-known head (pr_head=).
   dir=$(stage_unclaimed_duplicate duplicate-squash-pruned ship "branch=fm/stale-task" \
     "pr=https://github.com/example/project/pull/7")
-  cat > "$dir/fakebin/gh" <<'SH'
+  current=$(git -C "$dir/project" rev-parse HEAD)
+  cat > "$dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
-if [ "$1 $2" = "pr view" ]; then
-  printf 'MERGED\t0123456789abcdef0123456789abcdef01234567\thttps://github.com/example/project/pull/7\n'
+if [ "\$1 \$2" = "pr view" ]; then
+  printf 'MERGED\t$current\thttps://github.com/example/project/pull/7\n'
   exit 0
 fi
 exit 1
 SH
   chmod +x "$dir/fakebin/gh"
+  expect_release_refused "$dir" stale-task "not recorded or not resolvable" "pruned branch with no recorded head"
+  unique=$(printf 'beyond\n' | git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit-tree 'HEAD^{tree}' -p HEAD)
+  printf 'pr_head=%s\n' "$unique" >> "$dir/home/state/stale-task.meta"
+  expect_release_refused "$dir" stale-task "not contained in a merged PR head" \
+    "pruned branch whose recorded head is one commit beyond the PR head"
+  fm_write_meta "$dir/home/state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" "endpoint_task_id=stale-task" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/stale-task" \
+    "pr=https://github.com/example/project/pull/7" "pr_head=$current"
   run_release "$dir" stale-task \
     || fail "records-only release refused a squash-merged ship whose branch was pruned: $(cat "$dir/stderr")"
   assert_released_leaving_live_slot "$dir" stale-task "squash-merged pruned ship"
 
   dir=$(stage_unclaimed_duplicate duplicate-pruned-unmerged ship "branch=fm/stale-task")
-  expect_release_refused "$dir" stale-task "not landed" "pruned branch with no merged PR"
+  printf 'pr_head=%s\n' "$(git -C "$dir/project" rev-parse HEAD)" >> "$dir/home/state/stale-task.meta"
+  expect_release_refused "$dir" stale-task "not contained in a merged PR head" "pruned branch with no merged PR"
 
   dir=$(stage_unclaimed_duplicate duplicate-local-only ship "branch=fm/stale-task" "mode=local-only")
   unique=$(printf 'landed\n' | git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
@@ -1222,6 +1239,46 @@ test_records_only_release_through_symlinked_home() {
     || fail "records-only release through a symlinked FM_HOME refused: $(cat "$dir/stderr")"
   assert_released_leaving_live_slot "$dir" stale-task "release through symlinked FM_HOME"
   pass "fm-teardown: records-only release works when FM_HOME is reached through a symlink"
+}
+
+# Zellij and cmux have no recovery classifier, so neither the stale endpoint nor
+# a sibling's can be judged: release refuses with the backend named.
+test_records_only_release_refuses_unverified_backends() {
+  local dir
+  dir=$(stage_unclaimed_duplicate duplicate-zellij ship "branch=fm/stale-task")
+  git -C "$dir/project" branch fm/stale-task
+  fm_write_meta "$dir/home/state/stale-task.meta" \
+    "window=lab:7" "endpoint_task_id=stale-task" "worktree=$dir/worktree" "project=$dir/project" \
+    "kind=ship" "branch=fm/stale-task" \
+    "backend=zellij" "zellij_session=lab" "zellij_tab_id=3" "zellij_pane_id=7"
+  expect_release_refused "$dir" stale-task \
+    "backend zellij cannot prove the endpoint agent-free; release unavailable on this backend" "stale zellij endpoint"
+
+  dir=$(stage_unclaimed_duplicate duplicate-cmux-sibling ship "branch=fm/stale-task")
+  git -C "$dir/project" branch fm/stale-task
+  fm_write_meta "$dir/home/state/live-task.meta" \
+    "window=workspace-1:surface-2" "endpoint_task_id=live-task" "worktree=$dir/worktree" "project=$dir/project" \
+    "kind=ship" "branch=fm/live-task" \
+    "backend=cmux" "cmux_workspace_id=workspace-1" "cmux_surface_id=surface-2"
+  expect_release_refused "$dir" stale-task \
+    "backend cmux cannot prove the endpoint agent-free; release unavailable on this backend" "cmux sibling endpoint"
+  pass "fm-teardown: records-only release refuses, naming the backend, when Zellij or cmux cannot prove an endpoint agent-free"
+}
+
+# The archive is published only after the record is removed: a failure partway
+# through leaves the record and no completion-looking archive.
+test_records_only_release_archives_last() {
+  local dir
+  dir=$(stage_unclaimed_duplicate duplicate-archive-last ship "branch=fm/stale-task")
+  git -C "$dir/project" branch fm/stale-task
+  FM_TEST_STALE_COMMAND=zsh FM_TEST_FAIL_KILL=1 expect_release_refused "$dir" stale-task \
+    "" "endpoint close failing mid-retirement"
+  ! compgen -G "$dir/home/data/stale-task/retired-duplicate-claim*.meta" >/dev/null \
+    || fail "a failed retirement left a completion-looking archive"
+  FM_TEST_STALE_COMMAND=zsh run_release "$dir" stale-task \
+    || fail "records-only release retry failed: $(cat "$dir/stderr")"
+  assert_released_leaving_live_slot "$dir" stale-task "retry after a failed close"
+  pass "fm-teardown: records-only release archives the stale record only after it is retired"
 }
 
 test_records_only_release_of_stale_scout() {
@@ -1666,6 +1723,8 @@ test_unclaimed_duplicate_requires_records_only_release
 test_records_only_release_uses_landed_work_proofs
 test_records_only_release_through_symlinked_home
 test_records_only_release_of_stale_scout
+test_records_only_release_refuses_unverified_backends
+test_records_only_release_archives_last
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

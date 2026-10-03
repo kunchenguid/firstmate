@@ -184,11 +184,14 @@
 #   which has a live endpoint. The stale endpoint must be dead or missing. A
 #   ship's work is read from its own branch ref, never the shared checkout, and
 #   must pass ordinary teardown's landed-work proofs (a pruned ref only through
-#   a merged PR); a scout must pass the report and completion gates. It
-#   archives the stale record under data/<id>/, closes its exact endpoint and
-#   backlog item, and leaves the shared worktree, slot, and live processes
-#   untouched. It cannot combine with --force; missing or ambiguous proof
-#   refuses before cleanup.
+#   a merged PR whose head contains the record's pr_head=); a scout must pass
+#   the report and completion gates. It closes its exact endpoint and backlog
+#   item, removes the record, then archives it under
+#   data/<id>/retired-duplicate-claim.<spawn_gen>.meta, leaving the shared
+#   worktree, slot, and live processes untouched. Zellij and cmux cannot prove
+#   an endpoint agent-free, so release is unavailable on those backends. It
+#   cannot combine with --force; missing or ambiguous proof refuses before
+#   cleanup.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -1477,6 +1480,8 @@ remove_pr_poll_artifacts() {
 # or a records-only release's branch ref in the project.
 LANDED_DIR=$WT
 LANDED_REF=HEAD
+# A pruned branch ref's last-known head (the record's pr_head=); empty otherwise.
+LANDED_RECORDED_HEAD=
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
@@ -1573,10 +1578,12 @@ pr_is_merged() {
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
-  if [ "$LANDED_REF" != HEAD ] && ! git -C "$LANDED_DIR" show-ref --verify --quiet "$LANDED_REF"; then
-    landed=1
+  ensure_commit_object "$target" "$head" || return 1
+  if [ -n "$LANDED_RECORDED_HEAD" ]; then
+    # A merged PR proves only the commits up to its head: the pruned branch's
+    # recorded head must be one of them.
+    git -C "$LANDED_DIR" merge-base --is-ancestor "$LANDED_RECORDED_HEAD" "$head" 2>/dev/null && landed=1
   else
-    ensure_commit_object "$target" "$head" || return 1
     current=$(git -C "$LANDED_DIR" rev-parse --verify "$LANDED_REF" 2>/dev/null) || return 1
     if git -C "$LANDED_DIR" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
       landed=1
@@ -2443,7 +2450,7 @@ require_exclusive_task_worktree_slot() {
 # or status in that slot. The proofs are ordinary teardown's: reachable from a
 # remote (or the live owner's branch), merged into local main for local-only,
 # or landed through a merged PR or default-branch content. A pruned branch ref
-# is landed only through a merged PR.
+# is landed only through a merged PR whose head contains the record's pr_head=.
 duplicate_claim_branch_is_landed() {
   local branch owner_branch owner_ref='' remaining name
   branch=$(fm_meta_get "$META" branch)
@@ -2470,6 +2477,16 @@ duplicate_claim_branch_is_landed() {
     fi
   elif [ "$MODE" = local-only ]; then
     echo "REFUSED: local-only task $ID's branch ref $LANDED_REF is missing; its landing on local main cannot be checked." >&2
+    return 1
+  else
+    LANDED_RECORDED_HEAD=$(fm_meta_get "$META" pr_head)
+    if [ -z "$LANDED_RECORDED_HEAD" ] \
+      || ! git -C "$PROJ" cat-file -e "$LANDED_RECORDED_HEAD^{commit}" 2>/dev/null; then
+        echo "REFUSED: task $ID's branch ref $LANDED_REF is missing and its last-known head (pr_head=${LANDED_RECORDED_HEAD:-<none>}) is not recorded or not resolvable; a merged PR cannot prove its work landed." >&2
+        return 1
+    fi
+    pr_is_merged "$branch" && return 0
+    echo "REFUSED: task $ID's branch ref $LANDED_REF is missing and its recorded head $LANDED_RECORDED_HEAD is not contained in a merged PR head; records-only release would lose that work." >&2
     return 1
   fi
   work_is_landed "$branch" && return 0
@@ -3443,7 +3460,12 @@ if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
   RELEASE_OWNER_ID=
   for RELEASE_I in "${!TEARDOWN_DUPLICATE_IDS[@]}"; do
     fm_backend_validate_task_endpoint "${TEARDOWN_DUPLICATE_METAS[$RELEASE_I]}" "${TEARDOWN_DUPLICATE_IDS[$RELEASE_I]}" || continue
-    [ "$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")" = alive ] || continue
+    RELEASE_OTHER_STATE=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
+    [ "$RELEASE_OTHER_STATE" != unverified ] || {
+      echo "REFUSED: backend $FM_BACKEND_VALIDATED_BACKEND cannot prove the endpoint agent-free; release unavailable on this backend (task ${TEARDOWN_DUPLICATE_IDS[$RELEASE_I]})." >&2
+      exit 1
+    }
+    [ "$RELEASE_OTHER_STATE" = alive ] || continue
     [ -z "$RELEASE_OWNER_ID" ] || {
       echo "REFUSED: tasks $RELEASE_OWNER_ID and ${TEARDOWN_DUPLICATE_IDS[$RELEASE_I]} both have live endpoints on $WT; ownership is ambiguous." >&2
       exit 1
@@ -3462,6 +3484,10 @@ if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
   fi
   case "$RELEASE_ENDPOINT_STATE" in
     dead|missing) ;;
+    unverified)
+      echo "REFUSED: backend $BACKEND cannot prove the endpoint agent-free; release unavailable on this backend." >&2
+      exit 1
+      ;;
     *)
       echo "REFUSED: task $ID's endpoint $T reads '$RELEASE_ENDPOINT_STATE', not positively agent-free; records-only release left every record intact." >&2
       exit 1
@@ -3616,21 +3642,16 @@ fi
 
 if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
   DUPLICATE_ARCHIVE_DIR="$DATA/$ID"
-  DUPLICATE_ARCHIVE="$DUPLICATE_ARCHIVE_DIR/retired-duplicate-claim.meta"
-  [ ! -L "$DUPLICATE_ARCHIVE_DIR" ] && [ ! -L "$DUPLICATE_ARCHIVE" ] || {
-    echo "REFUSED: duplicate-claim archive path is a symlink: $DUPLICATE_ARCHIVE" >&2
+  # Published last, after the record is removed, under a generation-unique name.
+  DUPLICATE_ARCHIVE="$DUPLICATE_ARCHIVE_DIR/retired-duplicate-claim.${TEARDOWN_META_SPAWN_GEN:-$(date -u +%Y%m%dT%H%M%SZ)-$$}.meta"
+  [ ! -L "$DUPLICATE_ARCHIVE_DIR" ] || {
+    echo "REFUSED: duplicate-claim archive directory is a symlink: $DUPLICATE_ARCHIVE_DIR" >&2
     exit 1
   }
   mkdir -p "$DUPLICATE_ARCHIVE_DIR" || {
     echo "REFUSED: cannot create duplicate-claim archive directory $DUPLICATE_ARCHIVE_DIR" >&2
     exit 1
   }
-  if ! cp "$META" "$DUPLICATE_ARCHIVE.tmp.$$" \
-    || ! mv -f "$DUPLICATE_ARCHIVE.tmp.$$" "$DUPLICATE_ARCHIVE"; then
-      rm -f "$DUPLICATE_ARCHIVE.tmp.$$"
-      echo "REFUSED: cannot archive task $ID's stale record at $DUPLICATE_ARCHIVE" >&2
-      exit 1
-  fi
 fi
 
 BACKLOG_CLOSED=0
@@ -3972,6 +3993,14 @@ fi
 # racing the same id stays serialized exactly as it was before. A captain-held
 # row takes the retain transition here instead of the close: same record, same
 # ordering, the row returns to Queued with its deliverable recorded.
+if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
+  DUPLICATE_ARCHIVE_TMP="$DUPLICATE_ARCHIVE_DIR/.retired-duplicate-claim.tmp.$$"
+  cp "$META" "$DUPLICATE_ARCHIVE_TMP" || {
+    rm -f "$DUPLICATE_ARCHIVE_TMP"
+    echo "error: cannot stage task $ID's stale record for archiving; retaining the record for a rerun" >&2
+    exit 1
+  }
+fi
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
   if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
@@ -3997,6 +4026,11 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+fi
+# ln refuses an existing name, so a retry never overwrites an earlier archive.
+if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ] \
+  && ! { ln "$DUPLICATE_ARCHIVE_TMP" "$DUPLICATE_ARCHIVE" && rm -f "$DUPLICATE_ARCHIVE_TMP"; }; then
+    echo "warning: task $ID's record is retired, but its archive could not be published at $DUPLICATE_ARCHIVE; the copy remains at $DUPLICATE_ARCHIVE_TMP" >&2
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
