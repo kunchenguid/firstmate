@@ -877,8 +877,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Reads the
 # status file, plus its sibling `.meta` for the task kind the terminal rule needs
-# when the caller passes no <kind>; no globals beyond the optional
-# FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
+# when the caller passes no <kind>. This is the durable open-set the fleet
 # snapshot and any point-in-time consumer must use instead of trusting the last
 # status line.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
