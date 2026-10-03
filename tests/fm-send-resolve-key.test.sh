@@ -314,11 +314,26 @@ test_routine_steer_never_closes() {
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=schema]' >/dev/null \
     || fail "a routine steer or later working line cleared an unanswered captain decision: $out"
+  # The reported defect: the worker reports the parts it DID finish
+  # while the captain's question is still unanswered - the two routinely land
+  # on one log, and the worker's own done: line even says so. That line must
+  # not retire the decision, and the supported way to answer it must still
+  # work; refusing here is what shut the only answering route while the
+  # question sat open in the log.
   printf 'done: task complete\nnote: cleanup complete\n' >> "$home/state/t3.status"
-  run_send "$fb" "$home" "$log" t3 --resolve-key schema "answer to a stale decision" > "$dir/terminal.out" 2> "$dir/terminal.err"; rc=$?
-  expect_code 1 "$rc" "an answer to a terminally superseded decision must refuse"
-  [ ! -e "$home/state/t3.inbox/002.msg" ] || fail "a stale decision answer was delivered"
-  pass "fm-send preserves decisions through routine work and refuses superseded terminal decisions"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=schema]' >/dev/null \
+    || fail "a done: line retired an unanswered captain decision: $out"
+  run_send "$fb" "$home" "$log" t3 --resolve-key schema "split it" > "$dir/terminal.out" 2> "$dir/terminal.err"; rc=$?
+  expect_code 0 "$rc" "a decision left open under a later done: line must still be answerable: $(cat "$dir/terminal.err")"
+  [ -e "$home/state/t3.inbox/002.msg" ] || fail "the answer to a still-open decision was not delivered"
+  grep -F 'resolved [key=schema]' "$home/state/t3.status" >/dev/null \
+    || fail "answering the decision did not close it: $(cat "$home/state/t3.status")"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F '[key=schema]' >/dev/null; then
+    fail "the answered decision stayed open: $out"
+  fi
+  pass "fm-send preserves decisions through routine work and a later done: line, and still answers them"
 }
 
 test_not_open_key_refuses_before_send() {
@@ -336,6 +351,12 @@ test_not_open_key_refuses_before_send() {
   [ "$rc" -ne 0 ] || fail "a not-open key should refuse"
   assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the refusal should name the bad key"
   assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
+  # The refusal must report what this lookup FOUND, never assert a fact about
+  # the record it did not establish. A key no line ever stated is not
+  # evidence that the decision was answered, and saying "already closed" here
+  # is what sent an operator away from a decision that was still open.
+  assert_contains "$(cat "$err")" "no line in" "the refusal should say what it actually looked for"
+  assert_not_contains "$(cat "$err")" "already closed" "the refusal claimed the decision was closed without establishing it"
   [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
   [ ! -d "$home/state/t4.inbox" ] || fail "a refused answer still enqueued an inbox record"
   if grep -F 'resolved' "$home/state/t4.status" >/dev/null; then
@@ -344,7 +365,34 @@ test_not_open_key_refuses_before_send() {
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=real-key]' >/dev/null \
     || fail "the real decision disappeared after a refused answer: $out"
-  pass "fm-send --resolve-key: a key that is not open refuses loudly before anything is sent"
+  # A key the log really did close is the case this code CAN establish, and it
+  # says so plainly, naming the verb that closed it.
+  printf 'resolved [key=real-key]: answered: chosen\n' >> "$home/state/t4.status"
+  : > "$err"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t4 --resolve-key real-key "the answer again" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "answering an already-closed key should refuse"
+  assert_contains "$(cat "$err")" "already closed" "a genuinely closed key should be reported as closed"
+  assert_contains "$(cat "$err")" "'resolved' line" "the refusal should name the verb that closed the key"
+  # The third shape, seen in the field: the decision was TRANSFERRED to a
+  # durable captain-held task, which closes the status ledger without settling
+  # the question. The transferred row is commonly keyed by neither id this
+  # lookup searches, so the refusal must not report a settlement it has not
+  # established - it names the transfer, names what it searched, and says the
+  # answer may still be owed.
+  printf 'needs-decision [key=moved]: declare or drop\ncaptain-held [key=moved]: tracked by sample-origins-call\n' \
+    >> "$home/state/t4.status"
+  : > "$err"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t4 --resolve-key moved "declare it" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a transferred key should refuse"
+  assert_contains "$(cat "$err")" "TRANSFERS the question" "the refusal should name the transfer, not a settlement"
+  assert_contains "$(cat "$err")" "may still be owed" "the refusal should not imply the question is answered"
+  assert_contains "$(cat "$err")" "the captain-hold ledger was searched for task ids" "the refusal should say what it actually searched"
+  assert_not_contains "$(cat "$err")" "already closed" "a transfer is not a settlement and must not be reported as one"
+  pass "fm-send --resolve-key: refusals separate a settled key, a transferred key, and one never stated"
 }
 
 # The close is an enqueue-time fact: the durable record IS the delivery, so a
@@ -905,6 +953,94 @@ test_decision_answer_partition_relocates_under_the_record() {
   pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
 }
 
+# A refusal may report only what its lookups actually established. When
+# tasks-axi is absent the captain-hold ledger is never consulted at all, so a
+# refusal that still reported it empty would assert a lookup result it does not
+# hold - the same substitution of a fact about itself for a fact about the world
+# that produced "already closed or mistyped".
+test_unreadable_hold_ledger_is_not_reported_as_empty() {
+  local dir fb log home err rc nolookup nopath p
+  dir="$TMP_ROOT/hold-unreadable"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home hold-unreadable)
+  fm_write_meta "$home/state/t4.meta" "window=sess:fm-t4" "kind=ship"
+  printf 'needs-decision [key=real-key]: choose\n' > "$home/state/t4.status"
+
+  # Drop only the PATH entries that actually carry tasks-axi, so the rest of
+  # the script keeps every ordinary tool it needs and `command -v tasks-axi`
+  # is the single thing that fails.
+  nolookup="$dir/nolookup"; mkdir -p "$nolookup"
+  nopath=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -x "$p/tasks-axi" ] && continue
+    nopath="${nopath}${nopath:+:}$p"
+  done <<EOF
+$(printf '%s' "$PATH" | tr ':' '\n')
+EOF
+  command -v tasks-axi >/dev/null 2>&1 && PATH="$nopath" command -v tasks-axi >/dev/null 2>&1 \
+    && fail "could not build a PATH without tasks-axi"
+  : > "$log"
+  env PATH="$fb:$nolookup:$nopath" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t4 --resolve-key mistyped "the answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a not-open key should refuse"
+  assert_contains "$(cat "$err")" "could not be read" \
+    "an unconsulted captain-hold ledger must be reported as unread, not as empty"
+  assert_contains "$(cat "$err")" "UNKNOWN" \
+    "the refusal must mark the unread ledger's contents unknown"
+  assert_not_contains "$(cat "$err")" "was searched" \
+    "the refusal claimed a captain-hold search that never ran"
+  assert_not_contains "$(cat "$err")" "held neither open" \
+    "the refusal asserted an empty captain-hold ledger it never read"
+  [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+
+  # With tasks-axi reachable the lookup really does run and come back empty,
+  # and only then may the refusal say so.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$nolookup/tasks-axi"
+  chmod +x "$nolookup/tasks-axi"
+  : > "$err"
+  env PATH="$fb:$nolookup:$nopath" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t4 --resolve-key mistyped "the answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a not-open key should still refuse when the ledger is readable"
+  assert_contains "$(cat "$err")" "was searched" \
+    "a captain-hold lookup that really ran should report that it searched"
+  assert_not_contains "$(cat "$err")" "could not be read" \
+    "a readable ledger must not be reported as unreadable"
+
+  pass "fm-send --resolve-key: an unread captain-hold ledger is reported as unread, never as empty"
+}
+
+# The fold and this lookup share _fm_decision_fold_line, so no non-racing input
+# reaches fm-send with a key the fold still holds open. The branch that used to
+# tell an operator they had found a reader defect is therefore gone: a key that
+# IS open answers normally rather than reporting a bug that is not there.
+test_open_key_answers_instead_of_reporting_a_reader_defect() {
+  local dir fb log home err rc
+  dir="$TMP_ROOT/no-reader-defect"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home no-reader-defect)
+  fm_write_meta "$home/state/t4.meta" "window=sess:fm-t4" "kind=ship"
+  # The reported shape: an unkeyed decision, a keyed one, and a terminal line
+  # after both. The keyed decision must still be answerable through its key.
+  printf 'needs-decision: unkeyed question\n' > "$home/state/t4.status"
+  printf 'needs-decision [key=legacy-index]: drop it or keep it\n' >> "$home/state/t4.status"
+  printf 'done: finished the parts that were ready\n' >> "$home/state/t4.status"
+
+  : > "$log"; : > "$err"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t4 --resolve-key legacy-index "drop it" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a decision still open after a done: line must be answerable by its key"
+  assert_not_contains "$(cat "$err")" "defect in the reader" \
+    "an answerable key was reported as a reader defect"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t4.status" \
+    | grep -qF 'resolved [key=legacy-index]: answered: drop it' \
+    || fail "the answer did not close the key: $(cat "$home/state/t4.status")"
+  pass "fm-send --resolve-key: a key still open after a terminal line answers normally"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
@@ -929,3 +1065,5 @@ test_stamped_close_line_stays_within_the_status_line_cap
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record
+test_unreadable_hold_ledger_is_not_reported_as_empty
+test_open_key_answers_instead_of_reporting_a_reader_defect

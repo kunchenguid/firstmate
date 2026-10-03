@@ -942,15 +942,16 @@ test_open_decision_clears_on_keyed_resolution() {
   pass "durable fold clears a decision only on a keyed resolution"
 }
 
-# A COMPLETED scout report must never be read as a pending decision. A scout that
-# raised a needs-decision and then finished (done) - its report delivered, its
-# decision either answered or captured in the report for the captain - must surface
-# only as a report POINTER, not a reopened pending decision, even when the report
-# body and the stale status line contain decision-like prose. This is the Lavish-103
-# defect: a terminal single-owner task's stale, never-keyed-resolved needs-decision
-# must not linger as pending. Decisions come purely from the keyed fold reconciled
-# against the crew lifecycle; report prose never opens or reopens a decision.
-test_completed_scout_report_is_pointer_not_pending() {
+# Decisions come purely from the keyed fold; report PROSE never opens or reopens
+# one. That is the surviving half of the Lavish-103 defect, and it still holds.
+# What changed is how a finished scout stops being pending: its decision must
+# actually be CLOSED - answered, or transferred to a durable
+# captain-held task - rather than discarded by the `done:` line itself. A
+# finishing worker routinely reports the parts it completed while the captain's
+# question is still owed, so clearing it there is what made an unanswered
+# decision stop being asked. The clean report-pointer reading is still reachable,
+# through the close that bin/fm-captain-hold.sh performs before completion.
+test_completed_scout_decision_clears_only_when_closed() {
   local home fakebin out kind terminal id phase single mate single_state mate_state
   home=$(make_home completed-scout)
   mkdir -p "$home/projects/scout-wt" "$home/data/lavish-103"
@@ -969,16 +970,33 @@ test_completed_scout_report_is_pointer_not_pending() {
   printf '# Lavish 103\nThe open question is whether to adopt approach A or B.\nThis needs a captain decision. Recommendation: A.\n' > "$home/data/lavish-103/report.md"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  # The report is delivered AND the question is still unanswered: both are true
+  # at once, and the surface must say so rather than pick one.
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "lavish-103")
-    | .current_state.state == "done"
-      and .hints.pending_decision == false
-      and (.hints.open_decisions | length) == 0
+    | .hints.pending_decision == true
+      and (.hints.open_decisions | map(.key)) == ["default"]
       and .hints.scout_report_present == true
-  ' >/dev/null || fail "a completed scout report must be a pointer, not a pending decision: $out"
+  ' >/dev/null || fail "a finished scout dropped its unanswered decision: $out"
 
-  # Same terminal-supersession contract across ship/scout/secondmate, both snapshot
-  # modes, and reopen/resolve after cleanup.
+  # Closing it - here the durable captain-held transfer fm-captain-hold.sh writes
+  # before completion - is what makes it the clean report pointer. The report
+  # prose still reads like a decision and still opens nothing.
+  printf 'captain-held: tracked by lavish-103-call\n' >> "$home/state/lavish-103.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  # The transfer is the log's newest event, so the crew reading no longer comes
+  # from the worker's own done: line; what this case owns is the decision going
+  # quiet and the report staying a pointer.
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "lavish-103")
+    | .hints.pending_decision == false
+      and (.hints.open_decisions | length) == 0
+      and .hints.blocked_event == false
+      and .hints.scout_report_present == true
+  ' >/dev/null || fail "a closed decision must leave a report pointer, not a pending decision: $out"
+
+  # A terminal line closes nothing on ANY kind, across both snapshot modes and
+  # through reopen and resolution after cleanup.
   home=$(make_home terminal-cleanup)
   mkdir -p "$home/projects/task"
   fakebin=$(make_fakebin "$home")
@@ -995,10 +1013,11 @@ test_completed_scout_report_is_pointer_not_pending() {
   done
   for phase in terminal reopened resolved; do
     case "$phase" in
-      terminal) single='[]'; mate='["access","choice"]'; single_state=unknown; mate_state=parked ;;
-      reopened) single='["access","new-choice"]'; mate='["access","choice","new-choice"]'; single_state=parked; mate_state=parked ;;
-      resolved) single='[]'; mate='["choice"]'; single_state=unknown; mate_state=parked ;;
+      terminal) single='["access","choice"]' ;;
+      reopened) single='["access","choice","new-choice"]' ;;
+      resolved) single='["choice"]' ;;
     esac
+    mate=$single; single_state=parked; mate_state=parked
     for kind in ship scout secondmate; do
       for terminal in 'done' failed; do
         id="$kind-$terminal"
@@ -1025,7 +1044,7 @@ test_completed_scout_report_is_pointer_not_pending() {
           + [ ("secondmate-done","secondmate-failed") as $id | $mate[] | {id:$id,key:.} ]) | sort_by(.id,.key))
     ' >/dev/null || fail "$phase home summary revived a completed decision or lost a current one: $out"
   done
-  pass "a completed scout's stale decision surfaces as a report pointer, not pending"
+  pass "a finished task keeps its unanswered decision and becomes a pointer only once it is closed"
 }
 
 # The complementary safety property: a scout still PARKED at a decision (its last
@@ -1164,7 +1183,7 @@ test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
-test_completed_scout_report_is_pointer_not_pending
+test_completed_scout_decision_clears_only_when_closed
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
