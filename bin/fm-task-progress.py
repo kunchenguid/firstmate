@@ -19,7 +19,7 @@ END = "<!-- /firstmate-progress -->"
 FIELDS = ("acceptance", "current_state", "remaining_gap", "next_step")
 MAX_FIELD_BYTES = 1200
 BLOCK_RE = re.compile(
-    rf"(?:^|\n){re.escape(START)}(?: context=(?P<context>[a-f0-9]{{64}}))? -->\n"
+    rf"(?:^|\n){re.escape(START)}(?: context=(?P<context>[a-f0-9]{{64}})(?: identity=(?P<identity>[a-f0-9]{{64}}))?)? -->\n"
     r"acceptance: (?P<acceptance>[^\n]*)\n"
     r"current_state: (?P<current>[^\n]*)\n"
     r"remaining_gap: (?P<gap>[^\n]*)\n"
@@ -49,14 +49,14 @@ def text(value: object, name: str, *, empty: bool = False) -> str:
     return value
 
 
-def parse(body: str) -> tuple[dict[str, str] | None, re.Match[str] | None, str | None]:
+def parse(body: str) -> tuple[dict[str, str] | None, re.Match[str] | None, str | None, str | None]:
     matches = list(BLOCK_RE.finditer(body))
     if len(matches) > 1:
         raise Refusal("task body has duplicate Firstmate progress blocks")
     if not matches:
         if START in body or END in body:
             raise Refusal("task body has a malformed Firstmate progress block")
-        return None, None, None
+        return None, None, None, None
     match = matches[0]
     try:
         values = {
@@ -70,13 +70,50 @@ def parse(body: str) -> tuple[dict[str, str] | None, re.Match[str] | None, str |
     values = {name: text(values[name], name, empty=name not in ("acceptance", "current_state")) for name in FIELDS}
     if bool(values["remaining_gap"]) != bool(values["next_step"]):
         raise Refusal("remaining_gap and next_step must both be empty or both be present")
-    return values, match, match.group("context")
+    return values, match, match.group("context"), match.group("identity")
+
+
+def identity_digest(context: str) -> str | None:
+    try:
+        value = json.loads(context)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    stable = {name: value.get(name, "") for name in ("goal", "brief_sha256", "execution_generation")}
+    return digest(json.dumps(stable, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def context_relation(stored: str | None, stored_identity: str | None, current: str) -> str:
+    if stored == digest(current.encode()):
+        return "exact"
+    if stored_identity is not None and stored_identity == identity_digest(current):
+        return "disposition_only"
+    try:
+        value = json.loads(current)
+    except json.JSONDecodeError:
+        return "mismatch"
+    if not isinstance(value, dict):
+        return "mismatch"
+    # Goal, brief digest and executor generation are the authenticated intent
+    # identity. Only backlog disposition/hold/block changes may explain a stale
+    # compact context without authorizing new work.
+    for state in {str(value.get("task_state", "")), "in_flight", "queued", "done"}:
+        for held in ("yes", "no"):
+            for blocked in ("yes", "no"):
+                candidate = dict(value)
+                candidate.update(task_state=state, held=held, blocked=blocked)
+                encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+                if stored == digest(encoded.encode()):
+                    return "disposition_only"
+    return "mismatch"
 
 
 def projection(task: str, goal: str, state: str, held: str, blocked: str,
                body: str, context: str) -> dict[str, object]:
-    values, _, stored_context = parse(body)
-    active = values is not None and stored_context == digest(context.encode())
+    values, _, stored_context, stored_identity = parse(body)
+    relation = context_relation(stored_context, stored_identity, context) if values is not None else "absent"
+    active = values is not None and relation == "exact"
     return {
         "task_id": task,
         "goal": goal,
@@ -84,10 +121,14 @@ def projection(task: str, goal: str, state: str, held: str, blocked: str,
         "task_held": held,
         "task_blocked": blocked,
         "recorded": active,
-        "acceptance": values["acceptance"] if active else "",
-        "current_state": values["current_state"] if active else "",
-        "remaining_gap": values["remaining_gap"] if active else "",
-        "next_step": values["next_step"] if active else "",
+        "context_relation": relation,
+        # Values remain visible when context is stale so MAIN and viewers can
+        # reconcile the sole ordinary progress record. `recorded` remains the
+        # authority bit for Branch execution.
+        "acceptance": values["acceptance"] if values is not None else "",
+        "current_state": values["current_state"] if values is not None else "",
+        "remaining_gap": values["remaining_gap"] if values is not None else "",
+        "next_step": values["next_step"] if values is not None else "",
         # Context is an opaque read-time concurrency salt supplied by the
         # task owner (currently goal, brief bytes, task state, execution
         # generation, and the backlog hold/block flags). It is
@@ -101,7 +142,7 @@ def render(values: dict[str, object], context: str) -> str:
     if bool(clean["remaining_gap"]) != bool(clean["next_step"]):
         raise Refusal("remaining_gap and next_step must both be empty or both be present")
     return "\n".join([
-        START + " context=" + digest(context.encode()) + " -->",
+        START + " context=" + digest(context.encode()) + " identity=" + str(identity_digest(context)) + " -->",
         "acceptance: " + json.dumps(clean["acceptance"], ensure_ascii=False),
         "current_state: " + json.dumps(clean["current_state"], ensure_ascii=False),
         "remaining_gap: " + json.dumps(clean["remaining_gap"], ensure_ascii=False),
@@ -131,7 +172,7 @@ def main() -> int:
             print(json.dumps(current, ensure_ascii=False, separators=(",", ":")))
             return 0
         if args.action == "values":
-            values, _, _ = parse(body)
+            values, _, _, _ = parse(body)
             print(json.dumps(values, ensure_ascii=False, separators=(",", ":")))
             return 0
         if not args.expected_token or args.expected_token != current["record_token"]:
@@ -142,7 +183,7 @@ def main() -> int:
         if not isinstance(values, dict) or set(values) != set(FIELDS):
             raise Refusal("progress update must contain only acceptance, current_state, remaining_gap and next_step")
         block = render(values, args.context)
-        _, match, _ = parse(body)
+        _, match, _, _ = parse(body)
         if match:
             prefix = body[:match.start()].rstrip("\n")
             suffix = body[match.end():].lstrip("\n")

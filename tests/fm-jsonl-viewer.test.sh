@@ -176,13 +176,15 @@ cat <<'JSON'
 {"structured":true,"id":"accepted-working","title":"Accepted while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
 {"structured":true,"id":"record-archive-working","title":"Record archive while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
 {"structured":true,"id":"invalid-archive","title":"Invalid archive authority","state":"in_flight","kind":"ship","repo":"viewer"},
-{"structured":true,"id":"active-working","title":"Active work","state":"in_flight","kind":"ship","repo":"viewer"}]},"tasks":[
+{"structured":true,"id":"active-working","title":"Active work","state":"in_flight","kind":"ship","repo":"viewer"},
+{"structured":true,"id":"done-open-gap","title":"Done with unfinished goal","state":"done","kind":"ship","repo":"viewer","compact_progress":{"remaining_gap":"Acceptance is not met","next_step":"Continue the authorized work"}}]},"tasks":[
 {"id":"archive-working","record_disposition":"archive_done","current_state":{"state":"working"}},
 {"id":"archive-ambiguous","record_disposition":"archive_done","current_state":{"state":"unknown"}},
 {"id":"accepted-working","record_disposition":"done","current_state":{"state":"working"}},
 {"id":"record-archive-working","record_disposition":"archive_done","current_state":{"state":"working"}},
 {"id":"invalid-archive","record_disposition":"active","current_state":{"state":"working"}},
-{"id":"active-working","record_disposition":"active","current_state":{"state":"working"}}]}
+{"id":"active-working","record_disposition":"active","current_state":{"state":"working"}},
+{"id":"done-open-gap","record_disposition":"done","current_state":{"state":"unknown"}}]}
 JSON
 SH
 chmod +x "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh"
@@ -208,7 +210,8 @@ jq -e '
   and (.tasks | any(.id == "record-archive-working" and .category == "history" and .status == "Archived"))
   and (.tasks | any(.id == "invalid-archive" and .category == "processing" and .warning == null))
   and (.tasks | any(.id == "active-working" and .category == "processing"))
-  and ([.tasks[] | .category] | sort | group_by(.) | map({(.[0]): length}) | add == {held:1,history:3,processing:2})
+  and (.tasks | any(.id == "done-open-gap" and .category == "held" and .status == "Unresolved goal gap"))
+  and ([.tasks[] | .category] | sort | group_by(.) | map({(.[0]): length}) | add == {held:2,history:3,processing:2})
 ' "$TMP_ROOT/candidate-tasks.json" >/dev/null || fail "candidate archive classification or controls were incorrect"
 kill "$CANDIDATE_SERVER_PID" 2>/dev/null || true
 wait "$CANDIDATE_SERVER_PID" 2>/dev/null || true

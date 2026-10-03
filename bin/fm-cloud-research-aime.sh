@@ -786,6 +786,10 @@ cmd_retire() {
     fi
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$id" >/dev/null \
       || die "AIME task decision completion gate has not passed"
+    # shellcheck source=bin/fm-remote-execution-receipt-lib.sh
+    . "$SCRIPT_DIR/fm-remote-execution-receipt-lib.sh"
+    fm_remote_execution_receipt_record "$DATA" "$id" "$AIME_STATE_EXECUTOR" aime "$generation" \
+      || die "cannot retain immutable AIME execution identity"
     source=$(fm_aime_source_id "$id") || die "invalid task id"
     "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null \
       || die "cannot retire the AIME process-event source"

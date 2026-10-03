@@ -18,9 +18,9 @@ fm_cleanup_historical_disposition() { # <task> <generation>; emits accepted|arch
   path="${FM_DATA_OVERRIDE:-${DATA:-${FM_HOME:?}/data}}/$id/lifecycle.json"
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   jq -er --arg id "$id" --arg generation "$generation" '
-    (.schema == "fm-task-lifecycle.v1" or .schema == "fm-task-lifecycle.v2") and
-    .task_id == $id and .execution_generation == $generation and
-    (.disposition == "accepted" or .disposition == "archived") |
+    select((.schema == "fm-task-lifecycle.v1" or .schema == "fm-task-lifecycle.v2") and
+      .task_id == $id and .execution_generation == $generation and
+      (.disposition == "accepted" or .disposition == "archived")) |
     .disposition
   ' "$path"
 }
@@ -62,8 +62,9 @@ fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
     # State/hold changes may invalidate it without changing MAIN's four raw
     # fields, so their empty gap remains authoritative. Legacy Done rows that
     # predate compact progress also retain their exact terminal fact.
-    if [ "$values" != null ] && printf '%s' "$values" | jq -e \
-        '.remaining_gap == "" and .next_step == ""' >/dev/null; then
+    if [ "$values" != null ] && printf '%s' "$projection" | jq -e \
+        '(.context_relation == "exact" or .context_relation == "disposition_only") and
+         .remaining_gap == "" and .next_step == ""' >/dev/null; then
       printf 'accepted\n'; return 0
     fi
     if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = "done" ] && \

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer an ordinary task through its durable inbox or a verified local backend.
-# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id> --expected-generation <spawn-gen>] [--idempotent] [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--idempotent] [--resolve-key <key>]... <text...>
 # Special key form: fm-send.sh <target> --key Enter
 # Recorded historical secondmate or remote-home targets refuse before delivery.
 # Text addressed by task selector uses the durable inbox except harness-native
@@ -200,15 +200,9 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
-ACTION_ID=
 IDEMPOTENT=0
 COMPACT_PROGRESS_TOKEN=
 COMPACT_PROGRESS_PAYLOAD_SHA=
-if [ "${1:-}" = --action-id ]; then
-  [ $# -ge 3 ] || { echo 'error: --action-id needs an id and body' >&2; exit 2; }
-  ACTION_ID=$2
-  shift 2
-fi
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
 # supervision actors, so refuse while the OTHER actor holds this task's live
@@ -222,8 +216,7 @@ if [ -n "$TARGET_META" ]; then
     fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
     send_exit_status=0
     trap 'send_exit_status=$?; fm_lease_guard_release; exit "$send_exit_status"' EXIT
-    if [ -z "$ACTION_ID" ]; then
-      if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ]; then
+    if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ]; then
         branch_progress_token=$(printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -er --arg task "$LEASE_GUARD_TASK" '.[$task] // empty' 2>/dev/null || true)
         printf '%s' "${FM_BRANCH_TASK_SCOPE:-[]}" | jq -e --arg task "$LEASE_GUARD_TASK" \
           'type == "array" and (index("*") != null or index($task) != null)' >/dev/null 2>&1 || {
@@ -247,7 +240,6 @@ if [ -n "$TARGET_META" ]; then
         COMPACT_PROGRESS_PAYLOAD_SHA=$(printf '%s' "$branch_current_progress" | python3 -c \
           'import hashlib,json,sys; print(hashlib.sha256(json.load(sys.stdin)["next_step"].encode()).hexdigest())') || exit 1
         FM_SEND_EXPECTED_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
-      fi
     fi
   fi
 fi
@@ -257,7 +249,6 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
-EXPECTED_GENERATION=
 fm_send_add_resolve_key() { # <key>
   local k=$1
   case "$k" in
@@ -276,13 +267,9 @@ fm_send_add_resolve_key() { # <key>
 }
 while :; do
   case "${1:-}" in
-  --action-id|--expected-generation)
-    [ $# -ge 2 ] || exit 2
-    case "$1" in
-      --action-id) [ -z "$ACTION_ID" ] || exit 2; ACTION_ID=$2 ;;
-      --expected-generation) [ -z "$EXPECTED_GENERATION" ] || exit 2; EXPECTED_GENERATION=$2 ;;
-    esac
-    shift 2
+  --action-id|--action-id=*|--expected-generation|--expected-generation=*)
+    echo 'REFUSED: --action-id and --expected-generation belonged to the removed rich task lifecycle; use compact MAIN-authored continuation or an existing operation owner' >&2
+    exit 6
     ;;
   --idempotent)
     IDEMPOTENT=1
@@ -308,18 +295,11 @@ while :; do
   esac
 done
 
-if [ "$IDEMPOTENT" = 1 ] && { [ "$(fm_lease_actor)" != branch ] || [ -n "$ACTION_ID$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
+if [ "$IDEMPOTENT" = 1 ] && { [ "$(fm_lease_actor)" != branch ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
   echo 'REFUSED: --idempotent is only for an ordinary Branch continuation to its admitted task' >&2
   exit 6
 fi
 
-if [ -n "$ACTION_ID$EXPECTED_GENERATION" ]; then
-  [ -n "$ACTION_ID" ] && [ -n "$EXPECTED_GENERATION" ] && [ -n "$TARGET_META" ] || exit 2
-  [ "$TARGET_BACKEND" != remote ] && [ -z "$FIRE_AND_FORGET_ID$RESOLVE_KEYS" ] || exit 2
-  [ "$(fm_meta_get "$TARGET_META" kind)" != secondmate ] || exit 2
-  [ "${1-}" != --key ] || exit 2
-  FM_SEND_EXPECTED_SPAWN_GEN=$EXPECTED_GENERATION
-fi
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
 fi
@@ -374,11 +354,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
     exit 1
   fi
-  if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
-  echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
-  exit 6
-fi
-if [ "${1:-}" = "--key" ]; then
+  if [ "${1:-}" = "--key" ]; then
     echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
     exit 1
   fi
@@ -480,10 +456,6 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # failure is surfaced below with the attempted resolution attached, while a
 # timeout-like result stays uncertain and forbids blind replay.
 
-if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
-  echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
-  exit 6
-fi
 if [ -n "$COMPACT_PROGRESS_TOKEN" ] && [ "${1:-}" = --key ]; then
   echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact continuation authorizes only its exact MAIN-authored text next_step" >&2
   exit 6
@@ -528,9 +500,6 @@ else
     \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
     *) INBOX_PLANE=1 ;;
     esac
-  fi
-  if [ -n "$ACTION_ID" ] && [ "$INBOX_PLANE" != 1 ]; then
-    echo 'REFUSED: lifecycle actions cannot use the direct native-prompt plane' >&2; exit 6
   fi
   if [ "$IDEMPOTENT" = 1 ] && [ "$INBOX_PLANE" != 1 ]; then
     echo 'REFUSED: --idempotent requires ordinary task inbox text' >&2; exit 6
@@ -593,9 +562,7 @@ else
         exit 6
       fi
     fi
-    if [ -n "$ACTION_ID" ]; then
-      INBOX_RECORD=$(fm_task_inbox_write_handoff "$STATE" "$INBOX_TASK_ID" "$MESSAGE" "action.$ACTION_ID" "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
-    elif [ "$IDEMPOTENT" = 1 ]; then
+    if [ "$IDEMPOTENT" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' \
         "$CURRENT_INBOX_SPAWN_GEN" "$COMPACT_PROGRESS_TOKEN") || inbox_write_rc=$?
       case "$INBOX_RECORD" in

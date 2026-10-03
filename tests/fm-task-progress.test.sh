@@ -94,9 +94,10 @@ if [ "$(printf '%s' "$after_intent" | jq -r .record_token)" = "$token" ]; then
   fail "authenticated intent correction retained the old progress token"
 fi
 printf '%s' "$after_intent" | jq -e '
-  .recorded==false and .acceptance=="" and .current_state=="" and
-  .remaining_gap=="" and .next_step==""' >/dev/null \
-  || fail "authenticated intent correction left stale progress active"
+  .recorded==false and .context_relation=="mismatch" and
+  .remaining_gap=="Validation has not passed" and
+  .next_step=="Run the authorized validation and review its result"' >/dev/null \
+  || fail "authenticated intent correction did not expose stale progress for MAIN-only reconciliation"
 corrected_record='{"acceptance":"The corrected task behavior passes","current_state":"The corrected intent is recorded","remaining_gap":"The corrected validation remains","next_step":"Run the corrected validation"}'
 corrected=$(progress update-progress ordinary --expected-token "$(printf '%s' "$after_intent" | jq -r .record_token)" \
   --progress "$corrected_record") || fail "corrected intent progress update failed"
@@ -107,18 +108,18 @@ task_cmd update ordinary --title "Corrected requested outcome" >/dev/null \
   || fail "title-only correction fixture failed"
 after_title=$(progress progress ordinary) || fail "progress read after title-only correction failed"
 printf '%s' "$after_title" | jq -e '
-  .goal=="Corrected requested outcome" and .recorded==false and .acceptance=="" and
-  .current_state=="" and .remaining_gap=="" and .next_step==""' >/dev/null \
-  || fail "title-only goal correction left stale progress active"
+  .goal=="Corrected requested outcome" and .recorded==false and .context_relation=="mismatch" and
+  .remaining_gap=="The corrected validation remains" and .next_step=="Run the corrected validation"' >/dev/null \
+  || fail "title-only goal correction did not require MAIN reconciliation"
 corrected=$(progress update-progress ordinary --expected-token "$(printf '%s' "$after_title" | jq -r .record_token)" \
   --progress "$corrected_record") || fail "title-corrected progress update failed"
 
 printf '%s\n' 'spawn_gen=g2' >> "$HOME_DIR/state/ordinary.meta"
 after_generation=$(progress progress ordinary) || fail "progress read after executor replacement failed"
 printf '%s' "$after_generation" | jq -e '
-  .recorded==false and .acceptance=="" and .current_state=="" and
-  .remaining_gap=="" and .next_step==""' >/dev/null \
-  || fail "executor replacement left stale progress active"
+  .recorded==false and .context_relation=="mismatch" and
+  .remaining_gap=="The corrected validation remains" and .next_step=="Run the corrected validation"' >/dev/null \
+  || fail "executor replacement did not require MAIN reconciliation"
 regenerated=$(progress update-progress ordinary --expected-token "$(printf '%s' "$after_generation" | jq -r .record_token)" \
   --progress "$corrected_record") || fail "replacement executor progress update failed"
 printf '%s' "$regenerated" | jq -e '.recorded==true and .next_step=="Run the corrected validation"' >/dev/null \
@@ -137,8 +138,8 @@ task_cmd "done" ordinary >/dev/null || fail "disposition completion fixture fail
 task_cmd reopen ordinary >/dev/null || fail "disposition reopen fixture failed"
 queued=$(progress progress ordinary) || fail "queued progress read failed"
 printf '%s' "$queued" | jq -e '
-  .task_state=="queued" and .recorded==false and .acceptance=="" and
-  .current_state=="" and .remaining_gap=="" and .next_step==""' >/dev/null \
+  .task_state=="queued" and .recorded==false and .context_relation=="disposition_only" and
+  .remaining_gap=="The corrected validation remains" and .next_step=="Run the corrected validation"' >/dev/null \
   || fail "queued task retained in-flight compact progress authority"
 [ "$(printf '%s' "$queued" | jq -r .record_token)" != "$token" ] \
   || fail "task disposition change retained the old compact authority token"
@@ -154,7 +155,8 @@ task_cmd hold ordinary --reason "captain decision pending" --kind captain >/dev/
 held=$(progress progress ordinary) || fail "held progress read failed"
 printf '%s' "$held" | jq -e '
   .task_state=="in_flight" and .task_held=="yes" and .task_blocked=="no" and
-  .recorded==false and .remaining_gap=="" and .next_step==""' >/dev/null \
+  .recorded==false and .context_relation=="disposition_only" and
+  .remaining_gap=="The corrected validation remains" and .next_step=="Run the corrected validation"' >/dev/null \
   || fail "an explicit hold left compact continuation authority active"
 [ "$(printf '%s' "$held" | jq -r .record_token)" != "$token" ] \
   || fail "an explicit hold retained the old compact authority token"
@@ -170,7 +172,8 @@ task_cmd block ordinary --by progress-blocker >/dev/null || fail "compact block 
 blocked=$(progress progress ordinary) || fail "blocked progress read failed"
 printf '%s' "$blocked" | jq -e '
   .task_state=="in_flight" and .task_held=="no" and .task_blocked=="yes" and
-  .recorded==false and .remaining_gap=="" and .next_step==""' >/dev/null \
+  .recorded==false and .context_relation=="disposition_only" and
+  .remaining_gap=="The corrected validation remains" and .next_step=="Run the corrected validation"' >/dev/null \
   || fail "a dependency block left compact continuation authority active"
 [ "$(printf '%s' "$blocked" | jq -r .record_token)" != "$token" ] \
   || fail "a dependency block retained the old compact authority token"
@@ -201,8 +204,8 @@ remote_replaced=$(progress progress remote) || fail "remote replacement progress
 if [ "$(printf '%s' "$remote_updated" | jq -r .record_token)" = "$(printf '%s' "$remote_replaced" | jq -r .record_token)" ]; then
   fail "remote execution replacement retained the old compact token"
 fi
-printf '%s' "$remote_replaced" | jq -e '.recorded==false and .next_step==""' >/dev/null \
-  || fail "remote execution replacement left stale progress active"
+printf '%s' "$remote_replaced" | jq -e '.recorded==false and .context_relation=="mismatch" and .next_step!=""' >/dev/null \
+  || fail "remote execution replacement did not retain stale progress for MAIN reconciliation"
 
 task_cmd add legacy-cloud "Finish the legacy cloud result" --kind scout --body "Keep legacy progress resumable." --start >/dev/null \
   || fail "legacy cloud fixture task add failed"
@@ -227,8 +230,8 @@ legacy_replaced=$(progress progress legacy-cloud) || fail "legacy cloud replacem
 if [ "$(printf '%s' "$legacy_updated" | jq -r .record_token)" = "$(printf '%s' "$legacy_replaced" | jq -r .record_token)" ]; then
   fail "legacy cloud execution replacement retained the old compact token"
 fi
-printf '%s' "$legacy_replaced" | jq -e '.recorded==false and .next_step==""' >/dev/null \
-  || fail "legacy cloud execution replacement left stale progress active"
+printf '%s' "$legacy_replaced" | jq -e '.recorded==false and .context_relation=="mismatch" and .next_step!=""' >/dev/null \
+  || fail "legacy cloud execution replacement did not retain stale progress for MAIN reconciliation"
 jq 'del(.execution_generation) | .revision+=1' "$HOME_DIR/state/cloud-tasks/legacy-cloud/state.json" > "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json"
 chmod 0600 "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json"
 mv "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json" "$HOME_DIR/state/cloud-tasks/legacy-cloud/state.json"
@@ -259,8 +262,8 @@ printf '%s' "$complete" | jq -e '.remaining_gap=="" and .next_step==""' >/dev/nu
   || fail "satisfied goal retained an executable next step"
 
 listed=$(progress progress-list) || fail "active task discovery failed"
-assert_equals "ordinary" "$(printf '%s' "$listed" | jq -r '.tasks[]')" \
-  "monitoring did not discover the unfinished original task record"
+assert_equals $'dash-body\nlegacy-cloud\nordinary\nremote' "$(printf '%s' "$listed" | jq -r '.tasks[]')" \
+  "monitoring did not retain Done rows whose compact gaps remain open"
 
 mkdir -p "$TMP_ROOT/fakebin"
 # shellcheck disable=SC2016 # These variables expand when the generated fixture runs.
@@ -305,7 +308,25 @@ expect_code 6 "$rc" "branch progress write"
 assert_contains "$out" "task progress belongs to MAIN" "branch update refusal lost ownership reason"
 
 task_cmd "done" ordinary >/dev/null || fail "fixture completion failed"
-assert_equals 0 "$(progress progress-list | jq '.tasks | length')" "completed task remained active progress work"
+assert_equals $'dash-body\nlegacy-cloud\nremote' "$(progress progress-list | jq -r '.tasks[]')" \
+  "accepted completion hid or invented open compact gaps"
+FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_cleanup_completion_mode ordinary g2' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" >/dev/null \
+  || fail "Done disposition invalidated identity-bound empty compact completion"
+printf '%s\n' 'New authenticated intent opens work after the old acceptance.' >"$HOME_DIR/data/ordinary/brief.md"
+out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_cleanup_completion_mode ordinary g2' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" 2>&1)
+rc=$?
+expect_code 6 "$rc" "completion after authenticated intent change"
+assert_contains "$out" 'not MAIN-accepted' \
+  "raw empty progress bypassed the authenticated intent binding"
+mkdir -p "$HOME_DIR/data/historical-terminal"
+jq -n '{schema:"fm-task-lifecycle.v2",task_id:"historical-terminal",execution_generation:"legacy-g1",disposition:"archived"}' \
+  >"$HOME_DIR/data/historical-terminal/lifecycle.json"
+historical_mode=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_cleanup_completion_mode historical-terminal legacy-g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh") \
+  || fail "generation-matched historical terminal fact was not readable"
+assert_equals archived "$historical_mode" "historical archived disposition was not selected before field access"
 out=$(progress update-progress ordinary --expected-token "$(printf '%s' "$complete" | jq -r .record_token)" --progress "$record" 2>&1)
 rc=$?
 expect_code 6 "$rc" "completed task progress update"

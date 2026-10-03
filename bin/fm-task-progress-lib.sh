@@ -37,7 +37,7 @@ fm_task_progress_sha256_file() { # <path>
 }
 
 fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE/HELD/BLOCKED
-  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} out status
+  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} out status links link artifact
   FM_TASK_PROGRESS_BODY=
   FM_TASK_PROGRESS_GOAL=
   FM_TASK_PROGRESS_STATE=
@@ -57,6 +57,26 @@ fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE/HELD
     echo "REFUSED: could not decode task $1 goal" >&2
     return 1
   }
+  links=$(printf '%s\n' "$out" | sed -n 's/^  links: //p' | head -1 \
+    | fm_task_progress_decode_scalar) || {
+    echo "REFUSED: could not decode task $1 artifact links" >&2
+    return 1
+  }
+  # tasks-axi's Markdown presentation appends each structured artifact value
+  # to the displayed title. Recover the original task title for compact goal
+  # identity; a genuine title correction still invalidates the scope. Strip
+  # one suffix per declared link so a title that itself ended in the same path
+  # remains intact after the backend adds its second copy.
+  while IFS= read -r link; do
+    link=${link#"${link%%[![:space:]]*}"}
+    artifact=${link#*:}
+    [ "$artifact" != "$link" ] || continue
+    case "$FM_TASK_PROGRESS_GOAL" in
+      *" $artifact") FM_TASK_PROGRESS_GOAL=${FM_TASK_PROGRESS_GOAL%" $artifact"} ;;
+    esac
+  done <<EOF
+$(printf '%s' "$links" | tr ',' '\n')
+EOF
   FM_TASK_PROGRESS_BODY=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
     | fm_task_progress_decode_scalar) || {
     echo "REFUSED: could not decode task $1 body" >&2
@@ -93,14 +113,12 @@ fm_task_progress_read() ( # <task>
 # row can still prove that MAIN cleared its gap before the row moved sections.
 # Emits JSON null for historical rows that never adopted compact progress.
 fm_task_progress_values() ( # <task>
-  local context
   # shellcheck disable=SC2030,SC2031 # This reader is intentionally isolated in a subshell.
   local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   fm_task_progress_detail "$1" || return $?
-  context=$(fm_task_progress_context "$1") || return $?
   printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
     values --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
-    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" --context "$context"
+    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED"
 )
 
 fm_task_progress_execution_generation() { # <task>
@@ -251,18 +269,34 @@ fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
   fm_task_progress_read "$id"
 )
 
-fm_task_progress_list() ( # active task ids, one per line
-  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} listing
+fm_task_progress_list() ( # active task ids plus Done rows with an open compact gap
+  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} listing done_listing id values
   # shellcheck disable=SC2030,SC2031 # This reader is intentionally isolated in a subshell.
   local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   listing=$(fm_backlog_row_list "$data" --state in_flight --limit 10000) || return $?
-  printf '%s\n' "$listing" | awk '
+  done_listing=$(fm_backlog_row_list "$data" --state "done" --limit 10000) || return $?
+  {
+    printf '%s\n' "$listing" | awk '
     /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
     rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ {
       line=$0; sub(/^  /,"",line); sub(/,.*/,"",line); print line; next
     }
     rows { rows=0 }
-  ' | jq -Rsc '{tasks:(split("\n") | map(select(length > 0)))}'
+    '
+    printf '%s\n' "$done_listing" | awk '
+      /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
+      rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ {
+        line=$0; sub(/^  /,"",line); sub(/,.*/,"",line); print line; next
+      }
+      rows { rows=0 }
+    ' | while IFS= read -r id; do
+      values=$(fm_task_progress_values "$id") || exit $?
+      if [ "$values" != null ] && printf '%s' "$values" | jq -e \
+          '.remaining_gap != "" and .next_step != ""' >/dev/null; then
+        printf '%s\n' "$id"
+      fi
+    done
+  } | LC_ALL=C sort -u | jq -Rsc '{tasks:(split("\n") | map(select(length > 0)))}'
 )
 
 # Legacy teardown remains available for records that never adopted compact

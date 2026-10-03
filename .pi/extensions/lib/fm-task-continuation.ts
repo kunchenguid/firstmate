@@ -131,7 +131,15 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       const id = ids[(cursor + i) % ids.length];
       try {
         const progress = await command(["progress", id]);
-        if (!progress?.recorded || !progress.remaining_gap || !progress.next_step) continue;
+        if (!progress?.remaining_gap || !progress.next_step) continue;
+        if (!progress.recorded) {
+          const reason = progress.task_state === "done"
+            ? "Done row retains a nonempty compact gap; MAIN must reopen/start it before routing the recorded next step"
+            : "authenticated intent, executor generation, hold, block, or disposition changed; MAIN must refresh compact progress before continuation";
+          const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${reason}`).digest("hex");
+          reconciliations.push({ task_id: id, reason, key });
+          continue;
+        }
         const current = await runCommandAsync("bash", [join(root, "bin/fm-task-state.sh"), "--durable-only", id], {
           env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_DATA_OVERRIDE: data }, maxBuffer: 64 * 1024,
         });

@@ -1389,7 +1389,7 @@ test_cancellation_and_retirement_authority() {
 # Exercise the real backlog CLI, including a close that landed before its
 # caller saw an error. Retry must preserve evidence and never resurrect work.
 test_retirement_pairs_backlog_and_preserves_failed_close() {
-  local home fakebin id=ida-close out real_tasks mode
+  local home fakebin id=ida-close out real_tasks mode rc
   command -v tasks-axi >/dev/null 2>&1 || { printf 'skip: remote backlog pairing needs tasks-axi\n'; return; }
   real_tasks=$(command -v tasks-axi)
   for mode in closed held interrupted; do
@@ -1421,6 +1421,12 @@ SH
       assert_present "$(state_file "$home" "$id")" "failed close lost terminal state"
       assert_present "$home/data/$id/report.md" "failed close lost report"
       assert_grep 'execution evidence retained' "$home/retire.err" "failed close lacked actionable diagnostic"
+      out=$(FM_HOME="$home" "$STATE_CMD" progress "$id") \
+        || fail "interrupted close lost readable compact progress"
+      [ "$(printf '%s' "$out" | jq -r .goal)" = 'Remote research' ] \
+        || fail "report-link decoration replaced the original compact goal"
+      [ "$(printf '%s' "$out" | jq -r .context_relation)" = disposition_only ] \
+        || fail "interrupted close changed more than compact task disposition"
     fi
     PATH="$fakebin:$BASE_PATH" TASKS_AXI_BACKEND=markdown FM_REAL_TASKS="$real_tasks" FM_CLOSE_INTERRUPT="$home/interrupt" FM_HOME="$home" \
       "$RETIRE" "$id" >/dev/null || fail "remote retirement/retry failed for $mode"
@@ -1434,6 +1440,20 @@ SH
     assert_present "$home/data/$id/report.md" "retirement lost durable report"
     assert_absent "$home/state/$id.meta" "retirement retained execution metadata"
     assert_contains "$out" "data/$id/report.md" "retirement lost report link"
+    assert_present "$home/data/$id/remote-execution.json" \
+      "retirement lost immutable iDA execution identity"
+    if [ "$mode" = closed ]; then
+      TASKS_AXI_BACKEND=markdown tasks-axi reopen "$id" --file "$home/data/backlog.md" >/dev/null \
+        || fail "iDA identity-reuse fixture could not reopen the row"
+      TASKS_AXI_BACKEND=markdown tasks-axi start "$id" --file "$home/data/backlog.md" >/dev/null \
+        || fail "iDA identity-reuse fixture could not restart the row"
+      rc=0
+      dispatch_ida "$home" "$fakebin" "$id" >"$home/reuse.out" 2>"$home/reuse.err" || rc=$?
+      [ "$rc" -eq 6 ] || fail "retired iDA id reuse exited $rc instead of 6"
+      assert_grep 'retained remote execution identity' "$home/reuse.err" \
+        "retired iDA id reuse lost its identity blocker"
+      assert_absent "$(state_file "$home" "$id")" "retired iDA id reuse created provider state"
+    fi
   done
   pass "remote retirement pairs closed/held backlog state and retries interrupted close without losing evidence"
 }
@@ -1628,10 +1648,16 @@ test_terminal_disposition_guards_remote_effects() {
   pass 'iDA terminal admission blocks dispatch, followup, retirement, and task-id reuse without provider replay'
 }
 
-if [ "${FM_REMOTE_TEST_CASE:-}" = followup ]; then
-  test_followup_identity_and_unknown_submission
-  exit 0
-fi
+case "${FM_REMOTE_TEST_CASE:-}" in
+  followup)
+    test_followup_identity_and_unknown_submission
+    exit 0
+    ;;
+  retirement)
+    test_retirement_pairs_backlog_and_preserves_failed_close
+    exit 0
+    ;;
+esac
 
 test_followup_identity_and_unknown_submission
 test_terminal_disposition_guards_remote_effects

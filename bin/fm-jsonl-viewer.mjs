@@ -296,6 +296,10 @@ function taskOverview(home, roots, codeRoot) {
       project: record.repo || null,
       holdKind: record.hold_kind || null,
       blockedBy: Array.isArray(record.unresolved_blocker_ids) ? record.unresolved_blocker_ids : [],
+      compactOpenGap: typeof record.compact_progress?.remaining_gap === "string"
+        && record.compact_progress.remaining_gap.length > 0
+        && typeof record.compact_progress?.next_step === "string"
+        && record.compact_progress.next_step.length > 0,
     });
   }
   for (const task of snapshot.tasks) {
@@ -322,8 +326,9 @@ function taskOverview(home, roots, codeRoot) {
   }
   const tasks = [...items.values()].map(item => {
     const disposition = item.recordDisposition || "unknown";
-    const terminalConflict = ["working", "blocked", "parked"].includes(item.currentState)
-      && ["done", "archive_done"].includes(disposition);
+    const compactOpenGap = Boolean(item.compactOpenGap) && disposition === "done";
+    const terminalConflict = (["working", "blocked", "parked"].includes(item.currentState)
+      && ["done", "archive_done"].includes(disposition)) || compactOpenGap;
     const remoteStatusUnconfirmed = disposition === "archive_done"
       && !["done", "failed"].includes(item.currentState);
     const held = item.heldByDecision || item.openDecisionCount > 0 || item.currentState === "blocked" || item.currentState === "parked"
@@ -332,7 +337,7 @@ function taskOverview(home, roots, codeRoot) {
     let status = "Needs reconciliation";
     if (terminalConflict && disposition !== "archive_done") {
       category = "held";
-      status = "Completion conflict";
+      status = compactOpenGap ? "Unresolved goal gap" : "Completion conflict";
     } else if (disposition === "archive_done") {
       category = "history";
       status = "Archived";

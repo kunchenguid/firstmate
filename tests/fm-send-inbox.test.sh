@@ -462,6 +462,71 @@ test_terminal_task_refuses_new_steer() {
   pass "fm-send: retained terminal resources reject new steers before enqueue"
 }
 
+test_removed_lifecycle_action_flags_refuse() {
+  local dir err rc
+  dir=$(setup_case removed-action-flags)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 --action-id old-action --expected-generation old-generation "unauthorized payload"
+  rc=$?
+  [ "$rc" -eq 6 ] || fail "removed lifecycle action flags exited $rc instead of 6"
+  assert_contains "$(cat "$err")" 'belonged to the removed rich task lifecycle' \
+    "removed lifecycle action flags did not explain their refusal"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "removed lifecycle action flags created an inbox record"
+  [ ! -s "$dir/send.log" ] || fail "removed lifecycle action flags reached the endpoint"
+  pass "fm-send: removed lifecycle action flags cannot bypass compact continuation"
+}
+
+test_done_row_with_open_gap_allows_repair_steer() {
+  local dir err
+  dir=$(setup_case done-open-gap)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/data"
+  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
+  cat >"$dir/home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] t1 - Prematurely closed fixture (kind: ship)
+  <!-- firstmate-progress:v1 context=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->
+  acceptance: "MAIN verifies the complete outcome"
+  current_state: "Only a partial result exists"
+  remaining_gap: "Acceptance is not met"
+  next_step: "Continue the authorized work"
+  <!-- /firstmate-progress -->
+EOF
+  run_send "$dir" "$err" -- t1 "repair the unfinished goal" \
+    || fail "Done row with an open compact gap rejected its repair steer: $(cat "$err")"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] \
+    || fail "Done row with an open compact gap did not retain its repair steer"
+  pass "fm-send: Done cannot hide a nonempty compact gap"
+}
+
+test_non_markdown_terminal_read_refuses_steer() {
+  local dir err rc
+  dir=$(setup_case non-markdown-terminal)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/data"
+  printf 'backend="beads"\n[beads]\npath=".beads"\n' >"$dir/home/.tasks.toml"
+  cat >"$dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = show ] && [ "$2" = t1 ]; then
+  printf '%s\n' '  title: "Terminal external row"' '  state: done' '  held: no' '  blocked: no' '  body: "-"'
+  exit 0
+fi
+exit 2
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  run_send "$dir" "$err" -- t1 "must not resume external terminal work"
+  rc=$?
+  [ "$rc" -eq 6 ] || fail "non-Markdown terminal steer exited $rc instead of 6: $(cat "$err")"
+  assert_contains "$(cat "$err")" 'explicitly terminal (done)' \
+    "non-Markdown terminal steer did not use the backend-neutral exact read"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "non-Markdown terminal steer created an inbox record"
+  pass "fm-send: backend-neutral task reads preserve terminal effect guards"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -477,3 +542,6 @@ test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
 test_terminal_task_refuses_new_steer
+test_removed_lifecycle_action_flags_refuse
+test_done_row_with_open_gap_allows_repair_steer
+test_non_markdown_terminal_read_refuses_steer

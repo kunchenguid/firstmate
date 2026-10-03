@@ -1392,6 +1392,19 @@ test_cloud_retirement_preserves_report() {
   [ ! -e "$home/state/$id.meta" ] || fail "AIME retirement retained volatile task metadata"
   [ ! -e "$home/state/$id.status" ] || fail "AIME retirement retained volatile status history"
   [ ! -e "$home/state/cloud-tasks/$id" ] || fail "AIME retirement retained private cloud state"
+  assert_present "$home/data/$id/remote-execution.json" \
+    "AIME retirement lost its immutable execution identity"
+  tasks-axi reopen "$id" --file "$home/data/backlog.md" >/dev/null \
+    || fail "AIME identity-reuse fixture could not reopen the row"
+  tasks-axi start "$id" --file "$home/data/backlog.md" >/dev/null \
+    || fail "AIME identity-reuse fixture could not restart the row"
+  : >"$home/bytedcli.log"
+  rc=0
+  dispatch_aime "$home" "$fakebin" "$id" >"$home/reuse.out" 2>"$home/reuse.err" || rc=$?
+  [ "$rc" -eq 6 ] || fail "retired AIME id reuse exited $rc instead of 6"
+  assert_grep 'retained remote execution identity' "$home/reuse.err" \
+    "retired AIME id reuse lost its identity blocker"
+  [ ! -s "$home/bytedcli.log" ] || fail "retired AIME id reuse reached the provider"
 
   id=provider-failed
   new_task "$home" "$id"
@@ -1484,6 +1497,7 @@ test_local_executor_wrappers_delegate_unchanged() {
   cp "$ROOT/bin/fm-task-state.sh" "$root/bin/"
   cp "$ROOT/bin/fm-task-retire.sh" "$root/bin/"
   cp "$ROOT/bin/fm-cleanup-receipt-lib.sh" "$root/bin/"
+  cp "$ROOT/bin/fm-remote-execution-receipt-lib.sh" "$root/bin/"
   cat >"$root/bin/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'spawn'

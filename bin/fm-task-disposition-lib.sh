@@ -143,9 +143,45 @@ EOF
 # can never gain a new steer, handoff, worker or provider effect merely because
 # its endpoint/resource record was retained for cleanup.
 fm_task_disposition_effect_guard() { # <data-dir> <task-id> [operation]
-  local data=$1 task=$2 operation=${3:-effect} snapshot disposition
-  snapshot=$(fm_task_disposition_snapshot "$data") || return 1
-  disposition=$(fm_task_disposition_for "$snapshot" "$task" 2>/dev/null || true)
+  local data=$1 task=$2 operation=${3:-effect} snapshot disposition detail_error detail_rc values root backend
+  # Historical/manual homes with no ordinary task source keep their established
+  # operability; absence of a data directory is not evidence of terminality.
+  [ -d "$data" ] || return 0
+  # The backend-neutral exact row read wins over the markdown projection. A
+  # Done row whose sole compact record still has a gap remains unfinished and
+  # may receive the authorized continuation needed to repair its disposition.
+  # shellcheck source=bin/fm-task-progress-lib.sh
+  . "$FM_TASK_DISPOSITION_LIB_DIR/fm-task-progress-lib.sh"
+  detail_error=$(mktemp "${TMPDIR:-/tmp}/fm-task-disposition.XXXXXX") || return 1
+  if fm_task_progress_detail "$task" 2>"$detail_error"; then
+    rm -f "$detail_error"
+    [ "$FM_TASK_PROGRESS_STATE" = "done" ] || return 0
+    values=$(fm_task_progress_values "$task") || return $?
+    if [ "$values" != null ] && printf '%s' "$values" | jq -e \
+        '.remaining_gap != "" and .next_step != ""' >/dev/null; then
+      return 0
+    fi
+    disposition="done"
+  else
+    detail_rc=$?
+    if ! grep -qx 'code: NOT_FOUND' "$detail_error"; then
+      cat "$detail_error" >&2
+      rm -f "$detail_error"
+      return "$detail_rc"
+    fi
+    rm -f "$detail_error"
+    snapshot=$(fm_task_disposition_snapshot "$data") || return 1
+    disposition=$(fm_task_disposition_for "$snapshot" "$task" 2>/dev/null || true)
+    if [ -z "$disposition" ]; then
+      root=$(fm_backlog_root "$data") || return 1
+      backend=$(fm_tasks_axi_backend_resolve "$root") || return 1
+      if [ "$backend" != markdown ]; then
+        printf 'REFUSED: task %s is absent from the backend-neutral current-task read; %s cannot assume it is nonterminal\n' \
+          "$task" "$operation" >&2
+        return 6
+      fi
+    fi
+  fi
   case "$disposition" in
     done|archive_done)
       printf 'REFUSED: task %s is explicitly terminal (%s); %s cannot start new work\n' \
@@ -161,6 +197,9 @@ fm_task_disposition_effect_guard() { # <data-dir> <task-id> [operation]
 # not active lifecycle admission or progress.
 fm_task_historical_execution_guard() { # <data-dir> <task-id>
   local data=$1 task=$2 record="$1/$2/lifecycle.json"
+  # shellcheck source=bin/fm-remote-execution-receipt-lib.sh
+  . "$FM_TASK_DISPOSITION_LIB_DIR/fm-remote-execution-receipt-lib.sh"
+  fm_remote_execution_receipt_guard "$data" "$task" || return $?
   [ -e "$record" ] || [ -L "$record" ] || return 0
   [ -f "$record" ] && [ ! -L "$record" ] || {
     echo "REFUSED: task $task has unsafe retained execution history" >&2

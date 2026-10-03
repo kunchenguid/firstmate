@@ -598,6 +598,10 @@ cmd_retire() {
     report=$(fm_remote_report_path "$id") || die "cannot resolve report path"
     fm_remote_report_safe "$id" && [ "$REMOTE_STATE_REPORT_PATH" = "$report" ] || die "iDA task has no safe report at data/$id/report.md"
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$id" >/dev/null || die "iDA task decision completion gate has not passed"
+    # shellcheck source=bin/fm-remote-execution-receipt-lib.sh
+    . "$SCRIPT_DIR/fm-remote-execution-receipt-lib.sh"
+    fm_remote_execution_receipt_record "$DATA" "$id" remote-agent ida "remote-$generation" \
+      || die "cannot retain immutable iDA execution identity"
     source=$(fm_remote_source_id ida "$id")
     "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null || die "cannot retire iDA process-event source"
     fm_backlog_remote_retire "$CONFIG" "$DATA" "$id" \

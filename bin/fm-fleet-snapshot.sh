@@ -370,6 +370,15 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       (($line | capture("^[-*][[:space:]]+\\[(?<check>[ xX])\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+(?<rest>.*)$")?) //
        (($line | capture("^[-*][[:space:]]+\\*\\*(?<id>[^*]+)\\*\\*[[:space:]]+-[[:space:]]+(?<rest>.*)$")?)
         | if . == null then null else . + {check:" "} end));
+    def compact_progress($lines):
+      ([$lines | join("\n") | capture(
+        "(?:^|\\n)<!-- firstmate-progress:v1(?: context=[a-f0-9]{64}(?: identity=[a-f0-9]{64})?)? -->\\n" +
+        "acceptance: (?<acceptance>[^\\n]*)\\ncurrent_state: (?<current_state>[^\\n]*)\\n" +
+        "remaining_gap: (?<remaining_gap>[^\\n]*)\\nnext_step: (?<next_step>[^\\n]*)\\n" +
+        "<!-- /firstmate-progress -->")] | .[0] // null) as $match
+      | if $match == null then null
+        else try ($match | with_entries(.value |= fromjson)) catch {invalid:true}
+        end;
     def structured_row($line):
       ($line | test("^[-*][[:space:]]+\\[[ xX]\\][[:space:]]+[^[:space:]]+[[:space:]]+-[[:space:]]+"))
       or ($line | test("^[-*][[:space:]]+\\*\\*[^*]+\\*\\*[[:space:]]+-[[:space:]]+"));
@@ -436,6 +445,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
+    | .records |= map(.compact_progress = compact_progress(.body_lines))
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
