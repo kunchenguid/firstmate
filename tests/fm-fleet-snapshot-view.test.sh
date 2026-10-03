@@ -1156,7 +1156,7 @@ EOF
 # backlog without canonical key order republishes identical state as different
 # bytes. Pin the seed to several values and require byte-identical summaries.
 test_home_summary_bytes_ignore_perl_hash_seed() {
-  local home seed out first= orders=
+  local home seed out first='' orders=''
   for seed in $(seq 16); do
     orders="$orders$(PERL_HASH_SEED=$seed perl -e 'my %h = (date => 1, verb => 1); print join(",", keys %h), "\n"')
 "
