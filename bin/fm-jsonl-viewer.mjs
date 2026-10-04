@@ -33,6 +33,12 @@ const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const FLEET_SNAPSHOT_TIMEOUT_MS = 60000;
 const TASK_DISPOSITION_TIMEOUT_MS = 15000;
 const TASK_OVERVIEW_CACHE_TTL_MS = 2000;
+const TASK_CATEGORY_PRIORITY = new Map([
+  ["processing", 0],
+  ["held", 1],
+  ["completed", 2],
+  ["history", 3],
+]);
 
 let taskOverviewCache = null;
 let taskOverviewInFlight = null;
@@ -387,7 +393,9 @@ function taskOverview(home, roots, codeRoot) {
       documentTypes: item.documentTypes || [],
       documentModifiedAt: item.documentModifiedAt || null,
     };
-  }).sort((left, right) => left.category.localeCompare(right.category) || left.title.localeCompare(right.title));
+  }).sort((left, right) => (TASK_CATEGORY_PRIORITY.get(left.category) ?? TASK_CATEGORY_PRIORITY.size)
+    - (TASK_CATEGORY_PRIORITY.get(right.category) ?? TASK_CATEGORY_PRIORITY.size)
+    || left.title.localeCompare(right.title));
   return {
     generatedAt: snapshot.generated,
     tasks,

@@ -56,14 +56,6 @@ cat > "$HOME_FIXTURE/data/backlog.md" <<MARKDOWN
 - [ ] $FIRST_REPORT_ID - Delayed report task (repo: viewer) (kind: scout)
 - [ ] tall-task-01 - Tall dashboard task 01 (repo: viewer) (kind: ship)
 - [ ] tall-task-02 - Tall dashboard task 02 (repo: viewer) (kind: ship)
-- [ ] tall-task-03 - Tall dashboard task 03 (repo: viewer) (kind: ship)
-- [ ] tall-task-04 - Tall dashboard task 04 (repo: viewer) (kind: ship)
-- [ ] tall-task-05 - Tall dashboard task 05 (repo: viewer) (kind: ship)
-- [ ] tall-task-06 - Tall dashboard task 06 (repo: viewer) (kind: ship)
-- [ ] tall-task-07 - Tall dashboard task 07 (repo: viewer) (kind: ship)
-- [ ] tall-task-08 - Tall dashboard task 08 (repo: viewer) (kind: ship)
-- [ ] tall-task-09 - Tall dashboard task 09 (repo: viewer) (kind: ship)
-- [ ] tall-task-10 - Tall dashboard task 10 (repo: viewer) (kind: ship)
 
 ## Queued
 - [ ] $BRIEF_ID - Held with task instructions blocked-by: upstream (repo: viewer) (kind: ship)
@@ -76,6 +68,19 @@ cat > "$HOME_FIXTURE/data/done-archive.md" <<'MARKDOWN'
 ## Archived 2026-09
 - [x] archived-task - Dashboard archived task (repo: viewer) (kind: ship)
 MARKDOWN
+for task in "$REPORT_ID:Dashboard processing task" "$FIRST_REPORT_ID:Delayed report task" "tall-task-01:Tall dashboard task 01" "tall-task-02:Tall dashboard task 02"; do
+  task_id=${task%%:*}
+  task_title=${task#*:}
+  FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$task_id" "$task_title" --repo viewer --kind ship --start >/dev/null
+done
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$BRIEF_ID" 'Held with task instructions' --repo viewer --kind ship >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" block "$BRIEF_ID" --by upstream >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add no-document 'Held without document' --repo viewer --kind ship >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" block no-document --by upstream >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add completed-task 'Dashboard completed task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$ARCHIVED_ID" 'Dashboard archived task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" archive "$ARCHIVED_ID" >/dev/null
 cat > "$FIRST_SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1779999999000,"content":[{"type":"text","text":"delayed first session"}]}}
 JSONL
@@ -150,11 +155,12 @@ done
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
   NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
   PLAYWRIGHT_ROOT="$PLAYWRIGHT_ROOT" CDP_URL="$CDP_URL" VIEWER_URL="http://127.0.0.1:$PORT" \
-  VIEWER_HOME="$HOME_FIXTURE" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" VIEWER_DENSE_SHORT_ID="$DENSE_SHORT_ID" VIEWER_SUPERVISOR_ID="$SUPERVISOR_ID" \
+  VIEWER_HOME="$HOME_FIXTURE" VIEWER_ROOT="$ROOT" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" VIEWER_DENSE_SHORT_ID="$DENSE_SHORT_ID" VIEWER_SUPERVISOR_ID="$SUPERVISOR_ID" \
   VIEWER_FIRST_REPORT_ID="$FIRST_REPORT_ID" VIEWER_REPORT_ID="$REPORT_ID" VIEWER_BRIEF_ID="$BRIEF_ID" VIEWER_TOKEN="$TOKEN" \
   node --input-type=module <<'NODE'
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_ROOT);
@@ -190,7 +196,19 @@ await page.route("**/api/tasks*", async route => {
     delay.markStarted();
     await delay.released;
   }
-  await route.continue();
+  const response = await route.fetch();
+  const body = await response.json();
+  if (Array.isArray(body.tasks)) {
+    body.tasks = body.tasks.flatMap(task => task.category !== "completed" ? [task] : [
+      task,
+      ...Array.from({ length: 40 }, (_, index) => ({
+        ...task,
+        id: `completed-copy-${String(index + 1).padStart(2, "0")}`,
+        title: `Dashboard completed task copy ${String(index + 1).padStart(2, "0")}`,
+      })),
+    ]);
+  }
+  await route.fulfill({ response, json: body });
 });
 let delayFirst = false;
 let releaseDelayed = () => {};
@@ -261,14 +279,30 @@ try {
   await page.getByText("<img id=unsafe src=x onerror=alert(1)>", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
   initialTaskDelay.release();
   await page.locator("#source").selectOption("tasks");
-  await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 20000 }).catch(async error => {
+    throw new Error(`task inventory did not become visible: ${await page.locator("#task-status").textContent()} (${error.message})`);
+  });
   if (new URL(page.url()).pathname !== "/dashboard") throw new Error(`authenticated landing did not use the Dashboard route: ${page.url()}`);
   if (!await page.locator('nav [data-route="dashboard"]').evaluate(element => element.classList.contains("active"))) throw new Error("Dashboard navigation identity was not active");
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
-  if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 12) throw new Error("processing task category was not rendered");
+  if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count()) throw new Error("completed task counter was rendered");
   if (await page.locator('#sessions .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
   if (await page.locator('#sessions .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
+  const completedTaskCount = await page.locator('#sessions .task-card[data-category="completed"]').count();
+  if (completedTaskCount !== 41) throw new Error(`dense completed task inventory was not rendered: ${completedTaskCount}`);
+  const initialTaskCategories = await page.locator('#sessions .task-card').evaluateAll(cards => cards.slice(0, 4).map(card => card.dataset.category));
+  if (initialTaskCategories.some(category => category !== "processing")) throw new Error(`processing tasks were buried behind the dense non-processing inventory: ${initialTaskCategories.join(",")}`);
+  const processingTaskIds = await page.locator('#sessions .task-card[data-category="processing"] small:first-of-type').allTextContents();
+  for (const taskId of processingTaskIds) {
+    await page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: taskId }).click();
+    await page.waitForFunction(expectedId => new URL(window.location.href).searchParams.get("task") === expectedId
+      && document.querySelector("#task-detail-meta")?.textContent.split(" · ")[0] === expectedId, taskId);
+  }
+  await page.locator("#session-search").fill("processing");
+  if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4
+    || await page.locator('#sessions .task-card:not([data-category="processing"])').count()) throw new Error("task search did not isolate every processing task");
+  await page.locator("#session-search").fill("");
   await page.locator('#sessions .task-card[data-category="history"]').first().click();
   await page.getByRole("heading", { name: "Archived task brief" }).waitFor({ state: "visible", timeout: 3000 });
   if (!await page.locator("#task-document-report").isDisabled()) throw new Error("archived brief-only task did not show its unavailable report");
@@ -284,7 +318,7 @@ try {
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
-  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "12,2,1") throw new Error("background task refresh did not preserve loaded counts");
+  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "4,2,1") throw new Error("background task refresh did not preserve loaded counts");
   if (!await dashboardReportCardNode.evaluate(node => node.isConnected)) throw new Error("background task refresh replaced the unchanged task generation before the response");
   if (!await page.locator("#sessions").evaluate(element => element.scrollHeight > element.clientHeight)) throw new Error("dashboard fixture was not tall enough to exercise sidebar scrolling");
   await dashboardReportCard.click();
@@ -374,6 +408,7 @@ try {
 
   const backlog = `${process.env.VIEWER_HOME}/data/backlog.md`;
   fs.writeFileSync(backlog, `## In flight\n- [ ] ${process.env.VIEWER_FIRST_REPORT_ID} - Delayed report task (repo: viewer) (kind: scout)\n\n## Queued\n- [ ] ${process.env.VIEWER_BRIEF_ID} - Held with task instructions blocked-by: upstream (repo: viewer) (kind: ship)\n- [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)\n\n## Done\n- [x] completed-task - Dashboard completed task (repo: viewer) (kind: ship)\n- [x] ${process.env.VIEWER_REPORT_ID} - Dashboard processing task (repo: viewer) (kind: ship)\n`);
+  execFileSync(`${process.env.VIEWER_ROOT}/bin/fm-tasks-axi.sh`, ["done", process.env.VIEWER_REPORT_ID], { env: { ...process.env, FM_HOME: process.env.VIEWER_HOME }, stdio: "ignore" });
   await page.locator('#sessions .task-card[data-category="completed"]').filter({ hasText: "Dashboard processing task" }).first().waitFor({ state: "visible", timeout: 5000 });
 
   await page.reload({ waitUntil: "domcontentloaded" });

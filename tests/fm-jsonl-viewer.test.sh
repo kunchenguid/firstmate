@@ -325,6 +325,9 @@ jq -e '
     and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null and .documentTypes == []))
     and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief" and .documentTypes == ["brief"]))
     and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
+    and (.tasks
+      | map(.category | if . == "processing" then 0 elif . == "held" then 1 elif . == "completed" then 2 elif . == "history" then 3 else 4 end) as $priorities
+      | $priorities == ($priorities | sort))
     and (.tasks | all(.id != "cancelled-task" and .id != "invalid-lifecycle-task"))
     and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","wait","warning"]))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve canonical task states or ignore lifecycle-only rows"
