@@ -27,7 +27,8 @@
 # never reaches it. Opt in with FM_FLEET_PRUNE_MERGED=1 (default off) to also
 # prune such a branch, but only on positive proof its work landed in
 # origin/<default>: bin/fm-branch-landed-lib.sh's content leg, or its merged-PR leg
-# when gh can resolve a merged PR for the branch. Missing evidence, a lookup error,
+# when gh can resolve a PR for the branch that merged into <default>. A PR merged
+# into any other base proves nothing here. Missing evidence, a lookup error,
 # or a merge conflict keeps the branch, as do the checked-out branch, the default
 # branch, and a branch with a worktree. FM_FLEET_PRUNE=0 disables this prune too.
 # This prune runs after the fast-forward, so a slow proof never delays the refresh.
@@ -309,7 +310,7 @@ prune_landed_branches() {
     if ! fm_branch_landed_content_in_ref "$PROJ" "$BASE" "$tip"; then
       [ "$PR_LOOKUP" = 1 ] || continue
       target=$(fm_branch_landed_pr_number_from_branch "$PROJ" "$branch") || continue
-      fm_branch_landed_in_merged_pr "$PROJ" "$target" "$tip" >/dev/null || continue
+      fm_branch_landed_in_merged_pr "$PROJ" "$target" "$tip" "$DEFAULT" >/dev/null || continue
     fi
     out=$(LC_ALL=C git -C "$PROJ" -c core.abbrev=40 branch -D -- "$branch" 2>&1) || continue
     deleted=$(printf '%s\n' "$out" | sed -n 's/^Deleted branch .* (was \([0-9a-f]*\))\.$/\1/p' | head -1)

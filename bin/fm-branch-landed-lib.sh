@@ -7,7 +7,9 @@
 # test and bin/fm-fleet-sync.sh's opt-in landed-branch prune both trust:
 #   - fm_branch_landed_in_merged_pr: the forge reports the PR merged, and its head
 #     contains the commit (ancestor, or every commit not on any remote has an
-#     equivalent patch id in the PR head).
+#     equivalent patch id in the PR head). An optional base also requires the PR
+#     to have merged into that branch. fleet-sync passes its default branch.
+#     Teardown passes none, so a PR merged into another task branch still counts.
 #   - fm_branch_landed_content_in_ref: a 3-way merge of the default ref with the
 #     commit yields the default ref's own tree, so the commit introduces nothing
 #     the default branch lacks (its change landed via squash).
@@ -100,18 +102,30 @@ EOF
 
 # Is the PR named by <target> merged, with a head that contains <commit>? Asks
 # GitHub for the PR state, head, and URL from <repo>, and echoes the resolved PR
-# URL on success. Returns non-zero when the PR is not merged, the commit is not
-# contained in the PR head, or any gh or git error occurs.
-fm_branch_landed_in_merged_pr() {  # <repo> <target> <commit>
-  local repo=$1 target=$2 commit=$3 view state remainder head resolved_url current
+# URL on success. With <base>, the PR must also have merged into that branch.
+# Returns non-zero when the PR is not merged, merged into another base, the
+# commit is not contained in the PR head, or any gh or git error occurs.
+fm_branch_landed_in_merged_pr() {  # <repo> <target> <commit> [<base>]
+  local repo=$1 target=$2 commit=$3 required_base=${4:-} view state remainder head resolved_url base current
+  local fields=state,headRefOid,url query='.state + "\t" + .headRefOid + "\t" + .url'
   [ -n "$target" ] || return 1
-  view=$(cd "$repo" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  if [ -n "$required_base" ]; then
+    fields="$fields,baseRefName"
+    query="$query"' + "\t" + .baseRefName'
+  fi
+  view=$(cd "$repo" && gh pr view "$target" --json "$fields" -q "$query" 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
   head=${remainder%%$'\t'*}
   resolved_url=${remainder#*$'\t'}
   [ "$head" != "$remainder" ] || return 1
+  if [ -n "$required_base" ]; then
+    base=${resolved_url#*$'\t'}
+    [ "$base" != "$resolved_url" ] || return 1
+    resolved_url=${resolved_url%%$'\t'*}
+    [ "$base" = "$required_base" ] || return 1
+  fi
   case "$state" in
     MERGED|merged) ;;
     *) return 1 ;;

@@ -31,8 +31,8 @@
 # It also pins branch pruning end to end. A gone-upstream branch is pruned by
 # default. A task branch pushed from a separate worktree (the no-mistakes shape)
 # has no upstream, so it survives unless FM_FLEET_PRUNE_MERGED=1 opts in; then it
-# is pruned only on a squash-merge content proof or a merged-PR head that contains
-# it. Unpushed work, the checked-out branch, a branch with a worktree, and the
+# is pruned only on a squash-merge content proof or a head that contains it of a
+# PR merged into main. A PR merged into another base keeps the branch. Unpushed work, the checked-out branch, a branch with a worktree, and the
 # default branch always survive, and FM_FLEET_PRUNE=0 disables every prune.
 # The prune runs after the fast-forward, and bootstrap's time-bounded refresh
 # keeps the content proof but makes no PR lookups.
@@ -787,12 +787,13 @@ squash_merge_and_delete() {
   git -C "$work" push -q origin --delete "$branch"
 }
 
-# prune_fakebin <home> <tag> [merged-pr-head]: gh and gh-axi stubs. With no head,
-# every lookup fails, as with no forge or a network error. With a head, PR 7 for
-# any branch is merged with that head. Every PR lookup appends "<cmd> <args>
+# prune_fakebin <home> <tag> [merged-pr-head] [merged-pr-base]: gh and gh-axi
+# stubs. With no head, every lookup fails, as with no forge or a network error.
+# With a head, PR 7 for any branch is merged into <merged-pr-base> (default main)
+# with that head. Every PR lookup appends "<cmd> <args>
 # <local main sha>" to <fakebin>/pr-calls.log, run from the clone it queries.
 prune_fakebin() {
-  local home=$1 tag=$2 head=${3:-} fakebin log
+  local home=$1 tag=$2 head=${3:-} base=${4:-main} fakebin log
   fakebin="$home/fb-$tag"
   log="$fakebin/pr-calls.log"
   rm -rf "$fakebin"; mkdir -p "$fakebin"
@@ -813,7 +814,7 @@ SH
       printf '#!/usr/bin/env bash\n%s\n' "$(pr_call_logger gh "$log")"
       cat <<SH
 case "\${1:-} \${2:-}" in
-  "pr view") printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+  "pr view") printf '%s\t%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' '$base' ; exit 0 ;;
 esac
 exit 1
 SH
@@ -949,6 +950,23 @@ test_bootstrap_refresh_prunes_on_content_proof_without_pr_lookups() {
   pass "bootstrap's bounded refresh prunes on the content proof and makes no PR lookups"
 }
 
+test_pr_merged_into_non_default_base_keeps_branch() {
+  local home clone fakebin out tip
+  home=$(new_home)
+  clone=$(build_pair "$home" stacked)
+  # A stacked task PR merged into its parent task branch, whose own PR never
+  # merged, so the work never reached main and the content proof fails.
+  tip=$(push_task_branch "$home" stacked fm/child b.txt child)
+  fakebin=$(prune_fakebin "$home" stacked "$tip" fm/parent)
+
+  out=$(FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  [ -s "$fakebin/pr-calls.log" ] || fail "fixture: the merged-PR proof should have looked up the PR"
+  assert_not_contains "$out" "pruned fm/child" "a PR merged into a non-default base must not prune"
+  branch_exists "$clone" fm/child || fail "a branch whose PR merged into another task branch must survive"
+  pass "a branch whose PR merged into a non-default base survives the opted-in prune"
+}
+
 test_unpushed_commit_without_worktree_survives() {
   local home clone fakebin out tip wt
   home=$(new_home)
@@ -1081,6 +1099,7 @@ test_landed_no_upstream_branch_kept_without_opt_in
 test_squash_merged_no_upstream_branch_pruned_when_opted_in
 test_merged_pr_no_upstream_branch_pruned_when_opted_in
 test_bootstrap_refresh_prunes_on_content_proof_without_pr_lookups
+test_pr_merged_into_non_default_base_keeps_branch
 test_unpushed_commit_without_worktree_survives
 test_checked_out_landed_branch_survives
 test_landed_branch_with_worktree_survives
