@@ -358,7 +358,7 @@ SH
   chmod +x "$daemon/bin/codex-chatgpt-web"
   local real_home=$HOME
   export HOME="$HOME_DIR"
-  local out rc pid dead i
+  local out rc pid dead
   sleep 30 &
   local foreign=$!
   printf '%s\n' "$foreign" > "$HOME_DIR/state/chatgpt-loop-bridge.pid"
