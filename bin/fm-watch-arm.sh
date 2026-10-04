@@ -86,13 +86,6 @@
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
 # the stop.
 #
-# outside a marked lab with
-# "watcher: FAILED - refusing to arm from a disposable validation checkout" and
-# exits 1 before touching any state: a watcher armed from there outlives the
-# validation step, holds the real home's lock, and keeps writing that home's
-# state from a checkout that is about to be deleted. A marked stock-layout lab
-# home is disposable and permitted; ordinary tests use the sandbox bypass
-# exported by tests/lib.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

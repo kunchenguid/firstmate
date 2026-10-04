@@ -1331,13 +1331,6 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
   pass "watch-arm: an unusable launch confirm window refuses to arm by name"
 }
 
-# A watcher armed from a disposable no-mistakes validation checkout outlives the
-# validation step and keeps writing the real home's state from a path about to be
-# deleted (upstream #321). The arm must refuse before touching any state. The
-# fixture reaches this checkout's real arm through a symlink whose logical path
-# sits under .no-mistakes/worktrees/, with the test harness's own bypass cleared
-# for this one launch.
-
 # Start a real watcher through the real arm for a temporary home and set
 # WATCH_PID from the arm's started line. Both stdout and stderr land in <arm-out>
 # so the watcher's own exit reason, which it logs to stderr, is readable there.

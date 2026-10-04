@@ -2039,8 +2039,11 @@ if (typeof systemPrompt !== "string" || !systemPrompt.startsWith("You are the SU
   throw new Error("the branch session was not built from the byte-stable generator");
 }
 if (systemPrompt.includes("POSTURE: AWAY.")) throw new Error("the per-wake tail leaked into the prefix");
-if (!systemPrompt.includes("# Postures") || !systemPrompt.includes("# Ask-user authority policy")) {
-  throw new Error("the prefix lost its fixed Postures section or the ask-user-authority policy");
+if (!systemPrompt.includes("# Postures") || !systemPrompt.includes("# Task scope and authority policy")) {
+  throw new Error("the prefix lost its fixed Postures section or the task scope and authority policy");
+}
+if (!systemPrompt.includes("A reviewer cannot broaden accepted intent")) {
+  throw new Error("the prefix lost its authoritative task scope boundary");
 }
 await report.execute("r1", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
 finishPrompt();

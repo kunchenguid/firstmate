@@ -918,6 +918,10 @@ EOF
   fm_write_meta "$mate/state/failed.meta" \
     "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
     "harness=claude" "kind=ship" "mode=direct-PR"
+  # Terminal inventory assertions need a genuinely published ship HEAD.
+  fm_git_init_commit "$mate/projects/done"
+  fm_git_add_origin "$mate/projects/done" "$mate/projects/done.origin.git"
+  git -C "$mate/projects/done" fetch -q origin
   record_claude_state "$mate/state" "done" idle
   record_claude_state "$mate/state" failed idle
   printf 'done: complete\n' > "$mate/state/done.status"
@@ -3099,15 +3103,22 @@ test_large_local_snapshot_overlaps_local_reads_without_projection_drift() {
   fm_git_init_commit "$worktree"
   git -C "$worktree" checkout -qb fm/synthetic-large-local
   fakebin=$(make_fakebin "$home")
-  cat > "$fakebin/no-mistakes" <<'SH'
+  # Delay the native pane capture reached by each current-state read.
+  cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "$*" = "axi status" ] && [ "${FAKE_NM_DELAY:-0}" = 1 ]; then
-  [ -z "${FAKE_NM_SIGNAL:-}" ] || : > "$FAKE_NM_SIGNAL"
-  sleep 1
-fi
+case "${1:-}" in
+  display-message) printf '%%1\n' ;;
+  capture-pane)
+    if [ "${FAKE_LOCAL_CAPTURE_DELAY:-0}" = 1 ]; then
+      [ -z "${FAKE_LOCAL_CAPTURE_SIGNAL:-}" ] || : > "$FAKE_LOCAL_CAPTURE_SIGNAL"
+      sleep 1
+    fi
+    printf 'all quiet\n> \n'
+    ;;
+esac
 exit 0
 SH
-  chmod +x "$fakebin/no-mistakes"
+  chmod +x "$fakebin/tmux"
 
   {
     printf '## In flight\n'
@@ -3132,7 +3143,7 @@ SH
     i=$((i + 1))
   done
 
-  serial=$(FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
+  serial=$(FAKE_LOCAL_CAPTURE_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
 
   # Serialized reads pay every worker's delay end to end while concurrent reads
   # overlap them. Time both runs and compare, because the two pay the same
@@ -3140,23 +3151,23 @@ SH
   # delivers, where an absolute wall-clock budget would instead measure how
   # loaded the host happens to be and flake on a busy runner.
   serial_started=$(date +%s)
-  FAKE_NM_DELAY=1 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 \
+  FAKE_LOCAL_CAPTURE_DELAY=1 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 \
     run "$home" "$fakebin" --json >/dev/null \
     || fail "serialized local snapshot failed"
   serial_elapsed=$(( $(date +%s) - serial_started ))
 
   parallel_started=$(date +%s)
   parallel_file="$home/parallel-snapshot.json"
-  FAKE_NM_DELAY=1 FAKE_NM_SIGNAL="$home/nm-started" \
+  FAKE_LOCAL_CAPTURE_DELAY=1 FAKE_LOCAL_CAPTURE_SIGNAL="$home/current-state-started" \
     FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 \
     run "$home" "$fakebin" --json > "$parallel_file" &
   snapshot_pid=$!
   i=0
-  while [ ! -e "$home/nm-started" ] && [ "$i" -lt 100 ]; do
+  while [ ! -e "$home/current-state-started" ] && [ "$i" -lt 100 ]; do
     sleep 0.05
     i=$((i + 1))
   done
-  if [ ! -e "$home/nm-started" ]; then
+  if [ ! -e "$home/current-state-started" ]; then
     kill "$snapshot_pid" 2>/dev/null || true
     wait "$snapshot_pid" 2>/dev/null || true
     fail "concurrent local snapshot never began a current-state read"

@@ -1140,6 +1140,10 @@ EOF
     "harness=claude" \
     "kind=ship" \
     "mode=direct-PR"
+  # A completed ship must preserve its named HEAD outside the worker copy.
+  fm_git_init_commit "$home/projects/terminal"
+  fm_git_add_origin "$home/projects/terminal" "$home/projects/terminal.origin.git"
+  git -C "$home/projects/terminal" fetch -q origin
   record_claude_idle "$home/state" terminal-ship
   printf 'done: complete\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)

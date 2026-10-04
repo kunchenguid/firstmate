@@ -69,6 +69,19 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
+  assert_contains "$out_a" "A reviewer cannot broaden accepted intent" "branch prompt lost its authoritative scope boundary"
+
+  # A missing tracked authority section must stop prompt preparation.
+  local incomplete_root refused status
+  incomplete_root="$TMP_ROOT/prompt-without-authority"
+  mkdir -p "$incomplete_root/bin" "$incomplete_root/.agents/skills/stuck-crewmate-recovery"
+  cp "$ROOT/bin/fm-branch-prompt.sh" "$incomplete_root/bin/fm-branch-prompt.sh"
+  cp "$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md" "$incomplete_root/.agents/skills/stuck-crewmate-recovery/SKILL.md"
+  printf '# AGENTS\n\n### Other policy\n' > "$incomplete_root/AGENTS.md"
+  refused=$("$incomplete_root/bin/fm-branch-prompt.sh" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "branch prompt accepted a missing tracked authority section"
+  assert_contains "$refused" "selected delivery authority policy is missing" "missing authority refusal lost its reason"
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
