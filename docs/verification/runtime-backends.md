@@ -1,5 +1,8 @@
 # Runtime backend verification
 
+Retirement note (2026-10-05): references to No-Mistakes below are historical evidence only; that tool and delivery mode are permanently retired.
+Current delivery uses repository-owned validation and `direct-PR` or `local-only`.
+
 Audience: maintainer verification.
 
 This record contains reusable version-scoped evidence for active runtime guarantees.

@@ -780,7 +780,7 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
 
-  printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
+  printf '%s\n' '- demo [direct-PR] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
@@ -793,7 +793,7 @@ EOF
   ' "$home/state/home-summary.json" >/dev/null \
     || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
-  assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
+  assert_contains "$out" "- demo [direct-PR] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
@@ -1824,13 +1824,13 @@ SH
 #!/usr/bin/env bash
 set -u
 no-mistakes axi status >/dev/null
-printf '%s\n' 'state: done · source: run-step · passed'
+printf '%s\n' 'state: done · source: pane · passed'
 SH
   chmod +x "$fakebin/no-mistakes" "$crew_state"
 
   fm_write_meta "$home/state/slow-child.meta" \
     'window=firstmate:fm-slow-child' "worktree=$worktree" 'project=firstmate' \
-    'harness=pi' 'kind=scout' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=slow-child.1'
+    'harness=pi' 'kind=scout' 'mode=direct-PR' 'yolo=off' 'spawn_gen=slow-child.1'
   printf '%s\n' 'working: validating' > "$home/state/slow-child.status"
   : > "$home/state/slow-child.turn-ended"
   touch -t 202001010000 "$home/state/slow-child.meta" \

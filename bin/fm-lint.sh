@@ -3,13 +3,11 @@
 #
 # Runs its file set with ShellCheck's default severity, extended analysis,
 # ambient configuration disabled, and one exact ShellCheck version. CI selects
-# canonical partitions; no-mistakes invokes the context-selected default, so
 # both use this owner without duplicating lint configuration.
 # The explicit --fast mode is local-only and disables ShellCheck's extended
 # dataflow analysis while preserving ordinary shell lint checks and source
 # following. CI, main, and merge-base-less runs attempt --norc
 # --external-sources with full dataflow for each canonical root. An ordinary
-# local branch (changed-file mode, including the no-mistakes lint step) drops
 # --external-sources, keeps dataflow, and excludes SC1091, SC2034, SC2153,
 # and SC2329, the codes that need library context. CI checks those codes
 # on source-following attempts (see the memory fallback below). Explicit

@@ -2039,8 +2039,11 @@ if (typeof systemPrompt !== "string" || !systemPrompt.startsWith("You are the SU
   throw new Error("the branch session was not built from the byte-stable generator");
 }
 if (systemPrompt.includes("POSTURE: AWAY.")) throw new Error("the per-wake tail leaked into the prefix");
-if (!systemPrompt.includes("# Postures") || !systemPrompt.includes("# Ask-user authority policy")) {
-  throw new Error("the prefix lost its fixed Postures section or the ask-user-authority policy");
+if (!systemPrompt.includes("# Postures") || !systemPrompt.includes("# Task scope and authority policy")) {
+  throw new Error("the prefix lost its fixed Postures section or the task scope and authority policy");
+}
+if (!systemPrompt.includes("A reviewer cannot broaden accepted intent")) {
+  throw new Error("the prefix lost its authoritative task scope boundary");
 }
 await report.execute("r1", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
 finishPrompt();
@@ -2223,7 +2226,7 @@ test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
     commit -q --allow-empty -m init
   fm_write_meta "$home/state/held.meta" \
     'window=fm-held' "worktree=$home/projects/held" "project=$home/projects/held" \
-    'harness=pi' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=g1' \
+    'harness=pi' 'kind=ship' 'mode=direct-PR' 'yolo=off' 'spawn_gen=g1' \
     'pr=https://example.test/o/r/pull/153'
   printf 'done: PR https://example.test/o/r/pull/153 open, green, mergeable\n' > "$home/state/held.status"
   old=$(( $(date +%s) - 600 ))

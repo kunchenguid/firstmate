@@ -105,7 +105,7 @@ EOF
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" PATH="$fb:$PATH" \
-    "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off --backend orca 2>&1)
+    "$SPAWN" "$id" "$case_dir/project" --mode direct-PR --yolo off --backend orca 2>&1)
   status=$?
 
   expect_code 0 "$status" "an Orca-backed spawn should succeed"$'\n'"$out"
@@ -144,7 +144,7 @@ EOF
     echo "project=$proj"
     echo "harness=codex"
     echo "kind=ship"
-    echo "mode=no-mistakes"
+    echo "mode=direct-PR"
     echo "yolo=off"
     echo "backend=orca"
     echo "orca_worktree_id=wt-1::$wt"

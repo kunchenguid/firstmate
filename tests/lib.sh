@@ -38,15 +38,6 @@ umask 022
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
 
-# Exempt firstmate's own test suite from the gate-lifecycle refusal
-# (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
-# worktree - the exact environment that guard refuses - so without this every
-# test that drives the real fm-spawn/fm-send/fm-teardown would be refused during
-# firstmate's own validation. A confused gate agent never sources this helper, so
-# the boundary against the real hazard is unaffected. tests/fm-gate-refuse.test.sh
-# strips this to verify real refusal.
-export FM_GATE_REFUSE_BYPASS=1
-
 # Arms the test-only seams bin/ scripts expose (e.g. fm-afk-launch.sh's
 # FM_TEST_HARNESS harness pin). Normal primary launches do not arm it, so a
 # leaked harness pin alone stays inert outside a suite.
@@ -348,11 +339,6 @@ fi
 # skip, which is how "run it after a harness upgrade" keeps proving the guard
 # actually ran. Setting one to 0 (or FM_LIVE=0) turns it off; a guard's own
 # variable wins over FM_LIVE.
-#
-# Sourcing this library also exports FM_GATE_REFUSE_BYPASS=1, which is what
-# lets a live guard drive the real fm-spawn/fm-send/fm-teardown from inside a
-# no-mistakes gate worktree instead of being refused by
-# bin/fm-gate-refuse-lib.sh.
 #
 # Every path that lets a live run proceed also exports DISABLE_AUTOUPDATER=1,
 # so a live harness invocation never lets Claude Code's auto-updater rewrite

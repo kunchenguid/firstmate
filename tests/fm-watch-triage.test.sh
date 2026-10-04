@@ -540,24 +540,24 @@ test_crew_is_provably_working_classifier() {
   # cannot leak into a later test (every behavioral test sets its own verdict anyway).
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   crew_is_provably_working a || fail "active run-step not treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   crew_is_provably_working a || fail "busy pane not treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   ! crew_is_provably_working a || fail "stale status-log working: treated as provably working"
-  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  FM_FAKE_CREW_STATE='state: done · source: pane · checks green'
   ! crew_is_provably_working a || fail "finished run treated as provably working"
-  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  FM_FAKE_CREW_STATE='state: parked · source: pane · parked at review'
   ! crew_is_provably_working a || fail "parked run treated as provably working"
-  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  FM_FAKE_CREW_STATE='state: failed · source: pane · run failed'
   ! crew_is_provably_working a || fail "failed run treated as provably working"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   ! crew_is_provably_working a || fail "unknown crew treated as provably working"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · x'
+  FM_FAKE_CREW_STATE='state: working · source: pane · x'
   ! crew_is_provably_working "" || fail "empty id treated as provably working"
   unset FM_FAKE_CREW_STATE
-  pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
+  pass "crew_is_provably_working: only working+busy-pane is provable; idle/finished/parked/failed/unknown surface"
 }
 
 # status_is_paused: the shared pause verb test both consumers read (so neither
@@ -602,7 +602,7 @@ test_crew_absorb_class_classifier() {
   dir=$(make_case absorb-class); fakebin="$dir/fakebin"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
@@ -796,8 +796,8 @@ test_signal_crew_provably_working_classifier() {
   local dir fakebin state
   dir=$(make_case signal-provably-working); fakebin="$dir/fakebin"; state="$dir/state"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  export FM_FAKE_CREW_STATE_a='state: working · source: run-step · running'
-  export FM_FAKE_CREW_STATE_b='state: done · source: run-step · run passed'
+  export FM_FAKE_CREW_STATE_a='state: working · source: pane · running'
+  export FM_FAKE_CREW_STATE_b='state: done · source: pane · run passed'
   signal_crew_provably_working "$state/a.status" "$state/a.turn-ended" \
     || fail "a single provably-working crew (status+turn-end) was not benign"
   ! signal_crew_provably_working "$state/a.status" "$state/b.turn-ended" \
@@ -816,7 +816,7 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
   local dir fakebin state line
   dir=$(make_case secondmate-signal-classify); fakebin="$dir/fakebin"; state="$dir/state"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  export FM_FAKE_CREW_STATE_sm='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_sm='state: working · source: pane · running'
   printf 'kind=secondmate\n' > "$state/sm.meta"
   # Unmarked routine progress from a PROVABLY working mate absorbs like any crew.
   printf 'working: step 2 of 5\npaused [at=1]: waiting on CI\n' > "$state/sm.status"
@@ -848,7 +848,7 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
     || fail "an unproven secondmate's routine progress was absorbed"
   # An ordinary crewmate keeps the plain provably-working rule: the marker and
   # verb read is keyed on recorded kind, not on task naming or content guessing.
-  export FM_FAKE_CREW_STATE_crew='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_crew='state: working · source: pane · running'
   printf 'kind=ship\n' > "$state/crew.meta"
   printf 'working: progress\n' > "$state/crew.status"
   signal_crew_provably_working "$state/crew.status" \
@@ -867,7 +867,7 @@ test_provably_working_signal_absorbed() {
   # The crew's pipeline is in an actively-running step: positive evidence it is
   # still working, so a no-verb working: signal is absorbed (the original low-churn
   # case during a long validation).
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -1300,7 +1300,7 @@ test_turn_ended_mixed_positive_evidence_batch_absorbed() {
   printf '%s' "$(hash_text 'second task previous render')" > "$state/.hash-$second_key"
   printf '0\n' > "$state/.count-$first_key"
   printf '0\n' > "$state/.count-$second_key"
-  export FM_FAKE_CREW_STATE_first='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_first='state: working · source: pane · running'
   export FM_FAKE_CREW_STATE_second='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-first\nfm-second')" \
     FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_FORBIDDEN_TARGET="$first_window" \
@@ -1337,7 +1337,7 @@ test_turn_ended_mixed_positive_evidence_batch_default_off() {
   printf '%s' "$(hash_text 'second task previous render')" > "$state/.hash-$second_key"
   printf '0\n' > "$state/.count-$first_key"
   printf '0\n' > "$state/.count-$second_key"
-  export FM_FAKE_CREW_STATE_firstoff='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_firstoff='state: working · source: pane · running'
   export FM_FAKE_CREW_STATE_secondoff='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-firstoff\nfm-secondoff')" \
     FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir" off)" \
@@ -1374,7 +1374,7 @@ test_status_and_turn_end_batch_never_uses_churn_evidence() {
   second_key=$(printf '%s' "$second_window" | tr ':/.' '___')
   printf '%s' "$(hash_text 'second task previous render')" > "$state/.hash-$second_key"
   printf '0\n' > "$state/.count-$second_key"
-  export FM_FAKE_CREW_STATE_firststatus='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_firststatus='state: working · source: pane · running'
   export FM_FAKE_CREW_STATE_secondturn='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-firststatus\nfm-secondturn')" \
     FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
@@ -1672,7 +1672,7 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   printf 'note: routed reply landed in the parent stream\n' > "$state/mate.status"
   # Busy evidence that absorbs routine progress must not absorb a secondmate's
   # parent-directed note: its status stream is the routed-reply channel.
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · running'
   FM_CONFIG_OVERRIDE="$(churn_config "$dir")" watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a busy secondmate's routed status note"
@@ -1692,7 +1692,7 @@ test_secondmate_routine_progress_absorbed_then_note_surfaced() {
   printf 'working: step 2 of 5\n' > "$state/mate.status"
   # A provably working mate's unmarked routine progress is absorbed exactly like
   # an ordinary crewmate's (no exit, no durable wake, suppressor advanced)...
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · running'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -1998,7 +1998,7 @@ test_captain_held_signal_payload_marked_for_branch_exclusion() {
   out="$dir/watch.out"
   status_file="$state/task.status"
   printf 'captain-held [key=route]: awaiting the captain\n' > "$status_file"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · still wrapping up'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · still wrapping up'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a captain-held signal while the crew was still working"
@@ -2079,7 +2079,7 @@ test_actionable_signal_survives_a_later_routine_append() {
   printf 'needs-decision: pick A or B\nworking: still tidying the branch\n' >> "$status_file"
   # Positive evidence the crew is still working, so the no-verb fallback cannot
   # rescue the wake: only reading the event itself can surface it.
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 \
@@ -2167,7 +2167,7 @@ test_routine_appends_after_a_classified_event_stay_absorbed() {
   printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
   sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
   printf 'working: still tidying the branch\n' >> "$status_file"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -2311,7 +2311,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   pane_hash=$(hash_text "no-mistakes axi run: validating...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
 
   # Phase A: a high escalation threshold means the first sighting is absorbed,
   # not surfaced, despite the captain-relevant "done:" status-log line.
@@ -2366,7 +2366,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # The crew's pipeline is actively running: a static pane is normal (waiting on CI).
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · ci running'
 
   # Phase A: a high escalation threshold means the first sighting is absorbed.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -3053,7 +3053,7 @@ wedge_reported_wait_secs() {  # <watch-out>
 
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
   local dir state fakebin out capture window key n past reported
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: pane · ci running'
 
   dir=$(wedge_threshold_fixture declared-wait-working \
     'paused: final validation at step 6/6 - clean whole-assembly baseline (~20 min)' 0)
@@ -3136,7 +3136,7 @@ test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
 # is the retraction that does.
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer() {
   local dir state fakebin out capture window key n
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: pane · ci running'
 
   dir=$(wedge_threshold_fixture default-answer-after-wait \
     "$(printf 'needs-decision: which color\npaused: waiting on the vendor release\nresolved [key=default]: answered: blue')" 0)
@@ -3172,7 +3172,7 @@ test_wedge_threshold_keeps_a_wait_past_a_default_key_answer() {
 # absorber makes exactly this distinction, and a lane routed here must not lose it.
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   local dir state fakebin out capture window key n armed_timer
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: pane · ci running'
 
   dir=$(wedge_threshold_fixture captain-held-wait \
     'captain-held: which retention window wins' 2000)
@@ -3271,158 +3271,6 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
 # consumer which merely searched the verdict for the token would fail it.
 # The second half of that evidence - that the human was actually asked and has
 # not answered - is pinned in the test below this one.
-test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human() {
-  local dir state fakebin out capture window key n queued
-  # The gate's own findings table said a human owes this answer, so
-  # bin/fm-crew-state.sh minted the human-decision component (its derivation from
-  # the `action` column by position is pinned in tests/fm-crew-state.test.sh).
-  local human='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision · run: 01RUNGATE'
-  # The same gate with no run component: nothing can tie a decision to it.
-  local runless='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision'
-  # The same shape owed the crewmate itself. The gate name is free text carried
-  # out of the run payload, so this one spells the whole marker inside it: a
-  # consumer that searched the verdict for those words instead of comparing a
-  # whole component for equality would read this lane as human-owed and take its
-  # ladder away.
-  local crewmate='state: parked · source: run-step · parked at fix_review (ask-user: authority decision follow-up): 2 finding(s) · run: 01RUNGATE'
-
-  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
-
-  # The log every case here shares: the crew escalated the gate's question and
-  # nobody has answered it yet, so its decision fold still holds one open
-  # `needs-decision`. That is the record of who was TOLD; the crew-state verdict
-  # above is the record of who OWES the answer, and the deferral needs both.
-  # The trailing `working:` note is what a crew appends next and does not close a
-  # decision, so it leaves the fold open while keeping the LAST line
-  # non-captain-relevant - the plain route into the wedge timer these cases want.
-  # The file is backdated well past the recheck cadence, and it is still not the
-  # record of when this wait began, so nothing about the recheck may be computed
-  # from its mtime.
-  local escalated='needs-decision [key=nm-01RUNGATE-review]: the gate raised an authority question
-working: still parked at that gate'
-  # An open decision too, but under a key that names no run: an unrelated
-  # question raised earlier in the same task and never closed. It says nothing
-  # about whether anyone was told about THIS gate.
-  local unrelated='needs-decision [key=earlier-question]: which changelog section fits
-working: still parked at that gate'
-
-  dir=$(wedge_threshold_fixture parked-gate-human "$escalated" 2000)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-    || fail "a gate awaiting a human was never rechecked at the threshold: $(cat "$out")"
-  grep -F 'verified wait at a parked gate' "$out" >/dev/null \
-    || fail "the parked-gate recheck did not name its evidence: $(cat "$out")"
-  grep -F "awaiting firstmate's ask-user decision" "$out" >/dev/null \
-    || fail "the parked-gate recheck did not name firstmate as the one the wait is on: $(cat "$out")"
-  grep -F "decide the gate's ask-user finding and relay the decision to the crewmate" "$out" >/dev/null \
-    || fail "the parked-gate recheck did not name the action that clears the lane: $(cat "$out")"
-  grep -F 'awaiting the captain' "$out" >/dev/null \
-    && fail "the parked-gate recheck named the captain for a decision firstmate owns: $(cat "$out")"
-  grep -F 'confirm the wait still holds' "$out" >/dev/null \
-    && fail "a parked gate borrowed the external-wait action, which does not clear it: $(cat "$out")"
-  grep -F 'possible wedge' "$out" >/dev/null \
-    && fail "a gate awaiting a human was reported as a possible wedge: $(cat "$out")"
-  # No wait age is published, because no record of when this wait began exists:
-  # the status file is an unrelated line, and the idle window this deferral
-  # resets every pass would report the same small number forever.
-  grep -E ', waiting [0-9]+s' "$out" >/dev/null \
-    && fail "the parked-gate recheck published a wait age it has no record for: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the parked-gate recheck"
-
-  # Long cadence, not a ladder: every further threshold inside the cadence is
-  # absorbed whole, with no escalation counted and nothing queued.
-  queued=$(wedge_stale_wakes "$state" "$window")
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" absorb \
-      || fail "a gate awaiting a human wedge-escalated at threshold $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
-    || fail "a gate awaiting a human queued a further wake inside its recheck cadence: $(cat "$state/.wake-queue")"
-  [ ! -e "$state/.wedge-escalations-$key" ] \
-    || fail "a gate awaiting a human counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
-
-  # The other direction, and the whole reason the distinction is drawn: a gate
-  # the crewmate itself must answer keeps the unchanged schedule, reason and
-  # demand-deep-inspection wording.
-  dir=$(wedge_threshold_fixture parked-gate-crewmate "$escalated" 2000)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$crewmate" exit \
-      || fail "a gate awaiting the crewmate stopped escalating at threshold $n: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge crewmate-gate escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "a gate awaiting the crewmate did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "a gate awaiting the crewmate lost the demand-deep-inspection wording: $(cat "$out")"
-  grep -F 'verified wait at a parked gate' "$out" >/dev/null \
-    && fail "a gate awaiting the crewmate was deferred as a wait on a human: $(cat "$out")"
-
-  # The wait is owed by firstmate, not the captain, so the captain-away silence
-  # does not apply: under away posture the supervision branch is the actor
-  # allowed to answer it, and it keeps the long recheck cadence throughout.
-  dir=$(wedge_threshold_fixture parked-gate-away "$escalated" 2000)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  write_away_record "$state"
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-    || fail "a parked gate owed firstmate's decision was silenced while the away-posture record existed: $(cat "$out")"
-  grep -F "awaiting firstmate's ask-user decision" "$out" >/dev/null \
-    || fail "the away-posture parked-gate recheck did not name firstmate: $(cat "$out")"
-  grep -F 'possible wedge' "$out" >/dev/null \
-    && fail "an away-posture parked gate was reported as a possible wedge: $(cat "$out")"
-  grep -F 'never rechecked while the away-posture record exists' "$state/.watch-triage.log" >/dev/null \
-    && fail "a parked gate owed firstmate took the captain-away silence: $(cat "$state/.watch-triage.log")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the away-posture parked-gate recheck"
-  queued=$(wedge_stale_wakes "$state" "$window")
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" absorb \
-      || fail "an away-posture parked gate wedge-escalated at threshold $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
-    || fail "an away-posture parked gate queued a further wake inside its recheck cadence: $(cat "$state/.wake-queue")"
-  [ ! -e "$state/.wedge-escalations-$key" ] \
-    || fail "an away-posture parked gate counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
-
-  # An open decision under an unrelated key does not bind to this gate, so the
-  # lane keeps the unchanged ladder: nothing says anyone was told about it.
-  dir=$(wedge_threshold_fixture parked-gate-unrelated-key "$unrelated" 2000)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-      || fail "a gate with only an unrelated open decision stopped escalating at threshold $n: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge unrelated-key escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "a gate with only an unrelated open decision did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "a gate with only an unrelated open decision lost the demand-deep-inspection wording: $(cat "$out")"
-  grep -F 'verified wait at a parked gate' "$out" >/dev/null \
-    && fail "an unrelated open decision was read as this gate's wait: $(cat "$out")"
-
-  # A verdict naming no run cannot be bound to any decision, so it keeps the
-  # ladder even with the run-shaped key open.
-  dir=$(wedge_threshold_fixture parked-gate-runless "$escalated" 2000)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$runless" exit \
-    || fail "a runless human-owed gate never escalated: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the runless-gate escalation"
-  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
-    || fail "a runless human-owed gate did not take the unchanged ladder: $(cat "$out")"
-  pass "a gate awaiting firstmate's decision for its own run is rechecked on the long cadence in either posture, while a crewmate-owed gate, an unrelated open decision and a runless verdict keep the unchanged ladder"
-}
 
 # --- an unconfigured home behaves exactly as it did before this evidence -----
 # The parked-gate record is the one wait here that is not the worker's own
@@ -3435,58 +3283,6 @@ working: still parked at that gate'
 # arm must not even be reached: no current-state read is spent and no recheck
 # throttle is written. The fixture is byte-identical to the armed case above
 # except for the flag, so the difference is attributable to the flag alone.
-test_wedge_threshold_parked_gate_is_off_until_armed() {
-  local dir state fakebin out capture window key n unarmed_probes armed_probes
-  local human='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision · run: 01RUNGATE'
-  local escalated='needs-decision [key=nm-01RUNGATE-review]: the gate raised an authority question
-working: still parked at that gate'
-  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
-
-  dir=$(wedge_threshold_fixture parked-gate-unarmed "$escalated" 2000)
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  [ ! -e "$dir/config/wedge-defer-parked-gate" ] \
-    || fail "the unarmed fixture armed the flag, so it proves nothing"
-  export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
-  : > "$FM_FAKE_CREW_STATE_LOG"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-      || fail "an unarmed home stopped escalating a parked gate at threshold $n: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge unarmed-gate escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "an unarmed home did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "an unarmed home lost the demand-deep-inspection wording: $(cat "$out")"
-  grep -F 'verified wait at a parked gate' "$out" >/dev/null \
-    && fail "an unarmed home deferred a parked gate: $(cat "$out")"
-  [ ! -e "$state/.waiting-resurfaced-$key" ] \
-    || fail "an unarmed home wrote the parked-gate recheck throttle"
-  unarmed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
-  unset FM_FAKE_CREW_STATE_LOG
-
-  [ "$unarmed_probes" -eq 0 ] \
-    || fail "an unarmed home spent $unarmed_probes current-state read(s) on a parked gate over three thresholds"
-
-  # The same fixture with only the flag added, counted the same way, so the
-  # zero above is the flag's doing rather than a fixture that could never have
-  # reached the reader: one armed threshold must spend a read. A guard placed
-  # after the consult instead of before it would make both counts nonzero.
-  dir=$(wedge_threshold_fixture parked-gate-armed-probe-count "$escalated" 2000)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
-  : > "$FM_FAKE_CREW_STATE_LOG"
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-    || fail "the armed control was never rechecked: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the armed control recheck"
-  armed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
-  unset FM_FAKE_CREW_STATE_LOG
-  [ "$armed_probes" -gt 0 ] \
-    || fail "the armed control spent no current-state read, so the probe count proves nothing"
-  pass "with config/wedge-defer-parked-gate absent a parked gate keeps the unchanged ladder, wording and reads"
-}
 
 # --- a parked human-owed gate also needs the human to still owe an answer ----
 # The gate's findings table says who the answer is owed BY. It does not say the
@@ -3502,61 +3298,6 @@ working: still parked at that gate'
 # `needs-decision` therefore means the human was told and has not answered; its
 # absence means the outstanding move belongs to the crewmate, or that nobody was
 # ever told at all. Each of those keeps the unchanged schedule below.
-test_wedge_threshold_parked_gate_needs_an_unanswered_decision() {
-  local dir state fakebin out capture window key n
-  local human='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision · run: 01RUNGATE'
-  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
-
-  # Answered, not yet relayed. The gate verdict is byte-identical to the one the
-  # test above defers on; only the closing `resolved` line differs, and the
-  # `resolved:` verb is not captain-relevant, so this lane takes the same plain
-  # non-terminal route into the wedge timer as that one.
-  dir=$(wedge_threshold_fixture parked-gate-decided \
-    'needs-decision [key=nm-01RUNGATE-review]: the gate raised an authority question
-resolved [key=nm-01RUNGATE-review]: firstmate chose the second fix' 2000)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-      || fail "a decided-but-unrelayed gate stopped escalating at threshold $n: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge decided-gate escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "a decided-but-unrelayed gate did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "a decided-but-unrelayed gate lost the demand-deep-inspection wording: $(cat "$out")"
-  grep -F 'verified wait at a parked gate' "$out" >/dev/null \
-    && fail "a gate whose decision was already answered was deferred as a wait on the captain: $(cat "$out")"
-
-  # Parked at a human-owed gate, quiet, and the crewmate never escalated it: no
-  # human has been told, so there is no wait to defer to.
-  dir=$(wedge_threshold_fixture parked-gate-unescalated 'working: validation under way' 2000)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-    || fail "a human-owed gate nobody was told about never escalated: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the unescalated-gate escalation"
-  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
-    || fail "a human-owed gate nobody was told about did not take the unchanged ladder: $(cat "$out")"
-
-  # An open `blocked` record is not an unanswered question: it is an obstacle the
-  # crew reported, and a different action clears it. A `blocked:` last line is
-  # captain-relevant, so this lane reaches the wedge timer through the
-  # overridden-terminal-status branch instead, which only ever sees a hash whose
-  # timer is already running - hence the fixture's fourth argument.
-  dir=$(wedge_threshold_fixture parked-gate-blocked \
-    'blocked [key=nm-01RUNGATE-review]: the fixture cannot reach its dependency' 2000 600)
-  arm_parked_gate "$dir"
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-    || fail "a human-owed gate with only a blocker open never escalated: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the blocked-gate escalation"
-  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
-    || fail "an open blocker was accepted as an unanswered gate decision: $(cat "$out")"
-  pass "a parked human-owed gate is deferred only while its decision is still open, so an answered-but-unrelayed gate, an unescalated one, and one holding only a blocker all keep the unchanged ladder"
-}
 
 # --- a wait record that does not carry every field is refused ----------------
 # wait_record joins its five fields with US and wedge_defer_wait parses them with
@@ -3673,7 +3414,7 @@ gone_endpoint_env() {  # <dead|missing> -> assignments for the round below
 
 test_gone_endpoint_reports_once_instead_of_escalating_forever() {
   local dir state fakebin out capture window key verdict round
-  local failed='state: failed · source: run-step · run failed'
+  local failed='state: failed · source: pane · run failed'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   for verdict in dead missing; do
     dir=$(wedge_threshold_fixture "gone-endpoint-$verdict" 'working: still compiling' 0)
@@ -3717,7 +3458,7 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
 # schedule, reason and count, because neither shows the agent is gone.
 test_live_and_unproven_endpoints_still_wedge_escalate() {
   local dir state fakebin out capture window key spec verdict comm inventory
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: pane · ci running'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   for spec in 'alive|grok|fm-wedge' 'ambiguous|node|fm-wedge' 'unreadable||fm-wedge'; do
     verdict=${spec%%|*}; comm=${spec#*|}; inventory=${comm#*|}; comm=${comm%%|*}
@@ -3751,8 +3492,8 @@ test_live_and_unproven_endpoints_still_wedge_escalate() {
 # reported again rather than silenced by the record of the first one.
 test_gone_report_rearms_when_the_endpoint_comes_back() {
   local dir state fakebin out capture window key
-  local failed='state: failed · source: run-step · run failed'
-  local working='state: working · source: run-step · ci running'
+  local failed='state: failed · source: pane · run failed'
+  local working='state: working · source: pane · ci running'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   dir=$(wedge_threshold_fixture gone-rearm 'working: still compiling' 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -3798,8 +3539,8 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
 # silent and never advance the escalation count.
 test_second_death_after_a_same_window_relaunch_reports_in_full() {
   local dir state fakebin out capture window key
-  local failed='state: failed · source: run-step · run failed'
-  local working='state: working · source: run-step · ci running'
+  local failed='state: failed · source: pane · run failed'
+  local working='state: working · source: pane · ci running'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   dir=$(wedge_threshold_fixture gone-relaunch-swallow 'working: still compiling' 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -3870,7 +3611,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
 # never advance the escalation count.
 test_identical_dead_display_of_a_successor_still_reports() {
   local dir state fakebin out capture window key
-  local failed='state: failed · source: run-step · run failed'
+  local failed='state: failed · source: pane · run failed'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   dir=$(wedge_threshold_fixture identical-dead-display 'working: still compiling' 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -4348,7 +4089,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
 
   printf 'working: upstream landed, resuming\n' > "$state/transition.status"
   sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$state/.seen-transition_status"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -4383,7 +4124,7 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '1\n' > "$state/.count-$key"
   : > "$state/.paused-$key"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -4413,7 +4154,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '1\n' > "$state/.count-$key"
   : > "$state/.paused-$key"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -4492,7 +4233,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # The crew's pipeline is actively running: a static pane is normal (waiting on CI).
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
 
   # Priming round: first sighting of this stale hash classifies and absorbs it
   # (establishing .stale-$key and starting the wedge timer) without going
@@ -4548,7 +4289,7 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   printf '1\n' > "$state/.count-$key"
   # Pre-seed one escalation as if a prior wedge round already fired.
   printf '1\n' > "$state/.wedge-escalations-$key"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
 
   # The pane content changes (the crew is active again): the hash no longer
   # matches, so the watcher resets escalation bookkeeping instead of escalating.
@@ -5660,7 +5401,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
   back=$(( $(date +%s) - 5000 ))
   : > "$state/.writing-since-$key"
   set_mtime "$back" "$state/.writing-since-$key"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
 
   # First sight of this hash, absorbed because the active run outranks the stale
   # captain-relevant line. The absorb opens a new idle window, so the finished chain
@@ -5725,7 +5466,7 @@ SH
   printf 'working: compiling step 2\n' > "$status_file"
   # Provably working so the no-verb signal is absorbed (which is what writes the
   # triage log line under test).
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCH_TRIAGE_LOG_MAX_BYTES=1 "$WATCH" > "$out" &
   pid=$!
@@ -6216,7 +5957,7 @@ test_beacon_stays_fresh_while_absorbing() {
   printf 'working: a\n' > "$status_file"
   # Provably working so the working: notes are absorbed (the path that must keep the
   # beacon fresh).
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   # Wait on the beacon itself rather than a fixed liveness budget: the watcher's
@@ -6248,7 +5989,7 @@ test_afk_signal_records_heartbeat_endpoint() {
   out="$dir/watch.out"; status_file="$state/task.status"
   printf 'needs-decision: choose release target\nworking: preparing both targets\n' > "$status_file"
   date '+%s' > "$state/.afk"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "afk watcher did not hand the actionable signal to the daemon"
@@ -6269,7 +6010,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
   # Set a PROVABLY-WORKING verdict: if afk failed to bypass the provably-working
   # check, this no-verb signal would be absorbed (not surfaced). The test asserting
   # a surface therefore also proves afk reverts to one-shot and skips the costly read.
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "with .afk present the watcher did not exit one-shot for a benign signal"
@@ -6706,9 +6447,6 @@ test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
-test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
-test_wedge_threshold_parked_gate_needs_an_unanswered_decision
-test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms

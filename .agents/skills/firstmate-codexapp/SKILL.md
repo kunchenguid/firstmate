@@ -47,7 +47,7 @@ git log --oneline --max-count=3
 ```
 
 For writable repo work, instruct the worker to use the Codex-created current directory.
-Do not tell it to `cd` into the saved project checkout for edits, commits, no-mistakes, pushes, or PR work.
+Do not tell it to `cd` into the saved project checkout for edits, commits, pushes, or PR work.
 
 When sending follow-up instructions, use `send_message_to_thread`.
 If the user types directly into the visible thread, treat that as authoritative and reconcile from `read_thread` instead of undoing it.

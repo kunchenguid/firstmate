@@ -27,7 +27,7 @@ test_scout_done_is_not_gated() {
   wt="$TMP_ROOT/scout-wt"
   fm_git_worktree "$repo" "$wt" fm/scout
   git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
-  accept_done scout no-mistakes "$wt" "$repo" 'done: report written' \
+  accept_done scout direct-PR "$wt" "$repo" 'done: report written' \
     || fail "scout done: must not require named-head reachability outside the copy"
   pass "scout done: is not gated"
 }
@@ -39,7 +39,7 @@ test_unpushed_ship_done_is_refused() {
   fm_git_worktree "$repo" "$wt" fm/unpushed
   git -C "$wt" commit -q --allow-empty -m 'fix only in the worktree'
   sha=$(git -C "$wt" rev-parse HEAD)
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/1 checks green")
+  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/1 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "unpushed ship done: was accepted (exit $rc)"
   case "$reason" in
@@ -57,9 +57,31 @@ test_remote_containing_named_head_is_accepted() {
   git -C "$wt" commit -q --allow-empty -m 'fix on the branch'
   sha=$(git -C "$wt" rev-parse HEAD)
   git -C "$wt" update-ref refs/remotes/origin/fm/pushed "$sha"
-  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/2 checks green" \
+  accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/2 checks green" \
     || fail "named head on a remote-tracking ref was refused"
   pass "named head on a remote-tracking ref is accepted"
+}
+
+test_legacy_and_unknown_ship_modes_preserve_named_head() {
+  local repo wt sha mode reason rc
+  repo="$TMP_ROOT/legacy-mode-repo"
+  wt="$TMP_ROOT/legacy-mode-wt"
+  fm_git_worktree "$repo" "$wt" fm/legacy-mode
+  git -C "$wt" commit -q --allow-empty -m 'work requiring durable publication'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  for mode in '' no-mistakes no-mistakes-prod-only unknown; do
+    rc=0
+    reason=$(accept_done ship "$mode" "$wt" "$repo" 'done: PR https://example.test/o/r/pull/4') || rc=$?
+    [ "$rc" -eq 1 ] || fail "legacy/unknown mode '$mode' accepted unpublished work"
+    assert_contains "$reason" "named head $sha is unreachable outside the worker copy" \
+      "legacy/unknown mode '$mode' bypassed the named-head guard"
+  done
+  git -C "$wt" update-ref refs/remotes/origin/fm/legacy-mode "$sha"
+  for mode in '' no-mistakes no-mistakes-prod-only unknown; do
+    accept_done ship "$mode" "$wt" "$repo" 'done: PR https://example.test/o/r/pull/4' \
+      || fail "legacy/unknown mode '$mode' refused a durably published head"
+  done
+  pass "legacy and unknown ship modes preserve the named-head guard"
 }
 
 test_moved_branch_without_named_head_is_refused() {
@@ -73,7 +95,7 @@ test_moved_branch_without_named_head_is_refused() {
   # The fork branch exists and moved, but only to a merge of the default
   # branch: reachability of that branch is not reachability of the named head.
   git -C "$wt" update-ref refs/remotes/origin/fm/moved "$main_sha"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/3 checks green")
+  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/3 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "moved remote branch without the named head was accepted"
   case "$reason" in
@@ -83,16 +105,6 @@ test_moved_branch_without_named_head_is_refused() {
   pass "a moved remote branch that lacks the named head is refused"
 }
 
-test_no_mistakes_prevalidation_done_is_not_gated() {
-  local repo wt
-  repo="$TMP_ROOT/preval-repo"
-  wt="$TMP_ROOT/preval-wt"
-  fm_git_worktree "$repo" "$wt" fm/preval
-  git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
-  accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' \
-    || fail "no-mistakes pre-validation done: must not require named-head reachability"
-  pass "no-mistakes pre-validation done: is not gated"
-}
 
 test_local_only_linked_branch_is_accepted() {
   local repo wt
@@ -203,28 +215,6 @@ test_merge_marker_binds_to_the_named_pr() {
   pass "the merged-PR short-circuit applies only to the recorded PR the done line names"
 }
 
-test_forge_recorded_head_is_accepted_without_local_object() {
-  local repo wt meta state forge_head
-  repo="$TMP_ROOT/forge-repo"
-  wt="$TMP_ROOT/forge-wt"
-  state="$TMP_ROOT/forge-state"
-  mkdir -p "$state"
-  fm_git_worktree "$repo" "$wt" fm/forge
-  git -C "$wt" commit -q --allow-empty -m 'worker head, not pushed from this copy'
-  # The pipeline's own commit: on the forge and in the gate repo, never
-  # fetched into the worker clone.
-  forge_head=0123456789abcdef0123456789abcdef01234567
-  meta="$state/forge.meta"
-  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
-    "$wt" "$repo" "$forge_head" > "$meta"
-  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/5 checks green" \
-    "$state" forge "$meta" \
-    || fail "forge-recorded pr_head the worker clone never fetched was refused"
-  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/6 checks green" \
-    "$state" forge "$meta" >/dev/null \
-    && fail "pr_head recorded for PR 5 was accepted for a done naming PR 6"
-  pass "a forge-recorded head for the named PR is accepted without a local object"
-}
 
 # A direct-PR worker pushes from its own copy: a commit made after the PR's
 # recorded head, never pushed, is the named head and is refused.
@@ -265,10 +255,10 @@ test_ci_ready_variants_are_gated() {
     'done: PR https://github.com/o/r/pull/5 checks green.' \
     'done: PR https://github.com/o/r/pull/5 (checks green)'; do
     rc=0
-    accept_done ship no-mistakes "$wt" "$repo" "$line" >/dev/null || rc=$?
-    [ "$rc" -eq 1 ] || fail "no-mistakes CI-ready variant skipped the gate: $line"
+    accept_done ship direct-PR "$wt" "$repo" "$line" >/dev/null || rc=$?
+    [ "$rc" -eq 1 ] || fail "direct-PR CI-ready variant skipped the gate: $line"
   done
-  pass "no-mistakes CI-ready done: with extra text is gated"
+  pass "direct-PR CI-ready done: with extra text is gated"
 }
 
 test_keyed_and_spaced_done_lines_are_gated() {
@@ -278,8 +268,8 @@ test_keyed_and_spaced_done_lines_are_gated() {
   fm_git_worktree "$repo" "$wt" fm/keyed
   git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
   for line in \
-    'no-mistakes|done [key=fix]: PR https://github.com/o/r/pull/5 checks green' \
-    'no-mistakes|done : PR https://github.com/o/r/pull/5 checks green' \
+    'direct-PR|done [key=fix]: PR https://github.com/o/r/pull/5 checks green' \
+    'direct-PR|done : PR https://github.com/o/r/pull/5 checks green' \
     'direct-PR|done [key=fix]: PR https://github.com/o/r/pull/5' \
     'direct-PR|done: [key=fix] PR https://github.com/o/r/pull/5'; do
     mode=${line%%|*}
@@ -296,9 +286,9 @@ test_non_done_lines_are_not_gated() {
   wt="$TMP_ROOT/nongate-wt"
   fm_git_worktree "$repo" "$wt" fm/nongate
   git -C "$wt" commit -q --allow-empty -m 'unpushed'
-  accept_done ship no-mistakes "$wt" "$repo" 'working: still implementing' \
+  accept_done ship direct-PR "$wt" "$repo" 'working: still implementing' \
     || fail "working: line was gated"
-  accept_done ship no-mistakes "$wt" "$repo" 'blocked: waiting on a credential' \
+  accept_done ship direct-PR "$wt" "$repo" 'blocked: waiting on a credential' \
     || fail "blocked: line was gated"
   pass "non-done lines are not gated"
 }
@@ -371,7 +361,7 @@ EOF
 # every ship brief requires for GitHub operations, never raw gh (issue 5325).
 test_pr_based_dod_draft_check_uses_gh_axi() {
   local mode out
-  for mode in direct-PR no-mistakes; do
+  for mode in direct-PR direct-PR; do
     out="$TMP_ROOT/dod-$mode.md"
     fm_dod_block "$mode" dod-draft-task > "$out"
     assert_no_grep 'gh pr view' "$out" "$mode: DoD must not document a raw gh draft check"
@@ -384,13 +374,12 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
 
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
-test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
+test_legacy_and_unknown_ship_modes_preserve_named_head
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
-test_forge_recorded_head_is_accepted_without_local_object
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
 test_ci_ready_variants_are_gated
 test_keyed_and_spaced_done_lines_are_gated

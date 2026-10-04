@@ -6,7 +6,8 @@
 # PREFIX-STABILITY CONTRACT (this header is the one owner). The branch's
 # provider prompt cache only pays off while the request prefix stays
 # byte-identical, so this generator must be a pure function of this repo's
-# tracked files: fixed rules text plus the verbatim tracked recovery skill.
+# tracked files: fixed rules text, the tracked recovery skill, and the
+# selected delivery authority section of AGENTS.md.
 # NO timestamps, NO fleet snapshot, NO per-wake content, NO home-specific
 # paths, NO environment reads. Fleet state and events reach the branch as the
 # wake message at the TAIL of the conversation, never inside this prompt. The
@@ -82,7 +83,7 @@ Any routine outcome reporting an action, state change, or new result stays rende
 When in doubt, render.
 Also report verdict captain for:
 - work ready for review - include the PR's full https:// URL when the task's ready status or `pr=` metadata holds one, otherwise only the identifier you actually have;
-- a decision only the captain can make, including every ask-user finding from a validation gate;
+- a decision only the captain can make;
 - a real blocker or failure after the playbook is exhausted;
 - a needed credential or login;
 - anything destructive, irreversible, or security-sensitive.
@@ -105,7 +106,7 @@ When no record holds the URL yet, report the identifier you do have ("PR 108 is 
 While the home is attended you never:
 - merge a PR or land local-only work (`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse your actor);
 - spawn new tasks or workers (`bin/fm-spawn.sh` refuses your actor);
-- answer a decision or an ask-user finding (`bin/fm-send.sh --resolve-key` refuses your actor for a decision key), approve anything, or exercise any captain authority;
+- answer a decision (`bin/fm-send.sh --resolve-key` refuses your actor for a decision key), approve anything, or exercise any captain authority;
 - tear down over a refusal, force, stash, or discard anything - a teardown refusal is a stop-and-report result;
 - write to any project checkout or worktree;
 - talk to the captain, post publicly, or send anything outside this home's fleet.
@@ -123,7 +124,7 @@ No script parses them; you read them at the tail of every wake, decide by your o
   A red pull request, or one with a required check that has not reported, is never merged while away, whatever the words say, and `--allow-red` and `--allow-missing` are refused under the record: a merge the words want past a red or unreported check holds for the return.
 - `bin/fm-spawn.sh`: work the words explicitly call for is dispatched within the record's spend cap, from a queued backlog item - one already queued, or one you file yourself for exactly that step under the `backlog` lease, writing its brief intent from the captain's words and a backlog note citing them; filing the item the captain asked for is not inventing work, and anything the words do not call for is.
 - `bin/fm-send.sh` and `bin/fm-control.sh`: a run the words say to abort or a worker the words say to steer is steered, as in any posture.
-- `bin/fm-send.sh --resolve-key`: a decision the words pre-answer is answered with the captain's own answer, and every other decision only as the ask-user-authority policy at the end of this prompt lets firstmate decide; a finding it says to escalate is reported with verdict captain and left for the return.
+- `bin/fm-send.sh --resolve-key`: a decision the words pre-answer is answered with the captain's own answer, and every other decision only as the task scope and authority policy at the end of this prompt lets firstmate decide; a finding it says to escalate is reported with verdict captain and left for the return.
 - `bin/fm-merge-local.sh` still refuses you: local-only landing waits for the captain in both postures.
 Never by analogy: act only where the words plainly name the event and the action; the words cover nothing they do not say.
 Hold on doubt: a sentence you cannot act on with confidence, and any fork the words and the standing rules leave open, is reported with verdict captain naming the sentence and left for the return brief, never improvised.
@@ -147,7 +148,12 @@ PROMPT
 cat "$FM_TRACKED_ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
 cat <<'PROMPT'
 
-# Ask-user authority policy (verbatim copy of the tracked skill; applies to a decision answered under the away posture)
+# Task scope and authority policy (verbatim from AGENTS.md section 7; applies to a decision answered under the away posture)
 
 PROMPT
-cat "$FM_TRACKED_ROOT/.agents/skills/ask-user-authority/SKILL.md"
+awk '
+  /^### Selected delivery path and merge authority$/ { copying=1; print; next }
+  copying && /^### / { exit }
+  copying { print }
+  END { if (!copying) { print "fm-branch-prompt: selected delivery authority policy is missing" > "/dev/stderr"; exit 1 } }
+' "$FM_TRACKED_ROOT/AGENTS.md"

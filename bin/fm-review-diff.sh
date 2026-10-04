@@ -6,7 +6,6 @@
 # the default branch, and local-only projects against the local default branch.
 # When state/<id>.meta records pr= as a GitHub pull-request URL or a bare
 # number for an open PR, the compare side is ALWAYS a freshly fetched
-# refs/pull/<n>/head by default so review stays current after no-mistakes fix
 # rounds push to the PR. A recorded pr_head= is only a fallback when fetch fails
 # (stale recorded SHAs must never win over a reachable remote PR head). If
 # neither PR head can be resolved, fall back to the local branch with a warning.

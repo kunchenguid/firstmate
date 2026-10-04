@@ -689,7 +689,6 @@ prefetch_task_observations() {  # <meta> <id>
 }
 
 # Current-state and endpoint reads are independent observations. Start each
-# task's pair together so five local workers pay one slow no-mistakes response
 # window rather than five in series, while every command bound remains owned by
 # fm-timeout-lib.sh.
 prefetch_task_current_states() {
@@ -806,7 +805,7 @@ task_json_lines() {
     # reconciled against the crew LIFECYCLE, which only clears a stale decision the
     # crew has provably moved past. Two lifecycle signals clear it, neither of which
     # reads any report content:
-    #   - a live activity read (run-step or busy pane) that is working/done, so a
+    #   - a live activity read (busy pane) that is working/done, so a
     #     crew that resumed past a gate is not still reported as parked; and
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
@@ -818,7 +817,7 @@ task_json_lines() {
     # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
     if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+       { { { [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""

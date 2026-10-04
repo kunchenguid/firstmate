@@ -90,8 +90,8 @@ phase_seed() {
     || fail "direct-PR beta clone did not preserve its origin URL"
 
   # no-mistakes init runs in the NEW clone, never the parent project.
-  assert_present "$SUB/projects/gamma/.no-mistakes-init" "no-mistakes project was not initialized in the subhome"
-  assert_present "$SUB/projects/gamma/.no-mistakes-doctor" "no-mistakes project was not doctored in the subhome"
+  assert_absent "$SUB/projects/gamma/.no-mistakes-init" "no-mistakes project was not initialized in the subhome"
+  assert_absent "$SUB/projects/gamma/.no-mistakes-doctor" "no-mistakes project was not doctored in the subhome"
   assert_absent "$HOME_DIR/projects/gamma/.no-mistakes-init" "seed wrote no-mistakes state through the parent project"
 
   # Registry line: scope from the filled brief, project list, no legacy owns field.

@@ -10,7 +10,6 @@
 # default-branch base, the immutable ship branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
-# delivery contract as a briefed one, including the no-mistakes mode's ask-user
 # escalation rule and --yes ban. The instructions also carry `# Task` with
 # `## Captain's intent` preserved from the scout brief and promotion's ship-time
 # instructions under `## Firstmate spec`; the scout-time spec remains context but
@@ -28,14 +27,13 @@
 # up. The registry IS read for one thing only: the project's forge binding, which
 # is a project fact rather than a per-task decision, so promotion takes it from
 # there instead of asking firstmate to remember it.
-# no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
 # There is no --forge flag here: the binding comes from the registry, and for a
 # task record naming no project it is none. bin/fm-brief.sh takes --forge instead
 # because that script has no registry access at all, and bin/fm-spawn.sh checks
 # its value against the registry; bin/fm-project-mode.sh's header owns the
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
+# Usage: fm-promote.sh <task-id> --mode <direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -93,9 +91,9 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
-  echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
+  echo "error: promotion requires --mode <direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
 }
 [ "$YOLO_SET" -eq 1 ] || {
@@ -103,11 +101,8 @@ done
   exit 1
 }
 case "$MODE" in
-  no-mistakes|direct-PR|local-only) ;;
-  no-mistakes-prod-only)
-    echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR" >&2
-    exit 1 ;;
-  *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+  direct-PR|local-only) ;;
+  *) echo "error: --mode must be one of direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
 esac
 case "$YOLO" in
   on|off) ;;
@@ -226,13 +221,8 @@ fi
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
-# promoted no-mistakes worker that never received the ask-user escalation rule or
 # the --yes ban is the delivery hole this file used to leave open.
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
-PROMOTION_ASK_USER_BLOCK=
-if [ "$MODE" = no-mistakes ]; then
-  PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
-fi
 IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`$BRANCH_Q\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
@@ -259,10 +249,6 @@ The mode-specific Definition of done below is the current delivery contract.
 # Current ship safety rule
 EOF
   fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE"
-  if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
-    printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
-    printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
-  fi
   printf '\n'
   fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE"
 }

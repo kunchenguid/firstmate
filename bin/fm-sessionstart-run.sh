@@ -53,8 +53,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 COMPLETION_FILE="$STATE/.session-start-complete"
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
@@ -85,11 +83,9 @@ stand_down() {
   exit 0
 }
 
-# The same two eligibility owners the nudge wrapper uses, so a no-mistakes gate
 # agent and an unmarked task worktree can never run a session start for a home
 # they do not own. Pi's preflight-only status preserves that intentional silence
 # without mistaking it for a failed eligible attempt that needs the manual nudge.
-fm_is_gate_agent "$FM_ROOT" && stand_down
 if [ ! -d "$STATE" ] && fm_primary_root_matches "$FM_ROOT"; then
   if ! MKDIR_ERR=$(mkdir -p "$STATE" 2>&1); then
     printf 'fm-sessionstart-run: startup could not create the state directory %s: %s\n' \

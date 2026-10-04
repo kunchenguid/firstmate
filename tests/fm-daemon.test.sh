@@ -810,7 +810,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     win="sess:fm-$task"
     pane="$dir/pane.txt"
     action_log="$dir/actions.log"
-    reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone)"
+    reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the busy-pane state alone)"
     fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
     case "$case_name" in
       working) status_line='working: building' ;;
@@ -868,7 +868,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
 # enriched-wedge override force-escalated every such reason, discarding the `pause`
 # verdict classify_stale had already returned for the same pane, so a healthy
 # declared wait was escalated once per STALE_ESCALATE_SECS for as long as it lasted.
-# A declaration is categorically stronger than the run-step/pane state the enriched
+# A declaration is categorically stronger than the busy-pane state the enriched
 # reason tells the supervisor not to re-absorb on, so it routes the pane to the long
 # PAUSE_RESURFACE_SECS recheck instead. This drives repeated enriched wedges through
 # the real handle_wake/housekeeping pair and asserts the cadence, not just one wake.
@@ -893,7 +893,7 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
     if [ "$i" -ge 3 ]; then
       # Past FM_WEDGE_DEMAND_INSPECT_COUNT the watcher enriches the same reason with
       # its demand-deep-inspection marker; a declaration outranks both forms.
-      reason="stale: $win (idle 250s, possible wedge, escalation $i, demand-deep-inspection: same pane has wedge-escalated $i times in a row - do not re-absorb on the run-step/pane state alone)"
+      reason="stale: $win (idle 250s, possible wedge, escalation $i, demand-deep-inspection: same pane has wedge-escalated $i times in a row - do not re-absorb on the busy-pane state alone)"
     else
       reason="stale: $win (idle 250s, possible wedge, escalation $i)"
     fi

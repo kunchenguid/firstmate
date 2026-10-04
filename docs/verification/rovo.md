@@ -1,5 +1,8 @@
 # Verification: the rovo (Atlassian Rovo CLI) crewmate/scout adapter
 
+Retirement note (2026-10-05): references to No-Mistakes below are historical evidence only; that tool and delivery mode are permanently retired.
+Current delivery uses repository-owned validation and `direct-PR` or `local-only`.
+
 Active empirical evidence for firstmate's rovo adapter.
 The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/references/harness/rovo.md) owns the operating facts; this record owns how they were established and what is still unproven.
 

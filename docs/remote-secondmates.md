@@ -348,7 +348,7 @@ Resolve the concrete origin from any of these sources rather than imposing one U
 - The forge.
 - An explicit paste.
 
-Seeding a project this machine has never cloned needs no clone under `projects/`, no `no-mistakes` initialization here, and no fleet sync first.
+Seeding a project this machine has never cloned needs no clone under `projects/` and no fleet sync first.
 A bare `<project>` is still accepted when this machine happens to have `projects/<project>`.
 That clone's configured origin is then read instead of being retyped.
 

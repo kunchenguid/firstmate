@@ -174,13 +174,13 @@
 # (a remote mate's escalations reach it through the parent-replies ingest);
 # only the answer message crosses the backend or remote transport.
 #
-# Answering a decision is the gate-answer path and is main-owned while
+# Answering a decision is the decision-answer path and is main-owned while
 # attended: when any named key is an open needs-decision or a captain-held task
 # (a blocked: key is ordinary steering and stays lease-guarded only), the Pi
 # supervision branch is refused outright, exactly as its prompt promises. While
 # the away-posture record exists main is parked and that one refusal relocates
 # to the branch (contract: bin/fm-lease-lib.sh); which findings firstmate may
-# decide at all remains ask-user-authority's judgment for either actor.
+# decide at all follows AGENTS.md section 7 for either actor.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
@@ -217,11 +217,6 @@ FM_SEND_ORIGINAL_ARGS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never steer
-# a crewmate (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
 
 if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   echo "error: FM_HOME is not set; fm-send refuses to resolve targets without an explicit firstmate home" >&2
@@ -649,7 +644,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
   # blocked: key is ordinary steering and takes no partition guard. Under the
   # away-posture record the guard passes the branch instead (relocation:
   # bin/fm-lease-lib.sh); which findings firstmate may decide at all stays
-  # ask-user-authority's judgment, for either actor.
+  # governed by AGENTS.md section 7, for either actor.
   RESOLVE_IS_DECISION=0
   [ -z "$RESOLVE_HOLD_KEYS" ] || RESOLVE_IS_DECISION=1
   for k in $RESOLVE_STATUS_KEYS; do

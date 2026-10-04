@@ -11,12 +11,6 @@
 # metadata publication, and the pane environment export.
 set -u
 
-# This suite does not source tests/lib.sh, so exempt its teardown subprocess from
-# the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does for
-# the rest of the suite: the no-mistakes gate runs this suite from a gate worktree,
-# which the guard would otherwise refuse.
-export FM_GATE_REFUSE_BYPASS=1
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 
@@ -63,7 +57,6 @@ SH
   ln -s "$ROOT/bin/fm-gemini-lib.sh" "$fake/bin/fm-gemini-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
-  ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
@@ -77,8 +70,8 @@ SH
   ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   ln -s "$ROOT/bin/fm-path-lib.sh" "$fake/bin/fm-path-lib.sh"
-  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
-  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
+  # fm-lab-home-lib.sh: teardown sources it before any fleet mutation.
+  ln -s "$ROOT/bin/fm-lab-home-lib.sh" "$fake/bin/fm-lab-home-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
   # fm-public-followup-lib.sh (and the fm-x-lib.sh and fm-env-lib.sh it
@@ -128,7 +121,7 @@ worktree=$TMP_ROOT/nonexistent-worktree-$id
 project=$TMP_ROOT/nonexistent-project-$id
 harness=claude
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 tasktmp=$tasktmp
 META
@@ -171,7 +164,6 @@ SH
   ln -s "$ROOT/bin/fm-gemini-lib.sh" "$fake/bin/fm-gemini-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
-  ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
@@ -182,8 +174,8 @@ SH
   ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   ln -s "$ROOT/bin/fm-path-lib.sh" "$fake/bin/fm-path-lib.sh"
-  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
-  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
+  # fm-lab-home-lib.sh: teardown sources it before any fleet mutation.
+  ln -s "$ROOT/bin/fm-lab-home-lib.sh" "$fake/bin/fm-lab-home-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
   # fm-public-followup-lib.sh (and the fm-x-lib.sh and fm-env-lib.sh it
@@ -225,7 +217,7 @@ worktree=$TMP_ROOT/nonexistent-wt-$id
 project=$TMP_ROOT/nonexistent-proj-$id
 harness=claude
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 META
   FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \

@@ -102,7 +102,7 @@ spawn_ship() {
   : > "$CASE/launch.log"
   FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
     ANTHROPIC_API_KEY=ambient-invoker-key \
-    fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" "$PROJ" --mode no-mistakes --yolo off "$@"
+    fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" "$PROJ" --mode direct-PR --yolo off "$@"
 }
 
 # run_pane: execute the recorded launch in a pane whose ambient environment

@@ -403,7 +403,7 @@ fm_write_meta "$E2E_HOME/state/wedged-task.meta" \
   'worktree=/nonexistent/wedged-task' \
   'project=alpha' \
   'harness=claude' \
-  'mode=no-mistakes' \
+  'mode=direct-PR' \
   'yolo=off'
 
 DIGEST="$E2E/digest.out"

@@ -243,7 +243,7 @@ EOF
   safe_id "$NAME" || die "project name is unsafe: $NAME"
   [ -n "$ORIGIN" ] || die "project $NAME has no origin"
   fm_project_origin_safe "$ORIGIN" || die "project $NAME origin is not an accepted clone URL: $ORIGIN"
-  case "$MODE" in no-mistakes|direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
+  case "$MODE" in direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
   case "$REGISTRY_LINE" in "- $NAME "*) ;; *) die "project $NAME registry line is malformed" ;; esac
   DEST="$FM_HOME/projects/$NAME"
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
@@ -254,11 +254,7 @@ EOF
   else
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
     git clone --no-local --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
-    if [ "$MODE" = no-mistakes ]; then
-      command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
-      (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \
-        || die "no-mistakes initialization failed for project $NAME"
-    fi
+
   fi
   printf '%s\n' "$REGISTRY_LINE" >> "$PROJECT_REG"
 done < <(grep '^project=' "$TMP/manifest")
