@@ -970,22 +970,25 @@ test_completed_copy_preservation_ignores_force() {
 }
 
 test_completed_unsafe_check_refuses_before_effect() {
-  local dir id=completed-unsafe-check external rc
-  dir=$(make_case "$id")
-  write_herdr_meta "$dir/home/state/$id.meta" \
-    "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
-  stage_archived_action "$dir" "$id" cleanup uncertain
-  external="$dir/external-check"
-  printf 'preserve external target\n' > "$external"
-  ln -s "$external" "$dir/home/state/$id.check.sh"
-  rc=0
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail 'unsafe completed check artifact was removed'
-  assert_contains "$(cat "$dir/stderr")" 'unsafe task PR-check artifact' \
-    'unsafe completed check did not fail at the authenticated-artifact boundary'
-  assert_present "$external" 'unsafe check cleanup changed its external target'
-  assert_present "$dir/home/state/$id.meta" 'unsafe check cleanup retired task metadata'
-  [ ! -s "$dir/runtime.log" ] || fail 'unsafe check cleanup reached the endpoint'
+  local dir id external rc artifact
+  for artifact in check.sh pr-poll-merge-notified; do
+    id="completed-unsafe-${artifact//./-}"
+    dir=$(make_case "$id")
+    write_herdr_meta "$dir/home/state/$id.meta" \
+      "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    stage_archived_action "$dir" "$id" cleanup uncertain
+    external="$dir/external-check"
+    printf 'preserve external target\n' > "$external"
+    ln -s "$external" "$dir/home/state/$id.$artifact"
+    rc=0
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "unsafe completed $artifact artifact was removed"
+    assert_contains "$(cat "$dir/stderr")" 'unsafe task PR-check artifact' \
+      "unsafe completed $artifact did not fail at the authenticated-artifact boundary"
+    assert_present "$external" "unsafe $artifact cleanup changed its external target"
+    assert_present "$dir/home/state/$id.meta" "unsafe $artifact cleanup retired task metadata"
+    [ ! -s "$dir/runtime.log" ] || fail "unsafe $artifact cleanup reached the endpoint"
+  done
   pass 'completed cleanup preserves authentication and refuses unsafe check artifacts before effects'
 }
 
