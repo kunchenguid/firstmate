@@ -723,7 +723,7 @@ github_verify_mergeable() {
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,baseRefOid,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -860,6 +860,7 @@ EOF
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
+  FM_PR_GITHUB_VIEW=$json
 }
 
 # Read one live GitHub pull request view after gh returns. The selected
@@ -1336,6 +1337,25 @@ require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
 
+coord_merge_guard() {
+  [ -f "$FM_HOME/config/coordination.json" ] || return 0
+  if [ ! -f "$FM_ROOT/bin/fm-coord-adapter.py" ]; then
+    echo "error: coordination adapter is missing; merge paused" >&2
+    return 1
+  fi
+  FM_HOME="$FM_HOME" FM_PR_GITHUB_VIEW="${FM_PR_GITHUB_VIEW:-}" FM_PR_GITHUB_REQUIRED="${FM_PR_GITHUB_REQUIRED:-}" \
+    python3 "$FM_ROOT/bin/fm-coord-adapter.py" pre-merge "$ID" "$URL" "$FM_PR_MERGE_HEAD"
+}
+
+# Report the forge outcome so an attempted integration slot settles: merged,
+# refused (the PR reads back unmerged and unqueued after a failed merge call),
+# or unknown. The adapter warns on its own; the merge's exit status stands.
+coord_merge_result() {
+  [ -f "$FM_HOME/config/coordination.json" ] && [ -f "$FM_ROOT/bin/fm-coord-adapter.py" ] || return 0
+  FM_HOME="$FM_HOME" FM_PR_GITHUB_VIEW="${FM_PR_GITHUB_VIEW:-}" \
+    python3 "$FM_ROOT/bin/fm-coord-adapter.py" merge-result "$ID" "$URL" "$1" || true
+}
+
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its gh or glab child lives,
 # stale-owner recovery can release the record for archive or replacement and
@@ -1384,6 +1404,7 @@ case "$PROVIDER" in
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
+    coord_merge_guard || exit 1
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
@@ -1399,30 +1420,38 @@ case "$PROVIDER" in
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
+      coord_outcome=unknown
       if github_read_outcome; then
         if [ "$FM_PR_GITHUB_MERGED" != true ] && [ "$FM_PR_GITHUB_QUEUED" != true ]; then
+          coord_outcome=refused
           github_report_unmerged_outcome
         else
+          [ "$FM_PR_GITHUB_MERGED" != true ] || coord_outcome=merged
           printf 'actionable: the merge command for %s failed, but the pull request reads back as state=%s, merged=%s, isInMergeQueue=%s\n' \
             "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
         fi
       fi
+      coord_merge_result "$coord_outcome"
       exit "$merge_status"
     fi
     if ! github_read_outcome; then
       github_report_forge_output "$merge_output"
+      coord_merge_result unknown
       exit 1
     fi
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
       printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+      coord_merge_result merged
     elif [ "$FM_PR_GITHUB_QUEUED" = true ]; then
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+      coord_merge_result unknown
       exit 0
     else
       github_report_forge_output "$merge_output"
       github_report_unmerged_outcome
+      coord_merge_result unknown
       exit 1
     fi
     ;;
@@ -1438,6 +1467,7 @@ case "$PROVIDER" in
     away_status=0
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
+    coord_merge_guard || exit 1
     merge_status=0
     gitlab_merge_args=()
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
