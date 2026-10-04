@@ -693,7 +693,7 @@ $ ls "$TURNEND"
 `tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
 It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact flags against the installed Codex, and fails naming the harness and version if the hook layer comes back on.
 It spends no model tokens, so it runs by default wherever Codex is installed.
-The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free by default and keeps its hooks only under the `config/codex-crew-hooks` opt-in, while a secondmate, which runs a primary session on this repository's own project hooks, always keeps them.
 
 Maintainer-verified 2026-10-03 on codex-cli 0.160.0, Linux, with `hooks = true` in the machine's `~/.codex/config.toml`: hook trust granted in a repository checkout carries to that repository's linked worktrees.
 The operator first trusted the project hooks interactively in the main checkout, `/home/aalsalman/firstmate/projects/starwell-ts`.

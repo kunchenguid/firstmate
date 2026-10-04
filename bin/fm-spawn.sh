@@ -341,6 +341,9 @@
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
+#     __CODEXHOOKS__ `--disable hooks ` on a codex crewmate or scout launch unless
+#                  config/codex-crew-hooks is `on` (empty then; supplies its own
+#                  trailing space; docs/configuration.md "Codex crew hooks")
 #     __CLAUDEADDDIRS__ quoted --add-dir flags granting exactly this task's
 #                  Firstmate channel directories (claude_add_dirs_flag below;
 #                  supplies its own trailing space, empty never used)
