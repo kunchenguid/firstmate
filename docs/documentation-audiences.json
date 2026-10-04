@@ -389,6 +389,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/memory-protection.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },

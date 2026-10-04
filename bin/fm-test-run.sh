@@ -2213,6 +2213,27 @@ if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
   exit 0
 fi
 
+# Heavy suites are refused on a host whose config routes them to the campaign VM
+# (bin/fm-heavy-guard.sh owns the decision and the refusal text). Execution-only:
+# every inspection mode above has already exited, so --list stays available for
+# planning. Full-regression walks, the live-harness family, the real-Herdr
+# family, and any lane named heavy are the heavy classes here; a project's
+# acceptance or E2E suite is refused through its heavy lane in bin/fm-mem-box.sh.
+refuse_heavy_selection_for_host() {
+  local guard="$ROOT/bin/fm-heavy-guard.sh" args=(check)
+  [ -f "$guard" ] || return 0
+  [ -n "${MODE:-}" ] || return 0
+  args+=(--selection "$MODE")
+  if [ -n "${LANE:-}" ]; then
+    args+=(--lane "$LANE")
+  fi
+  if [ -n "${FAMILY:-}" ]; then
+    args+=(--family "$FAMILY")
+  fi
+  bash "$guard" "${args[@]}"
+}
+refuse_heavy_selection_for_host
+
 # An empty selection is a clean result, not a no-op that falls through. Exiting
 # here also keeps every array expansion below off the empty-array path: under
 # `set -u`, bash 3.2 (the stock macOS shell) treats "${arr[@]}" on an empty
@@ -2462,23 +2483,32 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
   : "$id"
+  # Every test script runs inside its own cgroup v2 memory box, so a leaking
+  # suite dies at its box boundary instead of taking the host with it. The
+  # fallback keeps a host without systemd (stock macOS) running the suite
+  # unboxed, with the fallback notice suppressed so the runner's output stays
+  # clean.
+  local -a boxed=(bash)
+  if [ -f "$ROOT/bin/fm-mem-box.sh" ]; then
+    boxed=("$ROOT/bin/fm-mem-box.sh" exec test -- bash)
+  fi
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+      FM_MEM_BOX_QUIET=1 fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${boxed[@]}" -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?
     else
-      bash "$script" 2>&1 | tee "$out"
+      FM_MEM_BOX_QUIET=1 "${boxed[@]}" "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    FM_MEM_BOX_QUIET=1 fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${boxed[@]}" "$script" >"$out" 2>&1
     rc=$?
   else
-    bash "$script" >"$out" 2>&1
+    FM_MEM_BOX_QUIET=1 "${boxed[@]}" "$script" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
