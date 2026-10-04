@@ -79,7 +79,7 @@ Cleanup does not imply a later clone sync; include that separately when authoriz
 Unsupported actions refuse explicitly.
 
 Before handing off effects, the operation runner revalidates the request, grant expiry, revocation, exact arguments and structural target identity.
-Completed cleanup then uses the ordinary exact-pane owner without another ShortTask actor-binding admission check; its receipt records the actual window and copy outcomes.
+Completed cleanup enters the ShortTask owner at the ordinary exact-pane boundary after its read-only acceptance, delivery, endpoint, and copy checks; that owner revalidates the actor-bound request immediately before the first mutation, and its receipt records the actual window and copy outcomes.
 For example, cleanup of an accepted task with an uncommitted copy closes its recorded pane and archives its resource metadata while retaining that copy and its report.
 The [completed cleanup contract](task-continuation.md#acceptance-archive-and-cleanup) owns copy preservation and endpoint identity requirements.
 Merge still binds the entire metadata audit record under the compatibility checks in [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs).

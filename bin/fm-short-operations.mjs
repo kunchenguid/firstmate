@@ -219,8 +219,10 @@ export function operationReceipts(dir) {
     const receipt=read(path.join(dir,x)), step=request.input.operations?.steps[receipt.index];
     if(!step || x!==`operation-${receipt.index}.receipt.json` || receipt.id!==request.id || receipt.nonce!==request.nonce || !['completed','refused'].includes(receipt.state) || receipt.action!==commandFor(step).action) fail('malformed operation receipt');
     if(receipt.settlement!==undefined) {
-      if(!((receipt.settlement==='dead-owner-codebase-readback'&&receipt.action==='merge')||(['dead-owner-cleanup-readback','main-current-cleanup-readback','main-archived-cleanup-readback'].includes(receipt.settlement)&&receipt.action==='cleanup'))) fail('malformed operation settlement');
+      if(!((receipt.settlement==='dead-owner-codebase-readback'&&receipt.action==='merge')||(['dead-owner-cleanup-readback','dead-owner-legacy-cleanup-preflight-readback','main-current-cleanup-readback','main-archived-cleanup-readback'].includes(receipt.settlement)&&receipt.action==='cleanup'))) fail('malformed operation settlement');
       recordedProcessIdentity(receipt.effectExecutor,`settled ${receipt.action} executor`);
+      if(receipt.settlement==='dead-owner-legacy-cleanup-preflight-readback' &&
+         (receipt.state!=='refused'||receipt.evidence?.reason!=='legacy cleanup acceptance preflight refused before owner effects'||receipt.evidence?.taskBindingUnchanged!==true||receipt.evidence?.endpointStillPresent!==true)) fail('malformed legacy cleanup preflight settlement');
     }
     if(receipt.state==='completed') {
       const e=receipt.evidence;
@@ -272,6 +274,40 @@ function cleanupOwnerReadback(home,root,step,binding) {
   return {evidence:proof.facts,cleanupFile,cleanupBytes};
 }
 
+function legacyCleanupPreflightReadback(home,root,request,started,index,step,binding,intent,effect,resultBytes) {
+  // a70ee10e wrote the cleanup marker in the ShortTask runner before invoking
+  // teardown.  The current owner marker is instead a direct child of that
+  // runner.  Only the legacy shape can use this compatibility readback.
+  if(!equal(effect.owner,started.identity)) return null;
+  const dir=path.join(home,'state/short-agents',request.id),outputFile=path.join(dir,`operation-${index}.output.json`);
+  const cleanupFile=path.join(home,'state',step.task+'.cleanup.json'),metaFile=path.join(home,'state',step.task+'.meta');
+  if(exists(cleanupFile)||!exists(outputFile)||!equal(metadata(home,step.task,true),binding)) return null;
+  const outputStat=fs.lstatSync(outputFile);
+  if(!outputStat.isFile()||outputStat.isSymbolicLink()||outputStat.nlink!==1||outputStat.size>1048576) fail('unsafe legacy cleanup output evidence');
+  const outputBytes=fs.readFileSync(outputFile,'utf8'),output=JSON.parse(outputBytes);
+  fields(output,['stdout','stderr','error']);
+  const refusals=new Set([
+    `REFUSED: compact task ${step.task} is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup\n`,
+    `REFUSED: task ${step.task} is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup\n`,
+  ]);
+  if(output.stdout!==''||!refusals.has(output.stderr)||typeof output.error!=='string') return null;
+  let presence;
+  try {
+    presence=execFileSync('bash',['-c',
+      '. "$1"; fm_backend_validate_task_endpoint "$2" "$3" >/dev/null && fm_backend_source herdr && session=$(fm_backend_meta_exact_value "$2" herdr_session) && pane=$(fm_backend_meta_exact_value "$2" herdr_pane_id) && fm_backend_herdr_pane_presence_state "$session" "$pane"',
+      'legacy-cleanup-readback',path.join(root,'bin/fm-backend.sh'),metaFile,step.task],
+    {encoding:'utf8',env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state')},stdio:['ignore','pipe','pipe']}).trim();
+  } catch(error) {
+    const detail=String(error.stderr??'').trim();
+    fail(detail?`legacy cleanup endpoint readback refused: ${detail}`:'legacy cleanup endpoint readback refused');
+  }
+  if(presence!=='present') return null;
+  if(!equal(read(path.join(dir,'request.json')),request)||fs.readFileSync(path.join(dir,'result.json'),'utf8')!==resultBytes||
+     !equal(read(path.join(dir,`operation-${index}.intent.json`)),intent)||!equal(read(path.join(dir,`operation-${index}.effect.json`)),effect)||
+     fs.readFileSync(outputFile,'utf8')!==outputBytes||exists(cleanupFile)||!equal(metadata(home,step.task,true),binding)) fail('legacy cleanup preflight evidence changed during readback');
+  return {reason:'legacy cleanup acceptance preflight refused before owner effects',taskBindingUnchanged:true,endpointStillPresent:true};
+}
+
 function settleCleanupLocked(home,request,started,index,step) {
   const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),dir=path.join(home,'state/short-agents',request.id);
   const requestFile=path.join(dir,'request.json'),resultFile=path.join(dir,'result.json'),intentFile=path.join(dir,`operation-${index}.intent.json`),effectFile=path.join(dir,`operation-${index}.effect.json`),receiptFile=path.join(dir,`operation-${index}.receipt.json`);
@@ -285,10 +321,16 @@ function settleCleanupLocked(home,request,started,index,step) {
   if(intent.nonce!==request.nonce||intent.index!==index||!equal(intent.step,step)||!Number.isSafeInteger(intent.at)) fail('operation intent identity changed');
   if(effect.id!==request.id||effect.nonce!==request.nonce||effect.index!==index||!Number.isSafeInteger(effect.at)) fail('operation effect identity changed');
   recordedProcessIdentity(effect.owner,'cleanup executor');
-  if(!equal(effect.owner,started.identity)||sameLiveProcess(effect.owner)) fail('cleanup settlement requires the original runner to be dead');
+  const legacyEffect=equal(effect.owner,started.identity);
+  if((!legacyEffect&&(effect.owner.parent!==started.pid||effect.owner.boot!==started.identity.boot))||sameLiveProcess(effect.owner)) fail('cleanup executor is not bound to the dead original runner');
   if(!(request.acceptedAt<=started.at&&started.at<=intent.at&&intent.at<=effect.at&&effect.at<=result.finishedAt)) fail('short cleanup settlement chronology is invalid');
   const expectedMarkers=resources(home,step).map(({file,target})=>({file,record:{home,id:request.id,nonce:request.nonce,index,target}}));
   for(const marker of expectedMarkers) if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed');
+  const noEffect=legacyCleanupPreflightReadback(home,root,request,started,index,step,binding,intent,effect,resultBytes);
+  if(noEffect) {
+    if(!publish(receiptFile,{id:request.id,nonce:request.nonce,index,action:'cleanup',state:'refused',at:Date.now(),executor:processIdentity(process.pid),settlement:'dead-owner-legacy-cleanup-preflight-readback',effectExecutor:effect.owner,evidence:noEffect})) fail('operation refusal receipt changed during settlement');
+    return operationReceipts(dir).find(value=>value.index===index);
+  }
   const readback=cleanupOwnerReadback(home,root,step,binding);
   if(!readback) return null;
   if(!equal(read(requestFile),request)||fs.readFileSync(resultFile,'utf8')!==resultBytes||!equal(read(intentFile),intent)||!equal(read(effectFile),effect)||fs.readFileSync(readback.cleanupFile,'utf8')!==readback.cleanupBytes) fail('short cleanup settlement evidence changed during readback');
@@ -379,7 +421,7 @@ function reconcileLocked(home,request) {
       if(receipt.settlement==='main-current-cleanup-readback') fail('removed rich-lifecycle settlement cannot authorize a current effect');
       if(receipt.settlement===undefined&&sameLiveProcess(receipt.executor)) continue;
     } else {
-      if(exists(effectFile)) continue;
+      if(exists(effectFile)&&receipt?.settlement!=='dead-owner-legacy-cleanup-preflight-readback') continue;
       if(exists(intentFile)) {
         const intent=read(intentFile);
         if(receipt?.state!=='refused' || intent.nonce!==request.nonce || intent.index!==index || !equal(intent.step,step)) continue;

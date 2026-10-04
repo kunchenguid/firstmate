@@ -44,6 +44,7 @@ fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
       .recorded == true and
       ((.task_state == "in_flight" and .task_blocked == "no") or
        .task_state == "done") and
+      (.task_held == "no" or .task_hold_kind == "captain") and
       .remaining_gap == "" and .next_step == ""' >/dev/null; then
       printf 'accepted\n'; return 0
     fi

@@ -76,6 +76,7 @@ fm_task_progress_completion_guard() ( # <task>
   printf '%s' "$projection" | jq -e '
     .recorded == true and .task_state == "in_flight" and
     .task_blocked == "no" and
+    (.task_held == "no" or .task_hold_kind == "captain") and
     .remaining_gap == "" and .next_step == ""' >/dev/null || {
     echo "REFUSED: task $1 is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup" >&2
     return 6

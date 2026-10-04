@@ -100,6 +100,23 @@ Endpoint cleanup binds the exact task, executor generation, Herdr session, and p
 
 Historical private files, reports, operation receipts, dirty copies, and unlanded work remain untouched. Removing the rich lifecycle subsystem does not authorize deleting or rewriting them.
 
+### Cleanup guard boundary and failure history
+
+The October 2026 repeated cleanup failure had two separate causes. Commit `4f852e49` made the compact record authoritative and rejected the still-held task as not accepted; that exposed the stale progress wording but did not create the reservation. Earlier commit `a70ee10e` wrote a cleanup effect marker before calling teardown, so that preflight refusal had no refused/no-effect receipt and retained the resource reservation. A replacement request then correctly refused the occupied resource. The continuation change therefore contributed to the first refusal, while the earlier ShortTask effect boundary caused the repeated refusal.
+
+The cleanup checks remain deliberately split:
+
+| Current fact and owner | Risk protected | Refusal or safe outcome |
+|---|---|---|
+| MAIN's canonical acceptance, with no hold or only an exact `captain` hold | An executor result, commit, PR, or success exit must not accept an unmet goal | Other holds, blockers, or a business gap refuse; a captain hold retains its task row after resource cleanup |
+| Current-generation merge receipt for a ship, or report plus decision gate for a scout | Cleanup must not grant merge authority or discard an undelivered result | Missing or mismatched delivery proof refuses |
+| Exact task generation, endpoint binding, and exclusive reservation | A stale task must not close a reused pane or race another owner | Identity conflict, a live owner, or an unknown effect refuses |
+| Exact endpoint readback, independently from copy disposition | Pane retirement must not imply that a copy is disposable | The correct pane may retire while a primary, shared, dirty, unintegrated, or unverified copy is retained |
+| Owner receipt after the mutation boundary | An intent is not proof that an effect occurred | Completed cleanup settles from exact owner facts; current pre-effect refusal records `refused`; uncertainty remains reserved |
+| Legacy wrapper-owned effect plus the exact acceptance-preflight refusal, unchanged task binding, no cleanup record, a dead runner, and the exact endpoint still present | Repair only the known false-effect shape without guessing from stderr or exit status alone | This conjunction records a refused/no-effect settlement; any missing or conflicting fact preserves the old reservation |
+
+These are behavior boundaries, not keyword classification. In particular, there is no “cleanup-only” bypass, no automatic acceptance from `done`, and no relaxation for unknown effects or unsafe copies. `tests/fm-task-progress.test.sh` covers captain versus non-captain holds; `tests/fm-short-operations-cases.mjs` covers the legacy false-effect settlement, uncertain-evidence retention, normal accepted cleanup, completed readback, and replay idempotence; endpoint and copy safety remain covered by `tests/fm-teardown-endpoint-safety.test.sh`.
+
 ## Executable evidence
 
 [`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) covers one-file CRUD, filtered inventory, atomic publication, unchanged-write elision, MAIN-only updates, restart recovery, held-lock independence, terminal safety, snapshot derivation, and semantic-acceptance consumers.

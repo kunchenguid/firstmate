@@ -215,6 +215,7 @@ def progress_projection(record: dict[str, Any]) -> dict[str, Any]:
     progress = record["progress"]
     return {"task_id": record["id"], "goal": record["title"], "task_state": record["state"],
             "task_held": "no" if record["hold"] is None else "yes",
+            "task_hold_kind": record["hold"]["kind"] if record["hold"] is not None else "",
             "task_blocked": "no" if not record["blocked_by"] else "yes",
             "recorded": bool(progress["acceptance"]) and bool(progress["current_state"]),
             "context_relation": relation, **progress, "record_token": token}

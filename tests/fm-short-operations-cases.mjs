@@ -434,6 +434,27 @@ try {
   assert.ok(!fs.existsSync(resource(replayHome,refusedInput.operations.steps[0]).file),'proven no-effect refusal retained the resource reservation');
   assert.ok(fs.existsSync(path.join(replayState,refusedTask+'.meta')),'preflight refusal changed task metadata');
   assert.equal(closeCount(refusedEndpoint.root_pane.pane_id),0,'preflight refusal closed the endpoint');
+  // Recreate the exact pre-fix persisted shape introduced by a70ee10e: cleanup's wrapper wrote
+  // the runner-owned effect marker before the acceptance guard ran, then the
+  // guard refused with no cleanup owner record or endpoint effect.
+  const refusedRequest=JSON.parse(fs.readFileSync(path.join(refusedDir,'request.json')));
+  const refusedStarted=JSON.parse(fs.readFileSync(path.join(refusedDir,'started.json')));
+  const refusedIntent=JSON.parse(fs.readFileSync(path.join(refusedDir,'operation-0.intent.json')));
+  fs.unlinkSync(path.join(refusedDir,'operation-0.receipt.json'));
+  fs.writeFileSync(path.join(refusedDir,'operation-0.effect.json'),JSON.stringify({id:refusedRequest.id,nonce:refusedRequest.nonce,index:0,owner:refusedStarted.identity,at:refusedIntent.at+1}));
+  const legacyReservation=resource(replayHome,refusedInput.operations.steps[0]);
+  fs.writeFileSync(legacyReservation.file,JSON.stringify({home:replayHome,id:refusedRequest.id,nonce:refusedRequest.nonce,index:0,target:legacyReservation.target}));
+  const refusedOutputPath=path.join(refusedDir,'operation-0.output.json'),refusedOutputBytes=fs.readFileSync(refusedOutputPath,'utf8');
+  fs.writeFileSync(refusedOutputPath,JSON.stringify({...JSON.parse(refusedOutputBytes),stderr:'unknown failure\n'}));
+  await replayService.reconcile();assert.ok(fs.existsSync(legacyReservation.file),'uncertain legacy cleanup output released the reservation');
+  assert.ok(!fs.existsSync(path.join(refusedDir,'operation-0.receipt.json')),'uncertain legacy cleanup was rewritten as refused');
+  fs.writeFileSync(refusedOutputPath,refusedOutputBytes);
+  await replayService.reconcile();
+  const legacyReceipt=JSON.parse(fs.readFileSync(path.join(refusedDir,'operation-0.receipt.json')));
+  assert.equal(legacyReceipt.state,'refused');assert.equal(legacyReceipt.settlement,'dead-owner-legacy-cleanup-preflight-readback');
+  assert.equal(legacyReceipt.evidence.endpointStillPresent,true);assert.equal(closeCount(refusedEndpoint.root_pane.pane_id),0);
+  assert.ok(!fs.existsSync(legacyReservation.file),'verified legacy preflight refusal retained the reservation');
+  await replayService.reconcile();assert.equal(closeCount(refusedEndpoint.root_pane.pane_id),0,'legacy refusal reconciliation replayed an effect');
   compactAccept(refusedTask,replayEnv);
   const acceptedInput=req('cleanup-after-preflight-refusal',[{action:'cleanup',task:refusedTask}]);
   const acceptedOperation=replayService.submit(acceptedInput);let acceptedResult;
