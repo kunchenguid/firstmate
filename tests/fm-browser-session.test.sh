@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 BROWSER="$ROOT/bin/fm-browser-session.sh"
+WRAPPER="$ROOT/bin/browser-axi/chrome-devtools-axi"
 TMP_ROOT=$(fm_test_tmproot fm-browser-session)
 TEST_HOME="$TMP_ROOT/user-home"
 FAKEBIN="$TMP_ROOT/fakebin"
@@ -25,17 +26,17 @@ trap cleanup EXIT
 
 mkdir -p "$TEST_HOME" "$FAKEBIN"
 
-cat > "$FAKEBIN/chrome-devtools-axi" <<'SH'
+cat > "$FAKEBIN/chrome-devtools-axi-real" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${1:-}" = stop ] || exit 2
-session=${CHROME_DEVTOOLS_AXI_SESSION:?}
-pid_file="$HOME/.chrome-devtools-axi/sessions/$session/bridge.pid"
-pid=$(jq -er '.pid' "$pid_file")
-printf '%s\n' "$session" >> "${FM_FAKE_BROWSER_STOP_LOG:?}"
-kill "$pid"
+[ "${1:-}" = test-bridge ] || {
+  printf 'unexpected real cli call: %s\n' "$*" >> "${FM_FAKE_BROWSER_STOP_LOG:?}"
+  exit 2
+}
+shift
+exec node "${FM_FAKE_BRIDGE_JS:?}" "$@"
 SH
-chmod +x "$FAKEBIN/chrome-devtools-axi"
+chmod +x "$FAKEBIN/chrome-devtools-axi-real"
 
 cat > "$FAKEBIN/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -75,6 +76,11 @@ const fs = require("node:fs");
 const http = require("node:http");
 const session = process.argv[2];
 const portFile = process.argv[3];
+const stopLog = process.env.FM_FAKE_BROWSER_STOP_LOG;
+process.on("SIGTERM", () => {
+  fs.appendFileSync(stopLog, `${process.env.CHROME_DEVTOOLS_AXI_SESSION}\n`);
+  process.exit(0);
+});
 const server = http.createServer((request, response) => {
   if (request.url !== "/health") {
     response.writeHead(404).end();
@@ -95,11 +101,14 @@ browser_name() {
 }
 
 start_session() {
-  local session=$1 dir port_file attempt
+  local session=$1 owner_session=${2:-$1} dir port_file attempt
   dir="$TEST_HOME/.chrome-devtools-axi/sessions/$session"
   mkdir -p "$dir"
   port_file="$TMP_ROOT/port.${BASHPID:-$$}.$RANDOM"
-  node "$BRIDGE_JS" "$session" "$port_file" >/dev/null 2>&1 &
+  CHROME_DEVTOOLS_AXI_SESSION="$owner_session" \
+    FM_CHROME_DEVTOOLS_AXI_REAL="$FAKEBIN/chrome-devtools-axi-real" \
+    FM_FAKE_BRIDGE_JS="$BRIDGE_JS" FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" \
+    "$WRAPPER" test-bridge "$session" "$port_file" >/dev/null 2>&1 &
   START_PID=$!
   PIDS="$PIDS $START_PID"
   attempt=0
@@ -199,7 +208,7 @@ test_live_bridge_for_another_session_is_never_signaled() {
   foreign_session=fm-1111111111111111111111111111111111111111
   mkdir -p "$home"
   session=$(browser_name "$home" "$id")
-  start_session "$foreign_session"
+  start_session "$session" "$foreign_session"
   foreign_pid=$START_PID
   foreign_port=$START_PORT
   mkdir -p "$TEST_HOME/.chrome-devtools-axi/sessions/$session"
@@ -212,14 +221,34 @@ test_live_bridge_for_another_session_is_never_signaled() {
     "$BROWSER" cleanup "$home" "$home/state/$id.meta" 2>&1)
   status=$?
   expect_code 1 "$status" "cleanup must refuse a bridge serving another session"
-  assert_contains "$out" "does not report that exact session" "session-identity refusal was not explicit"
+  assert_contains "$out" "did not accept its identity-bound shutdown request" "session-identity refusal was not explicit"
   assert_alive "$foreign_pid" "cleanup signaled another session's live bridge"
   [ "$(wc -l < "$STOP_LOG" | tr -d ' ')" = "$before" ] || fail "cleanup called stop for another session's bridge"
-  pass "bridge PID reuse cannot cross the health-reported session boundary"
+  pass "identity changes after health cannot cross the shutdown boundary"
+}
+
+test_worker_stop_uses_identity_bound_shutdown() {
+  local home id session pid out status before
+  home="$TMP_ROOT/worker-stop-home"
+  id=browser-worker-stop-a1
+  mkdir -p "$home"
+  session=$(browser_name "$home" "$id")
+  start_session "$session"
+  pid=$START_PID
+  before=$(wc -l < "$STOP_LOG" | tr -d ' ')
+
+  out=$(HOME="$TEST_HOME" CHROME_DEVTOOLS_AXI_SESSION="$session" \
+    FM_CHROME_DEVTOOLS_AXI_REAL="$FAKEBIN/chrome-devtools-axi-real" \
+    FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" "$WRAPPER" stop 2>&1)
+  status=$?
+  expect_code 0 "$status" "worker stop should use the task bridge's shutdown endpoint: $out"
+  assert_dead "$pid" "worker stop left its exact task bridge alive"
+  [ "$(wc -l < "$STOP_LOG" | tr -d ' ')" = "$((before + 1))" ] || fail "worker stop invoked the PID-directed real CLI"
+  pass "worker stop uses the same identity-bound shutdown endpoint"
 }
 
 test_terminal_sweep_closes_only_terminal_owner() {
-  local home terminal_id active_id terminal_session active_session terminal_pid restarted_pid active_pid out
+  local home terminal_id active_id terminal_session active_session terminal_pid restarted_pid active_pid out signature
   home="$TMP_ROOT/terminal-home"
   terminal_id=browser-terminal-a1
   active_id=browser-active-a1
@@ -243,12 +272,14 @@ test_terminal_sweep_closes_only_terminal_owner() {
   # Terminal recovery must bind dedupe to the bridge incarnation, not suppress
   # cleanup forever merely because the status line did not change.
   start_session "$terminal_session"; restarted_pid=$START_PID
+  signature=$(printf '%s' 'done: implementation committed' | cksum | awk -v pid="$restarted_pid" '{print $1 ":" $2 ":" pid}')
+  printf '%s\n' "$signature" > "$home/state/.$terminal_id.browser-terminal-cleaned"
   out=$(HOME="$TEST_HOME" PATH="$FAKEBIN:$PATH" FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" \
     "$BROWSER" sweep "$home" "$home/state")
   [ -z "$out" ] || fail "restarted terminal cleanup should stay silent: $out"
   assert_dead "$restarted_pid" "terminal sweep ignored a later bridge incarnation"
   assert_alive "$active_pid" "terminal resweep touched the active task browser"
-  pass "terminal recovery closes each exact browser incarnation and preserves active task sessions"
+  pass "terminal recovery cannot be suppressed by a reused-PID cleanup marker"
 }
 
 test_idle_detection_warns_uncertain_and_closes_orphan() {
@@ -304,6 +335,7 @@ test_owned_process_counts_and_capacity_warning_rearm() {
 test_home_scoped_names_and_exact_cleanup
 test_live_non_bridge_pid_is_never_signaled
 test_live_bridge_for_another_session_is_never_signaled
+test_worker_stop_uses_identity_bound_shutdown
 test_terminal_sweep_closes_only_terminal_owner
 test_idle_detection_warns_uncertain_and_closes_orphan
 test_owned_process_counts_and_capacity_warning_rearm

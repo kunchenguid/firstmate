@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+real=${FM_CHROME_DEVTOOLS_AXI_REAL:?}
+case "$real" in
+  /*) ;;
+  *)
+    echo "error: FM_CHROME_DEVTOOLS_AXI_REAL must be absolute" >&2
+    exit 1
+    ;;
+esac
+[ -x "$real" ] || {
+  echo "error: configured chrome-devtools-axi is not executable: $real" >&2
+  exit 1
+}
+
+script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+if [ "${1:-}" = stop ]; then
+  session=${CHROME_DEVTOOLS_AXI_SESSION:?}
+  pid_file=${HOME:?}/.chrome-devtools-axi/sessions/$session/bridge.pid
+  [ -f "$pid_file" ] || exit 0
+  port=$(jq -er '.port | select(type == "number" and floor == . and . > 0 and . <= 65535)' "$pid_file") || exit 1
+  exec node "$script_dir/shutdown-client.cjs" "$port" "$session"
+fi
+
+hook=$script_dir/bridge-shutdown.cjs
+case " ${NODE_OPTIONS:-} " in
+  *" --require=$hook "*) ;;
+  *) NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$hook" ;;
+esac
+export NODE_OPTIONS
+exec "$real" "$@"

@@ -261,7 +261,8 @@ The launch boundary clears inherited connection, profile, explicit port, WebSock
 The browser tool therefore owns a separate bridge, MCP server, headless browser, profile, and helper tree for every task without exposing home paths or exceeding its session-name limit.
 
 `bin/fm-browser-session.sh` is the sole lifecycle owner.
-Cleanup starts from the exact metadata binding, recomputes the expected identity, verifies the named session's PID still belongs to chrome-devtools-axi's bridge, requires its health endpoint to report the same session identity, then delegates graceful whole-tree closure and bounded escalation to `chrome-devtools-axi stop` and verifies that exact bridge disappeared.
+Task launch routes chrome-devtools-axi through a Firstmate wrapper that adds a loopback-only shutdown endpoint to the bridge process.
+Cleanup starts from the exact metadata binding, recomputes the expected identity, verifies the named session's PID still belongs to chrome-devtools-axi's bridge, asks that endpoint to validate its own session and signal itself, then verifies that exact bridge disappeared.
 No cleanup path searches process names and kills matches, so an active neighbor, a manually started browser, or another home's equal task id is outside its authority.
 Worker exit and teardown call that cleanup directly, and the watcher periodically recovers sessions left behind by crashes or missing status delivery.
 

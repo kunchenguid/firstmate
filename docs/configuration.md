@@ -408,7 +408,8 @@ Workers run `chrome-devtools-axi stop` as soon as browser work finishes; a later
 Secondmates do not receive a browser assignment themselves; tasks launched from their homes receive home-scoped assignments normally.
 
 `bin/fm-control.sh ... exit` and `bin/fm-teardown.sh` stop the recorded exact browser session as part of worker cleanup.
-The browser helper validates the metadata against the expected home-and-task identity, validates the recorded bridge PID and port, requires that bridge's health endpoint to report the same session identity, calls `chrome-devtools-axi stop` for only that named session, and verifies that bridge exited.
+The task launch path wraps chrome-devtools-axi so each bridge exposes a loopback-only shutdown endpoint that validates its own session identity and then signals itself.
+The browser helper validates the metadata against the expected home-and-task identity, validates the recorded bridge PID and port, requests shutdown from that exact endpoint without signaling a reusable PID, and verifies that bridge exited.
 It never enumerates Chrome processes as kill targets, and a malformed identity or PID refuses cleanup rather than risking an active or unrelated browser.
 The watcher provides a bounded backstop: terminal task outcomes close a surviving recorded session, and a session with no change in its own chrome-devtools-axi state for the idle timeout is detected.
 A stale session is closed automatically only when the worker runtime authoritatively reports its owner dead or missing; an alive, ambiguous, unreadable, or unsupported owner produces one warning per activity epoch and remains untouched.

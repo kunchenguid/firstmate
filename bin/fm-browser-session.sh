@@ -17,22 +17,21 @@
 #
 # `cleanup` accepts only the exact derived session recorded once in a regular
 # task meta file. It reads that named session's own bridge.pid, refuses a live
-# PID whose process is not chrome-devtools-axi's bridge, requires the bridge's
-# health endpoint to report the exact session identity, invokes the tool's
-# public `stop` command, and verifies that exact bridge is gone. The tool owns
-# graceful MCP/Chrome closure and its bounded whole-tree escalation. Missing
-# `browser_session=` is a compatibility no-op for tasks launched before this
+# PID whose process is not chrome-devtools-axi's bridge, asks the exact bridge's
+# session-bound shutdown endpoint to stop itself, and verifies that exact bridge
+# is gone. The bridge owns graceful MCP/Chrome closure and whole-tree cleanup.
+# Missing `browser_session=` is a compatibility no-op for tasks launched before this
 # safeguard. No command enumerates and kills arbitrary Chrome processes.
 #
-# `sweep` is the watcher's bounded backstop. A new `done:` or `failed:` event
-# closes that task's session once. A session whose own state has not changed for
+# `sweep` is the watcher's bounded backstop. A terminal `done:` or `failed:`
+# status closes every live incarnation of that task's session. A session whose
+# own state has not changed for
 # FM_BROWSER_IDLE_TIMEOUT_SECS (default 1800) is closed when the recorded worker
 # is authoritatively dead or missing; every other stale owner is warned once per
 # activity epoch and left untouched. The recovery-grade backend classifier can
 # prove dead/missing only on its verified backends, so unverified backends take
 # the warning path rather than risking an active browser. Markers under the
-# owning home suppress repeated terminal and idle handling and are retired with
-# the task.
+# owning home suppress repeated idle warnings and are retired with the task.
 #
 # The same sweep counts chrome-devtools-axi-owned headless browser roots and
 # their descendant helper processes from one process-table snapshot. At
@@ -198,27 +197,8 @@ browser_pid_is_bridge() {  # <pid>
   esac
 }
 
-browser_health_matches_session() {  # <port> <session>
-  node -e '
-    const http = require("node:http");
-    const port = Number(process.argv[1]);
-    const expected = process.argv[2];
-    const req = http.get({hostname: "127.0.0.1", port, path: "/health", timeout: 2000}, response => {
-      let body = "";
-      response.setEncoding("utf8");
-      response.on("data", chunk => { body += chunk; });
-      response.on("end", () => {
-        try {
-          const health = JSON.parse(body);
-          process.exitCode = response.statusCode === 200 && health.status === "ok" && health.session === expected ? 0 : 1;
-        } catch {
-          process.exitCode = 1;
-        }
-      });
-    });
-    req.on("timeout", () => req.destroy());
-    req.on("error", () => { process.exitCode = 1; });
-  ' "$1" "$2" >/dev/null 2>&1
+browser_shutdown_owned_session() {  # <port> <session>
+  node "$SCRIPT_DIR/browser-axi/shutdown-client.cjs" "$1" "$2" >/dev/null 2>&1
 }
 
 cleanup_browser_session() {  # <firstmate-home> <task-meta>
@@ -237,22 +217,8 @@ cleanup_browser_session() {  # <firstmate-home> <task-meta>
     echo "error: browser session $session records live PID $pid, but that PID is not chrome-devtools-axi's bridge; refusing to signal it" >&2
     return 1
   }
-  browser_health_matches_session "$port" "$session" || {
-    echo "error: browser session $session records bridge PID $pid, but its health endpoint does not report that exact session; refusing to signal it" >&2
-    return 1
-  }
-  rc=0
-  browser_session_pid "$session" || rc=$?
-  if [ "$rc" -ne 0 ] || [ "$BROWSER_PID" != "$pid" ] || [ "$BROWSER_PORT" != "$port" ]; then
-    echo "error: browser session $session changed bridge identity during cleanup; refusing to signal it" >&2
-    return 1
-  fi
-  command -v chrome-devtools-axi >/dev/null 2>&1 || {
-    echo "error: browser session $session is live but chrome-devtools-axi is unavailable; refusing to orphan it" >&2
-    return 1
-  }
-  if ! CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi stop >/dev/null; then
-    echo "error: chrome-devtools-axi could not stop task browser session $session" >&2
+  if ! browser_shutdown_owned_session "$port" "$session"; then
+    echo "error: browser session $session did not accept its identity-bound shutdown request; refusing PID-directed cleanup" >&2
     return 1
   fi
   attempt=0
@@ -354,7 +320,7 @@ marker_write() {  # <path> <content>
 
 sweep_browser_sessions() {  # <firstmate-home> <state-dir>
   local home=$1 state=$2 now idle_timeout root_warn helper_warn meta id session rc pid
-  local status_line verb signature terminal_marker activity age idle_marker backend target owner
+  local status_line verb signature activity age idle_marker backend target owner
   local counts roots helpers capacity_marker capacity_created=0 root
   [ -d "$home" ] || {
     echo "error: browser sweep Firstmate home is missing: $home" >&2
@@ -400,16 +366,8 @@ sweep_browser_sessions() {  # <firstmate-home> <state-dir>
     verb=$(status_line_verb "$status_line")
     case "$verb" in
       done|failed)
-        # Include the live bridge incarnation so a same-task browser restarted
-        # after an earlier terminal cleanup is recovered on the next sweep too.
-        signature=$(printf '%s' "$status_line" | cksum | awk -v pid="$pid" '{print $1 ":" $2 ":" pid}')
-        terminal_marker="$state/.$id.browser-terminal-cleaned"
-        if [ "$(marker_read "$terminal_marker" || true)" != "$signature" ]; then
-          if cleanup_browser_session "$home" "$meta"; then
-            marker_write "$terminal_marker" "$signature" || warning_add "task=$id browser terminal-cleanup marker could not be written"
-          else
-            warning_add "task=$id session=$session terminal cleanup failed"
-          fi
+        if ! cleanup_browser_session "$home" "$meta"; then
+          warning_add "task=$id session=$session terminal cleanup failed"
         fi
         continue
         ;;

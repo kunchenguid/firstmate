@@ -3172,7 +3172,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/.$child_id.branch-outcome-index" \
-      "$sub_state/.$child_id.browser-terminal-cleaned" "$sub_state/.$child_id.browser-idle-warned"
+      "$sub_state/.$child_id.browser-idle-warned"
   done
 }
 
@@ -3614,7 +3614,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/.$ID.branch-outcome-index" \
-  "$STATE/.$ID.browser-terminal-cleaned" "$STATE/.$ID.browser-idle-warned"
+  "$STATE/.$ID.browser-idle-warned"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

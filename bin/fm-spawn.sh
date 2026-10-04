@@ -201,7 +201,8 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). The same pane receives one home-and-task-
 #   scoped CHROME_DEVTOOLS_AXI_SESSION, recorded as browser_session= in task
-#   metadata. Inherited browser connection, profile, port, and forwarded-flag
+#   metadata. The task PATH selects Firstmate's chrome-devtools-axi wrapper,
+#   which adds the bridge's session-bound self-shutdown endpoint. Inherited browser connection, profile, port, and forwarded-flag
 #   settings are cleared, so browser work never shares another task's browser
 #   or profile and lifecycle cleanup can close only that exact process tree. A secondmate runs
 #   in its own home and receives neither task marker; its child tasks receive
@@ -4185,8 +4186,35 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 BROWSER_SESSION=
+BROWSER_AXI_REAL=
+browser_axi_real_resolve() {
+  local wrapper candidate candidate_dir resolved
+  wrapper="$FM_ROOT/bin/browser-axi/chrome-devtools-axi"
+  while IFS= read -r candidate; do
+    case "$candidate" in /*) ;; *) continue ;; esac
+    candidate_dir=$(CDPATH='' cd -- "$(dirname "$candidate")" 2>/dev/null && pwd -P) || continue
+    resolved="$candidate_dir/$(basename "$candidate")"
+    [ "$resolved" = "$wrapper" ] && continue
+    [ -x "$resolved" ] || continue
+    printf '%s\n' "$resolved"
+    return 0
+  done < <(type -a -p chrome-devtools-axi 2>/dev/null || true)
+  return 1
+}
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BROWSER_SESSION=$("$SCRIPT_DIR/fm-browser-session.sh" name "$FM_HOME" "$ID") || exit 1
+  BROWSER_AXI_REAL=$(browser_axi_real_resolve || true)
+  case "$BROWSER_AXI_REAL" in
+    /*) ;;
+    *)
+      echo "error: chrome-devtools-axi must resolve to an absolute executable before task launch" >&2
+      exit 1
+      ;;
+  esac
+  [ -x "$BROWSER_AXI_REAL" ] || {
+    echo "error: chrome-devtools-axi is not executable: $BROWSER_AXI_REAL" >&2
+    exit 1
+  }
 fi
 
 SPAWN_META_PATH="$STATE/$ID.meta"
@@ -4465,12 +4493,16 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # no shell syntax.
 spawn_send_text_line "$T" "unset CHROME_DEVTOOLS_AXI_AUTO_CONNECT CHROME_DEVTOOLS_AXI_BROWSER_URL CHROME_DEVTOOLS_AXI_WS_HEADERS CHROME_DEVTOOLS_AXI_USER_DATA_DIR CHROME_DEVTOOLS_AXI_PORT CHROME_DEVTOOLS_AXI_CHROME_ARGS"
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  sq_browser_axi_real=$(shell_quote "$BROWSER_AXI_REAL")
+  sq_browser_axi_dir=$(shell_quote "$FM_ROOT/bin/browser-axi")
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
   spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION"
+  spawn_send_text_line "$T" "export FM_CHROME_DEVTOOLS_AXI_REAL=$sq_browser_axi_real"
+  spawn_send_text_line "$T" "export PATH=$sq_browser_axi_dir:\$PATH"
 else
   # A persistent secondmate is not itself a task browser owner. Clear any
   # ambient assignment before launch so only child task spawns receive one.
-  spawn_send_text_line "$T" "unset FM_TASK_ID CHROME_DEVTOOLS_AXI_SESSION"
+  spawn_send_text_line "$T" "unset FM_TASK_ID CHROME_DEVTOOLS_AXI_SESSION FM_CHROME_DEVTOOLS_AXI_REAL"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -4495,7 +4527,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID CHROME_DEVTOOLS_AXI_SESSION \
+    FM_TASK_ID CHROME_DEVTOOLS_AXI_SESSION FM_CHROME_DEVTOOLS_AXI_REAL \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.

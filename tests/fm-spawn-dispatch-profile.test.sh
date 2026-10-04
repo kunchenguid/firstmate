@@ -1399,7 +1399,7 @@ test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
 }
 
 test_task_browser_session_is_recorded_and_exported() {
-  local rec id out status textlog expected probe launch setup result
+  local rec id out status textlog expected probe launch setup result result_prefix result_real
   id=browser-session-z24
   rec=$(make_spawn_case browser-session claude "$id")
   read_case_record "$rec"
@@ -1414,7 +1414,9 @@ printf '%s\n' "$CHROME_DEVTOOLS_AXI_SESSION" \
   "${CHROME_DEVTOOLS_AXI_WS_HEADERS-unset}" \
   "${CHROME_DEVTOOLS_AXI_USER_DATA_DIR-unset}" \
   "${CHROME_DEVTOOLS_AXI_PORT-unset}" \
-  "${CHROME_DEVTOOLS_AXI_CHROME_ARGS-unset}"
+  "${CHROME_DEVTOOLS_AXI_CHROME_ARGS-unset}" \
+  "$(command -v chrome-devtools-axi)" \
+  "$FM_CHROME_DEVTOOLS_AXI_REAL"
 SH
   chmod +x "$probe"
   printf '%s\n' \
@@ -1453,8 +1455,18 @@ SH
     CHROME_DEVTOOLS_AXI_CHROME_ARGS='--user-data-dir=/tmp/shared-via-flag' \
     /bin/sh -c "$setup
 $launch") || fail "emitted browser-isolated launch failed"
-  [ "$result" = "$(printf '%s\nunset\nunset\nunset\nunset\nunset\nunset' "$expected")" ] \
+  result_prefix=$(printf '%s\n' "$result" | sed -n '1,8p')
+  result_real=$(printf '%s\n' "$result" | sed -n '9p')
+  [ "$result_prefix" = "$(printf '%s\nunset\nunset\nunset\nunset\nunset\nunset\n%s' \
+    "$expected" "$ROOT/bin/browser-axi/chrome-devtools-axi")" ] \
     || fail "inherited browser connection or profile settings reached the worker: $result"
+  case "$result_real" in
+    /*) ;;
+    *) fail "spawn did not preserve an absolute real chrome-devtools-axi path: $result_real" ;;
+  esac
+  [ "$result_real" != "$ROOT/bin/browser-axi/chrome-devtools-axi" ] \
+    || fail "spawn configured the Firstmate wrapper to recurse into itself"
+  [ -x "$result_real" ] || fail "spawn configured a non-executable real chrome-devtools-axi path: $result_real"
   pass "ship spawns enforce one isolated browser session and clear ambient sharing settings"
 }
 
