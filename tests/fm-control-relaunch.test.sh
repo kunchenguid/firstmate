@@ -510,9 +510,12 @@ watcher_check_verdict() {  # <case-dir> <id>
   ' _ "$ROOT" "$1/home/state" "$2"
 }
 
-# assert_relaunch_keeps_pr_poll_authenticated <name> <id> <trace on|off>
+# assert_relaunch_keeps_pr_poll_authenticated <name> <id> <trace on|off> [broken]
+# With `broken`, the registered record first gets the trailing
+# control_relaunch_tx= (and traceparent= when tracing is on) an earlier relaunch
+# left after pr=, and relaunch must restore that same poll's authentication.
 assert_relaunch_keeps_pr_poll_authenticated() {
-  local name=$1 id=$2 trace=$3 dir out rc url head
+  local name=$1 id=$2 trace=$3 start=${4:-fresh} dir out rc url head
   url="https://github.com/example/repo/pull/711"
   head=0123456789abcdef0123456789abcdef01234567
   dir=$(new_case "$name" "$id")
@@ -532,6 +535,14 @@ SH
   expect_code 0 "$rc" "PR registration should arm the poll"$'\n'"$out"
   [ "$(watcher_check_verdict "$dir" "$id")" = authenticated-pr-poll ] \
     || fail "the freshly registered PR poll must be authenticated (trace $trace)"
+  if [ "$start" = broken ]; then
+    printf '%s\n' 'control_relaunch_tx=earlier-relaunch' >> "$dir/home/state/$id.meta"
+    [ "$trace" = off ] || printf '%s\n' 'traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
+      >> "$dir/home/state/$id.meta"
+    out=$(watcher_check_verdict "$dir" "$id")
+    [ "$out" = rejected-unauthenticated ] \
+      || fail "a key after pr= must still be rejected before relaunch (trace $trace), got $out"
+  fi
 
   out=$(run_control "$dir" "$id" relaunch --note "continuing after the PR"); rc=$?
   expect_code 0 "$rc" "relaunch of a PR-registered task should succeed"$'\n'"$out"
@@ -544,7 +555,7 @@ SH
   out=$(watcher_check_verdict "$dir" "$id")
   [ "$out" = authenticated-pr-poll ] \
     || fail "relaunch (trace $trace) turned the armed PR poll into $out:"$'\n'"$(cat "$dir/home/state/$id.meta")"
-  pass "fm-control relaunch: an armed PR poll stays authenticated to the watcher (trace $trace)"
+  pass "fm-control relaunch: an armed PR poll ($start record) is authenticated to the watcher after relaunch (trace $trace)"
 }
 
 test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_off() {
@@ -553,6 +564,14 @@ test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_off() {
 
 test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_on() {
   assert_relaunch_keeps_pr_poll_authenticated pr-poll-trace-on rl712 on
+}
+
+test_relaunch_repairs_a_pr_poll_broken_by_an_earlier_relaunch_with_trace_off() {
+  assert_relaunch_keeps_pr_poll_authenticated pr-poll-broken-trace-off rl713 off broken
+}
+
+test_relaunch_repairs_a_pr_poll_broken_by_an_earlier_relaunch_with_trace_on() {
+  assert_relaunch_keeps_pr_poll_authenticated pr-poll-broken-trace-on rl714 on broken
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2458,6 +2477,8 @@ test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_off
 test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_on
+test_relaunch_repairs_a_pr_poll_broken_by_an_earlier_relaunch_with_trace_off
+test_relaunch_repairs_a_pr_poll_broken_by_an_earlier_relaunch_with_trace_on
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
