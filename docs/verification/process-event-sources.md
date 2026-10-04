@@ -5,37 +5,26 @@ Audience: maintainer verification.
 This record holds reusable version-scoped evidence for the runner's active guarantees.
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
-Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
-Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
-Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
+The published reply handoff was verified on 2026-09-29 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.80 installed.
+The poll lifecycle was first verified on 2026-07-31 with 0.1.45; generic keyed-answer feed was verified on 2026-08-16, and cross-origin keyed-answer feed on 2026-08-19.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 
-## The published Lavish poll interface the adapter wraps
+## The published Lavish poll and reply interfaces
 
-Verified at implementation time without upgrading the installed build:
+The current published command surface includes a synchronous reply command in addition to the blocking poll:
 
 ```sh
 $ lavish-axi --version
-0.1.45
+0.1.80
+$ lavish-axi reply --help | head -1
+Usage: lavish-axi reply <html-file> (--agent-reply "..." | --agent-reply-file <path>)
 $ lavish-axi poll --help | head -1
-Usage: lavish-axi poll <html-file> [--agent-reply "..."]
+Usage: lavish-axi poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]
 ```
 
-The same help states that the command "long-polls indefinitely".
-The adapter therefore registers the plain blocking form with no timeout flag, so a completion is a real server-side event rather than a timer expiry.
-
-This build exposes no capabilities command and no multiplexed or subscription endpoint:
-
-```sh
-$ lavish-axi capabilities --json
-error: Lavish Editor expects an HTML file
-code: VALIDATION_ERROR   # exit 2
-```
-
-Exit 2 with `VALIDATION_ERROR` is positive proof the subcommand does not exist, because the word is parsed as a filename.
-Note that `lavish-axi <anything> --help` exits 0 for any argument, including a nonsense subcommand, so a `--help` exit code can never be used as a capability probe.
-
-The adapter requires none of those extra commands or endpoints: delivery uses the published poll shape above.
+`reply --help` states that the command exits 0 only after the server answers that the reply was sent, which is when the board stops showing Working, and exits non-zero if that answer does not arrive within 10 seconds.
+`poll --help` states that the command long-polls indefinitely; when `--agent-reply` is supplied, it posts the reply and then keeps waiting, so its return is not an acceptance receipt.
+The adapter uses `lavish-axi reply` under the source lock after arm eligibility and before listener registration on 0.1.80 and newer, and preserves poll-with-reply for older compatible versions.
 Its separate routing lookup reads the board's saved Lavish session; the adapter header owns that contract.
 
 ## Why an ended Lavish review is terminal
@@ -102,7 +91,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | generic built-in keyed-answer feed | `tests/fm-captain-hold-lifecycle.test.sh` drives a bound built-in source through the real runner with a fixture adapter that only prints keyed lines, proving any bound built-in channel reaches the one keyed-answer intake: named captain-held tasks close at capture time, a card-declared release mode frees held work, keys naming no captain-held task skip, freeform prose forges nothing, matching answer-and-mode replays are idempotent while mode mismatches refuse, an unbound source closes nothing, and capture remains independent of the handler wake. |
 | structured reconcile feed | The same suite drives the optional `reconciles` adapter seam through the real runner and proves only a bound captured source can create a request; the ordinary keyed-answer and chat paths refuse the reserved value without closing or creating a request, versioned selection stays separate from its note, rollout-compatible ordinary legacy answers still pass, and legacy reconcile-shaped values feed neither intake. |
 | adapter-owned silence verdict | an ordinary firstmate-owned Lavish source driven against a stand-in poll that returns an empty ended session captures its result, records it durably handled, appends no wake, and stays silent through a later `reconcile` that would otherwise republish it, while still retiring its ended source; the same real path with a `Send & End` response carrying the captain's choice still publishes its `check` wake and is left unacknowledged for the handler |
-| worker-owned Lavish rounds | one three-round fixture arms a board for an identity-matched task endpoint, delivers nonterminal and terminal captures directly to that task's steering inbox without a firstmate `check` wake, acknowledges each nonterminal round through a successful re-arm, rings the owner's doorbell once when the capture writes a fresh inbox note and never re-rings or resurrects a note the owner has filed into `handled/` across repeated reconciles, refuses a second armer and every early retirement, and concludes the terminal round through `handled` without another poll; focused fixtures also pin failed re-arm rollback, generation-specific reply staging, one reply post across transient poll retries, unreachable-owner refusal, interrupted conclusion recovery, and repeat acknowledgement isolation |
+| worker-owned Lavish rounds | one three-round fixture arms a board for an identity-matched task endpoint, delivers nonterminal and terminal captures directly to that task's steering inbox without a firstmate `check` wake, acknowledges each nonterminal round through a successful re-arm, rings the owner's doorbell once when the capture writes a fresh inbox note and never re-rings or resurrects a note the owner has filed into `handled/` across repeated reconciles, refuses a second armer and every early retirement, and concludes the terminal round through `handled` without another poll; focused fixtures also pin synchronous reply acceptance before modern arm returns, failed reply refusal before registration, refused-arm reply isolation, direct poll reply ordering, the legacy poll-with-reply fallback, failed re-arm rollback, one legacy reply post across transient retries, unreachable-owner refusal, interrupted conclusion recovery, and repeat acknowledgement isolation |
 | Lavish handled-status classification | an executable fixture table pins exact `feedback`, `ended`, `waiting`, and `browser_disconnected` mappings, including `browser_disconnected` to `disconnected`; the same suite proves that status is nonterminal and receives a zero-answer silence verdict |
 | session-derived Lavish routing | the three-round worker fixture starts its first listener under conflicting ambient host/port values and configuration, then recovers later listeners while that conflicting configuration remains, and proves every reply/poll uses the board's saved session endpoint; direct polls cover Unicode artifact paths, hostnames, IPv6, session endpoint changes, quiet retries, and refusal before reply consumption when session evidence is absent or invalid; spawn coverage still proves the configured opening address enters the worker launch |
 | silence fails closed | the adapter's published `silent` command suppresses only an `ended` session with no queued content block or a `browser_disconnected` response, and announces a real answer, freeform prose, any recognized content block regardless of its declared count, a malformed top-level content header, a `waiting` or `missing` session, a server error, an unreadable result, and indented payload text imitating an empty content block; the `remote-reply` and `when` adapters, which implement no `silent` command, announce every result |

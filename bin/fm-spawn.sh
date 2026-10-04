@@ -299,7 +299,9 @@
 #   pins to 1 with a literal assignment so it survives the cleared environment
 #   even on a host that never had it set.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
-#   assignments still apply inside the filtered environment. Raw commands must
+#   assignments still apply inside the filtered environment, including the
+#   FM_TASK_INBOX export every launch carries (the absolute state/<id>.inbox
+#   path the steering doorbell names). Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
@@ -1530,6 +1532,7 @@ spawn_refuse_if_away_spend_cap() {
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
   FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
+  [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = away ] || return 0
   cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
@@ -1545,15 +1548,16 @@ spawn_refuse_if_away_spend_cap() {
     exit 1
   fi
 }
-# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while the
-# away-posture record exists, a fresh ordinary spawn refuses for BOTH actors
-# once this home already holds that many ordinary task records, counted the
-# same way the return brief counts tasks live at return (every state/*.meta
-# whose kind is not secondmate). A relaunch replaces a worker that already
-# counts, and a secondmate is a persistent home rather than spend, so both are
-# exempt. Checked before any endpoint, worktree, or record exists, so a refusal
-# costs nothing to unwind; rechecked after the task-set lock so two fresh
-# spawns cannot both publish from a stale count.
+# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while an
+# away record exists (never a quiet-mode one, whose captain is present and
+# spends as attended: bin/fm-afk-contract.sh mode), a fresh ordinary spawn
+# refuses for BOTH actors once this home already holds that many ordinary task
+# records, counted the same way the return brief counts tasks live at return
+# (every state/*.meta whose kind is not secondmate). A relaunch replaces a
+# worker that already counts, and a secondmate is a persistent home rather than
+# spend, so both are exempt. Checked before any endpoint, worktree, or record
+# exists, so a refusal costs nothing to unwind; rechecked after the task-set
+# lock so two fresh spawns cannot both publish from a stale count.
 spawn_refuse_if_away_spend_cap
 spawn_require_relocated_queued_work() {
   local actor
@@ -5164,6 +5168,12 @@ fi
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
+# Every launch also exports the absolute path of this task's steering inbox, so
+# the constant doorbell line (bin/fm-task-inbox-lib.sh) can name
+# "$FM_TASK_INBOX" instead of a path that grows with the home's depth. Like the
+# kill switch below it is an export statement, so it survives a compound raw
+# launch and the launch-env-allowlist `env -i` wrapper.
+LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
 # own environment, carry it into the launch command text so Claude Code's

@@ -1114,6 +1114,36 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a forgotten captain hold on the long cadence and resets its window"
 }
 
+# The away record owns the one exception: nobody is there to answer a captain
+# hold, so it is never rechecked. Quiet mode's record is a present captain
+# (bin/fm-afk-contract.sh AWAY OR QUIET), so a quiet daemon rechecks the same
+# hold on the same cadence.
+test_housekeeping_captain_held_silenced_only_by_an_away_record() {
+  local mode dir state fakebin win pane key
+  for mode in away quiet; do
+    dir=$(make_supercase "captain-held-$mode-record")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    win="sess:fm-held-w11r"; pane="$dir/pane.txt"
+    printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$state/held-w11r.status"
+    printf 'idle prompt $\n' > "$pane"
+    key=$(printf '%s' "held-w11r" | tr ':/.' '___')
+    echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_AFK_MODE="$mode" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+      || fail "fixture: could not record the $mode posture"
+    [ "$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" mode)" = "$mode" ] || fail "fixture: the record is not $mode"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    if [ "$mode" = away ]; then
+      ! grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+        || fail "a captain hold was rechecked while the away record exists: $(cat "$state/.subsuper-escalations")"
+    else
+      grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+        || fail "quiet mode's record silenced a captain hold as if the captain were away: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
+    fi
+  done
+  pass "housekeeping silences a captain hold only under an away record, never under quiet mode's"
+}
+
 # A crew that RESUMED - whose latest status line no longer declares the wait - drops
 # its pause tracking without escalating. The dimension pinned here is that pane busy
 # state does not GATE that clear: the status append alone ends the wait, on the
@@ -3141,6 +3171,7 @@ test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
+test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_declared_time_controls_pause_recheck

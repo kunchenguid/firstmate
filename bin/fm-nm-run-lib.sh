@@ -71,7 +71,7 @@ fm_nm_strip_quotes() {
 # open it with SQLite's mode=ro, so a missing database is never created.
 fm_nm_state_db() {  # <worktree>
   local root=${NM_HOME:-}
-  [ -n "$root" ] || root="${HOME:-}/.no-mistakes"
+  [ -n "$root" ] || root=~/.no-mistakes
   case "$root" in
     /*) ;;
     *) root="$1/$root" ;;

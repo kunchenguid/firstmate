@@ -11,10 +11,10 @@
 # ledger appends nothing, so a retried cleanup never counts a task twice.
 # Recording is disabled unless config/pipeline-spend is present; in that case
 # this command exits before reading task metadata, no-mistakes state, or ledger.
-# bin/fm-teardown.sh calls record for every ship task whose local copy it
-# cleans up, before it deletes the task branch this script attributes runs by
-# and before it removes state/<id>.meta. The ledger is private and gitignored
-# with the rest of data/.
+# When enabled, bin/fm-teardown.sh calls record for every ship task whose
+# local copy it cleans up, before it deletes the task branch this script
+# attributes runs by and before it removes state/<id>.meta. The ledger is
+# private and gitignored with the rest of data/.
 # Exit status: 0 when a record was recorded or already present, its source is
 # unavailable, or recording is disabled; 1 when the task record is missing,
 # names a secondmate, or the record could not be built or written; 2 for bad usage.

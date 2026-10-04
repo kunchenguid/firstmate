@@ -3664,19 +3664,29 @@ EOF
 # An opted-in home spawns the supervision host in the arm's place; its
 # streamed status line drives readiness and the handling handoff, and a
 # handed-back wake is delivered with every host line and the away note.
-test_opencode_primary_watch_plugin_runs_the_supervision_host() {
-  local plugin repo home log stop out status
+test_opencode_primary_watch_plugin_runs_the_supervision_host() {  # [away|quiet]
+  local kind=${1:-away} plugin repo home log stop out status f
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  repo="$TMP_ROOT/opencode-host-root"
-  home="$TMP_ROOT/opencode-host-home"
-  log="$TMP_ROOT/opencode-host.log"
-  stop="$TMP_ROOT/opencode-host.stop"
+  repo="$TMP_ROOT/opencode-host-root-$kind"
+  home="$TMP_ROOT/opencode-host-home-$kind"
+  log="$TMP_ROOT/opencode-host-$kind.log"
+  stop="$TMP_ROOT/opencode-host-$kind.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
-  : > "$home/state/.afk-contract"
+  if [ "$kind" = quiet ]; then
+    # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+    # QUIET): the plugin asks the record owner, so the same handback carries no
+    # away note.
+    for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do cp "$ROOT/bin/$f" "$repo/bin/$f"; done
+    FM_HOME="$home" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+      || fail "fixture: could not record quiet mode"
+  else
+    : > "$home/state/.afk-contract"
+  fi
   : > "$home/config/supervision-host"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$repo/bin/"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
@@ -3702,7 +3712,7 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" RECORD_KIND="$kind" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -3728,16 +3738,19 @@ for (const needle of [
   "signal: synthetic wake",
   "supervision-host: the away session could not take this wake: fixture; this wake is yours",
   "supervision-host: outcome 1 for demo [captain]: fixture",
-  "not from the captain: it is not a return",
 ]) {
   if (!prompts[0].includes(needle)) throw new Error(`the wake prompt lacks '${needle}': ${prompts[0]}`);
+}
+const awayNote = prompts[0].includes("not from the captain: it is not a return");
+if (process.env.RECORD_KIND === "quiet" ? awayNote : !awayNote) {
+  throw new Error(`the away note must appear exactly under an away record (${process.env.RECORD_KIND}): ${prompts[0]}`);
 }
 EOF
   )
   status=$?
-  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must run the supervision host on an opted-in home: $out"
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must run the supervision host on an opted-in home ($kind record): $out"
   [ -z "$out" ] || fail "OpenCode host test printed output: $out"
-  pass "OpenCode watcher plugin runs the supervision host on an opted-in home and relays every host line"
+  pass "OpenCode watcher plugin runs the supervision host on an opted-in home and relays every host line ($kind record)"
 }
 
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
@@ -4435,6 +4448,7 @@ test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_primary_watch_plugin_runs_the_supervision_host
+test_opencode_primary_watch_plugin_runs_the_supervision_host quiet
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

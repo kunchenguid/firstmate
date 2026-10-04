@@ -71,7 +71,7 @@ This in-process supervision branch is Pi-only by construction:
   A home on any harness that already has an outcome store still receives the shared drain compatibility recovery described in [Lost-wake outcome backstop](#lost-wake-outcome-backstop).
 - It does not change which harness is primary and never moves a home to Pi.
 
-On an opted-in non-Pi home, the supervision host runs the branch beside the primary, away and on Claude and Cursor also attended.
+On a non-Pi home that runs the supervision host, the host runs the branch beside the primary, away and on Claude and Cursor also attended.
 [supervision-host.md](supervision-host.md) owns its scope and mechanism.
 
 ## Components and their owners
@@ -581,8 +581,8 @@ A leftover `state/.afk` flag declines nothing.
 ### Authority relocation
 
 `fm_lease_forbid_branch` passes the branch actor only for the actions whose guarded script opts in.
-It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, readable, live record.
-An archived, incomplete, or invalid record restores the attended refusal byte for byte.
+It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, readable, live away record (`mode` is not quiet).
+An archived, incomplete, invalid, or quiet record restores the attended refusal byte for byte.
 
 The captain's away words are the whole mandate:
 
