@@ -192,8 +192,8 @@ const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
   "The outcome identities below refer to exact, durable anchor entries already shown to the captain in this transcript. Each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Process each identified outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
-  "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
+  "Process each identified outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. The targeted load is an authenticated completion capsule: retain one MAIN semantic/authority decision, then grant one existing bounded operation chain for supported merge/sync/cleanup steps without pre-acquiring its leases or accepting worker success automatically. Unsupported activation and genuine blockers stay with their existing owners. " +
+  "When every outcome below is processed, call fm_branch_processed with sequences=\"{S}\" exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MainDialogItem = MirrorItem & { feishuKey?: string };
@@ -206,8 +206,27 @@ type OutcomeRow = {
   verdict: Verdict;
   summary: string;
   silent: boolean;
+  wake?: string;
+  taskGeneration?: string;
+  evidenceKey?: string;
+  taskDisposition?: string;
+  statusEndpoint?: number;
+  statusIdent?: string;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
+type TaskOutcomeObservation = {
+  task: string;
+  record_token: string | null;
+  progress: Record<string, unknown> | null;
+  executor_state: string;
+  executor_digest: string;
+  task_generation: string | null;
+  recorded_task_generation: string | null;
+  task_generation_mismatch: boolean;
+  candidate_identity: string | null;
+  metadata_digest: string | null;
+};
+type LoadedOutcomeEvidence = { outcome_digest: string };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -560,7 +579,13 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
   if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
-  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
+  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent,
+    ...(typeof row.wake === "string" ? { wake: row.wake } : {}),
+    ...(typeof row.taskGeneration === "string" ? { taskGeneration: row.taskGeneration } : {}),
+    ...(typeof row.evidenceKey === "string" ? { evidenceKey: row.evidenceKey } : {}),
+    ...(typeof row.taskDisposition === "string" ? { taskDisposition: row.taskDisposition } : {}),
+    ...(typeof row.statusEndpoint === "number" ? { statusEndpoint: row.statusEndpoint } : {}),
+    ...(typeof row.statusIdent === "string" ? { statusIdent: row.statusIdent } : {}) };
 }
 
 function parseVisibleOutcomeRecord(value: unknown): VisibleOutcomeRecord | null {
@@ -574,7 +599,45 @@ function sameOutcome(left: OutcomeRow, right: OutcomeRow): boolean {
     left.task === right.task &&
     left.verdict === right.verdict &&
     left.summary === right.summary &&
-    left.silent === right.silent;
+    left.silent === right.silent &&
+    left.evidenceKey === right.evidenceKey && left.taskGeneration === right.taskGeneration;
+}
+
+function coalesceExactOutcomeRows(rows: OutcomeRow[], history: OutcomeRow[] = rows): OutcomeRow[] {
+  const latest = new Map<string, number>();
+  const duplicateCounts = new Map<string, number>();
+  history.forEach((row) => {
+    if (!row.evidenceKey || !row.taskGeneration) return;
+    const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
+    duplicateCounts.set(key, (duplicateCounts.get(key) ?? 0) + 1);
+  });
+  rows.forEach((row, index) => {
+    if (!row.evidenceKey || !row.taskGeneration) return;
+    const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
+    latest.set(key, index);
+  });
+  const exact = rows.filter((row, index) => {
+    if (!row.evidenceKey || !row.taskGeneration) return true;
+    const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
+    return latest.get(key) === index;
+  });
+  const terminalSequence = new Map<string, number>();
+  history.forEach((row) => {
+    if (row.taskGeneration && ["done", "archived"].includes(row.taskDisposition ?? "")) {
+      const key = JSON.stringify([row.task, row.taskGeneration]);
+      terminalSequence.set(key, Math.min(terminalSequence.get(key) ?? row.seq, row.seq));
+    }
+  });
+  return exact.filter((row) => {
+    const terminal = terminalSequence.get(JSON.stringify([row.task, row.taskGeneration]));
+    const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
+    const repeatedRoutine = row.verdict === "routine" && (duplicateCounts.get(key) ?? 0) >= 2;
+    if (!repeatedRoutine || terminal === undefined) return true;
+    const firstMaterialSequence = history.find((candidate) => candidate.task === row.task &&
+      candidate.taskGeneration === row.taskGeneration && candidate.evidenceKey === row.evidenceKey &&
+      candidate.verdict === row.verdict && candidate.summary === row.summary && candidate.silent === row.silent)?.seq;
+    return firstMaterialSequence === undefined || firstMaterialSequence > terminal;
+  });
 }
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
@@ -734,6 +797,20 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function taskRecordDispositionInvariant(task: string): string {
+    try {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(task)) return "";
+      const data = process.env.FM_DATA_OVERRIDE || join(fmHome, "data");
+      const record = JSON.parse(readFileSync(join(data, task, "task.json"), "utf8")) as Record<string, unknown>;
+      // Only the canonical terminal transition may differ while a branch turn
+      // is in flight. Notes, links, progress, holds, dependencies, and every
+      // other business field remain part of this exact comparison.
+      const stable = { ...record };
+      for (const field of ["state", "closed", "completion", "updated_at"]) delete stable[field];
+      return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
+    } catch { return ""; }
+  }
+
   // Accepted wake turns that have not settled yet. A newly offered iDA result
   // must fall back to main while the branch is busy unless the current live
   // row grant already owns that exact result row; accepting an unclaimed
@@ -789,7 +866,7 @@ export default function (pi: ExtensionAPI) {
     nextTurnQueued: boolean;
     inlineSequences: number[];
     authenticatedSequences: number[];
-    rows: Array<{ seq: number; task: string }>;
+    rows: OutcomeRow[];
   };
   let processing: ProcessingState | null = null;
   // Exact outcome contents are loaded once per main-session generation through
@@ -798,6 +875,8 @@ export default function (pi: ExtensionAPI) {
   // Reload clears every witness; compaction clears older tool reads but keeps
   // the authenticated inline bodies carried by the still-pending request.
   const loadedOutcomeSequences = new Set<number>();
+  const loadedOutcomeEvidence = new Map<number, LoadedOutcomeEvidence>();
+  const pendingOutcomeEvidence = new Map<number, Promise<TaskOutcomeObservation>>();
   const loadedShortTaskResults = new Set<string>();
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
@@ -1234,7 +1313,80 @@ export default function (pi: ExtensionAPI) {
       if (!row || row.verdict !== "captain") return null;
       rows.push(row);
     }
+    const history = await readOutcomeHistory();
+    return history === null ? null : coalesceExactOutcomeRows(rows, history);
+  }
+
+  async function readOutcomeHistory(): Promise<OutcomeRow[] | null> {
+    const listed = await runOutcomeScript(["list", "--all"]);
+    if (!listed.ok) return null;
+    const rows: OutcomeRow[] = [];
+    for (const line of listed.stdout.split("\n")) {
+      if (!line) continue;
+      let row: OutcomeRow | null = null;
+      try { row = parseOutcomeRow(JSON.parse(line)); }
+      catch { row = null; }
+      if (!row) return null;
+      rows.push(row);
+    }
     return rows;
+  }
+
+  function outcomeDigest(row: OutcomeRow): string {
+    return createHash("sha256").update(JSON.stringify(row)).digest("hex");
+  }
+
+  async function observeOutcomeTask(row: OutcomeRow): Promise<TaskOutcomeObservation> {
+    const read = async (args: string[]) => runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), ...args], {
+      env: scriptEnv, maxBuffer: 1024 * 1024,
+    });
+    const first = await read(["progress", row.task]);
+    const executor = await read(["--durable-only", row.task]);
+    const second = await read(["progress", row.task]);
+    let taskGeneration: string | null = null;
+    let candidateIdentity: string | null = null;
+    let metadataDigest: string | null = null;
+    try {
+      const metadata = readFileSync(join(state, `${row.task}.meta`), "utf8");
+      metadataDigest = createHash("sha256").update(metadata).digest("hex");
+      const exact = (field: string) => {
+        const values = metadata.split("\n").filter((line) => line.startsWith(`${field}=`))
+          .map((line) => line.slice(field.length + 1));
+        return values.length === 1 && values[0] ? values[0] : null;
+      };
+      taskGeneration = exact("spawn_gen");
+      candidateIdentity = exact("pr_head");
+      if (taskGeneration !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(taskGeneration)) taskGeneration = null;
+      if (candidateIdentity !== null && !/^[a-f0-9]{40,64}$/.test(candidateIdentity)) candidateIdentity = null;
+    } catch { /* Exact metadata absence is itself rechecked through null. */ }
+    const taskGenerationMismatch = Boolean(row.taskGeneration && taskGeneration !== row.taskGeneration);
+    if (first.status === 1 && second.status === 1) {
+      const executorState = executor.stdout.trim();
+      return { task: row.task, record_token: null, progress: null, executor_state: executorState,
+        executor_digest: createHash("sha256").update(executorState).digest("hex"),
+        task_generation: taskGeneration, recorded_task_generation: row.taskGeneration ?? null,
+        task_generation_mismatch: taskGenerationMismatch,
+        candidate_identity: candidateIdentity, metadata_digest: metadataDigest };
+    }
+    if (first.status !== 0 || second.status !== 0) {
+      throw new Error(`task observation refused for ${row.task}: progress statuses ${String(first.status)}/${String(second.status)}`);
+    }
+    const progress = JSON.parse(first.stdout) as Record<string, unknown>;
+    const confirmed = JSON.parse(second.stdout) as Record<string, unknown>;
+    if (typeof progress.record_token !== "string" || progress.record_token !== confirmed.record_token) {
+      throw new Error(`task observation changed while loading ${row.task}`);
+    }
+    const executorState = executor.stdout.trim();
+    return { task: row.task, record_token: progress.record_token, progress, executor_state: executorState,
+      executor_digest: createHash("sha256").update(executorState).digest("hex"),
+      task_generation: taskGeneration, recorded_task_generation: row.taskGeneration ?? null,
+      task_generation_mismatch: taskGenerationMismatch,
+      candidate_identity: candidateIdentity, metadata_digest: metadataDigest };
+  }
+
+  function rememberOutcomeEvidence(row: OutcomeRow): void {
+    loadedOutcomeSequences.add(row.seq);
+    loadedOutcomeEvidence.set(row.seq, { outcome_digest: outcomeDigest(row) });
   }
 
   // Encoding shells out, so it can fail on a broken checkout. This file's
@@ -1245,8 +1397,8 @@ export default function (pi: ExtensionAPI) {
     content: string;
     inlineSequences: number[];
     authenticatedSequences: number[];
+    observations: Map<number, TaskOutcomeObservation>;
   }> {
-    const through = rows[rows.length - 1].seq;
     const direct = new Map<number, string>();
     const references = new Map<number, string>();
     const loadedReferences = new Set<number>();
@@ -1269,26 +1421,35 @@ export default function (pi: ExtensionAPI) {
     if (resultLookup.length) instructions.push(`Before acting on the oversized ShortTask references for sequences ${resultLookup.map((row) => row.seq).join(",")}, call fm_short_task with action=result for each listed ShortTask identity; that single authenticated load supplies the complete unchanged result and acknowledgement evidence, so do not load the same body through fm_branch_outcomes.`);
     if (!ordinaryLookup.length && !resultLookup.length) instructions.push("Every result below is already loaded through its authenticated inline body or a prior authenticated fm_short_task read; do not call fm_branch_outcomes for it.");
     const lookupInstruction = `${instructions.join(" ")} `;
+    const authenticated = new Set([...direct.keys(), ...loadedReferences]);
+    const observations = new Map<number, TaskOutcomeObservation>();
+    for (const row of rows) {
+      if (authenticated.has(row.seq)) observations.set(row.seq, await observeOutcomeTask(row));
+    }
     const listed = rows.map((row) => {
       const result = direct.get(row.seq);
-      if (result !== undefined) return `[seq ${row.seq}] task=${row.task}\nAuthenticated ShortTask result:\n${result}`;
+      const observation = observations.get(row.seq);
+      const observed = observation === undefined ? "" : `\nAuthenticated task observation:\n${JSON.stringify(observation)}`;
+      if (result !== undefined) return `[seq ${row.seq}] task=${row.task}\nAuthenticated ShortTask result:\n${result}${observed}`;
       const reference = references.get(row.seq);
       return reference === undefined
         ? `[seq ${row.seq}] task=${row.task}`
-        : `[seq ${row.seq}] task=${row.task}\nAuthenticated ShortTask result reference${loadedReferences.has(row.seq) ? " (complete result already loaded)" : ""}:\n${reference}`;
+        : `[seq ${row.seq}] task=${row.task}\nAuthenticated ShortTask result reference${loadedReferences.has(row.seq) ? " (complete result already loaded)" : ""}:\n${reference}${observed}`;
     }).join("\n\n");
-    const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n${lookupInstruction}\n${listed}`;
+    const body = `${PROCESSING_INSTRUCTION.replace("{S}", rows.map((row) => row.seq).join(","))}\n${lookupInstruction}\n${listed}`;
     try {
       return {
         content: await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body),
         inlineSequences: [...direct.keys()],
         authenticatedSequences: [...direct.keys(), ...loadedReferences],
+        observations,
       };
     } catch {
       return {
         content: body,
         inlineSequences: [...direct.keys()],
         authenticatedSequences: [...direct.keys(), ...loadedReferences],
+        observations,
       };
     }
   }
@@ -1323,8 +1484,12 @@ export default function (pi: ExtensionAPI) {
     }
     processing.inlineSequences = request.inlineSequences;
     processing.authenticatedSequences = request.authenticatedSequences;
-    processing.rows = rows.map(({ seq, task }) => ({ seq, task }));
-    for (const seq of request.authenticatedSequences) loadedOutcomeSequences.add(seq);
+    processing.rows = rows;
+    for (const seq of request.authenticatedSequences) {
+      const row = rows.find((candidate) => candidate.seq === seq);
+      const observation = request.observations.get(seq);
+      if (row && observation) rememberOutcomeEvidence(row);
+    }
     // A presentation already sent is consumed by the run it joins or opens;
     // until that run settles, sending a widened or identical copy would hand
     // overlapping requests to the same run.
@@ -1362,6 +1527,7 @@ export default function (pi: ExtensionAPI) {
     if (!unread.ok) return false;
     if (unread.stdout) {
       if (!currentMainSession) return false;
+      const parsedUnread: OutcomeRow[] = [];
       for (const line of unread.stdout.split("\n")) {
         let row: OutcomeRow | null = null;
         try {
@@ -1370,6 +1536,12 @@ export default function (pi: ExtensionAPI) {
           row = null;
         }
         if (!row) return false;
+        parsedUnread.push(row);
+      }
+      const history = await readOutcomeHistory();
+      if (history === null) return false;
+      const deliveredSequences = new Set(coalesceExactOutcomeRows(parsedUnread, history).map((row) => row.seq));
+      for (const row of parsedUnread) {
         // The last cancellation point of this row: everything from here to
         // its mark-read is synchronous delivery plus the awaited script that
         // records it, with no second ownership test in between. That is
@@ -1390,7 +1562,11 @@ export default function (pi: ExtensionAPI) {
         // representation for routine delivery, which changes the delivery
         // contract rather than this ordering, so it is deliberately not done
         // here.
-        if (row.verdict === "captain") {
+        if (!deliveredSequences.has(row.seq)) {
+          // The later exact task/generation/material row is the one delivery.
+          // This row remains immutable audit evidence and is covered by the
+          // later sequence-bound acknowledgement.
+        } else if (row.verdict === "captain") {
           if (!ensureVisibleCaptainOutcome(row)) return false;
         } else {
           deliverRoutineOutcome(row);
@@ -1498,6 +1674,7 @@ export default function (pi: ExtensionAPI) {
           const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary,
             "--silent", String(silent && !progressToken)];
           if (wake) appendArgs.push("--wake", wake);
+          if (progressToken) appendArgs.push("--material-key", progressToken);
           const appended = await runOutcomeScript(appendArgs);
           if (!appended.ok) {
             return {
@@ -2108,7 +2285,9 @@ ${context.command}
       const entryOffset = sessionManager.getEntries().length;
       wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
       branchProgressBindings = { [offer.task]: progress.record_token };
-      branchProgressSnapshots = { [offer.task]: await compactResumeSnapshot(offer.task) };
+      const admittedResumeSnapshot = await compactResumeSnapshot(offer.task);
+      const admittedRecordInvariant = taskRecordDispositionInvariant(offer.task);
+      branchProgressSnapshots = { [offer.task]: admittedResumeSnapshot };
       branchEffectAuthorityNeeded = new Set();
       continuationToolsRemaining = 8;
       const timeout = setTimeout(() => { void session.abort(); }, 120_000);
@@ -2116,7 +2295,7 @@ ${context.command}
       try {
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This reads the canonical per-task business and progress record; it is not a queue wake or a rich lifecycle grant.\n` +
-          `Compare the goal and acceptance method with actual task artifacts and current executor state. The exact current MAIN-authored next_step may continue the same worker through fm-send --idempotent; any other same-task text remains unauthorized. Route cross-task work back to MAIN for the durable handoff owner. ` +
+          `Compare the goal and acceptance method with actual task artifacts and current executor state. The exact current MAIN-authored next_step may continue the same worker with bin/fm-send.sh <task> --idempotent '<exact next_step>'; the task selector comes before --idempotent and the message must be the complete next_step verbatim. Any other same-task text remains unauthorized. Route cross-task work back to MAIN for the durable handoff owner. ` +
           `For an implementation checkpoint, inspect the same worker and its exact-candidate native-review evidence. If an exact continuation is required but no existing operation owner binds its payload, target, and executor generation, report that required effect to MAIN instead of sending it. ` +
           `The worker owns native review, corrections, tests, and branch custody; the review must bind the committed base and candidate plus the accepted intent. MAIN owns authority-bearing findings and final semantic acceptance. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
@@ -2140,7 +2319,31 @@ ${context.command}
         wakeTaskScope = null;
       }
       const error = settledPromptProviderError(sessionManager, entryOffset);
-      if (error || durableReportRevision <= before) throw new Error(error || "continuation settled without a durable outcome");
+      if (error) throw new Error(error);
+      if (durableReportRevision <= before) {
+        const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", offer.task], { env: scriptEnv });
+        const terminal = current.status === 0 ? JSON.parse(current.stdout) : null;
+        const terminalSnapshot = await compactResumeSnapshot(offer.task);
+        const terminalRecordInvariant = taskRecordDispositionInvariant(offer.task);
+        const archivalOnly = terminal && ["done", "archived"].includes(terminal.task_state) &&
+          terminal.task_held === "no" && terminal.task_blocked === "no" &&
+          terminal.goal === progress.goal && terminal.acceptance === progress.acceptance &&
+          terminal.current_state === progress.current_state && terminal.remaining_gap === progress.remaining_gap &&
+          terminal.next_step === progress.next_step && Boolean(admittedResumeSnapshot) &&
+          terminalSnapshot === admittedResumeSnapshot && Boolean(admittedRecordInvariant) &&
+          terminalRecordInvariant === admittedRecordInvariant;
+        if (!archivalOnly) throw new Error("continuation settled without a durable outcome");
+        const settlementId = sessionManager.appendCustomEntry("fm-task-continuation-terminal-settlement", {
+          task: offer.task, admission: offer.admission, admitted_record_token: progress.record_token,
+          terminal_record_token: terminal.record_token, disposition: terminal.task_state,
+          result: "superseded-before-report", generation: acceptedGeneration,
+        });
+        if (!settlementId || !sessionManager.getEntries().some((entry) => entry.id === settlementId)) {
+          throw new Error("terminal continuation settlement was not retained");
+        }
+        durableReportRevision += 1;
+        trace("settlement", "terminal-superseded");
+      }
       recordDurableBranchReport(branchForTask.generation, branchForTask.selectionRevision);
       trace("settlement", "reported-continuation");
     });
@@ -2148,7 +2351,8 @@ ${context.command}
       trace("failure", "continuation-failed");
       if (acceptedGeneration === generation && await actingAsOwner(acceptedGeneration)) {
         await runOutcomeScript(["append", "--task", offer.task, "--verdict", "captain", "--summary",
-          `Supervisor Branch could not continue the authorized task; obligation retained: ${String(error).slice(0, 1200)}`]);
+          `Supervisor Branch could not continue the authorized task; obligation retained: ${String(error).slice(0, 1200)}`,
+          "--material-key", offer.progress.record_token]);
         await enqueueDelivery(() => reconcileWithHealth(acceptedGeneration));
       }
     }).catch(() => { /* Original task progress remains due if reporting also fails. */ })
@@ -2400,6 +2604,8 @@ ${context.command}
     providerRecovery = null;
     reconcileRecovery = null;
     loadedOutcomeSequences.clear();
+    loadedOutcomeEvidence.clear();
+    pendingOutcomeEvidence.clear();
     loadedShortTaskResults.clear();
     generation += 1;
     mirrorCollection.collectAnchor = null;
@@ -2429,17 +2635,33 @@ ${context.command}
     const { id, summary } = value as { id?: unknown; summary?: unknown };
     if (typeof id !== "string" || typeof summary !== "string" || successfulResultSummary(fmHome, id) !== summary) return;
     loadedShortTaskResults.add(id);
-    for (const row of processing?.rows ?? []) if (row.task === id) loadedOutcomeSequences.add(row.seq);
+    for (const row of processing?.rows ?? []) {
+      if (row.task !== id) continue;
+      const pending = observeOutcomeTask(row);
+      pendingOutcomeEvidence.set(row.seq, pending);
+      void pending.then(() => {
+        if (processing?.rows.some((candidate) => candidate.seq === row.seq)) rememberOutcomeEvidence(row);
+      }).catch(() => { /* The acknowledgement remains refused until a new authenticated load. */ })
+        .finally(() => pendingOutcomeEvidence.delete(row.seq));
+    }
   });
 
   pi.on?.("session_compact", () => {
-    loadedOutcomeSequences.clear();
+    for (const seq of [...loadedOutcomeSequences]) {
+      if (!processing?.inlineSequences.includes(seq)) {
+        loadedOutcomeSequences.delete(seq);
+        loadedOutcomeEvidence.delete(seq);
+      }
+    }
+    pendingOutcomeEvidence.clear();
     loadedShortTaskResults.clear();
     // A pending processing request is retained as Pi's current or queued
     // custom-message input across compaction. Its authenticated inline bodies
     // remain loaded for that exact request; older tool reads do not.
     if (processing?.pending) {
-      for (const seq of processing.inlineSequences) loadedOutcomeSequences.add(seq);
+      // Inline bodies remain authenticated in the pending processing request;
+      // retain their original task/executor witness so acknowledgement can
+      // still reject a concurrent revision after compaction.
     }
   });
 
@@ -2575,6 +2797,8 @@ ${context.command}
     generation += 1;
     processing = null;
     loadedOutcomeSequences.clear();
+    loadedOutcomeEvidence.clear();
+    pendingOutcomeEvidence.clear();
     loadedShortTaskResults.clear();
     pendingMirror.length = 0;
     currentMainSession = null;
@@ -3017,14 +3241,19 @@ ${context.command}
             };
           }
           const selected = unique.map((seq) => bySequence.get(seq) as OutcomeRow);
+          const observations = new Map<number, TaskOutcomeObservation>();
           for (const row of selected) {
-            const reference = successfulNotification(fmHome, row.task);
-            if (reference !== row.summary || successfulInlineNotification(fmHome, row.task) !== null) {
-              loadedOutcomeSequences.add(row.seq);
-            }
+            const observation = await observeOutcomeTask(row);
+            observations.set(row.seq, observation);
+            const referenceOnly = successfulNotification(fmHome, row.task) === row.summary &&
+              successfulInlineNotification(fmHome, row.task) === null;
+            if (!referenceOnly || loadedShortTaskResults.has(row.task)) rememberOutcomeEvidence(row);
           }
           return {
-            content: [{ type: "text", text: selected.map((row) => JSON.stringify(row)).join("\n") }],
+            content: [{ type: "text", text: selected.map((row) => JSON.stringify({
+              outcome: row,
+              task_observation: observations.get(row.seq) ?? null,
+            })).join("\n") }],
             details: undefined,
           };
         });
@@ -3054,10 +3283,11 @@ ${context.command}
     name: "fm_branch_processed",
     label: "Acknowledge processed supervision outcomes",
     description:
-      "Acknowledge that every captain-facing supervision outcome up to a sequence number has been processed by this conversation. Call it exactly once after handling a supervision processing request, with through set to the highest sequence that request listed; an outcome that is not acknowledged is presented again.",
+      "Acknowledge the exact sequence membership loaded and processed by this conversation. Call it exactly once after handling a supervision processing request with sequences set to the request's complete comma-separated sequence list. Legacy through remains accepted for an unchanged active prefix; an outcome that is not authenticated and acknowledged is presented again.",
     promptSnippet: "Acknowledge processed captain-facing supervision outcomes by sequence.",
     parameters: Type.Object({
-      through: Type.Number({ description: "The highest outcome sequence number this conversation has processed" }),
+      through: Type.Optional(Type.Number({ description: "Legacy highest outcome sequence number this conversation has processed" })),
+      sequences: Type.Optional(Type.String({ description: "Comma-separated exact sequence membership from the active processing request" })),
     }),
     renderShell: "self",
     renderCall: (_args, theme, context) => {
@@ -3080,11 +3310,13 @@ ${context.command}
       return new Container();
     },
     execute: async (_toolCallId, params) => {
-      const raw = (params as { through?: unknown }).through;
-      const through = typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? raw : null;
-      if (through === null) {
+      const { through: raw, sequences: sequencesRaw } = params as { through?: unknown; sequences?: unknown };
+      const explicit = typeof sequencesRaw === "string" && /^[1-9][0-9]*(,[1-9][0-9]*)*$/.test(sequencesRaw)
+        ? sequencesRaw.split(",").map(Number) : null;
+      const through = explicit?.at(-1) ?? (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? raw : null);
+      if (through === null || (sequencesRaw !== undefined && explicit === null) || (explicit && raw !== undefined)) {
         return {
-          content: [{ type: "text", text: "acknowledgement refused: through must be a positive outcome sequence number" }],
+          content: [{ type: "text", text: "acknowledgement refused: pass either one positive through value or exact comma-separated sequences" }],
           details: undefined,
           isError: true,
         };
@@ -3108,9 +3340,29 @@ ${context.command}
             isError: true,
           };
         }
-        const missingEvidence = processing.sequences.split(",")
-          .map(Number)
-          .filter((seq) => seq <= through && !loadedOutcomeSequences.has(seq));
+        const activeSequences = processing.sequences.split(",").map(Number);
+        const activeMembership = explicit ? activeSequences : activeSequences.filter((seq) => seq <= through);
+        const requestedMembership = explicit ?? activeMembership;
+        if (new Set(requestedMembership).size !== requestedMembership.length ||
+            requestedMembership.some((seq, index) => seq !== activeMembership[index]) ||
+            requestedMembership.length !== activeMembership.length) {
+          return {
+            content: [{ type: "text", text: `acknowledgement refused: exact sequence membership must be ${activeMembership.join(",")}` }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        for (const seq of requestedMembership) {
+          const pendingEvidence = pendingOutcomeEvidence.get(seq);
+          if (pendingEvidence) {
+            try {
+              const row = processing.rows.find((candidate) => candidate.seq === seq);
+              await pendingEvidence;
+              if (row) rememberOutcomeEvidence(row);
+            } catch { /* The missing-evidence refusal below owns recovery. */ }
+          }
+        }
+        const missingEvidence = requestedMembership.filter((seq) => !loadedOutcomeSequences.has(seq));
         if (missingEvidence.length > 0) {
           return {
             content: [{ type: "text", text: `acknowledgement refused: load exact durable outcome evidence first for sequences=${missingEvidence.join(",")} using the retrieval method named in the active processing request` }],
@@ -3122,6 +3374,14 @@ ${context.command}
         // the separate semantic obligation before this cursor can advance.
         const pending = await readUnprocessedOutcomes(acknowledgedGeneration);
         if (pending === null) return { content: [{ type: "text", text: "continuation preservation refused: outcome store unavailable" }], details: undefined, isError: true };
+        const pendingBySequence = new Map(pending.map((row) => [row.seq, row]));
+        for (const seq of requestedMembership) {
+          const row = pendingBySequence.get(seq);
+          const evidence = loadedOutcomeEvidence.get(seq);
+          if (!row || !evidence || evidence.outcome_digest !== outcomeDigest(row)) {
+            return { content: [{ type: "text", text: `acknowledgement refused: outcome identity changed for seq ${seq}` }], details: undefined, isError: true };
+          }
+        }
         try {
           await continuation.preserve(pending.filter((row) => row.seq <= through).map((row) => row.task));
         } catch (error) {
@@ -3136,7 +3396,10 @@ ${context.command}
           };
         }
         for (const seq of loadedOutcomeSequences) {
-          if (seq <= through) loadedOutcomeSequences.delete(seq);
+          if (seq <= through) {
+            loadedOutcomeSequences.delete(seq);
+            loadedOutcomeEvidence.delete(seq);
+          }
         }
         const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
         if (remaining !== null && remaining.length === 0) processing = null;

@@ -105,8 +105,8 @@ let continuation = await install();
 const mainSchema = tools.get('fm_task_continuation').parameters;
 assert.match(tools.get('fm_task_continuation').description,/resource cleanup remain with their existing owners/,
   'the public continuation tool invites cleanup-only business gaps');
-assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'progress', 'task']);
-assert.deepEqual(mainSchema.properties.action.anyOf.map(value => value.const), ['read', 'update']);
+assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'hold', 'progress', 'task']);
+assert.deepEqual(mainSchema.properties.action.anyOf.map(value => value.const), ['read', 'update', 'hold']);
 assert.equal(mainSchema.additionalProperties, false, 'continuation schema accepts removed arguments');
 assert.equal(mainSchema.properties.progress.additionalProperties, false,
   'continuation progress schema accepts unknown fields');
@@ -194,9 +194,8 @@ const afterRestartInventory = JSON.parse(command('fm-tasks-axi.sh', ['inventory'
 assert.deepEqual(afterRestartInventory.tasks.map(item => item.id), ['task'],
   'restart continuation created a duplicate business task');
 
-// A delivered reminder is pacing evidence, never a finite admission budget.
-// Keep advancing the public receiver clock without changing the task row and
-// prove that reminders beyond the former two-attempt boundary remain routable.
+// A delivered reminder is pacing evidence. The same task/token/executor gets
+// two offers and one visible coordination escalation, then stays quiet.
 const firstAdmission = reminder.details.admissions[0];
 session.appendCustomEntry('fm-continuation-branch-delivery', {
   admissions: [firstAdmission], sessionFile: session.getSessionFile(), entryId: 'fixture-first', generation: 1,
@@ -211,22 +210,67 @@ const realDateNow = Date.now;
 let fixtureNow = realDateNow();
 Date.now = () => fixtureNow;
 try {
-  for (let attempt = 0; attempt < 4; attempt++) {
+  fixtureNow += 60 * 60 * 1000;
+  await fire('agent_before_settle');
+  fixtureNow += 60 * 60 * 1000;
+  const escalated = await fire('agent_before_settle');
+  const escalation = escalated.flatMap(value => value?.entries || [])
+    .find(entry => entry.customType === 'fm-task-continuation-escalation');
+  assert.ok(escalation, 'two unchanged offers did not produce one visible coordination escalation');
+  session.appendCustomMessageEntry(escalation.customType, escalation.content, escalation.display, escalation.details);
+  for (let attempt = 0; attempt < 10; attempt++) {
     fixtureNow += 60 * 60 * 1000;
-    const result = await fire('agent_before_settle');
-    assert.equal(result.some(value => value?.entries?.some(entry =>
-      entry.customType === 'fm-task-continuation-escalation')), false,
-    'unchanged open progress exhausted a finite continuation budget');
+    const quiet = await fire('agent_before_settle');
+    assert.equal(quiet.some(value => value?.continue), false,
+      'unchanged observation continued after its visible coordination escalation');
   }
 } finally {
   Date.now = realDateNow;
   offerHandler = undefined;
 }
-assert.equal(offered.length, 4, 'open progress stopped routing after a finite number of reminders');
+assert.equal(offered.length, 1, 'same-key pacing did not stop after the second total offer');
 assert.equal(new Set(offered).size, offered.length, 'continued reminders reused an admission identity');
-assert.ok(offered.at(-1).endsWith('.5'), 'continued reminders did not advance past the former attempt limit');
+assert.ok(offered.at(-1).endsWith('.2'), 'second unchanged offer did not preserve its admission identity');
 
-const finalProgress = { ...progress, current_state: 'Requested behavior verified', remaining_gap: '', next_step: '' };
+await fire('session_shutdown', { reason: 'pacing-replacement' });
+const pacedSessionFile = session.getSessionFile();
+const persistedPacing = session.getEntries().findLast(entry =>
+  entry.type === 'custom' && entry.customType === 'fm-continuation-input-pacing');
+assert.ok(persistedPacing, 'fixture did not persist home-bound pacing evidence');
+writeFileSync(home + '/sessions/zz-foreign-home.jsonl', [
+  JSON.stringify({ type: 'session', version: 3, id: 'foreign-home-fixture', timestamp: new Date().toISOString(), cwd: home }),
+  JSON.stringify({ ...persistedPacing, data: { ...persistedPacing.data, home: home + '-foreign', attempts: 0, escalated: false } }),
+].join('\n') + '\n');
+session = SessionManager.create(home, home + '/sessions');
+assert.notEqual(session.getSessionFile(), pacedSessionFile, 'pacing replacement reused the old transcript');
+session.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Fresh fixture session' }],
+  api: 'openai-completions', provider: 'fixture', model: 'fixture', timestamp: Date.now(), stopReason: 'stop',
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+continuation = await install();
+assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
+  'a genuinely new session file reset unchanged-offer pacing or admitted a sibling transcript from another operational home');
+
+const changedProjection = { ...progress, current_state: 'A materially newer executor result exists' };
+await tool({ action: 'update', task: 'task', progress: changedProjection });
+offered.length = 0;
+offerHandler = offer => { offered.push(offer.admission); return true; };
+await fire('agent_before_settle');
+offerHandler = undefined;
+assert.equal(offered.length, 1, 'material record revision did not re-admit continuation');
+
+const blocked = await validatedTool({ action: 'hold', task: 'task', hold: {
+  kind: 'blocker', responsibility: 'existing effect owner',
+  action: 'provide a supported custody reconciliation capability',
+  clearing_condition: 'the owner accepts and receipts that exact action',
+} });
+assert.equal(blocked.task_held, 'yes', 'named blocker did not become a canonical hold');
+assert.equal(blocked.task_hold_kind, 'blocker');
+assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
+  'blocked disposition remained eligible for continuation');
+command('fm-tasks-axi.sh', ['unhold', 'task']);
+
+const finalProgress = { ...changedProjection, current_state: 'Requested behavior verified', remaining_gap: '', next_step: '' };
 const completed = await tool({ action: 'update', task: 'task', progress: finalProgress });
 assert.equal(completed.remaining_gap, '');
 assert.equal(completed.next_step, '');
@@ -257,7 +301,8 @@ console.log('evidence - task continuation IO ' + JSON.stringify({
   richLifecycleCalls: 0,
   compactResumeCalls: 1,
   compactReadResponseBytes: compactResponseBytes,
-  continuedReminderAdmissions: offered.length + 1,
+  unchangedOffers: 2,
+  visibleCoordinationEscalations: 1,
   progressWritesForUnchangedUpdate: 0,
 }));
 console.log('ok - installed Pi SDK canonical workflow: intermediate runtime completion remains discoverable after restart, routes the exact next step without duplication, and stops only after MAIN acceptance or explicit archive');

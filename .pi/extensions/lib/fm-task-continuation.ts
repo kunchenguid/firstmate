@@ -1,7 +1,8 @@
 // Live-Pi reminder over the canonical per-task record. MAIN owns material progress
 // updates; existing executor, effect, lease, inbox, merge and cleanup owners act.
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { runCommandAsync } from "./fm-async-exec.ts";
@@ -14,12 +15,13 @@ type Observation = { task_id: string; state: string; reason: string; key: string
 type Reconciliation = { task_id: string; reason: string; key: string };
 type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; reconciliation: true }[];
   canNotify: () => boolean; canContinue: () => boolean };
-type InputPacing = { key: string; attempts: number; after: number; reserved?: string };
+type InputPacing = { key: string; attempts: number; after: number; reserved?: string; escalated?: boolean };
 const PACING_ENTRY = "fm-continuation-input-pacing";
 const MESSAGE = "fm-task-continuation";
 const ESCALATION = "fm-task-continuation-escalation";
 const INTERVAL_MS = 30_000;
 const MAX_REMINDER_INTERVALS = 10;
+const UNCHANGED_OFFERS = 2;
 const BATCH = 8;
 const atom = (s: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(s);
 
@@ -81,6 +83,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       lines.join("\n") + "\nUse fm_task_continuation read/update for the task goal, acceptance method, current state, remaining gap and next step. " +
       "Update only after a material change; do not write after each command or unchanged wait. " +
       "Take the authorized next step through its existing owner, review actual artifacts, and clear the gap only when the requested goal is satisfied. " +
+      "If an exact owner refuses and no supported action remains, do not preserve the refusal as an eligible next step: use fm_task_continuation hold for a named blocker or captain decision, or route an exact existing cross-task action through fm-task-handoff and verify its receipt/start. " +
       "A worker return, report, PR, empty inbox or provider success is not acceptance. " +
       "After semantic acceptance, keep delivery and resource cleanup in their existing owners instead of recording them as a new goal gap. " +
       "Existing leases, inbox/handoff acknowledgements, uncertain-effect readback, merge and cleanup guards remain authoritative.";
@@ -136,12 +139,60 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     return { observations, reconciliations };
   }
 
-  function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }) {
+  function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }, requiredHome?: string) {
     if (entry.customType !== MESSAGE && entry.customType !== ESCALATION && entry.customType !== "fm-continuation-branch-delivery") return;
-    const ids = (entry.details as { admissions?: unknown })?.admissions;
+    const details = entry.details as { admissions?: unknown; home?: unknown } | undefined;
+    if (requiredHome !== undefined && details?.home !== requiredHome) return;
+    const ids = details?.admissions;
     const at = typeof entry.timestamp === "number" ? entry.timestamp : Date.parse(entry.timestamp || "");
     if (!Array.isArray(ids) || !Number.isFinite(at)) return;
     for (const id of ids) if (typeof id === "string") delivered.set(id, at);
+  }
+
+  function restoreEntries(entries: readonly unknown[], requiredHome?: string) {
+    for (const candidate of entries) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const entry = candidate as { type?: unknown; customType?: unknown; details?: unknown; data?: unknown;
+        timestamp?: string | number };
+      if (entry.type === "custom_message") readDelivery({
+        customType: typeof entry.customType === "string" ? entry.customType : undefined,
+        details: entry.details, timestamp: entry.timestamp,
+      }, requiredHome);
+      if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
+        readDelivery({ customType: String(entry.customType), details: entry.data, timestamp: entry.timestamp as string | number }, requiredHome);
+      }
+      if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
+        const pace = entry.data as InputPacing & { id: string; home?: unknown };
+        if (requiredHome !== undefined && pace?.home !== requiredHome) continue;
+        if (typeof pace?.id === "string" && /^(progress|reconcile):/.test(pace.id)) pacing.set(pace.id, pace);
+      }
+    }
+  }
+
+  // Pacing receipts are Pi transcript state, not another task truth. A new
+  // session file has an empty branch, so recover the same extension entries
+  // from sibling sessions for this exact cwd and session directory.
+  function restoreHistoricalReceipts(ctx: ExtensionContext) {
+    const manager = ctx?.sessionManager;
+    const currentFile = manager?.getSessionFile?.();
+    const currentCwd = manager?.getCwd?.();
+    if (!currentFile || !currentCwd) return;
+    const sessionDir = manager.getSessionDir?.() || dirname(currentFile);
+    let names: string[] = [];
+    try {
+      names = readdirSync(sessionDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+        .map((entry) => entry.name).sort();
+    } catch { return; }
+    for (const name of names) {
+      try {
+        const rows = readFileSync(join(sessionDir, name), "utf8").split("\n").filter(Boolean)
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        const header = rows[0] as { type?: unknown; cwd?: unknown } | undefined;
+        if (header?.type !== "session" || header.cwd !== currentCwd) continue;
+        restoreEntries(rows, home);
+      } catch { /* A malformed unrelated transcript cannot grant a receipt. */ }
+    }
   }
 
   async function receive(ctx: ExtensionContext, owner: ContinuationReceiver): Promise<Admission | undefined> {
@@ -173,22 +224,33 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       if (!pace || pace.key !== item.key) pace = { key: item.key, attempts: 0, after: 0 };
       if (pace.reserved && delivered.has(pace.reserved)) {
         const at = delivered.get(pace.reserved)!;
-        pace.attempts += 1;
-        pace.after = at + INTERVAL_MS * Math.min(pace.attempts, MAX_REMINDER_INTERVALS);
+        if (pace.reserved.startsWith("e.")) {
+          pace.escalated = true;
+        } else {
+          pace.attempts += 1;
+          pace.after = at + INTERVAL_MS * Math.min(pace.attempts, MAX_REMINDER_INTERVALS);
+        }
         pace.reserved = undefined;
       }
-      if (!pace.reserved && Date.now() >= pace.after) {
+      if (!pace.reserved && pace.attempts < UNCHANGED_OFFERS && Date.now() >= pace.after) {
         pace.reserved = `n.${item.key}.${pace.attempts + 1}`;
+      }
+      if (!pace.reserved && pace.attempts >= UNCHANGED_OFFERS && !pace.escalated) {
+        pace.reserved = `e.${item.key}`;
       }
       if (pace.reserved && !submitted.has(pace.reserved) && !delivered.has(pace.reserved)) {
         const id = pace.reserved;
-        if (options.offer?.({
+        if (id.startsWith("e.")) {
+          escalations.push({ id, task: item.task_id,
+            reason: "the same task record, executor projection, and disposition produced two unchanged continuation offers; establish an executable owner handoff, named blocker, or captain decision before further observation",
+            reconciliation: true });
+        } else if (options.offer?.({
           task: item.task_id,
           admission: id,
           progress: item,
           delivered(proof) {
             if (!current()) return;
-            pi.appendEntry("fm-continuation-branch-delivery", { admissions: [id], ...proof });
+            pi.appendEntry("fm-continuation-branch-delivery", { admissions: [id], home, ...proof });
             delivered.set(id, Date.now());
           },
           settled() { submitted.delete(id); },
@@ -200,7 +262,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         }
       }
       pacing.set(paceId, pace);
-      pi.appendEntry(PACING_ENTRY, { id: paceId, ...pace });
+      pi.appendEntry(PACING_ENTRY, { id: paceId, home, ...pace });
     }
     if (!current()) throw new Error("readback receiver generation changed");
     if (lines.length || escalations.length) {
@@ -223,7 +285,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         "These tasks remain open. This is not completion or a task blocker. " +
         "Assign an authorized executor and verify receipt/start, reconcile a real dependency, or provide acceptance evidence. " +
         "If an effect may already have happened, read it back before any retry. Unrelated input does not close these tasks.",
-      details: { admissions: items.map(({ id }) => id),
+      details: { admissions: items.map(({ id }) => id), home,
         task: items.length === 1 ? items[0].task : undefined,
         tasks: items.map(({ task }) => task), owner: "main",
         kind: "task-record-reconciliation" },
@@ -274,7 +336,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         if (!admission.admissions.length) return;
         try {
           pi.sendMessage({ customType: MESSAGE, content: admission.content, display: false,
-            details: { admissions: admission.admissions } }, { triggerTurn: true, deliverAs: "followUp" });
+            details: { admissions: admission.admissions, home } }, { triggerTurn: true, deliverAs: "followUp" });
         } catch (error) {
           for (const entry of ctx.sessionManager.getBranch()) {
             if (entry.type === "custom_message") readDelivery(entry);
@@ -293,18 +355,11 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     generation++;
     context = ctx;
     pacing.clear();
+    submitted.clear();
     delivered.clear();
+    restoreHistoricalReceipts(ctx);
     const entries = ctx?.sessionManager?.getBranch?.() ?? ctx?.sessionManager?.getEntries?.() ?? [];
-    for (const entry of entries) {
-      if (entry.type === "custom_message") readDelivery(entry);
-      if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
-        readDelivery({ customType: entry.customType, details: entry.data, timestamp: entry.timestamp });
-      }
-      if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
-        const pace = entry.data as InputPacing & { id: string };
-        if (typeof pace?.id === "string" && /^(progress|reconcile):/.test(pace.id)) pacing.set(pace.id, pace);
-      }
-    }
+    restoreEntries(entries);
   };
   pi.on("session_start", restoreSession);
   pi.on("session_tree", restoreSession);
@@ -323,24 +378,28 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       if (escalation) for (const id of escalation.details.admissions) submitted.add(id);
       for (const id of admission.admissions) submitted.add(id);
       return { entries: [...(escalation ? [escalation] : []), ...(admission.admissions.length ? [{ type: "custom_message" as const, customType: MESSAGE,
-        content: admission.content, display: false, details: { admissions: admission.admissions } }] : [])],
+        content: admission.content, display: false, details: { admissions: admission.admissions, home } }] : [])],
         continue: admission.admissions.length > 0 || Boolean(escalation) };
     }
   });
 
   registerFirstmateTool(pi, {
     name: "fm_task_continuation", label: "Task continuation",
-    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step. Clear both gap fields after semantic acceptance; delivery and resource cleanup remain with their existing owners instead of becoming a new goal gap. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, or accepts a goal from process success.",
+    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record, or place the same task on an existing canonical hold after supported actions are exhausted. The task title is its goal; update records the acceptance method, current state, remaining gap and executable next step. hold requires named responsibility, required action or decision, and an observable clearing condition; kind captain uses the existing captain-hold owner and kind blocker uses the existing task-record hold owner. Clear both gap fields after semantic acceptance; delivery and resource cleanup remain with their existing owners instead of becoming a new goal gap. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, routes handoffs, or accepts a goal from process success.",
     executionMode: "sequential",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("read"), Type.Literal("update")]),
+    parameters: Type.Object({ action: Type.Union([Type.Literal("read"), Type.Literal("update"), Type.Literal("hold")]),
       task: Type.String(),
       progress: Type.Optional(Type.Object({ acceptance: Type.String(), current_state: Type.String(),
-        remaining_gap: Type.String(), next_step: Type.String() }, { additionalProperties: false }))
+        remaining_gap: Type.String(), next_step: Type.String() }, { additionalProperties: false })),
+      hold: Type.Optional(Type.Object({
+        kind: Type.Union([Type.Literal("blocker"), Type.Literal("captain")]),
+        responsibility: Type.String(), action: Type.String(), clearing_condition: Type.String(),
+      }, { additionalProperties: false })),
     }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, _ctx: ExtensionContext) {
       try {
         if (!owns()) throw new Error("this session does not own the fleet lock");
-        const unsupported = Object.keys(params).filter(key => !["action", "task", "progress"].includes(key));
+        const unsupported = Object.keys(params).filter(key => !["action", "task", "progress", "hold"].includes(key));
         if (unsupported.length) throw new Error(`unsupported compact continuation argument: ${unsupported.join(", ")}`);
         let result: unknown;
         if (params.action === "read") {
@@ -351,6 +410,27 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
             throw new Error("update requires task and compact progress fields");
           }
           result = await command(["update-progress", params.task, "--progress", JSON.stringify(params.progress)]);
+        } else if (params.action === "hold") {
+          if (!atom(params.task) || !params.hold || params.progress) {
+            throw new Error("hold requires task and hold fields without progress");
+          }
+          const fields = [params.hold.responsibility, params.hold.action, params.hold.clearing_condition]
+            .map((value) => value.trim());
+          if (fields.some((value) => !value || /[\r\n\0]/.test(value))) {
+            throw new Error("hold responsibility, action, and clearing_condition must be non-empty one-line text");
+          }
+          const reason = `Responsibility: ${fields[0]}; required action or decision: ${fields[1]}; clears when: ${fields[2]}`;
+          if (Buffer.byteLength(reason, "utf8") > 1200) throw new Error("hold reason exceeds 1200 UTF-8 bytes");
+          const owner = params.hold.kind === "captain" ? "fm-captain-hold.sh" : "fm-tasks-axi.sh";
+          const args = params.hold.kind === "captain"
+            ? [join(root, "bin", owner), "hold", params.task, "--reason", reason]
+            : [join(root, "bin", owner), "hold", params.task, "--kind", "blocker", "--reason", reason];
+          const held = await runCommandAsync("bash", args, {
+            env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_DATA_OVERRIDE: data,
+              FM_SUPERVISION_ACTOR: "main" }, maxBuffer: 1024 * 1024,
+          });
+          if (held.status !== 0) throw new Error(held.stderr.trim() || "task hold owner refused");
+          result = await command(["progress", params.task]);
         } else {
           throw new Error("unsupported compact continuation action");
         }

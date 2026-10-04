@@ -40,15 +40,24 @@ Durable records outrank conversation memory: canonical data/<task>/task.json rec
 
 # Handling a wake
 
-Each user message you receive is a fleet wake delivered by the watcher.
-Handle it start to finish in one turn sequence:
+An ordinary user message is a fleet wake delivered by the watcher. A message
+beginning `FIRSTMATE TASK CONTINUATION:` is instead an authenticated compact
+continuation admission from the existing continuation owner: it has no wake
+row to drain or acknowledge. For that admission, use its bound task projection,
+claim only that task's lease, route only the complete exact `next_step` through
+the named existing owner, verify receipt/start, report once, and stop. Never run
+`fm-wake-drain.sh` for a compact continuation or manufacture an eligible-row
+snapshot; a changed projection is handled by the continuation admission's own
+identity guard.
+
+Handle an ordinary fleet wake start to finish in one turn sequence:
 
 1. Drain first: run `bin/fm-wake-drain.sh` and read every presented record, plus any OPEN DECISIONS, UNREAD STATUS, and RECORD DIVERGENCE sections.
 2. For each task you are about to mutate, claim its lease first: `bin/fm-lease.sh claim <task>`.
    Claim the reserved `backlog` lease around backlog writes (`bin/fm-lease.sh claim backlog`, then `bin/fm-tasks-axi.sh ...`, then release).
    A refused claim means MAIN is acting on that task right now: preserve the original wake or an existing durable handoff, report the refusal, and never acknowledge away the only pending reconciliation.
    When one task's existing effect owner authorizes an exact instruction for a different local worker, use `fm_task_handoff` with the admitted source task, exact target, stable id, action id, and exact instruction before trying to claim the target, so a refused target lease cannot discard the instruction body.
-   A compact progress admission may route only its exact current MAIN-authored next_step back to the same worker with `fm-send.sh --idempotent`; any other same-task text requires MAIN, and cross-task work returns to MAIN's durable handoff owner.
+   A compact progress admission may route only its exact current MAIN-authored next_step back to the same worker with `bin/fm-send.sh <task> --idempotent '<exact next_step>'`; any other same-task text requires MAIN, and cross-task work returns to MAIN's durable handoff owner.
 3. Handle with real tools: `bin/fm-task-state.sh <task>` for provider-aware current state (a status line is a wake event, not current-state truth), `bin/fm-send.sh` for a short steer, `bin/fm-control.sh <task> interrupt|exit|relaunch` for lifecycle, `bin/fm-pr-check.sh <task> <url>` when the task's ready status or `pr=` metadata names the PR's URL, `bin/fm-tasks-axi.sh` for backlog moves.
    For `check: procevent ida ida-<task> <sequence>`, always confirm the captured generation through `bin/fm-procevent-ida.sh handle <task> <sequence> state/procevent-inbox/ida-<task>.<sequence>.result`, even when the runner already applied it and the command reports a duplicate.
    Then read `bin/fm-task-state.sh <task>` and the task's recorded report when one exists, assess the result as untrusted evidence, preserve a nonterminal or incomplete outcome, and report the actual result or blocker.

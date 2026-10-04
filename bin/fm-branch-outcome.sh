@@ -6,13 +6,17 @@
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
-#     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
+#     "statusEndpoint":N,"statusIdent":"...","taskGeneration":"...",
+#     "taskDisposition":"...","evidenceKey":"..."}. `evidenceKey` binds the exact stable producer
+#     material revision (or captured status revision when no producer key is
+#     supplied), while `taskGeneration` binds its proved executor generation.
+#     An unproved generation/material pair uses the legacy non-coalescible row shape. Legacy rows without `silent`
 #     or status provenance remain valid and are treated as visible.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted.
-#     Historical rows with rich-lifecycle identity fields remain readable, but
-#     append never creates or reuses that retired shape.
+#     Historical rows with the same identity fields remain readable; current
+#     append uses them only for delivery coalescing, never as lifecycle state.
 #     The read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
@@ -64,7 +68,7 @@
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--silent true|false] [--once-task]
+#       --summary <text> [--wake <text>] [--silent true|false] [--material-key <text>] [--once-task]
 #     Append one outcome record; prints the assigned seq.
 #     --once-task returns the existing row for an identical task/summary/verdict/
 #     wake, refusing conflicting reuse. This is a terminal-producer retry key.
@@ -86,8 +90,9 @@
 #     of the process holding $STATE/.branch-outcomes.lock (fm-wake-drain.sh may
 #     run its redirected presentation body in a subshell on Bash 3.2); it skips
 #     the nested acquire so drain's bounded lock wait remains the deadline.
-#   fm-branch-outcome.sh list [--recent <n>]
-#     Print the last n records (default 20), read or not.
+#   fm-branch-outcome.sh list [--recent <n>|--all]
+#     Print the last n records (default 20), or the complete validated
+#     append-only history with --all, read or not.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
@@ -105,6 +110,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
+DATA_ROOT=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
 LOCK="$STATE/.branch-outcomes.lock"
@@ -114,7 +120,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--material-key <text>] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>|--all] | startup-replay" >&2
   exit 2
 }
 
@@ -139,6 +145,17 @@ json_escape() { # <text> -> escaped JSON string content on stdout
       gsub(/[\001-\010\013\014\016-\037]/, "", line)
       print line
     }'
+}
+
+sha256_text() { # <text>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    echo "error: shasum or sha256sum is required" >&2
+    return 1
+  fi
 }
 
 read_cursor() {
@@ -194,6 +211,10 @@ last_seq() {
            or (keys == ["epoch", "evidenceKey", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "taskGeneration", "verdict", "wake"]
              and (.evidenceKey | type == "string" and test("^[a-f0-9]{64}$"))
              and (.taskGeneration | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")))
+           or (keys == ["epoch", "evidenceKey", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "taskDisposition", "taskGeneration", "verdict", "wake"]
+             and (.evidenceKey | type == "string" and test("^[a-f0-9]{64}$"))
+             and (.taskGeneration | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"))
+             and (.taskDisposition | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")))
            or (keys == ["epoch", "evidenceKey", "lifecycleRevision", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "taskGeneration", "verdict", "wake"]
              and (.evidenceKey | type == "string" and test("^[a-f0-9]{64}$"))
              and (.taskGeneration | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"))
@@ -443,6 +464,7 @@ case "$CMD" in
     WAKE=''
     SILENT=false
     ONCE_TASK=false
+    MATERIAL_KEY=''
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --once-task) ONCE_TASK=true; shift ;;
@@ -451,12 +473,14 @@ case "$CMD" in
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
+        --material-key) MATERIAL_KEY=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
     [ -n "$TASK" ] || usage
     outcome_index_path "$TASK" >/dev/null || usage
     [ -n "$SUMMARY" ] || usage
+    case "$MATERIAL_KEY" in *$'\n'*|*$'\r'*) echo "error: material key must be one line" >&2; exit 2 ;; esac
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
     if [ "$SILENT" = true ] && { [ "$TASK" != fleet ] || [ "$VERDICT" != routine ]; }; then
@@ -491,11 +515,33 @@ case "$CMD" in
     fi
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
+    TASK_GENERATION=$(awk -F= '$1 == "spawn_gen" { count++; value=substr($0, 11) }
+      END { if (count == 1 && value ~ /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/) print value; else exit 1 }' \
+      "$STATE/$TASK.meta" 2>/dev/null) || TASK_GENERATION=''
+    TASK_DISPOSITION=$(jq -er '.state | select(type == "string" and length > 0)' "$DATA_ROOT/$TASK/task.json" 2>/dev/null || printf 'unknown\n')
+    case "$TASK_DISPOSITION" in *[!A-Za-z0-9._-]*) TASK_DISPOSITION=unknown ;; esac
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
-      "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
-      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+    if [ -n "$TASK_GENERATION" ] && { [ -n "$MATERIAL_KEY" ] || { [ "$CAPTURED_STATUS_ENDPOINT" -ge 0 ] && [ -n "$CAPTURED_STATUS_IDENT" ]; }; }; then
+      if [ -n "$MATERIAL_KEY" ]; then
+        EVIDENCE_KEY=$(sha256_text "$TASK|$TASK_GENERATION|material|$MATERIAL_KEY") \
+          || { fm_lock_release "$LOCK"; exit 1; }
+      else
+        EVIDENCE_KEY=$(sha256_text "$TASK|$TASK_GENERATION|status|$CAPTURED_STATUS_ENDPOINT|$CAPTURED_STATUS_IDENT") \
+          || { fm_lock_release "$LOCK"; exit 1; }
+      fi
+      printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","taskGeneration":"%s","taskDisposition":"%s","evidenceKey":"%s"}\n' \
+        "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
+        "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
+        "$(json_escape "$CAPTURED_STATUS_IDENT")" "$(json_escape "$TASK_GENERATION")" \
+        "$(json_escape "$TASK_DISPOSITION")" "$EVIDENCE_KEY" >> "$STORE"
+    else
+      # Unknown generation or material identity remains append-only and
+      # visible, but is deliberately ineligible for identity coalescing.
+      printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+        "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
+        "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
+        "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+    fi
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still
@@ -628,10 +674,14 @@ case "$CMD" in
     ;;
   list)
     RECENT=20
+    ALL=false
     if [ "${1:-}" = --recent ]; then
       RECENT=${2:-}
       case "$RECENT" in ''|*[!0-9]*|0) usage ;; esac
       shift 2 || usage
+    elif [ "${1:-}" = --all ]; then
+      ALL=true
+      shift
     fi
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
@@ -640,7 +690,9 @@ case "$CMD" in
       echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
       exit 1
     fi
-    if [ -s "$STORE" ]; then
+    if [ -s "$STORE" ] && [ "$ALL" = true ]; then
+      cat "$STORE"
+    elif [ -s "$STORE" ]; then
       tail -n "$RECENT" "$STORE"
     fi
     fm_lock_release "$LOCK"

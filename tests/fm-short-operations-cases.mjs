@@ -388,6 +388,51 @@ try {
   const replayReceipt=JSON.parse(fs.readFileSync(path.join(replayDir,'operation-0.receipt.json')));
   assert.equal(replayReceipt.state,'completed');assert.equal(replayReceipt.settlement,'dead-owner-cleanup-readback');assert.deepEqual(replayReceipt.evidence,cleanupFacts);
   assert.ok(!fs.existsSync(reservation));assert.deepEqual(replayCopySnapshot(),replayCopyBefore);assert.equal(closeCount(replayEndpoint.root_pane.pane_id),closeCallsBefore);
+
+  // One accepted MAIN grant drives the existing merge, sync, and cleanup
+  // owners as one bounded chain. The single terminal result carries all
+  // receipts; the dirty task copy remains preserved by cleanup.
+  const chainTask='accepted-finish-chain',chainGeneration='g-accepted-finish-chain',chainCopy=path.join(tmp,'accepted-finish-chain-copy');
+  git('-C',replayProject,'remote','set-head','origin','main');
+  git('-C',replayProject,'worktree','add','-b','accepted-finish-chain-fixture',chainCopy);
+  fs.writeFileSync(path.join(chainCopy,'retained.txt'),'retain accepted finish chain changes\n');
+  const chainCopyBefore={head:git('-C',chainCopy,'rev-parse','HEAD'),status:git('-C',chainCopy,'status','--porcelain'),content:fs.readFileSync(path.join(chainCopy,'retained.txt'),'utf8')};
+  const chainEndpoint=JSON.parse(execFileSync(path.join(recoveryBin,'herdr'),['workspace','create','--cwd',path.join(tmp,'idle'),'--label','accepted-finish-chain'],{env:replayEnv,encoding:'utf8'})).result;
+  fs.mkdirSync(path.join(replayData,chainTask));
+  fs.writeFileSync(path.join(replayData,chainTask,'brief.md'),'Accepted finish operation-chain fixture\n');
+  fs.writeFileSync(path.join(replayData,chainTask,'report.md'),'The isolated result is semantically accepted\n');
+  fs.writeFileSync(path.join(replayState,chainTask+'.meta'),`kind=ship\nmode=no-mistakes\nspawn_gen=${chainGeneration}\nwindow=fixture:${chainEndpoint.root_pane.pane_id}\nendpoint_task_id=${chainTask}\nworktree=${chainCopy}\nproject=${replayProject}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=${chainEndpoint.workspace.workspace_id}\nherdr_tab_id=${chainEndpoint.tab.tab_id}\nherdr_pane_id=${chainEndpoint.root_pane.pane_id}\npr=https://code.byted.org/example/shortlab/merge_requests/7\npr_head=${'c'.repeat(40)}\n`);
+  addCompactTask(chainTask,'Accepted finish operation chain',replayEnv);
+  fs.writeFileSync(forge,JSON.stringify({merged:false,calls:0,red:false,lost:false}));
+  const chainInput=req('accepted-finish-chain',[
+    {action:'merge',task:chainTask,url:'https://code.byted.org/example/shortlab/merge_requests/7'},
+    {action:'sync',project:replayProject},
+    {action:'cleanup',task:chainTask},
+  ]);
+  let mainSemanticAuthorityDecisions=0;
+  const decideAndGrantFinish=()=>{
+    mainSemanticAuthorityDecisions+=1;
+    compactAccept(chainTask,replayEnv);
+    return replayService.submit(chainInput);
+  };
+  const chainSubmission=decideAndGrantFinish();let chainResult;
+  for(let n=0;n<12000;n++){chainResult=replayService.status(chainSubmission.id);if(chainResult.finishedAt)break;await wait(25);}
+  assert.equal(chainResult.state,'completed',JSON.stringify(chainResult));
+  assert.equal(mainSemanticAuthorityDecisions,1,'clean finish required more than one MAIN semantic/authority decision');
+  assert.equal(chainResult.toolCalls,1,'accepted finish required more than one combined operation handling');
+  assert.deepEqual(chainResult.operations,[
+    {index:0,action:'merge',state:'completed'},
+    {index:1,action:'sync',state:'completed'},
+    {index:2,action:'cleanup',state:'completed'},
+  ]);
+  const chainDir=replayService.dir(chainSubmission.id);
+  const chainReceipts=[0,1,2].map(index=>JSON.parse(fs.readFileSync(path.join(chainDir,`operation-${index}.receipt.json`))));
+  assert.deepEqual(chainReceipts.map(item=>item.action),['merge','sync','cleanup']);
+  assert.equal(JSON.parse(fs.readFileSync(forge)).calls,1,'combined finish replayed the merge owner');
+  assert.ok(!fs.existsSync(path.join(replayState,chainTask+'.meta')),'combined finish did not retire exact resource metadata');
+  assert.match(canonicalTasks(replayEnv,'show',chainTask),/state:\s+done/);
+  assert.deepEqual({head:git('-C',chainCopy,'rev-parse','HEAD'),status:git('-C',chainCopy,'status','--porcelain'),content:fs.readFileSync(path.join(chainCopy,'retained.txt'),'utf8')},chainCopyBefore);
+
   const boundaryTask='cleanup-success-boundary',boundaryGeneration='g-cleanup-success-boundary',boundaryCopy=path.join(tmp,'cleanup-success-boundary-copy');
   git('-C',replayProject,'worktree','add','-b','cleanup-success-boundary-fixture',boundaryCopy);fs.writeFileSync(path.join(boundaryCopy,'retained.txt'),'retain success-boundary changes\n');
   const boundaryCopySnapshot=()=>({head:git('-C',boundaryCopy,'rev-parse','HEAD'),status:git('-C',boundaryCopy,'status','--porcelain'),content:fs.readFileSync(path.join(boundaryCopy,'retained.txt'),'utf8')}),boundaryCopyBefore=boundaryCopySnapshot();
