@@ -63,6 +63,29 @@ If an addition needs more than a few lines of conditional detail (detail that ma
 A skill's cost is paid only by the sessions that actually load it.
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
 
+## Writing instruction surfaces
+
+Every always-loaded line costs context load on every turn, whether or not its branch fires.
+Each line also costs cognitive load, because it competes for the agent's attention with every other rule it must weigh.
+Cut for both, not only for tokens.
+
+A pointer's wording, not its target, decides whether an agent reaches it.
+Give each trigger branch one condition, stated in the words the agent will hold when it arrives there.
+Drop identity text the body already carries, so the pointer reads as a trigger rather than a second description.
+
+Put what every branch needs inline, and disclose behind a pointer only what some branches reach.
+Keep a concept's definition and its caveats together rather than split across sections.
+
+Completion criteria need clarity, meaning the agent can tell the criterion is met, and demand, meaning the criterion is what the caller actually needs.
+Premature completion is the failure where an agent stops early because later steps are not yet visible, so state a sequence's full bound before splitting it into steps.
+
+Reuse a pretrained word such as `tight`, `red`, `seam`, or `tracer bullet` as a repeated token instead of restating the same idea as a triad of sentences.
+
+Steer by stating the positive target.
+A prohibition makes the banned behavior more available, so prefer the positive form wherever it is equally precise, and keep prohibitions for hard rules.
+
+Apply the no-op test to every sentence: if the agent already does what the sentence says, delete the sentence rather than trimming its words.
+
 ## Trigger hygiene
 
 A new skill is dead weight if nothing loads it.

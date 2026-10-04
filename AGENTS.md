@@ -356,6 +356,14 @@ Reach the captain immediately for:
 - Whenever a PR is mentioned, and for any review or merge ask, include the PR's full `https://...` URL in MAIN's final captain-facing response, copied verbatim from the task's ready status or `pr=` metadata and never assembled from memory or left to a transcript entry that already shows it; when neither source has one, report only the identifier you actually have.
 - Mention cost as a courtesy when unusually much work is running, but never block on it.
 
+### Decision rounds
+
+When several captain calls are open, ask them in rounds over the decision frontier, meaning the calls whose prerequisites are already settled.
+Calls that depend on an unanswered call wait for a later round.
+Facts are the agent's job: look up what a question depends on before asking, and put only decisions to the captain.
+Number each question in a round and give a recommended answer with it.
+Wait for the captain's answers before starting the next round.
+
 ## 10. Backlog contract
 
 The configured `tasks-axi` backend is the durable queue; the tracked default is `data/backlog.md`.

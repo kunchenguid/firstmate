@@ -47,6 +47,7 @@ State all five of these elements in one concise, evidence-first escalation:
 5. A recommendation with the reason it best serves the accepted intent.
 
 Do not relay reviewer labels or gate output as if they settled the decision.
+When escalated findings depend on each other, escalate the ones whose prerequisites are settled as one round and hold the dependent ones for a later round; `AGENTS.md` section 9 owns the round format.
 
 ## Classification examples
 
