@@ -262,13 +262,14 @@
 #     failure never blocks this teardown.
 #   Fix 4 - close the task's recorded chrome-devtools-axi session before process
 #     reaping and again after its agent endpoint is gone. The first close lets
-#     the tool gracefully reap its detached MCP/Chrome tree before a worktree-
-#     cwd sweep can kill only the bridge; the second closes a browser raced in
-#     by the still-live worker between those steps. bin/fm-browser-session.sh
-#     verifies the home-and-task-derived session and bridge process before the
-#     tool receives `stop`; failure retains the task record and refuses instead
-#     of losing the only exact ownership link. Legacy records without a browser
-#     session are compatibility no-ops.
+#     the identity-bound shutdown endpoint gracefully reap its detached
+#     MCP/Chrome tree before a worktree-cwd sweep can kill only the bridge; the
+#     second closes a browser raced in by the still-live worker between those
+#     steps. bin/fm-browser-session.sh verifies the home-and-task-derived
+#     session and bridge process before asking that exact endpoint to stop
+#     itself; failure retains the task record and refuses instead of losing the
+#     only exact ownership link. Legacy records without a browser session are
+#     compatibility no-ops.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
