@@ -193,15 +193,19 @@ async function main() {
 					}
 				}
 			}
-			if (allowDMs) {
-				const dmsRes = await fetch("https://discord.com/api/v10/users/@me/channels", { headers: apiHeaders });
-				if (dmsRes.ok) {
-					const dms = await dmsRes.json();
-					if (Array.isArray(dms)) {
-						for (const dm of dms) {
-							if ([1, 3].includes(dm.type) && typeof dm.id === "string" && !excludeIds.includes(dm.id)) {
-								targetChannels.push(dm.id);
-							}
+		}
+
+		// DM discovery runs even when an explicit channel allowlist is configured:
+		// a captain who replies to the bot in a DM must be heard regardless of
+		// which guild channel the allowlist names. Dedupe against the allowlist.
+		if (allowDMs) {
+			const dmsRes = await fetch("https://discord.com/api/v10/users/@me/channels", { headers: apiHeaders });
+			if (dmsRes.ok) {
+				const dms = await dmsRes.json();
+				if (Array.isArray(dms)) {
+					for (const dm of dms) {
+						if ([1, 3].includes(dm.type) && typeof dm.id === "string" && !excludeIds.includes(dm.id) && !targetChannels.includes(dm.id)) {
+							targetChannels.push(dm.id);
 						}
 					}
 				}
@@ -237,13 +241,18 @@ async function main() {
 					continue;
 				}
 
-				// Check if mentioned or DM
+				// Check if mentioned, a DM, or a reply to one of the bot's own
+				// messages. A reply to the bot's message is an inbound command
+				// even without an explicit @mention: the captain answers a bot
+				// post by replying to it, and Discord does not add a mention for
+				// that. Dropping it is the silent no-reaction bug this guards.
 				const isDM = !msg.guild_id;
 				if (isDM && !allowDMs) continue;
 				const isMentioned = Array.isArray(msg.mentions) && msg.mentions.some((m) => m.id === botId);
 				const contentHasBotMention = msg.content && (msg.content.includes(`<@${botId}>`) || msg.content.includes(`<@!${botId}>`));
+				const isReplyToBot = msg.referenced_message?.author?.id === botId;
 
-				if (!isDM && !isMentioned && !contentHasBotMention) {
+				if (!isDM && !isMentioned && !contentHasBotMention && !isReplyToBot) {
 					continue;
 				}
 
@@ -265,6 +274,7 @@ async function main() {
 					request_id: reqId,
 					text: text || "[attachment]",
 					author_handle: msg.author?.global_name || msg.author?.username || "user",
+					author_id: msg.author?.id || "",
 					platform: "discord",
 					source: "discord-selfhosted",
 					reply_max_chars: 1900,

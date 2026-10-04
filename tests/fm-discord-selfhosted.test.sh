@@ -165,6 +165,73 @@ test_allowlist_overrides_default_exclusion() {
   pass "explicit allowlist takes precedence over the default Discord collision exclusion with a warning"
 }
 
+test_reply_to_bot_message_without_mention() {
+  local home wake_out inbox
+  home="$TMP_ROOT/reply-to-bot"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000002001","channel_id":"1000000000000000001","guild_id":"1000000000000000000","author":{"id":"8000000000000000001","username":"captain"},"content":"누락된 정보들 채워넣어","mentions":[],"message_reference":{"message_id":"1352000000000002000","channel_id":"1000000000000000001"},"referenced_message":{"id":"1352000000000002000","author":{"id":"9000000000000000001","bot":true},"content":"already registered movie"},"attachments":[]}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000001" \
+    "$ROOT/bin/fm-discord-poll.sh")
+  assert_equals "x-mention discord-sh-1352000000000002001" "$wake_out" "reply to a bot message without a mention wakes firstmate"
+  inbox="$home/state/x-inbox/discord-sh-1352000000000002001.json"
+  assert_present "$inbox" "reply to a bot message is captured"
+  assert_equals "8000000000000000001" "$(jq -r '.author_id' "$inbox")" "captured payload carries the author id for review"
+  assert_equals "누락된 정보들 채워넣어" "$(jq -r '.text' "$inbox")" "captured text keeps the captain's command"
+  pass "a reply to the bot's own message without a mention is captured"
+}
+
+test_reply_to_bot_message_with_mention() {
+  local home wake_out inbox
+  home="$TMP_ROOT/reply-to-bot-mention"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000002002","channel_id":"1000000000000000001","guild_id":"1000000000000000000","author":{"id":"8000000000000000001","username":"captain"},"content":"<@9000000000000000001> fill it in","mentions":[{"id":"9000000000000000001"}],"message_reference":{"message_id":"1352000000000002000","channel_id":"1000000000000000001"},"referenced_message":{"id":"1352000000000002000","author":{"id":"9000000000000000001","bot":true},"content":"already registered movie"},"attachments":[]}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000001" \
+    "$ROOT/bin/fm-discord-poll.sh")
+  assert_equals "x-mention discord-sh-1352000000000002002" "$wake_out" "reply to a bot message with a mention is captured"
+  inbox="$home/state/x-inbox/discord-sh-1352000000000002002.json"
+  assert_equals "fill it in" "$(jq -r '.text' "$inbox")" "the bot mention is stripped from the command text"
+  pass "a reply to the bot's own message that also mentions the bot is captured"
+}
+
+test_reply_to_member_without_mention_is_ignored() {
+  local home wake_out
+  home="$TMP_ROOT/reply-to-member"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000002003","channel_id":"1000000000000000001","guild_id":"1000000000000000000","author":{"id":"8000000000000000001","username":"captain"},"content":"ordinary chat","mentions":[],"message_reference":{"message_id":"1352000000000002000","channel_id":"1000000000000000001"},"referenced_message":{"id":"1352000000000002000","author":{"id":"8000000000000000002","username":"member"},"content":"a member said this"},"attachments":[]}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000001" \
+    "$ROOT/bin/fm-discord-poll.sh")
+  [ -z "$wake_out" ] || fail "a reply to a member's message without a mention woke firstmate: $wake_out"
+  assert_absent "$home/state/x-inbox/discord-sh-1352000000000002003.json" "a reply to a member is not captured without a mention"
+  pass "a reply to a non-bot message without a mention is still ignored"
+}
+
+test_dm_reply_is_polled_with_configured_channel() {
+  local home wake_out log
+  home="$TMP_ROOT/dm-with-channel"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  log="$home/fetch.log"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_CHANNELS='[{"id":"1000000000000000009","type":1}]' \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000002010","channel_id":"1000000000000000009","author":{"id":"8000000000000000001","username":"captain"},"content":"handle this DM command","mentions":[],"attachments":[]}]' \
+    FM_DISCORD_FAKE_FETCH_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000001" \
+    "$ROOT/bin/fm-discord-poll.sh")
+  assert_equals "x-mention discord-sh-1352000000000002010" "$wake_out" "a DM command is captured"
+  grep -Fq "1000000000000000009" "$log" || fail "the DM channel was not polled while a channel allowlist is configured"
+  pass "a DM command is polled and captured even when a channel allowlist is configured"
+}
+
 test_bootstrap_activation() {
   local home out shim cadence
   home="$TMP_ROOT/bootstrap-test"
@@ -194,4 +261,8 @@ test_default_dm_discovery
 test_reply_dry_run_routing
 test_collision_exclusion_filter
 test_allowlist_overrides_default_exclusion
+test_reply_to_bot_message_without_mention
+test_reply_to_bot_message_with_mention
+test_reply_to_member_without_mention_is_ignored
+test_dm_reply_is_polled_with_configured_channel
 test_bootstrap_activation

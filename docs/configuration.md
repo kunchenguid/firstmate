@@ -1431,6 +1431,8 @@ Pull-request review messages name the repository or project when the URL is an a
 Keep the configured channel private to the captain and trusted operators; only IDs in `FM_DISCORD_AUTHORIZED_USER_IDS` can answer decisions, and replies from other channel members are ignored.
 Reply directly to a decision message.
 The watcher captures that reply into the existing `state/x-inbox/` flow and `fmx-respond` applies it through `fm-captain-hold.sh answer-one` for a held task, or `fm-send.sh --resolve-key` for other keyed decisions.
+A reply to any of the bot's own messages is captured as a mention even without an explicit `@` mention, so replying to a bot post is enough to reach firstmate; a reply to another member's message still needs an explicit mention.
+When `FM_DISCORD_ALLOW_DMS` is on, the bot's DM channels are polled even when `FM_DISCORD_CHANNEL_ID` names a guild channel allowlist.
 Replies to ordinary messages do not resolve decisions.
 Failed sends remain in private state for watcher retries, including recovery of interrupted sends without reposting a notification already accepted by Discord.
 
