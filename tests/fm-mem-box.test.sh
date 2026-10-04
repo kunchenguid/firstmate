@@ -113,6 +113,7 @@ test_spawn_carries_the_home_and_cap_into_the_pane() {
   fm_test_spawn_brief "$home" boxed-worker
   fm_git_worktree "$proj" "$wt" boxed-worker
   fakebin=$(fm_test_make_spawn_fakebin "$root/fake" codex)
+  fm_test_fake_systemd_run "$fakebin"
   panelog="$root/pane.log"
   FM_FAKE_PANE_LOG="$panelog" fm_test_run_spawn "$home" "$wt" "$fakebin" boxed-worker "$proj" --mode no-mistakes --yolo off \
     || fail "spawn failed"
@@ -152,6 +153,47 @@ test_heavy_lane_consults_the_guard() {
   pass "heavy lane refuses under remote-only without classifying workers as heavy"
 }
 
+test_spawn_refuses_box_and_delivery_failures() {
+  local root mode home proj wt fakebin out rc
+  root=$(fm_test_tmproot fm-mem-box)
+  for mode in unavailable export literal submit; do
+    home="$root/$mode/home"
+    proj="$root/$mode/project"
+    wt="$root/$mode/wt"
+    fm_test_spawn_home "$home" codex
+    fm_test_spawn_brief "$home" failed-worker
+    fm_git_worktree "$proj" "$wt" failed-worker
+    fakebin=$(fm_test_make_spawn_fakebin "$root/$mode/fake" codex)
+    fm_test_fake_systemd_run "$fakebin"
+    mv "$fakebin/tmux" "$fakebin/tmux-ok"
+    cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${FM_FAIL_DELIVERY:-}:$*" in
+  export:*'export GOTMPDIR='*) exit 1 ;;
+  literal:*'. '*launch.*.sh*) exit 1 ;;
+esac
+if [ "${FM_FAIL_DELIVERY:-}" = submit ] && [ "$#" -eq 4 ] &&
+  [ "$1" = send-keys ] && [ "$4" = Enter ]; then
+  exit 1
+fi
+exec "${0%/*}/tmux-ok" "$@"
+SH
+    chmod +x "$fakebin/tmux"
+    rc=0
+    if [ "$mode" = unavailable ]; then
+      out=$(FM_FAKE_SYSTEMD_FAIL=1 fm_test_run_spawn "$home" "$wt" "$fakebin" failed-worker "$proj" --mode no-mistakes --yolo off) || rc=$?
+      case "$out" in *"memory box unavailable"*) ;; *) fail "missing box not named: $out" ;; esac
+    else
+      out=$(FM_FAIL_DELIVERY="$mode" fm_test_run_spawn "$home" "$wt" "$fakebin" failed-worker "$proj" --mode no-mistakes --yolo off) || rc=$?
+      case "$out" in *"could not deliver"*|*"could not submit"*) ;; *) fail "delivery failure not named: $out" ;; esac
+    fi
+    [ "$rc" -ne 0 ] || fail "$mode failure reported successful spawn"
+    case "$out" in *"spawned failed-worker"*) fail "$mode failure printed spawned" ;; esac
+    [ ! -e "$home/state/failed-worker.meta" ] || fail "$mode failure retained a dispatched task record"
+  done
+  pass "unavailable boxes and failed launch delivery cannot publish spawn success"
+}
+
 test_default_cap_when_unconfigured
 test_per_lane_and_default_config
 test_env_cap_overrides_config
@@ -160,3 +202,4 @@ test_box_applies_the_cgroup_limit
 test_unavailable_box_refuses_execution
 test_spawn_carries_the_home_and_cap_into_the_pane
 test_heavy_lane_consults_the_guard
+test_spawn_refuses_box_and_delivery_failures

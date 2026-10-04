@@ -7,10 +7,13 @@
 # focused scheduler checks, not the complete Firstmate suite.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 RUNNER="$ROOT/bin/fm-test-run.sh"
+RUNNER_FAKEBIN=$(fm_fakebin "$(fm_test_tmproot fm-test-run-systemd)")
+fm_test_fake_systemd_run "$RUNNER_FAKEBIN"
+export PATH="$RUNNER_FAKEBIN:$PATH"
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
@@ -91,8 +94,7 @@ test_changed_file_selection_is_conservative() {
 init_changed_fixture_repo() {
   local repo=$1 script
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  fm_test_install_runner "$repo"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
@@ -186,8 +188,7 @@ init_primary_and_linked_worktree() {
   git -C "$repo" worktree add --quiet -b linked-probe "$linked"
   for tree in "$repo" "$linked"; do
     mkdir -p "$tree/bin" "$tree/tests"
-    cp "$RUNNER" "$tree/bin/fm-test-run.sh"
-    cp "$ROOT/tests/git-config-helpers.sh" "$tree/tests/"
+    fm_test_install_runner "$tree"
     chmod +x "$tree/bin/fm-test-run.sh"
     cat >"$tree/tests/probe.test.sh" <<PROBE
 #!/usr/bin/env bash
@@ -511,8 +512,7 @@ PY
   timeout_repo="$tmp/timeout-repo"
   timeout_script=tests/fm-calm-pi-extension.test.sh
   mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
-  cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$timeout_repo/tests/"
+  fm_test_install_runner "$timeout_repo"
   cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
   [ "$1" -eq 1500 ] || return 99
@@ -663,8 +663,7 @@ test_family_proofs_run_in_separate_concurrent_phases() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-family-phases.XXXXXX")
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  fm_test_install_runner "$repo"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -1016,7 +1015,7 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
   tmp=$(fm_test_tmproot fm-test-run-non-lane-schedule)
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  fm_test_install_runner "$repo"
   for script in "${scripts[@]}"; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
     chmod +x "$repo/$script"
@@ -1202,7 +1201,7 @@ test_portable_serial_packing_budget_boundary() {
   done < <("$RUNNER" --list --all)
 
   for weight in 1200000 1200001; do
-    cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+    fm_test_install_runner "$repo"
     python3 - "$repo/bin/fm-test-run.sh" "$weight" <<'PY' \
       || fail "could not seed the fixture's measured timing input"
 from pathlib import Path
@@ -1340,8 +1339,7 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-unmapped.XXXXXX")
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  fm_test_install_runner "$repo"
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
   # map has never seen - the shape of any test added tomorrow.
@@ -1458,8 +1456,7 @@ test_per_script_timeout_bounds_a_hang() {
   runner="$repo/bin/fm-test-run.sh"
   hang=tests/fm-hang-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$runner"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  fm_test_install_runner "$repo"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   grandchild_pid="$tmp/grandchild.pid"
   cat >"$repo/$hang" <<'SH'
@@ -1525,8 +1522,7 @@ test_changed_bound_gives_slow_watcher_suites_headroom() {
   repo="$tmp/repo"
   script=tests/fm-watch-triage.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  fm_test_install_runner "$repo"
   cat >"$repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
   printf '%s\n' "$1" >bound-secs
@@ -1563,8 +1559,7 @@ test_max_wall_ms_is_a_result_not_advice() {
   runner="$repo/bin/fm-test-run.sh"
   fast=tests/fm-budget-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$runner"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  fm_test_install_runner "$repo"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
 sleep 1
@@ -1628,8 +1623,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   c=tests/fm-lint.test.sh
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
-  cp "$RUNNER" "$runner"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  fm_test_install_runner "$repo"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
@@ -1826,6 +1820,31 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_memory_cap_survives_parallel_environment_cleanup() {
+  local root repo home jobs bound out log script
+  root=$(fm_test_tmproot fm-test-run-memory-cap)
+  repo="$root/repo"
+  home="$root/home"
+  fm_test_install_runner "$repo"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/"
+  mkdir -p "$home/config"
+  printf 'test=2G\n' > "$home/config/memory-box"
+  for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh; do
+    printf '#!/bin/sh\necho "ok - cap probe"\n' > "$repo/tests/$script"
+  done
+  for jobs in 1 2; do
+    for bound in 0 5; do
+      log="$root/box-$jobs-$bound.log"
+      out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_FAKE_SYSTEMD_LOG="$log" \
+        "$repo/bin/fm-test-run.sh" --jobs "$jobs" --per-script-timeout-secs "$bound" \
+        tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh 2>&1) || fail "configured cap run failed: $out"
+      [ "$(cat "$log")" = "$(printf '2147483648 0\n2147483648 0')" ] \
+        || fail "jobs=$jobs bound=$bound lost the configured cap: $(cat "$log")"
+    done
+  done
+  pass "every streaming and capture path retains the spawning home's test cap"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1867,3 +1886,4 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_memory_cap_survives_parallel_environment_cleanup

@@ -3575,6 +3575,13 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
+WORKER_MEMORY_CAP=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$FM_ROOT/bin/fm-mem-box.sh" cap worker) || exit 1
+if ! FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" FM_MEM_BOX_CAP="$WORKER_MEMORY_CAP" \
+  "$FM_ROOT/bin/fm-mem-box.sh" exec worker -- true; then
+  echo "error: memory box unavailable; refusing to launch task $ID" >&2
+  exit 1
+fi
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
@@ -5303,7 +5310,6 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-WORKER_MEMORY_CAP=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$FM_ROOT/bin/fm-mem-box.sh" cap worker) || exit 1
 if ! spawn_send_text_line "$T" "exec env FM_HOME=$(shell_quote "$FM_HOME") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") FM_MEM_BOX_CAP=$(shell_quote "$WORKER_MEMORY_CAP") $(shell_quote "$FM_ROOT/bin/fm-mem-box.sh") exec worker -- \"\${SHELL:-/bin/bash}\""; then
   echo "error: could not send the memory-box command into pane $W; refusing to launch unboxed" >&2
   exit 1
@@ -5311,13 +5317,22 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp" || {
+  echo "error: could not deliver the launch environment into pane $W" >&2
+  exit 1
+}
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
-spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
+spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1" || {
+  echo "error: could not deliver the launch environment into pane $W" >&2
+  exit 1
+}
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
-  spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
+  spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")" || {
+    echo "error: could not deliver the launch environment into pane $W" >&2
+    exit 1
+  }
 fi
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
@@ -5325,7 +5340,10 @@ fi
 # The id reached a validated bare-slug charset above, so it carries no shell
 # syntax of its own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  spawn_send_text_line "$T" "export FM_TASK_ID=$ID" || {
+    echo "error: could not deliver the launch environment into pane $W" >&2
+    exit 1
+  }
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -5426,13 +5444,19 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
 fi
 sleep 0.3
 SPAWN_LAUNCH_SENT=1
-spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+if ! spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"; then
+  echo "error: could not deliver the launch command into pane $W" >&2
+  exit 1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if ! spawn_send_key "$T" Enter; then
+  echo "error: could not submit the launch command in pane $W" >&2
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

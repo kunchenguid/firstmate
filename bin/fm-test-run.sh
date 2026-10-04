@@ -2476,6 +2476,8 @@ record_script_result() {
 # positive, a script that outruns it is terminated and reported as exit 124: a
 # hung script must become a bounded failure rather than an unbounded suite,
 # because an unbounded suite is what silently outruns its caller's budget.
+TEST_MEMORY_CAP=$("$ROOT/bin/fm-mem-box.sh" cap test) || exit 1
+
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
   # Declaring the variables local first keeps the helper's export scoped to this
@@ -2486,7 +2488,7 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
   : "$id"
-  local -a boxed=("$ROOT/bin/fm-mem-box.sh" exec test -- bash)
+  local -a boxed=(env "FM_MEM_BOX_CAP=$TEST_MEMORY_CAP" "$ROOT/bin/fm-mem-box.sh" exec test -- bash)
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then

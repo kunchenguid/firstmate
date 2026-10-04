@@ -263,6 +263,39 @@ SH
   chmod +x "$fakebin/sleep"
 }
 
+fm_test_install_runner() {
+  local repo=$1
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-mem-box.sh" \
+    "$ROOT/bin/fm-heavy-guard.sh" "$repo/bin/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+}
+
+fm_test_fake_systemd_run() {
+  local fakebin=$1
+  cat > "$fakebin/systemd-run" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${FM_FAKE_SYSTEMD_FAIL:-0}" = 0 ] || exit 1
+cap= swap=
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+  case "$1" in
+    MemoryMax=*) cap=${1#*=} ;;
+    MemorySwapMax=*) swap=${1#*=} ;;
+  esac
+  shift
+done
+[ "$#" -gt 0 ] || exit 1
+shift
+[ "$#" -gt 0 ] && [ -n "$cap" ] && [ "$swap" = 0 ] || exit 1
+if [ "$1" != true ] && [ -n "${FM_FAKE_SYSTEMD_LOG:-}" ]; then
+  printf '%s %s\n' "$cap" "$swap" >> "$FM_FAKE_SYSTEMD_LOG"
+fi
+exec "$@"
+SH
+  chmod +x "$fakebin/systemd-run"
+}
+
 # --- spawn-world ------------------------------------------------------------
 
 # fm_test_spawn_home <home> [harness]

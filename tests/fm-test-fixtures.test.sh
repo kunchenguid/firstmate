@@ -25,7 +25,12 @@ test_git_config_isolation() (
   git init -q "$dir/caller"
   git -C "$dir/caller" config commit.gpgsign false
   cd "$dir/caller" || exit 1
-  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
+  fm_test_install_runner "$dir/runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
+  local runner_fakebin
+  runner_fakebin=$(fm_fakebin "$dir/systemd")
+  fm_test_fake_systemd_run "$runner_fakebin"
+  export PATH="$runner_fakebin:$PATH"
   cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
   fakebin=$(fm_fakebin "$dir/standalone")
   fm_fake_exit0 "$fakebin" pi
