@@ -126,6 +126,24 @@ test_unknown_is_permissive_and_loud() {
   pass "unmeasurable lanes launch as requested with a loud named diagnostic and never divert"
 }
 
+test_null_quota_fields_are_unknown() {
+  jq -n '{schemaVersion: 5, providers: [{provider: "codex", windows: null, state: null,
+    quotaSemantics: {status: "unknown", effectiveAvailability: null}}]}' > "$TMP/null-fields.json"
+  probe "$TMP/null-fields.json" --harness codex --model gpt-5.6-luna --auto-divert
+  expect_code 0 "$RC" "null windows and effectiveAvailability"
+  assert_equals "unknown codex gpt-5.6-luna" "$OUT" "null fields are unknown"
+  assert_contains "$ERR" "quota-axi verdict unavailable for codex:gpt-5.6-luna: " "the unknown verdict is named"
+  assert_not_contains "$ERR" "Traceback" "null fields do not crash the prober"
+
+  jq -n '{schemaVersion: 5, providers: null}' > "$TMP/null-providers.json"
+  probe "$TMP/null-providers.json" --harness codex --model gpt-5.6-luna --auto-divert
+  expect_code 0 "$RC" "null providers"
+  assert_equals "unknown codex gpt-5.6-luna" "$OUT" "null providers is unknown"
+  assert_contains "$ERR" "quota-axi has no codex row" "the missing row is named"
+  assert_not_contains "$ERR" "Traceback" "null providers does not crash the prober"
+  pass "null quota-axi fields resolve to unknown without a traceback"
+}
+
 test_unmetered_harness_launches_as_requested() {
   snapshot "$TMP/empty.json"
   probe "$TMP/empty.json" --harness rovo --auto-divert
@@ -138,4 +156,5 @@ test_inverted_codex_verdict_quota_axi_wins
 test_inverted_opencode_go_verdict_quota_axi_wins
 test_exhausted_divert_target_never_selected
 test_unknown_is_permissive_and_loud
+test_null_quota_fields_are_unknown
 test_unmetered_harness_launches_as_requested

@@ -109,7 +109,7 @@ def read_quota(provider: str) -> tuple[dict | None, str]:
 
 
 def quota_row(snapshot: dict, provider: str, lane: str) -> dict | None:
-    rows = [p for p in snapshot.get("providers", []) if p.get("provider") == provider]
+    rows = [p for p in snapshot.get("providers") or [] if p.get("provider") == provider]
     if snapshot.get("schemaVersion") == 6:
         return next((r for r in rows if r.get("accountKey") == lane), None) or \
             next((r for r in rows if r.get("accountKey") == "default"), None)
@@ -120,17 +120,18 @@ def verdict_from_row(row: dict, model: str) -> dict:
     """quota-axi's verdict for one row: {status, percent, fresh, detail}."""
     token = model.split("/", 1)[1] if "/" in model else model
     scopes = [
-        s for s in row.get("quotaSemantics", {}).get("effectiveAvailability", [])
+        s for s in (row.get("quotaSemantics") or {}).get("effectiveAvailability") or []
         if s.get("scope") in ("all_models", "all_products")
-        or (token and s.get("scope", "").split(":", 1)[-1] == token
-            and s.get("scope", "").startswith(("model:", "product:")))
+        or (token and (s.get("scope") or "").split(":", 1)[-1] == token
+            and (s.get("scope") or "").startswith(("model:", "product:")))
     ]
-    stale = bool(row.get("state", {}).get("stale"))
+    state = row.get("state") or {}
+    stale = bool(state.get("stale"))
     if row.get("notSetUp"):
         return {"status": UNKNOWN, "percent": None, "fresh": False,
-                "detail": f"not set up ({row.get('state', {}).get('error', 'no credential')})"}
+                "detail": f"not set up ({state.get('error') or 'no credential'})"}
     for s in scopes:
-        if s.get("runway", {}).get("status") == "exhausted_now":
+        if (s.get("runway") or {}).get("status") == "exhausted_now":
             return {"status": EXHAUSTED, "percent": s.get("effectivePercentRemaining", 0), "fresh": not stale,
                     "detail": f"{s['scope']} runway exhausted_now"}
     known = [s for s in scopes if s.get("status") == "known" and isinstance(s.get("effectivePercentRemaining"), (int, float))]
@@ -139,7 +140,7 @@ def verdict_from_row(row: dict, model: str) -> dict:
         pct = worst["effectivePercentRemaining"]
         return {"status": HEALTHY if pct > 0 else EXHAUSTED, "percent": pct, "fresh": not stale,
                 "detail": f"{worst['scope']} {pct}% remaining"}
-    windows = [w for w in row.get("windows", []) if isinstance(w.get("percentRemaining"), (int, float))]
+    windows = [w for w in row.get("windows") or [] if isinstance(w.get("percentRemaining"), (int, float))]
     if stale and windows:
         worst = min(windows, key=lambda w: w["percentRemaining"])
         pct = worst["percentRemaining"]

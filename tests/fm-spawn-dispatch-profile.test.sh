@@ -1045,6 +1045,24 @@ test_jev_prober_unknown_launches_as_requested() {
   pass "spawn launches as requested, loudly, when quota-axi has no verdict"
 }
 
+test_jev_prober_without_verdict_launches_as_requested() {
+  local rec id out status
+  id=profile-jev-crash-z5
+  rec=$(make_spawn_case jev-crash codex "$id")
+  read_case_record "$rec"
+  printf '#!/bin/sh\nexit 7\n' > "$CASE_DIR/broken-python"
+  chmod +x "$CASE_DIR/broken-python"
+
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_PYTHON="$CASE_DIR/broken-python" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 2>&1)
+  status=$?
+  expect_code 0 "$status" "a prober with no verdict should launch as requested: $out"
+  assert_contains "$(cat "$LAUNCH_LOG")" "codex --model 'gpt-5'" "codex lane was not launched as requested"
+  assert_contains "$out" "jev-quota-prober: prober returned no verdict for codex:gpt-5 (exit 7); quota guard absent for this launch, launching as requested" \
+    "spawn hid the missing prober verdict"
+  pass "spawn launches as requested, loudly, when the prober returns no verdict"
+}
+
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   local harness version rec id out status launch
   for harness in pi pi-signed; do
@@ -1942,6 +1960,7 @@ test_jev_prober_uses_quota_axi_over_inverted_codex_signal
 test_jev_prober_refuses_exhausted_lane_with_exhausted_divert_target
 test_jev_prober_diverts_exhausted_codex_to_healthy_pi_lane
 test_jev_prober_unknown_launches_as_requested
+test_jev_prober_without_verdict_launches_as_requested
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
