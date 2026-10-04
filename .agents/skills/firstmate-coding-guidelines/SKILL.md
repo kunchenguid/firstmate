@@ -65,12 +65,10 @@ When in doubt, write the fact into the skill or doc first by patching that owner
 
 ## Writing instruction surfaces
 
-Every always-loaded line costs context load on every turn, whether or not its branch fires.
-Each line also costs cognitive load, because it competes for the agent's attention with every other rule it must weigh.
-Cut for both, not only for tokens.
+Each always-loaded line also costs cognitive load, because it competes for the agent's attention with every other rule it must weigh.
 
 A pointer's wording, not its target, decides whether an agent reaches it.
-Give each trigger branch one condition, stated in the words the agent will hold when it arrives there.
+Word each trigger branch as `Trigger hygiene` below directs, using the words the agent will hold when it arrives there.
 Drop identity text the body already carries, so the pointer reads as a trigger rather than a second description.
 
 Put what every branch needs inline, and disclose behind a pointer only what some branches reach.
