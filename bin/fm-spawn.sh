@@ -4187,6 +4187,7 @@ META_WINDOW=$T
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 BROWSER_SESSION=
 BROWSER_AXI_REAL=
+BROWSER_STATUS_START=
 browser_axi_real_resolve() {
   local wrapper candidate candidate_dir resolved
   wrapper="$FM_ROOT/bin/browser-axi/chrome-devtools-axi"
@@ -4203,6 +4204,20 @@ browser_axi_real_resolve() {
 }
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BROWSER_SESSION=$("$SCRIPT_DIR/fm-browser-session.sh" name "$FM_HOME" "$ID") || exit 1
+  if [ -e "$STATE/$ID.status" ] || [ -L "$STATE/$ID.status" ]; then
+    [ -f "$STATE/$ID.status" ] && [ ! -L "$STATE/$ID.status" ] && [ -r "$STATE/$ID.status" ] || {
+      echo "error: task $ID status record is unsafe; refusing browser lifecycle publication" >&2
+      exit 1
+    }
+    BROWSER_STATUS_START=$(wc -c < "$STATE/$ID.status" | tr -d '[:space:]')
+    case "$BROWSER_STATUS_START" in ''|*[!0-9]*)
+      echo "error: task $ID status record size is unreadable; refusing browser lifecycle publication" >&2
+      exit 1
+      ;;
+    esac
+  else
+    BROWSER_STATUS_START=0
+  fi
   BROWSER_AXI_REAL=$(browser_axi_real_resolve || true)
   case "$BROWSER_AXI_REAL" in
     /*) ;;
@@ -4233,7 +4248,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent browser_session backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent browser_session browser_status_gen browser_status_start backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4254,6 +4269,8 @@ preserve_relaunch_meta() {
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   [ -z "$BROWSER_SESSION" ] || echo "browser_session=$BROWSER_SESSION"
+  [ -z "$BROWSER_SESSION" ] || echo "browser_status_gen=$SPAWN_GEN"
+  [ -z "$BROWSER_SESSION" ] || echo "browser_status_start=$BROWSER_STATUS_START"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

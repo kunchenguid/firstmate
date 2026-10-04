@@ -84,8 +84,16 @@ process.on("SIGTERM", () => {
   fs.appendFileSync(stopLog, `${process.env.CHROME_DEVTOOLS_AXI_SESSION}\n`);
   if (mode !== "hang") process.exit(0);
 });
-if (mode === "hang") {
-  const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {stdio: "ignore"});
+process.on("exit", () => {
+  try { process.kill(-process.pid, "SIGTERM"); } catch {}
+});
+if (mode === "hang" || mode === "stubborn-helper") {
+  const helper = spawn(process.execPath, ["-e", `
+    const fs = require("node:fs");
+    process.on("SIGTERM", () => {});
+    fs.writeFileSync(process.argv[1], "ready");
+    setInterval(() => {}, 1000);
+  `, `${portFile}.helper.ready`], {stdio: "ignore"});
   helper.unref();
   fs.writeFileSync(`${portFile}.helper`, String(helper.pid));
 }
@@ -145,8 +153,14 @@ start_session() {
   [ -s "$port_file" ] || fail "fake bridge did not publish its health port"
   START_PORT=$(cat "$port_file")
   START_HELPER=
-  if [ "$mode" = hang ]; then
+  if [ "$mode" = hang ] || [ "$mode" = stubborn-helper ]; then
     [ -s "$port_file.helper" ] || fail "hanging fake bridge did not publish its helper pid"
+    attempt=0
+    while [ "$attempt" -lt 30 ] && [ ! -s "$port_file.helper.ready" ]; do
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+    [ -s "$port_file.helper.ready" ] || fail "fake bridge helper did not become signal-ready"
     START_HELPER=$(cat "$port_file.helper")
     PIDS="$PIDS $START_HELPER"
   fi
@@ -154,13 +168,16 @@ start_session() {
 }
 
 write_meta() {
-  local home=$1 id=$2 session=$3 backend=${4:-}
+  local home=$1 id=$2 session=$3 backend=${4:-} status_start=${5:-0} spawn_gen="test-$2"
   mkdir -p "$home/state"
   {
     printf 'window=ghost:one\n'
     printf 'harness=claude\n'
     printf 'kind=ship\n'
+    printf 'spawn_gen=%s\n' "$spawn_gen"
     printf 'browser_session=%s\n' "$session"
+    printf 'browser_status_gen=%s\n' "$spawn_gen"
+    printf 'browser_status_start=%s\n' "$status_start"
     [ -z "$backend" ] || printf 'backend=%s\n' "$backend"
   } > "$home/state/$id.meta"
 }
@@ -305,6 +322,32 @@ test_hanging_shutdown_escalates_only_exact_process_group() {
   pass "hanging shutdown escalates only the identity-bound process group"
 }
 
+test_graceful_shutdown_reaps_sigterm_resistant_helpers() {
+  local home target_id neighbor_id target_session neighbor_session target_pid helper_pid neighbor_pid out status
+  home="$TMP_ROOT/graceful-stubborn-home"
+  target_id=browser-graceful-stubborn-a1
+  neighbor_id=browser-graceful-neighbor-a1
+  mkdir -p "$home"
+  target_session=$(browser_name "$home" "$target_id")
+  neighbor_session=$(browser_name "$home" "$neighbor_id")
+  start_session "$target_session" "$target_session" stubborn-helper
+  target_pid=$START_PID
+  helper_pid=$START_HELPER
+  start_session "$neighbor_session"
+  neighbor_pid=$START_PID
+  write_meta "$home" "$target_id" "$target_session"
+  write_meta "$home" "$neighbor_id" "$neighbor_session"
+
+  out=$(HOME="$TEST_HOME" PATH="$FAKEBIN:$PATH" FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" \
+    "$BROWSER" cleanup "$home" "$home/state/$target_id.meta" 2>&1)
+  status=$?
+  expect_code 0 "$status" "graceful browser cleanup should reap a resistant helper: $out"
+  assert_dead "$target_pid" "graceful shutdown left the bridge alive"
+  assert_dead "$helper_pid" "watchdog died before reaping a SIGTERM-resistant helper"
+  assert_alive "$neighbor_pid" "graceful escalation touched an unrelated active process group"
+  pass "graceful shutdown keeps exact-group escalation alive for resistant helpers"
+}
+
 test_terminal_sweep_closes_only_terminal_owner() {
   local home terminal_id active_id terminal_session active_session terminal_pid restarted_pid active_pid out signature
   home="$TMP_ROOT/terminal-home"
@@ -338,6 +381,30 @@ test_terminal_sweep_closes_only_terminal_owner() {
   assert_dead "$restarted_pid" "terminal sweep ignored a later bridge incarnation"
   assert_alive "$active_pid" "terminal resweep touched the active task browser"
   pass "terminal recovery cannot be suppressed by a reused-PID cleanup marker"
+}
+
+test_terminal_sweep_ignores_status_before_current_spawn() {
+  local home id session pid old_bytes out
+  home="$TMP_ROOT/relaunch-status-home"
+  id=browser-relaunch-active-a1
+  mkdir -p "$home/state"
+  session=$(browser_name "$home" "$id")
+  printf 'done: previous worker finished\n' > "$home/state/$id.status"
+  old_bytes=$(wc -c < "$home/state/$id.status" | tr -d '[:space:]')
+  start_session "$session"; pid=$START_PID
+  write_meta "$home" "$id" "$session" '' "$old_bytes"
+
+  out=$(HOME="$TEST_HOME" PATH="$FAKEBIN:$PATH" FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" \
+    "$BROWSER" sweep "$home" "$home/state")
+  [ -z "$out" ] || fail "stale pre-spawn terminal status should stay silent: $out"
+  assert_alive "$pid" "stale terminal status closed the active replacement browser"
+
+  printf 'done: replacement worker finished\n' >> "$home/state/$id.status"
+  out=$(HOME="$TEST_HOME" PATH="$FAKEBIN:$PATH" FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" \
+    "$BROWSER" sweep "$home" "$home/state")
+  [ -z "$out" ] || fail "current-spawn terminal cleanup should stay silent: $out"
+  assert_dead "$pid" "current-spawn terminal status did not close its browser"
+  pass "terminal cleanup authority begins at the current spawn generation"
 }
 
 test_idle_detection_warns_uncertain_and_closes_orphan() {
@@ -395,6 +462,8 @@ test_live_non_bridge_pid_is_never_signaled
 test_live_bridge_for_another_session_is_never_signaled
 test_worker_stop_uses_identity_bound_shutdown
 test_hanging_shutdown_escalates_only_exact_process_group
+test_graceful_shutdown_reaps_sigterm_resistant_helpers
 test_terminal_sweep_closes_only_terminal_owner
+test_terminal_sweep_ignores_status_before_current_spawn
 test_idle_detection_warns_uncertain_and_closes_orphan
 test_owned_process_counts_and_capacity_warning_rearm

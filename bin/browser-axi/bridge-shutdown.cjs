@@ -23,16 +23,36 @@ if (/^chrome-devtools-axi-bridge\.(?:js|ts)$/.test(basename(process.argv[1] || "
             join(__dirname, "shutdown-watchdog.cjs"),
             String(process.pid),
             "2000",
-          ], {stdio: "ignore"});
+          ], {stdio: ["ignore", "ignore", "ignore", "ipc"]});
           if (!Number.isInteger(watchdog.pid)) {
             response.writeHead(500, {"content-type": "application/json"});
             response.end(JSON.stringify({status: "watchdog-failed"}));
             return;
           }
           watchdog.unref();
-          response.writeHead(202, {"content-type": "application/json"});
-          response.end(JSON.stringify({status: "stopping", session: expected}), () => {
-            process.kill(process.pid, "SIGTERM");
+          let pending = true;
+          const readiness = setTimeout(() => {
+            if (!pending) return;
+            pending = false;
+            watchdog.kill("SIGKILL");
+            response.writeHead(500, {"content-type": "application/json"});
+            response.end(JSON.stringify({status: "watchdog-failed"}));
+          }, 1000);
+          watchdog.once("message", (message) => {
+            if (!pending || message !== "ready") return;
+            pending = false;
+            clearTimeout(readiness);
+            response.writeHead(202, {"content-type": "application/json"});
+            response.end(JSON.stringify({status: "stopping", session: expected}), () => {
+              process.kill(process.pid, "SIGTERM");
+            });
+          });
+          watchdog.once("exit", () => {
+            if (!pending) return;
+            pending = false;
+            clearTimeout(readiness);
+            response.writeHead(500, {"content-type": "application/json"});
+            response.end(JSON.stringify({status: "watchdog-failed"}));
           });
           return;
         }

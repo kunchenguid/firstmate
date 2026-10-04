@@ -308,9 +308,11 @@ SH
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
-  local dir out rc gen_before gen_after
+  local dir out rc gen_before gen_after status_bytes
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
+  printf 'done: previous worker finished\n' > "$dir/home/state/rl1.status"
+  status_bytes=$(wc -c < "$dir/home/state/rl1.status" | tr -d '[:space:]')
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
   printf 'busy_gen=%s\n' "$gen_before" >> "$dir/home/state/rl1.meta"
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
@@ -325,6 +327,10 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   gen_after=$(meta_field "$dir" rl1 busy_gen)
   [ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] \
     || fail "a relaunch must arm a fresh busy generation, got '$gen_after'"
+  [ "$(meta_field "$dir" rl1 browser_status_gen)" = "$(meta_field "$dir" rl1 spawn_gen)" ] \
+    || fail "browser terminal authority must bind to the replacement spawn generation"
+  [ "$(meta_field "$dir" rl1 browser_status_start)" = "$status_bytes" ] \
+    || fail "relaunch did not exclude the previous worker's terminal status"
   [ "$(journal_field "$dir" rl1 phase)" = complete ] \
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"

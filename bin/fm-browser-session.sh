@@ -319,9 +319,34 @@ marker_write() {  # <path> <content>
   (umask 077; printf '%s\n' "$content" > "$tmp") && mv -f "$tmp" "$path"
 }
 
+browser_terminal_status_from_meta() {  # <task-meta> <status-file>; 0=read, 1=unbound, 2=invalid
+  local meta=$1 status=$2 spawn_count gen_count start_count spawn_gen status_gen start size scan
+  spawn_count=$(grep -c '^spawn_gen=' "$meta" 2>/dev/null || true)
+  gen_count=$(grep -c '^browser_status_gen=' "$meta" 2>/dev/null || true)
+  start_count=$(grep -c '^browser_status_start=' "$meta" 2>/dev/null || true)
+  [ "$gen_count" -ne 0 ] || return 1
+  [ "$start_count" -ne 0 ] || return 1
+  [ "$spawn_count" -eq 1 ] && [ "$gen_count" -eq 1 ] && [ "$start_count" -eq 1 ] || return 2
+  spawn_gen=$(grep '^spawn_gen=' "$meta" | cut -d= -f2-)
+  status_gen=$(grep '^browser_status_gen=' "$meta" | cut -d= -f2-)
+  start=$(grep '^browser_status_start=' "$meta" | cut -d= -f2-)
+  [ -n "$spawn_gen" ] && [ "$status_gen" = "$spawn_gen" ] || return 2
+  case "$start" in ''|*[!0-9]*) return 2 ;; esac
+  if [ ! -e "$status" ] && [ ! -L "$status" ]; then
+    [ "$start" -eq 0 ] || return 2
+    return 0
+  fi
+  [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ] || return 2
+  size=$(wc -c < "$status" | tr -d '[:space:]')
+  case "$size" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$start" -le "$size" ] || return 2
+  scan=$(tail -c "+$((start + 1))" "$status" 2>/dev/null | _fm_status_event_scan) || true
+  printf '%s\n' "${scan##*$'\n'}"
+}
+
 sweep_browser_sessions() {  # <firstmate-home> <state-dir>
   local home=$1 state=$2 now idle_timeout root_warn helper_warn meta id session rc pid
-  local status_line verb signature activity age idle_marker backend target owner
+  local status_line status_rc verb signature activity age idle_marker backend target owner
   local counts roots helpers capacity_marker capacity_created=0 root
   [ -d "$home" ] || {
     echo "error: browser sweep Firstmate home is missing: $home" >&2
@@ -363,7 +388,13 @@ sweep_browser_sessions() {  # <firstmate-home> <state-dir>
       continue
     fi
 
-    status_line=$(last_status_line "$state/$id.status")
+    status_rc=0
+    status_line=$(browser_terminal_status_from_meta "$meta" "$state/$id.status") || status_rc=$?
+    case "$status_rc" in
+      0) ;;
+      1) status_line= ;;
+      *) warning_add "task=$id browser terminal authority is invalid"; status_line= ;;
+    esac
     verb=$(status_line_verb "$status_line")
     case "$verb" in
       done|failed)

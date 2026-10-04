@@ -7,6 +7,12 @@ if (!Number.isInteger(leader) || leader <= 1 || !Number.isInteger(delay) || dela
   process.exit(2);
 }
 
+process.on("SIGTERM", () => {});
+if (typeof process.send !== "function") {
+  process.exit(2);
+}
+process.send("ready", () => process.disconnect());
+
 setTimeout(() => {
   let group;
   try {

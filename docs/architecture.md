@@ -263,13 +263,14 @@ The browser tool therefore owns a separate bridge, MCP server, headless browser,
 `bin/fm-browser-session.sh` is the sole lifecycle owner.
 Task launch routes chrome-devtools-axi through a Firstmate wrapper that adds a loopback-only shutdown endpoint to the bridge process.
 Cleanup starts from the exact metadata binding, recomputes the expected identity, verifies the named session's PID still belongs to chrome-devtools-axi's bridge, and asks that endpoint to validate its own session and signal itself.
-The endpoint starts its escalation watchdog inside the original detached process group before signaling the bridge; a graceful-shutdown hang ends in a bounded group kill only after the watchdog revalidates its own membership in that exact group.
+The endpoint waits for its escalation watchdog to install a SIGTERM survivor inside the original detached process group before signaling the bridge; after normal group termination, any resistant descendant ends in a bounded group kill only after the watchdog revalidates its own membership in that exact group.
 Cleanup then verifies that exact bridge disappeared.
 No cleanup path searches process names and kills matches, so an active neighbor, a manually started browser, or another home's equal task id is outside its authority.
 Worker exit and teardown call that cleanup directly, and the watcher periodically recovers sessions left behind by crashes or missing status delivery.
 
 The periodic recovery separates detection from destructive authority.
-A terminal status event licenses exact-session cleanup; otherwise the named session's own state-file activity must first exceed the configured timeout, after which only a recovery-grade dead or missing worker verdict licenses automatic closure.
+A terminal status event written after the current spawn generation's recorded status cursor licenses exact-session cleanup; a pre-relaunch terminal event has no authority over its replacement.
+Otherwise the named session's own state-file activity must first exceed the configured timeout, after which only a recovery-grade dead or missing worker verdict licenses automatic closure.
 Every uncertain or live verdict warns and preserves the tree.
 Resource pressure uses a read-only process-table graph: browser roots must be headless descendants of a chrome-devtools-axi bridge, helpers must descend from those roots, and exceeding either configured count emits a deduplicated warning without expanding cleanup authority.
 Operator defaults and tunables live in [Task browser sessions](configuration.md#task-browser-sessions), and executable lifecycle, neighbor-preservation, orphan, and pressure regressions live in [`tests/fm-browser-session.test.sh`](../tests/fm-browser-session.test.sh).
