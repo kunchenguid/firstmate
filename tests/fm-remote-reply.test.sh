@@ -122,6 +122,36 @@ sha256_file() {
   fi
 }
 
+# Drive the real delta-reader executable across its unchanged-file wait.
+# The recording sleep appends a complete line after the initial empty snapshot,
+# so the next snapshot must deliver it without consuming or modifying the log.
+delta_cadence_case() {
+  local label=$1 override=$2 expected=$3 dir log empty_hash
+  dir="$TMP_ROOT/delta-$label"
+  mkdir -p "$dir/bin" "$dir/home/state"
+  log="$dir/home/state/replies.status"
+  : > "$log"
+  empty_hash=$(sha256_file "$log")
+  cat > "$dir/bin/sleep" <<'SH'
+#!/bin/bash
+printf '%s\n' "$1" >> "$FM_DELTA_SLEEP_LOG"
+printf 'cadence-delivered\n' >> "$FM_DELTA_APPEND_LOG"
+exec /bin/sleep "$@"
+SH
+  chmod +x "$dir/bin/sleep"
+  FM_HOME="$dir/home" PATH="$dir/bin:$PATH" FM_REMOTE_DELTA_POLL_SECONDS="$override" \
+    FM_DELTA_SLEEP_LOG="$dir/sleeps" FM_DELTA_APPEND_LOG="$log" \
+    "$BASH" "$ROOT/bin/fm-remote-delta-read.sh" state/replies.status 0 "$empty_hash" 30 \
+    > "$dir/result" || fail "$label delta reader failed"
+  [ "$(cat "$dir/sleeps")" = "$expected" ] || fail "$label delta reader did not wait $expected seconds"
+  assert_grep 'status=delta' "$dir/result" "$label delta reader did not publish a delta"
+  assert_grep 'cadence-delivered' "$dir/result" "$label delta reader lost the appended complete line"
+  [ "$(cat "$log")" = cadence-delivered ] || fail "$label delta reader changed its source log"
+  pass "$label delta reader waits $expected seconds then delivers a non-destructive complete-line delta"
+}
+delta_cadence_case default '' 0.5
+delta_cadence_case override 0.07 0.07
+
 ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
