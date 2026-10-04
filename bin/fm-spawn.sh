@@ -201,8 +201,9 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). The same pane receives one home-and-task-
 #   scoped CHROME_DEVTOOLS_AXI_SESSION, recorded as browser_session= in task
-#   metadata, so browser work never shares another task's bridge or profile and
-#   lifecycle cleanup can close only that exact process tree. A secondmate runs
+#   metadata. Inherited browser connection, profile, port, and forwarded-flag
+#   settings are cleared, so browser work never shares another task's browser
+#   or profile and lifecycle cleanup can close only that exact process tree. A secondmate runs
 #   in its own home and receives neither task marker; its child tasks receive
 #   their own browser sessions when that home spawns them. bin/fm-browser-session.sh
 #   owns derivation, cleanup, idle/orphan detection, and capacity warnings.
@@ -4460,10 +4461,9 @@ spawn_record_traceparent() {
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Give that same isolated worker
-# the browser session recorded above; this export overrides an ambient session
-# inherited from the pane host and reaches every supported harness/backend
-# through their shared pre-launch text channel. The id and derived browser name
-# contain no shell syntax.
+# the browser session recorded above. The id and derived browser name contain
+# no shell syntax.
+spawn_send_text_line "$T" "unset CHROME_DEVTOOLS_AXI_AUTO_CONNECT CHROME_DEVTOOLS_AXI_BROWSER_URL CHROME_DEVTOOLS_AXI_WS_HEADERS CHROME_DEVTOOLS_AXI_USER_DATA_DIR CHROME_DEVTOOLS_AXI_PORT CHROME_DEVTOOLS_AXI_CHROME_ARGS"
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
   spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION"

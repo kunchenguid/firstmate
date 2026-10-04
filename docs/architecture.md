@@ -257,10 +257,11 @@ Placement is proven only at launch, so `bin/fm-spawn.sh` also exports the task i
 
 Browser isolation follows the same home-and-task ownership boundary as worktree isolation.
 `bin/fm-spawn.sh` derives one opaque chrome-devtools-axi session name from the canonical `FM_HOME` plus task id, records it in task metadata, and exports it before each ship or scout launch.
+The launch boundary clears inherited connection, profile, explicit port, WebSocket header, and forwarded Chrome-flag settings before that export, preventing ambient configuration from reconnecting separate task bridges to one browser or profile.
 The browser tool therefore owns a separate bridge, MCP server, headless browser, profile, and helper tree for every task without exposing home paths or exceeding its session-name limit.
 
 `bin/fm-browser-session.sh` is the sole lifecycle owner.
-Cleanup starts from the exact metadata binding, recomputes the expected identity, verifies the named session's PID still belongs to chrome-devtools-axi's bridge, then delegates graceful whole-tree closure and bounded escalation to `chrome-devtools-axi stop` and verifies that exact bridge disappeared.
+Cleanup starts from the exact metadata binding, recomputes the expected identity, verifies the named session's PID still belongs to chrome-devtools-axi's bridge, requires its health endpoint to report the same session identity, then delegates graceful whole-tree closure and bounded escalation to `chrome-devtools-axi stop` and verifies that exact bridge disappeared.
 No cleanup path searches process names and kills matches, so an active neighbor, a manually started browser, or another home's equal task id is outside its authority.
 Worker exit and teardown call that cleanup directly, and the watcher periodically recovers sessions left behind by crashes or missing status delivery.
 

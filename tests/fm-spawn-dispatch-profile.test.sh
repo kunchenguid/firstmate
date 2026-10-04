@@ -1399,15 +1399,42 @@ test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
 }
 
 test_task_browser_session_is_recorded_and_exported() {
-  local rec id out status textlog expected
+  local rec id out status textlog expected probe launch setup result
   id=browser-session-z24
   rec=$(make_spawn_case browser-session claude "$id")
   read_case_record "$rec"
   textlog="$CASE_DIR/text.log"
   : > "$textlog"
+  probe="$CASE_DIR/browser-env-probe.sh"
+  cat > "$probe" <<'SH'
+#!/bin/sh
+printf '%s\n' "$CHROME_DEVTOOLS_AXI_SESSION" \
+  "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT-unset}" \
+  "${CHROME_DEVTOOLS_AXI_BROWSER_URL-unset}" \
+  "${CHROME_DEVTOOLS_AXI_WS_HEADERS-unset}" \
+  "${CHROME_DEVTOOLS_AXI_USER_DATA_DIR-unset}" \
+  "${CHROME_DEVTOOLS_AXI_PORT-unset}" \
+  "${CHROME_DEVTOOLS_AXI_CHROME_ARGS-unset}"
+SH
+  chmod +x "$probe"
+  printf '%s\n' \
+    CHROME_DEVTOOLS_AXI_AUTO_CONNECT \
+    CHROME_DEVTOOLS_AXI_BROWSER_URL \
+    CHROME_DEVTOOLS_AXI_WS_HEADERS \
+    CHROME_DEVTOOLS_AXI_USER_DATA_DIR \
+    CHROME_DEVTOOLS_AXI_PORT \
+    CHROME_DEVTOOLS_AXI_CHROME_ARGS \
+    > "$HOME_DIR/config/launch-env-allowlist"
 
   out=$(FM_FAKE_TEXT_LOG="$textlog" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1 \
+    CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222 \
+    CHROME_DEVTOOLS_AXI_WS_HEADERS='{"Authorization":"shared"}' \
+    CHROME_DEVTOOLS_AXI_USER_DATA_DIR=/tmp/shared-profile \
+    CHROME_DEVTOOLS_AXI_PORT=9222 \
+    CHROME_DEVTOOLS_AXI_CHROME_ARGS='--user-data-dir=/tmp/shared-via-flag' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --harness "/bin/sh '$probe'")
   status=$?
   expect_code 0 "$status" "task browser session spawn should succeed"
   expected=$("$ROOT/bin/fm-browser-session.sh" name "$HOME_DIR" "$id")
@@ -1415,7 +1442,20 @@ test_task_browser_session_is_recorded_and_exported() {
     "spawn did not bind the derived task browser session in metadata"
   assert_grep "export CHROME_DEVTOOLS_AXI_SESSION=$expected" "$textlog" \
     "spawn did not export the recorded browser session before launch"
-  pass "ship spawns record and export one task browser session"
+  setup=$(cat "$textlog")
+  launch=$(cat "$LAUNCH_LOG")
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+    CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1 \
+    CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222 \
+    CHROME_DEVTOOLS_AXI_WS_HEADERS='{"Authorization":"shared"}' \
+    CHROME_DEVTOOLS_AXI_USER_DATA_DIR=/tmp/shared-profile \
+    CHROME_DEVTOOLS_AXI_PORT=9222 \
+    CHROME_DEVTOOLS_AXI_CHROME_ARGS='--user-data-dir=/tmp/shared-via-flag' \
+    /bin/sh -c "$setup
+$launch") || fail "emitted browser-isolated launch failed"
+  [ "$result" = "$(printf '%s\nunset\nunset\nunset\nunset\nunset\nunset' "$expected")" ] \
+    || fail "inherited browser connection or profile settings reached the worker: $result"
+  pass "ship spawns enforce one isolated browser session and clear ambient sharing settings"
 }
 
 test_non_claude_harness_ignores_claude_permission_mode() {

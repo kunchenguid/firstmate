@@ -918,6 +918,8 @@ test_task_browser_assignment_contract() {
       "$id did not require the task browser assignment to be preserved"
     assert_grep "never override it or reuse another task's session" "$brief" \
       "$id did not forbid cross-task browser reuse"
+    assert_grep 'Run `chrome-devtools-axi stop` as soon as browser work finishes' "$brief" \
+      "$id did not require browser shutdown when browser work finishes"
   done
   pass "fm-brief: ship and scout workers preserve their task-owned browser assignment"
 }

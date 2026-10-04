@@ -12,6 +12,7 @@ FAKEBIN="$TMP_ROOT/fakebin"
 REAL_PS=$(command -v ps)
 PIDS=
 START_PID=
+START_PORT=
 
 cleanup() {
   local pid
@@ -30,7 +31,7 @@ set -eu
 [ "${1:-}" = stop ] || exit 2
 session=${CHROME_DEVTOOLS_AXI_SESSION:?}
 pid_file="$HOME/.chrome-devtools-axi/sessions/$session/bridge.pid"
-pid=$(tr -cd '0-9' < "$pid_file")
+pid=$(jq -er '.pid' "$pid_file")
 printf '%s\n' "$session" >> "${FM_FAKE_BROWSER_STOP_LOG:?}"
 kill "$pid"
 SH
@@ -69,7 +70,23 @@ SH
 chmod +x "$FAKEBIN/ps"
 
 BRIDGE_JS="$TMP_ROOT/chrome-devtools-axi-bridge.js"
-printf '%s\n' 'setInterval(() => {}, 1000);' > "$BRIDGE_JS"
+cat > "$BRIDGE_JS" <<'JS'
+const fs = require("node:fs");
+const http = require("node:http");
+const session = process.argv[2];
+const portFile = process.argv[3];
+const server = http.createServer((request, response) => {
+  if (request.url !== "/health") {
+    response.writeHead(404).end();
+    return;
+  }
+  response.writeHead(200, {"content-type": "application/json"});
+  response.end(JSON.stringify({status: "ok", session}));
+});
+server.listen(0, "127.0.0.1", () => {
+  fs.writeFileSync(portFile, String(server.address().port));
+});
+JS
 STOP_LOG="$TMP_ROOT/stops.log"
 : > "$STOP_LOG"
 
@@ -78,14 +95,21 @@ browser_name() {
 }
 
 start_session() {
-  local session=$1 dir
+  local session=$1 dir port_file attempt
   dir="$TEST_HOME/.chrome-devtools-axi/sessions/$session"
   mkdir -p "$dir"
-  node "$BRIDGE_JS" >/dev/null 2>&1 &
+  port_file="$TMP_ROOT/port.${BASHPID:-$$}.$RANDOM"
+  node "$BRIDGE_JS" "$session" "$port_file" >/dev/null 2>&1 &
   START_PID=$!
   PIDS="$PIDS $START_PID"
-  printf '{"pid":%s}\n' "$START_PID" > "$dir/bridge.pid"
-  sleep 0.1
+  attempt=0
+  while [ "$attempt" -lt 30 ] && [ ! -s "$port_file" ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ -s "$port_file" ] || fail "fake bridge did not publish its health port"
+  START_PORT=$(cat "$port_file")
+  printf '{"pid":%s,"port":%s}\n' "$START_PID" "$START_PORT" > "$dir/bridge.pid"
 }
 
 write_meta() {
@@ -154,7 +178,7 @@ test_live_non_bridge_pid_is_never_signaled() {
   pid=$!
   PIDS="$PIDS $pid"
   mkdir -p "$TEST_HOME/.chrome-devtools-axi/sessions/$session"
-  printf '{"pid":%s}\n' "$pid" > "$TEST_HOME/.chrome-devtools-axi/sessions/$session/bridge.pid"
+  printf '{"pid":%s,"port":65534}\n' "$pid" > "$TEST_HOME/.chrome-devtools-axi/sessions/$session/bridge.pid"
   write_meta "$home" "$id" "$session"
   before=$(wc -l < "$STOP_LOG" | tr -d ' ')
 
@@ -166,6 +190,32 @@ test_live_non_bridge_pid_is_never_signaled() {
   assert_alive "$pid" "cleanup signaled an unrelated process from a stale PID file"
   [ "$(wc -l < "$STOP_LOG" | tr -d ' ')" = "$before" ] || fail "cleanup called stop for an unsafe PID"
   pass "PID reuse cannot turn exact browser cleanup into an unrelated signal"
+}
+
+test_live_bridge_for_another_session_is_never_signaled() {
+  local home id session foreign_session foreign_pid foreign_port out status before
+  home="$TMP_ROOT/reused-bridge-home"
+  id=browser-reused-bridge-a1
+  foreign_session=fm-1111111111111111111111111111111111111111
+  mkdir -p "$home"
+  session=$(browser_name "$home" "$id")
+  start_session "$foreign_session"
+  foreign_pid=$START_PID
+  foreign_port=$START_PORT
+  mkdir -p "$TEST_HOME/.chrome-devtools-axi/sessions/$session"
+  printf '{"pid":%s,"port":%s}\n' "$foreign_pid" "$foreign_port" \
+    > "$TEST_HOME/.chrome-devtools-axi/sessions/$session/bridge.pid"
+  write_meta "$home" "$id" "$session"
+  before=$(wc -l < "$STOP_LOG" | tr -d ' ')
+
+  out=$(HOME="$TEST_HOME" PATH="$FAKEBIN:$PATH" FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" \
+    "$BROWSER" cleanup "$home" "$home/state/$id.meta" 2>&1)
+  status=$?
+  expect_code 1 "$status" "cleanup must refuse a bridge serving another session"
+  assert_contains "$out" "does not report that exact session" "session-identity refusal was not explicit"
+  assert_alive "$foreign_pid" "cleanup signaled another session's live bridge"
+  [ "$(wc -l < "$STOP_LOG" | tr -d ' ')" = "$before" ] || fail "cleanup called stop for another session's bridge"
+  pass "bridge PID reuse cannot cross the health-reported session boundary"
 }
 
 test_terminal_sweep_closes_only_terminal_owner() {
@@ -253,6 +303,7 @@ test_owned_process_counts_and_capacity_warning_rearm() {
 
 test_home_scoped_names_and_exact_cleanup
 test_live_non_bridge_pid_is_never_signaled
+test_live_bridge_for_another_session_is_never_signaled
 test_terminal_sweep_closes_only_terminal_owner
 test_idle_detection_warns_uncertain_and_closes_orphan
 test_owned_process_counts_and_capacity_warning_rearm

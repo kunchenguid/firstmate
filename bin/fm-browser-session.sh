@@ -17,7 +17,8 @@
 #
 # `cleanup` accepts only the exact derived session recorded once in a regular
 # task meta file. It reads that named session's own bridge.pid, refuses a live
-# PID whose process is not chrome-devtools-axi's bridge, invokes the tool's
+# PID whose process is not chrome-devtools-axi's bridge, requires the bridge's
+# health endpoint to report the exact session identity, invokes the tool's
 # public `stop` command, and verifies that exact bridge is gone. The tool owns
 # graceful MCP/Chrome closure and its bounded whole-tree escalation. Missing
 # `browser_session=` is a compatibility no-op for tasks launched before this
@@ -146,9 +147,11 @@ browser_session_dir() {  # <session>
 }
 
 BROWSER_PID=
+BROWSER_PORT=
 browser_session_pid() {  # <session>; 0=read, 1=absent, 2=unsafe/malformed
-  local session=$1 dir pid_file pid
+  local session=$1 dir pid_file record pid port
   BROWSER_PID=
+  BROWSER_PORT=
   dir=$(browser_session_dir "$session") || return 2
   pid_file="$dir/bridge.pid"
   if [ ! -e "$pid_file" ] && [ ! -L "$pid_file" ]; then
@@ -158,17 +161,27 @@ browser_session_pid() {  # <session>; 0=read, 1=absent, 2=unsafe/malformed
     echo "error: browser session $session has an unsafe bridge.pid" >&2
     return 2
   fi
-  pid=$(jq -er 'if (.pid | type) == "number" and (.pid | floor) == .pid and .pid > 1 then .pid else error("invalid pid") end' "$pid_file" 2>/dev/null) || {
+  record=$(jq -er '
+    if (.pid | type) == "number" and (.pid | floor) == .pid and .pid > 1 and
+       (.port | type) == "number" and (.port | floor) == .port and .port > 0 and .port <= 65535
+    then "\(.pid) \(.port)"
+    else error("invalid bridge identity")
+    end
+  ' "$pid_file" 2>/dev/null) || {
     echo "error: browser session $session has a malformed bridge.pid" >&2
     return 2
   }
-  case "$pid" in
-    ''|*[!0-9]*)
-      echo "error: browser session $session has a malformed bridge PID" >&2
+  read -r pid port <<EOF
+$record
+EOF
+  case "$pid:$port" in
+    *[!0-9:]*|:*|*:)
+      echo "error: browser session $session has a malformed bridge identity" >&2
       return 2
       ;;
   esac
   BROWSER_PID=$pid
+  BROWSER_PORT=$port
   return 0
 }
 
@@ -185,14 +198,37 @@ browser_pid_is_bridge() {  # <pid>
   esac
 }
 
+browser_health_matches_session() {  # <port> <session>
+  node -e '
+    const http = require("node:http");
+    const port = Number(process.argv[1]);
+    const expected = process.argv[2];
+    const req = http.get({hostname: "127.0.0.1", port, path: "/health", timeout: 2000}, response => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", chunk => { body += chunk; });
+      response.on("end", () => {
+        try {
+          const health = JSON.parse(body);
+          process.exitCode = response.statusCode === 200 && health.status === "ok" && health.session === expected ? 0 : 1;
+        } catch {
+          process.exitCode = 1;
+        }
+      });
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => { process.exitCode = 1; });
+  ' "$1" "$2" >/dev/null 2>&1
+}
+
 cleanup_browser_session() {  # <firstmate-home> <task-meta>
-  local home=$1 meta=$2 session pid rc attempt
+  local home=$1 meta=$2 session pid port rc attempt
   session=$(browser_session_from_meta "$home" "$meta") || return 1
   [ -n "$session" ] || return 0
   rc=0
   browser_session_pid "$session" || rc=$?
   case "$rc" in
-    0) pid=$BROWSER_PID ;;
+    0) pid=$BROWSER_PID; port=$BROWSER_PORT ;;
     1) return 0 ;;
     *) return 1 ;;
   esac
@@ -201,6 +237,16 @@ cleanup_browser_session() {  # <firstmate-home> <task-meta>
     echo "error: browser session $session records live PID $pid, but that PID is not chrome-devtools-axi's bridge; refusing to signal it" >&2
     return 1
   }
+  browser_health_matches_session "$port" "$session" || {
+    echo "error: browser session $session records bridge PID $pid, but its health endpoint does not report that exact session; refusing to signal it" >&2
+    return 1
+  }
+  rc=0
+  browser_session_pid "$session" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$BROWSER_PID" != "$pid" ] || [ "$BROWSER_PORT" != "$port" ]; then
+    echo "error: browser session $session changed bridge identity during cleanup; refusing to signal it" >&2
+    return 1
+  fi
   command -v chrome-devtools-axi >/dev/null 2>&1 || {
     echo "error: browser session $session is live but chrome-devtools-axi is unavailable; refusing to orphan it" >&2
     return 1
