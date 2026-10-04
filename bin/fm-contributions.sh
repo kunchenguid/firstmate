@@ -38,8 +38,9 @@
 # default 30, read from the poll's environment because the watcher runs it as
 # a direct child) with a three-second margin. Each read is capped by the
 # currently remaining poll budget, so normal forge latency is not rejected by
-# a fixed sub-budget; a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# a fixed sub-budget; the next URL is not started unless its full observation
+# reserve remains after this read. A read killed at the total bound or at the
+# deadline is budget refusal, never a forge failure. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -208,8 +209,8 @@ forge() {
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
   # Do not impose a second fixed timeout inside the poll budget. The current
-  # remaining budget is the hard upper bound for this read; later dependent
-  # waves recompute it, so a slow read cannot extend the total poll window.
+  # remaining budget is the hard upper bound for this read; the loop checks
+  # the next URL's observation reserve only after this read finishes.
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
   # A kill at the read bound or the deadline is budget refusal too; only the

@@ -952,8 +952,26 @@ test_unmeasured_url_does_not_starve_the_tail() {
         fail 'a tail PR began without its observation reserve'
       fi
     fi
-    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-      || fail 'a timed-out observation changed its prior freshness or record'
+    # Preserve the original invariant: a deferred or truncated read cannot
+    # partially write a record or stamp a failure, while a complete successful
+    # observation may legitimately refresh it after the fixed five-second cap
+    # is removed.
+    if ! cmp -s "$home/prior.json" "$home/data/delivery/contributions.json"; then
+      jq -e '.records[0]
+        | .error == null
+        and (.observation | type == "object"
+          and (.head | type == "string")
+          and (.state | type == "string")
+          and (.draft | type == "boolean")
+          and (.mergeable | type == "string")
+          and (.can_merge | type == "boolean")
+          and (.review_decision | type == "string")
+          and (.checks | type == "array")
+          and (.reviews | type == "array")
+          and (.events | type == "array"))' \
+        "$home/data/delivery/contributions.json" >/dev/null \
+        || fail 'a deferred or truncated observation partially wrote the delivery record'
+    fi
   done
   for task in second third; do
     jq -e --arg prior "$NOW" '.records[0] | .checked_at != $prior and .error == null' \
