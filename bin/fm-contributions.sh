@@ -235,18 +235,19 @@ wait_forges() { # background forge pids from one independent read wave
 
 SELF_LOGIN_RESOLVED=0
 SELF_LOGIN=''
-self_login() { # the authenticated forge login, resolved once per process; empty when unknown
-  if [ "$SELF_LOGIN_RESOLVED" -eq 0 ]; then
-    SELF_LOGIN=$(fm_run_timed 5 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api user --jq .login 2>/dev/null | head -n 1 || true)
-    case "$SELF_LOGIN" in *[!A-Za-z0-9_-]*) SELF_LOGIN='' ;; esac
-    SELF_LOGIN_RESOLVED=1
-  fi
-  printf '%s' "$SELF_LOGIN"
+resolve_self_login() { # the authenticated forge login, once per process within the poll budget; empty when unknown
+  local remaining
+  [ "$SELF_LOGIN_RESOLVED" -eq 0 ] || return 0
+  SELF_LOGIN_RESOLVED=1
+  remaining=$((DEADLINE - $(date +%s)))
+  [ "$remaining" -gt 0 ] || return 0
+  [ "$remaining" -le 5 ] || remaining=5
+  SELF_LOGIN=$(fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api user --jq .login 2>/dev/null | head -n 1 || true)
+  case "$SELF_LOGIN" in *[!A-Za-z0-9_-]*) SELF_LOGIN='' ;; esac
 }
 
 observe() { # canonical GitHub URL -> normalized JSON
-  local url=$1 part number kind endpoint head after label self
-  self=$(self_login)
+  local url=$1 part number kind endpoint head after label
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
@@ -275,7 +276,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --arg self "$self" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --arg self "$SELF_LOGIN" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
@@ -300,7 +301,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" --arg self "$self" '
+    jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" --arg self "$SELF_LOGIN" '
       $core[0] as $c | {state:$c.state,head:null,
         ready:any($c.labels[]; (.name | ascii_downcase) == ($label | ascii_downcase)),
         checks:[],reviews:[],events:($comments[0] | add // []
@@ -393,6 +394,7 @@ poll() {
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   while IFS=$'\t' read -r -a row; do
+    resolve_self_login
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
     url=${row[0]}
     observed=0
