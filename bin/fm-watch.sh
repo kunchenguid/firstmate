@@ -16,9 +16,12 @@
 # further out extends the cadence up to the FM_PAUSE_UNTIL_MAX_SECS ceiling.
 # An item held for the captain is never rechecked at all while an away record
 # (state/.afk-contract, never quiet mode's) exists, and with a present captain -
-# attended or in quiet mode - its unanswered hold surfaces once, then is
-# rechecked at most once per the far longer FM_CAPTAIN_HOLD_RESURFACE_SECS,
-# because until the captain answers a recheck can only restate their own question.
+# attended or in quiet mode - an ordinary crew task's unanswered hold surfaces
+# once, then is rechecked at most once per the far longer
+# FM_CAPTAIN_HOLD_RESURFACE_SECS, because until the captain answers a recheck can
+# only restate their own question; a captain-held line on the paused path
+# (secondmate windows, confirmed-dead crews, busy over-age panes) keeps the
+# PAUSE_RESURFACE_SECS cadence.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -383,8 +386,8 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten wait cannot rot
 # invisibly - except an item held for the captain, which is never rechecked
-# while an away record exists (away_record_present below) and otherwise takes
-# the far longer ceiling below instead of this cadence.
+# while an away record exists (away_record_present below) and, for an ordinary
+# crew task off the paused path, takes the far longer ceiling below instead.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 # The separate, far longer ceiling an UNANSWERED captain call is silent for,
 # attended as well as away. A recheck inside it can only restate the captain's
