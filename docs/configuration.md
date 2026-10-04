@@ -356,7 +356,8 @@ When the automatic transition gate applies, dispatch and completion each move th
 The ordinary successful path therefore keeps the backlog and live task set in sync ([`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh)).
 Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight item in this home; a missing, Done, held, or dependency-blocked item is refused before any endpoint or local copy is created.
 `bin/fm-integrate-after.sh` records integration-only dependencies as `integrate-after: <provider-id>` lines in the existing task body, so a frozen-contract consumer remains dispatchable while `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse landing until the provider is Done or its recorded PR has a confirmed merge notification.
-Workers waiting at the final integration checkpoint declare `paused: integrate-after: <provider-id>`; the watcher keeps the first alert and one long-cadence recheck, then absorbs repeats of that unchanged wait while continuing liveness and status monitoring.
+Workers waiting at the final integration checkpoint declare `paused: integrate-after: <provider-id>`; the watcher surfaces the initial wait and one long-cadence recheck, then quiets an unchanged declaration.
+It checks readiness on the bounded check cadence and queues one durable Firstmate notification for each pause declaration when the provider is ready or the relation has been removed after landing verification; the notification asks Firstmate to resume final validation and landing in order.
 Its `add`, `remove`, and `check` commands preserve older task bodies; rows without this relation and pre-backlog task records remain unchanged, while `blocked-by` keeps its implementation-blocking semantics.
 An archived or unreadable provider cannot prove landing and makes `check` refuse until the relation is removed after independent landing verification.
 
