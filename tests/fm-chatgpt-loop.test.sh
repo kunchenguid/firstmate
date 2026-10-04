@@ -325,13 +325,13 @@ test_task_id_validated_before_state_paths() {
 }
 
 test_trailing_option_requires_value() {
-  local dir=$TMP_ROOT/noval spec rc i pid
+  local dir=$TMP_ROOT/noval spec rc pid
   mkdir -p "$dir"
   for spec in "status --task" "consult --stage" "init --objective-file" "next-round --task" "record-findings --file" "record-result --file" "record-worker-failure --reason" "dispatch --stage"; do
     # shellcheck disable=SC2086
     bash "$LOOP" $spec >"$dir/noval.out" 2>&1 &
     pid=$!
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
       kill -0 "$pid" 2>/dev/null || break
       sleep 0.1
     done

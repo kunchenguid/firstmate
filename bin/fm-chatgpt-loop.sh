@@ -494,8 +494,7 @@ cmd_bridge_stop() {
       return 1
     fi
     kill "$pid" 2>/dev/null || true
-    local i
-    for i in $(seq 1 50); do
+    for _ in $(seq 1 50); do
       kill -0 "$pid" 2>/dev/null || break
       sleep 0.1
     done
