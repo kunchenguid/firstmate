@@ -9,7 +9,7 @@
 #        fm-chatgpt-loop.sh record-worker-failure --task ID --stage audit|plan --reason TEXT
 #        fm-chatgpt-loop.sh next-round --task ID
 #        fm-chatgpt-loop.sh status --task ID
-#        fm-chatgpt-loop.sh bridge status|start|stop [--task ID]
+#        fm-chatgpt-loop.sh bridge status|start|stop
 #
 # Firstmate owns everything about this workflow: the per-task state file, the
 # ChatGPT consultation lifecycle, worker dispatch, worker results, iteration
@@ -18,10 +18,12 @@
 # touches the bridge; nothing in the dispatch path starts, stops, or probes
 # it. The prompt handoff belongs to dispatch: right after a successful spawn,
 # dispatch steers the stored stage prompt (the audit prompt for --stage
-# audit, the plan for --stage plan) to that worker through fm-send.sh,
-# addressed at the spawn's first positional task id taken from the args after
-# --, and refuses before launching when that id cannot be determined. A
-# failed spawn records last_error, leaves the phase at <stage>-dispatch, and
+# audit, the plan for --stage plan) to that worker through fm-send.sh with an
+# explicit FM_HOME and state root, addressed at the plain task id that must
+# lead the args after --, and refuses before launching when that leading
+# token is absent or not a plain task id (never a token scanned from option
+# values). A failed spawn records last_error, leaves the phase at
+# <stage>-dispatch, and
 # exits nonzero; record-worker-failure likewise returns the phase to
 # <stage>-dispatch (never toward the next stage) so the same stage retries
 # cleanly through dispatch. The bridge is the already-installed
@@ -56,6 +58,8 @@ set -u
 LIBDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=bin/fm-chatgpt-bridge-lib.sh
 . "$LIBDIR/fm-chatgpt-bridge-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$LIBDIR/fm-pr-lib.sh"
 
 FM_HOME="${FM_HOME:-$(cd "$LIBDIR/.." && pwd)}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -249,11 +253,11 @@ cmd_dispatch() {
   else
     require_phase "$file" plan-dispatch "$task" || return 1
   fi
-  # Worker boundary: no spawned argv element or brief content may reference
-  # the ChatGPT bridge. Refuse before launching. Bridge-related ambient
-  # variables are scrubbed from the spawn environment below rather than
-  # refused, so the loop's own bridge configuration never reaches the worker.
-  local bad='chatgpt|CHATGPT_WEB_BRIDGE_URL|fm-chatgpt|codex-chatgpt-web|17841'
+  # Worker boundary: no spawned argv element may reference the ChatGPT
+  # bridge. Refuse before launching. Bridge-related ambient variables are
+  # scrubbed from the spawn environment below rather than refused, so the
+  # loop's own bridge configuration never reaches the worker.
+  local bad='CHATGPT_WEB_BRIDGE_URL|fm-chatgpt|codex-chatgpt-web|17841'
   local a
   for a in "${spawn_args[@]}"; do
     if printf '%s' "$a" | grep -Eiq "$bad"; then
@@ -261,16 +265,15 @@ cmd_dispatch() {
       return 2
     fi
   done
-  # The prompt handoff target is fm-spawn's first positional task id from the
-  # args after --. Refuse before launching when it cannot be determined.
-  local worker_task=""
-  for a in "${spawn_args[@]}"; do
-    case "$a" in
-      -*) ;;
-      *) worker_task=$a; break ;;
-    esac
-  done
-  [ -n "$worker_task" ] || { printf 'fm-chatgpt-loop: cannot determine the worker task id from the dispatch args; nothing launched, no state changed\n' >&2; return 2; }
+  # The handoff target is the plain task id that must lead the args after
+  # --. Refuse before launching rather than guessing among option values.
+  local worker_task=${spawn_args[0]:-}
+  if { [ "${worker_task#-}" = "$worker_task" ] && fm_task_id_creation_valid "$worker_task"; } then
+    :
+  else
+    printf 'fm-chatgpt-loop: refusing dispatch: the first arg after -- must be a plain task id (got %s); nothing launched, no state changed\n' "$worker_task" >&2
+    return 2
+  fi
   # The low-thinking worker is this workflow's definition: always --effort low.
   # Bridge lifecycle stays Firstmate-owned: the worker environment never
   # carries the bridge URL, and nothing here starts, stops, or probes it.
@@ -294,7 +297,7 @@ cmd_dispatch() {
   fi
   # Handoff: deliver the stored stage prompt to the spawned worker through the
   # ordinary durable steering path, right after launch.
-  if send_err=$("$SEND" "$worker_task" "$stage_prompt" 2>&1); then
+  if send_err=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SEND" "$worker_task" "$stage_prompt" 2>&1); then
     :
   else
     rc=$?
@@ -433,12 +436,25 @@ bridge_daemon_dir() {
   fi
 }
 
+# True only for a live pid whose command line is this loop's serve
+# entrypoint: a reused pid must neither block start nor be killed by stop.
+bridge_pid_is_loop_instance() {
+  local pid=$1 cmd
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$cmd" in
+    *codex-chatgpt-web*|*src/cli.ts*) return 0 ;;
+  esac
+  return 1
+}
+
 cmd_bridge_start() {
   [ $# -eq 0 ] || { printf 'fm-chatgpt-loop: bridge start takes no arguments; installation and authentication stay external\n' >&2; return 2; }
   if [ -f "$BRIDGE_PID_FILE" ]; then
     local old
     old=$(cat "$BRIDGE_PID_FILE" 2>/dev/null)
-    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+    if bridge_pid_is_loop_instance "$old"; then
       printf 'fm-chatgpt-loop: bridge already started by this loop (pid %s)\n' "$old" >&2
       return 1
     fi
@@ -474,6 +490,11 @@ cmd_bridge_stop() {
   pid=$(cat "$BRIDGE_PID_FILE" 2>/dev/null)
   [ -n "$pid" ] || { printf 'fm-chatgpt-loop: no loop-owned bridge instance to stop\n' >&2; rm -f "$BRIDGE_PID_FILE"; return 1; }
   if kill -0 "$pid" 2>/dev/null; then
+    if ! bridge_pid_is_loop_instance "$pid"; then
+      printf 'fm-chatgpt-loop: recorded bridge pid %s is not a loop-owned bridge instance; never killing a foreign process\n' "$pid" >&2
+      rm -f "$BRIDGE_PID_FILE"
+      return 1
+    fi
     kill "$pid" 2>/dev/null || true
     printf 'bridge instance %s stopped\n' "$pid"
   else

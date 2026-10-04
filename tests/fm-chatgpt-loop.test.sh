@@ -83,6 +83,10 @@ SH
 target=$1
 shift
 {
+  printf 'home: %s\n' "${FM_HOME:-}"
+  printf 'state: %s\n' "${FM_STATE_OVERRIDE:-}"
+} > "$STUB_SEND_DIR/send-env.txt"
+{
   printf 'target: %s\n' "$target"
   printf 'message:\n%s\n' "$*"
 } > "$STUB_SEND_DIR/send.txt"
@@ -230,6 +234,34 @@ test_spawn_failure_recorded() {
   pass "a failed spawn records last_error, holds the dispatch phase, and the stage retries"
 }
 
+test_dispatch_requires_plain_task_id() {
+  local dir=$TMP_ROOT/plainid
+  mkdir -p "$dir"
+  new_task_files
+  make_spawn_stub "$dir"
+  local pid rc out
+  pid=$(start_stub "$dir")
+  bash "$LOOP" init --task plainid --objective-file "$TMP_ROOT/objective.txt" >/dev/null
+  bash "$LOOP" consult --stage audit --task plainid >/dev/null
+  stop_stub "$pid"
+  out=$(bash "$LOOP" dispatch --stage audit --task plainid -- --mode local-only mytask myproj 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a flags-first dispatch must refuse before launch"
+  assert_contains "$out" "plain task id" "a non-plain first arg must be refused with a clear error"
+  out=$(bash "$LOOP" dispatch --stage audit --task plainid -- plainid=repo myproj 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a batch-pair first arg must refuse before launch"
+  assert_contains "$out" "plain task id" "a batch first arg must be refused with a clear error"
+  [ "$(loop_phase plainid)" = "audit-dispatch" ] || fail "a refused dispatch must change no state"
+  [ ! -f "$dir/argv.txt" ] || fail "a refused dispatch must launch nothing"
+  [ ! -f "$dir/send.txt" ] || fail "a refused dispatch must deliver no prompt"
+  env -u FM_HOME bash "$LOOP" dispatch --stage audit --task plainid -- plainid myproj --mode local-only --yolo off >/dev/null; rc=$?
+  [ "$rc" -eq 0 ] || fail "a plain leading task id must dispatch"
+  [ "$(loop_phase plainid)" = "audit-worker" ] || fail "the plain-id dispatch must advance to audit-worker"
+  assert_contains "$(cat "$dir/send.txt")" "target: plainid" "the handoff must target the leading plain task id"
+  assert_contains "$(cat "$dir/send-env.txt")" "home: $ROOT" "fm-send must receive an explicit FM_HOME even when the caller exports none"
+  assert_contains "$(cat "$dir/send-env.txt")" "state: $HOME_DIR/state" "fm-send must receive the loop's state root"
+  pass "dispatch refuses option-leading and batch first args, and hands off with an explicit FM_HOME"
+}
+
 test_wrong_phase_refuses() {
   local dir=$TMP_ROOT/wrongphase
   mkdir -p "$dir"
@@ -257,17 +289,61 @@ test_worker_never_touches_bridge() {
   bash "$LOOP" init --task boundary --objective-file "$TMP_ROOT/objective.txt" >/dev/null
   bash "$LOOP" consult --stage audit --task boundary >/dev/null
   stop_stub "$pid"
+  local out rc
+  out=$(bash "$LOOP" dispatch --stage audit --task boundary -- t p codex-chatgpt-web 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a dispatch carrying a bridge reference must refuse"
+  assert_contains "$out" "references the bridge" "the guard refusal must name the bridge reference"
+  [ "$(loop_phase boundary)" = "audit-dispatch" ] || fail "a guard refusal must change no state"
+  [ ! -f "$dir/argv.txt" ] || fail "a guard refusal must launch nothing"
   bash "$LOOP" dispatch --stage audit --task boundary -- t p --mode local-only --yolo off >/dev/null
   grep -Eiq 'CHATGPT_WEB_BRIDGE_URL|codex-chatgpt-web|17841|17911|fm-chatgpt-(consult|bridge)' "$dir/argv.txt" && fail "spawn argv must carry no bridge reference"
   grep -Ev '^(STUB_SPAWN_DIR|FM_CHATGPT_LOOP_SPAWN|FM_TASK_ID|FM_TASK_INBOX|GOTMPDIR|GIT_CONFIG_VALUE_)=' "$dir/env.txt" | grep -Eiq 'CHATGPT_WEB_BRIDGE_URL|codex-chatgpt-web|17841|17911|FM_CHATGPT_LOOP|fm-chatgpt-(consult|bridge)' && fail "spawn environment must carry no bridge reference"
-  local rc
-  bash "$LOOP" dispatch --stage plan --task boundary -- t p --bridge-status >/dev/null 2>&1; rc=$?
-  [ "$rc" -ne 0 ] || fail "a dispatch carrying a bridge reference must refuse"
   local out2 rc2
   out2=$(bash "$LOOP" bridge status 2>&1); rc2=$?
-  [ "$rc2" -ne 0 ] || true
+  [ "$rc2" -ne 0 ] || fail "bridge status must exit nonzero while no bridge is running"
   assert_contains "$out2" "bridge" "bridge status must report the bridge, not the worker"
-  pass "bridge lifecycle stays Firstmate-owned: dispatch carries no bridge reference and refuses one"
+  pass "bridge lifecycle stays Firstmate-owned: dispatch refuses a bridge-referencing arg before launch and reports the bridge itself"
+}
+
+test_bridge_pid_identity() {
+  local dir=$TMP_ROOT/bridgepid
+  mkdir -p "$dir/bin" "$HOME_DIR/state"
+  cat > "$dir/bin/codex-chatgpt-web" <<'SH'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+while :; do sleep 0.1; done
+SH
+  chmod +x "$dir/bin/codex-chatgpt-web"
+  export FM_CHATGPT_LOOP_DAEMON_DIR="$dir"
+  local out rc pid dead i
+  sleep 30 &
+  local foreign=$!
+  printf '%s\n' "$foreign" > "$HOME_DIR/state/chatgpt-loop-bridge.pid"
+  out=$(bash "$LOOP" bridge stop 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "bridge stop must refuse a foreign pid in the pidfile"
+  assert_contains "$out" "foreign" "bridge stop must report the foreign pid"
+  kill -0 "$foreign" 2>/dev/null || fail "bridge stop must never kill a foreign process"
+  [ ! -f "$HOME_DIR/state/chatgpt-loop-bridge.pid" ] || fail "bridge stop must clear a foreign pidfile"
+  out=$(bash "$LOOP" bridge start 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "bridge start must not be blocked by a live foreign pid: $out"
+  pid=$(cat "$HOME_DIR/state/chatgpt-loop-bridge.pid")
+  [ -n "$pid" ] && [ "$pid" != "$foreign" ] || fail "bridge start must record its own daemon pid"
+  out=$(bash "$LOOP" bridge start 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "bridge start must refuse while its own daemon runs"
+  assert_contains "$out" "already started by this loop" "bridge start must name the loop-owned instance"
+  out=$(bash "$LOOP" bridge stop 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "bridge stop must stop the loop-owned instance: $out"
+  assert_contains "$out" "stopped" "bridge stop must report stopping the loop-owned instance"
+  dead=0
+  for i in $(seq 1 30); do
+    kill -0 "$pid" 2>/dev/null || { dead=1; break; }
+    sleep 0.1
+  done
+  [ "$dead" -eq 1 ] || fail "bridge stop must kill the loop-owned instance"
+  [ ! -f "$HOME_DIR/state/chatgpt-loop-bridge.pid" ] || fail "bridge stop must clear the pidfile"
+  kill "$foreign" 2>/dev/null || true
+  unset FM_CHATGPT_LOOP_DAEMON_DIR
+  pass "bridge start and stop verify the recorded pid's identity before refusing or killing"
 }
 
 test_bridge_verbs_refused() {
@@ -288,6 +364,8 @@ test_plan_consult_carries_explicit_context
 test_consult_failure_is_retryable
 test_worker_failure_recorded
 test_spawn_failure_recorded
+test_dispatch_requires_plain_task_id
 test_wrong_phase_refuses
 test_worker_never_touches_bridge
+test_bridge_pid_identity
 test_bridge_verbs_refused
