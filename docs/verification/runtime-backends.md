@@ -711,20 +711,23 @@ It covers unchanged hooks content only: a changed hooks file needs trust again, 
 `FM_CODEX_CREW_HOOKS_LIVE=1 tests/fm-codex-crew-hooks-live-e2e.test.sh` is the command that refreshes the opt-in half of this record.
 It captures the crewmate and scout launches `bin/fm-spawn.sh` actually builds, runs each under a real PTY in a linked worktree of a test checkout whose `.codex/hooks.json` registers one sentinel-writing `SessionStart` hook, and requires the sentinel with `config/codex-crew-hooks` set to `on` and a completed turn with no sentinel when the file is absent.
 It submits prompts, so it is opt-in.
-It never writes Codex's trust store or passes `--dangerously-bypass-hook-trust`: its checkout lives at the stable path `${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/codex-crew-hooks-live/project` so the operator can trust it once interactively, and until then the guard reports the missing trust as a skip.
+It never writes Codex's trust store or passes `--dangerously-bypass-hook-trust`: its checkout lives at the stable path `${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/codex-crew-hooks-live/project` so the operator can trust it once interactively.
+That `codex-crew-hooks-live` directory is the guard's own: the guard creates it with an ownership marker file, deletes nothing in it, and fails naming the path, without touching it, when the directory already exists without the marker or its `project` is not the repository the guard created.
+Because the guard only runs when forced on, a launch that parks on Codex's trust dialog is a failure naming the Codex version, never a skip.
+The marker records the last run in which the hook ran trusted, so that failure says whether the checkout was never trusted or trust that once held has regressed.
 
-Run 2026-10-03 on codex-cli 0.160.0, Linux, on a machine where that checkout had never been trusted:
+Run 2026-10-03 on codex-cli 0.160.0, Linux, with `XDG_CACHE_HOME` pointing at a fresh empty directory, so the checkout had never been trusted:
 
 ```sh
 FM_CODEX_CREW_HOOKS_LIVE=1 tests/fm-codex-crew-hooks-live-e2e.test.sh
 ```
 
 ```text
-skip: live: codex has no persisted trust for the test checkout and its hook; run codex once in /home/aalsalman/.cache/firstmate/codex-crew-hooks-live/project, trust the folder and its hook, and rerun
+not ok - codex codex-cli 0.160.0: the crewmate launch parked on a trust dialog because <XDG_CACHE_HOME>/firstmate/codex-crew-hooks-live/project and its hook were never trusted; run codex once in that directory, trust the folder and its hook, and rerun
 ```
 
 The opted-in launch parked on Codex's "Trust this folder?" dialog, so this run confirms only that an untrusted checkout still stops an opted-in launch and that the guard leaves `~/.codex/config.toml` unchanged.
-That a trusted project hook runs under the opt-in is not yet recorded for any Codex version; trust the checkout as the skip line says and rerun the guard to record it.
+That a trusted project hook runs under the opt-in is not yet recorded for any Codex version; trust the checkout as the failure line says and rerun the guard to record it.
 
 ## Composer classification matrix
 

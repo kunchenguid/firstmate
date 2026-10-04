@@ -17,14 +17,21 @@
 # it. This guard never writes codex's trust store and never passes
 # --dangerously-bypass-hook-trust. The checkout therefore lives at one stable
 # per-user path with fixed hooks content and is left in place between runs, so
-# the operator can trust it once interactively. Until then codex parks the
-# opted-in launch on its folder-trust or "Hooks need review" modal, and the
-# guard reports that as the reason for a skip. The checkout holds nothing but this fixture and is
-# rebuilt whenever it is missing, so it can be deleted at any time.
+# the operator can trust it once interactively.
 #
-# Each launch submits a real prompt, so the gate is opt-in (fm_live_gate):
-# FM_CODEX_CREW_HOOKS_LIVE=1 or FM_LIVE=1 forces it on (an absent tool then
-# fails instead of skipping). Refresh docs/verification/runtime-backends.md
+# Ownership: that stable path is a dedicated directory the guard creates
+# together with a marker file. The guard deletes nothing there, and a directory
+# that already exists without the marker, or a marked one whose checkout is not
+# the repository the guard made, fails the run by name instead of being touched.
+# Deleting the whole directory by hand is always safe; the next run rebuilds it.
+#
+# Each launch submits a real prompt, so the gate is opt-in (fm_live_gate): the
+# guard only ever runs forced on by FM_CODEX_CREW_HOOKS_LIVE=1 or FM_LIVE=1, and
+# a forced run that cannot prove its claim fails. An absent tool fails, and so
+# does codex parking the opted-in launch on its folder-trust or "Hooks need
+# review" modal. The marker records the last run in which the hook ran trusted,
+# so that failure says whether the checkout was never trusted or trust that
+# once held has regressed. Refresh docs/verification/runtime-backends.md
 # ("Codex hook trust") from this guard's output after any codex upgrade.
 set -u
 
@@ -35,7 +42,11 @@ fm_live_gate opt-in FM_CODEX_CREW_HOOKS_LIVE codex tmux git
 
 CODEX_VERSION=$(codex --version 2>&1)
 TMP_ROOT=$(fm_test_tmproot fm-codex-crew-hooks-live)
-CHECKOUT="${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/codex-crew-hooks-live/project"
+GUARD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/codex-crew-hooks-live"
+MARKER="$GUARD_DIR/.fm-codex-crew-hooks-live-guard"
+MARKER_OWNER='owner: tests/fm-codex-crew-hooks-live-e2e.test.sh'
+CHECKOUT="$GUARD_DIR/project"
+OWNED=0
 SENTINEL=.fm-codex-crew-hook-fired
 SOCKET="fm-codex-crew-hooks-$$"
 POLLS=${FM_CODEX_CREW_HOOKS_LIVE_POLLS:-180}
@@ -44,19 +55,29 @@ CHECKED=0
 cleanup() {
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
   fm_test_cleanup
-  git -C "$CHECKOUT" worktree prune 2>/dev/null || true
+  [ "$OWNED" -eq 0 ] || git -C "$CHECKOUT" worktree prune 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# prepare_checkout: (re)build the stable test checkout and commit the hooks
-# file, so every linked worktree carries the identical content trust is keyed by.
+# prepare_checkout: prove the guard directory is this guard's own, creating it
+# with its marker and test checkout when the path is free, then commit the hooks
+# file so every linked worktree carries the identical content trust is keyed by.
 prepare_checkout() {
-  if ! git -C "$CHECKOUT" rev-parse --git-dir >/dev/null 2>&1; then
-    rm -rf "$CHECKOUT" "$CHECKOUT.origin.git"
-    mkdir -p "$(dirname "$CHECKOUT")"
+  if [ -e "$GUARD_DIR" ] || [ -L "$GUARD_DIR" ]; then
+    if [ -L "$GUARD_DIR" ] || [ ! -f "$MARKER" ] || [ "$(sed -n 1p "$MARKER")" != "$MARKER_OWNER" ]; then
+      fail "codex $CODEX_VERSION: $GUARD_DIR exists but was not created by this guard (no ownership marker); left untouched - move it away or remove it yourself and rerun"
+    fi
+    [ "$(git -C "$CHECKOUT" rev-parse --absolute-git-dir 2>/dev/null)" = "$(cd -P -- "$CHECKOUT" 2>/dev/null && pwd -P)/.git" ] ||
+      fail "codex $CODEX_VERSION: $CHECKOUT is not the repository this guard created; left untouched - remove $GUARD_DIR yourself and rerun"
+  else
+    mkdir -p "$(dirname "$GUARD_DIR")"
+    if ! mkdir "$GUARD_DIR" || ! printf '%s\n' "$MARKER_OWNER" > "$MARKER"; then
+      fail "codex $CODEX_VERSION: could not create the guard directory $GUARD_DIR"
+    fi
     fm_git_init_commit "$CHECKOUT"
     fm_git_add_origin "$CHECKOUT" "$CHECKOUT.origin.git"
   fi
+  OWNED=1
   git -C "$CHECKOUT" worktree prune
   mkdir -p "$CHECKOUT/.codex"
   cat > "$CHECKOUT/.codex/hooks.json" <<JSON
@@ -140,17 +161,17 @@ launch_and_watch() {
 
 # check_kind <crewmate|scout> <fm-spawn args...>
 check_kind() {
-  local kind=$1 outcome
+  local kind=$1 outcome trusted_run
   shift
 
   outcome=$(launch_and_watch "$kind-on" on "$@") || exit 1
   case "$outcome" in
     fired) ;;
     untrusted)
-      # Nothing has been reported yet when the first launch lands here, so this
-      # is the runner-readable first line.
-      printf 'skip: live: codex has no persisted trust for the test checkout and its hook; run codex once in %s, trust the folder and its hook, and rerun\n' "$CHECKOUT"
-      exit 0
+      trusted_run=$(sed -n 's/^trusted-run: //p' "$MARKER")
+      [ -z "$trusted_run" ] ||
+        fail "codex $CODEX_VERSION: trust regressed - the $kind launch parked on a trust dialog for $CHECKOUT, whose hook last ran trusted on $trusted_run"
+      fail "codex $CODEX_VERSION: the $kind launch parked on a trust dialog because $CHECKOUT and its hook were never trusted; run codex once in that directory, trust the folder and its hook, and rerun"
       ;;
     *)
       fail "codex $CODEX_VERSION: a $kind launch under config/codex-crew-hooks=on never ran the trusted project hook ($outcome)"
@@ -172,4 +193,5 @@ check_kind crewmate --mode no-mistakes --yolo off
 check_kind scout --scout --harness codex
 
 [ "$CHECKED" -gt 0 ] || fail "live codex crew-hooks guard verified nothing; refusing a vacuous pass"
+printf '%s\ntrusted-run: %s with %s\n' "$MARKER_OWNER" "$(date -u +%Y-%m-%d)" "$CODEX_VERSION" > "$MARKER"
 echo "# all fm-codex-crew-hooks-live-e2e tests passed"
