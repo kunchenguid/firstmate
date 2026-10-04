@@ -1651,7 +1651,8 @@ handle_paused_stale() {  # <window> <task> <hash>
 }
 
 integrate_after_ready_tick() {
-  local statusf task last marker probe observed generation cached declaration result
+  local statusf task last marker probe observed generation cached declaration result wake_key
+  local remainder previous episode previous_episode observed_tmp
   for statusf in "$STATE"/*.status; do
     [ -f "$statusf" ] && [ ! -L "$statusf" ] || continue
     task=${statusf##*/}
@@ -1662,17 +1663,27 @@ integrate_after_ready_tick() {
     observed="$STATE/.integrate-after-observed-$task"
     generation=$(fm_wake_signal_sig "$statusf") || continue
     cached=$(cat "$observed" 2>/dev/null || true)
-    if [[ $cached == "$generation"$'\n'* ]]; then
-      declaration=${cached#*$'\n'}
+    if [[ $cached == "$generation"$'\n'*$'\n'* ]]; then
+      remainder=${cached#*$'\n'}
+      declaration=${remainder%%$'\n'*}
+      episode=${remainder#*$'\n'}
       if [ "$declaration" = '-' ]; then last=''; else last=${declaration#*:}; fi
     else
+      remainder=${cached#*$'\n'}
+      previous=${remainder%%$'\n'*}
+      previous_episode=${remainder#*$'\n'}
+      case "$previous_episode" in ''|*[!0-9]*) previous_episode=0 ;; esac
       last=$(status_declared_wait_line "$statusf")
       if status_is_paused "$last" && [[ $last == *'integrate-after: '* ]]; then
         declaration=$(grep -nFx -- "$last" "$statusf" | tail -1)
       else
         declaration='-'
       fi
-      printf '%s\n%s' "$generation" "$declaration" > "$observed" || exit 1
+      episode=$previous_episode
+      [ "$declaration" = "$previous" ] || episode=$((episode + 1))
+      observed_tmp=$(mktemp "$observed.XXXXXX") || exit 1
+      printf '%s\n%s\n%s' "$generation" "$declaration" "$episode" > "$observed_tmp" \
+        && mv -f "$observed_tmp" "$observed" || { rm -f "$observed_tmp"; exit 1; }
     fi
     if ! status_is_paused "$last" || [[ $last != *'integrate-after: '* ]]; then
       rm -f "$marker" "$probe"
@@ -1686,11 +1697,21 @@ integrate_after_ready_tick() {
     printf '%s' "$declaration" > "$probe" || exit 1
     result=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-integrate-after.sh" check "$task" 2>/dev/null) || continue
-    [[ $result == "integration-ready: $task (provider landing confirmed)" ]] || continue
+    case "$result" in
+      "integration-ready: $task (provider landing confirmed)"|"integration-ready: $task (no integration-only dependencies)") ;;
+      *) continue ;;
+    esac
     [ "$(fm_wake_signal_sig "$statusf")" = "$generation" ] || continue
     FM_INTEGRATE_AFTER_READY_REASON="check: integrate-after ready: $task; confirm final validation and landing order"
-    fm_wake_append check "integrate-after-ready-$task" "$FM_INTEGRATE_AFTER_READY_REASON" || exit 1
-    printf '%s' "$declaration" > "$marker" || exit 1
+    wake_key="integrate-after-ready-$task-$episode"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    if ! fm_wake_queued_keys_locked check | grep -qxF "$wake_key"; then
+      fm_wake_append_locked check "$wake_key" "$FM_INTEGRATE_AFTER_READY_REASON" \
+        || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; exit 1; }
+    fi
+    printf '%s' "$declaration" > "$marker" \
+      || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; exit 1; }
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
     return 0
   done
   return 1

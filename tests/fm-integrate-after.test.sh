@@ -55,7 +55,15 @@ FM_STATE_OVERRIDE="$TEST_HOME/state" bash -c '
 tool check consumer | grep -q 'provider landing confirmed' || fail 'confirmed PR merge did not release integration'
 if ready_tick; then fail 'unready probe ignored its durable check interval'; fi
 touch -t 202001010000 "$TEST_HOME/state/.integrate-after-probed-consumer"
-ready_tick || fail 'provider landing did not notify paused consumer'
+mkdir "$TEST_HOME/state/.integrate-after-ready-consumer"
+if ready_tick >/dev/null 2>&1; then fail 'failed marker write unexpectedly completed'; fi
+rmdir "$TEST_HOME/state/.integrate-after-ready-consumer"
+[ "$(grep -c 'integrate-after ready: consumer' "$TEST_HOME/state/.wake-queue")" -eq 1 ] \
+  || fail 'failed marker write lost the queued notification'
+touch -t 202001010000 "$TEST_HOME/state/.integrate-after-probed-consumer"
+ready_tick || fail 'queued ready notification was not recovered'
+[ "$(grep -c 'integrate-after ready: consumer' "$TEST_HOME/state/.wake-queue")" -eq 1 ] \
+  || fail 'retry duplicated a queued ready notification'
 grep -q 'integrate-after ready: consumer' "$TEST_HOME/state/.wake-queue" || fail 'ready notification was not durable'
 if ready_tick; then fail 'ready notification repeated for an unchanged pause'; fi
 printf 'paused: integrate-after: provider, waiting for landing\n' >> "$TEST_HOME/state/consumer.status"
@@ -78,4 +86,8 @@ backlog update consumer --body-file "$TEST_HOME/body" >/dev/null
 tool remove consumer provider >/dev/null
 tool remove consumer provider | grep -q '^unchanged:' || fail 'remove was not idempotent'
 tool check consumer | grep -q 'no integration-only dependencies' || fail 'relation was not removed'
+printf 'paused: integrate-after: provider, waiting for landing\n' > "$TEST_HOME/state/consumer.status"
+ready_tick || fail 'removing a verified dependency did not notify the paused consumer'
+[ "$(grep -c 'integrate-after ready: consumer' "$TEST_HOME/state/.wake-queue")" -eq 3 ] \
+  || fail 'dependency removal did not queue one ready notification'
 printf 'ok - integration relation dispatches early and gates landing\n'
