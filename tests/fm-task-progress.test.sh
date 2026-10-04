@@ -160,6 +160,12 @@ assert_grep 'not MAIN-accepted' "$TMP_ROOT/done-without-acceptance.err" \
 
 done_record='{"acceptance":"The requested behavior passes","current_state":"The outcome is accepted","remaining_gap":"","next_step":""}'
 "$STATE" update-progress first --progress "$done_record" >/dev/null || fail "acceptance update failed"
+"$TASKS" hold first --reason "accepted result still has a captain call" --kind captain >/dev/null \
+  || fail "accepted hold failed"
+FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_cleanup_completion_mode first g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" >/dev/null \
+  || fail "captain hold incorrectly revoked semantic cleanup acceptance"
+"$TASKS" unhold first >/dev/null || fail "accepted unhold failed"
 FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
   '. "$1"; fm_cleanup_completion_mode first g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" >/dev/null \
   || fail "cleanup consumer rejected semantic acceptance"

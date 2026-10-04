@@ -424,7 +424,7 @@ export function verifyOwner(action,args,{receipt=false}={}) {
     const marker=read(r.file);
     if(marker.id!==id || marker.nonce!==request.nonce || marker.index!==index || marker.home!==home) fail('operation resource ownership changed');
   }
-  return {home,dir,request,index,step};
+  return {home,dir,request,index,step,started};
 }
 function commandFor(step) {
   switch(step.action) {
@@ -460,9 +460,6 @@ export async function executeOperations(service,request,check) {
       }
       operationCurrent(service.home,request,index);
       if(!publish(intentFile,{nonce:request.nonce,index,step,at:Date.now()})) fail('operation intent already exists');
-      // Completed cleanup does not use actor-binding admission inside teardown.
-      // Preserve uncertainty before handing the exact request to that owner.
-      if(step.action==='cleanup') publish(path.join(dir,`operation-${index}.effect.json`),{id:request.id,nonce:request.nonce,index,owner:processIdentity(process.pid),at:Date.now()});
       const env={...process.env,FM_HOME:service.home,FM_ROOT_OVERRIDE:service.root,FM_STATE_OVERRIDE:path.join(service.home,'state'),FM_CONFIG_OVERRIDE:path.join(service.home,'config'),FM_SUPERVISION_ACTOR:'short',FM_SHORT_TASK:request.id,FM_SHORT_STEP:String(index),FM_FLEET_PRUNE:'0'};
       // Never inherit caller overrides that could redirect a guarded owner.
       for(const key of ['FM_DATA_OVERRIDE','FM_PROJECTS_OVERRIDE','FM_LEASE_HOLDER_PID']) delete env[key];
@@ -498,7 +495,8 @@ if(process.argv[1] && fs.realpathSync(process.argv[1])===fs.realpathSync(fileURL
     else if(command==='verify') verifyOwner(action,args);
     else if(command==='effect') {
       const v=verifyOwner(action,args);
-      publish(path.join(v.dir,`operation-${v.index}.effect.json`),{id:v.request.id,nonce:v.request.nonce,index:v.index,owner:processIdentity(process.ppid),at:Date.now()});
+      const owner=action==='cleanup'?v.started.identity:processIdentity(process.ppid);
+      publish(path.join(v.dir,`operation-${v.index}.effect.json`),{id:v.request.id,nonce:v.request.nonce,index:v.index,owner,at:Date.now()});
     }
     else if(command==='receipt') {
       const evidence=JSON.parse(args.pop());

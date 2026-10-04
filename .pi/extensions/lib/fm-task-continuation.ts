@@ -82,6 +82,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       "Update only after a material change; do not write after each command or unchanged wait. " +
       "Take the authorized next step through its existing owner, review actual artifacts, and clear the gap only when the requested goal is satisfied. " +
       "A worker return, report, PR, empty inbox or provider success is not acceptance. " +
+      "After semantic acceptance, keep delivery and resource cleanup in their existing owners instead of recording them as a new goal gap. " +
       "Existing leases, inbox/handoff acknowledgements, uncertain-effect readback, merge and cleanup guards remain authoritative.";
   }
 
@@ -329,7 +330,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 
   registerFirstmateTool(pi, {
     name: "fm_task_continuation", label: "Task continuation",
-    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, or accepts a goal from process success.",
+    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step. Clear both gap fields after semantic acceptance; delivery and resource cleanup remain with their existing owners instead of becoming a new goal gap. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, or accepts a goal from process success.",
     executionMode: "sequential",
     parameters: Type.Object({ action: Type.Union([Type.Literal("read"), Type.Literal("update")]),
       task: Type.String(),

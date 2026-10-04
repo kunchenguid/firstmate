@@ -103,6 +103,8 @@ async function validatedTool(params, ok = true) {
 
 let continuation = await install();
 const mainSchema = tools.get('fm_task_continuation').parameters;
+assert.match(tools.get('fm_task_continuation').description,/resource cleanup remain with their existing owners/,
+  'the public continuation tool invites cleanup-only business gaps');
 assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'progress', 'task']);
 assert.deepEqual(mainSchema.properties.action.anyOf.map(value => value.const), ['read', 'update']);
 assert.equal(mainSchema.additionalProperties, false, 'continuation schema accepts removed arguments');
@@ -185,6 +187,8 @@ assert.ok(reminder, 'unfinished intermediate result did not remind MAIN');
 assert.match(reminder.content, /task: goal: Deliver compact continuation/);
 assert.match(reminder.content, /acceptance: The public fixture passes/);
 assert.match(reminder.content, /next step: Restart the session, read the task row, and run the final checks/);
+assert.match(reminder.content,/resource cleanup in their existing owners instead of recording them as a new goal gap/,
+  'the runtime continuation reminder invites cleanup-only business gaps');
 assert.doesNotMatch(reminder.content, /backend-endpoint-not-task-id/);
 const afterRestartInventory = JSON.parse(command('fm-tasks-axi.sh', ['inventory']).stdout);
 assert.deepEqual(afterRestartInventory.tasks.map(item => item.id), ['task'],

@@ -38,9 +38,11 @@ fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
     if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = archived ]; then
       printf 'archived\n'; return 0
     fi
+    # A captain hold is handled later by teardown's retain transition and
+    # decision-inventory gate; it does not revoke MAIN's semantic acceptance.
     if printf '%s' "$projection" | jq -e '
       .recorded == true and
-      ((.task_state == "in_flight" and .task_held == "no" and .task_blocked == "no") or
+      ((.task_state == "in_flight" and .task_blocked == "no") or
        .task_state == "done") and
       .remaining_gap == "" and .next_step == ""' >/dev/null; then
       printf 'accepted\n'; return 0

@@ -44,7 +44,10 @@ Supervision routes that action to the correct existing worker.
 The passing test did not erase the gap.
 If the worker exits, the session compacts, or the conversation changes topic, `progress-list` scans the canonical records once and `progress` reads the named task record directly.
 
-After review and any corrections, MAIN compares the final artifacts with the acceptance method. Only MAIN may clear both `remaining_gap` and `next_step`. Delivery, merge authority, decisions, and cleanup can still prevent retirement even after semantic acceptance.
+After review and any corrections, MAIN compares the final artifacts with the acceptance method.
+Only MAIN may clear both `remaining_gap` and `next_step`, and it clears them once the requested outcome is semantically accepted even when delivery or resource cleanup remains pending.
+Delivery, merge authority, decisions, and cleanup retain their own records and guards instead of becoming a new business goal gap.
+A captain hold remains an independent disposition constraint: cleanup verifies its decision inventory and retains the held task row, but the hold does not revoke an already recorded semantic acceptance.
 
 Healthy unchanged execution and deliberate external waits stay quiet. A material result with an authorized remaining gap continues through an existing worker or action owner. A genuine authority decision, unresolved blocker, or failed exact-effect readback remains visible. Continued pursuit has no finite retry quota, but it never broadens the original authority or replays an uncertain effect.
 
