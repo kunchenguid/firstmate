@@ -105,6 +105,13 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
+#   check: captain inbox note pending: <keys>
+#                          an unacknowledged note saved by bin/fm-inbox.sh has
+#                          its `inbox:<id>` row queued and has not been surfaced
+#                          yet; reported once per queued row, never again while
+#                          that row stays queued, and never once the note is
+#                          acknowledged. Joined with `;` after any process-event
+#                          kinds above when more than one surfaces in a cycle
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -1982,7 +1989,8 @@ scan_signals() {
   return 0
 }
 
-# Deliver a durably queued process-event result to firstmate. Publication is
+# Deliver a durably queued process-event result, or an unacknowledged captain
+# inbox note, to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
 # surfaced yet, then reports it through the same actionable exit every other wake
@@ -1993,7 +2001,20 @@ scan_signals() {
 # and re-announcement, drain-time deduplication, and the handled acknowledgement
 # keep their existing owners untouched.
 procevent_surfaced_marker() {  # <queue-key>
-  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+  local prefix=procevent
+  case "$1" in inbox:*) prefix=inbox ;; esac
+  printf '%s/.seen-%s-%s' "$STATE" "$prefix" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+}
+
+# An ordinary captain inbox note (bin/fm-inbox.sh) is surfaced by the same
+# once-per-queued-record discipline, but only while the note itself is still
+# unacknowledged: the pending file under $STATE/inbox exists and the key names
+# a plain note id. A row whose note is already in handled/, or whose key names
+# no pending note, is left to the drain and the recovery path untouched.
+inbox_note_pending() {  # <queue-key>
+  local id=${1#inbox:}
+  case "$id" in ''|*[!A-Za-z0-9._-]*|*..*) return 1 ;; esac
+  [ -f "$STATE/inbox/$id.note" ] && [ ! -L "$STATE/inbox/$id.note" ]
 }
 
 procevent_surface_after_output() {
@@ -2013,12 +2034,16 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason captured="" stranded="" unstarted=""
+  local key reason captured="" stranded="" unstarted="" notes=""
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   while IFS= read -r key; do
-    case "$key" in procevent:*) ;; *) continue ;; esac
+    case "$key" in
+      procevent:*) ;;
+      inbox:*) inbox_note_pending "$key" || continue ;;
+      *) continue ;;
+    esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
     # A stranded source or one whose launch never proved itself is the opposite
@@ -2028,6 +2053,7 @@ procevent_surface_queued() {
     case "$key" in
       procevent:*:stranded:*) stranded="$stranded $key" ;;
       procevent:*:launch-failed:*) unstarted="$unstarted $key" ;;
+      inbox:*) notes="$notes $key" ;;
       *) captured="$captured $key" ;;
     esac
   done < <(fm_wake_queued_keys_locked check)
@@ -2037,6 +2063,10 @@ procevent_surface_queued() {
   fi
   reason="check:"
   [ -z "$captured" ] || reason="$reason process-event result captured:$captured"
+  if [ -n "$notes" ]; then
+    [ "$reason" = "check:" ] || reason="$reason;"
+    reason="$reason captain inbox note pending:$notes"
+  fi
   if [ -n "$stranded" ]; then
     [ "$reason" = "check:" ] || reason="$reason;"
     reason="$reason process-event source stranded:$stranded"
