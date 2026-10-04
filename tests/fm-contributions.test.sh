@@ -5,15 +5,22 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-contributions)
 NOW=2026-09-16T08:00:00Z
-HEAD_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-HEAD_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+PUBLISHED_REPO="$TMP_ROOT/published-delivery"
+fm_git_init_commit "$PUBLISHED_REPO"
+HEAD_A=$(git -C "$PUBLISHED_REPO" rev-parse HEAD)
+git -C "$PUBLISHED_REPO" checkout -qb replacement
+printf 'replacement candidate\n' >> "$PUBLISHED_REPO/README.md"
+git -C "$PUBLISHED_REPO" add README.md
+git -C "$PUBLISHED_REPO" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+  commit -qm replacement
+HEAD_B=$(git -C "$PUBLISHED_REPO" rev-parse HEAD)
+fm_git_add_origin "$PUBLISHED_REPO" "$TMP_ROOT/published-delivery.git"
 
 new_home() {
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$home/fakebin"
   printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
   printf '#!/bin/sh\nexit 1\n' > "$home/fakebin/tmux"
-  printf '#!/bin/sh\nexit 0\n' > "$home/fakebin/no-mistakes"
   chmod +x "$home/fakebin/"*
   printf '%s\n' "$home"
 }
@@ -103,7 +110,9 @@ test_newest_check_has_no_verdict() {
 
 forge_home() {
   local home=$1
-  mkdir -p "$home/forge" "$home/root/bin" "$home/wt"
+  mkdir -p "$home/forge" "$home/root/bin"
+  git clone --quiet --branch main "$TMP_ROOT/published-delivery.git" "$home/wt" \
+    || fail 'could not clone the published delivery candidate'
   printf '#!/bin/sh\nexit 0\n' > "$home/root/bin/fm-guard.sh"
   chmod +x "$home/root/bin/fm-guard.sh"
   printf 'worktree=%s/wt\nkind=ship\n' "$home" > "$home/state/delivery.meta"
