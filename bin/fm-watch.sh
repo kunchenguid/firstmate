@@ -563,7 +563,7 @@ inbox_steer_check() {  # <window> <task>
       return 0
       ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+  capture_pane tail40 "$backend" "$w" 40 "$(window_label "$w")" || tail40=
   if window_is_busy "$w" "$tail40"; then
     return 0
   fi
@@ -765,7 +765,7 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "$hash_bytes" = 32 ] || return 1
     prev=$(cat "$hash_file" 2>/dev/null) || return 1
     [[ $prev =~ ^[0-9a-f]{32}$ ]] || return 1
-    now=$(fm_backend_capture "$backend" "$w" 40 "$label" 2>/dev/null) || return 1
+    capture_pane now "$backend" "$w" 40 "$label" || return 1
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
     churned_keys+=("$key")
@@ -871,7 +871,7 @@ secondmate_in_active_turn() {  # <window> <idle>
   local w=$1 idle=$2 tail40
   [ -n "$w" ] || return 1
   [ "$idle" -lt "$BUSY_TURN_MAX_SECS" ] || return 1
-  tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
+  capture_pane tail40 "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || return 1
   window_is_busy "$w" "$tail40"
 }
 
@@ -2187,6 +2187,34 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+# Capture one pane into <outvar> without a blocking command substitution. Bash
+# 3.2 records a TERM that arrives while it waits on a command substitution and
+# acts on it only when something else wakes it, so a pane capture that hangs
+# would leave a stopped watcher polling. The capture runs as an owned process
+# group the EXIT cleanup stops through fm_active_check_stop, and the shell waits
+# on it with the builtin, which a stop signal ends at once on every supported
+# bash. Same status as the plain capture: nonzero when the capture failed.
+capture_pane() {  # <outvar> <backend> <window> <lines> <label>
+  local out=$1 file rc=0
+  file=$(mktemp "$STATE/.fm-capture-output.XXXXXX") || return 1
+  FM_CHECK_OUTPUT=$file
+  FM_CHECK_SIGNAL_PENDING=
+  trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
+  set -m
+  fm_backend_capture "$2" "$3" "$4" "$5" > "$file" 2>/dev/null &
+  FM_ACTIVE_CHECK_PID=$!
+  FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
+  set +m
+  watcher_stop_signals
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || rc=$?
+  FM_ACTIVE_CHECK_PID=
+  fm_active_check_stop || rc=1
+  printf -v "$out" '%s' "$(cat "$file" 2>/dev/null || true)"
+  fm_check_output_cleanup
+  return "$rc"
+}
+
 # 0 when any signaled status file carries a captain-relevant event in the bytes
 # appended since this watcher last classified it. The start offset is the
 # classified-position field in that file's .seen-* marker, and fm-classify-lib.sh's
@@ -3027,7 +3055,7 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    capture_pane tail40 "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"

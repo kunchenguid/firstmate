@@ -4728,6 +4728,11 @@ test_term_stops_a_watcher_blocked_inside_a_poll() {
     kill "$holder" 2>/dev/null || true; reap "$pid"
     fail "the watcher never blocked inside its pane capture: $(cat "$out")"
   fi
+  # The capture must already have been blocked for a while when TERM lands. A TERM
+  # sent in the first instant of the wait races the shell's own bookkeeping and
+  # passes about half the time on bash 3.2 even without the fix, so the stop
+  # request has to arrive once the shell is settled in its wait.
+  sleep 1
   kill "$pid" 2>/dev/null || true
   wait_for_exit "$pid" 100
   rc=$?
