@@ -1,6 +1,7 @@
 const http = require("node:http");
 const {syncBuiltinESMExports} = require("node:module");
-const {basename} = require("node:path");
+const {spawn} = require("node:child_process");
+const {basename, join} = require("node:path");
 
 if (/^chrome-devtools-axi-bridge\.(?:js|ts)$/.test(basename(process.argv[1] || ""))) {
   const createServer = http.createServer;
@@ -18,6 +19,17 @@ if (/^chrome-devtools-axi-bridge\.(?:js|ts)$/.test(basename(process.argv[1] || "
             response.end(JSON.stringify({status: "forbidden"}));
             return;
           }
+          const watchdog = spawn(process.execPath, [
+            join(__dirname, "shutdown-watchdog.cjs"),
+            String(process.pid),
+            "2000",
+          ], {stdio: "ignore"});
+          if (!Number.isInteger(watchdog.pid)) {
+            response.writeHead(500, {"content-type": "application/json"});
+            response.end(JSON.stringify({status: "watchdog-failed"}));
+            return;
+          }
+          watchdog.unref();
           response.writeHead(202, {"content-type": "application/json"});
           response.end(JSON.stringify({status: "stopping", session: expected}), () => {
             process.kill(process.pid, "SIGTERM");

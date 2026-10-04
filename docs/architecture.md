@@ -262,7 +262,9 @@ The browser tool therefore owns a separate bridge, MCP server, headless browser,
 
 `bin/fm-browser-session.sh` is the sole lifecycle owner.
 Task launch routes chrome-devtools-axi through a Firstmate wrapper that adds a loopback-only shutdown endpoint to the bridge process.
-Cleanup starts from the exact metadata binding, recomputes the expected identity, verifies the named session's PID still belongs to chrome-devtools-axi's bridge, asks that endpoint to validate its own session and signal itself, then verifies that exact bridge disappeared.
+Cleanup starts from the exact metadata binding, recomputes the expected identity, verifies the named session's PID still belongs to chrome-devtools-axi's bridge, and asks that endpoint to validate its own session and signal itself.
+The endpoint starts its escalation watchdog inside the original detached process group before signaling the bridge; a graceful-shutdown hang ends in a bounded group kill only after the watchdog revalidates its own membership in that exact group.
+Cleanup then verifies that exact bridge disappeared.
 No cleanup path searches process names and kills matches, so an active neighbor, a manually started browser, or another home's equal task id is outside its authority.
 Worker exit and teardown call that cleanup directly, and the watcher periodically recovers sessions left behind by crashes or missing status delivery.
 

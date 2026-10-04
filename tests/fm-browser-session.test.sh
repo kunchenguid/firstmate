@@ -14,6 +14,7 @@ REAL_PS=$(command -v ps)
 PIDS=
 START_PID=
 START_PORT=
+START_HELPER=
 
 cleanup() {
   local pid
@@ -72,15 +73,22 @@ chmod +x "$FAKEBIN/ps"
 
 BRIDGE_JS="$TMP_ROOT/chrome-devtools-axi-bridge.js"
 cat > "$BRIDGE_JS" <<'JS'
+const {spawn} = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const session = process.argv[2];
 const portFile = process.argv[3];
+const mode = process.argv[4] || "graceful";
 const stopLog = process.env.FM_FAKE_BROWSER_STOP_LOG;
 process.on("SIGTERM", () => {
   fs.appendFileSync(stopLog, `${process.env.CHROME_DEVTOOLS_AXI_SESSION}\n`);
-  process.exit(0);
+  if (mode !== "hang") process.exit(0);
 });
+if (mode === "hang") {
+  const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {stdio: "ignore"});
+  helper.unref();
+  fs.writeFileSync(`${portFile}.helper`, String(helper.pid));
+}
 const server = http.createServer((request, response) => {
   if (request.url !== "/health") {
     response.writeHead(404).end();
@@ -93,6 +101,25 @@ server.listen(0, "127.0.0.1", () => {
   fs.writeFileSync(portFile, String(server.address().port));
 });
 JS
+LAUNCHER_JS="$TMP_ROOT/detached-launcher.cjs"
+cat > "$LAUNCHER_JS" <<'JS'
+const {spawn} = require("node:child_process");
+const fs = require("node:fs");
+const [wrapper, pidFile, real, bridge, stopLog, owner, session, portFile, mode] = process.argv.slice(2);
+const child = spawn(wrapper, ["test-bridge", session, portFile, mode], {
+  detached: true,
+  stdio: "ignore",
+  env: {
+    ...process.env,
+    CHROME_DEVTOOLS_AXI_SESSION: owner,
+    FM_CHROME_DEVTOOLS_AXI_REAL: real,
+    FM_FAKE_BRIDGE_JS: bridge,
+    FM_FAKE_BROWSER_STOP_LOG: stopLog,
+  },
+});
+fs.writeFileSync(pidFile, String(child.pid));
+child.unref();
+JS
 STOP_LOG="$TMP_ROOT/stops.log"
 : > "$STOP_LOG"
 
@@ -101,15 +128,14 @@ browser_name() {
 }
 
 start_session() {
-  local session=$1 owner_session=${2:-$1} dir port_file attempt
+  local session=$1 owner_session=${2:-$1} mode=${3:-graceful} dir port_file pid_file attempt
   dir="$TEST_HOME/.chrome-devtools-axi/sessions/$session"
   mkdir -p "$dir"
   port_file="$TMP_ROOT/port.${BASHPID:-$$}.$RANDOM"
-  CHROME_DEVTOOLS_AXI_SESSION="$owner_session" \
-    FM_CHROME_DEVTOOLS_AXI_REAL="$FAKEBIN/chrome-devtools-axi-real" \
-    FM_FAKE_BRIDGE_JS="$BRIDGE_JS" FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" \
-    "$WRAPPER" test-bridge "$session" "$port_file" >/dev/null 2>&1 &
-  START_PID=$!
+  pid_file="$port_file.pid"
+  node "$LAUNCHER_JS" "$WRAPPER" "$pid_file" "$FAKEBIN/chrome-devtools-axi-real" \
+    "$BRIDGE_JS" "$STOP_LOG" "$owner_session" "$session" "$port_file" "$mode"
+  START_PID=$(cat "$pid_file")
   PIDS="$PIDS $START_PID"
   attempt=0
   while [ "$attempt" -lt 30 ] && [ ! -s "$port_file" ]; do
@@ -118,6 +144,12 @@ start_session() {
   done
   [ -s "$port_file" ] || fail "fake bridge did not publish its health port"
   START_PORT=$(cat "$port_file")
+  START_HELPER=
+  if [ "$mode" = hang ]; then
+    [ -s "$port_file.helper" ] || fail "hanging fake bridge did not publish its helper pid"
+    START_HELPER=$(cat "$port_file.helper")
+    PIDS="$PIDS $START_HELPER"
+  fi
   printf '{"pid":%s,"port":%s}\n' "$START_PID" "$START_PORT" > "$dir/bridge.pid"
 }
 
@@ -247,6 +279,32 @@ test_worker_stop_uses_identity_bound_shutdown() {
   pass "worker stop uses the same identity-bound shutdown endpoint"
 }
 
+test_hanging_shutdown_escalates_only_exact_process_group() {
+  local home target_id neighbor_id target_session neighbor_session target_pid helper_pid neighbor_pid out status
+  home="$TMP_ROOT/hanging-shutdown-home"
+  target_id=browser-hanging-a1
+  neighbor_id=browser-hanging-neighbor-a1
+  mkdir -p "$home"
+  target_session=$(browser_name "$home" "$target_id")
+  neighbor_session=$(browser_name "$home" "$neighbor_id")
+  start_session "$target_session" "$target_session" hang
+  target_pid=$START_PID
+  helper_pid=$START_HELPER
+  start_session "$neighbor_session"
+  neighbor_pid=$START_PID
+  write_meta "$home" "$target_id" "$target_session"
+  write_meta "$home" "$neighbor_id" "$neighbor_session"
+
+  out=$(HOME="$TEST_HOME" PATH="$FAKEBIN:$PATH" FM_FAKE_BROWSER_STOP_LOG="$STOP_LOG" \
+    "$BROWSER" cleanup "$home" "$home/state/$target_id.meta" 2>&1)
+  status=$?
+  expect_code 0 "$status" "hanging task browser cleanup should escalate successfully: $out"
+  assert_dead "$target_pid" "escalation left the hanging bridge alive"
+  assert_dead "$helper_pid" "escalation left a helper in the exact browser process group alive"
+  assert_alive "$neighbor_pid" "escalation touched an unrelated active browser process group"
+  pass "hanging shutdown escalates only the identity-bound process group"
+}
+
 test_terminal_sweep_closes_only_terminal_owner() {
   local home terminal_id active_id terminal_session active_session terminal_pid restarted_pid active_pid out signature
   home="$TMP_ROOT/terminal-home"
@@ -336,6 +394,7 @@ test_home_scoped_names_and_exact_cleanup
 test_live_non_bridge_pid_is_never_signaled
 test_live_bridge_for_another_session_is_never_signaled
 test_worker_stop_uses_identity_bound_shutdown
+test_hanging_shutdown_escalates_only_exact_process_group
 test_terminal_sweep_closes_only_terminal_owner
 test_idle_detection_warns_uncertain_and_closes_orphan
 test_owned_process_counts_and_capacity_warning_rearm

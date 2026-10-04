@@ -19,7 +19,8 @@
 # task meta file. It reads that named session's own bridge.pid, refuses a live
 # PID whose process is not chrome-devtools-axi's bridge, asks the exact bridge's
 # session-bound shutdown endpoint to stop itself, and verifies that exact bridge
-# is gone. The bridge owns graceful MCP/Chrome closure and whole-tree cleanup.
+# is gone. The endpoint's in-group watchdog bounds graceful MCP/Chrome closure
+# and escalates only against the process group whose membership it revalidates.
 # Missing `browser_session=` is a compatibility no-op for tasks launched before this
 # safeguard. No command enumerates and kills arbitrary Chrome processes.
 #
@@ -222,7 +223,7 @@ cleanup_browser_session() {  # <firstmate-home> <task-meta>
     return 1
   fi
   attempt=0
-  while [ "$attempt" -lt 20 ] && browser_pid_is_bridge "$pid"; do
+  while [ "$attempt" -lt 30 ] && browser_pid_is_bridge "$pid"; do
     sleep 0.1
     attempt=$((attempt + 1))
   done

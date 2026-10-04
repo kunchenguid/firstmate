@@ -409,6 +409,7 @@ Secondmates do not receive a browser assignment themselves; tasks launched from 
 
 `bin/fm-control.sh ... exit` and `bin/fm-teardown.sh` stop the recorded exact browser session as part of worker cleanup.
 The task launch path wraps chrome-devtools-axi so each bridge exposes a loopback-only shutdown endpoint that validates its own session identity and then signals itself.
+Before graceful shutdown, that exact bridge starts a bounded watchdog inside its detached process group; if shutdown hangs, the watchdog revalidates that it still belongs to the original group and force-kills only that group.
 The browser helper validates the metadata against the expected home-and-task identity, validates the recorded bridge PID and port, requests shutdown from that exact endpoint without signaling a reusable PID, and verifies that bridge exited.
 It never enumerates Chrome processes as kill targets, and a malformed identity or PID refuses cleanup rather than risking an active or unrelated browser.
 The watcher provides a bounded backstop: terminal task outcomes close a surviving recorded session, and a session with no change in its own chrome-devtools-axi state for the idle timeout is detected.
