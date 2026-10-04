@@ -490,6 +490,64 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+# Arm the real merge poll on a task, then report whether the watcher's own
+# validation (the one fm-watch.sh runs before every poll) still accepts it.
+arm_pr_poll() {  # <case-dir> <id> <url>
+  local dir=$1 id=$2 url=$3
+  # The forge answers only the head lookup; every other read is unavailable.
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *headRefOid*) echo 0123456789abcdef0123456789abcdef01234567 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" "$id" "$url" >/dev/null 2>&1
+}
+
+pr_poll_still_watched() {  # <case-dir> <id>
+  bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    fm_pr_poll_snapshot_capture "$2/state" "$3" "$1/bin/fm-pr-poll.sh" &&
+      fm_pr_metadata_identity_parse "$2/state/$3.meta"
+  ' _ "$ROOT" "$1/home" "$2"
+}
+
+test_relaunch_keeps_the_pr_merge_poll_watching() {
+  local dir out rc url=https://github.com/example/repo/pull/41 mode
+  for mode in off on; do
+    dir=$(new_case "pr-poll-$mode" rl41)
+    add_ship_task "$dir" rl41 claude
+    printf '%s\n' "$$" > "$dir/home/state/.lock"
+    printf '%s %s\n' "$$" "$mode" > "$dir/home/state/.trace-context-effective"
+    arm_pr_poll "$dir" rl41 "$url" || fail "could not arm the PR poll before the relaunch"
+    pr_poll_still_watched "$dir" rl41 || fail "the armed PR poll was not accepted before the relaunch"
+
+    out=$(run_control "$dir" rl41 relaunch --note "continuing after the PR was opened"); rc=$?
+    expect_code 0 "$rc" "relaunch of a task with a registered PR should succeed (trace $mode)"$'\n'"$out"
+    [ "$(meta_field "$dir" rl41 control_relaunch_tx)" != "" ] \
+      || fail "the relaunch transaction tag should still be recorded (trace $mode)"
+    pr_poll_still_watched "$dir" rl41 \
+      || fail "relaunch silently invalidated the PR merge poll (trace $mode)"$'\n'"$(cat "$dir/home/state/rl41.meta")"
+    [ "$(tail -n 1 "$dir/home/state/rl41.meta" | cut -d= -f1)" = pr ] \
+      || [ "$(tail -n 1 "$dir/home/state/rl41.meta" | cut -d= -f1)" = pr_head ] \
+      || fail "the pr= identity block must stay last in the record (trace $mode)"
+  done
+  pass "fm-control relaunch: a registered PR keeps its merge poll, with tracing on and off"
+}
+
+test_relaunch_without_a_pr_has_no_poll_to_keep() {
+  local dir out rc
+  dir=$(new_case no-pr rl42)
+  add_ship_task "$dir" rl42 claude
+  out=$(run_control "$dir" rl42 relaunch --note "no PR yet"); rc=$?
+  expect_code 0 "$rc" "relaunch without a PR should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl42 pr)" ] || fail "a relaunch must not invent a PR"
+  [ ! -e "$dir/home/state/rl42.check.sh" ] || fail "a relaunch must not arm a poll nobody registered"
+  pass "fm-control relaunch: a task with no PR is unaffected"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -2391,6 +2449,8 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_the_pr_merge_poll_watching
+test_relaunch_without_a_pr_has_no_poll_to_keep
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
