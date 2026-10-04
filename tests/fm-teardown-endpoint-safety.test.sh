@@ -1020,6 +1020,331 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
 }
 
+# The issue 6444 collision: no slot claim, two records naming one slot, one of
+# them live. Ordinary teardown refuses; the records-only release retires the
+# stale record without touching the slot or the live task.
+stage_unclaimed_duplicate() {  # <case-name> <stale-kind> [stale meta...]
+  local dir other=live-task name=$1 kind=$2
+  shift 2
+  dir=$(make_case "$name")
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/project" branch "fm/$other"
+  fm_write_meta "$dir/home/state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" "endpoint_task_id=stale-task" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=$kind" "$@"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/$other"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+case "$1" in
+  kill-window)
+    [ -z "${FM_TEST_FAIL_KILL:-}" ] || exit 1
+    ;;
+  list-windows)
+    printf 'fm-live-task\n'
+    [ -z "${FM_TEST_STALE_COMMAND:-}" ] || printf 'fm-stale-task\n'
+    ;;
+  display-message)
+    case "$*" in
+      *fm-stale-task*) printf '%s\n' "${FM_TEST_STALE_COMMAND:-}" ;;
+      *) printf 'codex\n' ;;
+    esac
+    ;;
+esac
+SH
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/gh"
+  cp "$dir/fakebin/gh" "$dir/fakebin/gh-axi"
+  chmod +x "$dir/fakebin/tmux" "$dir/fakebin/gh" "$dir/fakebin/gh-axi"
+  printf '%s\n' "$dir"
+}
+
+run_release() {  # <case> <id>
+  local dir=$1 id=$2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --release-duplicate-claim \
+    > "$dir/stdout" 2> "$dir/stderr"
+}
+
+expect_release_refused() {  # <case> <id> <stderr-fragment> <description>
+  local dir=$1 id=$2 fragment=$3 description=$4 rc
+  set +e
+  run_release "$dir" "$id"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$description: records-only release unexpectedly succeeded"
+  assert_present "$dir/home/state/$id.meta" "$description: refusal removed stale metadata"
+  assert_contains "$(cat "$dir/stderr")" "$fragment" "$description: refusal did not explain the cause"
+}
+
+assert_released_leaving_live_slot() {  # <case> <id> <description>
+  local dir=$1 id=$2 description=$3
+  assert_absent "$dir/home/state/$id.meta" "$description: release kept stale metadata"
+  compgen -G "$dir/home/data/$id/retired-duplicate-claim.*.meta" >/dev/null \
+    || fail "$description: release did not archive the stale record"
+  assert_present "$dir/home/state/live-task.meta" "$description: release removed live owner metadata"
+  assert_present "$dir/worktree/sentinel" "$description: release touched the live slot"
+  ! grep -Fq 'treehouse <return>' "$dir/runtime.log" \
+    || fail "$description: release returned the live slot"
+}
+
+test_unclaimed_duplicate_requires_records_only_release() {
+  local dir rc worker
+  dir=$(stage_unclaimed_duplicate duplicate-release ship "branch=fm/stale-task" \
+    "spawn_gen=spawn-stale-duplicate")
+  git -C "$dir/project" branch fm/stale-task
+  fm_write_meta "$dir/home/state/stale-two.meta" \
+    "window=firstmate:fm-stale-two" "endpoint_task_id=stale-two" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/stale-task" \
+    "spawn_gen=spawn-stale-two"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    cat > "$dir/home/.tasks.toml" <<'TOML'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+TOML
+    printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+      > "$dir/home/data/backlog.md"
+    tasks-axi add stale-task "stale duplicate" --kind ship --file "$dir/home/data/backlog.md" >/dev/null
+    tasks-axi start stale-task --file "$dir/home/data/backlog.md" >/dev/null
+    tasks-axi add stale-two "second stale duplicate" --kind ship --file "$dir/home/data/backlog.md" >/dev/null
+    tasks-axi start stale-two --file "$dir/home/data/backlog.md" >/dev/null
+  fi
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" stale-task > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ordinary teardown retired an unclaimed duplicate"
+  assert_present "$dir/worktree/sentinel" "ordinary duplicate refusal reset the live slot"
+  assert_contains "$(cat "$dir/stderr")" "--release-duplicate-claim" \
+    "ordinary teardown did not name the supported repair path"
+
+  for verdict in codex sleep; do
+    FM_TEST_STALE_COMMAND=$verdict expect_release_refused "$dir" stale-task \
+      "not positively agent-free" "stale endpoint running $verdict"
+  done
+
+  run_release "$dir" stale-task \
+    || fail "records-only release refused an agent-free landed stale record: $(cat "$dir/stderr")"
+  assert_released_leaving_live_slot "$dir" stale-task "landed ship beside a second stale record"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    tasks-axi show stale-task --file "$dir/home/data/backlog.md" \
+      | grep -Fq 'state: done' || fail "records-only release did not close the stale backlog item"
+  fi
+  run_release "$dir" stale-two \
+    || fail "second stale record on one slot could not be released: $(cat "$dir/stderr")"
+  assert_released_leaving_live_slot "$dir" stale-two "second stale record"
+  kill -0 "$worker" 2>/dev/null || fail "records-only release killed the live worker"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # The guard checks below rewrite a bare stale record; the backlog gate (and its
+  # spawn_gen requirement) is already covered above, so take it out of the way.
+  rm -f "$dir/home/.tasks.toml" "$dir/home/data/backlog.md"
+  claim_pool_slot "$dir" live-task
+  fm_write_meta "$dir/home/state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" "endpoint_task_id=stale-task" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/stale-task"
+  expect_release_refused "$dir" stale-task "ordinary teardown" "claimed slot"
+  claim_pool_slot "$dir" stale-task
+  expect_release_refused "$dir" stale-task "cannot be proved the stale duplicate" "own claim"
+  rm -f "$dir/pool/1/.fm-slot-owner"
+
+  fm_write_meta "$dir/home/state/live-task.meta" \
+    "window=firstmate:fm-gone-task" "endpoint_task_id=live-task" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/live-task"
+  expect_release_refused "$dir" stale-task "live owner cannot be identified" "no live owner"
+  rm -f "$dir/home/state/live-task.meta"
+  expect_release_refused "$dir" stale-task "no other task" "no other record"
+
+  pass "fm-teardown: an unclaimed duplicate refuses ordinary teardown; records-only release retires each stale record and leaves the live slot"
+}
+
+test_records_only_release_uses_landed_work_proofs() {
+  local dir unique current
+  dir=$(stage_unclaimed_duplicate duplicate-unlanded ship "branch=fm/stale-task")
+  # The commit must change content: an empty change is already in the default
+  # branch by content, which ordinary teardown rightly counts as landed.
+  unique=$(printf '100644 blob %s\tunique.txt\n' \
+    "$(printf 'unique\n' | git -C "$dir/project" hash-object -w --stdin)" | git -C "$dir/project" mktree)
+  unique=$(printf 'unique\n' | git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit-tree "$unique" -p HEAD)
+  git -C "$dir/project" update-ref refs/heads/fm/stale-task "$unique"
+  expect_release_refused "$dir" stale-task "not landed" "unique unlanded commit"
+
+  # A pruned branch is judged by the forge's merged PR head: a recorded
+  # last-known head (pr_head=) must be within it; with none recorded, nothing
+  # local is left to lose and the archive says so.
+  for unique in none beyond equal; do
+    dir=$(stage_unclaimed_duplicate "duplicate-squash-pruned-$unique" ship "branch=fm/stale-task" \
+      "pr=https://github.com/example/project/pull/7")
+    current=$(git -C "$dir/project" rev-parse HEAD)
+    cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+if [ "\$1 \$2" = "pr view" ]; then
+  printf 'MERGED\t$current\thttps://github.com/example/project/pull/7\n'
+  exit 0
+fi
+exit 1
+SH
+    chmod +x "$dir/fakebin/gh"
+    case "$unique" in
+      beyond)
+        printf 'pr_head=%s\n' "$(printf 'beyond\n' | git -C "$dir/project" -c user.name=test \
+          -c user.email=test@example.invalid commit-tree 'HEAD^{tree}' -p HEAD)" >> "$dir/home/state/stale-task.meta"
+        expect_release_refused "$dir" stale-task "no merged PR head contains" \
+          "pruned branch whose recorded head is one commit beyond the PR head"
+        continue
+        ;;
+      equal) printf 'pr_head=%s\n' "$current" >> "$dir/home/state/stale-task.meta" ;;
+    esac
+    run_release "$dir" stale-task \
+      || fail "records-only release refused a squash-merged pruned ship (pr_head $unique): $(cat "$dir/stderr")"
+    assert_released_leaving_live_slot "$dir" stale-task "squash-merged pruned ship (pr_head $unique)"
+    if [ "$unique" = none ]; then
+      grep -Fqx 'release_note=branch pruned; no local evidence of unlanded commits' \
+        "$dir"/home/data/stale-task/retired-duplicate-claim.*.meta \
+        || fail "pruned release with no recorded head did not note it in the archive"
+    else
+      ! grep -Fq 'release_note=' "$dir"/home/data/stale-task/retired-duplicate-claim.*.meta \
+        || fail "pruned release with a recorded head noted missing evidence"
+    fi
+  done
+
+  dir=$(stage_unclaimed_duplicate duplicate-pruned-unmerged ship "branch=fm/stale-task")
+  expect_release_refused "$dir" stale-task "no merged PR head contains" "pruned branch with no merged PR"
+
+  dir=$(stage_unclaimed_duplicate duplicate-local-only ship "branch=fm/stale-task" "mode=local-only")
+  unique=$(printf 'landed\n' | git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit-tree 'HEAD^{tree}' -p HEAD)
+  git -C "$dir/project" update-ref refs/heads/fm/stale-task "$unique"
+  expect_release_refused "$dir" stale-task "not yet merged" "local-only work not on local main"
+  current=$(git -C "$dir/project" symbolic-ref --short HEAD)
+  git -C "$dir/project" update-ref "refs/heads/$current" "$unique"
+  run_release "$dir" stale-task \
+    || fail "records-only release refused local-only work merged into local main: $(cat "$dir/stderr")"
+  assert_released_leaving_live_slot "$dir" stale-task "local-only landed ship"
+
+  pass "fm-teardown: records-only release accepts merged-PR and local-main landing and refuses unlanded branch work"
+}
+
+# A symlinked $FM_HOME (macOS /var -> /private/var) reaches the same state dir
+# as the canonical root home; it must be scanned once, not count the live owner twice.
+test_records_only_release_through_symlinked_home() {
+  local dir
+  dir=$(stage_unclaimed_duplicate duplicate-symlinked-home ship "branch=fm/stale-task")
+  git -C "$dir/project" branch fm/stale-task
+  ln -s "$dir" "$dir.link"
+  FM_HOME="$dir.link/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" stale-task --release-duplicate-claim \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "records-only release through a symlinked FM_HOME refused: $(cat "$dir/stderr")"
+  assert_released_leaving_live_slot "$dir" stale-task "release through symlinked FM_HOME"
+  pass "fm-teardown: records-only release works when FM_HOME is reached through a symlink"
+}
+
+# Zellij and cmux have no recovery classifier, so neither the stale endpoint nor
+# a sibling's can be judged: release refuses with the backend named.
+test_records_only_release_refuses_unverified_backends() {
+  local dir
+  dir=$(stage_unclaimed_duplicate duplicate-zellij ship "branch=fm/stale-task")
+  git -C "$dir/project" branch fm/stale-task
+  fm_write_meta "$dir/home/state/stale-task.meta" \
+    "window=lab:7" "endpoint_task_id=stale-task" "worktree=$dir/worktree" "project=$dir/project" \
+    "kind=ship" "branch=fm/stale-task" \
+    "backend=zellij" "zellij_session=lab" "zellij_tab_id=3" "zellij_pane_id=7"
+  expect_release_refused "$dir" stale-task \
+    "backend zellij cannot prove the endpoint agent-free; release unavailable on this backend" "stale zellij endpoint"
+
+  dir=$(stage_unclaimed_duplicate duplicate-cmux-sibling ship "branch=fm/stale-task")
+  git -C "$dir/project" branch fm/stale-task
+  fm_write_meta "$dir/home/state/live-task.meta" \
+    "window=workspace-1:surface-2" "endpoint_task_id=live-task" "worktree=$dir/worktree" "project=$dir/project" \
+    "kind=ship" "branch=fm/live-task" \
+    "backend=cmux" "cmux_workspace_id=workspace-1" "cmux_surface_id=surface-2"
+  expect_release_refused "$dir" stale-task \
+    "backend cmux cannot prove the endpoint agent-free; release unavailable on this backend" "cmux sibling endpoint"
+  pass "fm-teardown: records-only release refuses, naming the backend, when Zellij or cmux cannot prove an endpoint agent-free"
+}
+
+# The archive is a two-phase commit: <name>.pending before any cleanup, the
+# record removed, then the rename to <name>. A failure between any two phases
+# leaves the record or an archive of it, and a retry converges.
+assert_archive_state() {  # <case> <pending-count> <final-count> <description>
+  local dir=$1 pending final
+  pending=$(compgen -G "$dir/home/data/stale-task/retired-duplicate-claim.*.meta.pending" | wc -l | tr -d ' ')
+  final=$(compgen -G "$dir/home/data/stale-task/retired-duplicate-claim.*.meta" | wc -l | tr -d ' ')
+  [ "$pending:$final" = "$2:$3" ] || fail "$4: expected $2 pending and $3 final archives, found $pending and $final"
+}
+
+test_records_only_release_archives_in_two_phases() {
+  local dir
+  dir=$(stage_unclaimed_duplicate duplicate-archive-phases ship "branch=fm/stale-task" "spawn_gen=gen-1")
+  git -C "$dir/project" branch fm/stale-task
+  cat > "$dir/fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in
+  *retired-duplicate-claim*.pending) [ -z "${FM_TEST_FAIL_ARCHIVE_PENDING:-}" ] || exit 1 ;;
+  *retired-duplicate-claim*.meta) [ -z "${FM_TEST_FAIL_ARCHIVE_FINAL:-}" ] || exit 1 ;;
+esac
+exec /bin/ln "$@"
+SH
+  chmod +x "$dir/fakebin/ln"
+  # An earlier generation's archive keeps its name; this one takes a suffix.
+  mkdir -p "$dir/home/data/stale-task"
+  printf 'earlier\n' > "$dir/home/data/stale-task/retired-duplicate-claim.gen-1.meta"
+
+  FM_TEST_STALE_COMMAND=zsh FM_TEST_FAIL_ARCHIVE_PENDING=1 expect_release_refused "$dir" stale-task \
+    "pending retirement archive" "pending archive publish failing"
+  assert_archive_state "$dir" 0 1 "failed pending publish"
+  ! grep -Fq 'kill-window' "$dir/runtime.log" || fail "a failed pending publish still closed the endpoint"
+
+  FM_TEST_STALE_COMMAND=zsh FM_TEST_FAIL_KILL=1 expect_release_refused "$dir" stale-task \
+    "" "endpoint close failing after the pending archive"
+  assert_archive_state "$dir" 1 1 "failed endpoint close"
+
+  ! FM_TEST_STALE_COMMAND=zsh FM_TEST_FAIL_ARCHIVE_FINAL=1 run_release "$dir" stale-task \
+    || fail "records-only release reported success when its final archive rename failed"
+  assert_contains "$(cat "$dir/stderr")" "could not be published" "failed final rename did not explain the cause"
+  assert_absent "$dir/home/state/stale-task.meta" "failed final rename kept the record"
+  assert_archive_state "$dir" 1 1 "failed final rename"
+  grep -Fqx 'spawn_gen=gen-1' "$dir"/home/data/stale-task/retired-duplicate-claim.gen-1.1.meta.pending \
+    || fail "the pending archive does not hold the removed record"
+
+  run_release "$dir" stale-task || fail "records-only release retry did not finalize: $(cat "$dir/stderr")"
+  assert_archive_state "$dir" 0 2 "retry after failed final rename"
+  grep -Fqx 'earlier' "$dir/home/data/stale-task/retired-duplicate-claim.gen-1.meta" \
+    || fail "records-only release overwrote an earlier archive"
+  grep -Fqx 'spawn_gen=gen-1' "$dir/home/data/stale-task/retired-duplicate-claim.gen-1.1.meta" \
+    || fail "the finalized archive does not hold the removed record"
+  pass "fm-teardown: records-only release archives in two phases and a retry converges after a failure between any two"
+}
+
+test_records_only_release_of_stale_scout() {
+  local dir
+  dir=$(stage_unclaimed_duplicate duplicate-scout scout)
+  expect_release_refused "$dir" stale-task "no report" "scout without report"
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "fm-teardown: records-only release refuses a stale scout without a report (tasks-axi absent; release path skipped)"
+    return 0
+  fi
+  mkdir -p "$dir/home/data/stale-task"
+  printf '# report\n' > "$dir/home/data/stale-task/report.md"
+  printf 'decisions_reviewed=1\n' >> "$dir/home/state/stale-task.meta"
+  run_release "$dir" stale-task \
+    || fail "records-only release refused a stale scout with a report: $(cat "$dir/stderr")"
+  assert_released_leaving_live_slot "$dir" stale-task "scout with report"
+  pass "fm-teardown: records-only release retires a reported stale scout and refuses one without a report"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1441,6 +1766,12 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_unclaimed_duplicate_requires_records_only_release
+test_records_only_release_uses_landed_work_proofs
+test_records_only_release_through_symlinked_home
+test_records_only_release_of_stale_scout
+test_records_only_release_refuses_unverified_backends
+test_records_only_release_archives_in_two_phases
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
