@@ -64,6 +64,11 @@ fm_backend_herdr_kill() { return 0; }
 SH
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
+  ln -s "$ROOT/bin/fm-teardown-worktree-lib.sh" "$fake/bin/fm-teardown-worktree-lib.sh"
+  ln -s "$ROOT/bin/fm-cleanup-receipt-lib.sh" "$fake/bin/fm-cleanup-receipt-lib.sh"
+  ln -s "$ROOT/bin/fm-short-owner-lib.sh" "$fake/bin/fm-short-owner-lib.sh"
+  ln -s "$ROOT/bin/fm-task-progress-lib.sh" "$fake/bin/fm-task-progress-lib.sh"
+  ln -s "$ROOT/bin/fm-teardown-endpoint-lib.sh" "$fake/bin/fm-teardown-endpoint-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
@@ -80,12 +85,6 @@ SH
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
-  # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
-  # it for the relay-activation gate on the promised-public-reply check. Neither
-  # does anything in this fixture, which has no .env, but both are real siblings
-  # teardown now requires.
-  ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
-  ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   # Ordinary teardown reports any final ledger outcome before removing records.
   ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
@@ -169,6 +168,11 @@ fm_backend_herdr_kill() { return 0; }
 SH
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
+  ln -s "$ROOT/bin/fm-teardown-worktree-lib.sh" "$fake/bin/fm-teardown-worktree-lib.sh"
+  ln -s "$ROOT/bin/fm-cleanup-receipt-lib.sh" "$fake/bin/fm-cleanup-receipt-lib.sh"
+  ln -s "$ROOT/bin/fm-short-owner-lib.sh" "$fake/bin/fm-short-owner-lib.sh"
+  ln -s "$ROOT/bin/fm-task-progress-lib.sh" "$fake/bin/fm-task-progress-lib.sh"
+  ln -s "$ROOT/bin/fm-teardown-endpoint-lib.sh" "$fake/bin/fm-teardown-endpoint-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
@@ -182,12 +186,6 @@ SH
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
-  # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
-  # it for the relay-activation gate on the promised-public-reply check. Neither
-  # does anything in this fixture, which has no .env, but both are real siblings
-  # teardown now requires.
-  ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
-  ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash

@@ -79,7 +79,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
-| `fm-tasks-axi.sh`        | Compatibility task CRUD entrypoint over canonical records, plus the explicit non-task public-followup bridge |
+| `fm-tasks-axi.sh`        | Canonical task CRUD entrypoint over per-task records |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector, markdown archive resolver, and `tasks-axi` compatibility probe |
 | `fm-task-disposition-lib.sh` | Guard effects with canonical dispositions and retained legacy markdown evidence |
 | `fm-backlog-transition-lib.sh` | Apply canonical task transitions and replay interrupted operation-owned closes |
@@ -115,13 +115,4 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-teardown.sh`         | Retire accepted/archived task panes and records while preserving unsafe copies; keep landed-work gates for legacy teardown |
 | `fm-harness.sh`          | Detect the running harness, resolve worker harness, model, and effort, and validate the native-only `ultra` effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
-| `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |
-| `fm-x-poll.sh`           | One bounded Relay poll: stash newly offered mentions and emit their once-only wake   |
-| `fm-x-reply.sh`          | Post or dry-run preview a composed Relay reply or follow-up                          |
-| `fm-x-dismiss.sh`        | Dismiss a skipped Relay mention at the relay without replying                        |
-| `fm-x-link.sh`           | Link a spawned task to its originating Relay mention in task meta                    |
-| `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for a Relay-linked task                  |
-| `fm-public-followup-lib.sh` | Shared Relay gate, open-loop registry state, expiry classification, locking, and private state paths |
-| `fm-public-followup.sh`  | Reconcile and deliver typed public commitments, then rechain or explicitly retire their retained loops |
-| `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply |
 | `fm-inbox.sh`            | The captain's out-of-band text surface: queue a note, read status, ask a side question |

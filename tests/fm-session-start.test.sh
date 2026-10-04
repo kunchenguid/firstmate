@@ -160,7 +160,6 @@ case "${1:-}" in
       printf '  ready-%s,queued,ship,firstmate,Ready item %s\n' "$i" "$i"
       i=$((i + 1))
     done
-    printf 'ready_public_followups: 0 delivery-ready obligations\n'
     printf 'help[1]:\n'
     printf '%s\n' '  - Run `tasks-axi start <id>` to dispatch one of these'
     exit 0
@@ -1830,27 +1829,6 @@ EOF
   pass "an empty fleet reports no in-flight tasks and no legacy mode records"
 }
 
-test_next_step_sources_x_mode_cadence() {
-  local rec root home fakebin out
-  rec=$(new_world next-step-x)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  fm_fake_exit0 "$fakebin" curl jq
-  printf 'FMX_PAIRING_TOKEN=tok-next-step\n' > "$home/.env"
-
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "FMX: X mode on" "bootstrap did not activate X mode"
-  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi" "supervision block missing"
-  assert_contains "$out" "- X mode: active" "supervision block did not mention X cadence"
-  assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
-
-  pass "session start emits X-mode cadence guidance in the harness supervision block"
-}
-
 test_legacy_mode_records_are_inactive() {
   local rec root home fakebin out rc legacy_pid legacy_identity ambiguous_pid
   rec=$(new_world legacy-mode-records)
@@ -2058,7 +2036,6 @@ test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
 test_session_start_reads_only_canonical_task_records
 test_fleet_digest_empty_fleet
-test_next_step_sources_x_mode_cadence
 test_legacy_mode_records_are_inactive
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_diagnostic_rejects_stale_loaded_marker

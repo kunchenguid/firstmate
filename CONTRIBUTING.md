@@ -19,7 +19,6 @@ Changes should be reviewed against their actual intent before they are proposed,
   `.agents/skills/` holds agent-loaded skills that assume a live firstmate home and carry `metadata.internal: true` so installers such as [skills.sh](https://skills.sh) hide them from discovery; `skills/` holds standalone, installer-facing public skills with no firstmate dependency (see the README's "Two-tier skill layout").
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, and `projects/`) is gitignored; never commit it.
   Canonical task state lives only in `data/<task>/task.json`; [`bin/fm-tasks-axi.sh`](bin/fm-tasks-axi.sh) is the supported task CRUD entry point.
-  The root `.tasks.toml` and compatible external `tasks-axi` remain scoped to the separate public-followup typed-obligation family; they do not select or redirect task storage.
   A local `config/backend` file may select `herdr`, the sole supported terminal; an absent setting selects Herdr and an explicit retired setting refuses.
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.

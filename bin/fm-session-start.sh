@@ -32,8 +32,8 @@
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's mutating sweeps
-#                       (same-home backlog reconciliation, X-mode artifact
-#                       writes, and fleet sync) also run only when locked; the
+#                       (same-home backlog reconciliation and fleet sync) also
+#                       run only when locked; the
 #                       network sweep runs in the deferred
 #                       stage rather than this synchronous bootstrap section.
 #   3. wake-drain     - presents durable wakes and advances recovery handling
@@ -104,8 +104,8 @@
 # reminder line when one is missing.
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
-# SECOND concurrent session run bootstrap's mutating sweeps - writing X-mode
-# artifacts and fetching or fast-forwarding every project clone - before
+# SECOND concurrent session run bootstrap's mutating sweeps - fetching or
+# fast-forwarding every project clone - before
 # ever discovering another session already holds the lock. Two sessions racing
 # those sweeps is exactly the hazard the lock exists to prevent, so locking first closes the
 # hole outright: only the session that actually wins the lock ever touches
@@ -190,9 +190,8 @@
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
 #             mutating sweeps that startup already reconciled - the stale Herdr
-#             projection cleanup and bootstrap's six mutating sweeps (fleet
-#             sync, same-home backlog reconciliation, and X-mode
-#             artifact writes) - and
+#             projection cleanup and bootstrap's mutating sweeps (fleet sync
+#             and same-home backlog reconciliation) - and
 #             re-emit the rest. Wake-queue presentation is NOT skipped: queued
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
@@ -362,8 +361,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-task-disposition-lib.sh
 . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
-# shellcheck source=bin/fm-public-followup-lib.sh
-. "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -372,10 +371,9 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
-# tasks-axi subprocesses and this digest needs the same answer twice - here for
-# bootstrap and the public-followup owner, which report
-# an incompatible build as MISSING. Computing it once and handing it to that
-# child collapses six subprocesses to three. fm-tasks-axi-lib.sh owns both reuse
+# tasks-axi subprocesses and bootstrap needs the same answer in its child.
+# Computing it once and handing it to that child avoids a duplicate probe.
+# fm-tasks-axi-lib.sh owns both reuse
 # layers and the one-hop consumption rule that keeps the verdict out of any
 # agent's environment.
 if fm_tasks_axi_compatible; then TASKS_AXI_COMPATIBLE=1; else TASKS_AXI_COMPATIBLE=0; fi
@@ -715,7 +713,7 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'This session already took the helm at its own startup and has only lost its\n'
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
   printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
-  printf 'X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
+  printf 'same-home backlog reconciliation, and stale Herdr child cleanup - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
 else
   section "SESSION START - $FM_HOME"
@@ -734,8 +732,8 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: stale Herdr child cleanup, X-mode artifacts,\n'
-    printf '●  fleet sync, and wake-queue drain. Detect-only bootstrap\n'
+    printf '●  Skipping every mutating step: stale Herdr child cleanup, fleet sync,\n'
+    printf '●  same-home backlog reconciliation, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
@@ -837,9 +835,6 @@ fi
 
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
-X_MODE_PRESENT=0
-[ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
-
 if [ "$PRIMARY_HARNESS" = pi ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
   PI_TURNEND_EXT="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
@@ -869,8 +864,7 @@ if [ "$PRIMARY_HARNESS" = pi ]; then
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
-  --read-only "$READ_ONLY" \
-  --x-mode "$X_MODE_PRESENT"
+  --read-only "$READ_ONLY"
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
@@ -952,24 +946,6 @@ else
   printf '(none)\n'
 fi
 
-# Public commitments made through the myfirstmate relay. A promise to reply in a
-# public thread must survive compaction and restart, so it is surfaced from disk
-# here rather than from conversation memory. fm-public-followup-lib.sh owns both
-# gates: a home that never opted into the relay runs one [ -f ] test, prints no
-# subsection, and never reaches fm-public-followup.sh.
-if fm_pf_relay_active "$FM_HOME" \
-  && { fm_pf_has_registrations "$STATE" || fm_pf_has_events "$STATE"; }; then
-  PUBLIC_FOLLOWUP=$("$SCRIPT_DIR/fm-public-followup.sh" pending 2>/dev/null) || PUBLIC_FOLLOWUP=
-  if [ -n "$PUBLIC_FOLLOWUP" ]; then
-    subsection "Public commitments"
-    printf '%s\n' "$PUBLIC_FOLLOWUP"
-    printf '\nEach line is a public loop this home still holds: a reply still owed, or an open loop with nothing owed.\n'
-    printf 'Reconcile terminal results with %s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
-    printf '%s/bin/fm-public-followup.sh deliver <id>. Hand a delivered loop on with rechain, or close it with\n' "$FM_ROOT"
-    printf '%s/bin/fm-public-followup.sh retire <id> --reason "...". Load fmx-respond for the procedure.\n' "$FM_ROOT"
-  fi
-fi
-
 # --- 7. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
 # a stuck project clone or broken GitHub auth), and the section
@@ -1015,13 +991,6 @@ if [ "$READ_ONLY" -eq 1 ]; then
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session
 with verified fleet-lock ownership may perform mutable follow-up.
-
-EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
-  cat <<EOF
-Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
-X mode is active, so the emitted block's cadence instruction applies.
-This script never starts supervision itself.
 
 EOF
 else

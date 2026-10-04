@@ -85,17 +85,6 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
-test_predicate_x_mode_needs_supervision() {
-  local state="$TMP_ROOT/pred-x-mode/state"
-  mkdir -p "$state"
-  : > "$state/x-watch.check.sh"
-  fm_supervision_needed "$state" 300 || fail "X-mode relay poll did not register as supervision need"
-  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "X-mode relay poll must not count as an in-flight task"
-  [ "$FM_SUP_NEEDED" = true ] || fail "X-mode relay poll must set FM_SUP_NEEDED"
-  fm_supervision_unhealthy "$state" 300 || fail "X-mode relay poll with no beacon must be unhealthy"
-  pass "fm_supervision_needed: X-mode relay poll needs supervision"
-}
-
 test_predicate_source_needs_supervision() {
   local state="$TMP_ROOT/pred-source/state"
   mkdir -p "$state/procevent"
@@ -164,13 +153,15 @@ test_predicate_task_pr_poll_is_not_a_custom_check() {
   pass "fm_supervision_needed: a task PR poll without a trust binding is not a registered custom check"
 }
 
-test_predicate_relay_shim_is_not_a_custom_check() {
-  local state="$TMP_ROOT/pred-relay-not-custom/state"
+test_predicate_retained_relay_shim_is_inert() {
+  local state="$TMP_ROOT/pred-relay-inert/state"
   mkdir -p "$state"
   : > "$state/x-watch.check.sh"
-  fm_supervision_needed "$state" 300 || fail "the relay poll must still need supervision"
-  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "the relay shim keeps its own trust path and must not be counted as a custom check"
-  pass "fm_supervision_status: the relay shim is not counted as a registered custom check"
+  if fm_supervision_needed "$state" 300; then
+    fail "a retained Relay shim must not arm supervision"
+  fi
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "a retained Relay shim must not count as a custom check"
+  pass "fm_supervision_status: a retained Relay shim is inert"
 }
 
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
@@ -361,29 +352,6 @@ test_hook_blocks_from_fm_home_state() {
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
-}
-
-test_hook_x_mode_reason_sources_cadence() {
-  local dir home out status
-  dir=$(make_primary_dir "$TMP_ROOT/hook-x-mode")
-  home=$(cd "$dir" && pwd)
-  mkdir -p "$dir/config"
-  : > "$dir/config/x-mode.env"
-  : > "$dir/state/task1.meta"
-  out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block when in-flight X-mode work has no live watcher"
-  assert_contains "$out" "source '$home/config/x-mode.env' first" "block reason must source the effective X-mode cadence"
-  pass "fm-turnend-guard: X-mode repair reason sources the cadence config"
-}
-
-test_hook_x_mode_only_blocks_in_default_mode() {
-  local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/hook-x-mode-only")
-  : > "$dir/state/x-watch.check.sh"
-  out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "default hook mode must block an X-mode-only blind turn"
-  assert_contains "$out" "X-mode relay polling needs supervision" "X-mode-only blind stop must identify its supervision need"
-  pass "fm-turnend-guard: X-mode-only supervision remains guarded in default mode"
 }
 
 test_hook_registered_check_only_blocks_with_check_banner() {
@@ -886,13 +854,12 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
-test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_predicate_registered_check_needs_supervision
 test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check
-test_predicate_relay_shim_is_not_a_custom_check
+test_predicate_retained_relay_shim_is_inert
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
@@ -901,8 +868,6 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
-test_hook_x_mode_reason_sources_cadence
-test_hook_x_mode_only_blocks_in_default_mode
 test_hook_registered_check_only_blocks_with_check_banner
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override

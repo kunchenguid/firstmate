@@ -47,7 +47,6 @@ Launching a supported harness inside it for your primary session instantiates yo
 - **Explicit project modes** - each project ships via intent-aware harness-native `review-PR`, `direct-PR`, or `local-only`, with an optional `+yolo` merge-autonomy flag.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional Feishu channel for Pi** - configure one protected gitignored local file to pair one allowlisted Feishu user and P2P chat automatically with the exact current persisted Pi session, receive through the official Node SDK long connection, submit durable Feishu events with native steering without intercepting TUI input, and mirror finalized Assistant text from that session to the bound chat with exact generation and persisted-entry fencing.
-- **Optional Relay** - opt in with one local `.env` pairing token so firstmate can answer your public mentions on X and Discord alike, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-Relay behavior; a final reply promised in a thread becomes durable state that is reconciled from disk, so a restart or a compacted conversation cannot lose it; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Strict project boundary** - the first mate is read-only over your projects except for the narrow guarded and captain-approved operations authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), including fleet sync's guarded safe branch pruning; crewmates make every other project change behind the configured merge authority.
 - **Restart-proof** - all state lives on disk and in the Herdr session; kill the session anytime and the next one reconciles ordinary work and carries on.
 
@@ -137,9 +136,9 @@ The Herdr setup guide is linked in [Documentation](#documentation) below.
 
 You chat with the first mate.
 It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
-Dispatch profiles let you steer which harness handles which task, and opt-in Relay lets the same fleet answer public mentions.
+Dispatch profiles let you steer which harness handles each task.
 
-Full architecture - the supervision engine, worktree isolation, dispatch profiles, project modes, optional Relay, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
+Full architecture - the supervision engine, worktree isolation, dispatch profiles, project modes, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
 ## Built-in skills
 
@@ -175,7 +174,7 @@ Firstmate's skills live in two separate places with different audiences:
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, and project modes.
-- [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, trusted external process-event adapter setup, the files you set, and harness support.
+- [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, trusted external process-event adapter setup, the files you set, and harness support.
 - [docs/feishu-channel.md](docs/feishu-channel.md) - opt-in pairing, exact Pi session binding, supported P2P behavior, transport operation, safety boundaries, and recovery for the private Feishu channel.
 - [docs/extension-bindings.md](docs/extension-bindings.md) - maintainer architecture for the narrow trusted external `process-event-adapter/1` package, binding, handshake, and evidence boundary.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.

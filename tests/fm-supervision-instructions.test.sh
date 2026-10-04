@@ -31,15 +31,14 @@ test_conditional_stanzas() {
   home="$TMP_ROOT/conditional-home"
   config="$TMP_ROOT/conditional-config"
   mkdir -p "$home/state" "$home/config" "$config"
-  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --read-only 1 --x-mode 1)
+  : > "$config/x-mode.env"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --read-only 1)
   assert_contains "$out" "- Lock: read-only" "read-only stanza missing"
-  assert_contains "$out" "- X mode: active" "x-mode stanza missing"
-  assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
   assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
-  assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
+  assert_not_contains "$out" "x-mode.env" "retained Relay cadence artifact remained active"
   assert_not_contains "$out" "Away mode" "removed away mode was still advertised"
   assert_not_contains "$out" "Quiet mode" "removed quiet mode was still advertised"
-  pass "renderer includes read-only and effective x-mode current-state stanzas"
+  pass "renderer ignores retained Relay cadence state and keeps current lock state"
 }
 
 test_repair_lines() {
@@ -49,10 +48,6 @@ test_repair_lines() {
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
   assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line did not use checkpoint helper and env override"
 
-  : > "$home/config/x-mode.env"
-  out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
-  assert_contains "$out" "source '$home/config/x-mode.env' first" "x-mode repair line did not source the effective cadence config"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "x-mode codex repair line lost the checkpoint helper"
 }
 
 test_cross_harness_ordinary_continuation_and_repair_matrix() {

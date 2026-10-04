@@ -6,7 +6,7 @@ The related command guards have separate owners: [watcher-arm protection](arm-pr
 
 ## Current invariant
 
-When a task, process-event source, registered custom check, or Relay poll needs supervision, the primary must not end a turn without a current supervisor.
+When a task, process-event source, or registered custom check needs supervision, the primary must not end a turn without a current supervisor.
 The turn-end guard requires an identity-matched watcher process and a fresh beacon.
 The mid-turn pull guard can recognize an extension-owned watcher handoff; that does not relax the turn-end predicate.
 

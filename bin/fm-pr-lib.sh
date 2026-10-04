@@ -483,6 +483,8 @@ fm_pr_metadata_identity_parse() {
           fi
         fi
         ;;
+      # Retained private task metadata from the removed public Relay remains
+      # parseable evidence but has no activation or execution path.
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
       *)

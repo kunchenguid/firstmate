@@ -650,10 +650,6 @@ test_valid_recording_and_merge_derivation() {
     [ -d "$dir/home/state/$id.check.sh" ] \
       || fail "legacy task teardown changed the unsafe direct artifact"
     rmdir "$dir/home/state/$id.check.sh"
-    FM_HOME="$dir/home" "$ROOT/bin/fm-x-link.sh" "$id" req-legacy \
-      --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
-      > "$dir/x-link.out" 2> "$dir/x-link.err" \
-      || fail "path-safe legacy task ID could not link an X request"
     run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"

@@ -212,8 +212,7 @@ test_extra_hermetic_candidates_present() {
     tests/fm-send-strict.test.sh \
     tests/fm-spawn-batch.test.sh \
     tests/fm-pr-merge.test.sh \
-    tests/fm-review-diff.test.sh \
-    tests/fm-x-mode.test.sh; do
+    tests/fm-review-diff.test.sh; do
     printf '%s\n' "$listed" | grep -Fxq "$want" \
       || fail "extra hermetic candidate missing: $want"
   done

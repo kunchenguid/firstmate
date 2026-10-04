@@ -271,8 +271,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-public-followup-lib.sh
-. "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -560,40 +558,9 @@ teardown_retained_copy() (
 )
 if [ "$COPY_ONLY" = 1 ]; then teardown_retained_copy; exit $?; fi
 
-PUBLIC_FOLLOWUP_HOME=$FM_HOME
-PUBLIC_FOLLOWUP_STATE=$STATE
-PUBLIC_FOLLOWUP_WORK_HOME=main
-PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
-PUBLIC_FOLLOWUP_GUARD_CHECKED=0
-if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
-  PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
-fi
-
-teardown_public_followup_guard() {
-  [ "$PUBLIC_FOLLOWUP_GUARD_CHECKED" = 0 ] || return 0
-  PUBLIC_FOLLOWUP_GUARD_CHECKED=1
-  if [ "$FORCE" != "--force" ] \
-    && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
-    && [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
-    && fm_pf_has_registrations "$PUBLIC_FOLLOWUP_STATE"; then
-    if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$PUBLIC_FOLLOWUP_HOME" FM_STATE_OVERRIDE="$PUBLIC_FOLLOWUP_STATE" \
-        "$SCRIPT_DIR/fm-public-followup.sh" guard-work "$PUBLIC_FOLLOWUP_WORK_HOME" "$ID" 2>/dev/null); then
-      echo "REFUSED: task $ID still owes a public reply through the myfirstmate relay." >&2
-      printf '%s\n' "$PUBLIC_FOLLOWUP_BLOCKING" >&2
-      echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with bin/fm-tasks-axi.sh public-followup waive, or use --force after explicit discard approval." >&2
-      exit 1
-    fi
-  fi
-}
-
 if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
   completed_generation=$(fm_meta_get "$STATE/$ID.meta" spawn_gen)
   if fm_cleanup_completion_guard "$ID" "$completed_generation" >/dev/null 2>&1; then
-    teardown_public_followup_guard
-    X_REQUEST=$(grep '^x_request=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    if [ -n "$X_REQUEST" ]; then
-      echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
-    fi
     teardown_completed_task
     exit $?
   fi
@@ -1661,29 +1628,6 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     echo "Inventory its report and any structured review through bin/fm-captain-hold.sh before teardown." >&2
     exit 1
   fi
-fi
-
-# A public commitment is not kept until its final reply lands in the ORIGINAL
-# thread, and this cleanup removes the task records that make the promise
-# reconcilable. Refuse while this home still owes a public reply for exactly this
-# work. Both gates live in bin/fm-public-followup-lib.sh, so a home that never
-# opted into the myfirstmate relay runs one [ -f ] test and nothing else here.
-teardown_public_followup_guard
-
-# Non-blocking: a delivered public loop is not a teardown refusal (guard-work
-# already passed), but tearing down a ship whose PR merged while a loop is still
-# open with nothing owed is the moment the drop is detectable.
-if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
-    && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
-    && [ "${PUBLIC_FOLLOWUP_RELAY_ACTIVE:-0}" = 1 ] \
-    && fm_pf_has_delivered_open_loops "$PUBLIC_FOLLOWUP_STATE"; then
-  echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
-fi
-
-# Non-blocking: the legacy Relay link is not guarded as a refusal.
-X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-if [ -n "$X_REQUEST" ]; then
-  echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
