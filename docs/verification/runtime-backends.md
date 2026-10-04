@@ -2456,3 +2456,65 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+### 2026-09-27 interrupted-run recovery
+
+The Interrupt row above holds only when nothing was queued.
+On omp 18.3.0 (Homebrew `omp/18.3.0`), Herdr 0.9.1, macOS arm64, and `openai-codex/gpt-6-astra` at `--thinking low`, a watcher wake queued behind a busy `sleep 60` tool turn reached two stalled states:
+
+- Escape moved the queued wakes into the composer (`composer=pending`), aborted the run, and submitted nothing.
+- An empty Enter aborted the run with an empty composer and left the wakes in omp's queue.
+
+In both cases the home's durable wake queue held its 3 rows until the watch extension's interrupted-run recovery (the `.omp/extensions/fm-primary-omp-watch.ts` header owns it) acted.
+omp 18.3.0 renders no queued follow-up rows during a tool call, so the guard gates on the watcher's delivery log instead.
+The guard stretches the recovery's settle wait to 8 seconds to observe each stalled state, then requires the queue to drain with no further key and the composer to read `empty`; the Enter case also requires the extension's continuation steer in omp's transcript.
+
+```sh
+HERDR_LAB_SESSION=$(bin/fm-herdr-lab.sh name <label>) FM_OMP_INTERRUPT_LIVE_E2E=1 tests/fm-omp-interrupt-live-e2e.test.sh
+```
+
+```text
+# escape precondition held: composer=pending, 3 durable rows
+ok - live omp interrupt recovery (escape): omp omp/18.3.0 (openai-codex/gpt-6-astra) through Herdr drained the wake with no further key and left an empty composer in isolated session fm-lab-fm-omp-wake-stal-24730-2734
+# enter precondition held: composer=empty, 3 durable rows
+ok - live omp interrupt recovery (enter): omp omp/18.3.0 (openai-codex/gpt-6-astra) through Herdr drained the wake with no further key and left an empty composer in isolated session fm-lab-fm-omp-wake-stal-24730-2734
+```
+
+`HERDR_LAB_SESSION` is optional; without it the guard names its own lab session.
+Rerun the guard after any omp upgrade; it fails naming the omp version if Escape stops restoring queued messages or an empty Enter stops stranding them.
+
+### 2026-09-29 idle wake after an advisor note
+
+On omp 18.4.2 and 18.4.3 (Homebrew), Herdr 0.9.1, macOS 26.6.2 arm64, and `openai-codex/gpt-6-astra` at `--thinking low`, an idle omp started no turn for a follow-up queued while its conversation ended in an advisor note.
+omp starts a turn for a follow-up queued while idle only when the conversation's last message is an assistant reply or a tool result, and its advisor appends its note after a final answer with nothing queued.
+In that state a lab second mate reported `isIdle()` and `hasPendingMessages()` both true for 200 seconds while its durable wake queue grew from 3 to 6 rows, and `/fm-watch-arm-omp` answered `watcher: unchanged - omp extension already owns an arm child`.
+The next typed message started a turn, and omp then delivered every held wake one turn at a time.
+The same idle omp with an assistant reply ending the conversation started a turn for the wake as soon as it arrived.
+The watch extension therefore sends a wake to an idle omp as a plain user message and keeps a follow-up only while a run is in progress (the `.omp/extensions/fm-primary-omp-watch.ts` header owns the rule).
+
+The guard's `idle` case reaches that state with a lab-only extension that appends one advisor note after a final answer, because omp's real advisor posts only when its own model chooses to; the real advisor is off for that lab home.
+It idles 190 seconds, longer than the 180-second default `FM_SECONDMATE_WAKE_STALL_SECS`, then requires the wake to start a turn within 60 seconds and a later mid-run wake to start only after the run's final reply.
+Against the extension without that rule, on omp 18.4.3, the case failed:
+
+```text
+# idle precondition held: idle=true last=custom_message/advisor
+not ok - omp omp/18.4.3 (openai-codex/gpt-6-astra) through Herdr: after 190s idle behind an advisor note, the wake started no turn within 60s (3 durable rows, idle=true last=custom_message/advisor); omp is holding an idle wake until someone types
+```
+
+With the rule, every case passed:
+
+```sh
+HERDR_LAB_SESSION=$(bin/fm-herdr-lab.sh name <label>) FM_OMP_INTERRUPT_LIVE_E2E=1 tests/fm-omp-interrupt-live-e2e.test.sh
+```
+
+```text
+# escape precondition held: composer=pending, 3 durable rows
+ok - live omp interrupt recovery (escape): omp omp/18.4.3 (openai-codex/gpt-6-astra) through Herdr drained the wake with no further key and left an empty composer in isolated session fm-lab-fm-omp-idle-wake-96807-3708
+# enter precondition held: composer=empty, 3 durable rows
+ok - live omp interrupt recovery (enter): omp omp/18.4.3 (openai-codex/gpt-6-astra) through Herdr drained the wake with no further key and left an empty composer in isolated session fm-lab-fm-omp-idle-wake-96807-3708
+# idle precondition held: idle=true last=custom_message/advisor
+# idle wake started a turn 3s after its status line
+ok - live omp idle delivery: omp omp/18.4.3 (openai-codex/gpt-6-astra) through Herdr started a turn for a wake after 190s idle behind an advisor note, and a mid-run wake followed the run's final reply, in isolated session fm-lab-fm-omp-idle-wake-96807-3708
+```
+
+`tests/fm-omp-harness.test.sh` pins the same rule portably against a fake omp that holds an idle follow-up behind a non-assistant last message.
