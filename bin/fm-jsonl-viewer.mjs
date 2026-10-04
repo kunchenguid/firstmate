@@ -40,6 +40,12 @@ const TASK_CATEGORY_PRIORITY = new Map([
   ["history", 3],
 ]);
 
+function taskSortPriority(task) {
+  return task.status === "Needs reconciliation"
+    ? TASK_CATEGORY_PRIORITY.get("completed")
+    : TASK_CATEGORY_PRIORITY.get(task.category) ?? TASK_CATEGORY_PRIORITY.size;
+}
+
 let taskOverviewCache = null;
 let taskOverviewInFlight = null;
 let taskOverviewRefreshError = null;
@@ -393,8 +399,8 @@ function taskOverview(home, roots, codeRoot) {
       documentTypes: item.documentTypes || [],
       documentModifiedAt: item.documentModifiedAt || null,
     };
-  }).sort((left, right) => (TASK_CATEGORY_PRIORITY.get(left.category) ?? TASK_CATEGORY_PRIORITY.size)
-    - (TASK_CATEGORY_PRIORITY.get(right.category) ?? TASK_CATEGORY_PRIORITY.size)
+  }).sort((left, right) => taskSortPriority(left)
+    - taskSortPriority(right)
     || left.title.localeCompare(right.title));
   return {
     generatedAt: snapshot.generated,

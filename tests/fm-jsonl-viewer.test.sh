@@ -253,7 +253,9 @@ cat <<'JSON'
 {"id":"record-archive-working","record_disposition":"archive_done","current_state":{"state":"working"}},
 {"id":"invalid-archive","record_disposition":"active","current_state":{"state":"working"}},
 {"id":"active-working","record_disposition":"active","current_state":{"state":"working"}},
-{"id":"done-open-gap","record_disposition":"done","current_state":{"state":"unknown"}}]}
+{"id":"done-open-gap","record_disposition":"done","current_state":{"state":"unknown"}},
+{"id":"reconcile-task","record_disposition":"unknown","current_state":{"state":"unknown"}},
+{"id":"completed-before-reconcile","record_disposition":"done","current_state":{"state":"done"}}]}
 JSON
 SH
 chmod +x "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh"
@@ -280,7 +282,12 @@ jq -e '
   and (.tasks | any(.id == "invalid-archive" and .category == "processing" and .warning == null))
   and (.tasks | any(.id == "active-working" and .category == "processing"))
   and (.tasks | any(.id == "done-open-gap" and .category == "held" and .status == "Unresolved goal gap"))
-  and ([.tasks[] | .category] | sort | group_by(.) | map({(.[0]): length}) | add == {held:2,history:3,processing:2})
+  and (.tasks | any(.id == "reconcile-task" and .category == "held" and .status == "Needs reconciliation"))
+  and (.tasks | any(.id == "completed-before-reconcile" and .category == "completed" and .status == "Completed"))
+  and ([.tasks[] | .category] | sort | group_by(.) | map({(.[0]): length}) | add == {completed:1,held:3,history:3,processing:2})
+  and ([.tasks[] | select(.category == "processing") | .id] == ["active-working", "invalid-archive"])
+  and ([.tasks[] | select(.status == "Needs reconciliation" or .status == "Completed") | .id]
+    == ["completed-before-reconcile", "reconcile-task"])
 ' "$TMP_ROOT/candidate-tasks.json" >/dev/null || fail "candidate archive classification or controls were incorrect"
 kill "$CANDIDATE_SERVER_PID" 2>/dev/null || true
 wait "$CANDIDATE_SERVER_PID" 2>/dev/null || true

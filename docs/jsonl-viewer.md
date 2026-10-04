@@ -39,11 +39,12 @@ The top navigation switches among these authenticated pages without mixing login
 The task sidebar can collapse and reopen without clearing the selected task, and narrow screens stack the list above the reading area so navigation remains available.
 Selected task, report, and journal identities are encoded in the route, so direct links, reload, and browser back and forward restore the same reading context after authentication.
 Legacy bookmarks to `/` continue to open the login flow and then land on the Dashboard.
-The dashboard summarizes processing, waiting or blocked, and archived or cancelled tasks without a separate Completed card or section.
+The dashboard renders one status card for each status currently present in the task list, including separate `Completed` and `Needs reconciliation` cards.
+Each status card count uses the same search scope as the task list, and activating a card filters the list to that exact status; `View all tasks` clears the status filter.
 Completed records remain available through the task list and report view without being relabelled as archived.
 An explicitly archived task remains in the archived or cancelled group when its retained remote state is nonterminal or ambiguous, and the dashboard labels that remote status as unconfirmed without implying cancellation or success.
-`Processing` counts tasks marked active, in flight, or working only when no hold condition applies.
-`Waiting or blocked` counts tasks that are queued, parked, explicitly blocked, waiting on a dependency or open decision, or have conflicting current records, so they are excluded from `Processing` even if another current record still says working.
+Status cards use the backend-provided display status shown on each task card, so distinct statuses such as `Processing`, `Waiting`, `Blocked`, `Completed`, and `Needs reconciliation` are not collapsed into a broader category.
+The list ordering may share a sort priority between `Completed` and `Needs reconciliation`, while their labels, counts, and filters remain separate.
 
 The viewer does not use retained rich lifecycle records as an ordinary task source. It may read a valid historical `archived` fact only to keep an already explicit stop labelled `Cancelled`; malformed or non-archived legacy records are ignored and never require reconciliation.
 Each task shows explicit Brief and Report selectors, enables every canonical document that is actually available, and labels unavailable document types instead of inventing content.
