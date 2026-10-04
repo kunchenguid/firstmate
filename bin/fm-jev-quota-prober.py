@@ -10,11 +10,6 @@ percent above 0 is healthy. When quota-axi marks the reading stale and reports
 no known scope, the window percentRemaining quota-axi still reports (its last
 reading) decides, and the verdict names it stale.
 
-The prober's own local signals (Codex credit balance and credential state, the
-zai-general dry marker) never decide. When one would reach a different launch
-decision than quota-axi (one says exhausted, the other does not), a
-DISAGREEMENT line on stderr names both values and says quota-axi was used.
-
 Verdicts and exit codes (single-harness mode prints `<verdict> <harness> <model>`):
   healthy    0  quota-axi reports runway for the lane.
   unmetered  0  no quota-axi provider measures this harness/model; launch as requested.
@@ -153,39 +148,9 @@ def verdict_from_row(row: dict, model: str) -> dict:
     return {"status": UNKNOWN, "percent": None, "fresh": False, "detail": "no measured quota scope or window"}
 
 
-def is_zai_bundle_dry() -> bool:
-    """Local spend-fact signal for the zai-general bundle (a signal, never the verdict)."""
-    fm_root = Path(os.environ.get("FM_HOME", "/opt/ra/firstmate"))
-    if (fm_root / "state" / ".zai-bundle-dry").exists():
-        return True
-    outcomes_f = fm_root / "state" / "branch-outcomes.jsonl"
-    if outcomes_f.exists():
-        try:
-            lines = outcomes_f.read_text(encoding="utf-8", errors="replace").splitlines()[-50:]
-            return any("zai-general" in line and ("dry" in line.lower() or "insufficient balance" in line.lower())
-                       for line in lines)
-        except OSError:
-            pass
-    return False
-
-
-def local_signal(harness: str, model: str, row: dict | None) -> tuple[str, str] | None:
-    """The prober's own heuristics, kept only to expose disagreement with quota-axi."""
-    if harness == "codex" and row is not None:
-        state = row.get("state", {})
-        if state.get("error") or state.get("stale"):
-            return EXHAUSTED, state.get("error") or "Codex credentials unavailable or stale"
-        if (row.get("credits") or {}).get("remaining", 1) <= 0:
-            return EXHAUSTED, "Codex credit balance zero"
-        return HEALTHY, "Codex credentials and credits present"
-    if harness in ("pi", "pi-signed") and model.startswith("zai") and is_zai_bundle_dry():
-        return EXHAUSTED, "zai-general bundle dry (local spend fact)"
-    return None
-
-
 def probe(harness: str, model: str) -> dict:
     harness, model = harness.lower().strip(), (model or "").strip()
-    result = {"harness": harness, "model": model, "source": "quota-axi", "disagreement": None}
+    result = {"harness": harness, "model": model, "source": "quota-axi"}
     provider = provider_for(harness, model)
     if provider is None:
         return {**result, "status": UNMETERED, "percent": None, "fresh": False, "provider": None,
@@ -200,12 +165,6 @@ def probe(harness: str, model: str) -> dict:
         verdict = verdict_from_row(row, model)
     result.update(status=verdict["status"], percent=verdict["percent"], fresh=verdict["fresh"],
                   provider=provider, reason=f"quota-axi {provider}: {verdict['detail']}")
-    signal = local_signal(harness, model, row)
-    if signal and (signal[0] == EXHAUSTED) != (verdict["status"] == EXHAUSTED):
-        result["disagreement"] = (
-            f"DISAGREEMENT {harness}:{model or '-'}: prober={signal[0]} ({signal[1]}) "
-            f"vs quota-axi={verdict['status']} ({verdict['detail']}); using quota-axi"
-        )
     return result
 
 
@@ -220,11 +179,9 @@ def select_divert(original: tuple[str, str]) -> tuple[str, str] | None:
 
 
 def report(res: dict) -> None:
-    if res["disagreement"]:
-        print(f"jev-quota-prober: {res['disagreement']}", file=sys.stderr)
     if res["status"] == UNKNOWN:
-        print(f"jev-quota-prober: UNKNOWN quota-axi had no verdict for {res['harness']}:{res['model'] or '-'}: "
-              f"{res['reason']}; launch proceeds as requested", file=sys.stderr)
+        print(f"jev-quota-prober: quota-axi verdict unavailable for {res['harness']}:{res['model'] or '-'}: "
+              f"{res['reason']}; launching as requested", file=sys.stderr)
 
 
 def main() -> int:

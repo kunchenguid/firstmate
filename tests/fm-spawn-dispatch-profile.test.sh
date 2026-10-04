@@ -989,10 +989,7 @@ test_jev_prober_uses_quota_axi_over_inverted_codex_signal() {
   expect_code 0 "$status" "codex at 89% in quota-axi should launch: $out"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   assert_contains "$(cat "$LAUNCH_LOG")" "codex --model 'gpt-5'" "codex lane was not launched as requested"
-  assert_contains "$out" "DISAGREEMENT codex:gpt-5: prober=exhausted" "spawn hid the prober disagreement"
-  assert_contains "$out" "quota-axi=healthy (weekly 89% remaining (stale reading)); using quota-axi" \
-    "spawn diagnostic did not name the quota-axi value"
-  pass "spawn launches codex at quota-axi 89% and surfaces the inverted prober signal"
+  pass "spawn launches codex at quota-axi 89% despite the zero-credit stale row"
 }
 
 test_jev_prober_refuses_exhausted_lane_with_exhausted_divert_target() {
@@ -1007,6 +1004,7 @@ test_jev_prober_refuses_exhausted_lane_with_exhausted_divert_target() {
   status=$?
   expect_code 1 "$status" "exhausted codex with an exhausted divert target must refuse: $out"
   assert_contains "$out" "no divert lane is healthy in quota-axi" "refusal did not name the missing divert"
+  assert_contains "$out" "(verdict: exhausted)" "refusal did not name the exhausted verdict"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode-go" "spawn launched the exhausted opencode-go lane"
   assert_equals "" "$(cat "$LAUNCH_LOG")" "a refused spawn launched something"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn wrote metadata"
@@ -1042,7 +1040,8 @@ test_jev_prober_unknown_launches_as_requested() {
   expect_code 0 "$status" "codex with no quota-axi row should launch as requested: $out"
   assert_contains "$(cat "$LAUNCH_LOG")" "codex --model 'gpt-5'" "codex lane was not launched as requested"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode-go" "spawn diverted on an unknown verdict"
-  assert_contains "$out" "UNKNOWN quota-axi had no verdict for codex:gpt-5" "spawn hid the unknown diagnostic"
+  assert_contains "$out" "quota-axi verdict unavailable for codex:gpt-5: " "spawn hid the unknown diagnostic"
+  assert_contains "$out" "; launching as requested" "spawn hid the permissive launch"
   pass "spawn launches as requested, loudly, when quota-axi has no verdict"
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/fm-jev-quota-prober.test.sh - quota-axi is the Jev quota prober's only
-# verdict source: inverted local verdicts lose loudly, an exhausted divert target
+# verdict source: inverted local verdicts lose, an exhausted divert target
 # is never selected, and an unmeasurable lane launches as requested, loudly,
 # and never diverts.
 set -euo pipefail
@@ -55,17 +55,13 @@ probe() {
 }
 
 test_inverted_codex_verdict_quota_axi_wins() {
-  # The prober's own signals call codex dead (stale credential, zero credits)
+  # The old prober's own signals called codex dead (stale credential, zero credits)
   # while quota-axi still reports 89% of the weekly window.
   snapshot "$TMP/inverted.json" "$(row codex stale:89 0)" "$(row opencode-go 0)"
   probe "$TMP/inverted.json" --harness codex --model gpt-5.6-luna --auto-divert
   expect_code 0 "$RC" "codex at 89% in quota-axi"
   assert_equals "healthy codex gpt-5.6-luna" "$OUT" "quota-axi's healthy verdict wins over the prober's dead signal"
-  assert_contains "$ERR" "DISAGREEMENT codex:gpt-5.6-luna" "the inversion is loud, not silent"
-  assert_contains "$ERR" "prober=exhausted" "diagnostic names the prober value"
-  assert_contains "$ERR" "quota-axi=healthy (weekly 89% remaining (stale reading))" "diagnostic names the quota-axi value"
-  assert_contains "$ERR" "using quota-axi" "diagnostic names the source used"
-  pass "inverted codex verdict: quota-axi 89% wins with a loud diagnostic"
+  pass "inverted codex verdict: quota-axi 89% wins"
 }
 
 test_inverted_opencode_go_verdict_quota_axi_wins() {
@@ -108,31 +104,13 @@ EOF
   pass "exhausted or stale divert target is never selected"
 }
 
-test_disagreement_names_both_values() {
-  mkdir -p "$TMP/home/state"
-  : > "$TMP/home/state/.zai-bundle-dry"
-  snapshot "$TMP/zai.json" "$(row zai 42)"
-  probe "$TMP/zai.json" --harness pi --model zai-general/glm-5.3-flash
-  expect_code 0 "$RC" "zai healthy in quota-axi"
-  assert_equals "healthy pi zai-general/glm-5.3-flash" "$OUT" "quota-axi verdict used"
-  assert_contains "$ERR" "prober=exhausted (zai-general bundle dry (local spend fact))" "names the prober value"
-  assert_contains "$ERR" "quota-axi=healthy (all_models 42% remaining)" "names the quota-axi value"
-  assert_contains "$ERR" "using quota-axi" "names the source used"
-
-  # Agreement stays quiet.
-  snapshot "$TMP/codex-ok.json" "$(row codex 60 5)"
-  probe "$TMP/codex-ok.json" --harness codex --model gpt-5.6-luna
-  assert_equals "" "$ERR" "no diagnostic when the prober agrees with quota-axi"
-  pass "disagreement diagnostic names both values and the source used"
-}
-
 test_unknown_is_permissive_and_loud() {
   snapshot "$TMP/unset.json" "$(row devin unset)" "$(row opencode-go 90)"
   probe "$TMP/unset.json" --harness devin --auto-divert
   expect_code 0 "$RC" "not-set-up provider"
   assert_equals "unknown devin" "$OUT" "unknown verdict, not a divert"
-  assert_contains "$ERR" "UNKNOWN quota-axi had no verdict for devin:-" "the unknown verdict is named"
-  assert_contains "$ERR" "launch proceeds as requested" "the permissive launch is named"
+  assert_contains "$ERR" "jev-quota-prober: quota-axi verdict unavailable for devin:-: " "the unknown verdict is named"
+  assert_contains "$ERR" "; launching as requested" "the permissive launch is named"
 
   probe "$TMP/unset.json" --harness claude --model opus --auto-divert
   expect_code 0 "$RC" "provider missing from quota-axi output"
@@ -159,6 +137,5 @@ test_unmetered_harness_launches_as_requested() {
 test_inverted_codex_verdict_quota_axi_wins
 test_inverted_opencode_go_verdict_quota_axi_wins
 test_exhausted_divert_target_never_selected
-test_disagreement_names_both_values
 test_unknown_is_permissive_and_loud
 test_unmetered_harness_launches_as_requested
