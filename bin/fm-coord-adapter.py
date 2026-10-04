@@ -647,6 +647,25 @@ class Adapter:
             task.pop("pending_ci", None)
             self.save()
 
+    def ci_complete(self, task_id, batch_id, conclusion):
+        """Release this task's CI slot for the batch once its run reaches a terminal conclusion."""
+        if conclusion not in {"success", "failure", "cancelled", "timed_out"}:
+            raise Usage("ci-complete conclusion must be success, failure, cancelled, or timed_out")
+        task = self.state["tasks"].get(task_id)
+        if not task:
+            raise ValueError(f"{task_id}: no local intent record for CI completion")
+        pulse = self.state["requests"].get(f"{task_id}:pulse:{batch_id}")
+        head = pulse["payload"]["head_oid"] if pulse else task.get("published_head")
+        # Keyed outside the task prefix so a readmit keeps it; the lease TTL still frees a slot whose completion never lands.
+        key = f"ci-complete:{task_id}:{batch_id}"
+        reply = self.send(key, "ci-complete", {"repo": task["repo"], "base": task["base"], "head_oid": head, "batch_id": batch_id, "conclusion": conclusion})
+        if reply is None and "batch holds no active CI slot" in self.last_error:
+            # Already released (a lost reply or its lease lapsed); nothing is left to resend.
+            self.state["requests"].pop(key, None)
+            self.save()
+            return
+        self.required(task["repo"], reply is not None, f"batch {batch_id} completion is unconfirmed")
+
     def heartbeat(self, task_id):
         task = self.state["tasks"].get(task_id)
         live = self.live_claim(task_id)
@@ -759,6 +778,8 @@ def run(adapter, command):
         adapter.readmit(argv[2], argv[3])
     elif command == "pre-ci" and len(argv) in {3, 4, 5}:
         adapter.pre_ci(argv[2], argv[3] if len(argv) > 3 else argv[2], argv[4] if len(argv) == 5 else None)
+    elif command == "ci-complete" and len(argv) == 5:
+        adapter.ci_complete(argv[2], argv[3], argv[4])
     elif command == "pre-merge" and len(argv) == 5:
         adapter.pre_merge(argv[2], argv[3], argv[4])
     elif command == "merge-result" and len(argv) == 5:
@@ -778,12 +799,12 @@ def run(adapter, command):
         raise Usage("wrong adapter arguments")
 
 
-COMMANDS = {"dispatch", "pre-push", "pre-ci", "pre-merge", "merge-result", "readmit", "heartbeat", "attempt", "wrapper-exited", "release", "replay", "view"}
+COMMANDS = {"dispatch", "pre-push", "pre-ci", "ci-complete", "pre-merge", "merge-result", "readmit", "heartbeat", "attempt", "wrapper-exited", "release", "replay", "view"}
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
-        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [BATCH [WORKTREE]]|pre-merge TASK PR_URL HEAD|merge-result TASK PR_URL merged|refused|unknown|readmit TASK WORKTREE|heartbeat TASK|attempt TASK JSON|wrapper-exited TASK JSON|release TASK|replay|view>", file=sys.stderr)
+        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [BATCH [WORKTREE]]|ci-complete TASK BATCH success|failure|cancelled|timed_out|pre-merge TASK PR_URL HEAD|merge-result TASK PR_URL merged|refused|unknown|readmit TASK WORKTREE|heartbeat TASK|attempt TASK JSON|wrapper-exited TASK JSON|release TASK|replay|view>", file=sys.stderr)
         return 2
     home = os.environ.get("FM_HOME")
     if not home:
@@ -796,7 +817,7 @@ def main():
         adapter = Adapter(Path(home))
         if not adapter.enabled:
             return 0
-        if command in {"pre-push", "pre-ci", "heartbeat"} and len(sys.argv) > 2:
+        if command in {"pre-push", "pre-ci", "ci-complete", "heartbeat"} and len(sys.argv) > 2:
             dispatched = {**{task_id: task["repo"] for task_id, task in adapter.state["tasks"].items()}, **adapter.state.get("task_repos", {})}
             undispatched = sys.argv[2] not in dispatched
             adapter.repo = dispatched.get(sys.argv[2])
@@ -815,7 +836,7 @@ def main():
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         warn(str(exc))
         unowned = undispatched and command == "pre-ci" and adapter.enforced_repos
-        return 0 if adapter is not None and command in {"dispatch", "pre-push", "pre-ci", "pre-merge", "heartbeat"} and adapter.repo not in adapter.enforced_repos and not unowned else 1
+        return 0 if adapter is not None and command in {"dispatch", "pre-push", "pre-ci", "ci-complete", "pre-merge", "heartbeat"} and adapter.repo not in adapter.enforced_repos and not unowned else 1
 
 
 if __name__ == "__main__":

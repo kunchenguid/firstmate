@@ -3085,6 +3085,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
 The local Firstmate enrolled this intent at dispatch when the coordinator was reachable.
 Before any push or /no-mistakes run, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-push $coord_id "\$PWD"\` from this task worktree.
 Before requesting a ci:batch pulse, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-ci $coord_id BATCH_ID "\$PWD"\` from this task worktree with the stable batch ID agreed by the integration owner.
+When that batch's CI run reaches a terminal conclusion, execute \`FM_HOME=$coord_home python3 $coord_adapter ci-complete $coord_id BATCH_ID CONCLUSION\` with CONCLUSION one of success, failure, cancelled, or timed_out, so its CI slot frees for the next head.
 While actively working, execute \`FM_HOME=$coord_home python3 $coord_adapter heartbeat $coord_id\` about every 60 seconds to renew the claim.
 These calls only record and warn in shadow/advisory mode; report any warning in your ordinary task status so Firstmate can coordinate it.
 For an enforced repository, a failed adapter command stops that push or CI request until the owner explicitly readmits the intent; never treat an unreachable store as advisory.

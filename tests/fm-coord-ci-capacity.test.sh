@@ -127,8 +127,8 @@ grep -q 'queued for CI capacity at position 1' "$tmp/err" || fail "a queued batc
 if adapter "$tmp/y" pre-ci y batch-y "$repo" > /dev/null 2> "$tmp/err"; then
   fail 'a queued batch must stay refused until a slot completes'
 fi
-head_x=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["x"]["published_head"])' "$tmp/x/state/fm-coord-adapter.json")
-coord ci-complete "$(printf '{"request_id":"complete-x","repo":"owner/gated","base":"main","head_oid":"%s","batch_id":"batch-x","conclusion":"failure"}' "$head_x")" > /dev/null
+# The worker reports its batch's terminal run through the adapter, which frees the slot without an operator.
+adapter "$tmp/x" ci-complete x batch-x failure > /dev/null || fail 'the worker must complete its own batch through the adapter'
 # The poll after admission lost its reply; replay then receives the authorization.
 lose_poll() {
   python3 - "$tmp/$1/state/fm-coord-adapter.json" "$1" <<'PY'
@@ -168,8 +168,13 @@ pass 'an enforced worker queued for CI capacity pulses once after the slot ahead
 git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m z
 adapter "$tmp/z" pre-push z "$repo" > /dev/null || fail 'z must publish its head'
 adapter "$tmp/z" pre-ci z batch-z "$repo" > /dev/null 2>&1 && fail 'z must queue behind the active head'
-head_y=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["y"]["published_head"])' "$tmp/y/state/fm-coord-adapter.json")
-coord ci-complete "$(printf '{"request_id":"complete-y","repo":"owner/gated","base":"main","head_oid":"%s","batch_id":"batch-y","conclusion":"success"}' "$head_y")" > /dev/null
+adapter "$tmp/y" ci-complete y batch-y success > /dev/null || fail 'a green batch must free its slot through the adapter'
+adapter "$tmp/y" ci-complete y batch-y success > /dev/null || fail 'a repeated completion of a released batch must not fail'
+adapter "$tmp/y" view > "$tmp/view.json"
+python3 - "$tmp/view.json" <<'PY' || fail 'a completed batch must leave no pending local completion'
+import json,sys
+assert not [p for p in json.load(open(sys.argv[1]))['local_pending'] if p['operation']=='ci-complete']
+PY
 lose_poll z
 sqlite3 "$db" "UPDATE claims SET expires_mono_ns=0 WHERE intent_id LIKE 'z:%' AND state='active'"
 if adapter "$tmp/z" pre-ci z batch-z "$repo" > /dev/null 2> "$tmp/err"; then
