@@ -118,10 +118,10 @@ cmd_init() {
   local task="" objective_file="" context_file="" thread=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --task) task=${2:-}; shift 2 ;;
-      --objective-file) objective_file=${2:-}; shift 2 ;;
-      --context-file) context_file=${2:-}; shift 2 ;;
-      --thread) thread=${2:-}; shift 2 ;;
+      --task) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; task=$2; shift 2 ;;
+      --objective-file) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; objective_file=$2; shift 2 ;;
+      --context-file) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; context_file=$2; shift 2 ;;
+      --thread) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; thread=$2; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) printf 'fm-chatgpt-loop: unknown init argument %s\n' "$1" >&2; usage; return 2 ;;
     esac
@@ -171,8 +171,8 @@ cmd_consult() {
   local stage="" task=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --stage) stage=${2:-}; shift 2 ;;
-      --task) task=${2:-}; shift 2 ;;
+      --stage) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; stage=$2; shift 2 ;;
+      --task) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; task=$2; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) printf 'fm-chatgpt-loop: unknown consult argument %s\n' "$1" >&2; usage; return 2 ;;
     esac
@@ -231,8 +231,8 @@ cmd_dispatch() {
       spawn_args+=("$1"); shift
     else
       case "$1" in
-        --stage) stage=${2:-}; shift 2 ;;
-        --task) task=${2:-}; shift 2 ;;
+        --stage) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; stage=$2; shift 2 ;;
+        --task) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; task=$2; shift 2 ;;
         --) after_dash=1; shift ;;
         -h|--help) usage; return 0 ;;
         *) printf 'fm-chatgpt-loop: unknown dispatch argument %s\n' "$1" >&2; usage; return 2 ;;
@@ -314,8 +314,8 @@ cmd_record_findings() {
   local task="" rfile=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --task) task=${2:-}; shift 2 ;;
-      --file) rfile=${2:-}; shift 2 ;;
+      --task) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; task=$2; shift 2 ;;
+      --file) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; rfile=$2; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) printf 'fm-chatgpt-loop: unknown record-findings argument %s\n' "$1" >&2; usage; return 2 ;;
     esac
@@ -334,8 +334,8 @@ cmd_record_result() {
   local task="" rfile=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --task) task=${2:-}; shift 2 ;;
-      --file) rfile=${2:-}; shift 2 ;;
+      --task) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; task=$2; shift 2 ;;
+      --file) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; rfile=$2; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) printf 'fm-chatgpt-loop: unknown record-result argument %s\n' "$1" >&2; usage; return 2 ;;
     esac
@@ -354,9 +354,9 @@ cmd_record_worker_failure() {
   local task="" stage="" reason=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --task) task=${2:-}; shift 2 ;;
-      --stage) stage=${2:-}; shift 2 ;;
-      --reason) reason=${2:-}; shift 2 ;;
+      --task) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; task=$2; shift 2 ;;
+      --stage) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; stage=$2; shift 2 ;;
+      --reason) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; reason=$2; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) printf 'fm-chatgpt-loop: unknown record-worker-failure argument %s\n' "$1" >&2; usage; return 2 ;;
     esac
@@ -381,7 +381,7 @@ cmd_next_round() {
   local task=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --task) task=${2:-}; shift 2 ;;
+      --task) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; task=$2; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) printf 'fm-chatgpt-loop: unknown next-round argument %s\n' "$1" >&2; usage; return 2 ;;
     esac
@@ -401,7 +401,7 @@ cmd_status() {
   local task=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --task) task=${2:-}; shift 2 ;;
+      --task) [ $# -ge 2 ] || { printf 'fm-chatgpt-loop: %s needs a value\n' "$1" >&2; usage; return 2; }; task=$2; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) printf 'fm-chatgpt-loop: unknown status argument %s\n' "$1" >&2; usage; return 2 ;;
     esac

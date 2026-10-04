@@ -325,6 +325,29 @@ test_task_id_validated_before_state_paths() {
   pass "every subcommand validates the task id before building state paths"
 }
 
+test_trailing_option_requires_value() {
+  local dir=$TMP_ROOT/noval spec rc i pid
+  mkdir -p "$dir"
+  for spec in "status --task" "consult --stage" "init --objective-file" "next-round --task" "record-findings --file" "record-result --file" "record-worker-failure --reason" "dispatch --stage"; do
+    # shellcheck disable=SC2086
+    bash "$LOOP" $spec >"$dir/noval.out" 2>&1 &
+    pid=$!
+    for i in $(seq 1 30); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "a trailing valueless option must exit promptly instead of hanging: $spec"
+    fi
+    wait "$pid"; rc=$?
+    [ "$rc" -ne 0 ] || fail "a trailing valueless option must exit nonzero: $spec"
+    assert_contains "$(cat "$dir/noval.out")" "needs a value" "a trailing valueless option must name the missing value: $spec"
+  done
+  pass "a trailing valueless option refuses with a usage error instead of hanging"
+}
+
 test_bridge_pid_identity() {
   local dir=$TMP_ROOT/bridgepid
   mkdir -p "$dir/bin" "$HOME_DIR/state"
@@ -396,6 +419,7 @@ test_spawn_failure_recorded
 test_dispatch_requires_plain_task_id
 test_wrong_phase_refuses
 test_task_id_validated_before_state_paths
+test_trailing_option_requires_value
 test_worker_never_touches_bridge
 test_bridge_pid_identity
 test_bridge_verbs_refused
