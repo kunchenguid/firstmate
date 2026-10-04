@@ -1107,6 +1107,54 @@ teardown gm2 complete; state/gm2.gemini-settings.json removed
 Gemini as a PRIMARY or SECONDMATE runtime is unverified and is refused by `bin/fm-spawn.sh`: no wake protocol exists under `docs/supervision-protocols/` and no turn-end guard adapter was built or exercised.
 No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort, reasoning, or thinking flag, so the record-and-omit contract applies.
 
+## Optional Claude native draft discard
+
+The [native adapter setup](../configuration.md#optional-native-draft-control) and `bin/fm-control.sh --help` own activation, explicit discard authority, supported versions, and refusal behavior.
+On 2026-10-07, Claude Code 2.1.292 and Herdr 0.9.1, protocol 22, passed the token-free public-control matrix below.
+The generated 2.1.292 API types retain `prompt.read`, `prompt.fill`, and `command.run`; fill reports `isFilled` and optional `refusal`, while a read without a mounted composer can still return a default empty box.
+The portable regression exercises both admitted versions, 2.1.288 and 2.1.292, and refuses adjacent unverified versions and development suffixes through the module, transport, and public control path.
+
+Refresh with the installed admitted binary selected by `FM_NATIVE_CLAUDE_BIN`; `TMPDIR`, `LAB_HOME_HELPER`, and `HERDR_LAB_HELPER` select the disposable lab and guarded lifecycle helpers:
+
+```sh
+bash tests/fm-claude-native-control.test.sh
+FM_NATIVE_KEEP_EVIDENCE=1 bash tests/fm-claude-native-control-live-e2e.test.sh
+FM_NATIVE_KEEP_EVIDENCE=1 FM_CLAUDE_NATIVE_BUSY_LIVE=1 bash tests/fm-claude-native-control-live-e2e.test.sh
+```
+
+Token-free live output:
+
+```text
+PASS empty native exit; endpoint and files preserved
+PASS beginning native exit; endpoint and files preserved
+PASS middle native exit; endpoint and files preserved
+PASS multiline native exit; endpoint and files preserved
+PASS paste native exit; endpoint and files preserved
+PASS literal-markers native exit; endpoint and files preserved
+PASS image native exit; endpoint and files preserved
+PASS modal refused
+PASS rewrite refused
+PASS edit refused
+PASS doorbell native exit; endpoint and files preserved
+PASS live native control cases: 11
+```
+
+The authenticated busy guard also passed on 2.1.292 with tools disabled and a long plain-text generation prompt.
+The native turn-start marker, streamed API response and owned busy hook established a real busy turn before public control sent Escape.
+The debug log recorded local cancellation with `streamMode=responding`, accepted sentinel and empty fills, and native exit; the public command returned `stopped busy` with the process gone and pane and files preserved.
+
+```text
+PASS busy native exit; endpoint and files preserved
+PASS live native control cases: 1
+```
+
+All lab teardowns passed the unchanged-default-session tripwire.
+Background-work exit confirmation is outside this adapter's scope: a live background-sleep case displayed `Background work is running` after native exit was requested and failed to stop, so no successful exit is claimed for that case and no confirmation key is sent.
+
+An edit before native exit is enqueued refuses the operation and preserves that edit in the live matrix.
+There is a separate accepted race after native exit is already in flight: on Claude 2.1.288 / Herdr 0.9.1, measured on 2026-10-03, an edit during an approximately 114 ms held exit handoff was lost when the process exited.
+Native readback is not an atomic compare-and-exit operation; the CLI help exposes this limitation at the explicit discard gate.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

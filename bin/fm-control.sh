@@ -3,7 +3,7 @@
 # lifecycle verbs addressed to an exact task id.
 #
 # Usage: fm-control.sh <task-id> interrupt
-#        fm-control.sh <task-id> exit
+#        fm-control.sh <task-id> exit [--discard-pending]
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
@@ -51,6 +51,18 @@
 #              endpoint, so this verb cannot tell a destroyed window from one on
 #              a tmux server it cannot address, and it will not claim a stop it
 #              cannot see.
+#              --discard-pending explicitly authorizes discarding the input
+#              box, including attachments, through the optional native Claude
+#              adapter (Claude 2.1.288 or 2.1.292 on Herdr; early-access API).
+#              Requires config/claude-native-control=on at worker launch.
+#              It proves sentinel and empty readback, then invokes native exit;
+#              there is no screen-based clear or typed /exit fallback.
+#              Text arriving before native exit is sent causes refusal. A
+#              sub-second race remains after exit is in flight: a live test
+#              held the handoff about 114 ms and an intervening edit was lost.
+#              Stop typing before using this explicit discard operation.
+#              Failure after clearing may leave the old draft discarded; a
+#              timeout cannot cancel an already-issued native API operation.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -191,11 +203,17 @@ die() {  # <message>
 
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
+INPUT_LOCK=
+INPUT_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
 
 control_cleanup() {
   local status=$?
+  if [ "$INPUT_LOCK_HELD" = 1 ]; then
+    INPUT_LOCK_HELD=0
+    fm_lock_release "$INPUT_LOCK" || true
+  fi
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
@@ -243,6 +261,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+DISCARD_PENDING=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -264,6 +283,7 @@ for control_arg in "$@"; do
     continue
   fi
   case "$control_arg" in
+    --discard-pending) DISCARD_PENDING=1 ;;
     --harness) control_want_value=harness ;;
     --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
     --model) control_want_value=model ;;
@@ -281,6 +301,8 @@ for control_arg in "$@"; do
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
+[ "$DISCARD_PENDING" = 0 ] || [ "$VERB" = exit ] \
+  || die "--discard-pending applies to 'exit' only"
 if [ -n "$control_want_value" ]; then
   [ "$control_want_value" = note_file ] && die "--note-file requires a value"
   die "--$control_want_value requires a value"
@@ -363,6 +385,31 @@ fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
 fm_backend_validate "$BACKEND" || exit 1
+
+NATIVE_BRIDGE="$SCRIPT_DIR/../.claude/mods/firstmate-native-control/bridge.py"
+NATIVE_CHANNEL=
+if [ "$DISCARD_PENDING" = 1 ]; then
+  [ "$HARNESS" = claude ] && [ "$BACKEND" = herdr ] \
+    || die "--discard-pending supports only native Claude 2.1.288 or 2.1.292 on Herdr"
+  NATIVE_CHANNEL=$(fm_meta_get "$META" native_control)
+  native_state=$(cd "$STATE" && pwd -P)
+  case "$NATIVE_CHANNEL" in
+    "$native_state/.$ID.native-"*) ;;
+    *) die "task $ID has no native control launch channel; launch with config/claude-native-control=on" ;;
+  esac
+  INPUT_LOCK="$STATE/.input-$ID.lock"
+  fm_lock_try_acquire "$INPUT_LOCK" \
+    || die "task $ID input is locked by another delivery; nothing discarded"
+  INPUT_LOCK_HELD=1
+fi
+
+native_control() {  # inspect|client; binds the capability to fresh process info
+  local info
+  fm_backend_source herdr || return 1
+  info=$(fm_backend_herdr_cli "${T%%:*}" pane process-info --pane "${T#*:}") \
+    || die "cannot identify task $ID's native process"
+  printf '%s' "$info" | python3 "$NATIVE_BRIDGE" "$1" "$NATIVE_CHANNEL" "$ID" "$T" "$$"
+}
 
 # --- shared helpers ---------------------------------------------------------
 
@@ -676,6 +723,9 @@ do_exit() {
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
+  if [ "$DISCARD_PENDING" = 1 ]; then
+    native_control inspect >/dev/null || die "native discard capability unavailable; nothing discarded"
+  fi
   case "$(busy_verdict)" in
     busy*)
       cancel=$(deliver_interrupt) || return $?
@@ -692,6 +742,14 @@ do_exit() {
       esac
       ;;
   esac
+  if [ "$DISCARD_PENDING" = 1 ]; then
+    native_control client >&2 || die "native discard refused or unconfirmed; no terminal fallback attempted"
+    state=$(wait_agent_state "$EXIT_WAIT" dead) \
+      || die "native exit requested for $ID but agent-state=$state; exit=unconfirmed"
+    retire_busy_incarnation
+    printf 'stopped'
+    return 0
+  fi
   cmd=$(fm_control_exit_command "$HARNESS")
   hazard=$(fm_control_interrupt_hazard_signal "$HARNESS")
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
