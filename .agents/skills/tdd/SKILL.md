@@ -44,5 +44,4 @@ Never write every test first and then every implementation.
 ## Relation to no-mistakes' test-quality rule
 
 Tests written here also follow no-mistakes' test-quality rule, which owns what a test may assert.
-
-For a regression, reproduce the reported failure first: the test should fail before the fix and pass after it.
+Both rules aim at tests that prove behavior rather than implementation detail; the source-text rule is the stricter set.
