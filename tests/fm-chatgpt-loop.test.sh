@@ -154,7 +154,6 @@ test_plan_consult_carries_explicit_context() {
   make_spawn_stub "$dir"
   pid=$(start_stub "$dir")
   bash "$LOOP" init --task ctxcarry --objective-file "$TMP_ROOT/objective.txt" --context-file "$TMP_ROOT/context.txt" >/dev/null
-  bash "$LOOP" consult --stage audit --task happy-audit-unused 2>/dev/null || true
   bash "$LOOP" consult --stage audit --task ctxcarry >/dev/null
   stop_stub "$pid"
   bash "$LOOP" dispatch --stage audit --task ctxcarry -- t p --mode local-only --yolo off >/dev/null
@@ -349,15 +348,16 @@ test_trailing_option_requires_value() {
 }
 
 test_bridge_pid_identity() {
-  local dir=$TMP_ROOT/bridgepid
-  mkdir -p "$dir/bin" "$HOME_DIR/state"
-  cat > "$dir/bin/codex-chatgpt-web" <<'SH'
+  local daemon="$HOME_DIR/tools/codex-chatgpt-web"
+  mkdir -p "$daemon/bin" "$HOME_DIR/state"
+  cat > "$daemon/bin/codex-chatgpt-web" <<'SH'
 #!/usr/bin/env bash
 trap 'exit 0' TERM INT
 while :; do sleep 0.1; done
 SH
-  chmod +x "$dir/bin/codex-chatgpt-web"
-  export FM_CHATGPT_LOOP_DAEMON_DIR="$dir"
+  chmod +x "$daemon/bin/codex-chatgpt-web"
+  local real_home=$HOME
+  export HOME="$HOME_DIR"
   local out rc pid dead i
   sleep 30 &
   local foreign=$!
@@ -394,7 +394,7 @@ SH
   [ "$dead" -eq 1 ] || fail "bridge stop must kill the loop-owned instance"
   [ ! -f "$HOME_DIR/state/chatgpt-loop-bridge.pid" ] || fail "bridge stop must clear the pidfile"
   kill "$foreign" 2>/dev/null || true
-  unset FM_CHATGPT_LOOP_DAEMON_DIR
+  export HOME="$real_home"
   pass "bridge start and stop verify the recorded pid against the daemon-dir entrypoints before refusing or killing"
 }
 

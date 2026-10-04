@@ -284,7 +284,7 @@ cmd_dispatch() {
     stage_prompt=$(read_field "$file" plan)
     phase_next=plan-worker
   fi
-  if env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_SEND -u FM_CHATGPT_LOOP_DAEMON_DIR "$SPAWN" "${spawn_args[@]}" --effort low; then
+  if env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_SEND "$SPAWN" "${spawn_args[@]}" --effort low; then
     rc=0
   else
     rc=$?
@@ -428,11 +428,7 @@ cmd_bridge_status() {
 }
 
 bridge_daemon_dir() {
-  if [ -n "${FM_CHATGPT_LOOP_DAEMON_DIR:-}" ]; then
-    printf '%s\n' "$FM_CHATGPT_LOOP_DAEMON_DIR"
-  else
-    printf '%s/tools/codex-chatgpt-web\n' "$HOME"
-  fi
+  printf '%s/tools/codex-chatgpt-web\n' "$HOME"
 }
 
 # True only for a live pid whose command line is this loop's serve
