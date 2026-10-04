@@ -1029,6 +1029,23 @@ test_jev_prober_diverts_exhausted_codex_to_healthy_pi_lane() {
   pass "spawn diverts an exhausted lane only to a quota-axi-healthy target"
 }
 
+test_jev_prober_unknown_launches_as_requested() {
+  local rec id out status
+  id=profile-jev-unknown-z4
+  rec=$(make_spawn_case jev-unknown codex "$id")
+  read_case_record "$rec"
+  quota_snapshot "$CASE_DIR/quota.json" opencode-go=40
+
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_QUOTA_SNAPSHOT="$CASE_DIR/quota.json" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex with no quota-axi row should launch as requested: $out"
+  assert_contains "$(cat "$LAUNCH_LOG")" "codex --model 'gpt-5'" "codex lane was not launched as requested"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode-go" "spawn diverted on an unknown verdict"
+  assert_contains "$out" "UNKNOWN quota-axi had no verdict for codex:gpt-5" "spawn hid the unknown diagnostic"
+  pass "spawn launches as requested, loudly, when quota-axi has no verdict"
+}
+
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   local harness version rec id out status launch
   for harness in pi pi-signed; do
@@ -1925,6 +1942,7 @@ test_pi_threads_model_and_max_effort
 test_jev_prober_uses_quota_axi_over_inverted_codex_signal
 test_jev_prober_refuses_exhausted_lane_with_exhausted_divert_target
 test_jev_prober_diverts_exhausted_codex_to_healthy_pi_lane
+test_jev_prober_unknown_launches_as_requested
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

@@ -53,7 +53,7 @@ export FM_GATE_REFUSE_BYPASS=1
 export FM_TEST_SEAM=1
 
 # Every spawn runs bin/fm-jev-quota-prober.sh, which refuses a lane quota-axi
-# cannot measure. Under the seam above it reads this all-healthy quota-axi
+# reports exhausted. Under the seam above it reads this all-healthy quota-axi
 # snapshot instead of the host's quota-axi; a case that needs other quota
 # evidence points FM_TEST_QUOTA_SNAPSHOT at its own file.
 export FM_TEST_QUOTA_SNAPSHOT="${FM_TEST_QUOTA_SNAPSHOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assets/quota-axi-healthy.json}"

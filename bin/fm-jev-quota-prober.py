@@ -11,7 +11,8 @@ no known scope, the window percentRemaining quota-axi still reports (its last
 reading) decides, and the verdict names it stale.
 
 The prober's own local signals (Codex credit balance and credential state, the
-zai-general dry marker) never decide. When one disagrees with quota-axi, a
+zai-general dry marker) never decide. When one would reach a different launch
+decision than quota-axi (one says exhausted, the other does not), a
 DISAGREEMENT line on stderr names both values and says quota-axi was used.
 
 Verdicts and exit codes (single-harness mode prints `<verdict> <harness> <model>`):
@@ -19,13 +20,13 @@ Verdicts and exit codes (single-harness mode prints `<verdict> <harness> <model>
   unmetered  0  no quota-axi provider measures this harness/model; launch as requested.
   diverted   0  --auto-divert only: the lane is exhausted and the printed lane is a
                 divert target quota-axi reports fresh and healthy.
+  unknown    0  quota-axi could not give a verdict (missing, failed, no row, not
+                set up, no measured window); a named stderr diagnostic says so and
+                the launch proceeds as requested. Never diverts.
   exhausted  1  quota-axi reports the lane exhausted and no divert was chosen.
-  unknown    3  quota-axi could not give a verdict (missing, failed, no row, not
-                set up, no measured window); refuse rather than divert.
 
-A divert target quota-axi reports exhausted cannot be printed: divert_line()
-is the only place a divert is emitted, and it re-reads quota-axi for the target
-and raises unless that verdict is fresh and healthy.
+select_divert() only picks a divert target quota-axi reports fresh and healthy;
+bin/fm-spawn.sh re-probes the printed target and refuses it unless healthy.
 
 Test seam: with FM_TEST_SEAM=1, FM_TEST_QUOTA_SNAPSHOT=<quota-axi --json file>
 answers every provider from that file instead of running quota-axi. A provider
@@ -47,7 +48,7 @@ import sys
 from pathlib import Path
 
 HEALTHY, EXHAUSTED, UNKNOWN, UNMETERED, DIVERTED = "healthy", "exhausted", "unknown", "unmetered", "diverted"
-EXIT_CODES = {HEALTHY: 0, UNMETERED: 0, DIVERTED: 0, EXHAUSTED: 1, UNKNOWN: 3}
+EXIT_CODES = {HEALTHY: 0, UNMETERED: 0, DIVERTED: 0, UNKNOWN: 0, EXHAUSTED: 1}
 
 # Captain 2026-09-21: Grok is firstmate-only. Never divert crews/no-mistakes to Grok.
 # Ordered divert candidates. bin/fm-spawn.sh rebuilds launch resolution only for pi.
@@ -184,7 +185,7 @@ def local_signal(harness: str, model: str, row: dict | None) -> tuple[str, str] 
 
 def probe(harness: str, model: str) -> dict:
     harness, model = harness.lower().strip(), (model or "").strip()
-    result = {"harness": harness, "model": model, "source": "quota-axi", "local_signal": None, "disagreement": None}
+    result = {"harness": harness, "model": model, "source": "quota-axi", "disagreement": None}
     provider = provider_for(harness, model)
     if provider is None:
         return {**result, "status": UNMETERED, "percent": None, "fresh": False, "provider": None,
@@ -200,41 +201,30 @@ def probe(harness: str, model: str) -> dict:
     result.update(status=verdict["status"], percent=verdict["percent"], fresh=verdict["fresh"],
                   provider=provider, reason=f"quota-axi {provider}: {verdict['detail']}")
     signal = local_signal(harness, model, row)
-    if signal:
-        result["local_signal"] = {"status": signal[0], "reason": signal[1]}
-        if signal[0] != verdict["status"]:
-            result["disagreement"] = (
-                f"DISAGREEMENT {harness}:{model or '-'}: prober={signal[0]} ({signal[1]}) "
-                f"vs quota-axi={verdict['status']} ({verdict['detail']}); using quota-axi"
-            )
+    if signal and (signal[0] == EXHAUSTED) != (verdict["status"] == EXHAUSTED):
+        result["disagreement"] = (
+            f"DISAGREEMENT {harness}:{model or '-'}: prober={signal[0]} ({signal[1]}) "
+            f"vs quota-axi={verdict['status']} ({verdict['detail']}); using quota-axi"
+        )
     return result
-
-
-def divert_viable(res: dict) -> bool:
-    return res["status"] == HEALTHY and res["fresh"]
 
 
 def select_divert(original: tuple[str, str]) -> tuple[str, str] | None:
     for lane in DIVERT_LANES:
-        if lane != original and divert_viable(probe(*lane)):
+        if lane == original:
+            continue
+        res = probe(*lane)
+        if res["status"] == HEALTHY and res["fresh"]:
             return lane
     return None
-
-
-def divert_line(lane: tuple[str, str]) -> str:
-    """The only emitter of a divert. Re-reads quota-axi; an exhausted target raises."""
-    res = probe(*lane)
-    if not divert_viable(res):
-        raise RuntimeError(f"refusing divert target {lane[0]}:{lane[1]}: {res['status']} ({res['reason']})")
-    return f"{DIVERTED} {lane[0]} {lane[1]}"
 
 
 def report(res: dict) -> None:
     if res["disagreement"]:
         print(f"jev-quota-prober: {res['disagreement']}", file=sys.stderr)
     if res["status"] == UNKNOWN:
-        print(f"jev-quota-prober: cannot determine quota for {res['harness']}:{res['model'] or '-'}: "
-              f"{res['reason']}; refusing (fail closed)", file=sys.stderr)
+        print(f"jev-quota-prober: UNKNOWN quota-axi had no verdict for {res['harness']}:{res['model'] or '-'}: "
+              f"{res['reason']}; launch proceeds as requested", file=sys.stderr)
 
 
 def main() -> int:
@@ -274,10 +264,9 @@ def main() -> int:
     if res["status"] == EXHAUSTED and args.auto_divert:
         lane = select_divert((res["harness"], res["model"]))
         if lane:
-            line = divert_line(lane)
             print(f"jev-quota-prober: {res['harness']}:{res['model'] or '-'} exhausted ({res['reason']}); "
                   f"diverting to {lane[0]}:{lane[1]}", file=sys.stderr)
-            print(line)
+            print(f"{DIVERTED} {lane[0]} {lane[1]}")
             return 0
         print(f"jev-quota-prober: {res['harness']}:{res['model'] or '-'} exhausted ({res['reason']}) "
               "and no divert lane is healthy in quota-axi", file=sys.stderr)

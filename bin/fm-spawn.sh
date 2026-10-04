@@ -2410,8 +2410,8 @@ fi
 
 # Jev Pattern 9: pre-flight quota verdict. bin/fm-jev-quota-prober.py's header
 # owns the verdicts; quota-axi is their only source and the prober's stderr
-# (disagreement and refusal diagnostics) stays visible. Only healthy and
-# unmetered launch as requested; anything else refuses, never diverts blindly.
+# (disagreement and unknown diagnostics) stays visible. Healthy, unmetered and
+# unknown launch as requested; anything else refuses, never diverts blindly.
 # A divert target is re-probed here and must itself come back healthy, so an
 # exhausted lane cannot be launched even if a future prober path returned one.
 # The disable switch is a test seam only and is inert outside the suite.
@@ -2420,7 +2420,7 @@ if ! { [ "${FM_TEST_SEAM:-}" = 1 ] && [ "${FM_TEST_DISABLE_JEV_PROBER:-0}" = 1 ]
   _jev_out=$("$SCRIPT_DIR/fm-jev-quota-prober.sh" --harness "$HARNESS" ${MODEL:+--model "$MODEL"} --auto-divert) || _jev_out=
   read -r _jev_verdict _jev_harness _jev_model <<< "$_jev_out" || :
   case "${_jev_verdict:-}" in
-  healthy | unmetered) ;;
+  healthy | unmetered | unknown) ;;
   diverted)
     _jev_check=$("$SCRIPT_DIR/fm-jev-quota-prober.sh" --harness "$_jev_harness" --model "$_jev_model") || _jev_check=
     if [ "$_jev_check" != "healthy $_jev_harness $_jev_model" ]; then

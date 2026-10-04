@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-jev-quota-prober.test.sh - quota-axi is the Jev quota prober's only
 # verdict source: inverted local verdicts lose loudly, an exhausted divert target
-# is never emitted, and an unmeasurable lane refuses rather than diverts.
+# is never selected, and an unmeasurable lane launches as requested, loudly,
+# and never diverts.
 set -euo pipefail
 
 # shellcheck source=tests/lib.sh
@@ -90,9 +91,7 @@ test_exhausted_divert_target_never_selected() {
   expect_code 0 "$RC" "healthy divert target"
   assert_equals "diverted pi opencode-go/glm-5.3-flash" "$OUT" "healthy divert target is selected"
 
-  # By construction: the only divert emitter re-reads quota-axi and raises on
-  # an exhausted target, and selection skips exhausted and stale lanes even
-  # when they are listed first.
+  # Selection skips exhausted and stale lanes even when they are listed first.
   snapshot "$TMP/mixed.json" "$(row codex 0)" "$(row opencode-go 0)" "$(row zai stale:50)" "$(row kimi 30)"
   RC=0
   FM_TEST_SEAM=1 FM_TEST_QUOTA_SNAPSHOT="$TMP/mixed.json" python3 - "$ROOT/bin/fm-jev-quota-prober.py" <<'EOF' > "$TMP/out" 2>&1 || RC=$?
@@ -102,17 +101,11 @@ p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
 p.DIVERT_LANES = (("pi", "opencode-go/glm-5.3-flash"), ("pi", "zai/glm-5"), ("kimi", "k3"))
 assert p.select_divert(("codex", "gpt-5.6-luna")) == ("kimi", "k3"), p.select_divert(("codex", "gpt-5.6-luna"))
-for lane in (("pi", "opencode-go/glm-5.3-flash"), ("pi", "zai/glm-5")):
-    try:
-        p.divert_line(lane)
-    except RuntimeError as exc:
-        print("refused:", exc)
-    else:
-        raise SystemExit(f"divert_line emitted {lane}")
+p.DIVERT_LANES = (("pi", "opencode-go/glm-5.3-flash"), ("pi", "zai/glm-5"))
+assert p.select_divert(("codex", "gpt-5.6-luna")) is None
 EOF
-  expect_code 0 "$RC" "divert construction check: $(cat "$TMP/out")"
-  assert_contains "$(cat "$TMP/out")" "refusing divert target pi:opencode-go/glm-5.3-flash: exhausted" "emitter refuses the exhausted target"
-  pass "exhausted divert target cannot be selected or emitted"
+  expect_code 0 "$RC" "divert selection check: $(cat "$TMP/out")"
+  pass "exhausted or stale divert target is never selected"
 }
 
 test_disagreement_names_both_values() {
@@ -133,23 +126,26 @@ test_disagreement_names_both_values() {
   pass "disagreement diagnostic names both values and the source used"
 }
 
-test_unknown_fails_closed_without_divert() {
+test_unknown_is_permissive_and_loud() {
   snapshot "$TMP/unset.json" "$(row devin unset)" "$(row opencode-go 90)"
   probe "$TMP/unset.json" --harness devin --auto-divert
-  expect_code 3 "$RC" "not-set-up provider"
+  expect_code 0 "$RC" "not-set-up provider"
   assert_equals "unknown devin" "$OUT" "unknown verdict, not a divert"
-  assert_contains "$ERR" "refusing (fail closed)" "the refusal is named"
+  assert_contains "$ERR" "UNKNOWN quota-axi had no verdict for devin:-" "the unknown verdict is named"
+  assert_contains "$ERR" "launch proceeds as requested" "the permissive launch is named"
 
-  probe "$TMP/unset.json" --harness claude --auto-divert
-  expect_code 3 "$RC" "provider missing from quota-axi output"
+  probe "$TMP/unset.json" --harness claude --model opus --auto-divert
+  expect_code 0 "$RC" "provider missing from quota-axi output"
+  assert_equals "unknown claude opus" "$OUT" "missing row is unknown, not a divert"
   assert_contains "$ERR" "quota-axi has no claude row" "missing row is named"
 
   RC=0
   env -u FM_TEST_SEAM PATH="$(fm_test_base_path_sans "/usr/bin:/bin" quota-axi)" \
     "$PROBER" --harness codex --auto-divert > "$TMP/out" 2> "$TMP/err" || RC=$?
-  expect_code 3 "$RC" "quota-axi absent"
+  expect_code 0 "$RC" "quota-axi absent"
+  assert_equals "unknown codex" "$(cat "$TMP/out")" "absent quota-axi is unknown, not a divert"
   assert_contains "$(cat "$TMP/err")" "quota-axi is not installed" "absent quota-axi is named"
-  pass "unmeasurable lanes fail closed with a named reason and never divert"
+  pass "unmeasurable lanes launch as requested with a loud named diagnostic and never divert"
 }
 
 test_unmetered_harness_launches_as_requested() {
@@ -164,5 +160,5 @@ test_inverted_codex_verdict_quota_axi_wins
 test_inverted_opencode_go_verdict_quota_axi_wins
 test_exhausted_divert_target_never_selected
 test_disagreement_names_both_values
-test_unknown_fails_closed_without_divert
+test_unknown_is_permissive_and_loud
 test_unmetered_harness_launches_as_requested
