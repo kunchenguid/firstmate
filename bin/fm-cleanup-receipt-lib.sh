@@ -78,10 +78,12 @@ fm_cleanup_completion_guard() { # <task> <generation>
 }
 
 # Terminal disposition proof for state-only reconciliation after execution
-# metadata is already gone. A current canonical record is authoritative.
-# Only when that record is absent may the retained legacy lifecycle record
-# supply an exact task/generation terminal disposition; neither path creates or
-# updates task state.
+# metadata is already gone. The canonical record remains authoritative for
+# business state, but its schema has no execution generation; when it exists it
+# therefore cannot bind historical cleanup to the caller-supplied generation.
+# Only an absent canonical record plus the retained lifecycle's exact
+# task/generation terminal disposition can authorize this legacy path. Neither
+# path creates or updates task state.
 fm_cleanup_historical_completion_mode() ( # <task> <generation>; prints done|archived|accepted
   local id=$1 generation=$2 current_status lifecycle data
   data=${FM_DATA_OVERRIDE:-${DATA:-${FM_HOME:?}/data}}
@@ -96,7 +98,10 @@ fm_cleanup_historical_completion_mode() ( # <task> <generation>; prints done|arc
   if [ "$current_status" -eq 1 ]; then
     fm_task_progress_detail "$id" || return $?
     case "$FM_TASK_PROGRESS_STATE" in
-      done|archived) printf '%s\n' "$FM_TASK_PROGRESS_STATE"; return 0 ;;
+      done|archived)
+        echo "REFUSED: canonical terminal task $id has no execution generation; preserving historical state rather than applying generation $generation" >&2
+        return 6
+        ;;
       *) echo "REFUSED: task $id is not canonically terminal; preserving historical state" >&2; return 6 ;;
     esac
   fi

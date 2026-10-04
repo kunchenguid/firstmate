@@ -274,6 +274,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -367,6 +369,7 @@ retire_busy_state() {
 # writers and task-id reuse outside the cleanup window.
 retire_task_runtime_state() {  # <state-dir> <task-id> [busy-generation]
   local state_dir=$1 id=$2 busy_gen=${3:-}
+  fm_task_inbox_retirement_guard "$state_dir" "$id" || return 1
   retire_busy_state "$state_dir" "$id" "$busy_gen" || return 1
   status_retire_presentation_task "$state_dir" "$id" --require-settled || return 1
   rm -f "$state_dir/$id.turn-ended" "$state_dir/$id.progress" \
@@ -398,11 +401,14 @@ teardown_completed_task() (
   local copy_lock='' copy_lock_held=0
   local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
   local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-task-handoff.sh" retirement-check "$ID" || exit 1
   lock=$(fm_meta_lock_path "$meta") || exit 1
   fm_lock_acquire_wait "$lock"
   trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi' EXIT
   fm_backend_validate_task_endpoint "$meta" "$ID" || exit 1
   [ -z "$ENDPOINT_EXPECTED_GEN" ] || [ "$(fm_meta_get "$meta" spawn_gen)" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
+  fm_task_inbox_retirement_guard "$STATE" "$ID" || exit 1
   KIND=$(fm_meta_get "$meta" kind)
   [ -n "$KIND" ] || KIND=ship
   [ "$KIND" != secondmate ] || {
@@ -729,6 +735,8 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-task-handoff.sh" retirement-check "$ID" || exit 1
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
@@ -736,6 +744,7 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+fm_task_inbox_retirement_guard "$STATE" "$ID" || exit 1
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 [ "$TEARDOWN_META_KIND" != secondmate ] || {

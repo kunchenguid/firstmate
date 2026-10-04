@@ -45,57 +45,9 @@ esac
 [ -n "$id" ] || { printf 'usage: fm-task-retire.sh <task-id> [fm-teardown arguments...]\n' >&2; exit 2; }
 # shellcheck source=bin/fm-cleanup-receipt-lib.sh
 . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 meta="$STATE/$id.meta"
-
-historical_handoff_guard() {  # <state> <task-id>
-  local state=$1 task=$2 records statuses record handoff_id target status_file handoff_state
-  records="$state/task-handoffs/records"
-  statuses="$state/task-handoffs/status"
-  [ ! -e "$records" ] && [ ! -L "$records" ] && return 0
-  [ -d "$records" ] && [ ! -L "$records" ] || {
-    echo "REFUSED: task handoff records are unsafe; preserving task $task state" >&2
-    return 1
-  }
-  for record in "$records"/*.msg; do
-    [ -e "$record" ] || [ -L "$record" ] || continue
-    if [ ! -f "$record" ] || [ -L "$record" ]; then
-      echo "REFUSED: task handoff record is unsafe; preserving task $task state" >&2
-      return 1
-    fi
-    target=$(sed -n '/^--$/q; s/^target=//p' "$record" | head -1)
-    [ -n "$target" ] || {
-      echo "REFUSED: task handoff record has no target; preserving task $task state" >&2
-      return 1
-    }
-    [ "$target" = "$task" ] || continue
-    handoff_id=${record##*/}; handoff_id=${handoff_id%.msg}
-    status_file="$statuses/$handoff_id.state"
-    if [ ! -d "$statuses" ] || [ -L "$statuses" ] \
-      || [ ! -f "$status_file" ] || [ -L "$status_file" ]; then
-      echo "REFUSED: task $task has a pending or unsafe handoff $handoff_id; preserve and reconcile it first" >&2
-      return 1
-    fi
-    handoff_state=$(sed -n 's/^state=//p' "$status_file" | head -1)
-    case "$handoff_state" in
-      delivered|rejected) ;;
-      *) echo "REFUSED: task $task has pending handoff $handoff_id ($handoff_state); preserve and reconcile it first" >&2; return 1 ;;
-    esac
-  done
-}
-
-historical_inbox_guard() {  # <state> <task-id>
-  local inbox="$1/$2.inbox" record
-  [ ! -e "$inbox" ] && [ ! -L "$inbox" ] && return 0
-  [ -d "$inbox" ] && [ ! -L "$inbox" ] || {
-    echo "REFUSED: task $2 inbox is unsafe; preserving historical state" >&2
-    return 1
-  }
-  for record in "$inbox"/*.msg; do
-    [ -e "$record" ] || [ -L "$record" ] || continue
-    echo "REFUSED: task $2 has an unhandled inbox record; preserve and acknowledge it first" >&2
-    return 1
-  done
-}
 
 historical_state_cleanup() ( # <dry-run|apply> <generation>
   local action=$1 generation=$2 data meta_lock='' control_lock='' receipt disposition facts busy_gen path count=0
@@ -165,8 +117,9 @@ historical_state_cleanup() ( # <dry-run|apply> <generation>
     exit 1
   }
   [ -n "$facts" ] || exit 1
-  historical_inbox_guard "$STATE" "$id" || exit 1
-  historical_handoff_guard "$STATE" "$id" || exit 1
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-task-handoff.sh" retirement-check "$id" || exit 1
+  fm_task_inbox_retirement_guard "$STATE" "$id" || exit 1
   status_retire_presentation_task "$STATE" "$id" --check-settled || exit 1
   fm_pr_poll_cleanup_validate "$STATE" "$id" || exit 1
 

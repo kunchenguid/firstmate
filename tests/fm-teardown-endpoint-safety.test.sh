@@ -35,7 +35,49 @@ seed_presented_runtime() { # <home> <task> <meta>
     > "$home/state/$task.herdr-presentation"
   mkdir -p "$home/state/$task.inbox/handled"
   printf 'schema=fm-task-inbox.v1\n--\nsettled by accepted retirement\n' \
-    > "$home/state/$task.inbox/001.msg"
+    > "$home/state/$task.inbox/handled/001.msg"
+}
+
+test_public_retirement_preserves_pending_inbox_and_delivered_handoff() {
+  local dir id=pending-retirement rc=0 inbox handoff_id=delivery-pending
+  dir=$(make_case pending-retirement)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  inbox="$dir/home/state/$id.inbox"
+  mkdir -p "$inbox/handled"
+  printf 'schema=fm-task-inbox.v1\nexecution_generation=s-%s\n--\npending instruction\n' "$id" \
+    >"$inbox/001.msg"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$ROOT/bin/fm-task-retire.sh" "$id" \
+    >"$dir/pending.out" 2>"$dir/pending.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'public local retirement deleted an unhandled inbox instruction'
+  assert_grep 'unhandled inbox record' "$dir/pending.err" \
+    'public local retirement did not explain the pending inbox refusal'
+  assert_present "$inbox/001.msg" 'public local retirement removed the pending instruction'
+  assert_present "$dir/home/state/$id.meta" 'pending inbox refusal removed task metadata'
+  [ ! -s "$dir/runtime.log" ] || fail 'pending inbox refusal reached the runtime endpoint'
+
+  mkdir -p "$dir/home/state/task-handoffs/records" "$dir/home/state/task-handoffs/status"
+  printf 'schema=fm-task-handoff.v1\nid=%s\nfrom=source\ntarget=%s\ntarget_generation=s-%s\n--\npending instruction\n' \
+    "$handoff_id" "$id" "$id" >"$dir/home/state/task-handoffs/records/$handoff_id.msg"
+  printf 'schema=fm-task-handoff.v1\nstate=delivered\ninbox_record=%s\n' "$inbox/001.msg" \
+    >"$dir/home/state/task-handoffs/status/$handoff_id.state"
+  printf 'schema=fm-task-inbox.v1\nexecution_generation=s-%s\nhandoff=%s\n--\npending instruction\n' \
+    "$id" "$handoff_id" >"$inbox/001.msg"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$ROOT/bin/fm-task-retire.sh" "$id" \
+    >"$dir/handoff.out" 2>"$dir/handoff.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'public local retirement treated delivered handoff as handled'
+  assert_grep 'delivered but not handled' "$dir/handoff.err" \
+    'public local retirement did not use the handoff acknowledgement owner'
+  assert_present "$inbox/001.msg" 'delivered-unhandled handoff lost its sole inbox instruction'
+  assert_present "$dir/home/state/task-handoffs/records/$handoff_id.msg" \
+    'delivered-unhandled refusal removed the handoff record'
+  assert_present "$dir/home/state/$id.meta" 'delivered-unhandled refusal removed task metadata'
+  [ ! -s "$dir/runtime.log" ] || fail 'delivered-unhandled refusal reached the runtime endpoint'
+  pass 'public local retirement preserves pending inbox and delivered-unhandled handoff instructions'
 }
 # The fixture binds normal task records to Herdr; historical refusal is
 # covered by fm-retired-backends.test.sh, without weakening these lock tests.
@@ -1189,6 +1231,7 @@ test_open_goal_preserves_resources_before_cleanup
 test_done_row_with_raw_open_gap_stays_unfinished
 test_explicit_archive_skips_success_delivery_gate
 test_absent_current_row_with_open_history_refuses
+test_public_retirement_preserves_pending_inbox_and_delivered_handoff
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

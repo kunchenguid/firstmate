@@ -77,6 +77,8 @@ AIME_STATE_TIMEOUT=${FM_AIME_STATE_TIMEOUT:-15}
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 die() {
   printf 'error: %s\n' "$1" >&2
@@ -760,6 +762,11 @@ cmd_retire() {
   fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
   generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
   [ -n "$generation" ] || die 'AIME execution generation is missing'
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-task-handoff.sh" retirement-check "$id" \
+    || die 'AIME task has unsettled cross-task delivery; preserving retirement state'
+  fm_task_inbox_retirement_guard "$STATE" "$id" \
+    || die 'AIME task has unhandled inbox instructions; preserving retirement state'
   # shellcheck source=bin/fm-cleanup-receipt-lib.sh
   . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
   fm_cleanup_completion_guard "$id" "$generation" \
@@ -774,6 +781,8 @@ cmd_retire() {
     fm_lock_acquire_wait "$meta_lock" || die "cannot lock task metadata"
     trap 'fm_lock_release "$meta_lock"; fm_lock_release "$lock"' EXIT
     fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
+    fm_task_inbox_retirement_guard "$STATE" "$id" \
+      || die 'AIME task received an unhandled inbox instruction during retirement; preserving it'
     generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
     fm_cleanup_completion_guard "$id" "$generation" || die 'goal disposition changed before retirement'
     case "$AIME_STATE_PHASE" in

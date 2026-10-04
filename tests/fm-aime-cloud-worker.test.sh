@@ -1472,7 +1472,7 @@ test_cloud_retirement_preserves_report() {
 }
 
 test_canonical_retirement_retires_active_state_and_preserves_provider_evidence() {
-  local home fakebin id=aime-cleanup generation result handled artifact
+  local home fakebin id=aime-cleanup generation result handled artifact rc=0
   home=$(new_home canonical-retirement-cleanup)
   fakebin=$(make_fake_bytedcli "$home")
   write_config "$home" true
@@ -1500,6 +1500,15 @@ test_canonical_retirement_retires_active_state_and_preserves_provider_evidence()
   mkdir -p "$home/state/$id.inbox/handled"
   printf 'schema=fm-task-inbox.v1\n--\nsettled terminal steer\n' \
     >"$home/state/$id.inbox/001.msg"
+
+  retire_aime "$home" "$fakebin" "$id" >"$home/pending-retire.out" 2>"$home/pending-retire.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'AIME retirement deleted an unhandled inbox instruction'
+  assert_grep 'unhandled inbox record' "$home/pending-retire.err" \
+    'AIME pending inbox refusal was not explicit'
+  assert_present "$home/state/$id.inbox/001.msg" 'AIME pending inbox instruction was removed'
+  assert_present "$home/state/$id.meta" 'AIME pending inbox refusal removed task metadata'
+  assert_present "$home/state/cloud-tasks/$id" 'AIME pending inbox refusal removed provider runtime state'
+  mv "$home/state/$id.inbox/001.msg" "$home/state/$id.inbox/handled/001.msg"
 
   retire_aime "$home" "$fakebin" "$id" >/dev/null \
     || fail 'canonical AIME retirement cleanup failed'
