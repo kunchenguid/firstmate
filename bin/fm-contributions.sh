@@ -66,8 +66,10 @@
 # ready-for-pr. Labels are matched case-insensitively and exactly.
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
-# contribution author) and issue transitions to ready-for-pr persist as pending
-# before any wake. poll appends ordinary durable check wakes through fm-wake-lib
+# contribution author and this home's own authenticated login, read once per
+# poll with `gh api user`; a repository this home owns would otherwise turn
+# every thank-you it posts into a wake) and issue transitions to ready-for-pr
+# persist as pending before any wake. poll appends ordinary durable check wakes through fm-wake-lib
 # and emits only newly durable signals for the authenticated check to surface.
 # ack removes
 # only the named pending token. A crash after enqueue can duplicate a wake but
@@ -231,8 +233,20 @@ wait_forges() { # background forge pids from one independent read wave
   return "$rc"
 }
 
+SELF_LOGIN_RESOLVED=0
+SELF_LOGIN=''
+self_login() { # the authenticated forge login, resolved once per process; empty when unknown
+  if [ "$SELF_LOGIN_RESOLVED" -eq 0 ]; then
+    SELF_LOGIN=$(fm_run_timed 5 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api user --jq .login 2>/dev/null | head -n 1 || true)
+    case "$SELF_LOGIN" in *[!A-Za-z0-9_-]*) SELF_LOGIN='' ;; esac
+    SELF_LOGIN_RESOLVED=1
+  fi
+  printf '%s' "$SELF_LOGIN"
+}
+
 observe() { # canonical GitHub URL -> normalized JSON
-  local url=$1 part number kind endpoint head after label
+  local url=$1 part number kind endpoint head after label self
+  self=$(self_login)
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
@@ -261,7 +275,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --arg self "$self" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
@@ -274,7 +288,7 @@ observe() { # canonical GitHub URL -> normalized JSON
               status:(if .state == "pending" then "in_progress" else "completed" end),
               conclusion:(if .state == "pending" then null else .state end)} ]),
           events:((($comments[0] | add // [] | map(. + {_signal:"comment"})) + ($reviews | map(. + {_signal:"review"})) + ($inline[0] | add // [] | map(. + {_signal:"review-comment"})))
-            | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+            | map(select(.user.login != $c.user.login and ($self == "" or .user.login != $self) and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
                  author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
@@ -286,11 +300,11 @@ observe() { # canonical GitHub URL -> normalized JSON
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" '
+    jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" --arg self "$self" '
       $core[0] as $c | {state:$c.state,head:null,
         ready:any($c.labels[]; (.name | ascii_downcase) == ($label | ascii_downcase)),
         checks:[],reviews:[],events:($comments[0] | add // []
-          | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+          | map(select(.user.login != $c.user.login and ($self == "" or .user.login != $self) and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
             | {token:("comment:" + (.id|tostring) + ":" + (.updated_at // "")),type:"comment",source:.html_url,
                head:null,author:.user.login,body:(.body // "" | .[:500])})
           + [$timeline[0][] | .[] | select(.event == "labeled" and (.label.name | ascii_downcase) == ($label | ascii_downcase))
