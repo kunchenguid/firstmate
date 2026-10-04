@@ -199,8 +199,13 @@
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
 #   behavior suite from the repository primary checkout while that marker is
-#   set (its header owns the refusal). A secondmate runs in its own home and is
-#   not marked.
+#   set (its header owns the refusal). The same pane receives one home-and-task-
+#   scoped CHROME_DEVTOOLS_AXI_SESSION, recorded as browser_session= in task
+#   metadata, so browser work never shares another task's bridge or profile and
+#   lifecycle cleanup can close only that exact process tree. A secondmate runs
+#   in its own home and receives neither task marker; its child tasks receive
+#   their own browser sessions when that home spawns them. bin/fm-browser-session.sh
+#   owns derivation, cleanup, idle/orphan detection, and capacity warnings.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
@@ -244,7 +249,8 @@
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
-#   marker FM_TASK_ID that ship and scout panes receive above.
+#   marker FM_TASK_ID and task browser assignment CHROME_DEVTOOLS_AXI_SESSION
+#   that ship and scout panes receive above.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
@@ -4177,6 +4183,11 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+BROWSER_SESSION=
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  BROWSER_SESSION=$("$SCRIPT_DIR/fm-browser-session.sh" name "$FM_HOME" "$ID") || exit 1
+fi
+
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -4193,7 +4204,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent browser_session backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4213,6 +4224,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ -z "$BROWSER_SESSION" ] || echo "browser_session=$BROWSER_SESSION"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4447,12 +4459,18 @@ spawn_record_traceparent() {
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
-# suite in the repository's primary checkout. Ship and scout workers are the
-# ones assigned an isolated worktree; a secondmate runs its own home instead.
-# The id reached a validated bare-slug charset above, so it carries no shell
-# syntax of its own.
+# suite in the repository's primary checkout. Give that same isolated worker
+# the browser session recorded above; this export overrides an ambient session
+# inherited from the pane host and reaches every supported harness/backend
+# through their shared pre-launch text channel. The id and derived browser name
+# contain no shell syntax.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION"
+else
+  # A persistent secondmate is not itself a task browser owner. Clear any
+  # ambient assignment before launch so only child task spawns receive one.
+  spawn_send_text_line "$T" "unset FM_TASK_ID CHROME_DEVTOOLS_AXI_SESSION"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -4477,7 +4495,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID \
+    FM_TASK_ID CHROME_DEVTOOLS_AXI_SESSION \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.

@@ -260,6 +260,15 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - close the task's recorded chrome-devtools-axi session before process
+#     reaping and again after its agent endpoint is gone. The first close lets
+#     the tool gracefully reap its detached MCP/Chrome tree before a worktree-
+#     cwd sweep can kill only the bridge; the second closes a browser raced in
+#     by the still-live worker between those steps. bin/fm-browser-session.sh
+#     verifies the home-and-task-derived session and bridge process before the
+#     tool receives `stop`; failure retains the task record and refuses instead
+#     of losing the only exact ownership link. Legacy records without a browser
+#     session are compatibility no-ops.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -2884,6 +2893,14 @@ FMEOF
 
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
+  # A missing source file is fatal to Bash's `.` special builtin before
+  # fm_backend_source can return through this conditional. Check it explicitly
+  # so the EXIT lock-release trap preserves a nonzero, retryable refusal rather
+  # than the surrounding `!` context's inverted zero status.
+  if [ ! -f "$SCRIPT_DIR/backends/herdr.sh" ] || [ ! -r "$SCRIPT_DIR/backends/herdr.sh" ]; then
+    echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
+    return 1
+  fi
   if ! fm_backend_source herdr; then
     echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
     return 1
@@ -3060,6 +3077,10 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
+    "$SCRIPT_DIR/fm-browser-session.sh" cleanup "$home" "$child_meta" || {
+      echo "error: exact browser cleanup failed for child $child_id; retaining that child's durable identity records and stopping forced cleanup" >&2
+      return 1
+    }
     if [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
@@ -3082,6 +3103,12 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    # The child agent is now gone, so a second exact close covers a browser it
+    # could have started after the pre-close above.
+    "$SCRIPT_DIR/fm-browser-session.sh" cleanup "$home" "$child_meta" || {
+      echo "error: final exact browser cleanup failed for child $child_id; retaining that child's durable identity records and stopping forced cleanup" >&2
+      return 1
+    }
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3144,7 +3171,8 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
-      "$sub_state/.$child_id.branch-outcome-index"
+      "$sub_state/.$child_id.branch-outcome-index" \
+      "$sub_state/.$child_id.browser-terminal-cleaned" "$sub_state/.$child_id.browser-idle-warned"
   done
 }
 
@@ -3383,12 +3411,18 @@ else
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
+# them). Fix 1, Fix 2, and Fix 4's pre-close (see script header) run here,
+# unconditionally on --force, and before ANY destructive step below - a still-
+# parked run or leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
+if [ "$KIND" != secondmate ]; then
+  "$SCRIPT_DIR/fm-browser-session.sh" cleanup "$FM_HOME" "$META" || {
+    echo "error: exact browser cleanup failed for $ID; retaining its durable task record for retry" >&2
+    exit 1
+  }
+fi
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
@@ -3529,6 +3563,12 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 if [ "$KIND" != secondmate ]; then
+  # The endpoint is confirmed gone, so no task worker can race this final close
+  # by starting another browser before its ownership record is retired.
+  "$SCRIPT_DIR/fm-browser-session.sh" cleanup "$FM_HOME" "$META" || {
+    echo "error: final exact browser cleanup failed for $ID; retaining its durable task record for retry" >&2
+    exit 1
+  }
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then
     echo "error: $ID's final outcome has not reached the parent channel; retaining every durable task record so a rerun can retry the delivery" >&2
@@ -3573,7 +3613,8 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/.$ID.branch-outcome-index"
+  "$STATE/.$ID.branch-outcome-index" \
+  "$STATE/.$ID.browser-terminal-cleaned" "$STATE/.$ID.browser-idle-warned"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

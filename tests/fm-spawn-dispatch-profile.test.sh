@@ -1398,6 +1398,26 @@ test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
   pass "an unrecognized config/claude-permission-mode token refuses before any endpoint or metadata"
 }
 
+test_task_browser_session_is_recorded_and_exported() {
+  local rec id out status textlog expected
+  id=browser-session-z24
+  rec=$(make_spawn_case browser-session claude "$id")
+  read_case_record "$rec"
+  textlog="$CASE_DIR/text.log"
+  : > "$textlog"
+
+  out=$(FM_FAKE_TEXT_LOG="$textlog" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "task browser session spawn should succeed"
+  expected=$("$ROOT/bin/fm-browser-session.sh" name "$HOME_DIR" "$id")
+  assert_grep "browser_session=$expected" "$HOME_DIR/state/$id.meta" \
+    "spawn did not bind the derived task browser session in metadata"
+  assert_grep "export CHROME_DEVTOOLS_AXI_SESSION=$expected" "$textlog" \
+    "spawn did not export the recorded browser session before launch"
+  pass "ship spawns record and export one task browser session"
+}
+
 test_non_claude_harness_ignores_claude_permission_mode() {
   local rec id out status launch
   id=permmode-codex-z23
@@ -1415,6 +1435,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 }
 
 test_worker_launch_delivers_role_scope
+test_task_browser_session_is_recorded_and_exported
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

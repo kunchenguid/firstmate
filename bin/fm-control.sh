@@ -29,8 +29,10 @@
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent).
+#              the backend's recovery-grade classifier reports the agent gone,
+#              then bin/fm-browser-session.sh closes the exact task-owned browser
+#              tree. Already-stopped is success (idempotent) after the same
+#              browser cleanup.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
@@ -446,6 +448,11 @@ retire_busy_incarnation() {
   fi
 }
 
+cleanup_task_browser() {
+  "$SCRIPT_DIR/fm-browser-session.sh" cleanup "$FM_HOME" "$META" ||
+    die "task $ID's agent is stopped, but its exact browser session could not be closed; the task record is preserved for retry"
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
@@ -454,6 +461,7 @@ do_exit() {
   state=$(agent_state)
   case "$state" in
     dead)
+      cleanup_task_browser
       printf 'already-stopped'
       return 0
       ;;
@@ -469,6 +477,7 @@ do_exit() {
       case "$state" in
         dead)
           retire_busy_incarnation
+          cleanup_task_browser
           printf 'stopped'
           return 0
           ;;
@@ -503,9 +512,10 @@ do_exit() {
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
-  # The incarnation is over: retire its busy wiring so no stale record or
-  # orphaned generation survives the agent that produced it.
+  # The incarnation is over: retire its busy wiring and exact task browser so
+  # neither stale state nor a detached process tree survives the agent.
   retire_busy_incarnation
+  cleanup_task_browser
   printf 'stopped'
 }
 

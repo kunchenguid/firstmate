@@ -902,6 +902,26 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_task_browser_assignment_contract() {
+  local home id brief
+  home="$TMP_ROOT/browser-assignment"
+  for id in browser-ship browser-scout; do
+    if [ "$id" = browser-scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --scout >/dev/null \
+        || fail "browser scout scaffold failed"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --mode no-mistakes >/dev/null \
+        || fail "browser ship scaffold failed"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep 'Preserve the task-owned CHROME_DEVTOOLS_AXI_SESSION value' "$brief" \
+      "$id did not require the task browser assignment to be preserved"
+    assert_grep "never override it or reuse another task's session" "$brief" \
+      "$id did not forbid cross-task browser reuse"
+  done
+  pass "fm-brief: ship and scout workers preserve their task-owned browser assignment"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -925,6 +945,7 @@ test_worker_role_scope() {
 }
 
 test_worker_role_scope
+test_task_browser_assignment_contract
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header

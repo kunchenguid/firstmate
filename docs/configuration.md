@@ -398,6 +398,34 @@ Nothing is written into a project.
 An entry records what was known when that landing happened, so configuring prices later does not retroactively price an earlier landing.
 `bin/fm-cost.sh projects` is the operator view of that ledger: one row per project, plus a fleet total that counts priced and unpriced landings separately.
 
+## Task browser sessions
+
+Every ship and scout receives one deterministic `CHROME_DEVTOOLS_AXI_SESSION` derived from its resolved `FM_HOME` and task id.
+`bin/fm-spawn.sh` records that value as `browser_session=` in the task metadata and exports it into the worker before launch, so repeated `chrome-devtools-axi` commands for one task reconnect to that task's bridge while equal task ids in different Firstmate homes remain isolated.
+Workers must preserve the supplied value rather than selecting or reusing another named session.
+Secondmates do not receive a browser assignment themselves; tasks launched from their homes receive home-scoped assignments normally.
+
+`bin/fm-control.sh ... exit` and `bin/fm-teardown.sh` stop the recorded exact browser session as part of worker cleanup.
+The browser helper validates the metadata against the expected home-and-task identity, validates the recorded bridge PID, calls `chrome-devtools-axi stop` for only that named session, and verifies that bridge exited.
+It never enumerates Chrome processes as kill targets, and a malformed identity or PID refuses cleanup rather than risking an active or unrelated browser.
+The watcher provides a bounded backstop: terminal task outcomes close a surviving recorded session, and a session with no change in its own chrome-devtools-axi state for the idle timeout is detected.
+A stale session is closed automatically only when the worker runtime authoritatively reports its owner dead or missing; an alive, ambiguous, unreadable, or unsupported owner produces one warning per activity epoch and remains untouched.
+Tasks created before `browser_session=` existed are compatibility no-ops.
+
+The same periodic audit counts headless browser roots owned below chrome-devtools-axi bridge processes and every descendant helper from one process-table snapshot.
+It warns once when either threshold is reached and rearms after both counts fall below their thresholds; pressure detection includes manually selected browser sessions, but cleanup authority remains limited to an exact task metadata binding.
+Defaults and overrides are:
+
+```sh
+FM_BROWSER_IDLE_TIMEOUT_SECS=1800  # unchanged task browser state before orphan evaluation
+FM_BROWSER_AUDIT_INTERVAL=300      # watcher cadence for lifecycle and capacity audit
+FM_BROWSER_ROOT_WARN=4             # warn at this many owned headless browser roots
+FM_BROWSER_HELPER_WARN=30          # warn at this many descendants of those roots
+```
+
+Each setting must be a positive integer; invalid values use the shown default.
+`bin/fm-browser-session.sh` owns identity, validation, cleanup, process counting, and warning deduplication, while `bin/fm-watch.sh` owns the audit cadence.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
@@ -1061,6 +1089,7 @@ FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
+CHROME_DEVTOOLS_AXI_SESSION=  # internal home-and-task-scoped browser assignment fm-spawn.sh exports into ship and scout panes; preserve it rather than setting it by hand
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
@@ -1076,6 +1105,10 @@ FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tas
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
+FM_BROWSER_IDLE_TIMEOUT_SECS=1800  # unchanged task browser state before the watcher evaluates its owner as a possible orphan; positive integers only
+FM_BROWSER_AUDIT_INTERVAL=300  # seconds between watcher browser lifecycle and resource-pressure audits; positive integers only
+FM_BROWSER_ROOT_WARN=4         # owned headless browser roots that trigger a deduplicated capacity warning; positive integers only
+FM_BROWSER_HELPER_WARN=30      # descendants of owned headless browser roots that trigger the same warning; positive integers only
 FM_HOME_SUMMARY_INTERVAL=300   # seconds before a live watcher refreshes this home's state/home-summary.json even without a status signal; invalid or zero values use 300
 FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-summary refresh, including lock acquisition, validation, atomic publication, and worker-side failure logging; invalid or zero values use 60
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536

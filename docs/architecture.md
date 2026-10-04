@@ -253,6 +253,23 @@ If another live session holds the fleet lock, both surfaces keep the alarm but s
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
 Placement is proven only at launch, so `bin/fm-spawn.sh` also exports the task id as `FM_TASK_ID` into every ship and scout pane, and `bin/fm-test-run.sh` refuses to execute the behavior suite from the primary checkout while that marker is set; the runner's header owns the predicate and [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh) pins it.
 
+## Task-owned browser process trees
+
+Browser isolation follows the same home-and-task ownership boundary as worktree isolation.
+`bin/fm-spawn.sh` derives one opaque chrome-devtools-axi session name from the canonical `FM_HOME` plus task id, records it in task metadata, and exports it before each ship or scout launch.
+The browser tool therefore owns a separate bridge, MCP server, headless browser, profile, and helper tree for every task without exposing home paths or exceeding its session-name limit.
+
+`bin/fm-browser-session.sh` is the sole lifecycle owner.
+Cleanup starts from the exact metadata binding, recomputes the expected identity, verifies the named session's PID still belongs to chrome-devtools-axi's bridge, then delegates graceful whole-tree closure and bounded escalation to `chrome-devtools-axi stop` and verifies that exact bridge disappeared.
+No cleanup path searches process names and kills matches, so an active neighbor, a manually started browser, or another home's equal task id is outside its authority.
+Worker exit and teardown call that cleanup directly, and the watcher periodically recovers sessions left behind by crashes or missing status delivery.
+
+The periodic recovery separates detection from destructive authority.
+A terminal status event licenses exact-session cleanup; otherwise the named session's own state-file activity must first exceed the configured timeout, after which only a recovery-grade dead or missing worker verdict licenses automatic closure.
+Every uncertain or live verdict warns and preserves the tree.
+Resource pressure uses a read-only process-table graph: browser roots must be headless descendants of a chrome-devtools-axi bridge, helpers must descend from those roots, and exceeding either configured count emits a deduplicated warning without expanding cleanup authority.
+Operator defaults and tunables live in [Task browser sessions](configuration.md#task-browser-sessions), and executable lifecycle, neighbor-preservation, orphan, and pressure regressions live in [`tests/fm-browser-session.test.sh`](../tests/fm-browser-session.test.sh).
+
 ## No-mistakes gate authority boundary
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.

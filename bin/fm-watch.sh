@@ -112,6 +112,11 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
+#   check: browser sessions: <diagnostic>
+#                          the task-browser sweep found a session idle past its
+#                          bound, an exact cleanup it could not complete, or
+#                          machine-wide headless-browser pressure at the documented
+#                          root/helper ceiling; successful exact cleanup stays silent
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> idle=<seconds>s
 #                          an actionable row in an endpoint-recorded local
 #                          secondmate home's durable wake queue did not advance
@@ -231,6 +236,14 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
+esac
+# Task browser lifecycle is checked on a bounded cadence instead of on every
+# 15-second supervision poll. bin/fm-browser-session.sh owns cleanup, stale-age,
+# process counting, and warning dedupe; this watcher owns only when to call it
+# and how an emitted diagnostic enters the ordinary actionable queue.
+BROWSER_AUDIT_INTERVAL=${FM_BROWSER_AUDIT_INTERVAL:-300}
+case "$BROWSER_AUDIT_INTERVAL" in
+  ''|*[!0-9]*|0) BROWSER_AUDIT_INTERVAL=300 ;;
 esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
@@ -2171,6 +2184,20 @@ while :; do
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
+  fi
+
+  if [ "$(age_of "$STATE/.last-browser-audit")" -ge "$BROWSER_AUDIT_INTERVAL" ]; then
+    browser_audit_out=
+    browser_audit_status=0
+    browser_audit_out=$(env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-browser-session.sh" sweep "$FM_HOME" "$STATE" 2>&1) \
+      || browser_audit_status=$?
+    touch "$STATE/.last-browser-audit"
+    if [ "$browser_audit_status" -ne 0 ]; then
+      [ -n "$browser_audit_out" ] \
+        || browser_audit_out="browser lifecycle audit failed with status $browser_audit_status"
+    fi
+    [ -z "$browser_audit_out" ] || wake "check: browser sessions: $browser_audit_out"
   fi
 
   # Bearings publishes reconcile asks as local one-shot request files and
