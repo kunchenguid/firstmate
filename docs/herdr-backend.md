@@ -23,6 +23,8 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
+| Why Firstmate refuses to type into an agent Herdr resumed | [Agents resumed after a restart](#agents-resumed-after-a-restart) |
+| Running the Herdr server as a systemd user service | [Running the server under systemd](#running-the-server-under-systemd) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
 | Stopping or deleting Herdr sessions during verification | [Destructive lab safety](#destructive-lab-safety) |
@@ -662,11 +664,35 @@ No Herdr-specific copy of that protocol exists.
 ### Husks after a server restart
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids.
-The underlying harness processes and live agent registrations do not survive.
+On Herdr 0.9.1 and older, the harness processes and live agent registrations do not survive.
+On Herdr 0.9.2 and newer, agent resume is on by default, and an agent that reported a resume command comes back in its pane; [Agents resumed after a restart](#agents-resumed-after-a-restart) covers that case.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
+With `[session] resume_agents_on_restore = false` in Herdr's `config.toml`, every restored pane is a husk.
 
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
+
+### Agents resumed after a restart
+
+Herdr re-runs a resumed agent's command in the directory the pane was created in, not the directory the agent last worked in.
+For a fresh spawn, that directory is the project's primary checkout, because `treehouse get` enters the isolated worktree in a nested shell after the pane exists.
+The resumed agent keeps the pane id, the tab label, and its conversation, so every pane-level check still matches it.
+It does not keep its launch environment: it inherits the Herdr server's environment.
+
+Every ship and scout launch exports `FM_TASK_ID=<task-id>` before the agent starts, and the Herdr server is started without it.
+Before Firstmate types anything into a ship or scout pane, it reads the pane's process tree from `/proc/<pid>/environ`.
+When a harness is running and no process in the tree carries this task's marker, the pane holds a foreign agent:
+
+- The steering inbox records the message and types no doorbell, and the watcher raises one notification asking for recovery.
+- `bin/fm-send.sh --key` and typed text refuse and send nothing.
+- Every `bin/fm-control.sh` verb refuses before sending a key.
+
+Recovery asks the captain to stop the resumed agent or close its tab, then relaunch reclaims the task in its recorded worktree.
+A host without procfs, an unreadable process view, and a secondmate pane produce no verdict, so their behavior is unchanged.
+[Verification](verification/runtime-backends.md) "Task identity across a restart" records the harnesses checked and refreshes with `tests/fm-herdr-task-identity-live-e2e.test.sh`.
+
+Session start warns on a herdr home when the client is 0.9.2 or newer and `config.toml` does not turn resume off.
+Firstmate only reads that file and never writes it.
 
 ### Stale agent registrations
 
@@ -804,6 +830,66 @@ On stop:
 
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
+## Running the server under systemd
+
+A Herdr server started in the background joins the cgroup of whatever started it.
+A terminal window can carry systemd-oomd's `ManagedOOMMemoryPressure=kill`, as Ghostty's per-window scopes under `app.slice` do.
+Then one memory-pressure kill of that window stops the server and every agent pane in it.
+A user service in its own slice sits outside `app.slice`, so systemd-oomd never selects it while no ancestor slice carries `kill`.
+It gives no protection against the kernel's own OOM killer.
+
+Session start warns on a herdr home when the running `default` server sits under `app.slice`.
+When the user unit `herdr.service` is loaded, Firstmate starts the `default` session's server with `systemctl --user start herdr.service` instead of a background `herdr server`.
+A loaded unit that fails to start is reported as an error, never replaced by a background server.
+Named sessions, including lab sessions, keep the background launch.
+
+### The unit
+
+`~/.config/systemd/user/herdr.slice` (a name without `-`, so it adds no slice level):
+
+```ini
+[Unit]
+Description=Herdr server, outside the app.slice watched by systemd-oomd
+```
+
+`~/.config/systemd/user/herdr.service`:
+
+```ini
+[Unit]
+Description=Herdr server (default session)
+After=graphical-session.target
+
+[Service]
+Type=simple
+Slice=herdr.slice
+ExecStart=/usr/bin/herdr server
+ExecStop=/usr/bin/herdr server stop
+TimeoutStopSec=60
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+Firstmate never installs these files.
+A lab run proved that `herdr server` stays in the foreground as the unit's main process, that its panes join the unit's cgroup, and that a stop ends with `Result=success`.
+That run stopped the unit through a session-scoped `herdr session stop` and through plain SIGTERM; it did not run `herdr server stop` ([verification](verification/runtime-backends.md) "Server under a systemd user unit").
+
+### The switch
+
+The switch stops every agent in every fleet on the `default` session, so do it only when every fleet can stop.
+
+1. Write the two files above.
+2. Run `systemctl --user daemon-reload`.
+3. Run `systemd-analyze --user verify ~/.config/systemd/user/herdr.service`.
+4. Run `herdr server stop`.
+5. Run `systemctl --user enable --now herdr.service`.
+6. Run `cat /proc/$(pgrep -f '^/usr/bin/herdr server$')/cgroup` and expect `0::/user.slice/user-1000.slice/user@1000.service/herdr.slice/herdr.service`.
+7. Run `herdr` in a terminal window to attach the TUI; only the client lives in the window.
+
+- If the service is stopped, a plain `herdr` in a terminal window starts a server inside that window again.
+- Do not use `herdr update --handoff` with the service: the new server would start in the cgroup of the process that ran the update. Stop the service, run `herdr update`, then start the service.
+- To undo, run `systemctl --user disable --now herdr.service`, which also stops every agent, then delete the two files and run `systemctl --user daemon-reload`.
+
 ## Destructive lab safety
 
 Never use ambient `herdr server stop` for Firstmate verification.
@@ -846,6 +932,7 @@ tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh
 tests/fm-herdr-pi-stale-registration-live-e2e.test.sh
+tests/fm-herdr-task-identity-live-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-control-herdr-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh

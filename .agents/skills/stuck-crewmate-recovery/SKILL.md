@@ -44,6 +44,10 @@ A HERDR endpoint that is not merely idle but destroyed - a pane or workspace rem
 That relaunch proves the endpoint is destroyed before it rebinds, so a Herdr server that was merely stopped is adopted back rather than duplicated.
 On tmux there is no reclaim: a task record carries no socket identity for its endpoint, so a `missing` window cannot be told apart from one on a tmux server this seat cannot address, and both `exit` and `relaunch` refuse.
 Do not work around either refusal by respawning - it means a live agent may still hold that worktree.
+A refusal or notification saying the agent in a ship or scout pane was not launched for the task means Herdr resumed an agent session there after a restart, in the directory the pane was created in, often the project's primary checkout ([`docs/herdr-backend.md`](../../../docs/herdr-backend.md) "Agents resumed after a restart").
+Firstmate never types into that agent, and no control verb will stop it.
+Tell the captain which project directory the resumed agent is running in and ask them to stop it or close that tab, then check that directory for changes or merges the resumed agent made before it stopped.
+Once the pane is gone, `relaunch` reclaims the task in its recorded worktree as described above.
 That reclaim is the owning home's operation only, and a secondmate is the one exception: recover it through `bin/fm-spawn.sh <id> --secondmate` as above.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.

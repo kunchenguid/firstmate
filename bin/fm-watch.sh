@@ -499,9 +499,13 @@ window_key() {  # <window>
   printf '%s' "${key//./_}"
 }
 
-inbox_steer_escalate_unavailable() {  # <window> <task> <record>
+inbox_steer_escalate_unavailable() {  # <window> <task> <record> [foreign]
   local w=$1 task=$2 rec=$3 reason
-  reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
+  if [ "${4:-}" = foreign ]; then
+    reason="stale: $w (unread firstmate instruction: $rec is unhandled and the doorbell was not typed because $(fm_backend_foreign_endpoint_reason "$w" "$task"))"
+  else
+    reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
+  fi
   if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
@@ -517,7 +521,8 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # bin/fm-task-inbox-lib.sh owns delivery, busy-deferral, retry, and escalation policy.
 # Endpoint and busy checks precede delivery so recovery never types into a busy,
-# dead, or missing worker; the ring helper protects pending composer text.
+# dead, or missing worker, or into an agent not launched for the task
+# (fm_backend_endpoint_foreign); the ring helper protects pending composer text.
 # Normal retries keep the watcher blocking rather than waking firstmate.
 # Runs for secondmates too: their pane-staleness exemption is about quiet panes
 # being healthy, while an unacknowledged instruction can still be a stuck steer.
@@ -549,6 +554,10 @@ inbox_steer_check() {  # <window> <task>
       return 0
       ;;
   esac
+  if [ "$verb" != retry ] && fm_backend_endpoint_foreign "$backend" "$w" "$STATE/$task.meta" 2>/dev/null; then
+    inbox_steer_escalate_unavailable "$w" "$task" "$rec" foreign
+    return 0
+  fi
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if window_is_busy "$w" "$tail40"; then
     [ "$verb" != retry ] || return 0
@@ -571,6 +580,10 @@ inbox_steer_check() {  # <window> <task>
       fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" "$(window_harness "$w")" || ring_rc=$?
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
+        return 0
+      fi
+      if [ "$ring_rc" -eq 4 ]; then
+        inbox_steer_escalate_unavailable "$w" "$task" "$rec" foreign
         return 0
       fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then

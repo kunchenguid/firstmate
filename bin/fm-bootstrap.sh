@@ -22,7 +22,13 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "HERDR_SERVER_CGROUP: the default Herdr server (pid <pid>) runs in <cgroup>, under app.slice, ...",
+#                 "HERDR_AGENT_RESUME: Herdr <version> resumes agents after a server restart because <config.toml> does not set [session] resume_agents_on_restore = false; ...",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#          The two HERDR_ lines print only on a herdr home, from read-only
+#          process-table and config reads (bin/backends/herdr.sh's
+#          fm_backend_herdr_host_diagnostics owns when); bootstrap never starts,
+#          stops, or reconfigures Herdr and never writes its config.
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -1476,6 +1482,9 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  if [ "$BACKEND" = herdr ] && fm_backend_source herdr 2>/dev/null; then
+    fm_backend_herdr_host_diagnostics
+  fi
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,

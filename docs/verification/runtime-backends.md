@@ -1796,6 +1796,71 @@ ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi rea
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.
 
+### Task identity across a restart
+
+Measured 2026-10-04 on Linux x86_64 (Arch, kernel procfs) against Herdr 0.9.3 (protocol 22) in an isolated `fm-lab-` session.
+
+With agent resume on, a restarted Herdr server re-runs each agent's reported resume command in the pane's creation directory, with the server's environment, so the resumed agent carries no `FM_TASK_ID` launch marker.
+`fm_backend_herdr_task_identity` reads that marker from `/proc/<pid>/environ` across the pane shell's whole process tree.
+The vendor fact no fixture proves is that each real harness, started the way `bin/fm-spawn.sh` starts it (`export FM_TASK_ID=<id>` in the pane shell, then the launch command, no prompt), keeps a process in the pane tree that carries the marker.
+The live guard launches each installed harness twice, with and without the export, and reads the verdict for the right id, another id, and the unmarked launch:
+
+```sh
+tests/fm-herdr-task-identity-live-e2e.test.sh
+FM_HERDR_TASK_IDENTITY_HARNESSES=agy tests/fm-herdr-task-identity-live-e2e.test.sh
+```
+
+```text
+ok - real kiro-cli kiro-cli 2.27.1 under herdr 0.9.3: the launch marker reads match, another task foreign, and an unmarked launch foreign
+ok - real claude 2.1.289 (Claude Code) under herdr 0.9.3: the launch marker reads match, another task foreign, and an unmarked launch foreign
+# codex is not installed on this host; its identity was not checked
+ok - real pi 1.0.2 under herdr 0.9.3: the launch marker reads match, another task foreign, and an unmarked launch foreign
+ok - real herdr 0.9.3 + kiro-cli: fm-send --key, typed fm-send, and fm-control refuse an unmarked agent, and an inbox steer records without a doorbell
+# harnesses checked: kiro-cli claude pi
+ok - real agy 1.2.16 under herdr 0.9.3: the launch marker reads match, another task foreign, and an unmarked launch foreign
+ok - real herdr 0.9.3 + agy: fm-send --key, typed fm-send, and fm-control refuse an unmarked agent, and an inbox steer records without a doorbell
+```
+
+Codex is not verified by this record because no `codex` binary was installed on the measuring host.
+A running fleet worker on the same host showed the marker on every frame of its kiro-cli run (`kiro-cli`, `kiro-cli-chat`, `bun`, `node`) and on none of the Herdr server, `treehouse get`, and pane shell frames above it.
+`tests/fm-backend-herdr.test.sh` pins the verdict logic portably over real process trees: a launcher that carries the marker and execs the harness with an empty environment still reads `match`, a harness with no marker reads `foreign`, a pane with no harness and a host with no procfs read `unknown`, and the inbox doorbell types nothing into a ship pane that reads `foreign` while a secondmate is never checked.
+
+### Server under a systemd user unit
+
+Measured 2026-10-04 on Linux x86_64 with systemd 261 and Herdr 0.9.3, in an isolated `fm-lab-` session prepared through `bin/fm-herdr-lab.sh prepare`, with a transient user unit and slice that existed only for the run (nothing under `~/.config/systemd/user/` was written, and the default session's tripwire passed at teardown).
+
+```sh
+systemd-run --user --unit=fm-lab-herdr-unit-<pid> --slice=fmlabherdr.slice -p Type=simple -p TimeoutStopSec=60 \
+  -p "ExecStop=bin/fm-herdr-lab.sh stop <lab-session>" /usr/bin/herdr server --session <lab-session>
+systemctl --user show fm-lab-herdr-unit-<pid>.service -p MainPID -p ActiveState -p SubState -p ControlGroup
+systemctl --user stop fm-lab-herdr-unit-<pid>.service
+systemd-run --user --unit=fm-lab-herdr-unit-<pid>b --slice=fmlabherdr.slice -p Type=simple /usr/bin/herdr server --session <lab-session>
+systemctl --user stop fm-lab-herdr-unit-<pid>b.service
+```
+
+```text
+ActiveState=active
+SubState=running
+ControlGroup=/user.slice/user-1000.slice/user@1000.service/fmlabherdr.slice/fm-lab-herdr-unit-3165378.service
+MainPID args: /usr/bin/herdr server --session fm-lab-firstmate-herdr-3165382-185  ppid: 1202
+slice oomd: ManagedOOMSwap=auto ManagedOOMMemoryPressure=auto
+oomctl monitored lab slice: 0
+pane process 3168335 (sleep) cgroup: 0::/user.slice/user-1000.slice/user@1000.service/fmlabherdr.slice/fm-lab-herdr-unit-3165378.service
+stop took 0.33s
+ActiveState=inactive
+SubState=dead
+Result=success
+session after stop: {"name":"fm-lab-firstmate-herdr-3165382-185","running":false}
+restored workspaces: ["unitproof"]
+stop took 0.08s
+Result=success
+session after SIGTERM stop: {"name":"fm-lab-firstmate-herdr-3165382-185","running":false}
+```
+
+`herdr server` stays in the foreground as the unit's main process (its parent is the user manager, pid 1202, five seconds after start), and every pane process joins the unit's cgroup, outside `app.slice`.
+Stopping the unit through a session-scoped `herdr session stop` as `ExecStop`, and through systemd's own SIGTERM with no `ExecStop`, both ended with `Result=success` and kept the saved layout for the next start.
+`herdr server stop` itself was not run in the lab, because it names no session.
+
 ### Pane status authority across a relaunch
 
 Measured 2026-09-21 on Linux x86_64 against Herdr 0.9.1 (client protocol 22) and Pi 0.86.1, in an isolated `fm-lab-` session (`bin/fm-herdr-lab.sh`), after the same freeze was observed live on a relaunched Pi crewmate whose pane read `idle` while its validation pipeline ran.

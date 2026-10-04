@@ -13,9 +13,10 @@
 # here rather than improvised per harness in agent prose.
 #
 # This file owns three capability tables plus their pure artifact-path tables,
-# and ONE named exception to that purity - fm_control_endpoint_absence_verdict,
-# the single owner of the per-backend endpoint-absence proof, which does run
-# backend reads. Everything else has no side effects, runs no backend command,
+# and TWO named exceptions to that purity that do run backend reads -
+# fm_control_endpoint_absence_verdict, the single owner of the per-backend
+# endpoint-absence proof, and fm_control_refuse_foreign_endpoint, the control
+# plane's task-identity gate. Everything else has no side effects, runs no backend command,
 # and reads no state, so sourcing this file is still free and the tables can be
 # read by a test as a pure contract:
 #
@@ -304,6 +305,19 @@ fm_control_backend_supports_key() {  # <backend> <key>
       ;;
   esac
   return 1
+}
+
+# fm_control_refuse_foreign_endpoint: the control plane's task-identity gate.
+# Every verb sends a key or text, so each one asks this first. Returns 0 (and
+# prints the refusal sentence) when <target> provably holds an agent not
+# launched for task <id>, such as a session Herdr resumed after a restart in
+# the directory the pane was created in; bin/fm-backend.sh's
+# fm_backend_endpoint_foreign owns the verdict and its no-objection cases.
+# Nothing is sent and nothing is stopped: the resumed agent is not this task's,
+# so stopping it is the recovery path's decision (stuck-crewmate-recovery).
+fm_control_refuse_foreign_endpoint() {  # <backend> <target> <meta-file> <id> <verb>
+  fm_backend_endpoint_foreign "$1" "$2" "$3" 2>/dev/null || return 1
+  printf "refusing '%s': %s" "$5" "$(fm_backend_foreign_endpoint_reason "$2" "$4")"
 }
 
 # Whether <backend> has a recovery-grade agent-state classifier. Only tmux and

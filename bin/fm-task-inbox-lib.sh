@@ -58,7 +58,8 @@
 # FM_TASK_INBOX_BUSY_MAX. At that bound the same escalation path surfaces a
 # stuck-busy reason without typing. A non-busy due check or acknowledgement resets
 # this budget. Fire-and-forget retries remain outside escalation. A positively
-# dead or missing endpoint skips delivery and the ladder and escalates directly.
+# dead or missing endpoint, or one holding an agent not launched for the task,
+# skips delivery and the ladder and escalates directly.
 # This library owns the schedule, durable budgets, and escalation marker.
 # If delivery-attempt or busy-deferral bookkeeping fails while the record remains unhandled,
 # the caller surfaces that failure instead of retrying silently; a concurrently
@@ -348,8 +349,13 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # other than our own doorbell (the watcher re-rings later), 2 the backend send
 # failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
-# acknowledgement move is the only delivery signal.
+# typed; recovery owns the record), 4 skipped because the endpoint provably
+# holds an agent not launched for this task, such as a session Herdr resumed
+# after a restart (nothing typed; recovery owns the record;
+# fm_backend_endpoint_foreign in bin/fm-backend.sh owns the verdict). The task
+# record checked is the `<task>.meta` beside the record's inbox directory. No
+# return value is delivery proof; the acknowledgement move is the only delivery
+# signal.
 # The skip is deliberately narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -361,7 +367,12 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
-  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict inbox
+  inbox=${rec%/*}
+  inbox=${inbox%/handled}
+  if fm_backend_endpoint_foreign "$backend" "$target" "${inbox%.inbox}.meta" 2>/dev/null; then
+    return 4
+  fi
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
