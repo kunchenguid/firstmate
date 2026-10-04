@@ -8,8 +8,10 @@
 #   fm-remote-agent-ida.sh followup <task-id> --action-id <id> --expected-terminal-generation <n> --instructions <private-file>
 # A followup is one new turn in the SAME session. It freezes the prior terminal
 # record and checkpoints attempted before the sole create. Replaying the action
-# only reads back a same-message marker/task correlation; adjacency or a newest
-# task never proves identity. Missing correlation remains submission-unknown.
+# uses the exact session/task pair from a successful create receipt when that
+# pair was retained; without that receipt, only a same-message marker/task
+# correlation can recover identity. Adjacency or a newest task never proves
+# identity, and missing correlation remains submission-unknown.
 #   fm-remote-agent-ida.sh state <task-id> [--durable-only]
 #   fm-remote-agent-ida.sh artifacts <task-id>
 #   fm-remote-agent-ida.sh interrupt-wait <task-id>

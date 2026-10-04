@@ -112,6 +112,8 @@ Before submission, iDA derives and records one unique session marker from the ta
 The adapter places it in the private first message, then uses raw session list plus bounded session get to exact-match either that marker or a legacy exact session name before the only allowed create and after every timeout or ambiguous submission.
 A unique match is adopted; multiple matches, a truncated list, or unresolved identity becomes `ambiguous`.
 No ambiguous or `submission-unknown` state authorizes another create.
+When the official create succeeds with an exact session and task identity, the existing provider or follow-up action record retains that pair and subsequent reads select that exact turn without requiring the marker to reappear in the session messages.
+Marker matching remains the recovery path only while no authenticated receipt identity exists; task order, adjacency, answer text, and session task counts never establish a turn identity.
 
 An `ambiguous` or `submission-unknown` record that stays wedged has exactly one captain-authorized escape: `bin/fm-remote-agent-ida.sh abandon <id> --authorize-abandon`.
 Abandonment re-verifies an authoritative complete non-truncated zero-match session list, fail-terminals the durable record with a bound report, performs no provider write, and never retries or recreates; any future execution requires a separate explicit dispatch of a new task.

@@ -190,7 +190,7 @@ session_observation() { # <id> <session-id> <kind> [recorded-task-id]
   local id=$1 session_id=$2 kind=$3 expected_task_id=${4:-$IDA_STATE_TASK_ID}
   local root out err task_summary task_id task_count task_found task_status status_kind allow_untagged
   local answer answer_file availability terminal ambiguous=false class="" agent_id agent_name
-  local result_kind="" artifact_reference=null structured structured_state=empty
+  local result_kind="" artifact_reference=null structured structured_state=empty receipt_bound=false
   root=$(temp_root); out="$root/get.out"; err="$root/get.err"
   run_ida_json "$out" "$err" session get --session-id "$session_id"
   class=$IDA_READ_ERROR
@@ -200,19 +200,35 @@ session_observation() { # <id> <session-id> <kind> [recorded-task-id]
     error_observation "$id" "$kind" "$class" "$session_id" "$expected_task_id"
     return 0
   fi
-  if ! session_payload_has_marker "$out"; then
+  if [ -n "$expected_task_id" ] && { [ "$kind" = submission ] \
+      || { [ "$session_id" = "$IDA_STATE_SESSION_ID" ] && [ "$expected_task_id" = "$IDA_STATE_TASK_ID" ]; }; }; then
+    receipt_bound=true
+  fi
+  if [ "$receipt_bound" = false ] && ! session_payload_has_marker "$out"; then
     rm -rf -- "$root"
     ambiguous_observation "$id" "$kind" session-marker-mismatch 1
     return 0
   fi
+  if jq -e '
+      [.data.messages[]?
+        | (.task_result.task_id? // null | if . == null then null else tostring end) as $normalized
+        | (.deep_research_content.taskId? // null | if . == null then null else tostring end) as $raw
+        | select($normalized != null and $raw != null and $normalized != $raw)]
+      | length > 0
+    ' "$out" >/dev/null 2>&1; then
+    rm -rf -- "$root"
+    ambiguous_observation "$id" "$kind" provider-task-identity-conflict 1 "$session_id"
+    return 0
+  fi
   task_summary=$(jq -c --arg expected "$expected_task_id" '
     def remote_task_id:
-      .deep_research_content?
-      | select(type == "object")
-      | .taskId?
+      (.task_result.task_id? // .deep_research_content.taskId?)
       | select(. != null)
       | tostring
       | select(length > 0);
+    def remote_task_status:
+      (.task_result.terminal_status? // .deep_research_content.terminalStatus?)
+      | select(type == "string" and length > 0);
     . as $root
     | [$root.data.messages[]? | remote_task_id] | unique as $ids
     | (if $expected != "" then $expected elif ($ids | length) == 1 then $ids[0] else "" end) as $selected
@@ -220,8 +236,7 @@ session_observation() { # <id> <session-id> <kind> [recorded-task-id]
        found:($selected != "" and any($ids[]; . == $selected)),
        status:([$root.data.messages[]?
          | select((remote_task_id // "") == $selected)
-         | .deep_research_content.terminalStatus?
-         | select(type == "string" and length > 0)] | last // "")}
+         | remote_task_status] | last // "")}
   ' "$out") || die "cannot reconcile recorded iDA task"
   task_count=$(printf '%s' "$task_summary" | jq -r '.task_count')
   if [ -z "$expected_task_id" ] && [ "$task_count" -gt 1 ]; then
