@@ -102,6 +102,7 @@ write_field() {
 
 need_state() {
   local file
+  fm_task_id_creation_valid "$1" || { printf 'fm-chatgpt-loop: invalid task id: %s\n' "$1" >&2; return 1; }
   file=$(loop_state_file "$1")
   [ -f "$file" ] || { printf 'fm-chatgpt-loop: no loop state for task %s (run init first)\n' "$1" >&2; return 1; }
   printf '%s\n' "$file"
@@ -126,6 +127,7 @@ cmd_init() {
     esac
   done
   [ -n "$task" ] || { printf 'fm-chatgpt-loop: init needs --task\n' >&2; usage; return 2; }
+  fm_task_id_creation_valid "$task" || { printf 'fm-chatgpt-loop: invalid task id: %s\n' "$task" >&2; return 2; }
   [ -n "$objective_file" ] || { printf 'fm-chatgpt-loop: init needs --objective-file\n' >&2; usage; return 2; }
   [ -f "$objective_file" ] || { printf 'fm-chatgpt-loop: objective file not found: %s\n' "$objective_file" >&2; return 2; }
   [ -z "$thread" ] && thread="chatgpt-loop-$task"
@@ -198,9 +200,6 @@ cmd_consult() {
     build_audit_prompt "$file" "$prompt"
   else
     build_plan_prompt "$file" "$prompt"
-  fi
-  if [ -n "${FM_CHATGPT_LOOP_PROMPT_COPY:-}" ]; then
-    cp "$prompt" "$FM_CHATGPT_LOOP_PROMPT_COPY"
   fi
   if answer=$("$CONSULT_BIN" --prompt-file "$prompt" --mode "$stage" --thread "$thread" 2>"$work/stderr.txt"); then
     rc=0
@@ -285,7 +284,7 @@ cmd_dispatch() {
     stage_prompt=$(read_field "$file" plan)
     phase_next=plan-worker
   fi
-  if env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_SEND -u FM_CHATGPT_LOOP_PROMPT_COPY -u FM_CHATGPT_LOOP_DAEMON_DIR "$SPAWN" "${spawn_args[@]}" --effort low; then
+  if env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_SEND -u FM_CHATGPT_LOOP_DAEMON_DIR "$SPAWN" "${spawn_args[@]}" --effort low; then
     rc=0
   else
     rc=$?
@@ -437,14 +436,17 @@ bridge_daemon_dir() {
 }
 
 # True only for a live pid whose command line is this loop's serve
-# entrypoint: a reused pid must neither block start nor be killed by stop.
+# entrypoint under the resolved daemon dir: a reused pid must neither block
+# start nor be killed by stop, and a foreign tool that merely mentions
+# codex-chatgpt-web or src/cli.ts anywhere is never this loop's instance.
 bridge_pid_is_loop_instance() {
-  local pid=$1 cmd
+  local pid=$1 cmd dir
   [ -n "$pid" ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   cmd=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
+  dir=$(bridge_daemon_dir)
   case "$cmd" in
-    *codex-chatgpt-web*|*src/cli.ts*) return 0 ;;
+    *"$dir/bin/codex-chatgpt-web"*|*"$dir/src/cli.ts"*) return 0 ;;
   esac
   return 1
 }
@@ -496,6 +498,15 @@ cmd_bridge_stop() {
       return 1
     fi
     kill "$pid" 2>/dev/null || true
+    local i
+    for i in $(seq 1 50); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'fm-chatgpt-loop: bridge instance %s did not exit after TERM; keeping the pidfile for a retry\n' "$pid" >&2
+      return 1
+    fi
     printf 'bridge instance %s stopped\n' "$pid"
   else
     printf 'bridge instance %s already exited\n' "$pid"

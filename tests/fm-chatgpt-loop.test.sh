@@ -160,15 +160,15 @@ test_plan_consult_carries_explicit_context() {
   bash "$LOOP" dispatch --stage audit --task ctxcarry -- t p --mode local-only --yolo off >/dev/null
   printf 'worker finding: flaky retry logic\n' > "$dir/findings.txt"
   bash "$LOOP" record-findings --task ctxcarry --file "$dir/findings.txt" >/dev/null
-  export FM_CHATGPT_LOOP_PROMPT_COPY="$dir/plan-prompt.txt"
   pid=$(start_stub "$dir")
   bash "$LOOP" consult --stage plan --task ctxcarry >/dev/null
   stop_stub "$pid"
-  unset FM_CHATGPT_LOOP_PROMPT_COPY
-  assert_contains "$(cat "$dir/plan-prompt.txt")" "Fix the two failing CI checks" "the plan prompt must explicitly carry the objective"
-  assert_contains "$(cat "$dir/plan-prompt.txt")" "repo at /tmp/demo" "the plan prompt must explicitly carry the Firstmate context"
-  assert_contains "$(cat "$dir/plan-prompt.txt")" "stubbed consultation answer" "the plan prompt must explicitly carry the audit result"
-  assert_contains "$(cat "$dir/plan-prompt.txt")" "flaky retry logic" "the plan prompt must explicitly carry the worker findings"
+  local plan_prompt
+  plan_prompt=$(jq -r '.input[0].content' "$dir/request.json")
+  assert_contains "$plan_prompt" "Fix the two failing CI checks" "the plan prompt must explicitly carry the objective"
+  assert_contains "$plan_prompt" "repo at /tmp/demo" "the plan prompt must explicitly carry the Firstmate context"
+  assert_contains "$plan_prompt" "stubbed consultation answer" "the plan prompt must explicitly carry the audit result"
+  assert_contains "$plan_prompt" "flaky retry logic" "the plan prompt must explicitly carry the worker findings"
   pass "the plan consultation explicitly carries objective, context, audit result, and worker findings"
 }
 
@@ -305,6 +305,26 @@ test_worker_never_touches_bridge() {
   pass "bridge lifecycle stays Firstmate-owned: dispatch refuses a bridge-referencing arg before launch and reports the bridge itself"
 }
 
+test_task_id_validated_before_state_paths() {
+  local dir=$TMP_ROOT/badid rc out
+  mkdir -p "$dir"
+  new_task_files
+  make_spawn_stub "$dir"
+  out=$(bash "$LOOP" init --task .. --objective-file "$TMP_ROOT/objective.txt" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "init must refuse a path-escaping task id"
+  assert_contains "$out" "invalid task id" "a path-escaping task id must be refused with a clear error"
+  [ ! -f "$HOME_DIR/chatgpt-loop.json" ] || fail "a refused init must write no state outside the data root"
+  printf 'x\n' > "$dir/r.txt"
+  out=$(bash "$LOOP" record-result --task a/../victim --file "$dir/r.txt" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "record-result must refuse a task id escaping into a sibling task"
+  assert_contains "$out" "invalid task id" "an escaping task id must be refused at the state boundary"
+  [ ! -f "$HOME_DIR/data/victim/chatgpt-loop.json" ] || fail "a refused record must touch no sibling task state"
+  out=$(bash "$LOOP" status --task fm/x 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status must refuse a nested non-task id"
+  assert_contains "$out" "invalid task id" "a nested non-task id must be refused with a clear error"
+  pass "every subcommand validates the task id before building state paths"
+}
+
 test_bridge_pid_identity() {
   local dir=$TMP_ROOT/bridgepid
   mkdir -p "$dir/bin" "$HOME_DIR/state"
@@ -324,6 +344,15 @@ SH
   assert_contains "$out" "foreign" "bridge stop must report the foreign pid"
   kill -0 "$foreign" 2>/dev/null || fail "bridge stop must never kill a foreign process"
   [ ! -f "$HOME_DIR/state/chatgpt-loop-bridge.pid" ] || fail "bridge stop must clear a foreign pidfile"
+  bash -c 'trap "exit 0" TERM; while :; do sleep 0.1; done' src/cli.ts &
+  local mentions=$!
+  printf '%s\n' "$mentions" > "$HOME_DIR/state/chatgpt-loop-bridge.pid"
+  out=$(bash "$LOOP" bridge stop 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "bridge stop must refuse a pid whose command merely mentions src/cli.ts outside the daemon dir"
+  assert_contains "$out" "foreign" "bridge stop must report the lookalike pid as foreign"
+  kill -0 "$mentions" 2>/dev/null || fail "bridge stop must never kill a lookalike foreign process"
+  [ ! -f "$HOME_DIR/state/chatgpt-loop-bridge.pid" ] || fail "bridge stop must clear a lookalike pidfile"
+  kill "$mentions" 2>/dev/null || true
   out=$(bash "$LOOP" bridge start 2>&1); rc=$?
   [ "$rc" -eq 0 ] || fail "bridge start must not be blocked by a live foreign pid: $out"
   pid=$(cat "$HOME_DIR/state/chatgpt-loop-bridge.pid")
@@ -343,7 +372,7 @@ SH
   [ ! -f "$HOME_DIR/state/chatgpt-loop-bridge.pid" ] || fail "bridge stop must clear the pidfile"
   kill "$foreign" 2>/dev/null || true
   unset FM_CHATGPT_LOOP_DAEMON_DIR
-  pass "bridge start and stop verify the recorded pid's identity before refusing or killing"
+  pass "bridge start and stop verify the recorded pid against the daemon-dir entrypoints before refusing or killing"
 }
 
 test_bridge_verbs_refused() {
@@ -366,6 +395,7 @@ test_worker_failure_recorded
 test_spawn_failure_recorded
 test_dispatch_requires_plain_task_id
 test_wrong_phase_refuses
+test_task_id_validated_before_state_paths
 test_worker_never_touches_bridge
 test_bridge_pid_identity
 test_bridge_verbs_refused
