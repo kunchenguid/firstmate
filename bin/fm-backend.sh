@@ -1000,6 +1000,17 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_process_stopped: 0 iff <backend> can see that the agent pane's
+# foreground process group is stopped (SIGSTOP or a job-control stop). tmux
+# only; every other backend returns 1 (cannot tell), so it never changes a
+# verdict there. Callers use it solely to refuse a busy verdict.
+fm_backend_process_stopped() {  # <backend> <target>
+  local backend=$1 target=$2
+  [ "$backend" = tmux ] || return 1
+  fm_backend_source "$backend" || return 1
+  [ "$(fm_backend_tmux_foreground_stopped "$target" 2>/dev/null)" = stopped ]
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.

@@ -6,8 +6,10 @@
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
 # unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
-# process sleep state, marker mtimes, and the old global UI-regex OR are not
+# process-level override and yields dead, never busy. The one other process
+# fact is a refusal, never a grant: on tmux a stopped foreground process group
+# turns a busy verdict into unknown process-stopped. Child processes, CPU,
+# marker mtimes, and the old global UI-regex OR are not
 # state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
 # owned by the watcher, not current-state truth.
 #
@@ -47,7 +49,8 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
+#   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt,
+#   process-stopped
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -1010,14 +1013,31 @@ fm_busy_launch_prompt_parked() {  # <harness>
 
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
-# busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output: the grok,
+# busy|idle|unknown plus the producing source (see header). The only process
+# probe is the refusal in the wrapper below: a stopped tmux foreground process
+# group turns a busy verdict into unknown process-stopped.
+# <tail40> is optional pre-captured plain output: the grok,
 # rovo, and agy arms capture it themselves through fm_backend_capture when it
 # is absent (or report unknown capture-failed if that is unavailable too),
 # while the launch-prompt backstop below has no capture fallback of its own -
 # without a supplied tail40 it is skipped entirely and a record still pinned
 # at the fm-spawn seed keeps reading busy fm-spawn, unchanged.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
+  local verdict
+  verdict=$(fm_busy_classify_semantic "$@")
+  # The one process-level refusal: a stopped foreground process group (tmux
+  # only) is not proof of work, so a busy verdict from any source becomes
+  # unknown and the watcher's ordinary stale path can surface it. It never
+  # grants busy or idle, and an unreadable process table changes nothing.
+  if [ "${verdict%% *}" = busy ] && command -v fm_backend_process_stopped >/dev/null 2>&1 \
+    && fm_backend_process_stopped "$1" "$2"; then
+    printf 'unknown process-stopped'
+    return 0
+  fi
+  printf '%s' "$verdict"
+}
+
+fm_busy_classify_semantic() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
   case "$harness" in

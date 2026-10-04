@@ -414,5 +414,58 @@ fi
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
 
+# --- a stopped foreground process group is not proof of work ------------------
+# A SIGSTOPped agent keeps its busy record and its pane, so it read "busy" and
+# the watcher absorbed it as working for the whole BUSY_TURN_MAX_SECS bound. The
+# kernel's stopped state (ps STAT T) on the pane's foreground process group
+# downgrades a busy verdict to unknown, which the existing stale path surfaces.
+# A real SIGSTOP on a real process is the signal under test; no harness needed.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
+BUSY_STATE="$LAB/busy-state"
+mkdir -p "$BUSY_STATE"
+"$ROOT/bin/fm-busy-event.sh" arm "$BUSY_STATE" stopcase >/dev/null \
+  || fail "could not arm the busy record for the stopped-process case"
+
+# The harness runs behind a launcher, never as the pane's own direct child: a
+# stopped direct child of the tmux server does not stay stopped on this tmux
+# (observed: the pane process kept state S after kill -STOP), so only the
+# launcher shape reproduces what a real harness under a shell looks like.
+new_window stopwin "$LAB/bin/agent-launcher"
+wait_for_state "$SESSION:stopwin" alive \
+  || fail "the stopped-process case needs a running harness-named foreground process"
+stop_pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SESSION:stopwin" '#{pane_pid}')
+[ "$(fm_busy_classify tmux "$SESSION:stopwin" claude stopcase "$BUSY_STATE")" = "busy fm-spawn" ] \
+  || fail "a running agent with a busy record must still read busy"
+pass "stopped process: a running agent with a busy record reads busy"
+
+stop_pids=
+for p in $(fm_backend_tmux_foreground_pids "$SESSION:stopwin"); do
+  [ "$p" = "$stop_pane_pid" ] || stop_pids="$stop_pids $p"
+done
+[ -n "$stop_pids" ] || fail "the stopped-process case found no launcher child to stop"
+for p in $stop_pids; do kill -STOP "$p" 2>/dev/null || true; done
+for _ in $(seq 1 100); do
+  stopped=1
+  for p in $stop_pids; do
+    case "$(LC_ALL=C ps -p "$p" -o stat= 2>/dev/null)" in T*) ;; *) stopped=0 ;; esac
+  done
+  [ "$stopped" = 1 ] && break
+  sleep 0.1
+done
+[ "$stopped" = 1 ] || fail "SIGSTOP never put the foreground process group into state T"
+[ "$(fm_busy_classify tmux "$SESSION:stopwin" claude stopcase "$BUSY_STATE")" = "unknown process-stopped" ] \
+  || fail "a stopped foreground process group must read unknown process-stopped, never busy (got '$(fm_busy_classify tmux "$SESSION:stopwin" claude stopcase "$BUSY_STATE")')"
+pass "stopped process: a SIGSTOPped foreground group reads unknown, not busy"
+
+for p in $stop_pids; do kill -CONT "$p" 2>/dev/null || true; done
+for _ in $(seq 1 100); do
+  [ "$(fm_busy_classify tmux "$SESSION:stopwin" claude stopcase "$BUSY_STATE")" = "busy fm-spawn" ] && break
+  sleep 0.1
+done
+[ "$(fm_busy_classify tmux "$SESSION:stopwin" claude stopcase "$BUSY_STATE")" = "busy fm-spawn" ] \
+  || fail "a resumed process must read busy again"
+pass "stopped process: a resumed process reads busy again"
+
 cleanup_all
 trap - EXIT

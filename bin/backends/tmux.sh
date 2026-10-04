@@ -286,6 +286,25 @@ fm_backend_tmux_foreground_pids() {  # <target>
       done
 }
 
+# fm_backend_tmux_foreground_stopped: prints `stopped` iff any member of the
+# pane tty's foreground process group is in the kernel's stopped state (ps STAT
+# T), for example after SIGSTOP or a job-control stop. A stopped agent cannot be
+# working, yet it keeps its pane and its busy record, so the busy classifier
+# uses this one kernel fact only to REFUSE a busy verdict, never to grant one.
+# Same raw-pane-read caveat as the sibling readers above.
+fm_backend_tmux_foreground_stopped() {  # <target>
+  local target=$1 tty pgid tpgid stat
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pgid=,tpgid=,stat= 2>/dev/null \
+    | while read -r pgid tpgid stat; do
+        [ "$pgid" = "$tpgid" ] || continue
+        case "$stat" in
+          T*) printf 'stopped\n'; break ;;
+        esac
+      done
+}
+
 fm_backend_tmux_foreground_argv0s() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
