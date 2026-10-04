@@ -1191,25 +1191,6 @@ fm_backlog_completed_cleanup_receipt() {
     fm_cleanup_receipt completion-record "$id" "$generation" --facts "$facts" >/dev/null
 }
 
-# A validated close may outlive tasks-axi prune. Reuse the disposition owner
-# only after an explicit current NOT_FOUND; prove terminal task/generation and
-# preserved artifact before acknowledging bookkeeping. Never recreate a row,
-# replay resource effects, or erase an unapplied delivery reference.
-fm_backlog_archived_done() {  # <data> <id> <state> <generation> [artifact-pair]
-  local data=$1 id=$2 state=$3 generation=$4 artifact=${6:-} snapshot disposition receipt
-  [ "$FM_BACKLOG_ROW_RESULT" = not_found ] || return 1
-  # shellcheck source=bin/fm-task-disposition-lib.sh
-  . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-disposition-lib.sh"
-  snapshot=$(fm_task_disposition_snapshot "$data" "$artifact") || return 1
-  disposition=$(fm_task_disposition_for "$snapshot" "$id") || return 1
-  [ "$disposition" = archive_done ] || return 1
-  receipt="$state/$id.cleanup.json"
-  [ -e "$receipt" ] || [ -L "$receipt" ] || return 1
-  [ -f "$receipt" ] && [ ! -L "$receipt" ] && \
-    jq -e --arg id "$id" --arg generation "$generation" \
-      '.schema=="fm-task-cleanup.v1" and .task_id==$id and .spawn_gen==$generation' "$receipt" >/dev/null
-}
-
 fm_backlog_replay_transition() {
   local mode=$1 marker=$2 data=$3 id=$4 state=$5 generation=$6 disposition=$7
   shift 7
@@ -1220,12 +1201,7 @@ fm_backlog_replay_transition() {
   if [ "$mode" = retain ]; then
     fm_backlog_retain "$data" "$id" "$@" || return 1
   else
-    if ! fm_backlog_done "$data" "$id" "$@"; then
-      fm_backlog_row_probe "$data" "$id" || {
-        fm_backlog_archived_done "$data" "$id" "$state" "$generation" "$@" || return 1
-      }
-      [ "$FM_BACKLOG_ROW_RESULT" = not_found ] || return 1
-    fi
+    fm_backlog_done "$data" "$id" "$@" || return 1
   fi
   fm_backlog_completed_cleanup_receipt "$state" "$id" "$data" "$generation" "$disposition" || return 1
   fm_backlog_close_marker_remove "$marker" "$state"
@@ -1279,13 +1255,8 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       printf '%s' "$receipt" | jq -e '.phases.pane_close.state=="confirmed"' >/dev/null || return 1
     fi
     if ! fm_backlog_row_probe "$data" "$id"; then
-      fm_backlog_archived_done "$data" "$id" "$state" "$marker_spawn_gen" "${args[@]+"${args[@]}"}" || return 1
-      # shellcheck source=bin/fm-teardown-endpoint-lib.sh
-      . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-teardown-endpoint-lib.sh"
-      fm_teardown_cleanup_record_closed "$state" "$id" "$data" || return 1
-      fm_backlog_close_marker_remove "$marker" "$state" || return 1
-      FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
-      return 0
+      FM_BACKLOG_TRANSITION_ERROR="canonical task $id is missing; preserving its cleanup and pending-close records"
+      return 1
     fi
     cleanup_kind=close
     [ "$FM_BACKLOG_ROW_HOLD_KIND" != captain ] || cleanup_kind=retain
@@ -1315,20 +1286,9 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
-    # A pruned row does not authorize retiring live execution metadata by
-    # itself. Before crossing the record-removal boundary, require the exact
-    # archived task plus this generation's cleanup receipt; otherwise retain
-    # both records for operation readback.
     if ! fm_backlog_row_probe "$data" "$id"; then
-      if [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
-        FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
-        return 1
-      fi
-      if ! fm_backlog_archived_done "$data" "$id" "$state" "$marker_spawn_gen" \
-          "${args[@]+"${args[@]}"}"; then
-        FM_BACKLOG_TRANSITION_ERROR="missing task $id has no matching generation-bound cleanup receipt and archived delivery evidence; preserving its task and pending-close records"
-        return 1
-      fi
+      FM_BACKLOG_TRANSITION_ERROR="canonical task $id is missing; preserving its execution and pending-close records"
+      return 1
     fi
     if [ -z "$cleanup_disposition" ]; then
       fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
@@ -1349,14 +1309,8 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
       return 1
     fi
-    if fm_backlog_archived_done "$data" "$id" "$state" "$marker_spawn_gen" "${args[@]+"${args[@]}"}"; then
-      fm_backlog_completed_cleanup_receipt "$state" "$id" "$data" "$marker_spawn_gen" "$cleanup_disposition" || return 1
-      fm_backlog_close_marker_remove "$marker" "$state" || return 1
-      FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
-      return 0
-    fi
     if [ -n "$cleanup_disposition" ]; then
-      FM_BACKLOG_TRANSITION_ERROR="missing task $id has no matching terminal generation and archived delivery evidence; preserving its pending-close record"
+      FM_BACKLOG_TRANSITION_ERROR="canonical task $id is missing; preserving its pending-close record"
       return 1
     fi
     if [ "${#args[@]}" -eq 2 ] && [ "${args[0]}" = --pr ] \

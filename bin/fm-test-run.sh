@@ -631,6 +631,7 @@ tests/fm-documentation-audiences.test.sh 732
 tests/fm-feishu-channel.test.sh 3500
 tests/fm-feishu-processed-cleanup.test.sh 1000
 tests/fm-extension-binding.test.sh 7398
+tests/fm-fleet-snapshot-unfinished.test.sh 7397
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-sync.test.sh 37749
 tests/fm-gate-refuse.test.sh 4977
@@ -650,6 +651,7 @@ tests/fm-native-review.test.sh 100
 tests/fm-jsonl-viewer.test.sh 682
 tests/fm-lint-workflows.test.sh 855
 tests/fm-live-gate.test.sh 6000
+tests/fm-merge-receipt.test.sh 420
 tests/fm-operational-input.test.sh 231
 tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56
@@ -687,7 +689,6 @@ tests/fm-supervision-events.test.sh 719
 tests/fm-tangle-guard.test.sh 9662
 tests/fm-task-delivery.test.sh 5952
 tests/fm-task-inbox.test.sh 25369
-tests/fm-task-import.test.sh 3500
 tests/fm-task-progress.test.sh 2923
 tests/fm-tasks-axi.test.sh 1690
 tests/fm-teardown-endpoint-safety.test.sh 4620
@@ -1287,14 +1288,14 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-remote-agent.test.sh"
       [ "$path" != bin/fm-task-state.sh ] || printf '%s\n' "__script__:fm-task-progress.test.sh"
       ;;
-    bin/fm-task-import.sh)
-      printf '%s\n' "__script__:fm-task-import.test.sh"
-      ;;
     bin/fm-task-record.py|bin/fm-task-progress-lib.sh)
-      printf '%s\n' "__script__:fm-task-progress.test.sh" "__script__:fm-task-import.test.sh"
+      printf '%s\n' "__script__:fm-task-progress.test.sh"
       ;;
     tests/continuation-native.mjs)
       printf '%s\n' "__script__:fm-pi-branch-extension.test.sh"
+      ;;
+    tests/fm-short-operations-cases.mjs)
+      printf '%s\n' "__script__:fm-short-operations.test.sh"
       ;;
     bin/fm-stow-run.sh|bin/fm-heartbeat-receipt.py)
       printf '%s\n' "__script__:fm-periodic-stow.test.sh"

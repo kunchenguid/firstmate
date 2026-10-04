@@ -51,7 +51,7 @@
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
 # writes a resolution block while preserving the leading hold-set stamp until
 # the close succeeds (the previous body is preserved in record history through
-# `--archive-body` compatibility). It closes a question with canonical `done` - or,
+# the active `--archive-body` task-record operation). It closes a question with canonical `done` - or,
 # with `--release`, lifts the hold with canonical `unhold` so a captain-gated
 # WORK item resumes without closing - and restores resolution-first body
 # ordering. An exact retry also completes unfinished ordering normalization and

@@ -150,9 +150,8 @@ If the record inventory cannot be parsed, the guard prints nothing.
 
 ## Compatibility with pre-collapse installs
 
-`bin/fm-task-import.sh` is the explicit migration owner for retained markdown backlog and archive evidence.
-It creates canonical task records without rewriting or deleting either legacy source.
-Existing captain-hold ids and resolution bodies remain ordinary task ids and body text after import, so current hold, answer, verify, and close commands consume them without a second live backend.
+Retained markdown backlog and archive files are not task-state inputs; captain holds require a canonical task record.
+Existing canonical captain-hold ids and resolution bodies remain ordinary task ids and body text, so current hold, answer, verify, and close commands need no second live backend.
 
 ## Verification record
 

@@ -2477,12 +2477,9 @@ test_unreadable_backlog_refuses_the_merge() {
   set -e
   chmod 644 "$case_dir/home/data/backlog.md"
 
-  expect_code 1 "$rc" "unreadable-backlog-refuses: an unreadable authority record must refuse"
-  assert_grep 'refusing to merge' "$case_dir/stderr" \
-    "unreadable-backlog-refuses: the refusal did not say it refused to merge"
-  assert_no_grep 'pr merge' "$case_dir/gh.log" \
-    "unreadable-backlog-refuses: the forge merge ran despite an unreadable record"
-  pass "fm-pr-merge refuses when the backlog exists but cannot be read"
+  expect_code 0 "$rc" "unreadable-backlog-is-inert: retained legacy task data must not gate a merge"
+  assert_logged_gh_merge "$case_dir" 62 example/repo --squash
+  pass "fm-pr-merge ignores an unreadable retained legacy backlog"
 }
 
 test_unreadable_backend_config_refuses_the_merge() {
@@ -2501,12 +2498,9 @@ test_unreadable_backend_config_refuses_the_merge() {
   set -e
   chmod 644 "$case_dir/home/.tasks.toml"
 
-  expect_code 1 "$rc" "unreadable-backend-config-refuses: an unreadable authority route must refuse"
-  assert_grep 'tasks-axi backend configuration cannot be read' "$case_dir/stderr" \
-    "unreadable-backend-config-refuses: the unreadable authority route was not named"
-  assert_no_grep 'pr merge' "$case_dir/gh.log" \
-    "unreadable-backend-config-refuses: the forge merge ran despite an unreadable authority route"
-  pass "fm-pr-merge refuses when its configured backend cannot be read"
+  expect_code 0 "$rc" "unreadable-backend-config-is-inert: legacy task routing must not gate a merge"
+  assert_logged_gh_merge "$case_dir" 63 example/repo --squash
+  pass "fm-pr-merge ignores unreadable legacy task-backend configuration"
 }
 
 test_unreadable_user_backend_config_refuses_the_merge() {
@@ -2528,12 +2522,9 @@ test_unreadable_user_backend_config_refuses_the_merge() {
   set -e
   chmod 644 "$user_config"
 
-  expect_code 1 "$rc" "unreadable-user-backend-config-refuses: an unreadable authority route must refuse"
-  assert_grep "tasks-axi backend configuration cannot be read at $user_config" "$case_dir/stderr" \
-    "unreadable-user-backend-config-refuses: the unreadable authority route was not named"
-  assert_no_grep 'pr merge' "$case_dir/gh.log" \
-    "unreadable-user-backend-config-refuses: the forge merge ran despite an unreadable authority route"
-  pass "fm-pr-merge refuses when its user backend configuration cannot be read"
+  expect_code 0 "$rc" "unreadable-user-backend-config-is-inert: legacy user routing must not gate a merge"
+  assert_logged_gh_merge "$case_dir" 64 example/repo --squash
+  pass "fm-pr-merge ignores unreadable user-level legacy task-backend configuration"
 }
 
 test_untraversable_user_backend_config_directory_refuses_the_merge() {
@@ -2555,12 +2546,9 @@ test_untraversable_user_backend_config_directory_refuses_the_merge() {
   set -e
   chmod 755 "${user_config%/*}"
 
-  expect_code 1 "$rc" "untraversable-user-backend-config-directory-refuses: an unreadable authority route must refuse"
-  assert_grep "tasks-axi backend configuration cannot be read at $user_config" "$case_dir/stderr" \
-    "untraversable-user-backend-config-directory-refuses: the unreadable authority route was not named"
-  assert_no_grep 'pr merge' "$case_dir/gh.log" \
-    "untraversable-user-backend-config-directory-refuses: the forge merge ran despite an unreadable authority route"
-  pass "fm-pr-merge refuses when its user backend configuration directory cannot be traversed"
+  expect_code 0 "$rc" "untraversable-user-backend-config-is-inert: legacy user routing must not gate a merge"
+  assert_logged_gh_merge "$case_dir" 66 example/repo --squash
+  pass "fm-pr-merge ignores an untraversable user-level legacy task-backend directory"
 }
 
 test_absent_user_backend_config_directory_and_backlog_still_merge() {

@@ -378,7 +378,10 @@ teardown_completed_task() (
   [ -z "$ENDPOINT_EXPECTED_GEN" ] || [ "$(fm_meta_get "$meta" spawn_gen)" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
   KIND=$(fm_meta_get "$meta" kind)
   [ -n "$KIND" ] || KIND=ship
-  [ "$KIND" != secondmate ] || exit 1
+  [ "$KIND" != secondmate ] || {
+    echo "REFUSED: task $ID is a historical secondmate record; automatic teardown is no longer supported and its home was left untouched" >&2
+    exit 1
+  }
   copy=$(fm_backend_meta_exact_value "$meta" worktree) || exit 1
   project=$(fm_backend_meta_exact_value "$meta" project) || exit 1
   generation=$(fm_meta_get "$meta" spawn_gen)
@@ -683,20 +686,18 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
+[ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+[ "$TEARDOWN_META_KIND" != secondmate ] || {
+  echo "REFUSED: task $ID is a historical secondmate record; automatic teardown is no longer supported and its home was left untouched" >&2
+  exit 1
+}
 fm_control_require_recoverable_harness "$(fm_meta_get "$META" harness)" || exit 1
 # Ordinary compact continuation retains semantic acceptance in the canonical
-# per-task business and progress record. Historical tasks without that record
-# or an embedded legacy block keep the prior landed-work cleanup behavior below.
+# per-task business and progress record.
 # shellcheck source=bin/fm-task-progress-lib.sh
 . "$SCRIPT_DIR/fm-task-progress-lib.sh"
 fm_task_progress_completion_guard "$ID" || exit $?
-TEARDOWN_CANONICAL_RECORD=1
-if fm_task_progress_current_absent "$ID"; then
-  TEARDOWN_CANONICAL_RECORD=0
-else
-  progress_record_status=$?
-  [ "$progress_record_status" -eq 1 ] || exit "$progress_record_status"
-fi
 ENDPOINT_PHASE_DONE=0
 if [ "$ENDPOINT_ONLY" = 1 ]; then
   # This branch is before all worktree, slot, branch and record retirement
@@ -721,12 +722,6 @@ if [ "$ENDPOINT_ONLY" = 1 ]; then
   ENDPOINT_SESSION_LOCK=
   ENDPOINT_PHASE_DONE=1
 fi
-TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
-[ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
-[ "$TEARDOWN_META_KIND" != secondmate ] || {
-  echo "REFUSED: task $ID is a historical secondmate record; automatic teardown is no longer supported and its home was left untouched" >&2
-  exit 1
-}
 TEARDOWN_META_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
 TEARDOWN_LEGACY_PENDING=0
 TEARDOWN_LEGACY_ACCEPTED=0
@@ -735,9 +730,7 @@ TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
-if [ "$TEARDOWN_CANONICAL_RECORD" = 0 ]; then
-  TEARDOWN_BACKLOG_SKIP_REASON="historical task has no canonical business record"
-elif fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
+if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
   TEARDOWN_BACKLOG_APPLIES=1
 else
   TEARDOWN_BACKLOG_GATE_STATUS=$?

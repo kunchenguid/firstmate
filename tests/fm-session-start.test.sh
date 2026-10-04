@@ -447,11 +447,11 @@ EOF
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
 
-  # Exactly two context ABSENT markers (learnings.md and backlog.md, which is
-  # covered by its own test) - and the
+  # Exactly one context ABSENT marker (learnings.md). Canonical task inventory
+  # is always rendered from data/*/task.json, even when it is empty, and the
   # present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 2 ] || fail "expected 2 ABSENT markers (learnings.md and backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 1 ] || fail "expected 1 ABSENT marker (learnings.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
@@ -1308,183 +1308,7 @@ SH
   pass "session start: a read-only session declares its skipped network checks rather than dropping them"
 }
 
-# The compatibility verdict costs two capability probes and one session
-# start needs it twice. The digest must pay for it once.
-test_tasks_axi_compatibility_is_probed_once() {
-  local rec root home fakebin log probes
-  rec=$(new_world tasks-axi-once)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  make_fake_tasks_axi_compact "$fakebin"
-  log="$home/tasks-axi.log"
-  printf '# Backlog\n\n## In flight\n\n## Queued\n' > "$home/data/backlog.md"
-
-  FM_FAKE_TASKS_AXI_LOG="$log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
-
-  probes=$(grep -c -- '--version' "$log" || true)
-  [ "$probes" -eq 0 ] \
-    || fail "tasks-axi compatibility regressed to a version probe: $(cat "$log")"
-  probes=$(grep -c -- 'update --help' "$log" || true)
-  [ "$probes" -eq 1 ] \
-    || fail "tasks-axi update --help ran $probes times in one session start: $(cat "$log")"
-  probes=$(grep -c -- 'mv --help' "$log" || true)
-  [ "$probes" -eq 1 ] \
-    || fail "tasks-axi mv --help ran $probes times in one session start: $(cat "$log")"
-  assert_grep 'ready --file' "$log" "the backlog listing never ran, so the verdict was not actually reused"
-  pass "session start: the tasks-axi compatibility verdict is computed once and reused"
-}
-
-test_task_metadata_is_partitioned_by_authoritative_disposition() {
-  local rec root home fakebin out under_way inactive integrity id count
-  rec=$(new_world disposition-inventory)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  cat > "$root/.tasks.toml" <<'EOF'
-backend = "markdown"
-
-[markdown]
-archive = "data/done-archive.md"
-EOF
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-- [ ] active-task - Active Task (repo: firstmate) (kind: ship)
-- [ ] ambiguous-task - Ambiguous Task (repo: firstmate) (kind: ship)
-
-## Queued
-- [ ] queued-task - Queued Task (repo: firstmate) (kind: ship)
-- [ ] parked-task - Parked Task (repo: firstmate) (kind: ship) (hold-kind: parked)
-- [ ] ambiguous-task - Duplicate Ambiguous Task (repo: firstmate) (kind: ship)
-
-## Done
-- [x] done-task - Done Task (repo: firstmate) (kind: ship)
-EOF
-  cat > "$home/data/done-archive.md" <<'EOF'
-## Archived 2026-09
-- [x] archived-task - Archived Task (repo: firstmate) (kind: ship)
-EOF
-  for id in active-task queued-task parked-task done-task archived-task ambiguous-task unknown-task; do
-    printf 'kind=ship\nproject=firstmate\n' > "$home/state/$id.meta"
-  done
-
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  under_way=$(printf '%s\n' "$out" | awk '$0 == "Work under way (authoritative active task records)" {show=1; next} $0 == "Queued and retained task records (not current work)" {exit} show')
-  inactive=$(printf '%s\n' "$out" | awk '$0 == "Queued and retained task records (not current work)" {show=1; next} $0 == "Task record integrity (unknown or ambiguous disposition)" {exit} show')
-  integrity=$(printf '%s\n' "$out" | awk '$0 == "Task record integrity (unknown or ambiguous disposition)" {show=1; next} $0 == "Orphan status logs (state/*.status without matching .meta)" {exit} show')
-
-  assert_contains "$under_way" "--- active-task ---" "session start omitted the authoritative active task"
-  assert_not_contains "$under_way" "--- queued-task ---" "session start presented queued metadata as work under way"
-  assert_not_contains "$under_way" "--- done-task ---" "session start presented Done metadata as work under way"
-  assert_contains "$inactive" "--- queued-task ---" "session start hid queued task metadata"
-  assert_contains "$inactive" "--- parked-task ---" "session start hid parked task metadata"
-  assert_contains "$inactive" "--- done-task ---" "session start hid Done task metadata"
-  assert_contains "$inactive" "--- archived-task ---" "session start hid archive-retained task metadata"
-  assert_contains "$integrity" "--- ambiguous-task ---" "session start hid ambiguous task metadata"
-  assert_contains "$integrity" "--- unknown-task ---" "session start hid unknown task metadata"
-  for id in active-task queued-task parked-task done-task archived-task ambiguous-task unknown-task; do
-    count=$(printf '%s\n' "$out" | grep -F -c -- "--- $id ---" || true)
-    [ "$count" -eq 1 ] || fail "session start summarized $id $count times instead of once"
-  done
-  pass "session start partitions every task metadata record once by authoritative disposition"
-}
-
-# --- fleet-state digest: compact backlog rendering --------------------------
-
-# A backlog whose Done section, held row, blocked row, and plain queued rows can
-# each be told apart in the rendered digest. DONE-ROW-LINE and the *-BODY-LINE
-# markers exist so a leak is unmistakable.
-write_long_body_backlog() {
-  local path=$1 i=1
-  cat > "$path" <<'EOF'
-# Backlog
-
-## In flight
-- [ ] compact-startup - Compact startup digest (repo: firstmate) (kind: ship) (since 2026-07-15) (hold: captain choice pending) (hold-kind: captain)
-  OVERSIZED-BODY-LINE current startup leaks task note bodies into the session digest.
-  Another long body line that should not be printed after the fix.
-
-## Queued
-- [ ] blocked-followup - Follow compact startup blocked-by: compact-startup - waits for implementation (repo: firstmate) (kind: scout) (since 2026-07-15)
-  QUEUED-BODY-LINE this is another long multiline note.
-- [ ] held-queued - Held queued work (repo: firstmate) (kind: ship) (hold: captain choice pending) (hold-kind: captain)
-EOF
-  while [ "$i" -le 25 ]; do
-    printf -- '- [ ] plain-%s - Plain queued item %s (repo: firstmate) (kind: ship)\n' "$i" "$i" >> "$path"
-    i=$((i + 1))
-  done
-  cat >> "$path" <<'EOF'
-
-## Done
-- [x] landed-earlier - DONE-ROW-LINE already landed and torn down (repo: firstmate) (kind: ship)
-EOF
-}
-
-test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata() {
-  local rec root home fakebin out log
-  rec=$(new_world backlog-compact-tasks-axi)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_tasks_axi_compact "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  write_long_body_backlog "$home/data/backlog.md"
-  mkdir -p "$home/projects/firstmate"
-  printf 'window=fm-sess:compact\nworktree=%s\nproject=firstmate\nkind=ship\n' "$home/projects/firstmate" \
-    > "$home/state/compact-startup.meta"
-  log="$home/tasks-axi.log"
-
-  out=$(FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TASKS_AXI_READY=3 \
-    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "compact backlog inventory (tasks-axi; done rows omitted; in-flight, held, and blocked membership de-duplicated; ready queued bounded to 20; task bodies omitted)" \
-    "compatible tasks-axi backend did not render the de-duplicated backlog inventory"
-  assert_contains "$out" "tasks[3]{categories,id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:" \
-    "tasks-axi compact listing omitted the expected structured field header"
-  assert_contains "$out" "in_flight+held,compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending" \
-    "tasks-axi compact listing did not collapse duplicate category membership without losing it"
-  [ "$(printf '%s\n' "$out" | grep -F -c 'compact-startup,in_flight,ship,firstmate,Compact startup digest')" -eq 1 ] \
-    || fail "a task present in both in-flight and held was printed more than once"
-  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending" \
-    "tasks-axi compact listing omitted a held row or its hold metadata"
-  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
-    "tasks-axi compact listing omitted blocked-by metadata"
-  assert_contains "$out" "ready-3,queued,ship,firstmate,Ready item 3" \
-    "tasks-axi compact listing omitted a dispatchable queued row inside the bound"
-  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "tasks-axi compact digest leaked an in-flight task body"
-  assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi compact digest leaked a queued task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
-  assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
-  assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
-  assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
-    "compact digest omitted the full-body lookup pointer"
-  assert_contains "$out" "ready_public_followups: 0 delivery-ready obligations" \
-    "the composed listing dropped a real signal from the dispatchable set"
-  # One section pointer, not one repeated help block per composed group.
-  assert_not_contains "$out" "help[1]:" \
-    "the composed listing repeated tasks-axi's per-group help block"
-
-  # The fake refuses a body field, an unfiltered listing, and a done listing, so
-  # a clean render already proves those were never asked for; pin the group
-  # filters the listing is built from.
-  assert_grep "--state in_flight --fields blocked_by,hold_kind,hold_reason" "$log" \
-    "session start did not ask tasks-axi for the in-flight group"
-  assert_grep "--state held --fields blocked_by,hold_kind,hold_reason" "$log" \
-    "session start did not ask tasks-axi for the held group"
-  assert_grep "--state queued --blocked --fields blocked_by,hold_kind,hold_reason" "$log" \
-    "session start did not ask tasks-axi for the blocked queued group"
-  assert_grep "ready --file $home/data/backlog.md" "$log" \
-    "session start did not ask tasks-axi for the dispatchable queued set"
-
-  pass "compatible tasks-axi backlog rendering drops done rows and keeps every in-flight, held, and blocked row"
-}
-
-test_canonical_task_records_are_visible_at_startup_without_legacy_backlog() {
+test_session_start_reads_only_canonical_task_records() {
   local rec root home fakebin out
   rec=$(new_world canonical-startup)
   IFS='|' read -r root home fakebin <<EOF
@@ -1492,6 +1316,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_pi "$fakebin"
+  printf '## In flight\n\n- [ ] legacy-only - Must remain invisible\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" \
     add active-canonical "Canonical active goal" --kind ship --start >/dev/null
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" \
@@ -1504,131 +1329,10 @@ EOF
     "session start omitted a canonical in-flight task when no legacy backlog existed"
   assert_contains "$out" "held-canonical,queued,scout" \
     "session start omitted a canonical held task when no legacy backlog existed"
-  assert_not_contains "$out" "data/backlog.md\nABSENT" \
-    "session start treated the absent legacy backlog as absence of canonical tasks"
-  pass "session start discovers canonical active and held tasks without a legacy backlog"
+  assert_not_contains "$out" "legacy-only" "session start parsed retained legacy task data"
+  pass "session start discovers only canonical active and held tasks"
 }
 
-test_partial_migration_keeps_legacy_only_tasks_visible_at_startup() {
-  local rec root home fakebin out
-  rec=$(new_world partial-migration-startup)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  mkdir -p "$root/bin"
-  ln -s "$ROOT"/bin/* "$root/bin/"
-  printf '## In flight\n\n- [ ] legacy-only - Legacy unfinished goal (kind: ship, since 2026-10-01)\n\n## Queued\n\n## Done\n' \
-    > "$home/data/backlog.md"
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" \
-    add canonical-only "Canonical unfinished goal" --kind ship --start >/dev/null
-
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" 'canonical-only,in_flight,ship' \
-    'partial migration startup omitted the canonical task'
-  assert_contains "$out" 'legacy-only,in_flight,Legacy unfinished goal' \
-    'partial migration startup hid the unimported legacy task'
-  pass 'partial migration startup merges legacy-only unfinished tasks with canonical inventory'
-}
-
-# The bound may only ever cut the dispatchable-now listing, and whatever it cuts
-# must be disclosed with an exact count and the command that shows the rest.
-test_backlog_queued_bound_discloses_its_remainder() {
-  local rec root home fakebin out
-  rec=$(new_world backlog-queued-bound)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_tasks_axi_compact "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  write_long_body_backlog "$home/data/backlog.md"
-
-  out=$(FM_FAKE_TASKS_AXI_READY=7 FM_SESSION_START_QUEUED_LIMIT=3 \
-    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "ready-3,queued,ship,firstmate,Ready item 3" \
-    "the queued bound dropped a row inside its own limit"
-  assert_not_contains "$out" "ready-4,queued" "the queued bound did not actually bound the ready listing"
-  assert_contains "$out" "(shown 3 of 7 ready queued item(s))" \
-    "the bounded queued listing did not report what it showed"
-  assert_contains "$out" "(4 more queued - bin/fm-tasks-axi.sh ready)" \
-    "the bounded queued listing did not disclose an exact remainder and how to see it"
-
-  # The bound is for dispatchable work only: held and blocked rows stay whole.
-  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending" \
-    "the queued bound swallowed a held row"
-  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
-    "the queued bound swallowed a blocked row"
-  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending" \
-    "the queued bound swallowed an in-flight row"
-
-  pass "the startup backlog bound cuts only dispatchable queued rows and discloses the remainder exactly"
-}
-
-test_backlog_compact_manual_backend_skips_indented_bodies() {
-  local rec root home fakebin out
-  rec=$(new_world backlog-compact-manual)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  printf '%s\n' manual > "$home/config/backlog-backend"
-  write_long_body_backlog "$home/data/backlog.md"
-
-  out=$(FM_SESSION_START_QUEUED_LIMIT=4 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "compact backlog listing (manual backend; done rows omitted; every in-flight, held, and blocked title line kept; other queued bounded to 4; indented task bodies omitted)" \
-    "manual backend did not use compact title-line rendering"
-  assert_contains "$out" "## In flight" "manual compact rendering omitted the in-flight section heading"
-  assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
-    "manual compact rendering omitted the in-flight title line"
-  assert_contains "$out" "(hold: captain choice pending) (hold-kind: captain)" \
-    "manual compact rendering omitted hold metadata"
-  assert_contains "$out" "blocked-by: compact-startup - waits for implementation" \
-    "manual compact rendering omitted blocker metadata"
-  assert_contains "$out" "- [ ] held-queued - Held queued work" \
-    "manual compact rendering dropped a held queued title line"
-  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "manual compact digest leaked an in-flight task body"
-  assert_not_contains "$out" "QUEUED-BODY-LINE" "manual compact digest leaked a queued task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "manual compact digest listed a done row at startup"
-  assert_not_contains "$out" "## Done" "manual compact digest printed the done heading it never fills"
-  assert_contains "$out" "- [ ] plain-4 - Plain queued item 4" \
-    "manual compact rendering dropped a queued title line inside its bound"
-  assert_not_contains "$out" "- [ ] plain-5 - Plain queued item 5" \
-    "manual compact rendering did not bound its plain queued listing"
-  assert_contains "$out" "(shown 1 in-flight, 2 held or blocked queued, 4 of 25 other queued title line(s); 1 done row(s) omitted)" \
-    "manual compact rendering did not report its bound accounting"
-  assert_contains "$out" "(21 more queued - raise FM_SESSION_START_QUEUED_LIMIT or read data/backlog.md for the rest)" \
-    "manual compact rendering did not disclose an exact queued remainder"
-  assert_contains "$out" "or data/backlog.md" "manual compact digest omitted the data/backlog.md full-body pointer"
-
-  pass "manual backlog rendering drops done rows, keeps every held or blocked title line, and bounds the rest"
-}
-
-test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback() {
-  local rec root home fakebin out
-  rec=$(new_world backlog-compact-unavailable)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  write_long_body_backlog "$home/data/backlog.md"
-
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "compact backlog listing (tasks-axi unavailable or incompatible; done rows omitted;" \
-    "unavailable tasks-axi did not fall back to compact title-line rendering"
-  assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
-    "unavailable tasks-axi fallback omitted a backlog title line"
-  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "unavailable tasks-axi fallback leaked an in-flight task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "unavailable tasks-axi fallback listed a done row at startup"
-
-  pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
-}
 
 # --- runtime bound -----------------------------------------------------------
 #
@@ -2342,8 +2046,6 @@ test_read_once_contract_is_stated_once_before_its_subject
 test_herdr_backend_diagnostics_follow_real_session_start
 test_inactive_reconcile_never_blocks_the_digest
 test_read_only_session_declares_skipped_network_checks
-test_tasks_axi_compatibility_is_probed_once
-test_task_metadata_is_partitioned_by_authoritative_disposition
 test_latest_status_event_and_late_unread_note
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
@@ -2354,12 +2056,7 @@ test_remote_agent_startup_never_waits_for_provider_readback
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
-test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
-test_canonical_task_records_are_visible_at_startup_without_legacy_backlog
-test_partial_migration_keeps_legacy_only_tasks_visible_at_startup
-test_backlog_queued_bound_discloses_its_remainder
-test_backlog_compact_manual_backend_skips_indented_bodies
-test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
+test_session_start_reads_only_canonical_task_records
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_legacy_mode_records_are_inactive

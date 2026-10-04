@@ -55,6 +55,13 @@ cat > "$HOME_FIXTURE/data/done-archive.md" <<'MARKDOWN'
 ## Archived 2026-09
 - [x] archived-task - Archived historical task (repo: viewer) (kind: ship)
 MARKDOWN
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add task-one 'Processing task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add held-task 'Held task' --repo viewer --kind ship >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" block held-task --by upstream-task >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add completed-task 'Accepted completed task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add archived-task 'Archived historical task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" archive archived-task >/dev/null
 mkdir -p "$HOME_FIXTURE/data/cancelled-task" "$HOME_FIXTURE/data/invalid-lifecycle-task"
 cat > "$HOME_FIXTURE/data/cancelled-task/lifecycle.json" <<'JSON'
 {"schema":"fm-task-lifecycle.v2","task_id":"cancelled-task","disposition":"archived","assessment":{"authority_ref":"retained explicit stop"}}
@@ -369,8 +376,7 @@ printf '\nChanged report body.\n' >> "$REPORT_DIR/report.md"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report-changed.json"
 jq -e '(.content | contains("Changed report body.")) and .size > 0' "$TMP_ROOT/report-changed.json" >/dev/null || fail "changed task report was not refreshed"
 
-sed -i 's/## In flight/## In flight\n\n## Done/; /task-one - Processing task/d' "$HOME_FIXTURE/data/backlog.md"
-sed -i '/Accepted completed task/a\- [x] task-one - Processing task (repo: viewer) (kind: ship)' "$HOME_FIXTURE/data/backlog.md"
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" task-one >/dev/null
 sleep 6
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-refreshed.json"
 jq -e '.cacheHit == true and .refreshing == true and (.tasks | any(.id == "task-one" and .category == "processing"))' "$TMP_ROOT/tasks-refreshed.json" >/dev/null \

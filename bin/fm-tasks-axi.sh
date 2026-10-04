@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# fm-tasks-axi.sh - compatibility entrypoint for the per-task record owner.
+# fm-tasks-axi.sh - task CRUD entrypoint for the per-task record owner.
 #
 # Canonical task data lives only in data/<task>/task.json.  This wrapper keeps
 # established callers on one command surface while bin/fm-task-record.py owns
-# create/read/update/list/filter behavior. Legacy task rows are never mutated
-# here and remain available only to the explicit import path. The established
+# create/read/update/list/filter behavior. Retained legacy task files are inert
+# and never read or mutated here. The established
 # `public-followup` typed-obligation family is not task storage; it remains an
 # explicit passthrough to its existing tasks-axi owner.
 set -u
@@ -16,7 +16,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CALLER_DIR=$(pwd)
 
 usage() {
-  sed -n '2,8s/^# *//p' "$0"
+  sed -n '2,9s/^# *//p' "$0"
 }
 
 case "${1:-}" in

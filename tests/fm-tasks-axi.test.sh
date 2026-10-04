@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canonical per-task record compatibility tests for bin/fm-tasks-axi.sh.
+# Canonical per-task record tests for bin/fm-tasks-axi.sh.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -58,7 +58,7 @@ test_canonical_record_local_writes() {
   wrapper_from_code "$dir" "done" ship-1 --pr https://example.invalid/pull/1
   second_mtime=$(stat -c %Y "$dir/home/data/ship-1/task.json")
   [ "$first_mtime" = "$second_mtime" ] || fail 'idempotent done replay rewrote the record'
-  pass 'fm-tasks-axi compatibility writes one canonical record and preserves legacy bytes'
+  pass 'fm-tasks-axi writes one canonical record and preserves inert legacy bytes'
 }
 
 test_ambient_file_cannot_redirect() {
@@ -70,6 +70,36 @@ test_ambient_file_cannot_redirect() {
   assert_present "$dir/home/data/task-1/task.json" 'ambient file diverted canonical write'
   [ "$(cat "$dir/decoy.md")" = decoy ] || fail 'ambient file was rewritten'
   pass 'ambient shared-backlog variables cannot redirect canonical task writes'
+}
+
+test_removed_compatibility_arguments_refuse() {
+  local dir rc=0 before
+  dir=$(make_split removed-arguments)
+
+  wrapper_from_code "$dir" add stable 'Stable task' --kind ship --start >/dev/null
+  before=$(sha256sum "$dir/home/data/stable/task.json")
+
+  wrapper_from_code "$dir" add queued 'Old queued spelling' --queue \
+    >"$dir/out" 2>"$dir/err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "obsolete --queue returned $rc instead of argparse usage failure"
+  assert_absent "$dir/home/data/queued/task.json" "obsolete --queue created a task record"
+
+  for obsolete in --keep --no-prune; do
+    rc=0
+    if [ "$obsolete" = --keep ]; then
+      wrapper_from_code "$dir" "done" stable --keep 0 >"$dir/out" 2>"$dir/err" || rc=$?
+    else
+      wrapper_from_code "$dir" "done" stable --no-prune >"$dir/out" 2>"$dir/err" || rc=$?
+    fi
+    [ "$rc" -eq 2 ] || fail "obsolete $obsolete returned $rc instead of argparse usage failure"
+    [ "$before" = "$(sha256sum "$dir/home/data/stable/task.json")" ] \
+      || fail "obsolete $obsolete mutated the canonical task record"
+  done
+
+  rc=0
+  wrapper_from_code "$dir" prune --keep 10 >"$dir/out" 2>"$dir/err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "removed prune command returned $rc instead of argparse usage failure"
+  pass 'obsolete queue, retention, and prune compatibility inputs are rejected without writes'
 }
 
 test_task_directory_symlink_refuses() {
@@ -97,5 +127,6 @@ test_shadow_backlog_diagnostic_remains() {
 
 test_canonical_record_local_writes
 test_ambient_file_cannot_redirect
+test_removed_compatibility_arguments_refuse
 test_task_directory_symlink_refuses
 test_shadow_backlog_diagnostic_remains

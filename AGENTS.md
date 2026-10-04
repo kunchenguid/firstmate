@@ -399,7 +399,7 @@ Captain calls discovered by investigations or structured reviews follow `captain
 Dispatch, business completion, and resource cleanup update the named record themselves - `bin/fm-spawn.sh`, `bin/fm-task-retire.sh`, and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
 
-`bin/fm-task-record.py` owns the record schema and atomic mutation mechanics; `docs/configuration.md` owns layout and explicit legacy import.
+`bin/fm-task-record.py` owns the record schema and atomic mutation mechanics; `docs/configuration.md` owns the canonical layout.
 Use `bin/fm-tasks-axi.sh` for routine task CRUD so existing callers reach the canonical record owner from any directory.
 
 Keep free-form notes free of temporary paths, moving versions, ephemeral identifiers, and copied state that will rot.

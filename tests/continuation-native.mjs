@@ -87,7 +87,7 @@ async function tool(params, ok = true) {
 
 let continuation = await install();
 const mainSchema = tools.get('fm_task_continuation').parameters;
-assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'progress', 'record_token', 'task']);
+assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'progress', 'task']);
 assert.deepEqual(mainSchema.properties.action.anyOf.map(value => value.const), ['read', 'update']);
 assert.equal(tools.has('fm_task_intent_update'), false, 'removed intent-update tool remained registered');
 assert.deepEqual(JSON.parse(command('fm-task-state.sh', ['progress-list']).stdout).tasks, ['task']);
@@ -103,7 +103,7 @@ const progress = {
   remaining_gap: 'The restart check and final behavior review remain',
   next_step: 'Restart the session, read the task row, and run the final checks',
 };
-const updated = await tool({ action: 'update', task: 'task', record_token: empty.record_token, progress });
+const updated = await tool({ action: 'update', task: 'task', progress });
 assert.deepEqual({ goal: updated.goal, acceptance: updated.acceptance, current_state: updated.current_state,
   remaining_gap: updated.remaining_gap, next_step: updated.next_step },
 { goal: 'Deliver compact continuation', ...progress });
@@ -115,16 +115,33 @@ continuation = await install();
 const resumed = await tool({ action: 'read', task: 'task' });
 assert.equal(resumed.next_step, progress.next_step, 'restart lost the authorized next step');
 
+// A genuine captain hold changes task disposition, not the descriptive
+// progress. Reads remain useful while the continuation consumer waits instead
+// of manufacturing a stale-context reconciliation action.
+command('fm-tasks-axi.sh', ['hold', 'task', '--kind', 'captain', '--reason', 'Await publication authority']);
+const held = await tool({ action: 'read', task: 'task' });
+assert.equal(held.recorded, true, 'captain hold hid canonical descriptive progress');
+assert.equal(held.context_relation, 'disposition_only');
+assert.equal(held.task_held, 'yes');
+assert.equal(held.remaining_gap, progress.remaining_gap);
+assert.equal(held.next_step, progress.next_step);
+const heldSettle = await fire('agent_before_settle');
+assert.equal(heldSettle.some(value => value?.entries?.some(entry =>
+  ['fm-task-continuation', 'fm-task-continuation-escalation'].includes(entry.customType))), false,
+'captain hold manufactured a continuation or reconciliation action');
+command('fm-tasks-axi.sh', ['unhold', 'task']);
+assert.equal((await tool({ action: 'read', task: 'task' })).context_relation, 'exact');
+
 const taskRecord = home + '/data/task/task.json';
 const recordBefore = readFileSync(taskRecord);
 const mtimeBefore = statSync(taskRecord).mtimeMs;
-const unchanged = await tool({ action: 'update', task: 'task', record_token: resumed.record_token, progress });
+const unchanged = await tool({ action: 'update', task: 'task', progress });
 assert.deepEqual(readFileSync(taskRecord), recordBefore, 'unchanged update rewrote progress');
 assert.equal(statSync(taskRecord).mtimeMs, mtimeBefore, 'unchanged update replaced the task record');
 assert.equal(unchanged.record_token, resumed.record_token);
 
 const branch = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['update-progress', 'task',
-  '--expected-token', resumed.record_token, '--progress', JSON.stringify(progress)], {
+  '--progress', JSON.stringify(progress)], {
   encoding: 'utf8', env: { ...process.env, FM_HOME: home, FM_DATA_OVERRIDE: home + '/data',
     FM_STATE_OVERRIDE: home + '/state', FM_SUPERVISION_ACTOR: 'branch' },
 });
@@ -180,8 +197,7 @@ assert.equal(new Set(offered).size, offered.length, 'continued reminders reused 
 assert.ok(offered.at(-1).endsWith('.5'), 'continued reminders did not advance past the former attempt limit');
 
 const finalProgress = { ...progress, current_state: 'Requested behavior verified', remaining_gap: '', next_step: '' };
-const completed = await tool({ action: 'update', task: 'task', record_token: unchanged.record_token,
-  progress: finalProgress });
+const completed = await tool({ action: 'update', task: 'task', progress: finalProgress });
 assert.equal(completed.remaining_gap, '');
 assert.equal(completed.next_step, '');
 assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,

@@ -12,7 +12,7 @@
 #           network and appends NO wake, so it never interrupts work and is safe
 #           to run in a loop.
 #   ask     Answer a side question with a one-shot model call that never touches
-#           firstmate, the backlog, or the wake queue. A side question is not
+#           firstmate, task records, or the wake queue. A side question is not
 #           fleet work and must not become fleet work.
 #
 # Usage:
@@ -198,13 +198,9 @@ cmd_status() {
   printf 'time     %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'inbox    %s note(s) waiting for firstmate\n' "$pending"
 
-  if [ -f "$DATA/backlog.md" ]; then
-    printf '\n--- in flight ---\n'
-    awk '/^## In flight/{f=1;next} /^## /{f=0} f && /^- \[/{print}' \
-      "$DATA/backlog.md" | sed 's/^- \[ \] /  /' | cut -c1-150
-  else
-    printf '\n(no backlog at %s)\n' "$DATA/backlog.md"
-  fi
+  printf '\n--- in flight ---\n'
+  FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-tasks-axi.sh" list \
+    --state in_flight --limit 10000 | cut -c1-150
 
   local any=0
   for m in "$STATE"/*.meta; do

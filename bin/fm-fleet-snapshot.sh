@@ -14,11 +14,9 @@
 #   generated: UTC observation time for this fresh command execution.
 #   fm_home: resolved operational home.
 #   roots: resolved root/config/data/state/projects directories.
-#   backlog: {path,present,records[]} where records are ordered as written in
-#     data/backlog.md and cover In flight, Queued, and Done.
-#     Canonical tasks-axi rows are structured; free-form non-empty lines in
-#     those sections are preserved as unstructured records.
-#     Structured rows preserve captain-hold metadata such as hold_kind,
+#   backlog: {path,present,records[]} derived only from canonical
+#     data/<task>/task.json records and covering In flight, Queued, and Done.
+#     Records preserve captain-hold metadata such as hold_kind,
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
@@ -98,7 +96,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
-BACKLOG="$DATA/backlog.md"
 SNAPSHOT_NOW=${FM_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ -n "${FM_SNAPSHOT_NOW_EPOCH:-}" ]; then
   SNAPSHOT_EPOCH=$FM_SNAPSHOT_NOW_EPOCH
@@ -279,264 +276,54 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
-backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
-  local backlog=${1:-$BACKLOG} canonical_json='' legacy_json
-  if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
-    canonical_json=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory | jq -c \
-      --arg path "$DATA" --arg today "$SNAPSHOT_TODAY" \
-      --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
-      def timestamp_epoch($d):
-        if ($d | type) != "string" then null
-        elif ($d | test("T")) then try ($d | fromdateiso8601) catch null
-        else try (($d + "T00:00:00Z") | fromdateiso8601) catch null end;
-      def days_between($from; $to):
-        (timestamp_epoch($from)) as $a | (timestamp_epoch($to)) as $b
-        | if $a == null or $b == null then null else (($b - $a) / 86400 | floor) end;
-      .tasks as $tasks
-      | (reduce $tasks[] as $task ({};
-          .[$task.id] = ($task.state == "done" or $task.state == "archived"))) as $resolved
-      | {path:$path,present:true,
-        records:[$tasks[] | ([.blocked_by[] | select($resolved[.] != true)]) as $unresolved | {
-          order:0,state:(if .state == "archived" then "done" else .state end),structured:true,
-          id:.id,checked:(.state == "done" or .state == "archived"),title:.title,
-          repo:(if .repo == "" then null else .repo end),kind:.kind,
-          priority:(if .priority == "" then null else .priority end),
-          hold_reason:(.hold.reason // null),hold_kind:(.hold.kind // null),
-          hold_until:(.hold.until // .deferred_until // null),
-          hold_set:(.hold.set // null),blocked_by:(.blocked_by[0] // null),blocked_by_ids:.blocked_by,
-          unresolved_blocker_ids:$unresolved,blocked_reason:null,since:.created,merged:null,reported:null,
-          done:.closed,completion:(.completion // {verb:(if .closed then "done" else null end),date:.closed}),
-          links:(.links|to_entries|map(.value)),pr_url:(.links.pr // null),report_path:(.links.report // null),
-          local_note:null,raw:null,body_lines:(.body|split("\n")),body_excerpt:(.body[:240]),
-          compact_progress:.progress,
-          current_role:(if .state == "in_flight" and .hold != null then "held"
-                        elif .state == "in_flight" and .kind == "program" then "program"
-                        elif .state == "in_flight" then "worker"
-                        elif .state == "queued" then "queued" else "done" end),
-          requires_child_metadata:(.state == "in_flight" and .hold == null and .kind != "program"),
-          hold_age_days:days_between((.hold.set // .created); $today),
-          hold_bucket:(if .hold.kind != "captain" then null
-                       elif ($unresolved|length) > 0 then "blocked"
-                       elif (.hold.until // .deferred_until // null) > $today then "dated"
-                       elif (.hold.until // .deferred_until // null) == null
-                            and days_between((.hold.set // .created); $today) != null
-                            and days_between((.hold.set // .created); $today) >= $age_days then "aged"
-                       else "live" end),
-          captain_actionable:(.hold.kind == "captain" and ($unresolved|length) == 0
-                              and ((.hold.until // .deferred_until // null) <= $today)
-                              and ((.hold.until // .deferred_until // null) != null
-                                   or days_between((.hold.set // .created); $today) < $age_days))
-        }]}') || return 1
-  fi
-  if [ ! -f "$backlog" ]; then
-    if [ -n "$canonical_json" ]; then printf '%s\n' "$canonical_json"
-    else jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
-    fi
-    return 0
-  fi
-
-  # shellcheck disable=SC2094
-  legacy_json=$(jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
+backlog_json() {  # canonical data/<task>/task.json projection
+  local canonical_json
+  canonical_json=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory | jq -c \
+    --arg path "$DATA" --arg today "$SNAPSHOT_TODAY" \
     --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
-    def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
       elif ($d | test("T")) then try ($d | fromdateiso8601) catch null
       else try (($d + "T00:00:00Z") | fromdateiso8601) catch null end;
     def days_between($from; $to):
-      (timestamp_epoch($from)) as $a
-      | (timestamp_epoch($to)) as $b
-      | if $a == null or $b == null then null
-        else (($b - $a) / 86400 | floor) end;
-    def section_state:
-      if . == "In flight" then "in_flight"
-      elif . == "Queued" then "queued"
-      elif . == "Done" then "done"
-      else null end;
-    def cap($rest; $re):
-      (((($rest | capture($re)?) // {}) | .v) // null) as $v
-      | if $v == null then null else ($v | trim) end;
-    def metadata($rest; $key):
-      cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + ":[[:space:]]*(?<v>[^,)]*)");
-    # LOAD-BEARING, do not remove as a duplicate definition of the kind field.
-    # tasks-axi 0.2.5 omits the (kind: ...) metadata when a title starts with
-    # uppercase SCOUT or SHIP at a JavaScript word boundary (ASCII letters,
-    # digits, and underscore are word characters), so those rows carry no
-    # explicit kind to read. Without this fallback a scout whose title starts
-    # with SCOUT reports kind null, its
-    # recorded report stops counting as a delivery, and it drops out of Recently
-    # Landed - the defect this selector exists to fix. Pinned by
-    # the producer word-boundary regression in tests/fm-bearings-snapshot.test.sh.
-    def kind_of($rest):
-      metadata($rest; "kind") as $kind
-      | if $kind != null then $kind
-        elif ($rest | test("^SCOUT(?![A-Za-z0-9_])")) then "scout"
-        elif ($rest | test("^SHIP(?![A-Za-z0-9_])")) then "ship"
-        else null end;
-    def hold_metadata($rest):
-      cap($rest; ".*\\(hold:[[:space:]]*(?<v>[^)]*)");
-    def metadata_word($rest; $key):
-      cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + "[[:space:]]+(?<v>[^,)]*)");
-    def url_pattern: "https?://[^[:space:])\"<>]+";
-    def wrapped_url_pattern: "<?" + url_pattern + ">?";
-    def links($rest): [$rest | scan(url_pattern)];
-    def strip_trailing_metadata:
-      reduce range(0; 20) as $_ (.;
-        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|hold-until):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
-    def strip_title_artifacts:
-      sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+-[[:space:]]+local main$"; "")
-      | sub("[[:space:]]+local main$"; "")
-      | sub("[[:space:]]+-[[:space:]]*$"; "");
-    def clean_title:
-      strip_trailing_metadata
-      | strip_title_artifacts
-      | gsub("[[:space:]]+"; " ")
-      | trim;
-    def title_of($rest):
-      $rest
-      | gsub(wrapped_url_pattern; "")
-      | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
-      | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
-      | clean_title;
-    def blocked_by_ids($rest):
-      [ $rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0] ]
-      | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end);
-    def blocked_reason($rest):
-      cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
-      | if $reason == null then null
-        else ($reason | clean_title | if . == "" then null else . end)
-        end;
-    def local_note($rest):
-      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
-    def completion($rest):
-      (metadata_word($rest; "merged")) as $merged
-      | (metadata_word($rest; "reported")) as $reported
-      | (metadata_word($rest; "done")) as $done
-      | if $merged != null then {verb:"merged",date:$merged}
-        elif $reported != null then {verb:"reported",date:$reported}
-        elif $done != null then {verb:"done",date:$done}
-        else {verb:null,date:null} end;
-    def row_match($line):
-      (($line | capture("^[-*][[:space:]]+\\[(?<check>[ xX])\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+(?<rest>.*)$")?) //
-       (($line | capture("^[-*][[:space:]]+\\*\\*(?<id>[^*]+)\\*\\*[[:space:]]+-[[:space:]]+(?<rest>.*)$")?)
-        | if . == null then null else . + {check:" "} end));
-    def compact_progress($lines):
-      ([$lines | join("\n") | capture(
-        "(?:^|\\n)<!-- firstmate-progress:v1(?: context=[a-f0-9]{64}(?: identity=[a-f0-9]{64})?)? -->\\n" +
-        "acceptance: (?<acceptance>[^\\n]*)\\ncurrent_state: (?<current_state>[^\\n]*)\\n" +
-        "remaining_gap: (?<remaining_gap>[^\\n]*)\\nnext_step: (?<next_step>[^\\n]*)\\n" +
-        "<!-- /firstmate-progress -->")] | .[0] // null) as $match
-      | if $match == null then null
-        else try ($match | with_entries(.value |= fromjson)) catch {invalid:true}
-        end;
-    def structured_row($line):
-      ($line | test("^[-*][[:space:]]+\\[[ xX]\\][[:space:]]+[^[:space:]]+[[:space:]]+-[[:space:]]+"))
-      or ($line | test("^[-*][[:space:]]+\\*\\*[^*]+\\*\\*[[:space:]]+-[[:space:]]+"));
-    def parse_row($line; $section; $order):
-      row_match($line) as $m
-      | if $m == null then
-          {order:$order,state:$section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}
-        else
-          ($m.rest) as $rest
-          | {order:$order,
-             state:$section,
-             structured:true,
-             id:($m.id | trim),
-             checked:($m.check | test("[xX]")),
-             title:title_of($rest),
-             repo:metadata($rest; "repo"),
-             kind:kind_of($rest),
-             priority:metadata($rest; "priority"),
-             hold_reason:hold_metadata($rest),
-             hold_kind:metadata($rest; "hold-kind"),
-             hold_until:metadata($rest; "hold-until"),
-             hold_set:null,
-             blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
-             blocked_by_ids:blocked_by_ids($rest),
-             blocked_reason:blocked_reason($rest),
-             since:metadata_word($rest; "since"),
-             merged:metadata_word($rest; "merged"),
-             reported:metadata_word($rest; "reported"),
-             done:metadata_word($rest; "done"),
-             completion:completion($rest),
-             links:links($rest),
-             pr_url:((links($rest) | map(select(test("/pull/[0-9]+"))) | .[0]) // null),
-             report_path:cap($rest; ".*(?<v>data/[^[:space:])]+/report\\.md).*"),
-             local_note:local_note($rest),
-             raw:$line,
-             body_lines:[],
-             body_excerpt:null}
-        end;
-    reduce inputs as $line
-      ({path:$path,present:true,records:[],section:null,order:0};
-       if ($line | test("^##[[:space:]]+")) then
-         .section = (($line | sub("^##[[:space:]]+";"") | trim) | section_state)
-       elif .section == null or ($line | trim) == "" then
-         .
-       elif structured_row($line) then
-         .order += 1
-         | .records += [parse_row($line; .section; .order)]
-       elif ((.records | length) > 0 and (.records[-1].structured == true) and ($line | test("^[[:space:]]+"))) then
-         ($line | trim) as $body
-         | if $body == "" then .
-           else .records[-1].body_lines += [$body] end
-       else
-         .order += 1
-         | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
-       end)
-    | .records |= map(
-        if (.body_lines | length) > 0 then
-          .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
-          | .local_note = (.local_note
-              // (if any(.body_lines[];
-                    test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
-                  then null
-                  else cap(.body_lines[-1]; "^(?<v>local main)$")
-                  end))
-          | .body_excerpt = ((.body_lines | join(" "))[:240])
-        else . end)
-    | .records |= map(.compact_progress = compact_progress(.body_lines))
-    | .records as $records
-    | (reduce ($records[] | select(.structured)) as $record ({};
-         .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
-    | .records |= map(
-        if .structured then
-          . as $record
-          | .unresolved_blocker_ids = [
-              $record.blocked_by_ids[] as $blocker
-              | select($resolved_ids[$blocker] != true)
-              | $blocker
-            ]
-          | .current_role =
-              (if .state == "in_flight" and .hold_reason != null and .hold_kind != null then "held"
-               elif .state == "in_flight" and .kind == "program" then "program"
-               elif .state == "in_flight" then "worker"
-               elif .state == "queued" then "queued"
-               else "done" end)
-          | .requires_child_metadata = (.current_role == "worker")
-          | .hold_age_days = days_between((.hold_set // .since); $now)
-          | .hold_bucket =
-              (if .hold_kind != "captain" or .hold_reason == null or .state == "done" then null
-               elif (.unresolved_blocker_ids | length) > 0 then "blocked"
-               elif .hold_until != null and .hold_until > $today then "dated"
-               elif .hold_until == null and .hold_age_days != null
-                    and .hold_age_days >= $age_days then "aged"
-               else "live" end)
-          | .captain_actionable = (.hold_bucket == "live")
-        else . end)
-    | del(.section,.order)
-  ' < "$backlog") || return 1
-  if [ -z "$canonical_json" ]; then
-    printf '%s\n' "$legacy_json"
-  else
-    jq -cn --argjson canonical "$canonical_json" --argjson legacy "$legacy_json" '
-      (reduce $canonical.records[] as $record ({}; .[$record.id] = true)) as $canonical_ids
-      | $canonical + {records:($canonical.records +
-          [$legacy.records[] |
-            select(.structured != true or ($canonical_ids[.id] // false) != true)])}'
-  fi
+      (timestamp_epoch($from)) as $a | (timestamp_epoch($to)) as $b
+      | if $a == null or $b == null then null else (($b - $a) / 86400 | floor) end;
+    .tasks as $tasks
+    | (reduce $tasks[] as $task ({};
+        .[$task.id] = ($task.state == "done" or $task.state == "archived"))) as $resolved
+    | {path:$path,present:true,
+      records:[$tasks[] | ([.blocked_by[] | select($resolved[.] != true)]) as $unresolved | {
+        order:0,state:(if .state == "archived" then "done" else .state end),structured:true,
+        id:.id,checked:(.state == "done" or .state == "archived"),title:.title,
+        repo:(if .repo == "" then null else .repo end),kind:.kind,
+        priority:(if .priority == "" then null else .priority end),
+        hold_reason:(.hold.reason // null),hold_kind:(.hold.kind // null),
+        hold_until:(.hold.until // .deferred_until // null),
+        hold_set:(.hold.set // null),blocked_by:(.blocked_by[0] // null),blocked_by_ids:.blocked_by,
+        unresolved_blocker_ids:$unresolved,blocked_reason:null,since:.created,merged:null,reported:null,
+        done:.closed,completion:(.completion // {verb:(if .closed then "done" else null end),date:.closed}),
+        links:(.links|to_entries|map(.value)),pr_url:(.links.pr // null),report_path:(.links.report // null),
+        local_note:null,raw:null,body_lines:(.body|split("\n")),body_excerpt:(.body[:240]),
+        compact_progress:.progress,
+        current_role:(if .state == "in_flight" and .hold != null then "held"
+                      elif .state == "in_flight" and .kind == "program" then "program"
+                      elif .state == "in_flight" then "worker"
+                      elif .state == "queued" then "queued" else "done" end),
+        requires_child_metadata:(.state == "in_flight" and .hold == null and .kind != "program"),
+        hold_age_days:days_between((.hold.set // .created); $today),
+        hold_bucket:(if .hold.kind != "captain" then null
+                     elif ($unresolved|length) > 0 then "blocked"
+                     elif (.hold.until // .deferred_until // null) > $today then "dated"
+                     elif (.hold.until // .deferred_until // null) == null
+                          and days_between((.hold.set // .created); $today) != null
+                          and days_between((.hold.set // .created); $today) >= $age_days then "aged"
+                     else "live" end),
+        captain_actionable:(.hold.kind == "captain" and ($unresolved|length) == 0
+                            and ((.hold.until // .deferred_until // null) <= $today)
+                            and ((.hold.until // .deferred_until // null) != null
+                                 or days_between((.hold.set // .created); $today) < $age_days))
+      }]}') || return 1
+  printf '%s\n' "$canonical_json"
 }
 
 SNAPSHOT_TASK_DIR=

@@ -49,9 +49,11 @@ SH
 setup_case() { # <name> [harness] -> echoes case dir with home/state + t1 meta
   local name=$1 harness=${2:-pi} dir
   dir="$TMP_ROOT/$name"
-  mkdir -p "$dir/home/state"
+  mkdir -p "$dir/home/state" "$dir/home/data"
   make_stubs "$dir" >/dev/null
   fm_write_meta "$dir/home/state/t1.meta" "window=sess:w1:p-t1" "backend=herdr" "kind=ship" "harness=$harness"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add t1 "Inbox fixture" --kind ship --start >/dev/null \
+    || fail 'canonical task fixture failed'
   printf '%s\n' "$dir"
 }
 
@@ -137,12 +139,10 @@ test_branch_compact_progress_routes_exact_next_step() {
   mkdir -p "$dir/home/data/t1"
   printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' > "$dir/home/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add t1 "Continue the accepted validation" --kind ship \
-    --body "Keep the existing task identity." --start >/dev/null || fail 'compact task fixture failed'
   printf 'Continue the accepted validation\n' > "$dir/home/data/t1/brief.md"
   printf 'spawn_gen=s1\n' >> "$dir/home/state/t1.meta"
   token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 --expected-token "$token" \
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 \
     --progress '{"acceptance":"The accepted checks pass","current_state":"The checkpoint is ready","remaining_gap":"Validation has not started","next_step":"Start the existing no-mistakes run"}' >/dev/null \
     || fail 'compact progress fixture failed'
   token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
@@ -178,7 +178,6 @@ test_branch_compact_progress_routes_exact_next_step() {
   current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1) \
     || fail 'updated compact progress read failed'
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 \
-    --expected-token "$(printf '%s' "$current" | jq -r .record_token)" \
     --progress '{"acceptance":"The accepted checks pass","current_state":"A later material checkpoint is ready","remaining_gap":"Validation still has not started","next_step":"Start the existing no-mistakes run"}' >/dev/null \
     || fail 'same-text material progress update failed'
   token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
@@ -278,7 +277,8 @@ test_uncertain_ring_persists_recovery_before_suppression() {
 }
 
 test_transcript_variants_are_never_opened_by_send() {
-  local variant dir err rc marker transcript body
+  local variant dir err rc marker transcript body real_python
+  real_python=$(command -v python3)
   for variant in missing unreadable huge malformed; do
     dir=$(setup_case "no-transcript-read-$variant" codex)
     err="$dir/send.err"
@@ -295,8 +295,13 @@ test_transcript_variants_are_never_opened_by_send() {
       "$dir" "$dir" "$transcript" > "$dir/home/state/t1.busy-session"
     cat > "$dir/fakebin/python3" <<SH
 #!/usr/bin/env bash
-touch '$marker'
-exit 97
+for arg in "\$@"; do
+  if [ "\$arg" = '$transcript' ]; then
+    touch '$marker'
+    exit 97
+  fi
+done
+exec '$real_python' "\$@"
 SH
     chmod +x "$dir/fakebin/python3"
     run_send "$dir" "$err" -- t1 "transcript-independent $variant"
@@ -452,6 +457,7 @@ test_terminal_task_refuses_new_steer() {
   printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
   printf '%s\n' '## In flight' '' '## Queued' '' '## Done' '' \
     '- [x] t1 - Explicitly terminal fixture (kind: ship)' >"$dir/home/data/backlog.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" "done" t1 >/dev/null
 
   run_send "$dir" "$err" -- t1 "must not resume terminal work"
   rc=$?
@@ -472,6 +478,7 @@ test_terminal_task_refuses_native_task_sends() {
     printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
     printf '%s\n' '## In flight' '' '## Queued' '' '## Done' '' \
       '- [x] t1 - Explicitly terminal native fixture (kind: ship)' >"$dir/home/data/backlog.md"
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" "done" t1 >/dev/null
 
     rc=0
     if [ "$variant" = slash ]; then
@@ -507,7 +514,6 @@ test_done_row_with_open_gap_requires_main_reopen() {
   dir=$(setup_case done-open-gap)
   err="$dir/send.err"
   mkdir -p "$dir/home/data"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add t1 'Prematurely closed fixture' --kind ship --start >/dev/null
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 --progress \
     '{"acceptance":"MAIN verifies the complete outcome","current_state":"Only a partial result exists","remaining_gap":"Acceptance is not met","next_step":"Continue the authorized work"}' >/dev/null
   FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" 'done' t1 >/dev/null
@@ -525,6 +531,7 @@ test_noncanonical_external_task_refuses_steer() {
   dir=$(setup_case non-markdown-terminal)
   err="$dir/send.err"
   mkdir -p "$dir/home/data"
+  rm -f "$dir/home/data/t1/task.json"
   printf 'backend="beads"\n[beads]\npath=".beads"\n' >"$dir/home/.tasks.toml"
   cat >"$dir/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash

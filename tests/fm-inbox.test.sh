@@ -101,9 +101,12 @@ pass "text intake preserves a durable message until explicit acknowledgement"
 alt_data="$TMP_ROOT/data-elsewhere"
 mkdir -p "$alt_data"
 printf '# Backlog\n\n## In flight\n- [ ] moved-one - Moved work (kind: ship)\n' > "$alt_data/backlog.md"
+FM_DATA_OVERRIDE="$alt_data" "$ROOT/bin/fm-tasks-axi.sh" add canonical-one \
+  'Canonical moved work' --kind ship --start >/dev/null
 inbox_moved=$(env "${inbox_env[@]}" FM_DATA_OVERRIDE="$alt_data" "$ROOT/bin/fm-inbox.sh" status)
-assert_contains "$inbox_moved" 'moved-one' "status must read the overridden data directory"
-pass "status honors the home data override"
+assert_contains "$inbox_moved" 'canonical-one' "status must read canonical records from the overridden data directory"
+assert_not_contains "$inbox_moved" 'moved-one' "status read a retained legacy backlog row"
+pass "status honors the home data override and ignores retained legacy task data"
 
 # Exercise the removed public entrypoint paths: an old invocation must fail
 # before any transport can run.
