@@ -65,13 +65,14 @@ When in doubt, write the fact into the skill or doc first by patching that owner
 
 ## Writing instruction surfaces
 
-Each always-loaded line also costs cognitive load, because it competes for the agent's attention with every other rule it must weigh.
+Context load is what an instruction's mere presence costs every session: tokens, attention, and the risk that too much prose buries the load-bearing lines.
+Cognitive load is what the instruction costs whoever implements it, because it competes for attention with every other rule the agent must weigh.
 
 A pointer's wording, not its target, decides whether an agent reaches it.
 Word each trigger branch as `Trigger hygiene` below directs, using the words the agent will hold when it arrives there.
 Drop identity text the body already carries, so the pointer reads as a trigger rather than a second description.
 
-Put what every branch needs inline, and disclose behind a pointer only what some branches reach.
+Information hierarchy puts what every branch needs inline and discloses behind a pointer only what some branches reach, which is progressive disclosure.
 Keep a concept's definition and its caveats together rather than split across sections.
 
 Completion criteria need clarity, meaning the agent can tell the criterion is met, and demand, meaning the criterion is what the caller actually needs.
