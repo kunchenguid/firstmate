@@ -1613,6 +1613,12 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
+    bin/fm-branch-landed-lib.sh)
+      # Shared landed-work proofs, sourced by both bin/fm-teardown.sh (pr-forge)
+      # and bin/fm-fleet-sync.sh's opt-in landed-branch prune (session-bootstrap).
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
+      ;;
     bin/fm-control-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' session-bootstrap

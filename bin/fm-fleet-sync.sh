@@ -22,6 +22,15 @@
 # that would have been touched.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
+# A local branch with NO upstream (a task branch the no-mistakes pipeline pushed
+# from its own gate worktree never gets one) is never "[gone]", so the prune above
+# never reaches it. Opt in with FM_FLEET_PRUNE_MERGED=1 (default off) to also
+# prune such a branch, but only on positive proof its work landed in
+# origin/<default>: bin/fm-branch-landed-lib.sh's content leg, or its merged-PR leg
+# when gh can resolve a merged PR for the branch. Missing evidence, a lookup error,
+# or a merge conflict keeps the branch, as do the checked-out branch, the default
+# branch, and a branch with a worktree. FM_FLEET_PRUNE=0 disables this prune too.
+# See prune_landed_branches for how the delete stays exact under concurrent use.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -45,6 +54,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-branch-landed-lib.sh
+. "$SCRIPT_DIR/fm-branch-landed-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -254,6 +265,58 @@ prune_gone_branches() {
     --format='%(refname:short) %(upstream:track)' refs/heads 2>/dev/null)
 }
 
+prune_landed_branches() {
+  # Opt-in companion to prune_gone_branches for local branches that never had an
+  # upstream, so their remote deletion is invisible locally. Nothing about such a
+  # branch's tracking state says it merged, so it is deleted only on positive
+  # proof from bin/fm-branch-landed-lib.sh that its work is in $BASE. The default
+  # branch is skipped because a fully merged default always passes the content
+  # proof, yet fleet sync needs it to re-attach a detached clone.
+  # The delete is `git branch -D`, never `update-ref -d`, so git itself refuses a
+  # branch some worktree checked out after the scan below. The tip can still move
+  # between the proof and the delete, so the delete reports the exact sha it
+  # removed and a mismatch with the proven tip restores the branch at that sha.
+  [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
+  [ "${FM_FLEET_PRUNE_MERGED:-0}" = "1" ] || return 0
+
+  local worktree_branches current refline ref branch upstream tip target out deleted
+  worktree_branches=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null \
+    | sed -n 's#^branch refs/heads/##p')
+  current=$(git -C "$PROJ" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+
+  while IFS= read -r refline; do
+    ref=${refline%%$'\t'*}
+    refline=${refline#*$'\t'}
+    upstream=${refline%%$'\t'*}
+    tip=${refline#*$'\t'}
+    branch=${ref#refs/heads/}
+    [ -z "$upstream" ] || continue
+    [ -n "$branch" ] && [ -n "$tip" ] || continue
+    [ "$branch" != "$current" ] || continue
+    [ "$branch" != "$DEFAULT" ] || continue
+    if printf '%s\n' "$worktree_branches" | grep -Fxq -- "$branch"; then
+      continue
+    fi
+    if ! fm_branch_landed_content_in_ref "$PROJ" "$BASE" "$tip"; then
+      target=$(fm_branch_landed_pr_number_from_branch "$PROJ" "$branch") || continue
+      fm_branch_landed_in_merged_pr "$PROJ" "$target" "$tip" >/dev/null || continue
+    fi
+    out=$(LC_ALL=C git -C "$PROJ" -c core.abbrev=40 branch -D -- "$branch" 2>&1) || continue
+    deleted=$(printf '%s\n' "$out" | sed -n 's/^Deleted branch .* (was \([0-9a-f]*\))\.$/\1/p' | head -1)
+    if [ "$deleted" = "$tip" ]; then
+      echo "$label: pruned $branch (landed, no upstream)"
+      continue
+    fi
+    [ -n "$deleted" ] || deleted=$tip
+    if git -C "$PROJ" update-ref "refs/heads/$branch" "$deleted" "" 2>/dev/null; then
+      echo "$label: kept $branch: its tip changed while it was being pruned; restored at $deleted" >&2
+    else
+      echo "$label: WARNING: $branch changed while it was being pruned and could not be restored; its last tip was $deleted" >&2
+    fi
+  done < <(git -C "$PROJ" for-each-ref \
+    --format='%(refname)%09%(upstream)%09%(objectname)' refs/heads 2>/dev/null)
+}
+
 # True when some worktree of $PROJ has $DEFAULT checked out (so we cannot attach
 # to it here). The current worktree is detached when this is consulted, so any
 # match is necessarily another worktree.
@@ -362,6 +425,7 @@ sync_project() {
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
+  prune_landed_branches || true
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no

@@ -27,6 +27,13 @@
 # worktree dir as its cwd also blocks removal (the clone-dir liveness check); a
 # transient lock that self-clears is retried without a force-remove; and any
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
+#
+# It also pins branch pruning end to end. A gone-upstream branch is pruned by
+# default. A task branch pushed from a separate worktree (the no-mistakes shape)
+# has no upstream, so it survives unless FM_FLEET_PRUNE_MERGED=1 opts in; then it
+# is pruned only on a squash-merge content proof or a merged-PR head that contains
+# it. Unpushed work, the checked-out branch, a branch with a worktree, and the
+# default branch always survive, and FM_FLEET_PRUNE=0 disables every prune.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -747,6 +754,253 @@ test_non_signature_fetch_failure_is_not_retried() {
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
 }
 
+# --- landed-branch prune fixtures --------------------------------------------
+
+# push_task_branch <home> <name> <branch> <file> <content>: the no-mistakes shape.
+# The task branch is created in a separate worktree of the clone and pushed from
+# there without -u, so the clone's local branch has NO upstream and can never read
+# "[gone]". The worktree is then removed, as teardown does after a merge, leaving
+# only the local branch. Echoes the pushed tip.
+push_task_branch() {
+  local home=$1 name=$2 branch=$3 file=$4 content=$5 clone wt tip
+  clone="$home/projects/$name"
+  wt="$home/wt-$name-${branch//\//-}"
+  git -C "$clone" worktree add -q --no-track -b "$branch" "$wt" origin/main
+  commit_file "$wt" "$file" "$content" "task $branch"
+  git -C "$wt" push -q origin "$branch"
+  tip=$(git -C "$wt" rev-parse HEAD)
+  git -C "$clone" worktree remove "$wt"
+  printf '%s\n' "$tip"
+}
+
+# squash_merge_and_delete <home> <name> <branch> <file> <content>: land the task as
+# a squash merge on origin/main (one new commit, not the branch's own) and delete
+# the remote branch, as a forge does when the PR merges.
+squash_merge_and_delete() {
+  local home=$1 name=$2 branch=$3 file=$4 content=$5 work
+  work="$home/work-$name"
+  git -C "$work" pull -q --ff-only origin main
+  commit_file "$work" "$file" "$content" "squash $branch"
+  git -C "$work" push -q origin main
+  git -C "$work" push -q origin --delete "$branch"
+}
+
+# prune_fakebin <home> <tag> [merged-pr-head]: gh and gh-axi stubs. With no head,
+# every lookup fails, as with no forge or a network error. With a head, PR 7 for
+# any branch is merged with that head.
+prune_fakebin() {
+  local home=$1 tag=$2 head=${3:-} fakebin
+  fakebin="$home/fb-$tag"
+  rm -rf "$fakebin"; mkdir -p "$fakebin"
+  if [ -z "$head" ]; then
+    printf '#!/usr/bin/env bash\necho "error: unavailable" >&2\nexit 1\n' > "$fakebin/gh-axi"
+    printf '#!/usr/bin/env bash\necho "error: unavailable" >&2\nexit 1\n' > "$fakebin/gh"
+  else
+    cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
+esac
+exit 1
+SH
+    cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+esac
+exit 1
+SH
+  fi
+  chmod +x "$fakebin/gh-axi" "$fakebin/gh"
+  printf '%s\n' "$fakebin"
+}
+
+# run_sync_prune <home> <fakebin> [args...]: run fleet-sync with the stubs first on
+# PATH, stdout only. Callers set FM_FLEET_PRUNE / FM_FLEET_PRUNE_MERGED.
+run_sync_prune() {
+  local home=$1 fakebin=$2
+  shift 2
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+}
+
+branch_exists() { git -C "$1" show-ref --verify --quiet "refs/heads/$2"; }
+
+# --- landed-branch prune tests -------------------------------------------------
+
+test_gone_upstream_branch_still_pruned_by_default() {
+  local home clone fakebin out
+  home=$(new_home)
+  clone=$(build_pair "$home" gone)
+  fakebin=$(prune_fakebin "$home" gone)
+  git -C "$clone" checkout -q -b fm/tracked
+  commit_file "$clone" t.txt t "tracked work"
+  git -C "$clone" push -q -u origin fm/tracked
+  git -C "$clone" checkout -q main
+  squash_merge_and_delete "$home" gone fm/tracked t.txt t
+
+  out=$(run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_contains "$out" "gone: pruned fm/tracked" "gone-upstream prune should still run by default"
+  if branch_exists "$clone" fm/tracked; then fail "gone-upstream branch should have been pruned"; fi
+  pass "a branch whose upstream is gone is still pruned by default"
+}
+
+test_landed_no_upstream_branch_kept_without_opt_in() {
+  local home clone fakebin out
+  home=$(new_home)
+  clone=$(build_pair "$home" optout)
+  fakebin=$(prune_fakebin "$home" optout)
+  push_task_branch "$home" optout fm/task a.txt a >/dev/null
+  squash_merge_and_delete "$home" optout fm/task a.txt a
+  [ -z "$(git -C "$clone" for-each-ref --format='%(upstream)' refs/heads/fm/task)" ] \
+    || fail "fixture: the task branch must have no upstream"
+
+  out=$(run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_not_contains "$out" "pruned fm/task" "the landed-branch prune must be opt-in"
+  branch_exists "$clone" fm/task || fail "without FM_FLEET_PRUNE_MERGED=1 the branch must survive"
+  pass "a landed branch with no upstream is kept when the landed-branch prune is not opted in"
+}
+
+test_squash_merged_no_upstream_branch_pruned_when_opted_in() {
+  local home clone fakebin out
+  home=$(new_home)
+  clone=$(build_pair "$home" squash)
+  fakebin=$(prune_fakebin "$home" squash)
+  push_task_branch "$home" squash fm/task a.txt a >/dev/null
+  squash_merge_and_delete "$home" squash fm/task a.txt a
+
+  out=$(FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_contains "$out" "squash: pruned fm/task (landed, no upstream)" "opted-in prune should report the landed branch"
+  if branch_exists "$clone" fm/task; then fail "a squash-merged branch with no upstream should be pruned when opted in"; fi
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = main ] || fail "the clone should stay on main"
+  pass "a squash-merged branch with no upstream is pruned when opted in (content proof)"
+}
+
+test_merged_pr_no_upstream_branch_pruned_when_opted_in() {
+  local home clone fakebin out tip
+  home=$(new_home)
+  clone=$(build_pair "$home" mergedpr)
+  tip=$(push_task_branch "$home" mergedpr fm/task file.txt task-edit)
+  squash_merge_and_delete "$home" mergedpr fm/task file.txt task-edit
+  # A later main commit rewrites the same line, so the content proof conflicts and
+  # only the merged-PR proof can show the branch landed.
+  advance_origin "$home" mergedpr later-edit
+  git -C "$clone" fetch -q origin
+  if git -C "$clone" merge-tree --write-tree origin/main fm/task >/dev/null 2>&1; then
+    fail "fixture: the content proof must conflict so only the merged-PR proof applies"
+  fi
+  fakebin=$(prune_fakebin "$home" mergedpr "$tip")
+
+  out=$(FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_contains "$out" "mergedpr: pruned fm/task (landed, no upstream)" "merged-PR proof should prune the branch"
+  if branch_exists "$clone" fm/task; then fail "a branch contained in a merged PR head should be pruned when opted in"; fi
+  pass "a branch contained in a merged PR head is pruned when opted in (merged-PR proof)"
+}
+
+test_unpushed_commit_without_worktree_survives() {
+  local home clone fakebin out tip wt
+  home=$(new_home)
+  clone=$(build_pair "$home" parked)
+  # A parked task: its pushed work merged, then it gained one more commit that was
+  # never pushed, and its worktree was recycled. The merged PR still reports the
+  # old head, so neither proof covers the new commit.
+  tip=$(push_task_branch "$home" parked fm/task a.txt a)
+  squash_merge_and_delete "$home" parked fm/task a.txt a
+  wt="$home/wt-parked-again"
+  git -C "$clone" worktree add -q "$wt" fm/task
+  commit_file "$wt" b.txt unpushed "unpushed parked work"
+  git -C "$clone" worktree remove "$wt"
+  # A never-pushed branch with no PR at all, too.
+  git -C "$clone" branch fm/local main
+  wt="$home/wt-parked-local"
+  git -C "$clone" worktree add -q "$wt" fm/local
+  commit_file "$wt" c.txt local "local-only work"
+  git -C "$clone" worktree remove "$wt"
+  fakebin=$(prune_fakebin "$home" parked "$tip")
+
+  out=$(FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_not_contains "$out" "pruned" "no branch holding unpushed work may be pruned"
+  branch_exists "$clone" fm/task || fail "a merged branch with a later unpushed commit must survive"
+  branch_exists "$clone" fm/local || fail "a never-pushed branch with no PR must survive"
+  pass "a branch with an unpushed commit and no worktree survives the opted-in prune"
+}
+
+test_checked_out_landed_branch_survives() {
+  local home clone fakebin out
+  home=$(new_home)
+  clone=$(build_pair "$home" checkedout)
+  fakebin=$(prune_fakebin "$home" checkedout)
+  push_task_branch "$home" checkedout fm/task a.txt a >/dev/null
+  squash_merge_and_delete "$home" checkedout fm/task a.txt a
+  git -C "$clone" checkout -q fm/task
+
+  out=$(FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_not_contains "$out" "pruned fm/task" "the checked-out branch must never be pruned"
+  branch_exists "$clone" fm/task || fail "the checked-out landed branch must survive"
+  pass "the checked-out branch survives the opted-in prune"
+}
+
+test_landed_branch_with_worktree_survives() {
+  local home clone fakebin out wt
+  home=$(new_home)
+  clone=$(build_pair "$home" withwt)
+  fakebin=$(prune_fakebin "$home" withwt)
+  push_task_branch "$home" withwt fm/task a.txt a >/dev/null
+  squash_merge_and_delete "$home" withwt fm/task a.txt a
+  wt="$home/wt-withwt-live"
+  git -C "$clone" worktree add -q "$wt" fm/task
+
+  out=$(FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_not_contains "$out" "pruned fm/task" "a branch with a worktree must never be pruned"
+  branch_exists "$clone" fm/task || fail "a landed branch that still has a worktree must survive"
+  pass "a branch that still has a worktree survives the opted-in prune"
+}
+
+test_default_branch_without_upstream_survives() {
+  local home clone fakebin out
+  home=$(new_home)
+  clone=$(build_pair "$home" defaultnoup)
+  fakebin=$(prune_fakebin "$home" defaultnoup)
+  advance_origin "$home" defaultnoup C1
+  git -C "$clone" branch --unset-upstream main
+  git -C "$clone" checkout -q --detach
+
+  out=$(FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_not_contains "$out" "pruned main" "the default branch must never be pruned"
+  branch_exists "$clone" main || fail "the default branch must survive even with no upstream"
+  assert_contains "$out" "defaultnoup: recovered: re-attached main, synced" "the detached clone should still re-attach main"
+  pass "the default branch with no upstream survives the opted-in prune"
+}
+
+test_prune_disabled_keeps_every_branch() {
+  local home clone fakebin out
+  home=$(new_home)
+  clone=$(build_pair "$home" disabled)
+  fakebin=$(prune_fakebin "$home" disabled)
+  push_task_branch "$home" disabled fm/task a.txt a >/dev/null
+  squash_merge_and_delete "$home" disabled fm/task a.txt a
+  git -C "$clone" checkout -q -b fm/tracked
+  commit_file "$clone" t.txt t "tracked work"
+  git -C "$clone" push -q -u origin fm/tracked
+  git -C "$clone" checkout -q main
+  squash_merge_and_delete "$home" disabled fm/tracked t.txt t
+
+  out=$(FM_FLEET_PRUNE=0 FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  assert_not_contains "$out" "pruned" "FM_FLEET_PRUNE=0 must disable every prune"
+  branch_exists "$clone" fm/task || fail "FM_FLEET_PRUNE=0 must keep the landed no-upstream branch"
+  branch_exists "$clone" fm/tracked || fail "FM_FLEET_PRUNE=0 must keep the gone-upstream branch"
+  pass "FM_FLEET_PRUNE=0 disables both prunes even when the landed-branch prune is opted in"
+}
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
@@ -774,3 +1028,12 @@ test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs
 test_clone_root_named_by_another_spelling_still_syncs
+test_gone_upstream_branch_still_pruned_by_default
+test_landed_no_upstream_branch_kept_without_opt_in
+test_squash_merged_no_upstream_branch_pruned_when_opted_in
+test_merged_pr_no_upstream_branch_pruned_when_opted_in
+test_unpushed_commit_without_worktree_survives
+test_checked_out_landed_branch_survives
+test_landed_branch_with_worktree_survives
+test_default_branch_without_upstream_survives
+test_prune_disabled_keeps_every_branch

@@ -86,6 +86,8 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
+#          FM_FLEET_PRUNE_MERGED=1 opts in to also pruning landed branches that
+#          have no upstream (default off; fm-fleet-sync.sh owns the proof).
 #          BACKLOG_RECONCILE lines report what backlog_record_reconcile could not
 #          settle in THIS home. Every ordinary dispatch and completion now moves
 #          the backlog row inside the script that moves the task's record

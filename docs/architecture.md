@@ -487,6 +487,8 @@ Dirty clones, non-default branches, detached HEADs with unique commits, diverged
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
+A task branch pushed from the no-mistakes gate has no upstream, so that prune never reaches it.
+An opt-in setting, off by default, also prunes such a branch, but only on proof its work landed in the default branch; [configuration.md](configuration.md#environment-variables) names the setting.
 
 ## Self-updates stay safe
 
