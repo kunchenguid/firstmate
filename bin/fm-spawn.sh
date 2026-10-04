@@ -4504,8 +4504,17 @@ if [ "$KIND" != secondmate ]; then
     j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    # A permission dialog sits inside a turn, where no turn-lifecycle hook fires,
+    # so without these two a worker parked at an approval prompt keeps reading
+    # busy. The Notification hook (matcher permission_prompt) records unknown;
+    # PostToolUse puts busy back only while that exact unknown is still the
+    # record, so it never reopens a turn that ended. The Notification event and
+    # its matcher come from the Claude Code docs and are not yet proven on a
+    # real session, so a live check must confirm them before this is relied on.
+    j_permission=$(json_escape "$busy_cmd_prefix unknown $busy_suffix --event permission-prompt 2>/dev/null || true")
+    j_posttool=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event post-tool-use --only-if-event permission-prompt 2>/dev/null || true")
     cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}],"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"$j_permission"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"$j_posttool"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
     ;;

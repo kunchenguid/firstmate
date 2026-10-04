@@ -17,6 +17,10 @@
 #         --source S --event E
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
+#       With --only-if-event E the event applies only while the current
+#       record is state=unknown carrying event=E, and is otherwise a quiet
+#       no-op (exit 0), so a per-tool hook can undo exactly the unknown that
+#       one hook wrote and never reopens a turn that has since ended.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
 #       hook that outlives its incarnation fails closed here. The legacy
 #       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
@@ -44,7 +48,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--only-if-event E0]
   fm-busy-event.sh progress <state-dir> <id> --gen G
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
@@ -74,6 +78,7 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+ONLY_IF_EVENT=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -89,6 +94,7 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --only-if-event) ONLY_IF_EVENT=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -96,6 +102,8 @@ if [ "$CMD" = apply ] || [ "$CMD" = arm ]; then
   case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+  [ -z "$ONLY_IF_EVENT" ] || [ "$CMD" = apply ] || usage
+  [ -z "$ONLY_IF_EVENT" ] || fm_busy_token_valid "$ONLY_IF_EVENT" || { echo "error: invalid --only-if-event" >&2; exit 1; }
 fi
 
 [ "$CMD" != progress ] || [ "$USE_CURRENT_GEN" = 0 ] || usage
@@ -225,6 +233,18 @@ if [ "$CMD" = progress ]; then
   exit 0
 fi
 OLD_SEQ=0
+if [ -n "$ONLY_IF_EVENT" ]; then
+  old_line=
+  [ ! -f "$REC" ] || old_line=$(head -n 1 "$REC" 2>/dev/null || true)
+  case "$old_line" in
+    *" gen=$GEN "*" state=unknown "*" event=$ONLY_IF_EVENT "*) ;;
+    *)
+      lock_release
+      umask "$old_umask"
+      exit 0
+      ;;
+  esac
+fi
 if [ -f "$REC" ]; then
   old_line=$(head -n 1 "$REC" 2>/dev/null || true)
   case "$old_line" in
