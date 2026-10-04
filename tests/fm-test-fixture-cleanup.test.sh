@@ -119,10 +119,10 @@ test_orphan_sweep_respects_fixture_ownership() {
   active_dir=$(cat "$dirfile")
   touch -t 202001010000 "$active_dir/.fm-test-fixture"
 
-  stale_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-stale.XXXXXX")
+  stale_dir=$(mktemp -d "$FM_TEST_TMPDIR/fm-test-cleanup-stale.XXXXXX")
   printf '%s\n%s\n' "$$" reused-process-identity > "$stale_dir/.fm-test-fixture"
   touch -t 202001010000 "$stale_dir/.fm-test-fixture"
-  fresh_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-fresh.XXXXXX")
+  fresh_dir=$(mktemp -d "$FM_TEST_TMPDIR/fm-test-cleanup-fresh.XXXXXX")
   : > "$fresh_dir/.fm-test-fixture"
 
   bash -c '
@@ -146,7 +146,7 @@ test_orphan_sweep_respects_fixture_ownership() {
 
 test_orphan_sweep_reaps_read_only_package_tree() {
   local stale_dir package_dir
-  stale_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-read-only.XXXXXX")
+  stale_dir=$(mktemp -d "$FM_TEST_TMPDIR/fm-test-cleanup-read-only.XXXXXX")
   package_dir="$stale_dir/packages/extension"
   mkdir -p "$package_dir"
   printf '%s\n%s\n' "$$" reused-process-identity > "$stale_dir/.fm-test-fixture"
