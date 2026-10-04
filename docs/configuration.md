@@ -911,6 +911,7 @@ Only loopback overrides are accepted; anything else refuses.
 The bridge lifecycle stays external: Firstmate never installs, authenticates, or repairs the bridge, and an unreachable bridge fails the consultation with a prerequisite report.
 `--thread` is required and is a Firstmate-owned turn-identity id, but it does not by itself carry conversation continuity: the bridge replays prior turns only through `previous_response_id` chaining or history inside the request, and this client sends neither, so every consultation is a self-contained turn and Firstmate includes any prior context it needs considered in the prompt file.
 [`bin/fm-chatgpt-bridge-lib.sh`](../bin/fm-chatgpt-bridge-lib.sh) owns URL resolution, model slug handling, and Codex turn-metadata stamping.
+[`bin/fm-chatgpt-loop.sh`](../bin/fm-chatgpt-loop.sh) owns the per-task loop state machine: state file `data/<task-id>/chatgpt-loop.json`, phases `audit-consult`, `audit-dispatch`, `audit-worker`, `plan-consult`, `plan-dispatch`, `plan-worker`, and `complete` with a `next-round` transition for further cycles, the rule that every plan prompt explicitly carries the objective, context, audit prompt, audit result, and worker findings, and the Firstmate-owned bridge lifecycle where `bridge start` and `bridge stop` operate only the already-installed daemon, refuse install and authentication verbs, leave the browser visible by default, and never touch worker dispatch, which always scrubs bridge references from the spawned environment.
 
 ## Home brief include (config/brief-include.md)
 
