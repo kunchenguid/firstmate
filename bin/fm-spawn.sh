@@ -3553,6 +3553,10 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
       echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1
     fi
+  elif [ "$RELAUNCH" -eq 1 ] && [ "${BACKLOG_ROW_STATE%% *}" = in_flight ]; then
+    # A relaunch replaces the agent of an item already In flight; a hold or
+    # blocker on it is not a reason to strand the task, and there is no row to move.
+    BACKLOG_TRANSITION=0
   elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
