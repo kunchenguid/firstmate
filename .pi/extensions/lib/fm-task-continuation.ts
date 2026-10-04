@@ -334,10 +334,13 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     parameters: Type.Object({ action: Type.Union([Type.Literal("read"), Type.Literal("update")]),
       task: Type.String(),
       progress: Type.Optional(Type.Object({ acceptance: Type.String(), current_state: Type.String(),
-        remaining_gap: Type.String(), next_step: Type.String() })) }),
+        remaining_gap: Type.String(), next_step: Type.String() }, { additionalProperties: false }))
+    }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, _ctx: ExtensionContext) {
       try {
         if (!owns()) throw new Error("this session does not own the fleet lock");
+        const unsupported = Object.keys(params).filter(key => !["action", "task", "progress"].includes(key));
+        if (unsupported.length) throw new Error(`unsupported compact continuation argument: ${unsupported.join(", ")}`);
         let result: unknown;
         if (params.action === "read") {
           if (!atom(params.task)) throw new Error("read requires an existing canonical task id");

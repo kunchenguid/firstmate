@@ -6,6 +6,8 @@ import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
 
 const { SessionManager } = await import(pathToFileURL(process.env.FM_NATIVE_SDK + '/dist/index.js'));
+const { validateToolArguments } = await import(pathToFileURL(process.env.FM_NATIVE_SDK +
+  '/node_modules/@earendil-works/pi-ai/dist/index.js'));
 const { installTaskContinuation } = await import(pathToFileURL(process.env.PLUGIN));
 const watch = (await import(pathToFileURL(process.env.FM_NATIVE_WATCH_PLUGIN))).default;
 const periodic = (await import(pathToFileURL(process.env.FM_ROOT_OVERRIDE + '/.pi/extensions/fm-periodic-stow.ts'))).default;
@@ -84,13 +86,38 @@ async function tool(params, ok = true) {
   assert.equal(Boolean(result.isError), !ok, JSON.stringify(result));
   return ok ? JSON.parse(result.content[0].text) : result.content[0].text;
 }
+async function validatedTool(params, ok = true) {
+  const registered = tools.get('fm_task_continuation');
+  let validated;
+  try {
+    validated = validateToolArguments({ name: registered.name, description: registered.description,
+      parameters: registered.parameters },
+    { type: 'toolCall', id: 'validated-call', name: registered.name, arguments: params });
+  } catch (error) {
+    assert.equal(ok, false, String(error));
+    return String(error);
+  }
+  assert.equal(ok, true, 'installed Pi argument validation accepted an invalid call');
+  return tool(validated);
+}
 
 let continuation = await install();
 const mainSchema = tools.get('fm_task_continuation').parameters;
 assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'progress', 'task']);
 assert.deepEqual(mainSchema.properties.action.anyOf.map(value => value.const), ['read', 'update']);
+assert.equal(mainSchema.additionalProperties, false, 'continuation schema accepts removed arguments');
+assert.equal(mainSchema.properties.progress.additionalProperties, false,
+  'continuation progress schema accepts unknown fields');
 assert.equal(tools.has('fm_task_intent_update'), false, 'removed intent-update tool remained registered');
 assert.deepEqual(JSON.parse(command('fm-task-state.sh', ['progress-list']).stdout).tasks, ['task']);
+const taskRecord = home + '/data/task/task.json';
+const beforeRemovedToken = readFileSync(taskRecord);
+const removedToken = await validatedTool({ action: 'update', task: 'task', record_token: 'legacy-token',
+  progress: { acceptance: 'should not write', current_state: 'should not write',
+    remaining_gap: 'should not write', next_step: 'should not write' } }, false);
+assert.match(removedToken, /record_token/);
+assert.deepEqual(readFileSync(taskRecord), beforeRemovedToken,
+  'rejected record_token update changed the canonical task record');
 const empty = await tool({ action: 'read', task: 'task' });
 assert.equal(empty.goal, 'Deliver compact continuation');
 assert.equal(empty.recorded, false);
@@ -103,7 +130,7 @@ const progress = {
   remaining_gap: 'The restart check and final behavior review remain',
   next_step: 'Restart the session, read the task row, and run the final checks',
 };
-const updated = await tool({ action: 'update', task: 'task', progress });
+const updated = await validatedTool({ action: 'update', task: 'task', progress });
 assert.deepEqual({ goal: updated.goal, acceptance: updated.acceptance, current_state: updated.current_state,
   remaining_gap: updated.remaining_gap, next_step: updated.next_step },
 { goal: 'Deliver compact continuation', ...progress });
@@ -132,7 +159,6 @@ assert.equal(heldSettle.some(value => value?.entries?.some(entry =>
 command('fm-tasks-axi.sh', ['unhold', 'task']);
 assert.equal((await tool({ action: 'read', task: 'task' })).context_relation, 'exact');
 
-const taskRecord = home + '/data/task/task.json';
 const recordBefore = readFileSync(taskRecord);
 const mtimeBefore = statSync(taskRecord).mtimeMs;
 const unchanged = await tool({ action: 'update', task: 'task', progress });
