@@ -77,6 +77,46 @@ fm_cleanup_completion_guard() { # <task> <generation>
   fm_cleanup_completion_mode "$1" "$2" >/dev/null
 }
 
+# Terminal disposition proof for state-only reconciliation after execution
+# metadata is already gone. A current canonical record is authoritative.
+# Only when that record is absent may the retained legacy lifecycle record
+# supply an exact task/generation terminal disposition; neither path creates or
+# updates task state.
+fm_cleanup_historical_completion_mode() ( # <task> <generation>; prints done|archived|accepted
+  local id=$1 generation=$2 current_status lifecycle data
+  data=${FM_DATA_OVERRIDE:-${DATA:-${FM_HOME:?}/data}}
+  # shellcheck source=bin/fm-task-progress-lib.sh
+  . "$FM_CLEANUP_RECEIPT_DIR/fm-task-progress-lib.sh"
+  if fm_task_progress_current_absent "$id"; then
+    current_status=0
+  else
+    current_status=$?
+  fi
+  [ "$current_status" -ne 2 ] || return 1
+  if [ "$current_status" -eq 1 ]; then
+    fm_task_progress_detail "$id" || return $?
+    case "$FM_TASK_PROGRESS_STATE" in
+      done|archived) printf '%s\n' "$FM_TASK_PROGRESS_STATE"; return 0 ;;
+      *) echo "REFUSED: task $id is not canonically terminal; preserving historical state" >&2; return 6 ;;
+    esac
+  fi
+  lifecycle="$data/$id/lifecycle.json"
+  [ -f "$lifecycle" ] && [ ! -L "$lifecycle" ] \
+    && [ "$(stat -c %h "$lifecycle" 2>/dev/null || stat -f %l "$lifecycle")" = 1 ] || {
+      echo "REFUSED: task $id has no canonical terminal record or safe historical disposition" >&2
+      return 6
+    }
+  jq -er --arg id "$id" --arg generation "$generation" '
+    select((.schema == "fm-task-lifecycle.v1" or .schema == "fm-task-lifecycle.v2") and
+      .task_id == $id and .execution_generation == $generation and
+      (.disposition == "accepted" or .disposition == "archived")) |
+    .disposition
+  ' "$lifecycle" || {
+    echo "REFUSED: task $id historical disposition is not exact and terminal for generation $generation" >&2
+    return 6
+  }
+)
+
 fm_cleanup_delivery_guard() { # <task> <generation> <meta>
   local id=$1 generation=$2 meta=$3 kind url head report completion
   completion=$(fm_cleanup_completion_mode "$id" "$generation") || return $?

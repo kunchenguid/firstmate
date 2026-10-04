@@ -346,7 +346,7 @@ family_for_basename() {
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
-    fm-teardown-endpoint-safety.test.sh)
+    fm-task-retire-historical.test.sh|fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
@@ -684,6 +684,7 @@ tests/fm-supervision-events.test.sh 719
 tests/fm-tangle-guard.test.sh 9662
 tests/fm-task-delivery.test.sh 5952
 tests/fm-task-inbox.test.sh 25369
+tests/fm-task-retire-historical.test.sh 7000
 tests/fm-task-progress.test.sh 2923
 tests/fm-tasks-axi.test.sh 1690
 tests/fm-teardown-endpoint-safety.test.sh 4620
@@ -1269,7 +1270,7 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' pure-contract-unit
       ;;
-    bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
+    bin/fm-status-append.sh|bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -1281,7 +1282,12 @@ families_for_changed_path() {
     bin/fm-task-dispatch.sh|bin/fm-task-state.sh|bin/fm-task-retire.sh)
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
       printf '%s\n' "__script__:fm-remote-agent.test.sh"
+      [ "$path" != bin/fm-task-retire.sh ] || printf '%s\n' "__script__:fm-task-retire-historical.test.sh"
       [ "$path" != bin/fm-task-state.sh ] || printf '%s\n' "__script__:fm-task-progress.test.sh"
+      ;;
+    bin/fm-cleanup-receipt-lib.sh)
+      printf '%s\n' "__script__:fm-task-retire-historical.test.sh"
+      printf '%s\n' pr-forge
       ;;
     bin/fm-task-record.py|bin/fm-task-progress-lib.sh)
       printf '%s\n' "__script__:fm-task-progress.test.sh"

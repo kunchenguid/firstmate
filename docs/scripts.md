@@ -111,6 +111,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-merge-authority-lib.sh` | Resolve merge authority at the gate, persist it against the accepted canonical PR, and identity-check its later poll consumption |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, and write the ship instructions carrying that mode's definition of done |
 | `fm-task-retire.sh`      | Retire a local or AIME/iDA remote task through its executor-specific safety path     |
+| `fm-status-append.sh`    | Append one task status event under the shared presentation/retirement lock            |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, write the ship instructions carrying that mode's definition of done, and supersede the task's brief so a later relaunch cannot revive stale scout delivery text |
 | `fm-teardown.sh`         | Retire accepted/archived task panes and records while preserving unsafe copies; keep landed-work gates for legacy teardown |
 | `fm-harness.sh`          | Detect the running harness, resolve worker harness, model, and effort, and validate the native-only `ultra` effort |

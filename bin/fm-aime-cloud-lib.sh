@@ -556,7 +556,9 @@ fm_aime_status_append() {
   local id=$1 line=$2 file
   file="$STATE/$id.status"
   (umask 077; mkdir -p "$STATE") || return 1
-  [ ! -L "$file" ] || return 1
-  printf '%s\n' "$line" >> "$file"
-  chmod 0600 "$file" 2>/dev/null || true
+  if ! declare -F fm_wake_status_append >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-wake-lib.sh"
+  fi
+  fm_wake_status_append "$STATE" "$file" "$line"
 }

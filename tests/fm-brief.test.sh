@@ -211,6 +211,8 @@ test_ship_modes_generate_clean_briefs() {
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
+    assert_grep "$ROOT/bin/fm-status-append.sh" "$brief" \
+      "$id: brief did not route worker status through the serialized append owner"
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
     assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
@@ -350,7 +352,9 @@ test_native_review_dod_wording() {
   # Generated commands contain the supervising checkout's absolute root. Strip
   # that variable-length prefix before enforcing the stable wording budget.
   bytes=$(sed "s|$ROOT|<FM_ROOT>|g" "$brief" | wc -c | tr -d ' ')
-  [ "$bytes" -lt 7000 ] || fail "review-PR brief did not remain bounded: $bytes bytes"
+  # The explicit home-bound status writer is longer than a raw shell redirect,
+  # but keeps append and retirement atomic under the shared status lock.
+  [ "$bytes" -lt 7250 ] || fail "review-PR brief did not remain bounded: $bytes bytes"
   assert_present "$ROOT/bin/fm-native-review.sh" \
     "the generated trigger points to no executable review owner"
   pass "fm-brief.sh: review-PR brief keeps a bounded native-review contract"

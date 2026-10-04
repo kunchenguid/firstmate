@@ -1483,6 +1483,25 @@ fm_wake_status_mark_current() {  # <state> <status-file>
   fm_wake_status_seen_commit "$1" "$2" "$size" "$ident"
 }
 
+# Serialize one status-log append with presentation and retirement.
+# The file path is caller-resolved, but it must be the named state's direct
+# child and must never be a symlink. A retirement that gets the lock first may
+# remove the old log; the waiting append then creates a fresh unread log for
+# the reused task id instead of writing into an unlinked inode.
+fm_wake_status_append() (  # <state> <status-file> <line>
+  local state=$1 file=$2 line=$3 lock="$1/.status-presentation-lock" base task
+  [ "${file%/*}" = "$state" ] || return 2
+  base=${file##*/}
+  case "$base" in *.status) task=${base%.status} ;; *) return 2 ;; esac
+  case "$task" in ''|.*|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  [ "${#task}" -le 160 ] || return 2
+  fm_lock_acquire_wait "$lock" || return 2
+  trap 'fm_lock_release "$lock"' EXIT
+  [ ! -L "$file" ] || return 2
+  printf '%s\n' "$line" >> "$file" || return 2
+  chmod 0600 "$file" 2>/dev/null || true
+)
+
 # Guarded self-announced status append - the one dedup primitive for a status
 # line THIS home's own machinery writes as bookkeeping it has already presented
 # in the very turn or tick that writes it (an answerer-closes resolved line or a
@@ -1501,10 +1520,13 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # and wakes as before: task identity alone can never suppress new content.
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
-fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
+fm_wake_status_append_self_announced() (  # <state> <status-file> <line>
   local state=$1 file=$2 line=$3 marker pre_sig='' pre_size='' pre_ident='' post_size post_ident
+  local lock="$1/.status-presentation-lock"
   local LC_ALL=C
   _fm_wake_require_classify || return 1
+  fm_lock_acquire_wait "$lock" || return 2
+  trap 'fm_lock_release "$lock"' EXIT
   marker=$(fm_wake_signal_seen_path "$state" "$file")
   if [ -e "$file" ]; then
     pre_sig=$(fm_wake_signal_sig "$file") || pre_sig=''
@@ -1522,7 +1544,7 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
   fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1
   return 0
-}
+)
 
 # Map one structurally valid signal key to its home-local status filename.
 # Queue payload text is intentionally ignored: it is display data, not a path

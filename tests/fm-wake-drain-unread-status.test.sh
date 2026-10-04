@@ -315,6 +315,73 @@ test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_hi
   pass "settled retirement preserves unread/open status and removes only fully presented closed history"
 }
 
+test_settled_retirement_refuses_orphan_decision_cursor() {
+  local dir state cursor err rc=0
+  dir=$(make_case orphan-decision-cursor)
+  state="$dir/state"
+  cursor="$state/.orphan.open-decisions-cursor"
+  err="$dir/retire.err"
+  printf 'v5\t0\torphan:1:1\ndelivery\tneeds-decision\tchoose destination\n' >"$cursor"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$2" orphan --require-settled
+  ' _ "$ROOT" "$state" 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'settled retirement erased a cursor whose status log was missing'
+  assert_grep 'status is missing while its decision cursor remains' "$err" \
+    'orphan decision-cursor refusal was not explicit'
+  assert_present "$cursor" 'orphan decision cursor was removed'
+  pass 'settled retirement preserves an orphan decision cursor instead of inferring settlement'
+}
+
+test_status_append_serializes_with_retirement() {
+  local dir state status reader trigger i
+  dir=$(make_case append-retire-race)
+  state="$dir/state"
+  status="$state/racing.status"
+  trigger="$dir/append-started"
+  prime_cursor "$state" "$status"
+  reader="$dir/size-reader"
+  cat >"$reader" <<'SH'
+#!/usr/bin/env bash
+count_file=${FM_STATUS_RACE_COUNT:?}
+count=$(cat "$count_file" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" >"$count_file"
+if [ "$count" -eq 2 ]; then
+  FM_STATE_OVERRIDE=${FM_STATUS_RACE_STATE:?} \
+    "${FM_STATUS_RACE_ROOT:?}/bin/fm-status-append.sh" racing \
+      'note: concurrent append survives retirement' \
+      > /dev/null 2>"${FM_STATUS_RACE_TRIGGER:?}.err" &
+  : >"${FM_STATUS_RACE_TRIGGER:?}"
+  sleep 0.2
+fi
+wc -c <"$1"
+SH
+  chmod +x "$reader"
+  : >"$dir/count"
+
+  FM_STATUS_SIZE_READER="$reader" FM_STATUS_RACE_COUNT="$dir/count" \
+    FM_STATUS_RACE_STATE="$state" FM_STATUS_RACE_ROOT="$ROOT" FM_STATUS_RACE_TRIGGER="$trigger" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      . "$1/bin/fm-classify-lib.sh"
+      status_retire_presentation_task "$2" racing --require-settled
+    ' _ "$ROOT" "$state" || fail 'retirement failed while a serialized writer waited'
+  i=0
+  while ! grep -F 'concurrent append survives retirement' "$status" >/dev/null 2>&1 && [ "$i" -lt 100 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  assert_present "$trigger" 'race fixture did not reach the append window'
+  assert_grep 'concurrent append survives retirement' "$status" \
+    'serialized append was lost when retirement removed the prior status log'
+  [ "$(bash -c '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-classify-lib.sh"; status_presentation_cursor_offset "$2"' _ "$ROOT" "$status")" = 0 ] \
+    || fail 'replacement status inherited the retired file presentation cursor'
+  pass 'status append waits for retirement and becomes a fresh unread log instead of being lost'
+}
+
 test_weak_identity_still_presents_and_advances() {
   local dir state out second reader
   dir=$(make_case weak-identity); state="$dir/state"
@@ -435,6 +502,8 @@ test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_history
+test_settled_retirement_refuses_orphan_decision_cursor
+test_status_append_serializes_with_retirement
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
