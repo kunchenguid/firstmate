@@ -490,6 +490,71 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+# The watcher's verdict on a task's armed check, through the same functions in
+# the same order bin/fm-watch.sh uses: an authenticated PR poll, else a custom
+# check snapshot, else a rejected unauthenticated check.
+watcher_check_verdict() {  # <case-dir> <id>
+  # shellcheck disable=SC2016
+  bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    . "$1/bin/fm-check-lib.sh"
+    if fm_pr_poll_snapshot_capture "$2" "$3" "$1/bin/fm-pr-poll.sh"; then
+      echo authenticated-pr-poll
+    elif fm_custom_check_snapshot_prepare "$2" "$3"; then
+      fm_custom_check_snapshot_cleanup
+      echo custom-check
+    else
+      fm_custom_check_snapshot_cleanup
+      echo rejected-unauthenticated
+    fi
+  ' _ "$ROOT" "$1/home/state" "$2"
+}
+
+# assert_relaunch_keeps_pr_poll_authenticated <name> <id> <trace on|off>
+assert_relaunch_keeps_pr_poll_authenticated() {
+  local name=$1 id=$2 trace=$3 dir out rc url head
+  url="https://github.com/example/repo/pull/711"
+  head=0123456789abcdef0123456789abcdef01234567
+  dir=$(new_case "$name" "$id")
+  add_ship_task "$dir" "$id" claude
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s %s\n' "$$" "$trace" > "$dir/home/state/.trace-context-effective"
+  cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" --json isDraft "*) printf '%s\n' '{"isDraft":false}' ;;
+  *" headRefOid "*) printf '%s\n' '$head' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" "$id" "$url" 2>&1); rc=$?
+  expect_code 0 "$rc" "PR registration should arm the poll"$'\n'"$out"
+  [ "$(watcher_check_verdict "$dir" "$id")" = authenticated-pr-poll ] \
+    || fail "the freshly registered PR poll must be authenticated (trace $trace)"
+
+  out=$(run_control "$dir" "$id" relaunch --note "continuing after the PR"); rc=$?
+  expect_code 0 "$rc" "relaunch of a PR-registered task should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" pr)" = "$url" ] || fail "relaunch dropped the task PR"
+  [ "$(meta_field "$dir" "$id" pr_head)" = "$head" ] || fail "relaunch dropped the task PR head"
+  if [ "$trace" = on ]; then
+    fm_trace_context_valid "$(meta_field "$dir" "$id" traceparent)" \
+      || fail "an enabled relaunch must record the replacement trace carrier"
+  fi
+  out=$(watcher_check_verdict "$dir" "$id")
+  [ "$out" = authenticated-pr-poll ] \
+    || fail "relaunch (trace $trace) turned the armed PR poll into $out:"$'\n'"$(cat "$dir/home/state/$id.meta")"
+  pass "fm-control relaunch: an armed PR poll stays authenticated to the watcher (trace $trace)"
+}
+
+test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_off() {
+  assert_relaunch_keeps_pr_poll_authenticated pr-poll-trace-off rl711 off
+}
+
+test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_on() {
+  assert_relaunch_keeps_pr_poll_authenticated pr-poll-trace-on rl712 on
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -2391,6 +2456,8 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_off
+test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_on
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
