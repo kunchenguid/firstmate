@@ -112,6 +112,11 @@ git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
 REMOTE_ORIGIN="$TMP_ROOT/firstmate-origin.git"
 git init -q --bare "$REMOTE_ORIGIN"
 git -C "$REMOTE_ROOT" remote add origin "file://$REMOTE_ORIGIN"
+# Fork layout: the remote code root carries both remotes. `origin` is the
+# fleet's fork and `upstream` is the official source fm-update.sh advances
+# from; the fixture points both at the same bare repo so one bump is visible
+# to either name (mirrors the unit fixture in tests/fm-update.test.sh).
+git -C "$REMOTE_ROOT" remote add upstream "file://$REMOTE_ORIGIN"
 git -C "$REMOTE_ROOT" push -q -u origin main
 git --git-dir="$REMOTE_ORIGIN" symbolic-ref HEAD refs/heads/main
 
