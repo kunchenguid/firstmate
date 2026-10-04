@@ -234,6 +234,13 @@ assert.ok(offered.at(-1).endsWith('.2'), 'second unchanged offer did not preserv
 
 await fire('session_shutdown', { reason: 'pacing-replacement' });
 const pacedSessionFile = session.getSessionFile();
+const persistedPacing = session.getEntries().findLast(entry =>
+  entry.type === 'custom' && entry.customType === 'fm-continuation-input-pacing');
+assert.ok(persistedPacing, 'fixture did not persist home-bound pacing evidence');
+writeFileSync(home + '/sessions/zz-foreign-home.jsonl', [
+  JSON.stringify({ type: 'session', version: 3, id: 'foreign-home-fixture', timestamp: new Date().toISOString(), cwd: home }),
+  JSON.stringify({ ...persistedPacing, data: { ...persistedPacing.data, home: home + '-foreign', attempts: 0, escalated: false } }),
+].join('\n') + '\n');
 session = SessionManager.create(home, home + '/sessions');
 assert.notEqual(session.getSessionFile(), pacedSessionFile, 'pacing replacement reused the old transcript');
 session.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Fresh fixture session' }],
@@ -242,7 +249,7 @@ session.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Fres
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
 continuation = await install();
 assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
-  'a genuinely new session file reset unchanged-offer pacing');
+  'a genuinely new session file reset unchanged-offer pacing or admitted a sibling transcript from another operational home');
 
 const changedProjection = { ...progress, current_state: 'A materially newer executor result exists' };
 await tool({ action: 'update', task: 'task', progress: changedProjection });

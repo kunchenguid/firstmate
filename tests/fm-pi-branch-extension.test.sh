@@ -1650,34 +1650,23 @@ if (requests().length !== beforePairRepeat + 1 || requests().at(-1).options.trig
   throw new Error("the second presentation of the widened sequence set did not open its own turn");
 }
 writeFileSync(taskFMeta, `spawn_gen=g-task-f-relaunched\npr_head=${"b".repeat(40)}\n`);
-const staleIdentity = await processed.execute("ack-stale-identity", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
-if (!staleIdentity.isError || !staleIdentity.content.some((item) => item.type === "text" &&
-    (item.text.includes("task revision or executor identity changed") || item.text.includes("task generation changed")))) {
-  throw new Error(`a changed executor generation/candidate identity was silently acknowledged: ${JSON.stringify(staleIdentity)}`);
-}
-writeFileSync(taskFMeta, `spawn_gen=g-task-f\npr_head=${"a".repeat(40)}\n`);
-const restoredIdentity = await outcomes.execute("reload-restored-identity", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
-if (restoredIdentity.isError || !restoredIdentity.content.some((item) => item.type === "text" && item.text.includes('"task_generation":"g-task-f"'))) {
-  throw new Error(`the restored generation/candidate identity could not be loaded: ${JSON.stringify(restoredIdentity)}`);
+const staleIdentity = await outcomes.execute("read-stale-identity", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
+const staleIdentityText = staleIdentity.content.map((item) => item.text ?? "").join("\n");
+if (staleIdentity.isError || !staleIdentityText.includes('"recorded_task_generation":"g-task-f"') ||
+    !staleIdentityText.includes('"task_generation":"g-task-f-relaunched"') ||
+    !staleIdentityText.includes('"task_generation_mismatch":true')) {
+  throw new Error(`a stale generation outcome was not returned with readable mismatch evidence: ${JSON.stringify(staleIdentity)}`);
 }
 taskCommand("fm-task-state.sh", ["update-progress", "task-f", "--progress", JSON.stringify({
   acceptance: "The exact batch is processed once", current_state: "Concurrent material revision",
-  remaining_gap: "Reload the targeted observation", next_step: "Reload before acknowledgement",
+  remaining_gap: "Handle the already-loaded outcome", next_step: "Acknowledge its exact durable sequence",
 })]);
-const staleBatch = await processed.execute("ack-stale-batch", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
-if (!staleBatch.isError || !staleBatch.content.some((item) => item.type === "text" && item.text.includes("task revision or executor identity changed"))) {
-  throw new Error(`a concurrent task revision was silently batch-acknowledged: ${JSON.stringify(staleBatch)}`);
-}
-const refreshedPair = await outcomes.execute("reload-exact-pair", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
-if (refreshedPair.isError || !refreshedPair.content.some((item) => item.type === "text" && item.text.includes("Concurrent material revision"))) {
-  throw new Error(`the changed task observation could not be reloaded: ${JSON.stringify(refreshedPair)}`);
-}
 const wrongMembership = await processed.execute("ack-wrong-membership", { sequences: String(seqE) }, undefined, undefined, {});
 if (!wrongMembership.isError || !wrongMembership.content.some((item) => item.type === "text" && item.text.includes(`exact sequence membership must be ${seqE},${seqF}`))) {
   throw new Error(`a partial exact-membership acknowledgement was accepted: ${JSON.stringify(wrongMembership)}`);
 }
 const partial = await processed.execute("ack-partial", { through: seqE }, undefined, undefined, {});
-if (partial.isError) throw new Error(`partial acknowledgement failed: ${JSON.stringify(partial)}`);
+if (partial.isError) throw new Error(`a legitimate handling mutation prevented acknowledgement of the loaded durable outcome: ${JSON.stringify(partial)}`);
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqF])) throw new Error(`a partial acknowledgement did not keep the newer sequence open: ${unprocessedSeqs()}`);
 const beforeF = requests().length;
 await runOf();
@@ -6282,32 +6271,48 @@ const duplicate = append("--verdict", "routine", "--summary", "unchanged observe
 const substantive = append("--verdict", "routine", "--summary", "new ordered note", "--silent", "false", "--material-key", "rev-a");
 taskRecord("archived");
 const terminal = append("--verdict", "captain", "--summary", "verified terminal disposition", "--material-key", "rev-terminal");
-const lateFirst = append("--verdict", "routine", "--summary", "unchanged observer", "--wake", "late-delivery-1", "--material-key", "rev-a");
-const lateDuplicate = append("--verdict", "routine", "--summary", "unchanged observer", "--wake", "late-delivery-2", "--material-key", "rev-a");
+bus.emit("firstmate:outcomes-ready", {});
+await settle(() => mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length === 1,
+  "terminal delivery before later material");
+await settle(() => sentToMain.some((item) => item.message.customType === "fm-branch-process"),
+  "terminal processing request before later material");
+outcomeScript(["mark-processed", "--through", String(terminal)]);
+await fire("agent_start", {});
+await fire("agent_end", {});
+await fire("agent_settled", {});
+
+const obsoleteLate = append("--verdict", "routine", "--summary", "unchanged observer", "--wake", "obsolete-late-retry", "--material-key", "rev-a");
+const lateFirst = append("--verdict", "routine", "--summary", "later material revision", "--wake", "late-delivery-1", "--material-key", "rev-b");
+const lateDuplicate = append("--verdict", "routine", "--summary", "later material revision", "--wake", "late-delivery-2", "--material-key", "rev-b");
 const answer = append("--verdict", "captain", "--summary", "new decision answer remains visible", "--material-key", "rev-answer");
 const unknownFirst = Number(outcomeScript(["append", "--task", "task-u", "--verdict", "captain", "--summary", "unknown identity observation", "--material-key", "same-material"]));
 const unknownSecond = Number(outcomeScript(["append", "--task", "task-u", "--verdict", "captain", "--summary", "unknown identity observation", "--material-key", "same-material"]));
 bus.emit("firstmate:outcomes-ready", {});
 await settle(() => mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length === 4,
   "coalesced captain delivery");
-await settle(() => sentToMain.some((item) => item.message.content?.includes("new ordered note")),
-  "substantive routine delivery");
+await settle(() => sentToMain.some((item) => item.message.content?.includes("later material revision")),
+  "post-terminal material delivery");
 
 const audit = outcomeScript(["list", "--recent", "20"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
-if (audit.length !== 9 || audit.map((row) => row.seq).join(",") !==
-    [first, duplicate, substantive, terminal, lateFirst, lateDuplicate, answer, unknownFirst, unknownSecond].join(",")) {
+if (audit.length !== 10 || audit.map((row) => row.seq).join(",") !==
+    [first, duplicate, substantive, terminal, obsoleteLate, lateFirst, lateDuplicate, answer, unknownFirst, unknownSecond].join(",")) {
   throw new Error(`coalescing rewrote append-only audit evidence: ${JSON.stringify(audit)}`);
 }
 if (audit.filter((row) => row.task === "task-c").some((row) => row.taskGeneration !== "g-task-c" || !row.evidenceKey || !row.taskDisposition)) {
   throw new Error(`outcome identity fields were not retained: ${JSON.stringify(audit)}`);
 }
+if (audit.find((row) => row.seq === first).evidenceKey !== audit.find((row) => row.seq === obsoleteLate).evidenceKey) {
+  throw new Error(`one producer material revision changed identity across task disposition: ${JSON.stringify(audit)}`);
+}
 if (audit.filter((row) => row.task === "task-u").some((row) => row.taskGeneration || row.evidenceKey)) {
   throw new Error(`unknown executor identity was manufactured into coalescing evidence: ${JSON.stringify(audit)}`);
 }
 const routine = sentToMain.filter((item) => item.message.customType === "fm-branch-merge");
-if (routine.length !== 1 || !routine.some((item) => item.message.content.includes("new ordered note")) ||
+if (routine.length !== 2 || !routine.some((item) => item.message.content.includes("new ordered note")) ||
+    !routine.some((item) => item.message.content.includes("later material revision")) ||
+    routine.filter((item) => item.message.content.includes("later material revision")).length !== 1 ||
     routine.some((item) => item.message.content.includes("unchanged observer"))) {
-  throw new Error(`terminal disposition did not supersede only repeated obsolete observations: ${JSON.stringify(routine)}`);
+  throw new Error(`historical terminal disposition did not suppress only obsolete repeated observations while preserving later material: ${JSON.stringify(routine)}`);
 }
 const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
 if (visible.map((entry) => entry.data.seq).join(",") !== `${terminal},${answer},${unknownFirst},${unknownSecond}` ||
@@ -6315,10 +6320,10 @@ if (visible.map((entry) => entry.data.seq).join(",") !== `${terminal},${answer},
     visible.filter((entry) => entry.data.summary.includes("unknown identity observation")).length !== 2) {
   throw new Error(`new decision content was coalesced with terminal delivery: ${JSON.stringify(visible)}`);
 }
-await settle(() => sentToMain.some((item) => item.message.customType === "fm-branch-process"),
-  "coalesced processing request");
-const request = sentToMain.find((item) => item.message.customType === "fm-branch-process");
-if (!request || !request.message.content.includes(`sequences="${terminal},${answer},${unknownFirst},${unknownSecond}"`) ||
+await settle(() => sentToMain.filter((item) => item.message.customType === "fm-branch-process").length >= 2,
+  "post-terminal coalesced processing request");
+const request = sentToMain.filter((item) => item.message.customType === "fm-branch-process").at(-1);
+if (!request || !request.message.content.includes(`sequences="${answer},${unknownFirst},${unknownSecond}"`) ||
     request.message.content.includes(`[seq ${first}]`) || request.message.content.includes(`[seq ${duplicate}]`)) {
   throw new Error(`processing request did not carry the exact surviving identities: ${JSON.stringify(request)}`);
 }

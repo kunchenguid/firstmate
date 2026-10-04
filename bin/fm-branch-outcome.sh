@@ -90,8 +90,9 @@
 #     of the process holding $STATE/.branch-outcomes.lock (fm-wake-drain.sh may
 #     run its redirected presentation body in a subshell on Bash 3.2); it skips
 #     the nested acquire so drain's bounded lock wait remains the deadline.
-#   fm-branch-outcome.sh list [--recent <n>]
-#     Print the last n records (default 20), read or not.
+#   fm-branch-outcome.sh list [--recent <n>|--all]
+#     Print the last n records (default 20), or the complete validated
+#     append-only history with --all, read or not.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
@@ -119,7 +120,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--material-key <text>] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--material-key <text>] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>|--all] | startup-replay" >&2
   exit 2
 }
 
@@ -521,8 +522,13 @@ case "$CMD" in
     case "$TASK_DISPOSITION" in *[!A-Za-z0-9._-]*) TASK_DISPOSITION=unknown ;; esac
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
     if [ -n "$TASK_GENERATION" ] && { [ -n "$MATERIAL_KEY" ] || { [ "$CAPTURED_STATUS_ENDPOINT" -ge 0 ] && [ -n "$CAPTURED_STATUS_IDENT" ]; }; }; then
-      EVIDENCE_KEY=$(sha256_text "$TASK|$TASK_GENERATION|$TASK_DISPOSITION|$MATERIAL_KEY|$CAPTURED_STATUS_ENDPOINT|$CAPTURED_STATUS_IDENT") \
-        || { fm_lock_release "$LOCK"; exit 1; }
+      if [ -n "$MATERIAL_KEY" ]; then
+        EVIDENCE_KEY=$(sha256_text "$TASK|$TASK_GENERATION|material|$MATERIAL_KEY") \
+          || { fm_lock_release "$LOCK"; exit 1; }
+      else
+        EVIDENCE_KEY=$(sha256_text "$TASK|$TASK_GENERATION|status|$CAPTURED_STATUS_ENDPOINT|$CAPTURED_STATUS_IDENT") \
+          || { fm_lock_release "$LOCK"; exit 1; }
+      fi
       printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","taskGeneration":"%s","taskDisposition":"%s","evidenceKey":"%s"}\n' \
         "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
         "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
@@ -668,10 +674,14 @@ case "$CMD" in
     ;;
   list)
     RECENT=20
+    ALL=false
     if [ "${1:-}" = --recent ]; then
       RECENT=${2:-}
       case "$RECENT" in ''|*[!0-9]*|0) usage ;; esac
       shift 2 || usage
+    elif [ "${1:-}" = --all ]; then
+      ALL=true
+      shift
     fi
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
@@ -680,7 +690,9 @@ case "$CMD" in
       echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
       exit 1
     fi
-    if [ -s "$STORE" ]; then
+    if [ -s "$STORE" ] && [ "$ALL" = true ]; then
+      cat "$STORE"
+    elif [ -s "$STORE" ]; then
       tail -n "$RECENT" "$STORE"
     fi
     fm_lock_release "$LOCK"

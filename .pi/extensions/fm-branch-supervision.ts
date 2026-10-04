@@ -221,11 +221,12 @@ type TaskOutcomeObservation = {
   executor_state: string;
   executor_digest: string;
   task_generation: string | null;
+  recorded_task_generation: string | null;
+  task_generation_mismatch: boolean;
   candidate_identity: string | null;
   metadata_digest: string | null;
 };
-type LoadedOutcomeEvidence = { outcome_digest: string; record_token: string | null; executor_digest: string | null;
-  task_generation: string | null; candidate_identity: string | null; metadata_digest: string | null };
+type LoadedOutcomeEvidence = { outcome_digest: string };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -602,32 +603,40 @@ function sameOutcome(left: OutcomeRow, right: OutcomeRow): boolean {
     left.evidenceKey === right.evidenceKey && left.taskGeneration === right.taskGeneration;
 }
 
-function coalesceExactOutcomeRows(rows: OutcomeRow[]): OutcomeRow[] {
+function coalesceExactOutcomeRows(rows: OutcomeRow[], history: OutcomeRow[] = rows): OutcomeRow[] {
   const latest = new Map<string, number>();
   const duplicateCounts = new Map<string, number>();
+  history.forEach((row) => {
+    if (!row.evidenceKey || !row.taskGeneration) return;
+    const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
+    duplicateCounts.set(key, (duplicateCounts.get(key) ?? 0) + 1);
+  });
   rows.forEach((row, index) => {
     if (!row.evidenceKey || !row.taskGeneration) return;
     const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
     latest.set(key, index);
-    duplicateCounts.set(key, (duplicateCounts.get(key) ?? 0) + 1);
   });
   const exact = rows.filter((row, index) => {
     if (!row.evidenceKey || !row.taskGeneration) return true;
     const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
     return latest.get(key) === index;
   });
-  const terminal = new Set<string>();
-  exact.forEach((row) => {
+  const terminalSequence = new Map<string, number>();
+  history.forEach((row) => {
     if (row.taskGeneration && ["done", "archived"].includes(row.taskDisposition ?? "")) {
-      terminal.add(JSON.stringify([row.task, row.taskGeneration]));
+      const key = JSON.stringify([row.task, row.taskGeneration]);
+      terminalSequence.set(key, Math.min(terminalSequence.get(key) ?? row.seq, row.seq));
     }
   });
   return exact.filter((row) => {
-    const hasTerminal = terminal.has(JSON.stringify([row.task, row.taskGeneration]));
+    const terminal = terminalSequence.get(JSON.stringify([row.task, row.taskGeneration]));
     const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
     const repeatedRoutine = row.verdict === "routine" && (duplicateCounts.get(key) ?? 0) >= 2;
-    if (!repeatedRoutine) return true;
-    return !hasTerminal && !["done", "archived"].includes(row.taskDisposition ?? "");
+    if (!repeatedRoutine || terminal === undefined) return true;
+    const firstMaterialSequence = history.find((candidate) => candidate.task === row.task &&
+      candidate.taskGeneration === row.taskGeneration && candidate.evidenceKey === row.evidenceKey &&
+      candidate.verdict === row.verdict && candidate.summary === row.summary && candidate.silent === row.silent)?.seq;
+    return firstMaterialSequence === undefined || firstMaterialSequence > terminal;
   });
 }
 
@@ -1304,7 +1313,23 @@ export default function (pi: ExtensionAPI) {
       if (!row || row.verdict !== "captain") return null;
       rows.push(row);
     }
-    return coalesceExactOutcomeRows(rows);
+    const history = await readOutcomeHistory();
+    return history === null ? null : coalesceExactOutcomeRows(rows, history);
+  }
+
+  async function readOutcomeHistory(): Promise<OutcomeRow[] | null> {
+    const listed = await runOutcomeScript(["list", "--all"]);
+    if (!listed.ok) return null;
+    const rows: OutcomeRow[] = [];
+    for (const line of listed.stdout.split("\n")) {
+      if (!line) continue;
+      let row: OutcomeRow | null = null;
+      try { row = parseOutcomeRow(JSON.parse(line)); }
+      catch { row = null; }
+      if (!row) return null;
+      rows.push(row);
+    }
+    return rows;
   }
 
   function outcomeDigest(row: OutcomeRow): string {
@@ -1334,14 +1359,14 @@ export default function (pi: ExtensionAPI) {
       if (taskGeneration !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(taskGeneration)) taskGeneration = null;
       if (candidateIdentity !== null && !/^[a-f0-9]{40,64}$/.test(candidateIdentity)) candidateIdentity = null;
     } catch { /* Exact metadata absence is itself rechecked through null. */ }
-    if (row.taskGeneration && taskGeneration !== row.taskGeneration) {
-      throw new Error(`task generation changed while loading ${row.task}`);
-    }
+    const taskGenerationMismatch = Boolean(row.taskGeneration && taskGeneration !== row.taskGeneration);
     if (first.status === 1 && second.status === 1) {
       const executorState = executor.stdout.trim();
       return { task: row.task, record_token: null, progress: null, executor_state: executorState,
         executor_digest: createHash("sha256").update(executorState).digest("hex"),
-        task_generation: taskGeneration, candidate_identity: candidateIdentity, metadata_digest: metadataDigest };
+        task_generation: taskGeneration, recorded_task_generation: row.taskGeneration ?? null,
+        task_generation_mismatch: taskGenerationMismatch,
+        candidate_identity: candidateIdentity, metadata_digest: metadataDigest };
     }
     if (first.status !== 0 || second.status !== 0) {
       throw new Error(`task observation refused for ${row.task}: progress statuses ${String(first.status)}/${String(second.status)}`);
@@ -1354,17 +1379,14 @@ export default function (pi: ExtensionAPI) {
     const executorState = executor.stdout.trim();
     return { task: row.task, record_token: progress.record_token, progress, executor_state: executorState,
       executor_digest: createHash("sha256").update(executorState).digest("hex"),
-      task_generation: taskGeneration, candidate_identity: candidateIdentity, metadata_digest: metadataDigest };
+      task_generation: taskGeneration, recorded_task_generation: row.taskGeneration ?? null,
+      task_generation_mismatch: taskGenerationMismatch,
+      candidate_identity: candidateIdentity, metadata_digest: metadataDigest };
   }
 
-  function rememberOutcomeEvidence(row: OutcomeRow, observation?: TaskOutcomeObservation): void {
+  function rememberOutcomeEvidence(row: OutcomeRow): void {
     loadedOutcomeSequences.add(row.seq);
-    loadedOutcomeEvidence.set(row.seq, { outcome_digest: outcomeDigest(row),
-      record_token: observation?.record_token ?? null,
-      executor_digest: observation ? observation.executor_digest : null,
-      task_generation: observation?.task_generation ?? null,
-      candidate_identity: observation?.candidate_identity ?? null,
-      metadata_digest: observation?.metadata_digest ?? null });
+    loadedOutcomeEvidence.set(row.seq, { outcome_digest: outcomeDigest(row) });
   }
 
   // Encoding shells out, so it can fail on a broken checkout. This file's
@@ -1466,7 +1488,7 @@ export default function (pi: ExtensionAPI) {
     for (const seq of request.authenticatedSequences) {
       const row = rows.find((candidate) => candidate.seq === seq);
       const observation = request.observations.get(seq);
-      if (row && observation) rememberOutcomeEvidence(row, observation);
+      if (row && observation) rememberOutcomeEvidence(row);
     }
     // A presentation already sent is consumed by the run it joins or opens;
     // until that run settles, sending a widened or identical copy would hand
@@ -1516,7 +1538,9 @@ export default function (pi: ExtensionAPI) {
         if (!row) return false;
         parsedUnread.push(row);
       }
-      const deliveredSequences = new Set(coalesceExactOutcomeRows(parsedUnread).map((row) => row.seq));
+      const history = await readOutcomeHistory();
+      if (history === null) return false;
+      const deliveredSequences = new Set(coalesceExactOutcomeRows(parsedUnread, history).map((row) => row.seq));
       for (const row of parsedUnread) {
         // The last cancellation point of this row: everything from here to
         // its mark-read is synchronous delivery plus the awaited script that
@@ -2615,8 +2639,8 @@ ${context.command}
       if (row.task !== id) continue;
       const pending = observeOutcomeTask(row);
       pendingOutcomeEvidence.set(row.seq, pending);
-      void pending.then((observation) => {
-        if (processing?.rows.some((candidate) => candidate.seq === row.seq)) rememberOutcomeEvidence(row, observation);
+      void pending.then(() => {
+        if (processing?.rows.some((candidate) => candidate.seq === row.seq)) rememberOutcomeEvidence(row);
       }).catch(() => { /* The acknowledgement remains refused until a new authenticated load. */ })
         .finally(() => pendingOutcomeEvidence.delete(row.seq));
     }
@@ -3223,7 +3247,7 @@ ${context.command}
             observations.set(row.seq, observation);
             const referenceOnly = successfulNotification(fmHome, row.task) === row.summary &&
               successfulInlineNotification(fmHome, row.task) === null;
-            if (!referenceOnly || loadedShortTaskResults.has(row.task)) rememberOutcomeEvidence(row, observation);
+            if (!referenceOnly || loadedShortTaskResults.has(row.task)) rememberOutcomeEvidence(row);
           }
           return {
             content: [{ type: "text", text: selected.map((row) => JSON.stringify({
@@ -3333,8 +3357,8 @@ ${context.command}
           if (pendingEvidence) {
             try {
               const row = processing.rows.find((candidate) => candidate.seq === seq);
-              const observation = await pendingEvidence;
-              if (row) rememberOutcomeEvidence(row, observation);
+              await pendingEvidence;
+              if (row) rememberOutcomeEvidence(row);
             } catch { /* The missing-evidence refusal below owns recovery. */ }
           }
         }
@@ -3356,19 +3380,6 @@ ${context.command}
           const evidence = loadedOutcomeEvidence.get(seq);
           if (!row || !evidence || evidence.outcome_digest !== outcomeDigest(row)) {
             return { content: [{ type: "text", text: `acknowledgement refused: outcome identity changed for seq ${seq}` }], details: undefined, isError: true };
-          }
-          if (evidence.executor_digest !== null) {
-            let observed: TaskOutcomeObservation;
-            try { observed = await observeOutcomeTask(row); }
-            catch (error) {
-              return { content: [{ type: "text", text: `acknowledgement refused: ${String(error)}` }], details: undefined, isError: true };
-            }
-            if (observed.record_token !== evidence.record_token || observed.executor_digest !== evidence.executor_digest ||
-                observed.task_generation !== evidence.task_generation ||
-                observed.candidate_identity !== evidence.candidate_identity ||
-                observed.metadata_digest !== evidence.metadata_digest) {
-              return { content: [{ type: "text", text: `acknowledgement refused: task revision or executor identity changed for seq ${seq}; reload the targeted observation` }], details: undefined, isError: true };
-            }
           }
         }
         try {

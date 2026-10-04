@@ -139,15 +139,17 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     return { observations, reconciliations };
   }
 
-  function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }) {
+  function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }, requiredHome?: string) {
     if (entry.customType !== MESSAGE && entry.customType !== ESCALATION && entry.customType !== "fm-continuation-branch-delivery") return;
-    const ids = (entry.details as { admissions?: unknown })?.admissions;
+    const details = entry.details as { admissions?: unknown; home?: unknown } | undefined;
+    if (requiredHome !== undefined && details?.home !== requiredHome) return;
+    const ids = details?.admissions;
     const at = typeof entry.timestamp === "number" ? entry.timestamp : Date.parse(entry.timestamp || "");
     if (!Array.isArray(ids) || !Number.isFinite(at)) return;
     for (const id of ids) if (typeof id === "string") delivered.set(id, at);
   }
 
-  function restoreEntries(entries: readonly unknown[]) {
+  function restoreEntries(entries: readonly unknown[], requiredHome?: string) {
     for (const candidate of entries) {
       if (!candidate || typeof candidate !== "object") continue;
       const entry = candidate as { type?: unknown; customType?: unknown; details?: unknown; data?: unknown;
@@ -155,12 +157,13 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       if (entry.type === "custom_message") readDelivery({
         customType: typeof entry.customType === "string" ? entry.customType : undefined,
         details: entry.details, timestamp: entry.timestamp,
-      });
+      }, requiredHome);
       if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
-        readDelivery({ customType: String(entry.customType), details: entry.data, timestamp: entry.timestamp as string | number });
+        readDelivery({ customType: String(entry.customType), details: entry.data, timestamp: entry.timestamp as string | number }, requiredHome);
       }
       if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
-        const pace = entry.data as InputPacing & { id: string };
+        const pace = entry.data as InputPacing & { id: string; home?: unknown };
+        if (requiredHome !== undefined && pace?.home !== requiredHome) continue;
         if (typeof pace?.id === "string" && /^(progress|reconcile):/.test(pace.id)) pacing.set(pace.id, pace);
       }
     }
@@ -187,7 +190,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           .map((line) => JSON.parse(line) as Record<string, unknown>);
         const header = rows[0] as { type?: unknown; cwd?: unknown } | undefined;
         if (header?.type !== "session" || header.cwd !== currentCwd) continue;
-        restoreEntries(rows);
+        restoreEntries(rows, home);
       } catch { /* A malformed unrelated transcript cannot grant a receipt. */ }
     }
   }
@@ -247,7 +250,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           progress: item,
           delivered(proof) {
             if (!current()) return;
-            pi.appendEntry("fm-continuation-branch-delivery", { admissions: [id], ...proof });
+            pi.appendEntry("fm-continuation-branch-delivery", { admissions: [id], home, ...proof });
             delivered.set(id, Date.now());
           },
           settled() { submitted.delete(id); },
@@ -259,7 +262,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         }
       }
       pacing.set(paceId, pace);
-      pi.appendEntry(PACING_ENTRY, { id: paceId, ...pace });
+      pi.appendEntry(PACING_ENTRY, { id: paceId, home, ...pace });
     }
     if (!current()) throw new Error("readback receiver generation changed");
     if (lines.length || escalations.length) {
@@ -282,7 +285,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         "These tasks remain open. This is not completion or a task blocker. " +
         "Assign an authorized executor and verify receipt/start, reconcile a real dependency, or provide acceptance evidence. " +
         "If an effect may already have happened, read it back before any retry. Unrelated input does not close these tasks.",
-      details: { admissions: items.map(({ id }) => id),
+      details: { admissions: items.map(({ id }) => id), home,
         task: items.length === 1 ? items[0].task : undefined,
         tasks: items.map(({ task }) => task), owner: "main",
         kind: "task-record-reconciliation" },
@@ -333,7 +336,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         if (!admission.admissions.length) return;
         try {
           pi.sendMessage({ customType: MESSAGE, content: admission.content, display: false,
-            details: { admissions: admission.admissions } }, { triggerTurn: true, deliverAs: "followUp" });
+            details: { admissions: admission.admissions, home } }, { triggerTurn: true, deliverAs: "followUp" });
         } catch (error) {
           for (const entry of ctx.sessionManager.getBranch()) {
             if (entry.type === "custom_message") readDelivery(entry);
@@ -375,7 +378,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       if (escalation) for (const id of escalation.details.admissions) submitted.add(id);
       for (const id of admission.admissions) submitted.add(id);
       return { entries: [...(escalation ? [escalation] : []), ...(admission.admissions.length ? [{ type: "custom_message" as const, customType: MESSAGE,
-        content: admission.content, display: false, details: { admissions: admission.admissions } }] : [])],
+        content: admission.content, display: false, details: { admissions: admission.admissions, home } }] : [])],
         continue: admission.admissions.length > 0 || Boolean(escalation) };
     }
   });
