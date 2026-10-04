@@ -148,6 +148,12 @@
 # during the final locked remote-route validation; unset or empty guards do not
 # change ordinary sends.
 #
+# Identity guard: for a ship or scout task, --key and typed text refuse, and
+# the inbox plane records its message but skips the doorbell (ring status 4),
+# when the recorded endpoint provably holds an agent not launched for that task,
+# such as a session Herdr resumed after a restart; bin/fm-backend.sh's
+# fm_backend_endpoint_foreign owns the verdict.
+#
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
 # blocked: record in the target task's state/<id>.status. fm-send itself
@@ -442,6 +448,20 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
+
+# Identity guard for the planes that type into the terminal itself (--key and
+# typed text): refuse when the recorded task's endpoint provably holds an agent
+# Firstmate did not launch for that task, such as a session Herdr resumed after
+# a restart (fm_backend_endpoint_foreign in bin/fm-backend.sh owns the verdict).
+# The inbox plane still records its message and only skips the doorbell.
+fm_send_refuse_foreign_endpoint() {
+  [ -n "$TARGET_META" ] && [ "$TARGET_BACKEND" != remote ] || return 0
+  fm_backend_endpoint_foreign "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null || return 0
+  fm_send_known_undelivered_cleanup ||
+    echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+  echo "error: nothing sent to $T: $(fm_backend_foreign_endpoint_reason "$T" "$(fm_send_id_from_meta "$TARGET_META")")" >&2
+  exit 1
+}
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
 # supervision actors, so refuse while the OTHER actor holds this task's live
@@ -769,6 +789,7 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  fm_send_refuse_foreign_endpoint
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in
@@ -1099,6 +1120,7 @@ else
     1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
+    4) echo "fm-send: doorbell not typed because $(fm_backend_foreign_endpoint_reason "$T" "$INBOX_TASK_ID"); the steer is durably recorded at $INBOX_RECORD for recovery" >&2 ;;
     esac
     exit 0
   fi
@@ -1138,6 +1160,7 @@ else
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
   send_rc=0
+  fm_send_refuse_foreign_endpoint
   if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
   else

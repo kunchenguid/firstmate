@@ -18,6 +18,9 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
+# The fake-ShellCheck cases below pin the uncapped path; the memory-cap cases
+# select their mechanism explicitly.
+export FM_LINT_MEMORY_CAP=none
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
@@ -1560,6 +1563,80 @@ test_root_memory_limit_reports_a_named_death() {
   pass "a root refused by its enforced memory limit fails by name with a memory reason"
 }
 
+fm_lint_scope_cap_supported() {
+  [ "$(uname)" = Linux ] && command -v systemd-run >/dev/null 2>&1 || return 1
+  systemd-run --user --scope --quiet --collect -p MemoryMax=65536K -p MemorySwapMax=0 -p OOMPolicy=continue -- true >/dev/null 2>&1
+}
+
+test_resident_cap_kills_an_oversized_root_by_name() {
+  if ! fm_lint_scope_cap_supported; then
+    pass "SKIP (no systemd user scope on this host): resident memory cap check"
+    return
+  fi
+  local tmp fakebin out rc hoarder ok roots_log
+  tmp=$(fm_test_tmproot fm-lint-resident-cap)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_reactive_shellcheck "$fakebin"
+  hoarder="$tmp/hoarder.sh"
+  ok="$tmp/ok.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$hoarder"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$ok"
+
+  # Control: under a cap far above the stub's 512 MiB allocation, the same
+  # roots pass, so a failure below can only come from the cap itself.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_MEMORY_CAP=scope FM_LINT_ROOT_RESIDENT_KIB=2097152 \
+    "$LINT" --telemetry "$tmp/control.tsv" "$ok" "$hoarder" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the allocator failed under a 2 GiB resident cap"$'\n'"$out"
+  assert_contains "$out" "each ShellCheck root capped at 2048 MiB resident (systemd scope)" "the run did not announce its cap"
+  grep -q $'^meta\tmemory_cap\tscope$' "$tmp/control.roots.tsv" || fail "the roots sidecar did not record the scope cap"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_MEMORY_CAP=scope FM_LINT_ROOT_RESIDENT_KIB=65536 \
+    "$LINT" --telemetry "$tmp/capped.tsv" "$ok" "$hoarder" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a root over its resident cap unexpectedly passed"
+  assert_contains "$out" "hoarder.sh: ShellCheck was killed at its per-root memory cap of 64 MiB (FM_LINT_ROOT_RESIDENT_KIB=65536" \
+    "the cap kill was not named with the cap that cut it"
+  assert_contains "$out" "hit the memory ceiling with --external-sources (reason=memory rc=251)" \
+    "the cap kill was not classified as a memory failure"
+  roots_log="$tmp/capped.roots.tsv"
+  awk -F '\t' '$1 == "end" && $3 ~ /hoarder\.sh$/ && $10 == "memory" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the sidecar did not record the capped root as a memory failure"
+  awk -F '\t' '$1 == "end" && $3 ~ /ok\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the cap disturbed a root under it"
+  pass "a root over its resident memory cap is killed inside its own scope and fails by name as a memory failure"
+}
+
+test_default_jobs_drop_to_one_when_memory_cannot_hold_two_caps() {
+  if [ ! -r /proc/meminfo ]; then
+    pass "SKIP (no /proc/meminfo): automatic worker-count check"
+    return
+  fi
+  local tmp fakebin ok out rc
+  tmp=$(fm_test_tmproot fm-lint-auto-jobs)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_reactive_shellcheck "$fakebin"
+  ok="$tmp/ok.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$ok"
+  # A cap larger than any machine's memory: two of them never fit.
+  rc=0
+  out=$(env -u FM_LINT_JOBS PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_ROOT_RESIDENT_KIB=1099511627776 \
+    "$LINT" --telemetry "$tmp/auto.tsv" "$ok" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the automatic single-worker run failed"$'\n'"$out"
+  assert_contains "$out" "one ShellCheck process at a time:" "the run did not say why it dropped to one worker"
+  grep -q $'^meta\tjobs\t1$' "$tmp/auto.roots.tsv" || fail "the run did not drop to one worker"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=2 FM_LINT_ROOT_RESIDENT_KIB=1099511627776 \
+    "$LINT" --telemetry "$tmp/explicit.tsv" "$ok" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the explicit two-worker run failed"$'\n'"$out"
+  grep -q $'^meta\tjobs\t2$' "$tmp/explicit.roots.tsv" || fail "an explicit FM_LINT_JOBS=2 was overridden"
+  assert_not_contains "$out" "one ShellCheck process at a time:" "an explicit worker count was second-guessed"
+  rc=0
+  FM_LINT_MEMORY_CAP=bogus "$LINT" "$ok" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "an unknown FM_LINT_MEMORY_CAP was not refused (exit $rc)"
+  pass "local default concurrency drops to one worker when memory cannot hold two caps, and an explicit count stands"
+}
+
 test_memory_failure_retries_without_external_sources() {
   local tmp fakebin fixture out rc log rss_kib require_bounds=0 mode
   local -a modes=(0)
@@ -2081,6 +2158,8 @@ test_worker_trees_stop_on_signal
 test_root_deadline_names_the_root_and_reaps_the_tree
 test_root_memory_limit_reports_a_named_death
 test_memory_failure_retries_without_external_sources
+test_resident_cap_kills_an_oversized_root_by_name
+test_default_jobs_drop_to_one_when_memory_cannot_hold_two_caps
 test_memory_fallback_spends_only_the_remaining_root_deadline
 test_memory_evidence_outranks_findings_and_signal_reasons
 test_source_excerpt_with_oom_text_stays_findings

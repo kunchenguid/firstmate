@@ -144,7 +144,7 @@ case "${1:-}" in
     ;;
   server)
     {
-      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_HERDR_SENTINEL HERDR_SESSION; do
+      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_TASK_ID FM_TASK_INBOX FM_KIRO_TASK_ID FM_HERDR_SENTINEL HERDR_SESSION; do
         eval 'value=${'"$name"'-<unset>}'
         printf '%s=%s\n' "$name" "$value"
       done
@@ -725,6 +725,135 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive() {
   pass "herdr stale registration: the descendant walk reads a spaced executable path whole"
 }
 
+# --- task identity: is the agent in the pane the one launched for this task? ---
+#
+# A Herdr restart with agent resume on re-runs each agent's resume command in
+# the directory its pane was created in, keeping the pane id, so only the
+# launch marker FM_TASK_ID tells Firstmate's worker from the resumed session.
+# The fixture pairs one canned `pane process-info` body with REAL process trees
+# whose environments differ, so the verdict is read from the real
+# /proc/<pid>/environ of each process.
+
+task_identity_case() {  # <dir-suffix> <shell-pid> <task-id> [proc-root]
+  local dir="$TMP_ROOT/task-identity-$1" resp log fb
+  mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  shell_only_process_info "$2" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PROC_ROOT="${4:-/proc}" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_identity fmtest:w1:p2 "$1"' "$ROOT" "$3"
+}
+
+# task_identity_tree: a real shell whose child is a harness-named process, with
+# <env-prefix> applied to the child only, as `export FM_TASK_ID=...` before the
+# launch command applies it to the agent and never to the pane's shell. Prints
+# the shell pid.
+task_identity_tree() {  # <lab-dir> <env-prefix>
+  local lab=$1 sleep_bin
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  mkdir -p "$lab"
+  ln -sf "$sleep_bin" "$lab/pi"
+  env -u FM_TASK_ID sh -c "$2 '$lab/pi' 300; :" >/dev/null 2>&1 &
+  printf '%s' "$!"
+}
+
+task_identity_tree_stop() {  # <shell-pid>
+  pkill -P "$1" 2>/dev/null || true
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+test_task_identity_reads_the_launch_marker_from_the_pane_process_tree() {
+  local shell_pid out
+  [ -r /proc/self/environ ] || { pass "herdr task identity: skipped, no /proc on this host"; return 0; }
+  shell_pid=$(task_identity_tree "$TMP_ROOT/task-identity-bin" 'FM_TASK_ID=t1')
+  sleep 0.3
+  out=$(task_identity_case marked "$shell_pid" t1)
+  [ "$out" = match ] || { task_identity_tree_stop "$shell_pid"; fail "a harness launched with FM_TASK_ID=t1 must read match for t1, got '$out'"; }
+  out=$(task_identity_case other-task "$shell_pid" t2)
+  [ "$out" = foreign ] || { task_identity_tree_stop "$shell_pid"; fail "a harness launched for t1 must read foreign for t2, got '$out'"; }
+  out=$(task_identity_case no-procfs "$shell_pid" t2 "$TMP_ROOT/no-such-proc")
+  task_identity_tree_stop "$shell_pid"
+  [ "$out" = unknown ] || fail "without a readable procfs the identity must be unknown, never foreign, got '$out'"
+  pass "herdr task identity: the launch marker in the agent's environment decides match or foreign, and no procfs is unknown"
+}
+
+test_task_identity_unmarked_harness_is_foreign() {
+  local shell_pid out
+  [ -r /proc/self/environ ] || { pass "herdr task identity: skipped, no /proc on this host"; return 0; }
+  # The resumed-session shape: the harness inherits the server's environment,
+  # which carries no task marker at all.
+  shell_pid=$(task_identity_tree "$TMP_ROOT/task-identity-bin" 'env -u FM_TASK_ID')
+  sleep 0.3
+  out=$(task_identity_case unmarked "$shell_pid" t1)
+  task_identity_tree_stop "$shell_pid"
+  [ "$out" = foreign ] || fail "a running harness with no FM_TASK_ID must read foreign, got '$out'"
+  pass "herdr task identity: a harness running without the task marker reads foreign"
+}
+
+test_task_identity_survives_a_harness_that_clears_its_environment() {
+  local shell_pid out lab="$TMP_ROOT/task-identity-bin"
+  [ -r /proc/self/environ ] || { pass "herdr task identity: skipped, no /proc on this host"; return 0; }
+  mkdir -p "$lab"
+  ln -sf "$(command -v sleep)" "$lab/pi"
+  # A launcher carrying the marker that execs the harness with an EMPTY
+  # environment: the harness itself carries nothing, but the process above it
+  # in the pane still does.
+  FM_TASK_ID=t1 sh -c "env -i '$lab/pi' 300; :" >/dev/null 2>&1 &
+  shell_pid=$!
+  sleep 0.3
+  tr '\0' '\n' < "/proc/$(pgrep -P "$shell_pid" | head -1)/environ" | grep -q '^FM_TASK_ID=' \
+    && { task_identity_tree_stop "$shell_pid"; fail "fixture: the harness was meant to run with a cleared environment"; }
+  out=$(task_identity_case scrubbed "$shell_pid" t1)
+  task_identity_tree_stop "$shell_pid"
+  [ "$out" = match ] || fail "a harness that cleared its own environment under a marked launcher must still read match, got '$out'"
+  pass "herdr task identity: a harness that clears its own environment is not refused"
+}
+
+test_task_identity_without_a_harness_is_unknown() {
+  local sleep_bin shell_pid out
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  "$sleep_bin" 300 &
+  shell_pid=$!
+  out=$(task_identity_case no-harness "$shell_pid" t1)
+  kill "$shell_pid" 2>/dev/null || true
+  wait "$shell_pid" 2>/dev/null || true
+  [ "$out" = unknown ] || fail "a pane with no harness process must read unknown (liveness owns that case), got '$out'"
+  pass "herdr task identity: a pane without a harness is unknown, never foreign"
+}
+
+# The gate every sender asks: only a ship or scout record is checked, and only a
+# positive foreign verdict refuses. The doorbell is the cheapest real sender to
+# drive, and it must type nothing into a foreign pane.
+test_inbox_doorbell_refuses_a_foreign_agent_for_ship_tasks_only() {
+  local shell_pid dir state resp log fb rec out rc
+  [ -r /proc/self/environ ] || { pass "herdr foreign doorbell: skipped, no /proc on this host"; return 0; }
+  shell_pid=$(task_identity_tree "$TMP_ROOT/task-identity-bin" 'env -u FM_TASK_ID')
+  sleep 0.3
+  for kind in ship secondmate; do
+    dir="$TMP_ROOT/foreign-ring-$kind"
+    state="$dir/state"; resp="$dir/responses"; log="$dir/log"
+    mkdir -p "$state/t1.inbox/handled" "$resp"; : > "$log"
+    printf 'kind=%s\nbackend=herdr\nwindow=fmtest:w1:p2\n' "$kind" > "$state/t1.meta"
+    printf 'seq=1\n--\nhello\n' > "$state/t1.inbox/001.msg"
+    shell_only_process_info "$shell_pid" > "$resp/1.out"
+    fb=$(make_herdr_fakebin "$dir")
+    rc=0
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$dir" \
+      bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring herdr fmtest:w1:p2 "$1" fm-t1' \
+      "$ROOT" "$state/t1.inbox/001.msg" >/dev/null 2>&1 || rc=$?
+    out=$(cat "$log")
+    if [ "$kind" = ship ]; then
+      [ "$rc" -eq 4 ] || { task_identity_tree_stop "$shell_pid"; fail "the doorbell to a foreign agent in a ship pane must return 4, got $rc"; }
+      assert_not_contains "$out" $'\x1fsend-text' "the doorbell typed into a foreign agent's pane"
+      assert_not_contains "$out" $'\x1frun' "the doorbell ran a command in a foreign agent's pane"
+    else
+      [ "$rc" -ne 4 ] || { task_identity_tree_stop "$shell_pid"; fail "a secondmate carries no task marker and must never be refused as foreign"; }
+    fi
+  done
+  task_identity_tree_stop "$shell_pid"
+  pass "herdr foreign doorbell: a ship pane holding an unmarked agent gets nothing typed, while a secondmate is never checked"
+}
+
 test_registered_agent_with_an_unreadable_process_view_is_unknown() {
   local out
   out=$(stale_registration_case unreadable-exit idle 'Error: socket unavailable' 1)
@@ -1195,6 +1324,67 @@ test_container_ensure_starts_server_and_workspace() {
   pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
 }
 
+# make_systemctl_fakebin: a `systemctl` stub for the user manager. It reports
+# herdr.service with the LoadState in $FM_FAKE_UNIT_LOAD_STATE, logs every call
+# to $FM_FAKE_SYSTEMCTL_LOG, and on `start` either fails ($FM_FAKE_UNIT_START_RC)
+# or marks the fake Herdr server running, as the real unit would.
+make_systemctl_fakebin() {  # <fakebin-dir>
+  cat > "$1/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_SYSTEMCTL_LOG"
+case "$*" in
+  "--user show --property=LoadState --value herdr.service") printf '%s\n' "$FM_FAKE_UNIT_LOAD_STATE" ;;
+  "--user start herdr.service")
+    [ "${FM_FAKE_UNIT_START_RC:-0}" = 0 ] || { echo "Job for herdr.service failed." >&2; exit "$FM_FAKE_UNIT_START_RC"; }
+    : > "$FM_HERDR_SERVER_MARKER"
+    ;;
+esac
+SH
+  chmod +x "$1/systemctl"
+}
+
+systemd_server_case() {  # <dir-suffix> <session> <load-state> [start-rc]
+  local dir="$TMP_ROOT/server-systemd-$1" fb rc=0
+  mkdir -p "$dir"
+  fb=$(make_herdr_server_env_fakebin "$dir")
+  make_systemctl_fakebin "$fb"
+  : > "$dir/systemctl.log"
+  PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$dir/env" FM_HERDR_SERVER_MARKER="$dir/running" \
+    FM_FAKE_SYSTEMCTL_LOG="$dir/systemctl.log" FM_FAKE_UNIT_LOAD_STATE="$3" FM_FAKE_UNIT_START_RC="${4:-0}" \
+    FM_TEST_HERDR_SYSTEMD=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure "$1"' "$ROOT" "$2" \
+    > "$dir/out" 2>&1 || rc=$?
+  printf '%s' "$rc"
+}
+
+test_server_ensure_starts_the_default_session_through_its_user_unit() {
+  local dir rc
+  rc=$(systemd_server_case unit default loaded)
+  dir="$TMP_ROOT/server-systemd-unit"
+  [ "$rc" = 0 ] || fail "server_ensure through a loaded herdr.service should succeed, rc=$rc: $(cat "$dir/out")"
+  assert_contains "$(cat "$dir/systemctl.log")" "--user start herdr.service" "server_ensure did not start the default session through herdr.service"
+  [ ! -e "$dir/env" ] || fail "server_ensure also launched a background herdr server beside the unit"
+
+  rc=$(systemd_server_case no-unit default not-found)
+  dir="$TMP_ROOT/server-systemd-no-unit"
+  [ "$rc" = 0 ] || fail "server_ensure without the unit should keep the background launch, rc=$rc"
+  [ -e "$dir/env" ] || fail "server_ensure without the unit did not launch the background server"
+  assert_not_contains "$(cat "$dir/systemctl.log")" "start" "server_ensure started a unit that is not installed"
+
+  rc=$(systemd_server_case named fm-lab-x loaded)
+  dir="$TMP_ROOT/server-systemd-named"
+  [ "$rc" = 0 ] || fail "server_ensure for a named session should keep the background launch, rc=$rc"
+  [ -e "$dir/env" ] || fail "a named session must never be routed to the default session's unit"
+  assert_not_contains "$(cat "$dir/systemctl.log")" "start" "server_ensure started herdr.service for a named session"
+
+  rc=$(systemd_server_case failing default loaded 1)
+  dir="$TMP_ROOT/server-systemd-failing"
+  [ "$rc" != 0 ] || fail "a herdr.service that fails to start must fail server_ensure"
+  assert_contains "$(cat "$dir/out")" "systemctl --user start herdr.service" "the unit start failure was not named"
+  [ ! -e "$dir/env" ] || fail "a failed unit start fell back into the caller's cgroup with a background server"
+  pass "fm_backend_herdr_server_ensure: the default session starts through a loaded herdr.service, never beside it, and everything else keeps the background launch"
+}
+
 test_server_ensure_scrubs_home_and_harness_identity() {
   local dir log marker fb output name
   dir="$TMP_ROOT/server-env"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
@@ -1203,11 +1393,13 @@ test_server_ensure_scrubs_home_and_harness_identity() {
     FM_HOME=/tmp/wrong-home FM_ROOT_OVERRIDE=/tmp/wrong-root FM_STATE_OVERRIDE=/tmp/wrong-state \
     FM_DATA_OVERRIDE=/tmp/wrong-data FM_PROJECTS_OVERRIDE=/tmp/wrong-projects FM_CONFIG_OVERRIDE=/tmp/wrong-config \
     CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm \
+    FM_TASK_ID=some-task FM_TASK_INBOX=/tmp/some-task.inbox FM_KIRO_TASK_ID=some-task \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should start under a polluted launcher environment"
   output=$(cat "$log")
   for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL; do
+    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL \
+    FM_TASK_ID FM_TASK_INBOX FM_KIRO_TASK_ID; do
     assert_contains "$output" "$name=<unset>" "server_ensure leaked $name into the long-lived Herdr server"
   done
   assert_contains "$output" "FM_HERDR_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
@@ -5792,6 +5984,11 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free
+test_task_identity_reads_the_launch_marker_from_the_pane_process_tree
+test_task_identity_unmarked_harness_is_foreign
+test_task_identity_survives_a_harness_that_clears_its_environment
+test_task_identity_without_a_harness_is_unknown
+test_inbox_doorbell_refuses_a_foreign_agent_for_ship_tasks_only
 test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
 test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
@@ -5825,6 +6022,7 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_server_ensure_scrubs_home_and_harness_identity
+test_server_ensure_starts_the_default_session_through_its_user_unit
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label

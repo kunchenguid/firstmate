@@ -1649,19 +1649,41 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
-# call. The server outlives its launcher and passes its startup environment to
-# every later pane, so remove home, harness identity, and supervision selection
-# inherited from whichever agent happened to start it. Bounded poll for the
-# server to report running.
+# call. Bounded poll for the server to report running.
+#
+# A background `herdr server` lands in the cgroup of whichever process started
+# it - an agent pane, or a terminal window that systemd-oomd watches - and every
+# agent of every fleet then lives and dies with that cgroup. So for the
+# `default` session, when the user unit herdr.service is loaded, the server is
+# started through `systemctl --user start herdr.service` instead, which places
+# it in the unit's own slice (docs/herdr-backend.md "Running the server under
+# systemd"). A loaded unit that does not start is an error rather than a silent
+# fallback into the caller's cgroup. Named sessions, hosts without a user
+# manager, and homes without the unit keep the background launch.
+#
+# The background server outlives its launcher and passes its startup
+# environment to every later pane, so remove home, harness identity,
+# supervision selection, and task identity inherited from whichever agent
+# happened to start it. Task identity matters twice: a pane restored after a
+# restart must never carry another task's launch marker
+# (fm_backend_herdr_task_identity).
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
-  (
-    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-      CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
-    fm_backend_herdr_cli "$session" server >/dev/null 2>&1 &
-  ) || return 1
+  if [ "$session" = default ] && fm_backend_herdr_systemd_unit_loaded; then
+    if ! out=$(systemctl --user start herdr.service 2>&1); then
+      echo "error: herdr.service is installed but 'systemctl --user start herdr.service' failed: $out" >&2
+      return 1
+    fi
+  else
+    (
+      unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
+        CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL \
+        FM_TASK_ID FM_TASK_INBOX FM_KIRO_TASK_ID
+      fm_backend_herdr_cli "$session" server >/dev/null 2>&1 &
+    ) || return 1
+  fi
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0
@@ -1669,6 +1691,101 @@ fm_backend_herdr_server_ensure() {  # <session>
   done
   echo "error: herdr server for session '$session' did not report running within 10s" >&2
   return 1
+}
+
+# fm_backend_herdr_systemd_unit_loaded: whether the user manager is reachable
+# and has a herdr.service unit file loaded. Any failure to ask - no systemctl,
+# no user manager, no session bus - reads as "not loaded". A test suite
+# (FM_TEST_SEAM=1, set by tests/lib.sh) never reaches the real user manager
+# unless the case opts in with FM_TEST_HERDR_SYSTEMD=1 and a stub systemctl.
+fm_backend_herdr_systemd_unit_loaded() {
+  if [ "${FM_TEST_SEAM:-}" = 1 ] && [ "${FM_TEST_HERDR_SYSTEMD:-}" != 1 ]; then
+    return 1
+  fi
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [ "$(systemctl --user show --property=LoadState --value herdr.service 2>/dev/null)" = loaded ]
+}
+
+# fm_backend_herdr_host_diagnostics: read-only startup warnings about how this
+# host runs the `default` Herdr session, one line each, printed by
+# bin/fm-bootstrap.sh (whose header owns the line formats). It never starts,
+# stops, or reconfigures anything, and never writes Herdr's config.
+#
+#   HERDR_SERVER_CGROUP - a running default-session server sits under
+#     app.slice. On a host whose app.slice (or a terminal window's own scope)
+#     carries systemd-oomd's ManagedOOMMemoryPressure=kill, a memory-pressure
+#     kill of that cgroup takes the server and every agent pane with it
+#     (docs/herdr-backend.md "Running the server under systemd").
+#   HERDR_AGENT_RESUME - the client is 0.9.2 or newer and its config.toml does
+#     not set `[session] resume_agents_on_restore = false`, so a server restart
+#     re-runs each agent's resume command in the directory its pane was created
+#     in (docs/herdr-backend.md "Agents resumed after a restart").
+#
+# The server is found from the process table, never through a Herdr call, so a
+# stopped server is not started by asking. FM_HERDR_PS_BIN and
+# FM_HERDR_PROC_ROOT redirect the process reads, and the config is read from
+# ${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml, the path `herdr config
+# check` reads.
+fm_backend_herdr_host_diagnostics() {
+  local ps_bin proc pid cgroup version config
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  proc=${FM_HERDR_PROC_ROOT:-/proc}
+  if command -v "$ps_bin" >/dev/null 2>&1; then
+    while read -r pid; do
+      [ -n "$pid" ] || continue
+      cgroup=$(sed -n 's/^0:://p' "$proc/$pid/cgroup" 2>/dev/null | head -1)
+      case "$cgroup" in
+        */app.slice/*)
+          echo "HERDR_SERVER_CGROUP: the default Herdr server (pid $pid) runs in $cgroup, under app.slice, where a systemd-oomd memory-pressure kill takes the server and every agent pane with it; run it as the user service herdr.service in its own slice (docs/herdr-backend.md \"Running the server under systemd\")"
+          ;;
+      esac
+    done <<EOF
+$(LC_ALL=C "$ps_bin" -axo pid=,args= 2>/dev/null | awk '
+  {
+    pid = $1
+    line = $0
+    sub(/^[ \t]*[0-9]+[ \t]+/, "", line)
+    n = split(line, a, /[ \t]+/)
+    bin = a[1]; sub(/.*\//, "", bin)
+    if (bin != "herdr" || a[2] != "server") next
+    if (n == 2 || (n == 4 && a[3] == "--session" && a[4] == "default")) print pid
+  }')
+EOF
+  fi
+  version=$(fm_backend_herdr_bin_version 2>/dev/null) || version=
+  fm_backend_herdr_version_at_least "$version" 0.9.2 || return 0
+  config="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml"
+  fm_backend_herdr_resume_disabled "$config" && return 0
+  echo "HERDR_AGENT_RESUME: Herdr $version resumes agents after a server restart because $config does not set [session] resume_agents_on_restore = false; a resumed worker starts in the directory its pane was created in, which can be the project's primary checkout, and Firstmate never edits that file (docs/herdr-backend.md \"Agents resumed after a restart\")"
+}
+
+# fm_backend_herdr_bin_version: the PATH-first client's release, from
+# `herdr --version` alone (no server call).
+fm_backend_herdr_bin_version() {
+  local out
+  out=$(herdr --version 2>/dev/null | head -1) || return 1
+  out=${out#herdr }
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+# fm_backend_herdr_resume_disabled: whether <config.toml> turns agent resume
+# off, as `resume_agents_on_restore = false` inside a [session] table or as the
+# dotted `session.resume_agents_on_restore = false` at top level. An absent or
+# unreadable file is Herdr's default, which resumes.
+fm_backend_herdr_resume_disabled() {  # <config.toml>
+  [ -r "$1" ] || return 1
+  awk '
+    { line = $0; sub(/[ \t]*#.*$/, "", line) }
+    line ~ /^[ \t]*\[/ {
+      table = line
+      gsub(/[][ \t]/, "", table)
+      next
+    }
+    table == "session" && line ~ /^[ \t]*resume_agents_on_restore[ \t]*=[ \t]*false[ \t]*$/ { found = 1 }
+    table == "" && line ~ /^[ \t]*session\.resume_agents_on_restore[ \t]*=[ \t]*false[ \t]*$/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
 }
 
 # fm_backend_herdr_workspace_find_all: EVERY workspace id inside <session>
@@ -2225,13 +2342,16 @@ EOF
 #                 and its tab from `pane get`/`tab list`).
 #   no-agent    - `pane get` succeeds (the pane structurally exists) but `agent
 #                 get` responds with error code agent_not_found: nothing is
-#                 registered in it - exactly what a herdr session-layout restore
-#                 produces (verified empirically: `session stop` + fresh `herdr
-#                 server` restart leaves the pane alive, agent_status "unknown",
-#                 agent get -> agent_not_found - docs/herdr-backend.md "ID
-#                 stability across a server restart"), and what a future
-#                 `resume_agents_on_restore = false` restore would produce too
-#                 (a plain shell, never an agent).
+#                 registered in it - what a herdr session-layout restore
+#                 produces when no agent is resumed into the pane (verified
+#                 empirically: `session stop` + fresh `herdr server` restart
+#                 leaves the pane alive, agent_status "unknown", agent get ->
+#                 agent_not_found - docs/herdr-backend.md "Husks after a server
+#                 restart"). From Herdr 0.9.2 a restore with
+#                 `resume_agents_on_restore = false` always produces this; with
+#                 resume on, a pane whose agent reported a resume command comes
+#                 back with that agent running instead, which reads `live` here
+#                 and is caught by fm_backend_herdr_task_identity.
 #   stale-agent - `agent get` reports a registered agent_status (working, idle,
 #                 done, or blocked) but fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
@@ -2448,6 +2568,99 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
+# fm_backend_herdr_task_identity: whether the agent running in <target> is the
+# one Firstmate launched for <task-id>, as match|foreign|unknown.
+#
+# Why: Herdr restores every pane across a server restart, and with agent resume
+# on (the default since Herdr 0.9.2) it also re-runs each agent's reported
+# resume command in the directory the pane was CREATED in. For a fresh spawn
+# that is the project's primary checkout, because `treehouse get` enters the
+# isolated worktree in a nested shell after creation. The resumed agent keeps
+# the pane id, the tab label, and the conversation, so every pane-level check
+# still matches, and a doorbell or steer typed into it reaches an agent working
+# in the wrong checkout (docs/herdr-backend.md "Agents resumed after a
+# restart").
+#
+# What Firstmate controls that a restore cannot reproduce is the launch
+# environment: every ship and scout launch exports FM_TASK_ID=<task-id> before
+# the agent starts (bin/fm-spawn.sh), while a resumed agent inherits the Herdr
+# server's environment instead. The verdict is read from the kernel's record of
+# each process's exec environment (/proc/<pid>/environ) across the pane shell
+# and every descendant, because a harness may scrub or rewrite its own
+# environment after start but cannot change the record of the launcher
+# process above it, and children it spawns still inherit the marker:
+#
+#   match   - some process in the pane's tree carries FM_TASK_ID=<task-id>.
+#   foreign - none does, at least one harness process is running, and the
+#             environment of every harness process was readable. This is
+#             positive evidence that the agent is not this task's.
+#   unknown - anything else: no procfs (macOS), an unreadable process view or
+#             environment, no harness process at all (the liveness classifiers
+#             own that case), or an empty task id. Callers treat unknown as no
+#             objection, so a host or harness this cannot read keeps today's
+#             behavior rather than losing its steering.
+fm_backend_herdr_task_identity() {  # <target> <task-id>
+  local target=$1 task=$2 proc info shell_pid ps_bin rows pid name args argv0 environ
+  local harness_seen=0 harness_unreadable=0
+  [ -n "$task" ] || { printf 'unknown'; return 0; }
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  proc=${FM_HERDR_PROC_ROOT:-/proc}
+  [ -r "$proc/self/environ" ] || { printf 'unknown'; return 0; }
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unknown'; return 0; }
+  while IFS=$'\t' read -r pid name; do
+    [ -n "$pid" ] || continue
+    environ=$(tr '\0' '\n' 2>/dev/null < "$proc/$pid/environ") || environ=
+    if [ -n "$environ" ] && printf '%s\n' "$environ" | grep -qxF "FM_TASK_ID=$task"; then
+      printf 'match'
+      return 0
+    fi
+    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
+      harness_seen=1
+      [ -n "$environ" ] || harness_unreadable=1
+    fi
+  done <<EOF
+$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+  {
+    pid[NR] = $1; ppid[NR] = $2
+    line = $0
+    sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
+    comm[NR] = line
+  }
+  END {
+    want[shell] = 1
+    changed = 1
+    while (changed) {
+      changed = 0
+      for (n = 1; n <= NR; n++) {
+        if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
+      }
+    }
+    for (n = 1; n <= NR; n++) {
+      if (pid[n] in want) printf "%s\t%s\n", pid[n], comm[n]
+    }
+  }')
+EOF
+  if [ "$harness_seen" = 1 ] && [ "$harness_unreadable" = 0 ]; then
+    printf 'foreign'
+  else
+    printf 'unknown'
+  fi
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate
@@ -2456,10 +2669,13 @@ fm_backend_herdr_agent_alive() {  # <target>
 # A same-labeled tab already existing no longer means an automatic refusal:
 # herdr persists and restores its whole session layout (workspaces/tabs/
 # panes) across a server restart, including a reboot, and a restored fm-<id>
-# task tab comes back a HUSK - a dead pane, or (today, and unconditionally
-# once a future `resume_agents_on_restore = false` config ships) a plain
-# agent-less shell sitting in the saved cwd, never the crewmate that used to
-# be there. Before this fix, every fleet respawn after such a restart needed
+# task tab comes back either a HUSK - a dead pane, or a plain agent-less shell
+# sitting in the saved cwd - or, on Herdr 0.9.2 and newer with agent resume on
+# (the default), with the agent's own resume command re-run in that saved cwd.
+# `resume_agents_on_restore = false` in Herdr's config makes every restored
+# pane a husk. A resumed agent reads `live` and is never closed here; it is not
+# the crewmate that used to be there either, and fm_backend_herdr_task_identity
+# keeps Firstmate from typing into it. Before this fix, every fleet respawn after such a restart needed
 # the operator to manually close each husk pane first before firstmate could
 # spawn into it again. fm_backend_herdr_tab_is_husk classifies the existing
 # tab's pane conservatively (dead or no-agent only; anything live or

@@ -118,6 +118,10 @@
 #     than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
+#   - A ship or scout endpoint that provably holds an agent not launched for
+#     the task (a session Herdr resumed after a restart) refuses every verb
+#     before any key or text is sent (bin/fm-backend.sh's
+#     fm_backend_endpoint_foreign).
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
 #
@@ -353,6 +357,12 @@ fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
 fm_backend_validate "$BACKEND" || exit 1
+
+# Every verb types a key or text into the endpoint (bin/fm-control-lib.sh's
+# fm_control_refuse_foreign_endpoint owns the gate).
+if FOREIGN_REFUSAL=$(fm_control_refuse_foreign_endpoint "$BACKEND" "$T" "$META" "$ID" "$VERB"); then
+  die "$FOREIGN_REFUSAL"
+fi
 
 # --- shared helpers ---------------------------------------------------------
 

@@ -793,6 +793,46 @@ fm_backend_visible_capture() {  # <backend> <target> [expected-label]
   "fm_backend_${backend}_visible_capture" "$@"
 }
 
+# fm_backend_endpoint_foreign: true (0) only when <target> provably holds an
+# agent that Firstmate did not launch for the task recorded in <meta-file>, so
+# no text or key may be sent to it. Every sender of text or keys to a recorded
+# task asks this first: the steering doorbell (bin/fm-task-inbox-lib.sh), the
+# typed and key planes of bin/fm-send.sh, and every lifecycle verb of
+# bin/fm-control.sh.
+#
+# Only ship and scout tasks carry the FM_TASK_ID launch marker
+# (bin/fm-spawn.sh), so only they are checked; a secondmate, a missing or
+# unreadable record, and every backend without an identity read answer false,
+# exactly as before this guard existed. The backend owns the evidence: Herdr
+# reads the marker from the pane's process tree (fm_backend_herdr_task_identity
+# in bin/backends/herdr.sh), and only its positive `foreign` verdict counts.
+# tmux, zellij, orca, and cmux never restore an agent into a recorded endpoint,
+# so they have no identity read.
+fm_backend_endpoint_foreign() {  # <backend> <target> <meta-file>
+  local backend=$1 target=$2 meta=$3 kind task
+  [ -f "$meta" ] || return 1
+  kind=$(fm_meta_get "$meta" kind)
+  case "${kind:-ship}" in ship|scout) ;; *) return 1 ;; esac
+  task=${meta##*/}
+  task=${task%.meta}
+  [ -n "$task" ] || return 1
+  case "$backend" in
+    herdr)
+      fm_backend_source herdr || return 1
+      [ "$(fm_backend_herdr_task_identity "$target" "$task")" = foreign ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_foreign_endpoint_reason: the one sentence every refusal of a
+# foreign endpoint embeds, so the doorbell, steer, and control refusals name the
+# same cause and the same recovery.
+fm_backend_foreign_endpoint_reason() {  # <target> <task-id>
+  printf 'the agent in %s was not launched for task %s (its process tree lacks FM_TASK_ID=%s, so it is most likely a session Herdr resumed after a server restart, running in the directory the pane was created in rather than the task worktree); stop that agent and recover the task with stuck-crewmate-recovery' \
+    "$1" "$2" "$2"
+}
+
 # fm_backend_send_key: one backend-supported named special key.
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   local backend=$1
