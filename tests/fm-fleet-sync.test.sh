@@ -34,6 +34,8 @@
 # is pruned only on a squash-merge content proof or a merged-PR head that contains
 # it. Unpushed work, the checked-out branch, a branch with a worktree, and the
 # default branch always survive, and FM_FLEET_PRUNE=0 disables every prune.
+# The prune runs after the fast-forward, and bootstrap's time-bounded refresh
+# keeps the content proof but makes no PR lookups.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -787,32 +789,47 @@ squash_merge_and_delete() {
 
 # prune_fakebin <home> <tag> [merged-pr-head]: gh and gh-axi stubs. With no head,
 # every lookup fails, as with no forge or a network error. With a head, PR 7 for
-# any branch is merged with that head.
+# any branch is merged with that head. Every PR lookup appends "<cmd> <args>
+# <local main sha>" to <fakebin>/pr-calls.log, run from the clone it queries.
 prune_fakebin() {
-  local home=$1 tag=$2 head=${3:-} fakebin
+  local home=$1 tag=$2 head=${3:-} fakebin log
   fakebin="$home/fb-$tag"
+  log="$fakebin/pr-calls.log"
   rm -rf "$fakebin"; mkdir -p "$fakebin"
   if [ -z "$head" ]; then
-    printf '#!/usr/bin/env bash\necho "error: unavailable" >&2\nexit 1\n' > "$fakebin/gh-axi"
-    printf '#!/usr/bin/env bash\necho "error: unavailable" >&2\nexit 1\n' > "$fakebin/gh"
+    printf '#!/usr/bin/env bash\n%s\necho "error: unavailable" >&2\nexit 1\n' "$(pr_call_logger gh-axi "$log")" > "$fakebin/gh-axi"
+    printf '#!/usr/bin/env bash\n%s\necho "error: unavailable" >&2\nexit 1\n' "$(pr_call_logger gh "$log")" > "$fakebin/gh"
   else
-    cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
+    {
+      printf '#!/usr/bin/env bash\n%s\n' "$(pr_call_logger gh-axi "$log")"
+      cat <<'SH'
 case "${1:-} ${2:-}" in
   "pr list") printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
 esac
 exit 1
 SH
-    cat > "$fakebin/gh" <<SH
-#!/usr/bin/env bash
+    } > "$fakebin/gh-axi"
+    {
+      printf '#!/usr/bin/env bash\n%s\n' "$(pr_call_logger gh "$log")"
+      cat <<SH
 case "\${1:-} \${2:-}" in
   "pr view") printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
 esac
 exit 1
 SH
+    } > "$fakebin/gh"
   fi
   chmod +x "$fakebin/gh-axi" "$fakebin/gh"
   printf '%s\n' "$fakebin"
+}
+
+# pr_call_logger <cmd> <log>: the stub line that records a PR lookup. Bootstrap
+# runs `gh auth status` itself, so only `pr` calls count.
+pr_call_logger() {
+  local cmd=$1 log=$2
+  cat <<SH
+[ "\${1:-}" != pr ] || printf '%s\\n' "$cmd \$* \$(git rev-parse --verify -q refs/heads/main)" >> '$log'
+SH
 }
 
 # run_sync_prune <home> <fakebin> [args...]: run fleet-sync with the stubs first on
@@ -898,7 +915,38 @@ test_merged_pr_no_upstream_branch_pruned_when_opted_in() {
 
   assert_contains "$out" "mergedpr: pruned fm/task (landed, no upstream)" "merged-PR proof should prune the branch"
   if branch_exists "$clone" fm/task; then fail "a branch contained in a merged PR head should be pruned when opted in"; fi
+  [ -s "$fakebin/pr-calls.log" ] || fail "fixture: the merged-PR proof should have looked up the PR"
+  if grep -vq " $(git -C "$clone" rev-parse origin/main)\$" "$fakebin/pr-calls.log"; then
+    fail "every PR lookup should run after main is fast-forwarded: $(cat "$fakebin/pr-calls.log")"
+  fi
   pass "a branch contained in a merged PR head is pruned when opted in (merged-PR proof)"
+}
+
+test_bootstrap_refresh_prunes_on_content_proof_without_pr_lookups() {
+  local home clone fakebin out tip
+  home=$(new_home)
+  clone=$(build_pair "$home" bootprune)
+  push_task_branch "$home" bootprune fm/squashed a.txt a >/dev/null
+  squash_merge_and_delete "$home" bootprune fm/squashed a.txt a
+  # Only the merged-PR proof covers this branch, because a later main commit makes
+  # its content proof conflict.
+  tip=$(push_task_branch "$home" bootprune fm/viapr file.txt task-edit)
+  squash_merge_and_delete "$home" bootprune fm/viapr file.txt task-edit
+  advance_origin "$home" bootprune later-edit
+  fakebin=$(prune_fakebin "$home" bootprune "$tip")
+
+  out=$(PATH="$fakebin:$PATH" FM_FLEET_PRUNE_MERGED=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_not_contains "$out" "bootstrap refresh timed out" "the bounded refresh should finish"
+  if [ -s "$fakebin/pr-calls.log" ]; then
+    fail "bootstrap's bounded refresh must make no PR lookups: $(cat "$fakebin/pr-calls.log")"
+  fi
+  if branch_exists "$clone" fm/squashed; then fail "the content proof should still prune under bootstrap"; fi
+  branch_exists "$clone" fm/viapr || fail "a branch only the merged-PR proof covers must survive bootstrap"
+  [ "$(git -C "$clone" rev-parse main)" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "bootstrap should still fast-forward the clone"
+  pass "bootstrap's bounded refresh prunes on the content proof and makes no PR lookups"
 }
 
 test_unpushed_commit_without_worktree_survives() {
@@ -1032,6 +1080,7 @@ test_gone_upstream_branch_still_pruned_by_default
 test_landed_no_upstream_branch_kept_without_opt_in
 test_squash_merged_no_upstream_branch_pruned_when_opted_in
 test_merged_pr_no_upstream_branch_pruned_when_opted_in
+test_bootstrap_refresh_prunes_on_content_proof_without_pr_lookups
 test_unpushed_commit_without_worktree_survives
 test_checked_out_landed_branch_survives
 test_landed_branch_with_worktree_survives

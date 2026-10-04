@@ -88,6 +88,8 @@
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
 #          FM_FLEET_PRUNE_MERGED=1 opts in to also pruning landed branches that
 #          have no upstream (default off; fm-fleet-sync.sh owns the proof).
+#          This bounded refresh passes --no-pr-lookup, so that prune trusts only
+#          its local content proof here and makes no per-branch PR lookups.
 #          BACKLOG_RECONCILE lines report what backlog_record_reconcile could not
 #          settle in THIS home. Every ordinary dispatch and completion now moves
 #          the backlog row inside the script that moves the task's record
@@ -349,7 +351,7 @@ fleet_sync() {
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
+  "$FM_ROOT/bin/fm-fleet-sync.sh" --no-pr-lookup >"$tmp" 2>/dev/null &
   pid=$!
 
   start=$SECONDS

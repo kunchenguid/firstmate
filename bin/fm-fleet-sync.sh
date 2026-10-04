@@ -30,12 +30,16 @@
 # when gh can resolve a merged PR for the branch. Missing evidence, a lookup error,
 # or a merge conflict keeps the branch, as do the checked-out branch, the default
 # branch, and a branch with a worktree. FM_FLEET_PRUNE=0 disables this prune too.
+# This prune runs after the fast-forward, so a slow proof never delays the refresh.
+# --no-pr-lookup keeps only the local content leg. Bootstrap passes it because it
+# kills a refresh that outlives its deadline, and the merged-PR leg costs network
+# calls per branch on every run.
 # See prune_landed_branches for how the delete stays exact under concurrent use.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
-# Usage: fm-fleet-sync.sh [<project-dir-or-name>]
+# Usage: fm-fleet-sync.sh [--no-pr-lookup] [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
 # this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
@@ -76,12 +80,17 @@ if ! [[ "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS" =~ ^([0-9]+([.][0-9]*)?|[
 fi
 
 usage() {
-  echo "usage: fm-fleet-sync.sh [<project-dir-or-name>]" >&2
+  echo "usage: fm-fleet-sync.sh [--no-pr-lookup] [<project-dir-or-name>]" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
+fi
+PR_LOOKUP=1
+if [ "${1:-}" = "--no-pr-lookup" ]; then
+  PR_LOOKUP=0
+  shift
 fi
 [ $# -le 1 ] || { usage; exit 1; }
 
@@ -298,6 +307,7 @@ prune_landed_branches() {
       continue
     fi
     if ! fm_branch_landed_content_in_ref "$PROJ" "$BASE" "$tip"; then
+      [ "$PR_LOOKUP" = 1 ] || continue
       target=$(fm_branch_landed_pr_number_from_branch "$PROJ" "$branch") || continue
       fm_branch_landed_in_merged_pr "$PROJ" "$target" "$tip" >/dev/null || continue
     fi
@@ -425,8 +435,11 @@ sync_project() {
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
+  fast_forward_default
   prune_landed_branches || true
+}
 
+fast_forward_default() {
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
   [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
