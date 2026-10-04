@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 verb=${1:-}
 origin=${2:-}
 key=${3:-}
@@ -23,6 +24,7 @@ case "$verb" in ensure) [ "$#" -eq 4 ] ;; promote) [ "$#" -eq 5 ] ;; resolve) [ 
 case "$origin:$key" in *[!a-zA-Z0-9._:-]*|:*|*:) printf 'fm-ask-user-intake: invalid task or key\n' >&2; exit 2 ;; esac
 digest=$(printf '%s\t%s' "$origin" "$key" | shasum -a 256 | cut -c 1-20)
 id="ask-user-$digest"
+resolving="$STATE/.ask-user-resolving-$id"
 task_axi() { FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"; }
 if show=$(task_axi show "$id" --full 2>&1); then
   :
@@ -69,9 +71,19 @@ else
   [ -n "$show" ] || { printf 'absent: %s\n' "$id"; exit 0; }
   state=$(printf '%s\n' "$show" | sed -n 's/^  state: *//p' | head -1)
   kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: *//p' | head -1)
-  [ "$state" != 'done' ] || { printf 'resolved: %s\n' "$id"; exit 0; }
-  [ "$kind" = parked ] || { printf 'fm-ask-user-intake: %s is held by %s; use its authority owner\n' "$id" "$kind" >&2; exit 2; }
-  task_axi unhold "$id" >/dev/null
+  if [ "$state" = 'done' ]; then
+    rm -f "$resolving"
+    printf 'resolved: %s\n' "$id"
+    exit 0
+  fi
+  if [ "$kind" = parked ]; then
+    : > "$resolving"
+    task_axi unhold "$id" >/dev/null
+  elif { [ "$kind" != '-' ] && [ "$kind" != '"-"' ] && [ -n "$kind" ]; } || [ ! -f "$resolving" ]; then
+    printf 'fm-ask-user-intake: %s is held by %s; use its authority owner\n' "$id" "$kind" >&2
+    exit 2
+  fi
   task_axi 'done' "$id" >/dev/null
+  rm -f "$resolving"
   printf 'resolved: %s\n' "$id"
 fi

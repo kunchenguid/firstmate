@@ -22,6 +22,20 @@ count=$(backlog list --fields body | grep -c 'Review ask-user finding for ship-o
 if intake promote ship-one nm-run-review model-routing 'choose model' > /dev/null 2>&1; then
   fail 'routine routing was promoted to a captain call'
 fi
+mkdir -p "$home/fakebin"
+real_tasks_axi=$(command -v tasks-axi)
+cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ]; then exit 99; fi
+exec "$FM_REAL_TASKS_AXI" "$@"
+SH
+chmod +x "$home/fakebin/tasks-axi"
+if PATH="$home/fakebin:$PATH" FM_REAL_TASKS_AXI="$real_tasks_axi" intake resolve ship-one nm-run-review >/dev/null 2>&1; then
+  fail 'interrupted resolve unexpectedly completed'
+fi
+row=$(backlog show "$id" --full)
+printf '%s\n' "$row" | grep -q 'state: queued' || fail 'interrupted resolve did not leave an open row'
+printf '%s\n' "$row" | grep -q 'hold_kind: "-"' || fail 'interrupted resolve did not unhold the row'
 intake resolve ship-one nm-run-review >/dev/null
 intake resolve ship-one nm-run-review | grep -q '^resolved:' || fail 'resolve was not idempotent'
 row=$(backlog show "$id" --full)

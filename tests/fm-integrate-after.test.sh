@@ -53,12 +53,20 @@ FM_STATE_OVERRIDE="$TEST_HOME/state" bash -c '
   fm_pr_poll_merge_mark_notified "$2" provider github github.com example/project 12
 ' _ "$ROOT" "$TEST_HOME/state" || fail 'could not stage a confirmed merge notification'
 tool check consumer | grep -q 'provider landing confirmed' || fail 'confirmed PR merge did not release integration'
+if ready_tick; then fail 'unready probe ignored its durable check interval'; fi
+touch -t 202001010000 "$TEST_HOME/state/.integrate-after-probed-consumer"
 ready_tick || fail 'provider landing did not notify paused consumer'
 grep -q 'integrate-after ready: consumer' "$TEST_HOME/state/.wake-queue" || fail 'ready notification was not durable'
 if ready_tick; then fail 'ready notification repeated for an unchanged pause'; fi
+printf 'paused: integrate-after: provider, waiting for landing\n' >> "$TEST_HOME/state/consumer.status"
+ready_tick || fail 'new pause declaration was suppressed by the old ready marker'
+[ "$(grep -c 'integrate-after ready: consumer' "$TEST_HOME/state/.wake-queue")" -eq 2 ] \
+  || fail 'new pause did not get its own notification'
+if ready_tick; then fail 'new pause notification repeated'; fi
 printf 'working: final validation\n' > "$TEST_HOME/state/consumer.status"
 if ready_tick; then fail 'working consumer was notified'; fi
 [ ! -e "$TEST_HOME/state/.integrate-after-ready-consumer" ] || fail 'new work did not clear the notification marker'
+[ ! -e "$TEST_HOME/state/.integrate-after-probed-consumer" ] || fail 'new work did not clear the probe marker'
 backlog 'done' provider >/dev/null
 tool check consumer | grep -q 'provider landing confirmed' || fail 'Done provider did not release integration'
 printf 'Preserve this note.\nintegrate-after:provider\n' > "$TEST_HOME/body"
