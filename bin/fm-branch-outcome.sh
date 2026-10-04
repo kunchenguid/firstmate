@@ -26,8 +26,10 @@
 #     validate and read cold evidence; ordinary unread, unprocessed, recent,
 #     append, and cursor operations do not.
 #     Compaction shares the outcome lock. Its prepared record publishes cold
-#     evidence before the shorter active store and base, and every command
-#     completes an interrupted publication before using the store.
+#     evidence before the shorter active store, base, and any acknowledgement
+#     that advanced the processed frontier. Every command completes an
+#     interrupted publication before using the store, so acknowledgement and
+#     its required compaction cannot become a partial durable action.
 #     Historical rows with the same identity fields remain explicitly readable;
 #     current append uses them only for once-task identity, never as lifecycle
 #     state. The read state lives entirely in the cursor sidecar so marking
@@ -130,6 +132,7 @@ COMPACTION_JOURNAL="$STATE/.branch-outcomes-compaction"
 COMPACTION_ACTIVE="$STATE/.branch-outcomes-active.prepared"
 COMPACTION_COLD="$STATE/.branch-outcomes-cold.prepared"
 COMPACTION_BASE="$STATE/.branch-outcomes-base.prepared"
+COMPACTION_PROCESSED="$STATE/.branch-outcomes-processed.prepared"
 DATA_ROOT=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
@@ -220,15 +223,22 @@ read_processed() {
 }
 
 read_base() {
-  local version value extra
+  local version value extra trailing read_ok=0 has_trailing=0
   [ -e "$BASE_FILE" ] || { printf '1\n'; return 0; }
   exec 8< "$BASE_FILE" || {
     echo "error: refusing operation because the outcome base is unreadable" >&2
     return 1
   }
-  IFS=$(printf '\t') read -r version value extra <&8 || true
+  if IFS=$(printf '\t') read -r version value extra <&8; then
+    read_ok=1
+  fi
+  trailing=''
+  if IFS= read -r trailing <&8 || [ -n "$trailing" ]; then
+    has_trailing=1
+  fi
   exec 8<&-
-  if [ "$version" != fm-branch-outcomes-base-v1 ] || [ -n "$extra" ] \
+  if [ "$read_ok" -ne 1 ] || [ "$has_trailing" -ne 0 ] \
+      || [ "$version" != fm-branch-outcomes-base-v1 ] || [ -n "$extra" ] \
       || ! bounded_uint "$value" || [ "$value" -lt 1 ]; then
     echo "error: refusing operation because the outcome base is malformed" >&2
     return 1
@@ -328,25 +338,43 @@ write_base_prepared() { # <base>
   chmod 0600 "$COMPACTION_BASE"
 }
 
+write_processed_prepared() { # <sequence>
+  printf '%s\n' "$1" > "$COMPACTION_PROCESSED"
+  chmod 0600 "$COMPACTION_PROCESSED"
+}
+
 recover_compaction_locked() {
-  local schema old_base new_base old_last cold_hash active_hash base_hash extra
-  local current_hash current_base current_last
+  local schema old_base new_base old_last old_processed new_processed
+  local cold_hash active_hash base_hash processed_hash extra trailing
+  local current_hash current_base current_last current_processed read_ok=0 has_trailing=0
   if [ ! -e "$COMPACTION_JOURNAL" ]; then
-    rm -f -- "$COMPACTION_ACTIVE" "$COMPACTION_COLD" "$COMPACTION_BASE"
+    rm -f -- "$COMPACTION_ACTIVE" "$COMPACTION_COLD" "$COMPACTION_BASE" "$COMPACTION_PROCESSED"
     return 0
   fi
   exec 8< "$COMPACTION_JOURNAL" || return 1
-  IFS=$(printf '\t') read -r schema old_base new_base old_last cold_hash active_hash base_hash extra <&8 || true
+  if IFS=$(printf '\t') read -r schema old_base new_base old_last old_processed new_processed \
+      cold_hash active_hash base_hash processed_hash extra <&8; then
+    read_ok=1
+  fi
+  trailing=''
+  if IFS= read -r trailing <&8 || [ -n "$trailing" ]; then
+    has_trailing=1
+  fi
   exec 8<&-
-  if [ "$schema" != fm-branch-outcome-compaction-v1 ] || [ -n "$extra" ] \
+  if [ "$read_ok" -ne 1 ] || [ "$has_trailing" -ne 0 ] \
+      || [ "$schema" != fm-branch-outcome-compaction-v1 ] || [ -n "$extra" ] \
       || ! bounded_uint "$old_base" || ! bounded_uint "$new_base" \
-      || ! bounded_uint "$old_last" \
+      || ! bounded_uint "$old_last" || ! bounded_uint "$old_processed" \
+      || ! bounded_uint "$new_processed" \
       || [ "$new_base" -le "$old_base" ] || [ "$new_base" -gt "$old_last" ] \
-      || [ "${#cold_hash}" -ne 64 ] || [ "${#active_hash}" -ne 64 ] || [ "${#base_hash}" -ne 64 ]; then
+      || [ "$old_processed" -lt "$((old_base - 1))" ] \
+      || [ "$new_processed" -lt "$old_processed" ] || [ "$new_processed" -gt "$old_last" ] \
+      || [ "${#cold_hash}" -ne 64 ] || [ "${#active_hash}" -ne 64 ] \
+      || [ "${#base_hash}" -ne 64 ] || [ "${#processed_hash}" -ne 64 ]; then
     echo "error: refusing operation because the outcome compaction journal is malformed" >&2
     return 1
   fi
-  case "$cold_hash$active_hash$base_hash" in *[!a-f0-9]*)
+  case "$cold_hash$active_hash$base_hash$processed_hash" in *[!a-f0-9]*)
     echo "error: refusing operation because the outcome compaction journal is malformed" >&2
     return 1
     ;;
@@ -400,19 +428,41 @@ recover_compaction_locked() {
   fi
   [ "${FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT:-}" != after-base ] || return 75
 
-  rm -f -- "$COMPACTION_ACTIVE" "$COMPACTION_COLD" "$COMPACTION_BASE" "$COMPACTION_JOURNAL"
+  current_hash=$(sha256_file "$PROCESSED") || return 1
+  if [ "$current_hash" != "$processed_hash" ]; then
+    current_processed=$(read_processed) || return 1
+    [ "$current_processed" -eq "$old_processed" ] || {
+      echo "error: refusing recovery because the current processed marker does not match the journal" >&2
+      return 1
+    }
+    [ -f "$COMPACTION_PROCESSED" ] && [ "$(sha256_file "$COMPACTION_PROCESSED")" = "$processed_hash" ] || {
+      echo "error: refusing recovery because the prepared processed marker is missing or changed" >&2
+      return 1
+    }
+    mv -f -- "$COMPACTION_PROCESSED" "$PROCESSED" || return 1
+  fi
+  [ "${FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT:-}" != after-processed ] || return 75
+
+  rm -f -- "$COMPACTION_ACTIVE" "$COMPACTION_COLD" "$COMPACTION_BASE" \
+    "$COMPACTION_PROCESSED" "$COMPACTION_JOURNAL"
   [ "$(read_base)" -eq "$new_base" ] || return 1
   [ "$(last_seq)" -eq "$old_last" ] || return 1
+  [ "$(read_processed)" -eq "$new_processed" ] || return 1
   validate_cold_store || return 1
 }
 
 compaction_plan_locked() {
-  local base last cursor processed archive_through active_rows active_bytes cold_bytes move_rows
+  local requested_processed=${1:-} base last cursor current_processed processed
+  local archive_through active_rows active_bytes cold_bytes move_rows
   base=$(read_base) || return 1
   last=$(last_seq) || return 1
   cursor=$(read_cursor) || return 1
-  processed=$(read_processed) || return 1
-  if [ "$cursor" -gt "$last" ] || [ "$processed" -gt "$cursor" ] || [ "$processed" -lt "$((base - 1))" ]; then
+  current_processed=$(read_processed) || return 1
+  processed=${requested_processed:-$current_processed}
+  if ! bounded_uint "$processed" || [ "$cursor" -gt "$last" ] \
+      || [ "$current_processed" -gt "$cursor" ] \
+      || [ "$current_processed" -lt "$((base - 1))" ] \
+      || [ "$processed" -lt "$current_processed" ] || [ "$processed" -gt "$cursor" ]; then
     echo "error: refusing compaction because outcome cursors do not match the active base and tail" >&2
     return 1
   fi
@@ -427,14 +477,22 @@ compaction_plan_locked() {
 }
 
 compact_locked() {
-  local plan base last archive_through move_rows new_base journal_tmp
-  local cold_hash active_hash base_hash
-  plan=$(compaction_plan_locked) || return 1
+  local requested_processed=${1:-} plan base last archive_through move_rows new_base journal_tmp
+  local old_processed new_processed cold_hash active_hash base_hash processed_hash
+  old_processed=$(read_processed) || return 1
+  plan=$(compaction_plan_locked "$requested_processed") || return 1
   base=$(printf '%s\n' "$plan" | jq -r .base)
   last=$(printf '%s\n' "$plan" | jq -r .tail)
   archive_through=$(printf '%s\n' "$plan" | jq -r .archive_through)
   move_rows=$(printf '%s\n' "$plan" | jq -r .move_rows)
-  [ "$move_rows" -gt 0 ] || { printf '%s\n' "$plan"; return 0; }
+  new_processed=$(printf '%s\n' "$plan" | jq -r .processed)
+  if [ "$move_rows" -le 0 ]; then
+    if [ "$new_processed" -ne "$old_processed" ]; then
+      write_processed "$new_processed" || return 1
+    fi
+    printf '%s\n' "$plan"
+    return 0
+  fi
   validate_cold_store || {
     echo "error: refusing compaction because cold outcome evidence is malformed or does not meet the active base" >&2
     return 1
@@ -446,13 +504,16 @@ compact_locked() {
   { [ ! -s "$COLD_STORE" ] || cat "$COLD_STORE"; head -n "$move_rows" "$STORE"; } > "$COMPACTION_COLD" || return 1
   tail -n "+$((move_rows + 1))" "$STORE" > "$COMPACTION_ACTIVE" || return 1
   write_base_prepared "$new_base" || return 1
+  write_processed_prepared "$new_processed" || return 1
   chmod 0600 "$COMPACTION_COLD" "$COMPACTION_ACTIVE"
   cold_hash=$(sha256_file "$COMPACTION_COLD") || return 1
   active_hash=$(sha256_file "$COMPACTION_ACTIVE") || return 1
   base_hash=$(sha256_file "$COMPACTION_BASE") || return 1
+  processed_hash=$(sha256_file "$COMPACTION_PROCESSED") || return 1
   journal_tmp=$(mktemp "$STATE/.branch-outcomes-compaction.XXXXXX") || return 1
-  printf 'fm-branch-outcome-compaction-v1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$base" "$new_base" "$last" "$cold_hash" "$active_hash" "$base_hash" > "$journal_tmp" || {
+  printf 'fm-branch-outcome-compaction-v1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$base" "$new_base" "$last" "$old_processed" "$new_processed" \
+    "$cold_hash" "$active_hash" "$base_hash" "$processed_hash" > "$journal_tmp" || {
       rm -f -- "$journal_tmp"
       return 1
     }
@@ -646,6 +707,10 @@ processed_init_locked() {
     fi
     if [ "$processed_seq" -gt "$cursor_seq" ]; then
       echo "error: refusing processed initialization because the processed marker is ahead of the read cursor" >&2
+      return 1
+    fi
+    if [ "$processed_seq" -lt "$((base_seq - 1))" ]; then
+      echo "error: refusing processed initialization because the processed marker is behind the archived prefix" >&2
       return 1
     fi
   else
@@ -925,10 +990,9 @@ case "$CMD" in
       echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome" >&2
       exit 1
     fi
-    write_processed "$THROUGH"
-    if ! compact_locked >/dev/null; then
+    if ! compact_locked "$THROUGH" >/dev/null; then
       fm_lock_release "$LOCK"
-      echo "error: processed marker advanced but outcome compaction did not complete; preserve active evidence and retry compact --apply after resolving the reported store fault" >&2
+      echo "error: outcome acknowledgement and compaction did not complete; recover the published transaction or resolve the reported store fault" >&2
       exit 1
     fi
     fm_lock_release "$LOCK"

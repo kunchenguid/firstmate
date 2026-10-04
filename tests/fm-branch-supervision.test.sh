@@ -637,7 +637,7 @@ test_outcome_retention_keeps_64_processed_and_all_pending_rows() {
 }
 
 test_outcome_compaction_serializes_and_recovers_publication() {
-  local home crash mode pid out status seq
+  local home crash ack failed journal_bad mode pid out status seq unprocessed
   home="$TMP_ROOT/store-retention-concurrent"
   seed_outcome_history "$home" 128
   printf '100\n' > "$home/state/.branch-outcomes-cursor"
@@ -653,7 +653,7 @@ test_outcome_compaction_serializes_and_recovers_publication() {
   [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --all | jq -sc '[length,.[0].seq,.[-1].seq]')" = '[132,1,132]' ] \
     || fail "compaction and append did not serialize to one continuous history"
 
-  for mode in after-cold after-active after-base; do
+  for mode in after-cold after-active after-base after-processed; do
     crash="$TMP_ROOT/store-retention-$mode"
     seed_outcome_history "$crash" 128
     printf '112\n' > "$crash/state/.branch-outcomes-cursor"
@@ -667,7 +667,56 @@ test_outcome_compaction_serializes_and_recovers_publication() {
       || fail "$mode recovery did not restore complete history"
     [ ! -e "$crash/state/.branch-outcomes-compaction" ] || fail "$mode recovery left its journal active"
   done
-  pass "compaction serializes with appends and restart recovery completes every publication boundary"
+
+  ack="$TMP_ROOT/store-retention-ack-transaction"
+  seed_outcome_history "$ack" 128
+  printf '100\n' > "$ack/state/.branch-outcomes-cursor"
+  printf '99\n' > "$ack/state/.branch-outcomes-processed"
+  out=$(FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT=after-cold FM_HOME="$ack" \
+    "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 100 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "interrupted acknowledgement unexpectedly completed: $out"
+  [ "$(cat "$ack/state/.branch-outcomes-processed")" = 99 ] \
+    || fail "interrupted acknowledgement advanced the marker outside its recovery journal"
+  [ -e "$ack/state/.branch-outcomes-compaction" ] \
+    || fail "interrupted acknowledgement lost its recovery journal"
+  unprocessed=$(FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) \
+    || fail "ordinary read did not recover the acknowledged compaction"
+  [ -z "$unprocessed" ] || fail "recovered acknowledgement left seq 100 unprocessed: $unprocessed"
+  [ "$(cat "$ack/state/.branch-outcomes-processed")" = 100 ] \
+    || fail "recovered acknowledgement did not publish its exact marker"
+  [ "$(head -n 1 "$ack/state/branch-outcomes.jsonl" | jq -r .seq)" = 37 ] \
+    || fail "recovered acknowledgement did not retain the frontier-inclusive window"
+
+  FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-129 --verdict captain --summary summary-129 >/dev/null \
+    || fail "failed-compaction acknowledgement fixture append failed"
+  FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 129 \
+    || fail "failed-compaction acknowledgement fixture read failed"
+  sed '1s/"seq":1/"seq":2/' "$ack/state/branch-outcomes-cold.jsonl" > "$ack/state/cold.bad"
+  mv "$ack/state/cold.bad" "$ack/state/branch-outcomes-cold.jsonl"
+  out=$(FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 129 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "acknowledgement accepted malformed cold evidence"
+  [ "$(cat "$ack/state/.branch-outcomes-processed")" = 100 ] \
+    || fail "failed compaction advanced the acknowledgement before journal publication"
+  [ ! -e "$ack/state/.branch-outcomes-compaction" ] \
+    || fail "preparation failure published a compaction journal"
+
+  journal_bad="$TMP_ROOT/store-retention-journal-trailing"
+  seed_outcome_history "$journal_bad" 128
+  printf '112\n' > "$journal_bad/state/.branch-outcomes-cursor"
+  printf '100\n' > "$journal_bad/state/.branch-outcomes-processed"
+  FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT=after-cold FM_HOME="$journal_bad" \
+    "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null 2>&1 || true
+  printf 'trailing-record\n' >> "$journal_bad/state/.branch-outcomes-compaction"
+  out=$(FM_HOME="$journal_bad" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "recovery accepted a trailing compaction-journal record"
+  assert_contains "$out" "compaction journal is malformed" \
+    "trailing-journal refusal lost its diagnostic"
+
+  pass "compaction and acknowledgement serialize with appends and recover or refuse every publication boundary"
 }
 
 test_outcome_retention_refuses_identity_damage_without_loading_cold_normally() {
@@ -705,6 +754,12 @@ test_outcome_retention_refuses_identity_damage_without_loading_cold_normally() {
   status=$?
   [ "$status" -ne 0 ] || fail "unprocessed accepted a marker behind the archived prefix"
   assert_contains "$out" "behind the archived prefix" "behind-base refusal lost its diagnostic"
+  printf '128\n' > "$home/state/.branch-outcome-index-ready"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "processed-init ready shortcut accepted a marker behind the archived prefix"
+  assert_contains "$out" "behind the archived prefix" \
+    "processed-init behind-base refusal lost its diagnostic"
 
   malformed_base="$TMP_ROOT/store-retention-malformed-base"
   seed_outcome_history "$malformed_base" 4
@@ -715,6 +770,11 @@ test_outcome_retention_refuses_identity_damage_without_loading_cold_normally() {
     [ "$status" -ne 0 ] || fail "ordinary read accepted malformed active base $invalid_base"
     assert_contains "$out" "outcome base is malformed" "malformed-base refusal lost its diagnostic"
   done
+  printf 'fm-branch-outcomes-base-v1\t1\ntrailing-record\n' > "$malformed_base/state/.branch-outcomes-base"
+  out=$(FM_HOME="$malformed_base" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "ordinary read accepted a trailing outcome-base record"
+  assert_contains "$out" "outcome base is malformed" "trailing-base refusal lost its diagnostic"
   pass "active gaps, cold corruption, and behind-base cursors fail closed while normal reads stay on the active store"
 }
 
