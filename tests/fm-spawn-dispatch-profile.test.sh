@@ -21,11 +21,13 @@ make_spawn_pi_probe() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = --help ]; then
-  if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
-    printf '%s\n' 'Pi 0.82.0' 'Options: --help'
-  else
-    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
-  fi
+  # Mirror real Pi help advertising: 0.82.0 has --approve but not --tui-mode;
+  # 0.50.0 is a synthetic pre-approve probe; current defaults advertise both.
+  case "${FM_FAKE_PI_VERSION:-0.84.0}" in
+  0.50.0) printf '%s\n' 'Pi 0.50.0' 'Options: --help' ;;
+  0.82.0) printf '%s\n' 'Pi 0.82.0' 'Options: --help --approve' ;;
+  *) printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode> --approve' ;;
+  esac
 fi
 exit 0
 SH
@@ -1035,8 +1037,8 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
-    "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape and seeded-home --approve"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# evidence begin: persistent secondmate\n%s\n' "$out"
     printf 'launch command:\n%s\noriginal charter:\n' "$launch"
@@ -1044,6 +1046,74 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     printf 'supervisor AGENTS.md and charter remain byte-identical; no worker overlay created\n# evidence end\n'
   fi
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
+}
+
+test_pi_seeded_secondmate_preapproves_project_trust() {
+  local harness rec id sm out status launch
+  for harness in pi pi-signed; do
+    id="profile-${harness}-seeded-approve-z8e"
+    rec=$(make_spawn_case "profile-${harness}-seeded-approve" codex "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    sm=$(cd "$sm" && pwd -P)
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+    status=$?
+    expect_code 0 "$status" "$harness seeded secondmate spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "'$FAKEBIN_DIR/$harness'" \
+      "$harness secondmate must launch the probed executable"
+    assert_contains "$launch" "--approve" \
+      "$harness seeded secondmate must pre-approve project trust when help advertises --approve"
+    assert_contains "$launch" "-e '$sm/.pi/extensions/fm-primary-turnend-guard.ts'" \
+      "$harness secondmate lost its turn-end extension"
+  done
+  pass "seeded Pi/pi-signed secondmate launches carry session --approve when advertised"
+}
+
+test_pi_worker_launch_omits_seeded_home_approve() {
+  local rec id out status launch
+  id=profile-pi-worker-no-approve-z8f
+  rec=$(make_spawn_case profile-pi-worker-no-approve pi "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "pi ship spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular" \
+    "pi worker launch lost its regular TUI probe"
+  assert_not_contains "$launch" "--approve" \
+    "ordinary Pi worker launches must not receive secondmate seeded-home --approve"
+  pass "ordinary Pi worker launches omit --approve"
+}
+
+test_pi_approve_probe_omits_unsupported_flag() {
+  local harness rec id sm out status launch
+  for harness in pi pi-signed; do
+    id="profile-${harness}-no-approve-z8g"
+    rec=$(make_spawn_case "profile-${harness}-no-approve" codex "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    sm=$(cd "$sm" && pwd -P)
+
+    out=$(FM_TEST_PI_VERSION=0.50.0 \
+      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+    status=$?
+    expect_code 0 "$status" "$harness without --approve must still spawn"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "'$FAKEBIN_DIR/$harness'" \
+      "$harness without --approve must still launch the probed executable"
+    assert_not_contains "$launch" "--approve" \
+      "$harness without advertised --approve must omit the flag"
+    assert_not_contains "$launch" "--tui-mode" \
+      "$harness 0.50.0 probe fixture must omit --tui-mode too"
+  done
+  pass "Pi approve probing omits --approve when help does not advertise it"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -1856,6 +1926,9 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_pi_seeded_secondmate_preapproves_project_trust
+test_pi_worker_launch_omits_seeded_home_approve
+test_pi_approve_probe_omits_unsupported_flag
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_lavish_server_address_is_exported_to_worker_launch

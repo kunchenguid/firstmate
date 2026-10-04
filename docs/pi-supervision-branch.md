@@ -429,6 +429,14 @@ Nothing else advances that marker.
 An unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed.
 The extension presents the current unprocessed sequence set again at the next main run boundary and at every session start.
 
+The first presentation of a sequence set is an ordinary turn whose response stays visible, including prose alongside `fm_branch_processed`.
+From the second triggered presentation of that same set on, until its listed outcomes are acknowledged, an assistant final is removed before persistence only when its text is empty after trimming or exactly matches a final already visible for that sequence set after trimming.
+Differing replies stay visible, including the first real handling after an empty or unrelated reply.
+Messages carrying tool calls always retain their prose, signed reasoning, and usage accounting.
+Pi's Markdown transformer API buffers retry prose while streaming on versions that expose it, so the complete reply can be compared before rendering.
+A retained reply renders when the message ends.
+Successful acknowledgement releases subsequent assistant output, and a real user message restores ordinary output immediately, including when a processing request rides that prompt.
+
 ### Re-presentation pacing
 
 A presentation already pending its run boundary is not resent or widened.
@@ -633,7 +641,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - The new branch conversation at every main session start with continuation inside one session, and the mirror re-anchor that pairs with it.
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
 - The sequence-keyed processing request and its acknowledgement.
-- Re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, and session-start re-presentation.
+- Suppression of empty or exact-repeat retry finals with differing replies preserved, preserved tool calls and user responses, the triggered-then-next-turn pacing, and session-start re-presentation.
 - Routine outcomes staying turn-free, task-level no-change notes staying hidden, absent-marker re-presentation, and malformed-age reporting without acknowledgement.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
 - Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.

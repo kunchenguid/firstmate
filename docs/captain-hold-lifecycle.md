@@ -51,8 +51,9 @@ It works in this order:
 
 1. It uses an existing task, or creates one when nothing exists to hold.
 2. It records the task's UTC hold-set timestamp as the leading line of the task body.
-3. It invokes the underlying tasks-axi hold operation.
-4. It verifies both records.
+3. When `--origin` is supplied, it records the origin on the task, replacing any previous association.
+4. It invokes the underlying tasks-axi hold operation.
+5. It verifies the hold and timestamp.
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
@@ -62,6 +63,10 @@ Repeat and edge cases:
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
+- Before the backend hold runs, `--origin` records the origin the call is held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
+  If that write fails, the backend hold is not attempted.
+- The reason may contain parentheses, semicolons, quotes, and line breaks.
+  [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
 
 ### Answering a call (`answer`)
 
@@ -103,6 +108,10 @@ A post-teardown visual review can complete against the surviving report and dura
 `complete` accepts `--none` as an explicit semantic inventory result.
 `--none` is refused while the origin still has a lifecycle-open keyed status decision.
 Before recording completion, `complete` verifies every listed task against tasks-axi.
+The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
+For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
+An entry whose recorded origin differs from the one being completed is refused.
+An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
 The event names the reviewed inventory.
@@ -114,7 +123,7 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 `verify` checks three things:
 
 - The recorded attestation exists.
-- Every recorded inventory entry is still durable: actively captain-held, or carrying a recorded answer.
+- Every recorded inventory entry still passes the [completion inventory checks](#recording-a-reviewed-inventory-complete).
 - No keyed status decision opened after the last `complete`.
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
@@ -479,7 +488,7 @@ It then finishes any still-recorded dependency-edge cleanup without rewriting th
 
 ## Verification record
 
-The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic `sample` identities and decision text.
+The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic identities and decision text.
 It proves the behaviors below.
 The suite does not test the accepted merge-to-cleanup re-hold window or asynchronous queued-forge landing because those events occur after the locally serialized merge command has returned.
 
@@ -528,7 +537,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 ### Legacy paths
 
-- Every legacy path works: composed identities through the shim, pre-collapse `decision_keys=` metadata, routed-resolution replay, and a concrete-origin binding.
+- Composed identities through the shim, valid pre-collapse `decision_keys=` inventories, routed-resolution replay, and a concrete-origin binding remain supported.
+  Historical self-inventories require the [documented repair](#recording-a-reviewed-inventory-complete).
 
 ### Task-body read-back cases
 
