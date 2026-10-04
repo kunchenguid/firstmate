@@ -508,6 +508,27 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Pi seeded-secondmate project trust
+
+[`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the seeded-secondmate project-trust approval contract and compatibility fallback.
+The live guard below isolates Pi's trust-gate behavior in secondmate-shaped homes; portable launch-command coverage separately verifies that spawn selects the flag for the intended launches.
+
+Verified 2026-10-02 on pi 0.82.0 through the default-on live guard (disposable `PI_CODING_AGENT_DIR` / `HOME` only; never `~/.pi`):
+
+```sh
+bash tests/fm-pi-seeded-home-trust-live-e2e.test.sh
+```
+
+```
+# live pi version: 0.82.0
+ok - fresh seeded Pi secondmate-shaped home stalls on Trust project folder? without --approve
+ok - seeded home with --approve starts past the trust dialog without rewriting trust.json
+ok - unseeded path without --approve still prompts on Trust project folder?
+# all fm-pi-seeded-home-trust-live-e2e checks passed (3)
+```
+
+Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.sh` (`test_pi_seeded_secondmate_preapproves_project_trust`, `test_pi_worker_launch_omits_seeded_home_approve`, `test_pi_approve_probe_omits_unsupported_flag`).
+
 ## Launch-prompt backstop signatures
 
 `bin/fm-busy-lib.sh`'s launch-prompt backstop (`fm_busy_launch_prompt_parked`) reclassifies a launch whose busy record is still pinned at the fm-spawn seed as `unknown launch-prompt`, rather than `busy fm-spawn`, when the captured pane matches that harness's own recognized trust, sign-in, or first-run dialog.
@@ -2126,6 +2147,22 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
 In TUI mode, its `/supervision-model` model list is drawn with Pi's own `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder` through the extension context's `ui.custom` surface, which is what bounds and searches a long catalog.
+
+Processing-retry visibility was verified on 2026-09-27 against Pi 0.87.1 with a local intercepted provider stream, without credentials or an external provider request:
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 npm exec --yes --package=typescript@5.9.3 -- bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - real Pi SDK 0.87.1 suppresses only empty or exact-repeat retry finals, retains first and differing replies after reopen, buffers retry streaming, and keeps outcomes retryable
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.87.1
+```
+
+The guard runs the extension through Pi's actual message event runner, renders its streamed replies with the stock assistant component, and checks both live agent state and a reopened session file.
+The portable processing-turn case additionally covers whitespace-only replies, a one-character difference, prose alongside acknowledgment calls, signed reasoning and tool-call preservation, rejected and partial acknowledgements, busy follow-ups, user steering, and both orderings of a user message batched with a processing request.
+Other primary harnesses do not load this Pi extension, and these event and persistence boundaries are independent of the runtime session backend.
 
 Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 

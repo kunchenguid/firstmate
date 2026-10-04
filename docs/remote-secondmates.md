@@ -82,7 +82,8 @@ On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at
 After that bootstrap, every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session.
 It never runs in the SSH process or a Herdr pane.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
-When idle, the worker checks for newly staged work about once per second; after a lane starts or finishes it checks more frequently for a short period.
+The [`fm-remote-job-worker.sh` header](../bin/fm-remote-job-worker.sh) owns dispatch cadence and the quiet-scan latency for work arriving after its post-activity burst.
+Active-command and result waits use a separate sampling interval; the [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns its defaults, overrides, and completion, cancellation, and timeout latency contract.
 
 ### Job lanes and preemption
 
@@ -512,6 +513,7 @@ A process-event source takes these steps:
 - It does not carry blank separators.
 
 The listener holds its claim across an empty wait and across a delta it re-arms, so a line appended during either is collected without waiting for the next supervision cycle.
+The [`fm-remote-delta-read.sh` header](../bin/fm-remote-delta-read.sh) owns snapshot sampling and its line-visibility and wait-window latency contract.
 It stops when that registration is retired, the registered command changes, or the home's owner lease lapses.
 `bin/fm-procevent.sh` owns the generic relisten rule, and `bin/fm-procevent-remote-reply.sh` owns this adapter's answer.
 
