@@ -220,8 +220,12 @@ type TaskOutcomeObservation = {
   progress: Record<string, unknown> | null;
   executor_state: string;
   executor_digest: string;
+  task_generation: string | null;
+  candidate_identity: string | null;
+  metadata_digest: string | null;
 };
-type LoadedOutcomeEvidence = { outcome_digest: string; record_token: string | null; executor_digest: string | null };
+type LoadedOutcomeEvidence = { outcome_digest: string; record_token: string | null; executor_digest: string | null;
+  task_generation: string | null; candidate_identity: string | null; metadata_digest: string | null };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -612,17 +616,18 @@ function coalesceExactOutcomeRows(rows: OutcomeRow[]): OutcomeRow[] {
     const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
     return latest.get(key) === index;
   });
-  const terminal = new Map<string, number>();
-  exact.forEach((row, index) => {
+  const terminal = new Set<string>();
+  exact.forEach((row) => {
     if (row.taskGeneration && ["done", "archived"].includes(row.taskDisposition ?? "")) {
-      terminal.set(JSON.stringify([row.task, row.taskGeneration]), index);
+      terminal.add(JSON.stringify([row.task, row.taskGeneration]));
     }
   });
-  return exact.filter((row, index) => {
-    const terminalIndex = terminal.get(JSON.stringify([row.task, row.taskGeneration]));
+  return exact.filter((row) => {
+    const hasTerminal = terminal.has(JSON.stringify([row.task, row.taskGeneration]));
     const key = JSON.stringify([row.task, row.taskGeneration, row.evidenceKey, row.verdict, row.summary, row.silent]);
-    return terminalIndex === undefined || index >= terminalIndex || row.verdict !== "routine" ||
-      (duplicateCounts.get(key) ?? 0) < 2;
+    const repeatedRoutine = row.verdict === "routine" && (duplicateCounts.get(key) ?? 0) >= 2;
+    if (!repeatedRoutine) return true;
+    return !hasTerminal && !["done", "archived"].includes(row.taskDisposition ?? "");
   });
 }
 
@@ -781,6 +786,20 @@ export default function (pi: ExtensionAPI) {
     } catch {
       return "";
     }
+  }
+
+  function taskRecordDispositionInvariant(task: string): string {
+    try {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(task)) return "";
+      const data = process.env.FM_DATA_OVERRIDE || join(fmHome, "data");
+      const record = JSON.parse(readFileSync(join(data, task, "task.json"), "utf8")) as Record<string, unknown>;
+      // Only the canonical terminal transition may differ while a branch turn
+      // is in flight. Notes, links, progress, holds, dependencies, and every
+      // other business field remain part of this exact comparison.
+      const stable = { ...record };
+      for (const field of ["state", "closed", "completion", "updated_at"]) delete stable[field];
+      return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
+    } catch { return ""; }
   }
 
   // Accepted wake turns that have not settled yet. A newly offered iDA result
@@ -1299,10 +1318,30 @@ export default function (pi: ExtensionAPI) {
     const first = await read(["progress", row.task]);
     const executor = await read(["--durable-only", row.task]);
     const second = await read(["progress", row.task]);
+    let taskGeneration: string | null = null;
+    let candidateIdentity: string | null = null;
+    let metadataDigest: string | null = null;
+    try {
+      const metadata = readFileSync(join(state, `${row.task}.meta`), "utf8");
+      metadataDigest = createHash("sha256").update(metadata).digest("hex");
+      const exact = (field: string) => {
+        const values = metadata.split("\n").filter((line) => line.startsWith(`${field}=`))
+          .map((line) => line.slice(field.length + 1));
+        return values.length === 1 && values[0] ? values[0] : null;
+      };
+      taskGeneration = exact("spawn_gen");
+      candidateIdentity = exact("pr_head");
+      if (taskGeneration !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(taskGeneration)) taskGeneration = null;
+      if (candidateIdentity !== null && !/^[a-f0-9]{40,64}$/.test(candidateIdentity)) candidateIdentity = null;
+    } catch { /* Exact metadata absence is itself rechecked through null. */ }
+    if (row.taskGeneration && taskGeneration !== row.taskGeneration) {
+      throw new Error(`task generation changed while loading ${row.task}`);
+    }
     if (first.status === 1 && second.status === 1) {
       const executorState = executor.stdout.trim();
       return { task: row.task, record_token: null, progress: null, executor_state: executorState,
-        executor_digest: createHash("sha256").update(executorState).digest("hex") };
+        executor_digest: createHash("sha256").update(executorState).digest("hex"),
+        task_generation: taskGeneration, candidate_identity: candidateIdentity, metadata_digest: metadataDigest };
     }
     if (first.status !== 0 || second.status !== 0) {
       throw new Error(`task observation refused for ${row.task}: progress statuses ${String(first.status)}/${String(second.status)}`);
@@ -1314,14 +1353,18 @@ export default function (pi: ExtensionAPI) {
     }
     const executorState = executor.stdout.trim();
     return { task: row.task, record_token: progress.record_token, progress, executor_state: executorState,
-      executor_digest: createHash("sha256").update(executorState).digest("hex") };
+      executor_digest: createHash("sha256").update(executorState).digest("hex"),
+      task_generation: taskGeneration, candidate_identity: candidateIdentity, metadata_digest: metadataDigest };
   }
 
   function rememberOutcomeEvidence(row: OutcomeRow, observation?: TaskOutcomeObservation): void {
     loadedOutcomeSequences.add(row.seq);
     loadedOutcomeEvidence.set(row.seq, { outcome_digest: outcomeDigest(row),
       record_token: observation?.record_token ?? null,
-      executor_digest: observation ? observation.executor_digest : null });
+      executor_digest: observation ? observation.executor_digest : null,
+      task_generation: observation?.task_generation ?? null,
+      candidate_identity: observation?.candidate_identity ?? null,
+      metadata_digest: observation?.metadata_digest ?? null });
   }
 
   // Encoding shells out, so it can fail on a broken checkout. This file's
@@ -1607,7 +1650,7 @@ export default function (pi: ExtensionAPI) {
           const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary,
             "--silent", String(silent && !progressToken)];
           if (wake) appendArgs.push("--wake", wake);
-          if (wakeTaskScope?.token) appendArgs.push("--material-key", wakeTaskScope.token);
+          if (progressToken) appendArgs.push("--material-key", progressToken);
           const appended = await runOutcomeScript(appendArgs);
           if (!appended.ok) {
             return {
@@ -2219,6 +2262,7 @@ ${context.command}
       wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
       branchProgressBindings = { [offer.task]: progress.record_token };
       const admittedResumeSnapshot = await compactResumeSnapshot(offer.task);
+      const admittedRecordInvariant = taskRecordDispositionInvariant(offer.task);
       branchProgressSnapshots = { [offer.task]: admittedResumeSnapshot };
       branchEffectAuthorityNeeded = new Set();
       continuationToolsRemaining = 8;
@@ -2256,12 +2300,14 @@ ${context.command}
         const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", offer.task], { env: scriptEnv });
         const terminal = current.status === 0 ? JSON.parse(current.stdout) : null;
         const terminalSnapshot = await compactResumeSnapshot(offer.task);
+        const terminalRecordInvariant = taskRecordDispositionInvariant(offer.task);
         const archivalOnly = terminal && ["done", "archived"].includes(terminal.task_state) &&
           terminal.task_held === "no" && terminal.task_blocked === "no" &&
           terminal.goal === progress.goal && terminal.acceptance === progress.acceptance &&
           terminal.current_state === progress.current_state && terminal.remaining_gap === progress.remaining_gap &&
           terminal.next_step === progress.next_step && Boolean(admittedResumeSnapshot) &&
-          terminalSnapshot === admittedResumeSnapshot;
+          terminalSnapshot === admittedResumeSnapshot && Boolean(admittedRecordInvariant) &&
+          terminalRecordInvariant === admittedRecordInvariant;
         if (!archivalOnly) throw new Error("continuation settled without a durable outcome");
         const settlementId = sessionManager.appendCustomEntry("fm-task-continuation-terminal-settlement", {
           task: offer.task, admission: offer.admission, admitted_record_token: progress.record_token,
@@ -2282,7 +2328,7 @@ ${context.command}
       if (acceptedGeneration === generation && await actingAsOwner(acceptedGeneration)) {
         await runOutcomeScript(["append", "--task", offer.task, "--verdict", "captain", "--summary",
           `Supervisor Branch could not continue the authorized task; obligation retained: ${String(error).slice(0, 1200)}`,
-          "--material-key", offer.admission]);
+          "--material-key", offer.progress.record_token]);
         await enqueueDelivery(() => reconcileWithHealth(acceptedGeneration));
       }
     }).catch(() => { /* Original task progress remains due if reporting also fails. */ })
@@ -3317,7 +3363,10 @@ ${context.command}
             catch (error) {
               return { content: [{ type: "text", text: `acknowledgement refused: ${String(error)}` }], details: undefined, isError: true };
             }
-            if (observed.record_token !== evidence.record_token || observed.executor_digest !== evidence.executor_digest) {
+            if (observed.record_token !== evidence.record_token || observed.executor_digest !== evidence.executor_digest ||
+                observed.task_generation !== evidence.task_generation ||
+                observed.candidate_identity !== evidence.candidate_identity ||
+                observed.metadata_digest !== evidence.metadata_digest) {
               return { content: [{ type: "text", text: `acknowledgement refused: task revision or executor identity changed for seq ${seq}; reload the targeted observation` }], details: undefined, isError: true };
             }
           }

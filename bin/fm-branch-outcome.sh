@@ -7,9 +7,10 @@
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
 #     "statusEndpoint":N,"statusIdent":"...","taskGeneration":"...",
-#     "taskDisposition":"...","evidenceKey":"..."}. `evidenceKey` binds the exact producer material
-#     revision (or the captured wake/status revision when no producer key is
-#     supplied), while `taskGeneration` binds its executor generation. Legacy rows without `silent`
+#     "taskDisposition":"...","evidenceKey":"..."}. `evidenceKey` binds the exact stable producer
+#     material revision (or captured status revision when no producer key is
+#     supplied), while `taskGeneration` binds its proved executor generation.
+#     An unproved generation/material pair uses the legacy non-coalescible row shape. Legacy rows without `silent`
 #     or status provenance remain valid and are treated as visible.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
@@ -478,6 +479,7 @@ case "$CMD" in
     [ -n "$TASK" ] || usage
     outcome_index_path "$TASK" >/dev/null || usage
     [ -n "$SUMMARY" ] || usage
+    case "$MATERIAL_KEY" in *$'\n'*|*$'\r'*) echo "error: material key must be one line" >&2; exit 2 ;; esac
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
     if [ "$SILENT" = true ] && { [ "$TASK" != fleet ] || [ "$VERDICT" != routine ]; }; then
@@ -512,18 +514,28 @@ case "$CMD" in
     fi
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
-    TASK_GENERATION=$(sed -n 's/^spawn_gen=//p' "$STATE/$TASK.meta" 2>/dev/null | head -1)
-    case "$TASK_GENERATION" in ''|*[!A-Za-z0-9._-]*) TASK_GENERATION=none ;; esac
+    TASK_GENERATION=$(awk -F= '$1 == "spawn_gen" { count++; value=substr($0, 11) }
+      END { if (count == 1 && value ~ /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/) print value; else exit 1 }' \
+      "$STATE/$TASK.meta" 2>/dev/null) || TASK_GENERATION=''
     TASK_DISPOSITION=$(jq -er '.state | select(type == "string" and length > 0)' "$DATA_ROOT/$TASK/task.json" 2>/dev/null || printf 'unknown\n')
     case "$TASK_DISPOSITION" in *[!A-Za-z0-9._-]*) TASK_DISPOSITION=unknown ;; esac
-    EVIDENCE_KEY=$(sha256_text "$TASK|$TASK_GENERATION|$TASK_DISPOSITION|$MATERIAL_KEY|$WAKE|$CAPTURED_STATUS_ENDPOINT|$CAPTURED_STATUS_IDENT") \
-      || { fm_lock_release "$LOCK"; exit 1; }
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","taskGeneration":"%s","taskDisposition":"%s","evidenceKey":"%s"}\n' \
-      "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
-      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" "$(json_escape "$TASK_GENERATION")" \
-      "$(json_escape "$TASK_DISPOSITION")" "$EVIDENCE_KEY" >> "$STORE"
+    if [ -n "$TASK_GENERATION" ] && { [ -n "$MATERIAL_KEY" ] || { [ "$CAPTURED_STATUS_ENDPOINT" -ge 0 ] && [ -n "$CAPTURED_STATUS_IDENT" ]; }; }; then
+      EVIDENCE_KEY=$(sha256_text "$TASK|$TASK_GENERATION|$TASK_DISPOSITION|$MATERIAL_KEY|$CAPTURED_STATUS_ENDPOINT|$CAPTURED_STATUS_IDENT") \
+        || { fm_lock_release "$LOCK"; exit 1; }
+      printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","taskGeneration":"%s","taskDisposition":"%s","evidenceKey":"%s"}\n' \
+        "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
+        "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
+        "$(json_escape "$CAPTURED_STATUS_IDENT")" "$(json_escape "$TASK_GENERATION")" \
+        "$(json_escape "$TASK_DISPOSITION")" "$EVIDENCE_KEY" >> "$STORE"
+    else
+      # Unknown generation or material identity remains append-only and
+      # visible, but is deliberately ineligible for identity coalescing.
+      printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+        "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
+        "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
+        "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+    fi
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still

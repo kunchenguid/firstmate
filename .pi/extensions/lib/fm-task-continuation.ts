@@ -1,7 +1,8 @@
 // Live-Pi reminder over the canonical per-task record. MAIN owns material progress
 // updates; existing executor, effect, lease, inbox, merge and cleanup owners act.
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { runCommandAsync } from "./fm-async-exec.ts";
@@ -144,6 +145,51 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const at = typeof entry.timestamp === "number" ? entry.timestamp : Date.parse(entry.timestamp || "");
     if (!Array.isArray(ids) || !Number.isFinite(at)) return;
     for (const id of ids) if (typeof id === "string") delivered.set(id, at);
+  }
+
+  function restoreEntries(entries: readonly unknown[]) {
+    for (const candidate of entries) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const entry = candidate as { type?: unknown; customType?: unknown; details?: unknown; data?: unknown;
+        timestamp?: string | number };
+      if (entry.type === "custom_message") readDelivery({
+        customType: typeof entry.customType === "string" ? entry.customType : undefined,
+        details: entry.details, timestamp: entry.timestamp,
+      });
+      if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
+        readDelivery({ customType: String(entry.customType), details: entry.data, timestamp: entry.timestamp as string | number });
+      }
+      if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
+        const pace = entry.data as InputPacing & { id: string };
+        if (typeof pace?.id === "string" && /^(progress|reconcile):/.test(pace.id)) pacing.set(pace.id, pace);
+      }
+    }
+  }
+
+  // Pacing receipts are Pi transcript state, not another task truth. A new
+  // session file has an empty branch, so recover the same extension entries
+  // from sibling sessions for this exact cwd and session directory.
+  function restoreHistoricalReceipts(ctx: ExtensionContext) {
+    const manager = ctx?.sessionManager;
+    const currentFile = manager?.getSessionFile?.();
+    const currentCwd = manager?.getCwd?.();
+    if (!currentFile || !currentCwd) return;
+    const sessionDir = manager.getSessionDir?.() || dirname(currentFile);
+    let names: string[] = [];
+    try {
+      names = readdirSync(sessionDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+        .map((entry) => entry.name).sort();
+    } catch { return; }
+    for (const name of names) {
+      try {
+        const rows = readFileSync(join(sessionDir, name), "utf8").split("\n").filter(Boolean)
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        const header = rows[0] as { type?: unknown; cwd?: unknown } | undefined;
+        if (header?.type !== "session" || header.cwd !== currentCwd) continue;
+        restoreEntries(rows);
+      } catch { /* A malformed unrelated transcript cannot grant a receipt. */ }
+    }
   }
 
   async function receive(ctx: ExtensionContext, owner: ContinuationReceiver): Promise<Admission | undefined> {
@@ -306,18 +352,11 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     generation++;
     context = ctx;
     pacing.clear();
+    submitted.clear();
     delivered.clear();
+    restoreHistoricalReceipts(ctx);
     const entries = ctx?.sessionManager?.getBranch?.() ?? ctx?.sessionManager?.getEntries?.() ?? [];
-    for (const entry of entries) {
-      if (entry.type === "custom_message") readDelivery(entry);
-      if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
-        readDelivery({ customType: entry.customType, details: entry.data, timestamp: entry.timestamp });
-      }
-      if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
-        const pace = entry.data as InputPacing & { id: string };
-        if (typeof pace?.id === "string" && /^(progress|reconcile):/.test(pace.id)) pacing.set(pace.id, pace);
-      }
-    }
+    restoreEntries(entries);
   };
   pi.on("session_start", restoreSession);
   pi.on("session_tree", restoreSession);

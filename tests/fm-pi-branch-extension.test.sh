@@ -1453,6 +1453,8 @@ taskCommand("fm-task-state.sh", ["update-progress", "task-f", "--progress", JSON
   acceptance: "The exact batch is processed once", current_state: "Initial observation",
   remaining_gap: "MAIN handling remains", next_step: "Process the authenticated outcome",
 })]);
+const taskFMeta = `${home}/state/task-f.meta`;
+writeFileSync(taskFMeta, `spawn_gen=g-task-f\npr_head=${"a".repeat(40)}\n`);
 
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
@@ -1646,6 +1648,17 @@ const beforePairRepeat = requests().length;
 await runOf();
 if (requests().length !== beforePairRepeat + 1 || requests().at(-1).options.triggerTurn !== true) {
   throw new Error("the second presentation of the widened sequence set did not open its own turn");
+}
+writeFileSync(taskFMeta, `spawn_gen=g-task-f-relaunched\npr_head=${"b".repeat(40)}\n`);
+const staleIdentity = await processed.execute("ack-stale-identity", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
+if (!staleIdentity.isError || !staleIdentity.content.some((item) => item.type === "text" &&
+    (item.text.includes("task revision or executor identity changed") || item.text.includes("task generation changed")))) {
+  throw new Error(`a changed executor generation/candidate identity was silently acknowledged: ${JSON.stringify(staleIdentity)}`);
+}
+writeFileSync(taskFMeta, `spawn_gen=g-task-f\npr_head=${"a".repeat(40)}\n`);
+const restoredIdentity = await outcomes.execute("reload-restored-identity", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
+if (restoredIdentity.isError || !restoredIdentity.content.some((item) => item.type === "text" && item.text.includes('"task_generation":"g-task-f"'))) {
+  throw new Error(`the restored generation/candidate identity could not be loaded: ${JSON.stringify(restoredIdentity)}`);
 }
 taskCommand("fm-task-state.sh", ["update-progress", "task-f", "--progress", JSON.stringify({
   acceptance: "The exact batch is processed once", current_state: "Concurrent material revision",
@@ -6179,6 +6192,11 @@ globalThis.__fmOnBranchPrompt = async ({ text }) => {
       acceptance: "The exact terminal disposition is retained", current_state: "A material nonterminal revision appeared",
       remaining_gap: "The changed work needs reconciliation", next_step: "Reconcile the changed task revision",
     })]);
+    return;
+  }
+  if (text.includes("evidence-task")) {
+    command("fm-tasks-axi.sh", ["update", "evidence-task", "--note", "new terminal evidence arrived during reporting"]);
+    command("fm-tasks-axi.sh", ["archive", "evidence-task"]);
   }
 };
 
@@ -6216,6 +6234,19 @@ if ((globalThis.__fmSessionManagers ?? []).flatMap((manager) => manager.getEntri
   .some((entry) => entry.customType === "fm-task-continuation-terminal-settlement" && entry.data.task === "drift-task")) {
   throw new Error("material nonterminal drift was silenced as archive-only settlement");
 }
+
+seed("evidence-task");
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => prompts >= 3, "terminal-plus-evidence continuation prompt");
+await settle(() => outcomeScript(["list", "--recent", "20"]).split("\n").some((line) => {
+  if (!line) return false;
+  const row = JSON.parse(line);
+  return row.task === "evidence-task" && row.verdict === "captain" && row.summary.includes("continuation settled without a durable outcome");
+}), "terminal-plus-evidence reconciliation outcome");
+if ((globalThis.__fmSessionManagers ?? []).flatMap((manager) => manager.getEntries())
+  .some((entry) => entry.customType === "fm-task-continuation-terminal-settlement" && entry.data.task === "evidence-task")) {
+  throw new Error("a terminal transition with new task evidence was silenced as archival-only");
+}
 process.exit(0);
 EOF
   status=$?
@@ -6246,39 +6277,48 @@ const taskRecord = (state) => writeFileSync(`${home}/data/task-c/task.json`, JSO
 taskRecord("in_flight");
 await fire("session_start", {}, defaultSessionCtx);
 const append = (...args) => Number(outcomeScript(["append", "--task", "task-c", ...args]));
-const first = append("--verdict", "routine", "--summary", "unchanged observer", "--material-key", "rev-a");
-const duplicate = append("--verdict", "routine", "--summary", "unchanged observer", "--material-key", "rev-a");
+const first = append("--verdict", "routine", "--summary", "unchanged observer", "--wake", "delivery-token-1", "--material-key", "rev-a");
+const duplicate = append("--verdict", "routine", "--summary", "unchanged observer", "--wake", "delivery-token-2", "--material-key", "rev-a");
 const substantive = append("--verdict", "routine", "--summary", "new ordered note", "--silent", "false", "--material-key", "rev-a");
 taskRecord("archived");
 const terminal = append("--verdict", "captain", "--summary", "verified terminal disposition", "--material-key", "rev-terminal");
+const lateFirst = append("--verdict", "routine", "--summary", "unchanged observer", "--wake", "late-delivery-1", "--material-key", "rev-a");
+const lateDuplicate = append("--verdict", "routine", "--summary", "unchanged observer", "--wake", "late-delivery-2", "--material-key", "rev-a");
 const answer = append("--verdict", "captain", "--summary", "new decision answer remains visible", "--material-key", "rev-answer");
+const unknownFirst = Number(outcomeScript(["append", "--task", "task-u", "--verdict", "captain", "--summary", "unknown identity observation", "--material-key", "same-material"]));
+const unknownSecond = Number(outcomeScript(["append", "--task", "task-u", "--verdict", "captain", "--summary", "unknown identity observation", "--material-key", "same-material"]));
 bus.emit("firstmate:outcomes-ready", {});
-await settle(() => mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length === 2,
+await settle(() => mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length === 4,
   "coalesced captain delivery");
 await settle(() => sentToMain.some((item) => item.message.content?.includes("new ordered note")),
   "substantive routine delivery");
 
 const audit = outcomeScript(["list", "--recent", "20"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
-if (audit.length !== 5 || audit.map((row) => row.seq).join(",") !== [first, duplicate, substantive, terminal, answer].join(",")) {
+if (audit.length !== 9 || audit.map((row) => row.seq).join(",") !==
+    [first, duplicate, substantive, terminal, lateFirst, lateDuplicate, answer, unknownFirst, unknownSecond].join(",")) {
   throw new Error(`coalescing rewrote append-only audit evidence: ${JSON.stringify(audit)}`);
 }
-if (audit.some((row) => row.taskGeneration !== "g-task-c" || !row.evidenceKey || !row.taskDisposition)) {
+if (audit.filter((row) => row.task === "task-c").some((row) => row.taskGeneration !== "g-task-c" || !row.evidenceKey || !row.taskDisposition)) {
   throw new Error(`outcome identity fields were not retained: ${JSON.stringify(audit)}`);
 }
+if (audit.filter((row) => row.task === "task-u").some((row) => row.taskGeneration || row.evidenceKey)) {
+  throw new Error(`unknown executor identity was manufactured into coalescing evidence: ${JSON.stringify(audit)}`);
+}
 const routine = sentToMain.filter((item) => item.message.customType === "fm-branch-merge");
-if (routine.length !== 1 || !routine[0].message.content.includes("new ordered note") ||
+if (routine.length !== 1 || !routine.some((item) => item.message.content.includes("new ordered note")) ||
     routine.some((item) => item.message.content.includes("unchanged observer"))) {
   throw new Error(`terminal disposition did not supersede only repeated obsolete observations: ${JSON.stringify(routine)}`);
 }
 const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
-if (visible.map((entry) => entry.data.seq).join(",") !== `${terminal},${answer}` ||
-    !visible.some((entry) => entry.data.summary.includes("new decision answer"))) {
+if (visible.map((entry) => entry.data.seq).join(",") !== `${terminal},${answer},${unknownFirst},${unknownSecond}` ||
+    !visible.some((entry) => entry.data.summary.includes("new decision answer")) ||
+    visible.filter((entry) => entry.data.summary.includes("unknown identity observation")).length !== 2) {
   throw new Error(`new decision content was coalesced with terminal delivery: ${JSON.stringify(visible)}`);
 }
 await settle(() => sentToMain.some((item) => item.message.customType === "fm-branch-process"),
   "coalesced processing request");
 const request = sentToMain.find((item) => item.message.customType === "fm-branch-process");
-if (!request || !request.message.content.includes(`sequences="${terminal},${answer}"`) ||
+if (!request || !request.message.content.includes(`sequences="${terminal},${answer},${unknownFirst},${unknownSecond}"`) ||
     request.message.content.includes(`[seq ${first}]`) || request.message.content.includes(`[seq ${duplicate}]`)) {
   throw new Error(`processing request did not carry the exact surviving identities: ${JSON.stringify(request)}`);
 }

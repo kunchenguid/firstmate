@@ -233,10 +233,16 @@ assert.equal(new Set(offered).size, offered.length, 'continued reminders reused 
 assert.ok(offered.at(-1).endsWith('.2'), 'second unchanged offer did not preserve its admission identity');
 
 await fire('session_shutdown', { reason: 'pacing-replacement' });
-session = SessionManager.open(session.getSessionFile());
+const pacedSessionFile = session.getSessionFile();
+session = SessionManager.create(home, home + '/sessions');
+assert.notEqual(session.getSessionFile(), pacedSessionFile, 'pacing replacement reused the old transcript');
+session.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Fresh fixture session' }],
+  api: 'openai-completions', provider: 'fixture', model: 'fixture', timestamp: Date.now(), stopReason: 'stop',
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
 continuation = await install();
 assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
-  'session replacement reset unchanged-offer pacing');
+  'a genuinely new session file reset unchanged-offer pacing');
 
 const changedProjection = { ...progress, current_state: 'A materially newer executor result exists' };
 await tool({ action: 'update', task: 'task', progress: changedProjection });
