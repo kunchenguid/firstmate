@@ -41,3 +41,28 @@ export function installV2ToolHook(ctx, hooks) {
     hooks["tool.execute.before"]({ tool: event?.tool }, { args: event?.input ?? {} }),
   );
 }
+
+// The v2 event stream stays open for the plugin's lifetime; the returned
+// teardown stops it by aborting the controller. An unexpected stop - the
+// stream throws, or ends while the plugin is still live - would leave the
+// hook silently dark, so it is reported on stderr instead of discarded.
+export function subscribeEvents(ctx, hooks, id) {
+  const controller = new AbortController();
+  void (async () => {
+    try {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        try {
+          await hooks.event({ event: v1Event(event) });
+        } catch {}
+      }
+      if (!controller.signal.aborted) {
+        console.error(`[${id}] OpenCode v2 event subscription ended unexpectedly`);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        console.error(`[${id}] OpenCode v2 event subscription failed: ${error}`);
+      }
+    }
+  })();
+  return () => controller.abort();
+}

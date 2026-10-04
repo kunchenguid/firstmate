@@ -216,6 +216,9 @@ const ctx = {
         type: "session.created",
         data: { sessionID: "session-nudge-v2", agent: "build" },
       };
+      // A live subscription only stops when the plugin is torn down; keep
+      // this stream open so its end is not reported as an unexpected stop.
+      await new Promise(() => {});
     },
   },
 };

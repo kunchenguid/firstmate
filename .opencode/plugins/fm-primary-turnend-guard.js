@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
-import { clientFromCtx, v1Event } from "./lib/fm-opencode-v2-adapter.js";
+import { clientFromCtx, subscribeEvents } from "./lib/fm-opencode-v2-adapter.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
@@ -104,14 +104,6 @@ export default {
       client: clientFromCtx(ctx),
       directory: ctx.location?.directory,
     });
-    const controller = new AbortController();
-    void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        try {
-          await hooks.event({ event: v1Event(event) });
-        } catch {}
-      }
-    })().catch(() => {});
-    return () => controller.abort();
+    return subscribeEvents(ctx, hooks, "fm-primary-turnend-guard");
   },
 };

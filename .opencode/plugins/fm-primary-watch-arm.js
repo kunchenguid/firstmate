@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
-import { clientFromCtx, v1Event } from "./lib/fm-opencode-v2-adapter.js";
+import { clientFromCtx, subscribeEvents } from "./lib/fm-opencode-v2-adapter.js";
 
 // Supervision host: a home opted in with config/supervision-host
 // (docs/configuration.md "Supervision host" owns the gate, which
@@ -561,9 +561,10 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   };
 };
 
-// OpenCode v2 default export: the v2 loader requires `{ id, setup(ctx) }`, and
-// `clientFromCtx`/`v1Event` adapt v2 onto the v1 hook object above. The
-// coordinator entry the hooks install keeps serving the v2 turn-end guard.
+// OpenCode v2 default export: the v2 loader requires `{ id, setup(ctx) }`;
+// `clientFromCtx` and `subscribeEvents` adapt v2 onto the v1 hook object
+// above. The coordinator entry the hooks install keeps serving the v2
+// turn-end guard.
 export default {
   id: "fm-primary-watch-arm",
   async setup(ctx) {
@@ -571,14 +572,6 @@ export default {
       client: clientFromCtx(ctx),
       directory: ctx.location?.directory,
     });
-    const controller = new AbortController();
-    void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        try {
-          await hooks.event({ event: v1Event(event) });
-        } catch {}
-      }
-    })().catch(() => {});
-    return () => controller.abort();
+    return subscribeEvents(ctx, hooks, "fm-primary-watch-arm");
   },
 };
