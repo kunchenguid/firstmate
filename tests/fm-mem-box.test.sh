@@ -5,12 +5,12 @@
 # taking the host with it, so these cover the parts that decide the boundary:
 # byte-cap resolution and per-lane config, the exact single-quote escaping the
 # spawn path splices into a pane command, the real cgroup v2 limit when the host
-# can delegate one, the unboxed fallback and its required-mode refusal, and the
+# can delegate one, refusal when a box cannot be created, and the
 # heavy-lane hand-off to bin/fm-heavy-guard.sh.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 BOX="$ROOT/bin/fm-mem-box.sh"
 DEFAULT_CAP=8589934592
@@ -86,19 +86,53 @@ test_box_applies_the_cgroup_limit() {
   pass "boxed command runs under the configured cgroup memory limit"
 }
 
-test_fallback_and_required_mode() {
-  local root cfg rc out
+test_unavailable_box_refuses_execution() {
+  local root cfg rc out fakebin
   root=$(fm_test_tmproot fm-mem-box)
   cfg="$root/config"
   mkdir -p "$cfg"
-  out=$(FM_CONFIG_OVERRIDE="$cfg" FM_MEM_BOX_DISABLE=1 FM_MEM_BOX_QUIET=0 "$BOX" exec test -- true 2>&1) \
-    || fail "disabled box should still run the command"
-  case "$out" in *"running lane test unboxed"*) ;; *) fail "expected the unboxed notice: $out" ;; esac
+  fakebin=$(fm_fakebin "$root")
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/systemd-run"
+  chmod +x "$fakebin/systemd-run"
   rc=0
-  out=$(FM_CONFIG_OVERRIDE="$cfg" FM_MEM_BOX_DISABLE=1 FM_MEM_BOX_REQUIRED=1 "$BOX" exec test -- true 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "required mode must refuse when the box is unavailable"
-  case "$out" in *"required"*) ;; *) fail "required-mode refusal was not named: $out" ;; esac
-  pass "unboxed fallback notices, and required mode refuses"
+  out=$(PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$cfg" "$BOX" exec test -- touch "$root/executed" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "unavailable box must refuse"
+  [ ! -e "$root/executed" ] || fail "command ran outside a box"
+  case "$out" in *"cgroup v2"*|*"systemd user manager"*) ;; *) fail "missing capability not named: $out" ;; esac
+  pass "unavailable box refuses without executing the command"
+}
+
+test_spawn_carries_the_home_and_cap_into_the_pane() {
+  local root home proj wt fakebin panelog command out
+  root=$(fm_test_tmproot fm-mem-box)
+  home="$root/home"
+  proj="$root/project"
+  wt="$root/wt"
+  fm_test_spawn_home "$home" codex
+  printf 'worker=2G\n' > "$home/config/memory-box"
+  fm_test_spawn_brief "$home" boxed-worker
+  fm_git_worktree "$proj" "$wt" boxed-worker
+  fakebin=$(fm_test_make_spawn_fakebin "$root/fake" codex)
+  panelog="$root/pane.log"
+  FM_FAKE_PANE_LOG="$panelog" fm_test_run_spawn "$home" "$wt" "$fakebin" boxed-worker "$proj" --mode no-mistakes --yolo off \
+    || fail "spawn failed"
+  command=$(grep '^exec env .*fm-mem-box.sh' "$panelog")
+  [ -n "$command" ] || fail "pane received no box entry"
+  cat > "$fakebin/systemd-run" <<'SH'
+#!/bin/sh
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+shift
+exec "$@"
+SH
+  cat > "$fakebin/pane-shell" <<'SH'
+#!/bin/sh
+printf '%s\n' "$FM_HOME" "$FM_CONFIG_OVERRIDE" "$FM_MEM_BOX_CAP"
+SH
+  chmod +x "$fakebin/systemd-run" "$fakebin/pane-shell"
+  out=$(FM_HOME="$root/stale" FM_CONFIG_OVERRIDE="$root/stale/config" FM_MEM_BOX_CAP=8G \
+    SHELL="$fakebin/pane-shell" PATH="$fakebin:$PATH" bash -c "$command") || fail "pane entry failed"
+  [ "$out" = "$(printf '%s\n' "$home" "$home/config" 2147483648)" ] || fail "pane used stale policy: $out"
+  pass "spawned pane uses the spawning home's resolved cap and config"
 }
 
 test_heavy_lane_consults_the_guard() {
@@ -112,9 +146,10 @@ test_heavy_lane_consults_the_guard() {
   out=$(FM_CONFIG_OVERRIDE="$cfg" "$BOX" exec heavy -- true 2>&1) || rc=$?
   [ "$rc" -eq 3 ] || fail "heavy lane should be refused with exit 3, got $rc"
   case "$out" in *"/campaign/runner"*) ;; *) fail "refusal did not name the campaign runner: $out" ;; esac
-  FM_CONFIG_OVERRIDE="$cfg" "$BOX" exec worker -- true \
-    || fail "a non-heavy lane must still run under a remote-only posture"
-  pass "heavy lane refuses under remote-only and other lanes still run"
+  rc=0
+  FM_CONFIG_OVERRIDE="$cfg" "$BOX" exec worker -- true || rc=$?
+  [ "$rc" -ne 3 ] || fail "worker lane was classified heavy"
+  pass "heavy lane refuses under remote-only without classifying workers as heavy"
 }
 
 test_default_cap_when_unconfigured
@@ -122,5 +157,6 @@ test_per_lane_and_default_config
 test_env_cap_overrides_config
 test_malformed_config_is_a_hard_error
 test_box_applies_the_cgroup_limit
-test_fallback_and_required_mode
+test_unavailable_box_refuses_execution
+test_spawn_carries_the_home_and_cap_into_the_pane
 test_heavy_lane_consults_the_guard

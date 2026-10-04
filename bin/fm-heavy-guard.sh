@@ -25,8 +25,6 @@
 #                                absent, a runner directory that exists on this
 #                                host is named if one is found, otherwise the
 #                                refusal points at the campaign VM generally.
-#   config/heavy-suites-extra    whitespace-separated extra tokens to treat as
-#                                heavy (matched case-insensitively, exact).
 #
 # A lane named `heavy` and the families `live-harness-optin` and
 # `real-herdr-gated` are always heavy. Selection `all` is always heavy. A free
@@ -41,11 +39,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 FM_HEAVY_POSTURE_FILE="heavy-suites"
 FM_HEAVY_RUNNER_FILE="campaign-runner"
-FM_HEAVY_EXTRA_FILE="heavy-suites-extra"
 FM_HEAVY_DEFAULT_RUNNER=/sloth/gcp-runner
 
 usage() {
-  sed -n '2,33{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,/^set -u/{ /^set -u/d;s/^# \{0,1\}//;p;}' "$0"
 }
 
 die() {
@@ -78,7 +75,7 @@ fm_heavy_posture() {
   value=$(fm_heavy_lower "$(fm_heavy_read_setting "$FM_HEAVY_POSTURE_FILE")")
   case "$value" in
     ''|local) printf 'local\n' ;;
-    remote-only|remote) printf 'remote-only\n' ;;
+    remote-only) printf 'remote-only\n' ;;
     *)
       printf 'fm-heavy-guard: config/%s has an unknown posture: %s\n' \
         "$FM_HEAVY_POSTURE_FILE" "$value" >&2
@@ -124,14 +121,10 @@ fm_heavy_selection_is_heavy() {
 }
 
 # fm_heavy_token_is_heavy <token>
-# Exact configured tokens plus the built-in acceptance/e2e/full-CI pattern.
 fm_heavy_token_is_heavy() {
-  local token extra
+  local token
   token=$(fm_heavy_lower "$1")
   [ -n "$token" ] || return 1
-  for extra in $(fm_heavy_read_setting "$FM_HEAVY_EXTRA_FILE"); do
-    [ "$(fm_heavy_lower "$extra")" = "$token" ] && return 0
-  done
   case "$token" in
     acceptance|acceptance.cjs|acceptance.js|e2e|end-to-end|endtoend|full-ci|fullci|playwright|cypress) return 0 ;;
   esac
@@ -179,7 +172,6 @@ cmd_status() {
   printf 'heavy-lanes=heavy,acceptance,e2e,end-to-end,full-ci\n'
   printf 'heavy-families=live-harness-optin,real-herdr-gated\n'
   printf 'heavy-selections=all,full,full-ci\n'
-  printf 'heavy-extra=%s\n' "$(fm_heavy_read_setting "$FM_HEAVY_EXTRA_FILE")"
 }
 
 cmd_classify() {

@@ -6,10 +6,6 @@
 # passes the threshold, queues ONE firstmate note naming the top memory consumer
 # by RSS. The note is the alert: it carries a durable record and a check wake.
 #
-# Hysteresis keeps the alert meaningful: the check fires once when memory passes
-# the threshold and re-arms only after memory drops below the clear level, so a
-# host that stays busy does not queue a note every minute.
-#
 # Usage:
 #   fm-mem-alert.sh check [--meminfo <file>] [--procfs <dir>] [--state <file>]
 #                         [--now <epoch>] [--emit <command>] [--print]
@@ -18,14 +14,10 @@
 # `check`   samples memory, updates the armed/fired state, and emits one alert on
 #           a crossing. `--print` prints the alert body and the emit command
 #           without changing state or emitting, for inspection on a quiet host.
-# `status`  prints the effective thresholds, state, and current sample.
-#
-# Configuration (optional, in this home's gitignored config/):
-#   config/memory-alert-threshold   used-percent alert level (default 85)
-#   config/memory-alert-clear       used-percent re-arm level (default 75)
+# `status`  prints the fixed threshold, state, and current sample.
 #
 # Environment:
-#   FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE   as elsewhere in bin/.
+#   FM_HOME, FM_STATE_OVERRIDE   as elsewhere in bin/.
 #   FM_MEM_ALERT_STATE    state file (default $state/mem-alert.state)
 #   FM_MEM_ALERT_MEMINFO  meminfo source (default /proc/meminfo)
 #   FM_MEM_ALERT_PROCFS   proc mount point (default /proc)
@@ -37,50 +29,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-
-FM_MEM_ALERT_THRESHOLD_FILE="memory-alert-threshold"
-FM_MEM_ALERT_CLEAR_FILE="memory-alert-clear"
-FM_MEM_ALERT_DEFAULT_THRESHOLD=85
-FM_MEM_ALERT_DEFAULT_CLEAR=75
+FM_MEM_ALERT_THRESHOLD=85
 FM_MEM_ALERT_MEMINFO=${FM_MEM_ALERT_MEMINFO:-/proc/meminfo}
 FM_MEM_ALERT_PROCFS=${FM_MEM_ALERT_PROCFS:-/proc}
 FM_MEM_ALERT_STATE=${FM_MEM_ALERT_STATE:-$STATE/mem-alert.state}
 
 usage() {
-  sed -n '2,34{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,/^set -u/{ /^set -u/d;s/^# \{0,1\}//;p;}' "$0"
 }
 
 die() {
   printf 'fm-mem-alert: %s\n' "$*" >&2
   exit 2
-}
-
-fm_mem_alert_read_setting() {
-  local path="$CONFIG/$1" line
-  [ -r "$path" ] && [ ! -L "$path" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line=${line%%#*}
-    line=${line#"${line%%[![:space:]]*}"}
-    line=${line%"${line##*[![:space:]]}"}
-    [ -n "$line" ] || continue
-    printf '%s' "$line"
-    return 0
-  done < "$path"
-}
-
-# fm_mem_alert_percent <setting-file> <default> <what>
-fm_mem_alert_percent() {
-  local setting=$1 default=$2 what=$3 value
-  value=$(fm_mem_alert_read_setting "$setting")
-  [ -n "$value" ] || value=$default
-  case "$value" in
-    ''|0|*[!0-9]*|0*) die "config/$setting must be a percent in 1..100 ($what)" ;;
-  esac
-  if [ "$value" -gt 100 ]; then
-    die "config/$setting must be a percent in 1..100 ($what)"
-  fi
-  printf '%s\n' "$value"
 }
 
 # fm_mem_alert_used_percent <meminfo>
@@ -165,14 +125,11 @@ fm_mem_alert_state_write() {
 }
 
 cmd_status() {
-  local threshold clear used state
-  threshold=$(fm_mem_alert_percent "$FM_MEM_ALERT_THRESHOLD_FILE" "$FM_MEM_ALERT_DEFAULT_THRESHOLD" "alert level") || exit $?
-  clear=$(fm_mem_alert_percent "$FM_MEM_ALERT_CLEAR_FILE" "$FM_MEM_ALERT_DEFAULT_CLEAR" "re-arm level") || exit $?
+  local threshold=$FM_MEM_ALERT_THRESHOLD used state
   used=$(fm_mem_alert_used_percent "$FM_MEM_ALERT_MEMINFO") || exit $?
   state=$(fm_mem_alert_state_read)
   printf 'meminfo=%s\n' "$FM_MEM_ALERT_MEMINFO"
   printf 'threshold-percent=%s\n' "$threshold"
-  printf 'clear-percent=%s\n' "$clear"
   printf 'used-percent=%s\n' "$used"
   printf 'state=%s\n' "$state"
   printf 'state-file=%s\n' "$FM_MEM_ALERT_STATE"
@@ -205,9 +162,7 @@ cmd_check() {
   [ -n "$now" ] && FM_MEM_ALERT_NOW=$now
   [ -n "$emit" ] && FM_MEM_ALERT_EMIT=$emit
 
-  local threshold clear used prev top body
-  threshold=$(fm_mem_alert_percent "$FM_MEM_ALERT_THRESHOLD_FILE" "$FM_MEM_ALERT_DEFAULT_THRESHOLD" "alert level") || exit $?
-  clear=$(fm_mem_alert_percent "$FM_MEM_ALERT_CLEAR_FILE" "$FM_MEM_ALERT_DEFAULT_CLEAR" "re-arm level") || exit $?
+  local threshold=$FM_MEM_ALERT_THRESHOLD used prev top body
   used=$(fm_mem_alert_used_percent "$meminfo") || exit $?
   prev=$(fm_mem_alert_state_read)
 
@@ -220,7 +175,7 @@ cmd_check() {
 
   if [ "$used" -lt "$threshold" ]; then
     # Below the alert level: re-arm so the next crossing alerts again.
-    if [ "$used" -le "$clear" ] && [ "$prev" != armed ]; then
+    if [ "$prev" != armed ]; then
       fm_mem_alert_state_write armed
     fi
     return 0

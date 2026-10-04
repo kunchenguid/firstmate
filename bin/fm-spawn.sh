@@ -5303,16 +5303,8 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-# Every worker this home launches runs inside its own cgroup v2 memory box:
-# before any launch work the pane shell re-execs itself under bin/fm-mem-box.sh,
-# so the agent and every child it spawns - builds, tests, a project's acceptance
-# suite - share one bounded, swap-free scope. The box inherits the pane's
-# environment, cwd, and terminal, so nothing else about the pane changes; a host
-# that cannot delegate a memory scope re-execs the same shell unboxed with a
-# notice, and config/memory-box-required makes the wrapper refuse instead. The
-# exec is the first command sent, so a line this channel loses is lost exactly
-# as a lost pre-launch export would be.
-if ! spawn_send_text_line "$T" "exec $(shell_quote "$FM_ROOT/bin/fm-mem-box.sh") exec worker -- \"\${SHELL:-/bin/bash}\""; then
+WORKER_MEMORY_CAP=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$FM_ROOT/bin/fm-mem-box.sh" cap worker) || exit 1
+if ! spawn_send_text_line "$T" "exec env FM_HOME=$(shell_quote "$FM_HOME") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") FM_MEM_BOX_CAP=$(shell_quote "$WORKER_MEMORY_CAP") $(shell_quote "$FM_ROOT/bin/fm-mem-box.sh") exec worker -- \"\${SHELL:-/bin/bash}\""; then
   echo "error: could not send the memory-box command into pane $W; refusing to launch unboxed" >&2
   exit 1
 fi

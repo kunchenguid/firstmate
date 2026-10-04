@@ -3,9 +3,7 @@
 #
 # Heavy suites (acceptance, end-to-end, full-regression) are the ones that leak
 # tens of gigabytes. These cover the decision itself, the posture and runner
-# config, the refusal text, and the two-sided runner integration: a remote-only
-# posture refuses before execution, while a local posture still reaches
-# execution (with live prompts forced off so the run spends nothing).
+# config, refusal text, and runner refusal through family and script selection.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -113,18 +111,67 @@ test_runner_refuses_heavy_family_under_remote_posture() {
   pass "fm-test-run refuses a heavy family before executing it"
 }
 
-test_runner_reaches_execution_under_local_posture() {
-  local root cfg out rc
+test_runner_refuses_direct_heavy_scripts() {
+  local root cfg script rc out
   root=$(fm_test_tmproot fm-heavy-guard)
   cfg="$root/config"
   mkdir -p "$cfg"
-  # FM_LIVE=0 keeps the live guards from submitting prompts, so this proves the
-  # local path reaches execution without spending anything.
+  printf 'remote-only\n' > "$cfg/heavy-suites"
+  for script in tests/fm-pi-codex-native.test.sh tests/fm-backend-herdr-smoke.test.sh; do
+    rc=0
+    out=$(FM_CONFIG_OVERRIDE="$cfg" timeout 30 "$RUNNER" "$script" 2>&1) || rc=$?
+    [ "$rc" -eq 3 ] || fail "direct $script should refuse with exit 3, got $rc: $out"
+  done
+  pass "direct script selection honors every heavy family"
+}
+
+test_runner_executes_light_work_in_a_box() {
+  local root cfg fakebin out rc
+  root=$(fm_test_tmproot fm-heavy-guard)
+  cfg="$root/config"
+  mkdir -p "$cfg"
+  fakebin=$(fm_fakebin "$root")
+  printf 'remote-only\n' > "$cfg/heavy-suites"
+  printf 'test=2G\n' > "$cfg/memory-box"
+  printf 'printf "ok - fixture executed\\n"\n' > "$root/unit.test.sh"
+  cat > "$fakebin/systemd-run" <<'SH'
+#!/bin/sh
+cap= swap=
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+  case "$1" in
+    MemoryMax=*) cap=${1#*=} ;;
+    MemorySwapMax=*) swap=${1#*=} ;;
+  esac
+  shift
+done
+shift
+[ "$swap" = 0 ] || exit 1
+if [ "$1" != true ]; then
+  [ "$cap" = 2147483648 ] || exit 1
+  printf '%s\n' boxed > "$BOX_LOG"
+fi
+exec "$@"
+SH
+  chmod +x "$fakebin/systemd-run"
   rc=0
-  out=$(cd "$ROOT" && FM_CONFIG_OVERRIDE="$cfg" FM_LIVE=0 timeout 120 "$RUNNER" --family live-harness-optin 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "local posture should reach execution cleanly, got $rc"
-  case "$out" in *"FM_TEST_SUMMARY"*) ;; *) fail "runner produced no summary: $out" ;; esac
-  pass "fm-test-run reaches execution under the local posture"
+  out=$(PATH="$fakebin:$PATH" BOX_LOG="$root/box.log" FM_CONFIG_OVERRIDE="$cfg" \
+    "$RUNNER" --jobs 1 --per-script-timeout-secs 5 "$root/unit.test.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "light runner execution failed: $out"
+  [ "$(cat "$root/box.log")" = boxed ] || fail "script did not reach the configured scope"
+  case "$out" in *"ok - fixture executed"*) ;; *) fail "light script was not executed: $out" ;; esac
+  pass "light scripts still execute through the configured memory box"
+}
+
+test_remote_alias_is_rejected() {
+  local root cfg rc
+  root=$(fm_test_tmproot fm-heavy-guard)
+  cfg="$root/config"
+  mkdir -p "$cfg"
+  printf 'remote\n' > "$cfg/heavy-suites"
+  rc=0
+  FM_CONFIG_OVERRIDE="$cfg" "$GUARD" status >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "undocumented remote alias must be rejected"
+  pass "only remote-only is accepted as the remote posture"
 }
 
 test_status_reports_local_by_default
@@ -134,4 +181,6 @@ test_remote_posture_refuses_and_names_the_runner
 test_unknown_posture_is_an_error
 test_path_classification_is_delimited
 test_runner_refuses_heavy_family_under_remote_posture
-test_runner_reaches_execution_under_local_posture
+test_runner_refuses_direct_heavy_scripts
+test_remote_alias_is_rejected
+test_runner_executes_light_work_in_a_box

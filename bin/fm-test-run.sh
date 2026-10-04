@@ -2220,7 +2220,7 @@ fi
 # family, and any lane named heavy are the heavy classes here; a project's
 # acceptance or E2E suite is refused through its heavy lane in bin/fm-mem-box.sh.
 refuse_heavy_selection_for_host() {
-  local guard="$ROOT/bin/fm-heavy-guard.sh" args=(check)
+  local guard="$ROOT/bin/fm-heavy-guard.sh" script args=(check)
   [ -f "$guard" ] || return 0
   [ -n "${MODE:-}" ] || return 0
   args+=(--selection "$MODE")
@@ -2230,6 +2230,9 @@ refuse_heavy_selection_for_host() {
   if [ -n "${FAMILY:-}" ]; then
     args+=(--family "$FAMILY")
   fi
+  for script in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+    args+=(--path "$script" --family "$(family_for_basename "$(basename "$script")")")
+  done
   bash "$guard" "${args[@]}"
 }
 refuse_heavy_selection_for_host
@@ -2483,32 +2486,24 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
   : "$id"
-  # Every test script runs inside its own cgroup v2 memory box, so a leaking
-  # suite dies at its box boundary instead of taking the host with it. The
-  # fallback keeps a host without systemd (stock macOS) running the suite
-  # unboxed, with the fallback notice suppressed so the runner's output stays
-  # clean.
-  local -a boxed=(bash)
-  if [ -f "$ROOT/bin/fm-mem-box.sh" ]; then
-    boxed=("$ROOT/bin/fm-mem-box.sh" exec test -- bash)
-  fi
+  local -a boxed=("$ROOT/bin/fm-mem-box.sh" exec test -- bash)
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
-      FM_MEM_BOX_QUIET=1 fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${boxed[@]}" -c \
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${boxed[@]}" -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?
     else
-      FM_MEM_BOX_QUIET=1 "${boxed[@]}" "$script" 2>&1 | tee "$out"
+      "${boxed[@]}" "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    FM_MEM_BOX_QUIET=1 fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${boxed[@]}" "$script" >"$out" 2>&1
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${boxed[@]}" "$script" >"$out" 2>&1
     rc=$?
   else
-    FM_MEM_BOX_QUIET=1 "${boxed[@]}" "$script" >"$out" 2>&1
+    "${boxed[@]}" "$script" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then

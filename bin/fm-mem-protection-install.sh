@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# fm-mem-protection-install.sh - install or revert this host's memory-protection policy.
+# fm-mem-protection-install.sh - install this host's memory-protection policy.
 #
 # The policy has three host-side parts, all reproducible from this tracked script:
 #   1. earlyoom, configured to kill the largest process once available memory
 #      falls below 5 percent, preferring node/pytest/acceptance/vitest work and
-#      never preferring omp, sshd, dockerd, herdr, or clickhouse-server.
+#      excluding omp, sshd, dockerd, herdr, or clickhouse-server.
 #   2. a systemd user timer running bin/fm-mem-alert.sh once a minute from the
-#      home's tracked bin/ (a clean no-op until that script is present there).
+#      home's tracked bin/.
 #   3. this home's heavy-suite posture: heavy suites are refused locally and the
 #      campaign runner is named (bin/fm-heavy-guard.sh consumes it).
 #
@@ -14,15 +14,11 @@
 #   fm-mem-protection-install.sh status
 #   fm-mem-protection-install.sh print
 #   fm-mem-protection-install.sh install [--home <firstmate-home>] [--runner <path>]
-#   fm-mem-protection-install.sh revert [--home <firstmate-home>]
 #   fm-mem-protection-install.sh install-config [--home <firstmate-home>] [--runner <path>]
-#   fm-mem-protection-install.sh revert-config [--home <firstmate-home>]
 #
 # `status`  reports the current state of every part without changing anything.
 # `print`   prints every generated file and every command the installer would run.
 # `install` applies all parts. It is idempotent and requires sudo for part 1.
-# `revert`  reverses parts 1 and 2 and removes the two config files part 3 wrote
-#           when they still hold the values this installer wrote.
 #
 # Environment:
 #   FM_HOME   firstmate home whose config/ receives the heavy-suite posture and
@@ -39,18 +35,18 @@ FM_MP_EARLYOOM_BACKUP=/etc/default/earlyoom.fm-backup
 FM_MP_USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 FM_MP_SERVICE=fm-mem-alert.service
 FM_MP_TIMER=fm-mem-alert.timer
-# --prefer adds 300 to oom_score, --avoid subtracts 300. The regex matches the
+# --prefer adds 300 to oom_score, --ignore excludes matching processes. The regex matches the
 # basename in /proc/PID/comm, truncated to 15 bytes, so clickhouse-server and
 # systemd-journald appear truncated and are matched by prefix. Node.js renames
 # its main thread to "MainThread", so `node` alone would never match a node
 # process; MainThread is in the prefer list to catch node, vitest, and
 # acceptance.cjs runs.
 FM_MP_EARLYOOM_PREFER='^(node|nodejs|MainThread|pytest|vitest|acceptance|playwright|cypress|npm|npx)'
-FM_MP_EARLYOOM_AVOID='^(omp|sshd|dockerd|containerd|herdr|clickhouse|systemd|dbus-daemon|Xorg|gnome-shell|tmux|earlyoom)'
-FM_MP_EARLYOOM_ARGS="-m 5 -s 5 -r 60 --prefer '$FM_MP_EARLYOOM_PREFER' --avoid '$FM_MP_EARLYOOM_AVOID'"
+FM_MP_EARLYOOM_IGNORE='^(omp|sshd|dockerd|containerd|herdr|clickhouse|systemd|dbus-daemon|Xorg|gnome-shell|tmux|earlyoom)'
+FM_MP_EARLYOOM_ARGS="-m 5 -s 100 -r 60 --prefer '$FM_MP_EARLYOOM_PREFER' --ignore '$FM_MP_EARLYOOM_IGNORE'"
 
 usage() {
-  sed -n '2,36{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,/^set -u/{ /^set -u/d;s/^# \{0,1\}//;p;}' "$0"
 }
 
 die() {
@@ -65,13 +61,12 @@ say() {
 earlyoom_defaults_content() {
   cat <<EOF
 # Written by firstmate bin/fm-mem-protection-install.sh.
-# Revert with: bin/fm-mem-protection-install.sh revert
 #
 # -m 5            act once available memory falls below 5 percent of total
-# -s 5            swap gate (both memory and swap must be below their minimums)
+# -s 100          effectively ignore swap usage
 # -r 60           print a memory report every 60 seconds
 # --prefer REGEX  add 300 to oom_score, so node/pytest/acceptance/vitest work dies first
-# --avoid REGEX   subtract 300 from oom_score for the never-prefer set
+# --ignore REGEX  exclude infrastructure from victim selection
 EARLYOOM_ARGS="$FM_MP_EARLYOOM_ARGS"
 EOF
 }
@@ -87,10 +82,7 @@ Documentation=man:fm-mem-alert.sh(1)
 Type=oneshot
 Environment=FM_HOME=$home
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-# Run the home's tracked check when it is present. The guard makes the timer a
-# clean no-op on a home whose tracked scripts have not yet received
-# bin/fm-mem-alert.sh, instead of failing once a minute.
-ExecStart=/bin/sh -c 'if [ -x "\$FM_HOME/bin/fm-mem-alert.sh" ]; then exec "\$FM_HOME/bin/fm-mem-alert.sh" check; fi'
+ExecStart=/bin/sh -c 'exec "\$FM_HOME/bin/fm-mem-alert.sh" check'
 EOF
 }
 
@@ -211,6 +203,22 @@ write_config_noclobber() {
 }
 
 install_earlyoom() {
+  local prior_enabled=no prior_active=no
+  systemctl is-enabled earlyoom >/dev/null 2>&1 && prior_enabled=yes
+  systemctl is-active earlyoom >/dev/null 2>&1 && prior_active=yes
+  say "host-change record: earlyoom prior enabled=$prior_enabled active=$prior_active"
+  say "manual revert: [ ! -f $FM_MP_EARLYOOM_BACKUP ] || sudo cp -p $FM_MP_EARLYOOM_BACKUP $FM_MP_EARLYOOM_DEFAULTS"
+  if [ "$prior_enabled" = yes ]; then
+    say "manual revert: sudo systemctl enable earlyoom"
+  else
+    say "manual revert: sudo systemctl disable earlyoom"
+  fi
+  if [ "$prior_active" = yes ]; then
+    say "manual revert: sudo systemctl restart earlyoom"
+  else
+    say "manual revert: sudo systemctl stop earlyoom"
+  fi
+  say "manual revert: systemctl --user disable --now $FM_MP_TIMER"
   if ! command -v earlyoom >/dev/null 2>&1; then
     say "install: installing earlyoom"
     sudo apt-get install -y earlyoom || die "could not install earlyoom"
@@ -229,11 +237,12 @@ install_earlyoom() {
   rm -f "$tmp"
   sudo systemctl enable earlyoom >/dev/null || die "could not enable earlyoom"
   sudo systemctl restart earlyoom || die "could not start earlyoom"
-  say "install: earlyoom enabled and running with -m 5 -s 5"
+  say "install: earlyoom enabled and running with -m 5 -s 100"
 }
 
 install_timer() {
   local home=$1 runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+  [ -x "$home/bin/fm-mem-alert.sh" ] || die "alert executable missing: $home/bin/fm-mem-alert.sh"
   mkdir -p "$FM_MP_USER_UNIT_DIR" || die "could not create $FM_MP_USER_UNIT_DIR"
   (umask 022
     service_content "$home" > "$FM_MP_USER_UNIT_DIR/$FM_MP_SERVICE"
@@ -250,36 +259,6 @@ install_config() {
   write_config_noclobber "$home/config/heavy-suites" remote-only
   write_config_noclobber "$home/config/campaign-runner" "$runner"
   say "install: heavy suites refused locally; campaign runner $runner"
-}
-
-revert_earlyoom() {
-  if command -v earlyoom >/dev/null 2>&1; then
-    sudo systemctl disable --now earlyoom >/dev/null 2>&1 || true
-    say "revert: earlyoom disabled and stopped (package left installed)"
-  fi
-  if [ -f "$FM_MP_EARLYOOM_BACKUP" ]; then
-    sudo cp -p "$FM_MP_EARLYOOM_BACKUP" "$FM_MP_EARLYOOM_DEFAULTS" \
-      && say "revert: restored $FM_MP_EARLYOOM_DEFAULTS from backup"
-  elif [ -f "$FM_MP_EARLYOOM_DEFAULTS" ]; then
-    sudo rm -f "$FM_MP_EARLYOOM_DEFAULTS" && say "revert: removed $FM_MP_EARLYOOM_DEFAULTS"
-  fi
-}
-
-revert_timer() {
-  local runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-  XDG_RUNTIME_DIR=$runtime systemctl --user disable --now "$FM_MP_TIMER" >/dev/null 2>&1 || true
-  rm -f "$FM_MP_USER_UNIT_DIR/$FM_MP_SERVICE" "$FM_MP_USER_UNIT_DIR/$FM_MP_TIMER"
-  XDG_RUNTIME_DIR=$runtime systemctl --user daemon-reload >/dev/null 2>&1 || true
-  say "revert: $FM_MP_TIMER disabled and units removed"
-}
-
-revert_config() {
-  local home=$1 key
-  for key in heavy-suites campaign-runner; do
-    if [ -f "$home/config/$key" ]; then
-      rm -f "$home/config/$key" && say "revert: removed $home/config/$key"
-    fi
-  done
 }
 
 main() {
@@ -299,17 +278,12 @@ main() {
     status) cmd_status "$home" ;;
     print) cmd_print "$home" ;;
     install)
+      [ -x "$home/bin/fm-mem-alert.sh" ] || die "alert executable missing: $home/bin/fm-mem-alert.sh"
       install_earlyoom
       install_timer "$home"
       install_config "$home" "$runner"
       ;;
-    revert)
-      revert_earlyoom
-      revert_timer
-      revert_config "$home"
-      ;;
     install-config) install_config "$home" "$runner" ;;
-    revert-config) revert_config "$home" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
   esac

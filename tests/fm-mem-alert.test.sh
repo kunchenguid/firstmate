@@ -3,7 +3,7 @@
 #
 # The alert is the one-minute check that names the top memory consumer once the
 # host passes the threshold. These drive it with a fixture meminfo and a fixture
-# proc mount so the crossing, the hysteresis, and the top-process naming are all
+# proc mount so the crossing, re-arming, and the top-process naming are all
 # deterministic and independent of the host's real memory.
 set -u
 
@@ -71,28 +71,18 @@ test_crossing_alerts_once_and_names_the_top_process() {
   pass "one alert per crossing, naming the top process"
 }
 
-test_rearms_below_clear_and_alerts_again() {
+test_rearms_below_threshold_and_alerts_again() {
   setup
   run_check "$STATE" "$HIGH" "$PROC" "$OUT" || fail "first crossing failed"
   [ "$(cat "$STATE")" = fired ] || fail "state should be fired"
   rm -f "$OUT"
-  # 60% used is below the 75% clear level: re-arm without alerting.
+  make_meminfo "$LOW" 100000 20000
   run_check "$STATE" "$LOW" "$PROC" "$OUT" || fail "clear check exited non-zero"
   [ ! -e "$OUT" ] || fail "clearing must not alert"
-  [ "$(cat "$STATE")" = armed ] || fail "state should re-arm below the clear level"
+  [ "$(cat "$STATE")" = armed ] || fail "state should re-arm below the threshold"
   run_check "$STATE" "$HIGH" "$PROC" "$OUT" || fail "second crossing failed"
   [ -f "$OUT" ] || fail "a re-armed host should alert on the next crossing"
-  pass "hysteresis re-arms below the clear level and alerts again"
-}
-
-test_configured_threshold_is_honored() {
-  setup
-  printf '60\n' > "$CFG/memory-alert-threshold"
-  printf '50\n' > "$CFG/memory-alert-clear"
-  # 60% used now meets the configured 60% threshold.
-  run_check "$STATE" "$LOW" "$PROC" "$OUT" || fail "check exited non-zero"
-  [ -f "$OUT" ] || fail "configured threshold should fire at 60%"
-  pass "configured threshold and clear levels are honored"
+  pass "crossing re-arms below the threshold and alerts again"
 }
 
 test_regular_scan_finds_the_largest_process() {
@@ -123,7 +113,6 @@ test_status_reports_thresholds_and_state() {
 
 test_below_threshold_does_not_alert
 test_crossing_alerts_once_and_names_the_top_process
-test_rearms_below_clear_and_alerts_again
-test_configured_threshold_is_honored
+test_rearms_below_threshold_and_alerts_again
 test_regular_scan_finds_the_largest_process
 test_status_reports_thresholds_and_state

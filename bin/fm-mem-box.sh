@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-mem-box.sh - run a command inside a bounded cgroup v2 memory box.
 #
-# Every worker and heavy test a firstmate home launches runs under a per-lane
+# Every worker and test a firstmate home launches runs under a per-lane
 # memory cap, so a runaway leak dies inside its own box instead of taking the
 # whole host to the edge of swap. bin/fm-spawn.sh re-execs each worker's pane
 # shell through `exec`, so the agent and everything it spawns share one box, and
@@ -30,22 +30,14 @@
 #                                the fallback cap and `<lane>=<size>` overrides a
 #                                lane. <size> is a positive decimal byte count
 #                                with an optional K/M/G/T suffix (1024-based).
-#   config/memory-box-required   when present (or FM_MEM_BOX_REQUIRED=1), a host
-#                                whose delegation cannot provide the box refuses
-#                                rather than running the command unboxed.
 #
 # Environment:
 #   FM_MEM_BOX_CAP        explicit byte cap; wins over every configured cap.
-#   FM_MEM_BOX_DISABLE=1  run unboxed (escape hatch for a host without systemd).
-#   FM_MEM_BOX_REQUIRED=1 require the box; refuse when it is unavailable.
-#   FM_MEM_BOX_QUIET=1    suppress the unboxed-fallback notice (batch callers).
 #   FM_CONFIG_OVERRIDE    config directory override (as elsewhere in bin/).
 #   FM_MEM_BOX_LANES      space-separated lane names for `check` (optional).
 #
-# A host that cannot delegate a cgroup v2 memory scope (for example macOS) runs
-# the command unboxed with a one-line notice unless the box is required. A lane
-# named `heavy` additionally consults bin/fm-heavy-guard.sh, so a heavy suite
-# refuses on a host whose config routes heavy work to the campaign VM.
+# A host that cannot delegate a cgroup v2 memory scope refuses execution.
+# A lane named `heavy` additionally consults bin/fm-heavy-guard.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,7 +46,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 FM_MEM_BOX_CONFIG_FILE="memory-box"
-FM_MEM_BOX_REQUIRED_FILE="memory-box-required"
 FM_MEM_BOX_DEFAULT_CAP=8589934592 # 8 GiB
 FM_MEM_BOX_LANE_RE='^[A-Za-z0-9_.-]+$'
 FM_MEM_BOX_CAP_SOURCE=""
@@ -62,7 +53,7 @@ FM_MEM_BOX_CAP_VALUE=""
 FM_MEM_BOX_CAP_ERROR=""
 
 usage() {
-  sed -n '2,48{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,/^set -u/{ /^set -u/d;s/^# \{0,1\}//;p;}' "$0"
 }
 
 die() {
@@ -167,21 +158,13 @@ fm_mem_box_cap() {
 
 # ------------------------------------------------------------- host capability
 
-fm_mem_box_required() {
-  [ "${FM_MEM_BOX_REQUIRED:-}" = 1 ] && return 0
-  case "${FM_MEM_BOX_REQUIRED:-}" in true|yes|on) return 0 ;; esac
-  [ -e "$CONFIG/$FM_MEM_BOX_REQUIRED_FILE" ] && return 0
-  return 1
-}
-
 # fm_mem_box_supported
 # True when this host can delegate a cgroup v2 user memory scope.
 fm_mem_box_supported() {
-  [ "${FM_MEM_BOX_DISABLE:-}" = 1 ] && return 1
   command -v systemd-run >/dev/null 2>&1 || return 1
   [ -f /sys/fs/cgroup/cgroup.controllers ] || return 1
   fm_mem_box_prepare_env
-  systemd-run --user --scope --quiet -p MemoryMax=67108864 -- true >/dev/null 2>&1
+  systemd-run --user --scope --quiet -p MemoryMax=67108864 -p MemorySwapMax=0 -- true >/dev/null 2>&1
 }
 
 fm_mem_box_prepare_env() {
@@ -196,14 +179,12 @@ fm_mem_box_prepare_env() {
 }
 
 fm_mem_box_unsupported_reason() {
-  if [ "${FM_MEM_BOX_DISABLE:-}" = 1 ]; then
-    printf 'disabled by FM_MEM_BOX_DISABLE'
-  elif ! command -v systemd-run >/dev/null 2>&1; then
-    printf 'systemd-run is not installed'
+  if ! command -v systemd-run >/dev/null 2>&1; then
+    printf 'systemd-run is not installed (systemd user manager required)'
   elif [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
     printf 'cgroup v2 is not mounted'
   else
-    printf 'the systemd user manager cannot create a memory scope'
+    printf 'cgroup v2 delegation / systemd user manager cannot create a memory scope'
   fi
 }
 
@@ -272,14 +253,7 @@ cmd_exec() {
   cap=$FM_MEM_BOX_CAP_VALUE
 
   if ! fm_mem_box_supported; then
-    if fm_mem_box_required; then
-      die "memory box is required but unavailable ($(fm_mem_box_unsupported_reason)); refusing to run lane '$lane' unboxed"
-    fi
-    if [ "${FM_MEM_BOX_QUIET:-0}" != 1 ]; then
-      printf 'fm-mem-box: notice: memory box unavailable (%s); running lane %s unboxed\n' \
-        "$(fm_mem_box_unsupported_reason)" "$lane" >&2
-    fi
-    exec "$@"
+    die "memory box unavailable ($(fm_mem_box_unsupported_reason)); refusing to run lane '$lane' unboxed"
   fi
 
   exec systemd-run --user --scope --quiet --collect \
