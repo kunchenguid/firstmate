@@ -706,7 +706,25 @@ codex
 
 It opened straight to the prompt, with no "Hooks need review" modal and no folder-trust dialog.
 This is the precondition the `config/codex-crew-hooks` opt-in in [configuration](../configuration.md#codex-crew-hooks) relies on.
-It was a manual observation with no refreshing test, and it covers unchanged hooks content only: a changed hooks file needs trust again, and an untrusted one still parks the launch on the modal above.
+It covers unchanged hooks content only: a changed hooks file needs trust again, and an untrusted one still parks the launch on the modal above.
+
+`FM_CODEX_CREW_HOOKS_LIVE=1 tests/fm-codex-crew-hooks-live-e2e.test.sh` is the command that refreshes the opt-in half of this record.
+It captures the crewmate and scout launches `bin/fm-spawn.sh` actually builds, runs each under a real PTY in a linked worktree of a test checkout whose `.codex/hooks.json` registers one sentinel-writing `SessionStart` hook, and requires the sentinel with `config/codex-crew-hooks` set to `on` and a completed turn with no sentinel when the file is absent.
+It submits prompts, so it is opt-in.
+It never writes Codex's trust store or passes `--dangerously-bypass-hook-trust`: its checkout lives at the stable path `${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/codex-crew-hooks-live/project` so the operator can trust it once interactively, and until then the guard reports the missing trust as a skip.
+
+Run 2026-10-03 on codex-cli 0.160.0, Linux, on a machine where that checkout had never been trusted:
+
+```sh
+FM_CODEX_CREW_HOOKS_LIVE=1 tests/fm-codex-crew-hooks-live-e2e.test.sh
+```
+
+```text
+skip: live: codex has no persisted trust for the test checkout and its hook; run codex once in /home/aalsalman/.cache/firstmate/codex-crew-hooks-live/project, trust the folder and its hook, and rerun
+```
+
+The opted-in launch parked on Codex's "Trust this folder?" dialog, so this run confirms only that an untrusted checkout still stops an opted-in launch and that the guard leaves `~/.codex/config.toml` unchanged.
+That a trusted project hook runs under the opt-in is not yet recorded for any Codex version; trust the checkout as the skip line says and rerun the guard to record it.
 
 ## Composer classification matrix
 
