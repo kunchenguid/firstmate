@@ -27,5 +27,7 @@ A wide refactor whose blast radius cannot land green as a vertical slice uses ex
 
 When a design question cannot be settled in prose, a scout may deliver a prototype: throwaway code that answers that one question.
 Throwaway constrains how the code is written, not whether it survives.
-The report points to the prototype as a primary source on a named branch that outlives the scout's worktree, and the validated decision folds into the real code on the ship that follows.
+The report names the prototype branch and says it is preserved there as a primary source that outlives the scout's worktree.
+Before teardown the scout leaves the prototype branch not checked out and returns the worktree with the default branch checked out, because teardown force-deletes a branch that is still checked out.
+The validated decision folds into the real code on the ship that follows.
 A prototype never becomes a PR, because a scout never produces one, and it does not authorize implementation.
