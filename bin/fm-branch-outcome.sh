@@ -3,7 +3,7 @@
 # branch (docs/pi-supervision-branch.md).
 #
 # CONTRACT (this header is the one owner of the store's format).
-#   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
+#   - Active store: $STATE/branch-outcomes.jsonl. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
 #     "statusEndpoint":N,"statusIdent":"...","taskGeneration":"...",
@@ -12,15 +12,26 @@
 #     supplied), while `taskGeneration` binds its proved executor generation.
 #     An unproved generation/material pair uses the legacy non-coalescible row shape. Legacy rows without `silent`
 #     or status provenance remain valid and are treated as visible.
-#     Every read and append validates the complete log as a gap-free sequence;
-#     malformed, duplicate, or reordered rows fail closed.
-#     Existing lines are never rewritten, reordered, or deleted.
-#     Historical rows with the same identity fields remain readable; current
-#     append uses them only for delivery coalescing, never as lifecycle state.
-#     The read state lives
-#     entirely in the cursor sidecar so marking outcomes read cannot disturb
-#     the log. Retention: the log is small (one line per handled fleet event)
-#     and truncation, if ever needed, is a captain-approved manual act.
+#     Ordinary reads validate this retained active window as a gap-free
+#     sequence beginning at the base sequence recorded in
+#     $STATE/.branch-outcomes-base. The base is 1 when that sidecar is absent.
+#     Malformed, duplicate, reordered, or base-mismatched rows fail closed.
+#     Sequence identifiers are never rewritten.
+#   - Cold store: $STATE/branch-outcomes-cold.jsonl preserves the original,
+#     immutable bytes of every verified processed row moved out of the active
+#     scan path. Compaction retains the processed frontier and the preceding
+#     63 rows in the active store, plus every row above that frontier. It never
+#     truncates a row and 64 is a row count, not a byte cap. Explicit full or
+#     exact history reads, once-task identity checks, and index recovery may
+#     validate and read cold evidence; ordinary unread, unprocessed, recent,
+#     append, and cursor operations do not.
+#     Compaction shares the outcome lock. Its prepared record publishes cold
+#     evidence before the shorter active store and base, and every command
+#     completes an interrupted publication before using the store.
+#     Historical rows with the same identity fields remain explicitly readable;
+#     current append uses them only for once-task identity, never as lifecycle
+#     state. The read state lives entirely in the cursor sidecar so marking
+#     outcomes read cannot disturb either store.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
 #     Pi as a routine merge note, persisted as a sequence-keyed visible captain
 #     entry, emitted by the locked session-start replay, or silently consumed
@@ -90,9 +101,12 @@
 #     of the process holding $STATE/.branch-outcomes.lock (fm-wake-drain.sh may
 #     run its redirected presentation body in a subshell on Bash 3.2); it skips
 #     the nested acquire so drain's bounded lock wait remains the deadline.
-#   fm-branch-outcome.sh list [--recent <n>|--all]
-#     Print the last n records (default 20), or the complete validated
-#     append-only history with --all, read or not.
+#   fm-branch-outcome.sh list [--recent <n>|--all|--seq <n>]
+#     Print the last n active records (default 20), the complete validated
+#     active+cold history with --all, or one exact active/cold record by stable
+#     sequence with --seq.
+#   fm-branch-outcome.sh compact --dry-run|--apply
+#     Report or apply the 64-processed-row active retention policy.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
@@ -110,6 +124,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
+COLD_STORE="$STATE/branch-outcomes-cold.jsonl"
+BASE_FILE="$STATE/.branch-outcomes-base"
+COMPACTION_JOURNAL="$STATE/.branch-outcomes-compaction"
+COMPACTION_ACTIVE="$STATE/.branch-outcomes-active.prepared"
+COMPACTION_COLD="$STATE/.branch-outcomes-cold.prepared"
+COMPACTION_BASE="$STATE/.branch-outcomes-base.prepared"
 DATA_ROOT=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
@@ -118,9 +138,10 @@ MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
 OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
+RETAIN_PROCESSED=64
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--material-key <text>] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>|--all] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--material-key <text>] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>|--all|--seq <n>] | compact --dry-run|--apply | startup-replay" >&2
   exit 2
 }
 
@@ -198,9 +219,47 @@ read_processed() {
   printf '%s\n' "$value"
 }
 
-last_seq() {
-  [ -s "$STORE" ] || { printf '0\n'; return 0; }
-  jq -Rse '
+read_base() {
+  local version value extra
+  [ -e "$BASE_FILE" ] || { printf '1\n'; return 0; }
+  exec 8< "$BASE_FILE" || {
+    echo "error: refusing operation because the outcome base is unreadable" >&2
+    return 1
+  }
+  IFS=$(printf '\t') read -r version value extra <&8 || true
+  exec 8<&-
+  if [ "$version" != fm-branch-outcomes-base-v1 ] || [ -n "$extra" ] \
+      || ! bounded_uint "$value" || [ "$value" -lt 1 ]; then
+    echo "error: refusing operation because the outcome base is malformed" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+sha256_file() { # <path>, including an absent/empty file
+  if [ -s "$1" ]; then
+    if command -v shasum >/dev/null 2>&1; then
+      shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+      sha256sum "$1" | awk '{print $1}'
+    else
+      echo "error: shasum or sha256sum is required" >&2
+      return 1
+    fi
+  else
+    sha256_text ''
+  fi
+}
+
+file_size() { # <path>
+  [ -e "$1" ] || { printf '0\n'; return 0; }
+  wc -c < "$1" | tr -d '[:space:]'
+}
+
+segment_last_seq() { # <path> <first-seq>
+  local path=$1 first=$2
+  [ -s "$path" ] || { printf '%s\n' "$((first - 1))"; return 0; }
+  jq -Rse --argjson first "$first" '
     def valid:
       type == "object"
       and (
@@ -236,11 +295,171 @@ last_seq() {
     | map(fromjson)
     | . as $rows
     | if reduce range(0; length) as $i
-        (true; . and ($rows[$i] | valid and .seq == ($i + 1)))
+        (true; . and ($rows[$i] | valid and .seq == ($first + $i)))
       then .[-1].seq
       else error("malformed or non-sequential outcome store")
       end
-  ' "$STORE" 2>/dev/null
+  ' "$path" 2>/dev/null
+}
+
+last_seq() {
+  local base
+  base=$(read_base) || return 1
+  if [ ! -s "$STORE" ] && [ "$base" -ne 1 ]; then
+    return 1
+  fi
+  segment_last_seq "$STORE" "$base"
+}
+
+validate_cold_store() {
+  local base cold_last
+  base=$(read_base) || return 1
+  if [ "$base" -eq 1 ]; then
+    [ ! -s "$COLD_STORE" ] || return 1
+    return 0
+  fi
+  [ -s "$COLD_STORE" ] || return 1
+  cold_last=$(segment_last_seq "$COLD_STORE" 1) || return 1
+  [ "$cold_last" -eq "$((base - 1))" ]
+}
+
+write_base_prepared() { # <base>
+  printf 'fm-branch-outcomes-base-v1\t%s\n' "$1" > "$COMPACTION_BASE"
+  chmod 0600 "$COMPACTION_BASE"
+}
+
+recover_compaction_locked() {
+  local schema old_base new_base old_last cold_hash active_hash base_hash extra
+  local current_hash current_base current_last
+  if [ ! -e "$COMPACTION_JOURNAL" ]; then
+    rm -f -- "$COMPACTION_ACTIVE" "$COMPACTION_COLD" "$COMPACTION_BASE"
+    return 0
+  fi
+  exec 8< "$COMPACTION_JOURNAL" || return 1
+  IFS=$(printf '\t') read -r schema old_base new_base old_last cold_hash active_hash base_hash extra <&8 || true
+  exec 8<&-
+  if [ "$schema" != fm-branch-outcome-compaction-v1 ] || [ -n "$extra" ] \
+      || ! bounded_uint "$old_base" || ! bounded_uint "$new_base" \
+      || ! bounded_uint "$old_last" \
+      || [ "$new_base" -le "$old_base" ] || [ "$new_base" -gt "$old_last" ] \
+      || [ "${#cold_hash}" -ne 64 ] || [ "${#active_hash}" -ne 64 ] || [ "${#base_hash}" -ne 64 ]; then
+    echo "error: refusing operation because the outcome compaction journal is malformed" >&2
+    return 1
+  fi
+  case "$cold_hash$active_hash$base_hash" in *[!a-f0-9]*)
+    echo "error: refusing operation because the outcome compaction journal is malformed" >&2
+    return 1
+    ;;
+  esac
+
+  current_hash=$(sha256_file "$COLD_STORE") || return 1
+  if [ "$current_hash" != "$cold_hash" ]; then
+    current_base=$(read_base) || return 1
+    if [ "$current_base" -ne "$old_base" ] || ! validate_cold_store; then
+      echo "error: refusing recovery because current cold outcome evidence does not match the journal base" >&2
+      return 1
+    fi
+    [ -f "$COMPACTION_COLD" ] && [ "$(sha256_file "$COMPACTION_COLD")" = "$cold_hash" ] || {
+      echo "error: refusing recovery because prepared cold outcome evidence is missing or changed" >&2
+      return 1
+    }
+    mv -f -- "$COMPACTION_COLD" "$COLD_STORE" || return 1
+  fi
+  [ "${FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT:-}" != after-cold ] || return 75
+
+  current_hash=$(sha256_file "$STORE") || return 1
+  if [ "$current_hash" != "$active_hash" ]; then
+    current_last=$(segment_last_seq "$STORE" "$old_base") || {
+      echo "error: refusing recovery because current active outcome evidence does not match the journal base" >&2
+      return 1
+    }
+    [ "$current_last" -eq "$old_last" ] || {
+      echo "error: refusing recovery because current active outcome evidence does not match the journal tail" >&2
+      return 1
+    }
+    [ -f "$COMPACTION_ACTIVE" ] && [ "$(sha256_file "$COMPACTION_ACTIVE")" = "$active_hash" ] || {
+      echo "error: refusing recovery because prepared active outcome evidence is missing or changed" >&2
+      return 1
+    }
+    mv -f -- "$COMPACTION_ACTIVE" "$STORE" || return 1
+  fi
+  [ "${FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT:-}" != after-active ] || return 75
+
+  current_hash=$(sha256_file "$BASE_FILE") || return 1
+  if [ "$current_hash" != "$base_hash" ]; then
+    current_base=$(read_base) || return 1
+    [ "$current_base" -eq "$old_base" ] || {
+      echo "error: refusing recovery because the current outcome base does not match the journal" >&2
+      return 1
+    }
+    [ -f "$COMPACTION_BASE" ] && [ "$(sha256_file "$COMPACTION_BASE")" = "$base_hash" ] || {
+      echo "error: refusing recovery because prepared outcome base is missing or changed" >&2
+      return 1
+    }
+    mv -f -- "$COMPACTION_BASE" "$BASE_FILE" || return 1
+  fi
+  [ "${FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT:-}" != after-base ] || return 75
+
+  rm -f -- "$COMPACTION_ACTIVE" "$COMPACTION_COLD" "$COMPACTION_BASE" "$COMPACTION_JOURNAL"
+  [ "$(read_base)" -eq "$new_base" ] || return 1
+  [ "$(last_seq)" -eq "$old_last" ] || return 1
+  validate_cold_store || return 1
+}
+
+compaction_plan_locked() {
+  local base last cursor processed archive_through active_rows active_bytes cold_bytes move_rows
+  base=$(read_base) || return 1
+  last=$(last_seq) || return 1
+  cursor=$(read_cursor) || return 1
+  processed=$(read_processed) || return 1
+  if [ "$cursor" -gt "$last" ] || [ "$processed" -gt "$cursor" ] || [ "$processed" -lt "$((base - 1))" ]; then
+    echo "error: refusing compaction because outcome cursors do not match the active base and tail" >&2
+    return 1
+  fi
+  archive_through=$((processed - RETAIN_PROCESSED))
+  [ "$archive_through" -ge "$base" ] || archive_through=$((base - 1))
+  move_rows=$((archive_through - base + 1))
+  active_rows=$((last - base + 1 - move_rows))
+  active_bytes=$(file_size "$STORE") || return 1
+  cold_bytes=$(file_size "$COLD_STORE") || return 1
+  printf '{"base":%s,"tail":%s,"processed":%s,"retain_processed":%s,"archive_through":%s,"move_rows":%s,"active_rows_after":%s,"active_bytes_before":%s,"cold_bytes_before":%s}\n' \
+    "$base" "$last" "$processed" "$RETAIN_PROCESSED" "$archive_through" "$move_rows" "$active_rows" "$active_bytes" "$cold_bytes"
+}
+
+compact_locked() {
+  local plan base last archive_through move_rows new_base journal_tmp
+  local cold_hash active_hash base_hash
+  plan=$(compaction_plan_locked) || return 1
+  base=$(printf '%s\n' "$plan" | jq -r .base)
+  last=$(printf '%s\n' "$plan" | jq -r .tail)
+  archive_through=$(printf '%s\n' "$plan" | jq -r .archive_through)
+  move_rows=$(printf '%s\n' "$plan" | jq -r .move_rows)
+  [ "$move_rows" -gt 0 ] || { printf '%s\n' "$plan"; return 0; }
+  validate_cold_store || {
+    echo "error: refusing compaction because cold outcome evidence is malformed or does not meet the active base" >&2
+    return 1
+  }
+  new_base=$((archive_through + 1))
+  # The active segment has already been validated as a gap-free sequence, so
+  # row counts identify the exact prefix without parsing or reserializing it.
+  # This preserves the immutable original JSONL bytes in cold storage.
+  { [ ! -s "$COLD_STORE" ] || cat "$COLD_STORE"; head -n "$move_rows" "$STORE"; } > "$COMPACTION_COLD" || return 1
+  tail -n "+$((move_rows + 1))" "$STORE" > "$COMPACTION_ACTIVE" || return 1
+  write_base_prepared "$new_base" || return 1
+  chmod 0600 "$COMPACTION_COLD" "$COMPACTION_ACTIVE"
+  cold_hash=$(sha256_file "$COMPACTION_COLD") || return 1
+  active_hash=$(sha256_file "$COMPACTION_ACTIVE") || return 1
+  base_hash=$(sha256_file "$COMPACTION_BASE") || return 1
+  journal_tmp=$(mktemp "$STATE/.branch-outcomes-compaction.XXXXXX") || return 1
+  printf 'fm-branch-outcome-compaction-v1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$base" "$new_base" "$last" "$cold_hash" "$active_hash" "$base_hash" > "$journal_tmp" || {
+      rm -f -- "$journal_tmp"
+      return 1
+    }
+  chmod 0600 "$journal_tmp"
+  mv -f -- "$journal_tmp" "$COMPACTION_JOURNAL" || return 1
+  recover_compaction_locked || return 1
+  printf '%s\n' "$plan"
 }
 
 record_seq() { # <jsonl-line>
@@ -293,15 +512,16 @@ publish_outcome_index_ready() { # <seq>
 rebuild_outcome_indexes() {
   local rows task seq epoch endpoint ident f mtime
   rm -f -- "$OUTCOME_INDEX_READY" || return 1
-  [ -s "$STORE" ] || { publish_outcome_index_ready 0; return; }
-  rows=$(jq -r -s '
+  validate_cold_store || return 1
+  [ -s "$STORE" ] || { publish_outcome_index_ready "$(last_seq)"; return; }
+  rows=$({ [ ! -s "$COLD_STORE" ] || cat "$COLD_STORE"; cat "$STORE"; } | jq -r -s '
     map(select(.task != "fleet" and (.task | length > 0 and (test("[^A-Za-z0-9._-]") | not))))
     | group_by(.task)
     | map(.[-1])[]
     | [.task, (.seq | tostring), (.epoch | tostring),
        ((.statusEndpoint // "") | tostring), (.statusIdent // "")]
     | @tsv
-  ' "$STORE") || return 1
+  ') || return 1
   while IFS=$(printf '\t') read -r task seq epoch endpoint ident; do
     [ -n "$task" ] || continue
     if [ -z "$endpoint" ] || [ -z "$ident" ]; then
@@ -333,14 +553,19 @@ EOF
 }
 
 print_unread() {
-  local cursor last
+  local cursor last base
   cursor=$(read_cursor)
+  base=$(read_base) || return 1
   if ! last=$(last_seq); then
     echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
     return 1
   fi
   if [ "$cursor" -gt "$last" ]; then
     echo "error: refusing read because the outcome cursor is ahead of the store" >&2
+    return 1
+  fi
+  if [ "$cursor" -lt "$((base - 1))" ]; then
+    echo "error: refusing read because the outcome cursor is behind the archived prefix" >&2
     return 1
   fi
   [ -s "$STORE" ] || return 0
@@ -370,9 +595,10 @@ write_processed() { # <seq>
 
 # Captain rows above the processed marker and at or below the read cursor.
 print_unprocessed() {
-  local cursor processed last
+  local cursor processed last base
   cursor=$(read_cursor) || return 1
   processed=$(read_processed) || return 1
+  base=$(read_base) || return 1
   if ! last=$(last_seq); then
     echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
     return 1
@@ -385,6 +611,10 @@ print_unprocessed() {
     echo "error: refusing read because the processed marker is ahead of the read cursor" >&2
     return 1
   fi
+  if [ "$processed" -lt "$((base - 1))" ]; then
+    echo "error: refusing read because the processed marker is behind the archived prefix" >&2
+    return 1
+  fi
   [ -s "$STORE" ] || return 0
   jq -c --argjson processed "$processed" --argjson cursor "$cursor" \
     'select(.verdict == "captain" and .seq > $processed and .seq <= $cursor)' "$STORE"
@@ -393,7 +623,7 @@ print_unprocessed() {
 # Assumes $LOCK is already held. Callers that do not already hold it use the
 # processed-init command, which acquires and releases around this body.
 processed_init_locked() {
-  local store_last cursor_seq processed_seq
+  local store_last cursor_seq processed_seq base_seq ready_seq
   if ! store_last=$(last_seq); then
     echo "error: refusing processed initialization because the outcome store is malformed or non-sequential" >&2
     return 1
@@ -405,6 +635,11 @@ processed_init_locked() {
     echo "error: refusing processed initialization because the outcome cursor is ahead of the store" >&2
     return 1
   fi
+  base_seq=$(read_base) || return 1
+  if [ "$cursor_seq" -lt "$((base_seq - 1))" ]; then
+    echo "error: refusing processed initialization because the outcome cursor is behind the archived prefix" >&2
+    return 1
+  fi
   if [ -e "$PROCESSED" ]; then
     if ! processed_seq=$(read_processed); then
       return 1
@@ -414,7 +649,15 @@ processed_init_locked() {
       return 1
     fi
   else
+    if [ "$base_seq" -gt 1 ]; then
+      echo "error: refusing processed initialization because a compacted store has no processed marker" >&2
+      return 1
+    fi
     write_processed "$cursor_seq" || return 1
+  fi
+  ready_seq=$(cat "$OUTCOME_INDEX_READY" 2>/dev/null || true)
+  if [ "$ready_seq" = "$store_last" ]; then
+    return 0
   fi
   if ! rebuild_outcome_indexes; then
     echo "error: outcome index migration could not be completed safely" >&2
@@ -488,18 +731,31 @@ case "$CMD" in
       exit 2
     fi
     fm_lock_acquire_wait "$LOCK"
+    if ! recover_compaction_locked; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing append because outcome compaction recovery failed" >&2
+      exit 1
+    fi
     if ! LAST_SEQ=$(last_seq); then
       fm_lock_release "$LOCK"
       echo "error: refusing append because the outcome store is malformed or non-sequential" >&2
       exit 1
     fi
-    if ! CURSOR_SEQ=$(read_cursor) || [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ]; then
+    BASE_SEQ=$(read_base) || { fm_lock_release "$LOCK"; exit 1; }
+    if ! CURSOR_SEQ=$(read_cursor) || [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ] \
+        || [ "$CURSOR_SEQ" -lt "$((BASE_SEQ - 1))" ]; then
       fm_lock_release "$LOCK"
       echo "error: refusing append because the outcome cursor is invalid or ahead of the store" >&2
       exit 1
     fi
-    if [ "$ONCE_TASK" = true ] && [ -s "$STORE" ]; then
-      EXISTING=$(jq -c --arg task "$TASK" 'select(.task == $task)' "$STORE")
+    if [ "$ONCE_TASK" = true ] && { [ -s "$STORE" ] || [ -s "$COLD_STORE" ]; }; then
+      if ! validate_cold_store; then
+        fm_lock_release "$LOCK"
+        echo "error: refusing once-task append because cold outcome evidence is malformed" >&2
+        exit 1
+      fi
+      EXISTING=$({ [ ! -s "$COLD_STORE" ] || cat "$COLD_STORE"; [ ! -s "$STORE" ] || cat "$STORE"; } \
+        | jq -c --arg task "$TASK" 'select(.task == $task)')
       if [ -n "$EXISTING" ]; then
         if ! SEQ=$(printf '%s\n' "$EXISTING" | jq -ser --arg summary "$SUMMARY" --arg verdict "$VERDICT" --arg wake "$WAKE" --argjson silent "$SILENT" '
           if length == 1 and .[0].summary == $summary and .[0].verdict == $verdict and .[0].wake == $wake and .[0].silent == $silent
@@ -563,6 +819,10 @@ case "$CMD" in
   unread)
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
+    if ! recover_compaction_locked; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
     print_unread
     fm_lock_release "$LOCK"
     ;;
@@ -572,6 +832,10 @@ case "$CMD" in
     bounded_uint "$THROUGH" || usage
     [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
+    if ! recover_compaction_locked; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
     if ! LAST_SEQ=$(last_seq); then
       fm_lock_release "$LOCK"
       echo "error: refusing cursor advancement because the outcome store is malformed or non-sequential" >&2
@@ -581,7 +845,8 @@ case "$CMD" in
       fm_lock_release "$LOCK"
       exit 1
     fi
-    if [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ]; then
+    BASE_SEQ=$(read_base) || { fm_lock_release "$LOCK"; exit 1; }
+    if [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ] || [ "$CURSOR_SEQ" -lt "$((BASE_SEQ - 1))" ]; then
       fm_lock_release "$LOCK"
       echo "error: refusing cursor advancement because the outcome cursor is ahead of the store" >&2
       exit 1
@@ -600,6 +865,10 @@ case "$CMD" in
   unprocessed)
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
+    if ! recover_compaction_locked; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
     print_unprocessed
     STATUS=$?
     fm_lock_release "$LOCK"
@@ -611,6 +880,10 @@ case "$CMD" in
     bounded_uint "$THROUGH" || usage
     [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
+    if ! recover_compaction_locked; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
     if ! CURSOR_SEQ=$(read_cursor) || ! PROCESSED_SEQ=$(read_processed); then
       fm_lock_release "$LOCK"
       exit 1
@@ -625,9 +898,15 @@ case "$CMD" in
       echo "error: refusing processed advancement because the outcome cursor is ahead of the store" >&2
       exit 1
     fi
+    BASE_SEQ=$(read_base) || { fm_lock_release "$LOCK"; exit 1; }
     if [ "$PROCESSED_SEQ" -gt "$CURSOR_SEQ" ]; then
       fm_lock_release "$LOCK"
       echo "error: refusing processed advancement because the processed marker is ahead of the read cursor" >&2
+      exit 1
+    fi
+    if [ "$PROCESSED_SEQ" -lt "$((BASE_SEQ - 1))" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed advancement because the processed marker is behind the archived prefix" >&2
       exit 1
     fi
     if [ "$THROUGH" -gt "$CURSOR_SEQ" ]; then
@@ -647,6 +926,11 @@ case "$CMD" in
       exit 1
     fi
     write_processed "$THROUGH"
+    if ! compact_locked >/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: processed marker advanced but outcome compaction did not complete; preserve active evidence and retry compact --apply after resolving the reported store fault" >&2
+      exit 1
+    fi
     fm_lock_release "$LOCK"
     ;;
   processed-init)
@@ -662,6 +946,12 @@ case "$CMD" in
       echo "error: --held-lock requires an ancestor process to own the outcome lock" >&2
       exit 1
     fi
+    if ! recover_compaction_locked; then
+      if [ "$HELD_LOCK" -eq 0 ]; then
+        fm_lock_release "$LOCK"
+      fi
+      exit 1
+    fi
     if ! processed_init_locked; then
       if [ "$HELD_LOCK" -eq 0 ]; then
         fm_lock_release "$LOCK"
@@ -675,6 +965,7 @@ case "$CMD" in
   list)
     RECENT=20
     ALL=false
+    EXACT=''
     if [ "${1:-}" = --recent ]; then
       RECENT=${2:-}
       case "$RECENT" in ''|*[!0-9]*|0) usage ;; esac
@@ -682,24 +973,76 @@ case "$CMD" in
     elif [ "${1:-}" = --all ]; then
       ALL=true
       shift
+    elif [ "${1:-}" = --seq ]; then
+      EXACT=${2:-}
+      bounded_uint "$EXACT" || usage
+      shift 2 || usage
     fi
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
+    if ! recover_compaction_locked; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
     if ! last_seq >/dev/null; then
       fm_lock_release "$LOCK"
       echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
       exit 1
     fi
-    if [ -s "$STORE" ] && [ "$ALL" = true ]; then
-      cat "$STORE"
+    if [ "$ALL" = true ] || [ -n "$EXACT" ]; then
+      if ! validate_cold_store; then
+        fm_lock_release "$LOCK"
+        echo "error: refusing historical read because cold outcome evidence is malformed" >&2
+        exit 1
+      fi
+    fi
+    if [ "$ALL" = true ]; then
+      [ ! -s "$COLD_STORE" ] || cat "$COLD_STORE"
+      [ ! -s "$STORE" ] || cat "$STORE"
+    elif [ -n "$EXACT" ]; then
+      BASE_SEQ=$(read_base) || { fm_lock_release "$LOCK"; exit 1; }
+      if [ "$EXACT" -lt "$BASE_SEQ" ]; then
+        FOUND=$(jq -c --argjson seq "$EXACT" 'select(.seq == $seq)' "$COLD_STORE")
+      else
+        FOUND=$(jq -c --argjson seq "$EXACT" 'select(.seq == $seq)' "$STORE")
+      fi
+      if [ -z "$FOUND" ]; then
+        fm_lock_release "$LOCK"
+        echo "error: exact outcome sequence $EXACT does not exist" >&2
+        exit 1
+      fi
+      printf '%s\n' "$FOUND"
     elif [ -s "$STORE" ]; then
       tail -n "$RECENT" "$STORE"
     fi
     fm_lock_release "$LOCK"
     ;;
+  compact)
+    MODE=${1:-}
+    case "$MODE" in --dry-run|--apply) ;; *) usage ;; esac
+    [ "$#" -eq 1 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! recover_compaction_locked; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
+    if [ "$MODE" = --dry-run ]; then
+      compaction_plan_locked
+      STATUS=$?
+    else
+      compact_locked
+      STATUS=$?
+    fi
+    fm_lock_release "$LOCK"
+    exit "$STATUS"
+    ;;
   startup-replay)
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
+    if ! recover_compaction_locked; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
     UNREAD=$(print_unread)
     if [ -n "$UNREAD" ]; then
       REPLAYABLE=$(printf '%s\n' "$UNREAD" | jq -sc '

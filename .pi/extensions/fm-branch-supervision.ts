@@ -184,6 +184,10 @@ const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
 // request cannot become an unbounded loop of empty turns.
 const PROCESSING_TRIGGERED_ATTEMPTS = 2;
+// The outcome owner retains this many processed rows in its active store.
+// Every unread and unprocessed row is loaded separately and merged below, so
+// the history query is supporting context rather than a pending-work limit.
+const OUTCOME_HISTORY_WINDOW = 64;
 // One provider failure rejects immediately to watcher-owned fallback but leaves
 // room for a transient outage to recover on the next wake. A second consecutive
 // provider failure latches the branch off. While latched, main keeps every wake
@@ -643,6 +647,12 @@ function coalesceExactOutcomeRows(rows: OutcomeRow[], history: OutcomeRow[] = ro
       candidate.verdict === row.verdict && candidate.summary === row.summary && candidate.silent === row.silent)?.seq;
     return firstMaterialSequence === undefined || firstMaterialSequence > terminal;
   });
+}
+
+function includeRequiredOutcomeRows(history: OutcomeRow[], required: OutcomeRow[]): OutcomeRow[] {
+  const rows = new Map(history.map((row) => [row.seq, row]));
+  required.forEach((row) => rows.set(row.seq, row));
+  return [...rows.values()].sort((left, right) => left.seq - right.seq);
 }
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
@@ -1319,7 +1329,7 @@ export default function (pi: ExtensionAPI) {
       rows.push(row);
     }
     const history = await readOutcomeHistory();
-    return history === null ? null : coalesceExactOutcomeRows(rows, history);
+    return history === null ? null : coalesceExactOutcomeRows(rows, includeRequiredOutcomeRows(history, rows));
   }
 
   async function readOutcomeHistory(): Promise<OutcomeRow[] | null> {
@@ -1545,7 +1555,10 @@ export default function (pi: ExtensionAPI) {
       }
       const history = await readOutcomeHistory();
       if (history === null) return false;
-      const deliveredSequences = new Set(coalesceExactOutcomeRows(parsedUnread, history).map((row) => row.seq));
+      const deliveredSequences = new Set(coalesceExactOutcomeRows(
+        parsedUnread,
+        includeRequiredOutcomeRows(history, parsedUnread),
+      ).map((row) => row.seq));
       for (const row of parsedUnread) {
         // The last cancellation point of this row: everything from here to
         // its mark-read is synchronous delivery plus the awaited script that
