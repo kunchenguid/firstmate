@@ -18,7 +18,6 @@
 # report pointer, without consulting fm-crew-state.sh. A ship `done:` is
 # published only when bin/fm-dod-lib.sh accepts the named head, so an
 # unpushed copy is not reported upstream as ready. The cadence path uses
-# fm-crew-state.sh, which applies the same gate: a no-mistakes
 # pre-validation `done: {summary}` still reads done (the pipeline handoff),
 # while a CI-ready or direct-PR/local-only done whose head lives only in the
 # disposable copy reads blocked and is not a terminal inactive outcome.

@@ -3,7 +3,6 @@
 # Usage: . bin/fm-brief-heading-lib.sh
 #
 # This file is the single owner of how a brief's sections are read: the
-# `# Task` subsections bin/fm-brief.sh scaffolds feed the no-mistakes
 # `--intent` contract in bin/fm-dod-lib.sh, spawn and promotion validation,
 # and the task text bin/fm-dispatch-resolve.sh sends to the router, so every
 # consumer sees the same section bodies.

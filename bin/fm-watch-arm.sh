@@ -86,8 +86,6 @@
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
 # the stop.
 #
-# A copy of this script living under a disposable no-mistakes validation
-# checkout (a path containing /.no-mistakes/worktrees/) refuses every mode
 # outside a marked lab with
 # "watcher: FAILED - refusing to arm from a disposable validation checkout" and
 # exits 1 before touching any state: a watcher armed from there outlives the
@@ -98,27 +96,6 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
-  case "$SCRIPT_DIR/:$(cd "$SCRIPT_DIR" && pwd -P)/" in
-    */.no-mistakes/worktrees/*)
-      lab_root=$(cd -P -- "${FM_HOME:-/nonexistent}" 2>/dev/null && pwd -P || true)
-      state_dir=${FM_STATE_OVERRIDE:-${STATE:-${FM_HOME:-}/state}}
-      if [ -d "$state_dir" ]; then
-        resolved_state=$(cd -P -- "$state_dir" 2>/dev/null && pwd -P || true)
-      elif [ ! -e "$state_dir" ] && [ ! -L "$state_dir" ]; then
-        resolved_state=$(cd -P -- "$(dirname -- "$state_dir")" 2>/dev/null && pwd -P)/$(basename -- "$state_dir")
-      else
-        resolved_state=
-      fi
-      case "$resolved_state" in "$lab_root"/*) state_in_lab=1 ;; *) state_in_lab=0 ;; esac
-      if ! fm_gate_lab_permitted || [ "$state_in_lab" -ne 1 ]; then
-        echo "watcher: FAILED - refusing to arm from a disposable validation checkout: $SCRIPT_DIR"
-        exit 1
-      fi ;;
-  esac
-fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 

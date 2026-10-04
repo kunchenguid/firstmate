@@ -105,7 +105,7 @@ test_ship_allowlist_absent() {
   local rec out status seen
   rec=$(make_case ship-open codex ship-open-a1)
   read_case "$rec"
-  out=$(run_case_spawn ship-open-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
+  out=$(run_case_spawn ship-open-a1 "$PROJ_DIR" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "ship spawn without an allowlist should succeed: $out"
   assert_pane_export_precedes_launch "$PANE_LOG" "ship, allowlist absent"
@@ -125,7 +125,7 @@ test_ship_allowlist_enabled() {
   # operational floor and nothing else, so it is where a floor either holds or
   # is lost.
   : > "$HOME_DIR/config/launch-env-allowlist"
-  out=$(run_case_spawn ship-filtered-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
+  out=$(run_case_spawn ship-filtered-a1 "$PROJ_DIR" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "ship spawn under an allowlist should succeed: $out"
   assert_pane_export_precedes_launch "$PANE_LOG" "ship, allowlist enabled"
@@ -149,7 +149,7 @@ test_launch_command_carries_the_switch_without_the_pane_export() {
     rec=$(make_case "ship-nopane-$setting" codex "ship-nopane-$setting-a1")
     read_case "$rec"
     [ "$setting" = absent ] || : > "$HOME_DIR/config/launch-env-allowlist"
-    out=$(run_case_spawn "ship-nopane-$setting-a1" "$PROJ_DIR" --mode no-mistakes --yolo off)
+    out=$(run_case_spawn "ship-nopane-$setting-a1" "$PROJ_DIR" --mode direct-PR --yolo off)
     status=$?
     expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
     install_env_probe "$FAKEBIN_DIR" codex
@@ -202,7 +202,7 @@ test_launch_exports_task_inbox() {
     read_case "$rec"
     : > "$HOME_DIR/config/launch-env-allowlist"
     if [ "$kind" = ship ]; then
-      out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+      out=$(run_case_spawn "$id" "$PROJ_DIR" --mode direct-PR --yolo off)
     else
       sm="$CASE_DIR/secondmate-home"
       mkdir -p "$sm/bin" "$sm/data"
@@ -316,7 +316,7 @@ test_relaunch_rebuilds_the_switch() {
       echo "project=$proj"
       echo "harness=codex"
       echo "kind=ship"
-      echo "mode=no-mistakes"
+      echo "mode=direct-PR"
       echo "yolo=off"
       echo "tasktmp=$dir/tasktmp"
       echo "model=default"
@@ -367,7 +367,7 @@ printf '%s\n' "${COMPACT_ADVISER_DISABLE-unset}"
 SH
   chmod +x "$probe_dir/probe"
 
-  out=$(run_case_spawn raw-compound-a1 "$PROJ_DIR" --mode no-mistakes --yolo off \
+  out=$(run_case_spawn raw-compound-a1 "$PROJ_DIR" --mode direct-PR --yolo off \
     "cd $probe_dir && ./probe")
   status=$?
   expect_code 0 "$status" "raw compound launch spawn should succeed: $out"

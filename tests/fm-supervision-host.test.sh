@@ -2774,7 +2774,7 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
     commit -q --allow-empty -m init
   fm_write_meta "$home/state/held.meta" \
     'window=fm-held' "worktree=$home/projects/held" "project=$home/projects/held" \
-    'harness=claude' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=g1' \
+    'harness=claude' 'kind=ship' 'mode=direct-PR' 'yolo=off' 'spawn_gen=g1' \
     'pr=https://example.test/o/r/pull/153'
   printf 'done: PR https://example.test/o/r/pull/153 open, green, mergeable\n' > "$home/state/held.status"
   old=$(( $(date +%s) - 600 ))

@@ -73,22 +73,12 @@ On GitHub a recorded head stays true: it is the commit that was reviewed and, ab
 On Gerrit the same recorded value goes stale on every amend, and a stale value does not look stale - it looks like a perfectly well-formed revision, because it is one.
 Anything that compares against it is then comparing against an earlier patch set while believing it is comparing against the change.
 
-### Where today's mode names mislead
+### Delivery modes describe the stopping point
 
-Not one of Firstmate's three delivery-mode names refers to a stopping point, and each misses it differently.
-
-`direct-PR` names an artifact.
-On a forge with no pull request the name has no referent at all, which is why the natural first rule is to refuse the combination rather than give it a meaning: there is nothing to rename it to from inside the mode's own vocabulary.
-But the refusal follows from the name, not from anything the mode does - "push your work and stop without running the pipeline" is a coherent instruction on Gerrit.
-
-`no-mistakes` names a pipeline.
-It happens not to name an artifact, which is the only reason it survives the transplant unmodified.
-
-`local-only` names a place, and it is the closest of the three to honest, because where this mode stops is a place.
-
-So the name that blocks Gerrit is blocking it on a noun, and the name that lets Gerrit through does so by accident.
-That is a symptom.
-Section 3 is the diagnosis.
+`direct-PR` names an artifact, while its operational contract is publication for review after repository-native validation.
+On Gerrit that artifact is a change rather than a pull request.
+`local-only` stops at a ready branch and publishes nothing.
+The forge binding selects the publication mechanics without adding a delivery pipeline.
 
 ## 3. The axes and the composition test
 
@@ -106,8 +96,8 @@ A candidate that needs a new value each time some other axis gains one is not an
 
 An earlier candidate made shape a mode: `direct-PR` would mean a topic'd stack, and a new `direct-change` would mean a single squashed change.
 It fails immediately.
-`no-mistakes` needs the same distinction the moment it ships to Gerrit, so it splits too; `local-only` needs it as well, since a ready branch is already either one commit or several.
-Three modes become six, and every mode added afterwards arrives needing two names instead of one.
+`local-only` needs the same distinction, since a ready branch is already either one commit or several.
+Two modes become four, and every mode added afterwards arrives needing two names instead of one.
 Shape is not varying *with* mode there, it is varying *inside* every value of mode, which is the signature of a property that has been folded into the wrong axis.
 
 ### Why shape is not the forge either
@@ -146,15 +136,8 @@ Confirmation is what stops a wrong guess from becoming a silent second source of
 Proposing it at intake also puts the signal where a pre-publication signal has to be, in the brief at scaffold time with no clone read and no network call, while keeping a human at the one point where the evidence can be misread.
 The delivery-mode design takes that shape, treating a protocol fact such as an SSH remote on port 29418 or a `refs/for/<branch>` push target as good evidence to propose the binding while refusing to infer it later.
 
-The tool with the broadest forge coverage in this stack corroborates detection, though more narrowly than it first appears to.
-no-mistakes binds its provider by calling `DetectProvider(remoteURL)` across the six forges its `Provider` type names - GitHub, GitLab, Bitbucket, Azure DevOps, Forgejo and Gitea - and no project declares its forge anywhere in that scheme.
-Only well-known hosts are recognised from the URL alone.
-For a host it does not recognise, which is how Gerrit is nearly always deployed, it falls back to machine-local configuration keyed by host: SSH config, then whether the local `glab`, `gh` or `tea` CLI is logged in to that host, then a `FORGEJO_BASE_URL` environment variable, while its per-repository execution context resolves machine-local forge profiles.
-What survives as corroboration is exactly one fact: no per-project declaration anywhere in the scheme, across six forges.
-
-The same evidence also bears against detection.
-Because it reads per-machine login state, one remote can resolve to different forges on two machines, or to none on a machine where the CLI is not logged in, and that is a genuine argument for declaring the forge rather than detecting it.
-It does not overturn the decision, since confirmation at intake is where a misread is meant to be caught, but anyone relying on detection should know it is not purely structural.
+Detection can be uncertain for custom forge hosts.
+Confirmation at intake catches that uncertainty; the recorded binding is a project fact rather than one machine's opinion.
 
 #### Could the tool declare its own semantics instead?
 
@@ -189,12 +172,10 @@ The objection bounds how much weight detection can carry alone, which is the wei
 Read the modes as stopping points rather than as artifacts and they line up cleanly:
 
 - `local-only` stops at a ready branch and publishes nothing. Nothing about a forge applies, because no artifact is made: `bin/fm-merge-local.sh` fast-forwards the project's *local* default branch, and the intake guidance already allows a `local-only` project to have no remote at all.
-- `direct-PR` publishes without the pipeline.
-- `no-mistakes` runs the pipeline, then publishes.
+- `direct-PR` validates through repository-owned checks, then publishes.
 
-On that reading the forge composes with the two modes that publish and is meaningless on the one that does not.
-That inverts both rules the delivery-mode design currently carries, which permit `local-only forge=gerrit` as an annotation that changes nothing and refuse `direct-PR forge=gerrit` outright.
-The composition test says that is backwards on both counts: the refusal lands on the combination that has a meaning, and the permission on the combination that does not.
+On that reading the forge composes with the mode that publishes and is meaningless on the one that does not.
+The registered `forge=gerrit` binding composes with `direct-PR`, while `local-only` refuses the binding because it publishes nothing.
 
 The refusal reads as reasonable only because of the name.
 "That mode's definition of done is a pull request this forge does not have" is a true statement about the string `direct-PR` and not about the stopping point it names, and section 2 is why those two came apart.
@@ -255,25 +236,10 @@ Producing a stack of changes under a topic means giving each commit a `Change-Id
 None of that is a Firstmate concept, and every line of it Firstmate writes is a line Firstmate maintains on behalf of one forge.
 Move it and Firstmate's job shrinks back to "know which tool, call it", which is exactly what it already is everywhere else.
 
-### Does the pipeline need to know?
+### Publication after native validation
 
-The strongest objection is that the no-mistakes pipeline, not Firstmate, is what runs at delivery time, so hiding forge mechanics inside a forge tool only helps if the pipeline can call that tool.
-The objection is right about the mechanism.
-no-mistakes does own publication: `push`, `pr`, and `ci` are its own pipeline steps, sitting alongside `review`, `test`, `document`, and `lint`, and a run reports each of them independently.
-
-It does not defeat the answer, because on a Gerrit project those are precisely the steps that do not run.
-The delivery design has a `forge=gerrit` worker pass `--skip push,pr,ci` on every run and skip nothing else, keeping `review`, `test`, `document`, and `lint` as the whole point of the run.
-Publication then moves out of the pipeline entirely: once the run passes and its fixes are back on the worker's branch, the worker publishes that branch to the review server through the forge tool.
-So the caller of the forge tool is Firstmate or the worker, never no-mistakes, and the pipeline never has to know `gerrit-axi` exists.
-The objection's premise holds everywhere the pipeline publishes, and a Gerrit project is the one place it does not.
-
-That answer is contingent, though, and reading it as structural would be a mistake.
-The pipeline can be kept ignorant of the forge tool only because it has no Gerrit support to exercise: its `Provider` type names six forges and none of them is Gerrit, so its publication steps could not work against one.
-The skip exists because those steps cannot function, not because publication belongs outside the pipeline on principle.
-The push model would have to change too, not merely be switched on.
-The pipeline pushes to a fork: this repository's own run records its push target as `kind=fork` against a personal GitHub URL while `origin` is the upstream repository.
-A forkless forge has nowhere for that model to put anything, so Gerrit support there means a push step that targets `refs/for/<branch>` on the one shared repository rather than a fork it does not have.
-Add Gerrit to that provider set with that push step and the skip disappears, the pipeline publishes natively, and the question of who calls the forge tool reopens.
+The worker completes the repository-owned checks and warranted independent Codex review, then publishes through the configured forge tool.
+No separate pipeline owns the branch, fix commits, or publication.
 
 ### What powers the tool needs
 
@@ -311,32 +277,6 @@ The line is drawn at the whole of voting rather than at the decisive half.
 A `+1` satisfies no gate, so withholding it costs nothing the mechanics need, and the tool that cannot vote at all needs no one to reason about which votes are safe before each release.
 Withholding votes from the tool does not replace the ACL; it keeps the tool's own path from being the one that tests it.
 That matters more on a forkless forge, for the reason section 4 gives: the worker's identity already holds a grant on the shared repository, so its account's label permissions are the limit that stands between it and a manufactured approval, and the tool should not be a second way to probe that limit.
-
-### A third place the mechanics could live
-
-Two homes for the shape mechanics have been weighed so far, Firstmate and a forge tool Firstmate calls.
-There is a third, and it deserves arguing as a peer rather than a footnote, because it was not in view when the choice above was made.
-no-mistakes already carries a multi-forge abstraction, with a `Provider` type, per-provider packages, and a per-repository execution context, and Gerrit support could be contributed there natively following the pattern its six existing providers follow.
-
-The case for it is that it removes part of a duplication the other two options create.
-If the pipeline gains Gerrit support while Firstmate also has its own forge tool, `Change-Id` handling, magic-ref pushes, topic stacks and submittability are each implemented independently on both sides.
-Contributing upstream removes that duplication for the pipeline-driven path only: when a `no-mistakes` worker publishes, `Change-Id` handling on push and magic-ref publication would live in a pipeline that already knows six forges, behind the forkless push step the contingent skip above shows it would need, rather than in a seventh integration beside it, and that abstraction is both more mature than a new one and shared rather than ours alone.
-
-It removes only that part.
-The pipeline never merges: its host interface finds, creates and updates pull requests and reads their state, checks and mergeability, and its `ci` step only verifies that a merge happened.
-Merging, the merge poll and the stack watch below stay with Firstmate wherever publication lives, so Firstmate still needs a Gerrit-aware tool, and submittability and topic-stack reasoning still exist on both sides under this option.
-Publication stays there too for the other delivery path: a `direct-PR` worker never runs the pipeline, so its magic-ref push, `Change-Id` handling and topic stack come from Firstmate's own tool whatever the pipeline gains.
-It removes one caller of the forge tool's publication mechanics rather than the mechanics themselves.
-
-The case against is a dependency the other two options do not carry.
-Gerrit support upstream lands when that project decides it lands, at whatever scope its maintainers accept, and a forge needed now cannot be scheduled against someone else's roadmap.
-A tool under our own hand ships when we ship it.
-The honest reading is that the upstream route removes the publication duplication on the pipeline-driven path, not all of it, and pays for that with a schedule we do not control.
-
-**So: build ours now, contribute upstream later.**
-The two are sequential rather than exclusive, which is what makes the timing objection survivable.
-A forge tool built now ships against a schedule we hold, and its publication mechanics are the part that could later be contributed upstream once they are known to work, at which point the pipeline-driven path stops calling Firstmate's tool to publish, while `direct-PR` publication, merging, the merge poll and the stack watch stay in it.
-Choosing the upstream route first would have meant waiting; choosing it second costs only that the publication code is written before it is shared.
 
 ### Watching a stack
 

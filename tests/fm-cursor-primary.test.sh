@@ -75,7 +75,7 @@ install_scripts() {
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
-           fm-gate-refuse-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh \
+           fm-lab-home-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh \
            fm-supervision-engine-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done

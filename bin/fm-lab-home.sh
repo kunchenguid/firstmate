@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # fm-lab-home.sh - mint a disposable firstmate "lab" home.
 #
-# A lab home is a throwaway FM_HOME that a no-mistakes GATE agent may drive
-# through the fleet lifecycle entrypoints: bin/fm-gate-refuse-lib.sh refuses
-# those calls inside a gate agent unless FM_HOME carries the marker file this
-# helper writes (the lib owns the marker format and authorization decision;
-# this script is the supported writer).
+# A lab home keeps tests and experiments in a marked disposable stock-layout
+# home, independently of any supervisor's live fleet. fm-lab-home-lib.sh owns
+# its marker format; this script creates it only in an empty directory.
 #
 # Usage:
 #   fm-lab-home.sh create <dir>       make a marked lab home and print it
@@ -14,15 +12,15 @@
 #
 # A lab home is the stock layout only - state/, data/, config/, projects/ - and
 # callers remove it with ordinary rm -rf when done. Drive it with plain
-# FM_HOME=<dir>; any FM_*_OVERRIDE relocation defeats the allowance.
+# FM_HOME=<dir>; keep tests scoped to its private paths.
 # tmux-dir is the single owner of the short private socket directory: callers
 # use TMUX_TMPDIR=<printed-dir> and call teardown from their cleanup trap after
 # killing only the server addressed through that directory.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-lab-home-lib.sh
+. "$SCRIPT_DIR/fm-lab-home-lib.sh"
 
 fm_lab_home_error() {
   echo "fm-lab-home: $*" >&2
@@ -45,7 +43,7 @@ case "${1:-}" in
       exit 1
     fi
     mkdir -p "$dir" || exit 1
-    fm_gate_lab_mark "$dir" || {
+    fm_lab_mark "$dir" || {
       fm_lab_home_error "refusing '$dir': a lab marker is only ever stamped on a fresh empty dir"
       exit 1
     }

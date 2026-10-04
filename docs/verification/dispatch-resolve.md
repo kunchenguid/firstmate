@@ -1,5 +1,8 @@
 # Typed dispatch resolution verification
 
+Retirement note (2026-10-05): references to No-Mistakes below are historical evidence only; that tool and delivery mode are permanently retired.
+Current delivery uses repository-owned validation and `direct-PR` or `local-only`.
+
 Audience: maintainer verification.
 
 This record supports the opt-in `bin/fm-dispatch-resolve.sh` contract owned by [`../configuration.md`](../configuration.md) ("Typed dispatch resolution") and the declared rule and profile fields owned there under "Crew dispatch profiles".

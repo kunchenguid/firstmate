@@ -1337,37 +1337,6 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
 # fixture reaches this checkout's real arm through a symlink whose logical path
 # sits under .no-mistakes/worktrees/, with the test harness's own bypass cleared
 # for this one launch.
-test_arm_refuses_a_disposable_validation_checkout() {
-  local dir home state fakebin armout status link
-  dir=$(make_case disposable-checkout-refusal)
-  home="$dir/home"
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  armout="$dir/arm.out"
-  link="$dir/.no-mistakes/worktrees/run-1/firstmate"
-  mkdir -p "$home/data" "$(dirname "$link")"
-  ln -s "$ROOT" "$link"
-
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_GATE_REFUSE_BYPASS='' \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT=5 "$link/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
-  ARM_PID=$!
-  wait_for_exit "$ARM_PID" 200
-  status=$?
-  [ "$status" -ne 124 ] || fail "arm from a disposable checkout never stopped: $(cat "$armout")"
-  [ "$status" -ne 0 ] || fail "arm from a disposable checkout reported success: $(cat "$armout")"
-  grep -q '^watcher: FAILED' "$armout" \
-    || fail "arm did not report the typed failure line: $(cat "$armout")"
-  grep -qF 'disposable validation checkout' "$armout" \
-    || fail "the refusal did not name the disposable checkout: $(cat "$armout")"
-  ! grep -q '^watcher: started' "$armout" \
-    || fail "arm reported a started watcher despite the refusal: $(cat "$armout")"
-  [ ! -e "$state/.last-watcher-beat" ] \
-    || fail "a refused watcher still published a liveness beacon"
-  [ ! -e "$state/.watch.lock" ] \
-    || fail "a refused watcher still took the singleton lock"
-  pass "watch-arm: a disposable validation checkout refuses to arm"
-}
 
 # Start a real watcher through the real arm for a temporary home and set
 # WATCH_PID from the arm's started line. Both stdout and stderr land in <arm-out>
@@ -1587,7 +1556,6 @@ test_handling_delivered_rejects_a_superseded_generation() {
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
-test_arm_refuses_a_disposable_validation_checkout
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_reaper_stops_a_tracked_watcher

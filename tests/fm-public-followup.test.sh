@@ -1279,7 +1279,7 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "spawn_gen=public-followup-guard"
 
   rc=0
@@ -2154,7 +2154,7 @@ test_retention_creates_no_false_teardown_refusal() {
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "spawn_gen=public-followup-retain"
   emit_terminal "$home" "$home" pf-retain main ship-retain >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"

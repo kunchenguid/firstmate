@@ -82,7 +82,7 @@ fm_write_meta "$HOME_DIR/state/ledger-task.meta" \
   "project=firstmate" \
   "harness=claude" \
   "kind=ship" \
-  "mode=no-mistakes" \
+  "mode=direct-PR" \
   "spawn_gen=fm.ledger123456"
 busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" ledger-task)
 "$ROOT/bin/fm-busy-event.sh" apply "$HOME_DIR/state" ledger-task idle \
@@ -638,7 +638,7 @@ fm_write_meta "$COST_HOME/state/cost-task.meta" \
   "project=firstmate" \
   "harness=claude" \
   "kind=ship" \
-  "mode=no-mistakes" \
+  "mode=direct-PR" \
   "spawn_gen=fm.cost123456"
 cost_busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$COST_HOME/state" cost-task)
 "$ROOT/bin/fm-busy-event.sh" apply "$COST_HOME/state" cost-task idle \
@@ -822,7 +822,7 @@ fm_write_meta "$RESTART_HOME/state/restart-task.meta" \
   "project=firstmate" \
   "harness=claude" \
   "kind=ship" \
-  "mode=no-mistakes" \
+  "mode=direct-PR" \
   "spawn_gen=fm.restart123456"
 RESTART_LOCK_MARKER="$TMP_ROOT/restart-lock-held"
 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" bash -c '

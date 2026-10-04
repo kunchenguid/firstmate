@@ -3,8 +3,7 @@
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
-# is absorbed only when the crew shows it is still working through an actively
-# running no-mistakes step or a backend busy signal. A home that opts in with
+# is absorbed only when the crew shows a backend busy signal. A home with
 # config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
 # since the previous poll. Every other no-verb wake surfaces, so a crew
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
@@ -23,10 +22,8 @@
 #                          positive execution evidence, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
-#                          run-step or busy pane outranks even a captain-relevant log
-#                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause or verified captain-held transfer is
+#                          busy pane outranks even a captain-relevant log
+#                          line. A declared external-wait pause or verified captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Only when neither absorb class
@@ -42,9 +39,7 @@
 #                          resume. Unless afk is active. A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
 #                          wait or a verified `captain-held` transfer its worker
-#                          declared, or, where config/wedge-defer-parked-gate
-#                          arms it, a validation gate of its own awaiting a
-#                          supervisor decision nobody has answered yet - is
+#                          declared - is
 #                          deferred to that same long recheck cadence instead
 #                          (wedge_wait_evidence), and a pane whose own task
 #                          worktree was written during the quiet window is
@@ -312,7 +307,6 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # and ABSORBS the benign majority - it advances the suppression marker, logs to a
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
 # / stale path is absorb-only-on-positive-evidence. The shared proof is an actively
-# running no-mistakes step or a busy pane via crew_is_provably_working over
 # fm-crew-state.sh; where config/turnend-churn-absorb opts in, a bare turn-end alone
 # may also use bounded pane churn since the previous poll.
 # Every other crew that stopped its turn is SURFACED, so a finish reported
@@ -1222,80 +1216,10 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
   printf '%s\037%s\037%s\037%s\037%s' "$1" "$2" "$3" "$4" "$5"
 }
 
-# The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
-# read at the one moment it decides anything: when an escalation is about to
-# fire. Two records answer it, and they are independent: the worker's own status
-# line - a declared `paused:` external wait, or a verified `captain-held`
-# transfer - and, when that line explains nothing, the crew's authoritative
-# current state.
-#
-# The generated brief promises that declaring one buys the long recheck cadence
-# instead of a wedge, and the wedge timer is reachable while that declaration
-# stands: a crew that declares a wait and then has an active run or busy pane
-# attributed to it is handed to the timer as provably-working, and the timer then
-# escalates on elapsed idle time alone. The declaration is what the worker said
-# about its OWN silence, so it outranks a liveness verdict that only says
-# something is running.
-#
-# A declared clearing time that has ALREADY passed (`paused: ... until <t>`) is
-# not evidence: the wait the worker described is over, so it no longer explains
-# the silence, and the pane keeps the unchanged schedule. The records are read in
-# this order rather than pooled because the routing already guarantees it is the
-# right one: a pane whose last line is `paused:` or `captain-held:` reaches this
-# timer only through pause_state_class answering `working`, so its crew state is
-# a running step, never a parked gate.
-#
-# The second record is OFF unless the home creates config/wedge-defer-parked-gate,
-# and that one guard is what makes an unconfigured home's behaviour identical to
-# having no second record at all: it is read before the fold, so no fold or
-# crew-state read is spent, no wait record exists to defer on, no recheck wording
-# is reachable, and the lane keeps the unchanged escalation schedule, reason and
-# demand-deep-inspection wording. Unlike the status line, which is the worker's
-# own declaration about its own silence, this record is derived from a pipeline's
-# gate state, so which lanes lose the ladder for it is a home's choice to make
-# rather than a default every fleet inherits - the same reason
-# config/turnend-churn-absorb gates its own widened absorb.
-#
-# The second record takes TWO signals, and needs both. The crew's authoritative
-# current state must be a no-mistakes gate whose answer is owed by a HUMAN
-# (crew_gate_awaits_human_decision in fm-classify-lib.sh, minted from the
-# findings table's `action` column by position), AND the task's own decision fold
-# must still hold an open `needs-decision` record whose key is `nm-<run>-<step>`
-# for the run that verdict reports. The gate's table alone says only that the
-# answer is owed by a human; the open decision bound to that run is the positive
-# evidence that firstmate was actually told about THIS gate and has not answered
-# yet, which is what makes the lane's quiet a wait rather than a suspected wedge.
-# An open decision under any other key - an unrelated question never closed - is
-# not that evidence, and neither is a verdict that names no run. The wait is owed
-# by firstmate, not the captain: ask-user findings are routed to firstmate, which
-# decides most of them itself, and one it escalates becomes a captain-held
-# transfer that the first record above already catches. So the away-posture
-# silence does not apply to it: under away posture the supervision branch is the
-# actor allowed to answer it, and it is rechecked on the long cadence throughout.
-# The two signals come apart in both directions, and the ladder is kept in each:
-#   - the decision was ANSWERED and the crewmate has not yet relayed it with
-#     `axi respond`: the gate is still reported parked and still carries the
-#     ask-user row, but `fm-send --resolve-key` wrote the closing `resolved` line
-#     at answer time, so the fold is empty and what is outstanding is the
-#     crewmate's OWN next move;
-#   - the crewmate parked at a human-owed gate and went quiet before escalating
-#     it at all: nobody was ever told, so there is no wait to defer to.
-# A `blocked` record does not count: a blocker is not an unanswered gate decision
-# and a different action clears it. A gate awaiting the CREWMATE's own answer is
-# deliberately NOT evidence either: a crewmate that goes quiet before answering
-# its own gate is exactly the wedge this ladder exists to catch, so those keep
-# the unchanged schedule, reason and demand-deep-inspection wording.
-# Nothing here weakens detection for a pane with no wait at all - their
-# escalation schedule, reason and wording are untouched, and every way this
-# signal can come back empty (an unreadable status file, a fold with nothing
-# open, a key convention nobody followed) escalates on the unchanged schedule
-# rather than losing the ladder. The status-line and fold reads are file reads;
-# the crew-state read is the costly one (it may make a bounded no-mistakes call),
-# so it is taken only behind a first fold read that finds some open
-# `needs-decision` at all, and only in the at-threshold branch - at most once per
-# window per STALE_ESCALATE_SECS, never on an ordinary poll.
+# A declared paused wait or verified captain-held transfer explains quiet without
+# weakening ordinary wedge/death detection. Expired waits resume escalation.
 wedge_wait_evidence() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf run
+  local task=$1 last until statusf
   [ -n "$task" ] || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
@@ -1310,14 +1234,6 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
     fi
     wait_record 'declared wait' 'awaiting external' \
       external 'confirm the wait still holds' "$statusf"
-    return 0
-  fi
-  [ -e "$CONFIG/wedge-defer-parked-gate" ] || return 1
-  if status_has_open_needs_decision "$statusf" \
-    && run=$(crew_gate_awaits_human_decision "$task") \
-    && status_has_open_needs_decision "$statusf" "$run"; then
-    wait_record 'verified wait at a parked gate' "awaiting firstmate's ask-user decision" \
-      supervisor "decide the gate's ask-user finding and relay the decision to the crewmate" ''
     return 0
   fi
   return 1
@@ -1349,13 +1265,6 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # captain_call_stale_bound). That absorb arms no throttle and deliberately
 # leaves the idle timer alone: a `captain` whom is minted only by the
 # captain-held arm of wedge_wait_evidence, which returns before the
-# wedge-defer-parked-gate flag test and therefore before any decision-fold or
-# current-state read, so the only read that repeats under the away record is the
-# one status-line read that predates this deferral. There is nothing costly to
-# throttle there, so the recheck owed on return stays owed in full the moment the
-# record is archived rather than starting a cadence nobody could act on. The
-# costly parked-gate consult is owed to the supervisor instead, never silenced
-# here, and its own deferral restarts the timer below.
 # The escalation counter is left alone, exactly as the write deferral leaves it:
 # this is not an escalation, and a later genuine one must keep the
 # demand-inspection history it had already earned.
@@ -1505,12 +1414,9 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # The wait-evidence consult (wedge_wait_evidence), the worktree write probe, and
 # the dead-record probe (wedge_dead_record) run ONLY here, inside the
 # at-threshold branch that is about to escalate: at most one each per window per
-# STALE_ESCALATE_SECS, never on an ordinary poll. The crew-state read
-# wedge_wait_evidence may take under config/wedge-defer-parked-gate keeps that
-# same bound however long the wait lasts, because the deferral it feeds restarts
-# the idle timer like every other deferral below; an unconfigured home never
-# reaches that read at all. The wait consult runs first, because a pane that can
-# account for its own quiet has nothing to prove through its worktree. The dead-record probe
+# STALE_ESCALATE_SECS, never on an ordinary poll. The wait consult runs first,
+# because a pane that accounts for its quiet need not prove worktree activity.
+# The dead-record probe
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
@@ -1544,7 +1450,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the busy-pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -1642,13 +1548,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 # the busy verdict, so this exception does not suppress undeclared wedges or
 # alter the separate non-busy classification. handle_paused_stale keeps the
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
-# A pane that declared nothing falls through to the shared wedge timer, which,
-# in a home that armed config/wedge-defer-parked-gate, applies the same rule to
-# the one wait a busy pane cannot declare: a validation gate of its own awaiting
-# a supervisor decision that is still open also takes the bounded recheck rather
-# than the ladder, because who owes that answer does not depend on what the pane
-# is rendering, and the recheck names that supervisor and the action that clears
-# it. An unconfigured home keeps the unchanged ladder there.
+# A pane that declares no wait falls through to the ordinary wedge timer.
 # Away mode remains daemon-owned and receives the undecorated wake identity for
 # its own classification, which is why the declaration is read before the afk
 # branch rather than after it.
@@ -2908,7 +2808,6 @@ EOF
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
     # whose crew is still executing) in always-on mode -> advance the markers so it
     # will not re-fire, log, and keep blocking without enqueuing. Both evidence
-    # checks are costly (a bounded no-mistakes call, then a pane capture), so the ||
     # ordering evaluates them ONLY for a non-afk signal with no captain-relevant
     # status span, and the capture only once the authoritative verdict comes up short.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
@@ -3057,12 +2956,11 @@ EOF
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
-          # new entry once firstmate hands it to a no-mistakes validation
           # (AGENTS.md's sparse status-reporting contract), so the log can
           # keep showing a "done:"/needs-decision/blocked leftover from
           # BEFORE that validation started for the run's entire (possibly
           # many-minutes) duration, while stale_is_terminal - which has no
-          # run-step awareness - keeps reporting it as still-current on every
+          # backend state awareness - keeps reporting it as still-current on every
           # poll. Root cause of the 2026-07 herdr false-surface incidents: a
           # validating crew was surfaced as stale every few minutes despite an
           # actively-running pipeline, purely because of this stale leftover

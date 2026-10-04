@@ -169,7 +169,7 @@ worker_status_command() {  # <state> <note> [<state-dir> [<config-dir>]]
   rm -rf "${HOME_DIR:?}/data/$TASK"
   (cd "$HOME_DIR" && in_home env FM_STATE_OVERRIDE="${3:-$HOME_DIR/state}" \
     FM_CONFIG_OVERRIDE="${4:-$HOME_DIR/config}" \
-    "$ROOT/bin/fm-brief.sh" "$TASK" sample --mode no-mistakes >/dev/null) \
+    "$ROOT/bin/fm-brief.sh" "$TASK" sample --mode direct-PR >/dev/null) \
     || fail "brief scaffold failed"
   # shellcheck disable=SC2016 # Match literal backticks in the generated brief.
   cmd=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$HOME_DIR/data/$TASK/brief.md" | head -1)

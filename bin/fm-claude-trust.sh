@@ -151,7 +151,7 @@
 # home that is neither a task worktree nor a seeded secondmate home.
 # The evidence is structural: the home must carry bin/fm-lab-home.sh's marker
 # (a regular file this user owns, never a symlink, holding the token
-# bin/fm-gate-refuse-lib.sh owns), hold
+# bin/fm-lab-home-lib.sh owns), hold
 # AGENTS.md and bin/, and be a primary git checkout whose top level is exactly
 # the argument, because Claude Code keys the launch to that root. It is
 # trust-only for the same reason as a secondmate home, and bin/fm-live-lab.sh
@@ -226,8 +226,8 @@ esac
 
 refuse() { echo "error: refusing to pre-register Claude trust: $1" >&2; exit 1; }
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-lab-home-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/fm-lab-home-lib.sh"
 
 real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
 
@@ -329,9 +329,9 @@ if [ "$MODE" = worktree ]; then
       || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
   fi
 elif [ "$MODE" = lab-home ]; then
-  LAB_MARKER="$TARGET_REAL/$FM_GATE_LAB_MARKER"
+  LAB_MARKER="$TARGET_REAL/$FM_LAB_MARKER"
   [ ! -L "$LAB_MARKER" ] || refuse "'$LAB_MARKER' is a symlink; a lab home carries the marker as a regular file"
-  if ! { [ -f "$LAB_MARKER" ] && [ -O "$LAB_MARKER" ] && fm_gate_lab_home "$TARGET_REAL"; }; then
+  if ! { [ -f "$LAB_MARKER" ] && [ -O "$LAB_MARKER" ] && fm_lab_home "$TARGET_REAL"; }; then
     refuse "'$TARGET_REAL' carries no lab-home marker owned by this user, so it is not a disposable lab home"
   fi
   [ -f "$TARGET_REAL/AGENTS.md" ] || refuse "'$TARGET_REAL' has no AGENTS.md, so it is not a firstmate home"

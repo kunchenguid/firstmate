@@ -1,5 +1,8 @@
 # Devin CLI worker verification
 
+Retirement note (2026-10-05): references to No-Mistakes below are historical evidence only; that tool and delivery mode are permanently retired.
+Current delivery uses repository-owned validation and `direct-PR` or `local-only`.
+
 Audience: maintainer verification.
 
 Verified 2026-09-21 and re-verified 2026-09-22 on macOS arm64 with `devin 3000.11.1 (cc4e349ca55e)`.

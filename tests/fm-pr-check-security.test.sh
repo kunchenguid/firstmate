@@ -246,28 +246,7 @@ printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"s
   "${FM_TEST_GERRIT_REVISION:-5f07a68436929a527ddc7abadc8ef1abceae40ed}" \
   "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}"
 SH
-  # no-mistakes, answering only `axi status` the way the real CLI does from a
-  # worker copy: a run object, then its branch_sync block. By default the run's
-  # result is the copy's own passed HEAD and custody is returned; a case
-  # overrides the outcome, the pipeline head, the next action, or makes the read
-  # fail.
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-[ -z "${FM_TEST_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_NM_LOG"
-[ "${1:-} ${2:-}" = "axi status" ] || exit 2
-[ "${FM_TEST_NM_FAIL:-0}" = 0 ] || exit 1
-head=$(git rev-parse HEAD 2>/dev/null) || exit 1
-pipeline=${FM_TEST_NM_PIPELINE_HEAD:-$head}
-printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\noutcome: %s\n' \
-  "$pipeline" "${FM_TEST_NM_OUTCOME-passed}"
-printf 'branch_sync:\n  state: %s\n  local:\n    head: %s\n  pipeline:\n    current_head: %s\n' \
-  "${FM_TEST_NM_SYNC_STATE:-synchronized}" "$head" "$pipeline"
-if [ -n "${FM_TEST_NM_NEXT_ACTION:-}" ]; then
-  printf '  next_action:\n    code: %s\n    command: no-mistakes axi status\n' "$FM_TEST_NM_NEXT_ACTION"
-fi
-SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi"
-  chmod +x "$fakebin/no-mistakes"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
@@ -284,7 +263,7 @@ write_task_meta() {
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
 }
 
 # Extra "field=value" arguments are written before pr=, because
@@ -1736,8 +1715,8 @@ test_gerrit_arming_records_no_patch_set_revision() {
 }
 
 # A push to refs/for/ leaves no ref a fetch can see, so a remote-tracking ref
-# that holds the worker's HEAD - the no-mistakes gate branch after a pipeline
-# run - says nothing about what was published. Arming accepts the named head
+# that holds the worker's HEAD - an ordinary published branch.
+# It says nothing about what was published. Arming accepts the named head
 # only when a live read shows the change's current patch set carrying that
 # HEAD's tree - the squash is a new commit on the server's base, so the tree and
 # not the commit names what was published - and refuses otherwise, before
@@ -1756,7 +1735,7 @@ test_gerrit_ready_gate_reads_the_published_tree() {
   printf 'two\n' > "$dir/wt/b"
   git -C "$dir/wt" add b
   git -C "$dir/wt" commit -q -m second
-  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task "$(git -C "$dir/wt" rev-parse HEAD)"
+  git -C "$dir/wt" update-ref refs/remotes/origin/fm/task "$(git -C "$dir/wt" rev-parse HEAD)"
   published=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$base" -m squashed)
   other=$(git -C "$dir/wt" rev-parse HEAD~1)
   [ "$(git -C "$dir/wt" rev-parse "$published^{tree}")" != "$(git -C "$dir/wt" rev-parse "$other^{tree}")" ] \
@@ -1803,13 +1782,13 @@ test_gerrit_ready_gate_reads_the_published_tree() {
   grep -q '^pr_head=' "$state/task-published.meta" \
     && fail "the gate's live revision was recorded as pr_head"
 
-  git -C "$dir/wt" update-ref -d refs/remotes/no-mistakes/fm/task
+  git -C "$dir/wt" update-ref -d refs/remotes/origin/fm/task
   : > "$dir/gerrit-axi.log"
   set +e
   out=$(FM_TEST_GERRIT_REVISION=0123456789abcdef0123456789abcdef01234567 \
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
     bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
-      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4" "$5" task-published "$6"' \
+      fm_dod_accept_ship_done ship direct-PR "$2" "$3" "$4" "$5" task-published "$6"' \
     _ "$ROOT" "$dir/wt" "$dir/project" \
     "done: PR https://gerrit.example/c/group/apps/console/+/4201 published for review" \
     "$state" "$state/task-published.meta" 2>&1)
@@ -1820,150 +1799,22 @@ test_gerrit_ready_gate_reads_the_published_tree() {
   pass "Gerrit arming accepts a published HEAD only by the change's current patch set tree"
 }
 
-# On a Gerrit project the pipeline's push is skipped, so a fix round's commits
-# stay in its local gate until the worker recovers custody. A worker that
-# publishes before recovering has an unfixed HEAD and an unfixed patch set that
-# agree, so the published-tree check alone accepts it. A no-mistakes ready
-# report on a Gerrit change must therefore also show the copy holds the run's
-# result: refused while the run still holds the branch, when HEAD's tree is not
-# the pipeline head's, or when the run cannot be read; accepted once recovered,
-# even after the publish's Change-Id stamp rewrote the branch's messages.
-test_gerrit_nm_ready_gate_requires_recovered_custody() {
-  local dir state base unfixed fixed stamped squash elsewhere out rc url line
-  dir=$(make_case gerrit-custody-gate)
-  state="$dir/home/state"
-  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
-  url=https://gerrit.example/c/group/apps/console/+/4201
-  line="done: PR $url published for review"
-  base=$(git -C "$dir/wt" rev-parse HEAD)
-  printf 'flawed\n' > "$dir/wt/doc"
-  git -C "$dir/wt" add doc
-  git -C "$dir/wt" commit -q -m "Document the value"
-  unfixed=$(git -C "$dir/wt" rev-parse HEAD)
-  # The pipeline's fix commit exists only in its gate: build it in another repo,
-  # so this copy does not hold its object, exactly as before recovery.
-  elsewhere="$dir/gate-only"
-  git clone -q "$dir/wt" "$elsewhere"
-  printf 'fixed\n' > "$elsewhere/doc"
-  git -C "$elsewhere" commit -q -am "no-mistakes(review): Correct the documented value"
-  fixed=$(git -C "$elsewhere" rev-parse HEAD)
-  git -C "$dir/wt" cat-file -e "$fixed" 2>/dev/null && fail "the fixture copy already holds the pipeline's fix"
-
-  # Case A from the live test: the server holds the unfixed patch set, which
-  # matches the unrecovered HEAD, and the run reports custody unreturned.
-  write_task_meta "$dir" task-unrecovered
-  set +e
-  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_PIPELINE_HEAD=$fixed \
-    FM_TEST_NM_NEXT_ACTION=recover_custody run_check_entry "$dir" task-unrecovered "$url" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "arming accepted a publish of the head before the pipeline's fixes were recovered"
-  case "$out" in
-    *"still holds this copy's branch"*) ;;
-    *) fail "the refusal did not say the run still holds the branch: $out" ;;
-  esac
-  grep -q '^pr=' "$state/task-unrecovered.meta" && fail "a refused unrecovered publish recorded pr="
-  [ ! -e "$state/task-unrecovered.check.sh" ] || fail "a refused unrecovered publish armed a poll"
-
-  # The same state with no next action reported still refuses on the trees.
-  set +e
-  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-unrecovered "$url" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "arming accepted a copy whose HEAD is not the run's result"
-  case "$out" in
-    *"does not carry the no-mistakes run's result"*) ;;
-    *) fail "the refusal did not say the copy lacks the run's result: $out" ;;
-  esac
-
-  set +e
-  FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_NEXT_ACTION=continue_active_run \
-    run_check_entry "$dir" task-unrecovered "$url" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "arming accepted a publish while the run is still active"
-
-  set +e
-  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_FAIL=1 run_check_entry "$dir" task-unrecovered "$url" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "arming accepted a publish whose no-mistakes run could not be read"
-  case "$out" in
-    *"could not be read"*) ;;
-    *) fail "the refusal did not say the run could not be read: $out" ;;
-  esac
-
-  # A failed run whose own head was published has nothing to recover, so the
-  # trees agree; its outcome alone refuses it, as does a missing outcome.
-  set +e
-  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_OUTCOME=failed run_check_entry "$dir" task-unrecovered "$url" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "arming accepted a publish of a failed no-mistakes run"
-  case "$out" in
-    *"has outcome failed, not a pass"*) ;;
-    *) fail "the refusal did not name the run's failed outcome: $out" ;;
-  esac
-  grep -q '^pr=' "$state/task-unrecovered.meta" && fail "a refused failed-run publish recorded pr="
-  set +e
-  FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_OUTCOME='' run_check_entry "$dir" task-unrecovered "$url" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "arming accepted a publish of a run with no outcome"
-
-  # A published-for-review done whose URL is not a canonical Gerrit change is
-  # refused, even though a gate push left HEAD on a remote-tracking ref.
-  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task "$unfixed"
-  set +e
-  out=$(FM_TEST_GERRIT_REVISION=$unfixed PATH="$dir/fakebin:$BASE_PATH" \
+# A published-for-review completion must name a canonical Gerrit change even
+# when ordinary remote publication already preserves the local HEAD.
+test_gerrit_published_report_requires_canonical_change() {
+  local dir out rc
+  dir=$(make_case gerrit-canonical-published-report)
+  git -C "$dir/wt" update-ref refs/remotes/origin/fm/task "$(git -C "$dir/wt" rev-parse HEAD)"
+  rc=0
+  out=$(PATH="$dir/fakebin:$BASE_PATH" \
     bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
-      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+      fm_dod_accept_ship_done ship direct-PR "$2" "$3" "$4"' \
     _ "$ROOT" "$dir/wt" "$dir/project" \
-    "done: PR https://gerrit.example/r/c/group/apps/console/+/4201/1 published for review" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "the done gate accepted a published-for-review report naming no Gerrit change"
-  case "$out" in
-    *"canonical https://<host>/c/<project>/+/<number> form"*) ;;
-    *) fail "the refusal did not name the canonical Gerrit change form: $out" ;;
-  esac
-  git -C "$dir/wt" update-ref -d refs/remotes/no-mistakes/fm/task
-
-  # Recovery fast-forwards the copy to the fix; the publish then stamps a
-  # Change-Id, rewriting the message but not the tree, and pushes one squash.
-  git -C "$dir/wt" fetch -q "$elsewhere" "$fixed"
-  git -C "$dir/wt" merge -q --ff-only "$fixed"
-  stamped=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$unfixed" \
-    -m "no-mistakes(review): Correct the documented value" -m "Change-Id: I0123456789abcdef0123456789abcdef01234567")
-  git -C "$dir/wt" reset -q --hard "$stamped"
-  squash=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$base" -m squashed)
-  [ "$stamped" != "$fixed" ] || fail "the fixture's stamped head did not diverge from the pipeline head"
-
-  # The done gate itself, as crew-state and the secondmate ledger call it.
-  set +e
-  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
-    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
-    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
-      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
-    _ "$ROOT" "$dir/wt" "$dir/project" "$line" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "the done gate refused a recovered, published copy: $out"
-
-  write_task_meta "$dir" task-recovered
-  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" >/dev/null \
-    || fail "arming refused a recovered copy whose squash carries the pipeline's result"
-  grep -qxF "pr=$url" "$state/task-recovered.meta" || fail "the recovered publish was not recorded"
-
-  # A direct-PR task never runs the pipeline, so no run is asked about.
-  : > "$dir/nm.log"
-  write_task_meta "$dir" task-direct
-  sed -i.bak 's/^mode=no-mistakes$/mode=direct-PR/' "$state/task-direct.meta" && rm -f "$state/task-direct.meta.bak"
-  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_FAIL=1 FM_TEST_NM_LOG="$dir/nm.log" \
-    run_check_entry "$dir" task-direct "$url" >/dev/null \
-    || fail "a direct-PR Gerrit publish was refused over a pipeline it never runs"
-  [ ! -s "$dir/nm.log" ] || fail "a direct-PR Gerrit publish consulted no-mistakes"
-  pass "a no-mistakes Gerrit ready report requires the pipeline's fixes recovered into the published copy"
+    "done: PR https://gerrit.example/r/c/group/apps/console/+/4201/1 published for review" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a published-for-review completion naming no canonical change was accepted"
+  assert_contains "$out" "canonical https://<host>/c/<project>/+/<number> form" \
+    "the refusal did not name the canonical Gerrit change form"
+  pass "a published-for-review completion requires a canonical Gerrit change"
 }
 
 # The GitLab watch must follow a merge request exactly as the GitHub watch
@@ -3444,7 +3295,7 @@ test_gitlab_merge_watch
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree
-test_gerrit_nm_ready_gate_requires_recovered_custody
+test_gerrit_published_report_requires_canonical_change
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report

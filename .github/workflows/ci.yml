@@ -16,8 +16,6 @@ permissions:
 # main push gets its own group and is never cancelled. Cancellation is likewise
 # limited to pull_request events. Evidence and rationale: the September 12
 # Actions starvation report, section 3 "Workflow mechanics to ship first".
-# The compliance workflow deliberately keeps its own event-specific groups; do
-# not collapse it onto this simpler shape.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -524,7 +522,7 @@ jobs:
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
-          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          tracked=$(git ls-files -- data state config projects)
           if [ -n "$tracked" ]; then
             echo "::error::Personal fleet paths are tracked in git:"
             printf '%s\n' "$tracked"

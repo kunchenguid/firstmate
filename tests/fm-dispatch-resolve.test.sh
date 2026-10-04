@@ -558,7 +558,7 @@ TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
 assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a section outside the Task heading is not a task section"
 
 KIND_BRIEF="$TMP_ROOT/kind-brief.md"
-{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' '# Definition of done' 'Delivery contract: mode=no-mistakes' 'Delivery contract: mode=direct-PR'; } > "$KIND_BRIEF"
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' '# Definition of done' 'Delivery contract: mode=direct-PR' 'Delivery contract: mode=direct-PR'; } > "$KIND_BRIEF"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
 sent=$(jq -r .state.task.brief "$LOG/body")

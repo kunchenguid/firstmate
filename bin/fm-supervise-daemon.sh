@@ -1595,9 +1595,9 @@ handle_wake() {  # <reason> <state>
                 decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")
               fi
               # An enriched wedge reason carries the watcher's own escalation count
-              # and its "do not re-absorb on the run-step/pane state alone" demand,
+              # and its "do not re-absorb on the busy-pane state alone" demand,
               # so it outranks this daemon's cheaper status-log absorption - EXCEPT
-              # under a current declared wait. A `pause` verdict is not run-step or
+              # under a current declared wait. A `pause` verdict is not pane or
               # pane state at all: it is the crew's own declaration that this pane
               # waits by design, which is the one question the wedge timer cannot
               # answer for itself. Overriding it escalated healthy declared waits

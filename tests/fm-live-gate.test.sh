@@ -157,7 +157,7 @@ test_any_of_several_entry_points_turns_a_guard_on() {
 
 test_gate_lets_a_guard_drive_the_real_fleet_scripts_under_a_gate_marker() {
   # The nine live guards that never sourced the shared helpers used to be
-  # refused by bin/fm-gate-refuse-lib.sh whenever the pipeline ran them, because
+  # refused by bin/fm-lab-home-lib.sh whenever the pipeline ran them, because
   # the gate marker is set for every no-mistakes gate agent. Opening with the
   # shared gate is what carries the test-suite bypass into them.
   local path out rc
@@ -166,7 +166,7 @@ test_gate_lets_a_guard_drive_the_real_fleet_scripts_under_a_gate_marker() {
     printf '#!/usr/bin/env bash\nset -u\n'
     printf '. "%s/tests/lib.sh"\n' "$ROOT"
     printf 'fm_live_gate default-on FM_FAKE_LIVE fmfakeharness\n'
-    printf '. "%s/bin/fm-gate-refuse-lib.sh"\n' "$ROOT"
+    printf '. "%s/bin/fm-lab-home-lib.sh"\n' "$ROOT"
     printf 'if fm_is_gate_agent; then printf "refused\\n"; else printf "allowed\\n"; fi\n'
   } > "$path"
   chmod +x "$path"
@@ -217,7 +217,7 @@ test_disable_autoupdater_reaches_the_claude_pane_on_the_fm_spawn_launch_path() {
   fm_test_spawn_brief "$home" AU-1
   : > "$launchlog"
   FM_FAKE_LAUNCH_LOG="$launchlog" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" AU-1 "$proj" --mode no-mistakes --yolo off \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" AU-1 "$proj" --mode direct-PR --yolo off \
     >/dev/null 2>&1 || fail "the claude spawn must stage its launch command"
   launch=$(cat "$launchlog")
   [ -n "$launch" ] || fail "no claude launch command was captured"
@@ -260,7 +260,7 @@ test_disable_autoupdater_survives_a_daemon_pane_that_never_inherited_it() {
   fm_test_spawn_brief "$home" AU-2
   : > "$launchlog"
   DISABLE_AUTOUPDATER=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" AU-2 "$proj" --mode no-mistakes --yolo off \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" AU-2 "$proj" --mode direct-PR --yolo off \
     >/dev/null 2>&1 || fail "the claude spawn must stage its launch command"
   launch=$(cat "$launchlog")
   [ -n "$launch" ] || fail "no claude launch command was captured"
