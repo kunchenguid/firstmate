@@ -85,7 +85,7 @@ make_seeded_secondmate_home() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
-  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' > "$home/.gitignore"
   git -C "$home" init -q -b main
 }
 
@@ -837,7 +837,7 @@ test_native_effort_validator_keeps_axes_separate() {
 test_native_pi_ultra_is_explicit_and_model_scoped() {
   local rec id out launch harness mode native_profile model
   for harness in pi pi-signed; do
-    for mode in no-mistakes direct-PR; do
+    for mode in direct-PR local-only; do
       id="ultra-$harness-$mode"
       rec=$(make_spawn_case "$id" "$harness" "$id")
       read_case_record "$rec"
@@ -1634,8 +1634,8 @@ test_launch_environment_inheritance_preserves_on_source_errors
 test_worker_launch_delivers_role_scope() {
   local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox
   for brief_kind in heading legacy scaffold; do
-  for kind in no-mistakes direct-PR local-only scout; do
-    [ "$brief_kind" = heading ] && [ "$kind" != no-mistakes ] && continue
+  for kind in direct-PR local-only scout; do
+    [ "$brief_kind" = heading ] && [ "$kind" != direct-PR ] && continue
     id="role-launch-$brief_kind-$kind"
     rec=$(make_spawn_case "$id" codex)
     read_case_record "$rec"

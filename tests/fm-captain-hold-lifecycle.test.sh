@@ -31,7 +31,7 @@ make_home() {  # <name>
 ## Done
 EOF
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" tmux treehouse gh gh-axi
   printf '%s\n' "$home"
 }
 
@@ -256,7 +256,7 @@ archive = "data/done-archive.md"
 done_keep = 10
 EOF
   fb=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fb" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fb" tmux treehouse gh gh-axi
   printf '%s\n' "$home|$graph/.beads"
 }
 
@@ -1348,7 +1348,7 @@ test_secondmate_hold_stays_in_authoritative_home() {
 ## Done
 EOF
   fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" tmux treehouse gh gh-axi
   origin=sample-mate-review
   mkdir -p "$mate/data/$origin"
   tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null
@@ -1405,7 +1405,7 @@ test_secondmate_home_publishes_holds_and_answers() {
 ## Done
 EOF
   fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" tmux treehouse gh gh-axi
   channel="$parent/state/channel-mate.status"
   decision="$mate/decision.txt"
 
@@ -3371,6 +3371,8 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
   repo="$home/projects/sample-pr"
   wt="$home/projects/$pr_id"
   fm_git_worktree "$repo" "$wt" "fm/$pr_id"
+  # Publication readiness must pass before the captain-hold guard is reached.
+  git -C "$wt" fetch -q origin
   tasks_in "$home" add "$pr_id" "Ship the held pull request" --kind ship \
     --repo sample --start >/dev/null || fail "could not create the held PR fixture"
   fm_write_meta "$home/state/$pr_id.meta" \
@@ -3442,7 +3444,13 @@ test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   configure_merged_github "$home"
   id=sample-missing-pr-authority
   pr=https://github.com/sample/sample/pull/43
-  write_origin_meta "$home" "$id" ship
+  fm_git_worktree "$home/projects/sample" "$home/projects/$id" "fm/$id"
+  git -C "$home/projects/$id" fetch -q origin
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$home/projects/$id" "project=$home/projects/sample" \
+    "harness=codex" "kind=ship" "mode=direct-PR" "pr=$pr" \
+    "spawn_gen=fixture-$id"
 
   # A backlog that exists but cannot be read may hide a live captain hold, so
   # the merge must refuse without reaching the forge.
@@ -3784,6 +3792,7 @@ test_merge_entrypoints_serialize_forced_teardown_before_task_reads() {
   repo="$home/projects/sample-pr-race"
   wt="$home/projects/$id"
   fm_git_worktree "$repo" "$wt" "fm/$id"
+  git -C "$wt" fetch -q origin
   tasks_in "$home" add "$id" "Ship the released pull request" --kind ship \
     --repo sample --start >/dev/null || fail "could not create the PR teardown-race fixture"
   fm_write_meta "$home/state/$id.meta" \
@@ -3951,6 +3960,7 @@ test_released_merge_passes_the_entrypoint_and_lands() {
   repo="$home/projects/sample-released"
   wt="$home/projects/$id"
   fm_git_worktree "$repo" "$wt" "fm/$id"
+  git -C "$wt" fetch -q origin
   tasks_in "$home" add "$id" "Ship the approved pull request" --kind ship \
     --repo sample --start >/dev/null || fail "could not create the released merge fixture"
   fm_write_meta "$home/state/$id.meta" \

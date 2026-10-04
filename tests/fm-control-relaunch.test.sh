@@ -1101,7 +1101,7 @@ test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch() {
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
-  for mode in no-mistakes direct-PR local-only; do
+  for mode in direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
     home="$dir/home"
