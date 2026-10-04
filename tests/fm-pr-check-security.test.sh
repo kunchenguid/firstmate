@@ -287,8 +287,7 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments seed task metadata alongside the PR identity.
 write_poll_meta() {
   local state=$1 id=$2 url=$3 case_dir
   case_dir=$(cd "$state/../.." && pwd)
@@ -947,6 +946,40 @@ run_poll() {
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
+}
+
+test_poll_identity_with_later_task_metadata() {
+  local dir state suffix
+  dir=$(make_case later-task-metadata)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_STATE=OPEN run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+    >/dev/null 2>/dev/null || fail "could not arm metadata regression poll"
+  printf 'decisions_reviewed=1\ndecision_keys=follow-up\n' >> "$state/task-a.meta"
+  cp "$state/task-a.meta" "$dir/valid.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "later decision fields invalidated the authenticated poll"
+
+  for suffix in \
+    'pr=https://github.com/o/r/pull/1' \
+    'pr=https://github.com/o/r/pull/not-a-number' \
+    'pr_head=not-a-head' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'pr_head =0123456789abcdef0123456789abcdef01234567'; do
+    cp "$dir/valid.meta" "$state/task-a.meta"
+    printf '%s\n' "$suffix" >> "$state/task-a.meta"
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "duplicate or malformed identity remained authenticated: $suffix"
+  done
+  cp "$dir/valid.meta" "$state/task-a.meta"
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" \
+    || fail "watcher refused poll with later decision fields"
+  assert_grep 'task-a.check.sh: merged' "$dir/watch.out" \
+    "watcher did not report the authenticated merge"
+  assert_no_grep 'rejected unauthenticated' "$dir/watch.err" \
+    "watcher rejected legitimate decision metadata"
+  pass "PR identity stays strict while later decision metadata remains independent"
 }
 
 test_static_poll_contract() {
@@ -3440,6 +3473,7 @@ SH
 }
 
 test_parser_matrix
+test_poll_identity_with_later_task_metadata
 test_gitlab_merge_watch
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
