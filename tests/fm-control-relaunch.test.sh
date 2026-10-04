@@ -1817,6 +1817,107 @@ test_spawn_relaunch_refuses_an_unrecorded_task() {
   pass "fm-spawn --relaunch: an unrecorded task is refused"
 }
 
+# A relaunch adopts the recorded Herdr endpoint without renaming its tab, so
+# the human-readable task label the creating spawn recorded is still exactly
+# the label the tab wears and must survive the relaunch's metadata
+# republication verbatim (the replacement's brief may carry a changed title,
+# so recomputing the label would record text the tab does not show).
+test_spawn_relaunch_preserves_the_recorded_herdr_task_label() {
+  local dir wt out rc
+  dir=$(new_case herdr-label rl50)
+  add_ship_task "$dir" rl50 claude
+  # The shared stateful herdr fake below answers only for the pane its
+  # herdr-pane record names, reading the pane's shell cwd from fake/cwd (the
+  # tmux stub's cwd contract), so seed it with the endpoint this meta records.
+  printf '%s' 'pane-rl50' > "$dir/fake/herdr-pane"
+  make_herdr_stub "$dir"
+  wt=$(meta_field "$dir" rl50 worktree)
+  cat > "$dir/home/state/rl50.meta" <<EOF
+window=fake-herdr-session:pane-rl50
+endpoint_task_id=rl50
+worktree=$wt
+project=$dir/proj
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-rl50
+model=default
+effort=default
+backend=herdr
+herdr_session=fake-herdr-session
+herdr_workspace_id=ws-rl50
+herdr_tab_id=tab-rl50
+herdr_pane_id=pane-rl50
+herdr_task_label=Paint the fence (rl50)
+EOF
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl50 --relaunch); rc=$?
+  expect_code 0 "$rc" \
+    "a Herdr relaunch against the agent-free recorded endpoint should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl50 herdr_task_label)" = 'Paint the fence (rl50)' ] \
+    || fail "relaunch dropped or rewrote the recorded Herdr task label: '$(meta_field "$dir" rl50 herdr_task_label)'"
+  [ "$(meta_field "$dir" rl50 herdr_tab_id)" = tab-rl50 ] \
+    || fail "relaunch replaced the recorded Herdr tab"
+  if grep -q 'tab rename' "$dir/fake/herdr-log"; then
+    fail "relaunch relabeled the adopted endpoint's tab"
+  fi
+  pass "fm-spawn --relaunch: the recorded herdr_task_label survives republication verbatim"
+}
+
+# An opted-in home the dispatch preflight exempts (here a manual backlog) reads
+# its row title directly on a fresh spawn, but a relaunch never mints a label,
+# so it must not spend a backlog read on one.
+test_spawn_relaunch_skips_the_herdr_row_title_probe() {
+  local dir wt out rc
+  dir=$(new_case herdr-noprobe rl51)
+  add_ship_task "$dir" rl51 claude
+  printf '%s' 'pane-rl51' > "$dir/fake/herdr-pane"
+  make_herdr_stub "$dir"
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/herdr-task-titles"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  printf '# Backlog\n' > "$dir/home/data/backlog.md"
+  cat > "$dir/fakebin/tasks-axi" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/fake/tasks-axi-log"
+exit 1
+EOF
+  chmod +x "$dir/fakebin/tasks-axi"
+  wt=$(meta_field "$dir" rl51 worktree)
+  cat > "$dir/home/state/rl51.meta" <<EOF
+window=fake-herdr-session:pane-rl51
+endpoint_task_id=rl51
+worktree=$wt
+project=$dir/proj
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-rl51
+model=default
+effort=default
+backend=herdr
+herdr_session=fake-herdr-session
+herdr_workspace_id=ws-rl51
+herdr_tab_id=tab-rl51
+herdr_pane_id=pane-rl51
+herdr_task_label=Paint the shed (rl51)
+EOF
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl51 --relaunch); rc=$?
+  expect_code 0 "$rc" \
+    "a Herdr relaunch of an opted-in manual-backlog home should succeed"$'\n'"$out"
+  if [ -f "$dir/fake/tasks-axi-log" ] && grep -q 'show' "$dir/fake/tasks-axi-log"; then
+    fail "relaunch read the backlog row title it never uses: $(cat "$dir/fake/tasks-axi-log")"
+  fi
+  [ "$(meta_field "$dir" rl51 herdr_task_label)" = 'Paint the shed (rl51)' ] \
+    || fail "relaunch dropped or rewrote the recorded Herdr task label: '$(meta_field "$dir" rl51 herdr_task_label)'"
+  pass "fm-spawn --relaunch: an opted-in exempt home performs no row-title probe"
+}
+
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   local dir out rc
   dir=$(new_case wrongcwd rl18)
@@ -2029,7 +2130,12 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"workspace":{"workspace_id":"wsnew"},"tab":{"tab_id":"seedtab"}}}\n'
     exit 0 ;;
   'tab list')
-    printf '{"result":{"tabs":[]}}\n'
+    # A case may seed the tabs the surviving session still lists.
+    if [ -f "$D/herdr-tab-list" ]; then
+      cat "$D/herdr-tab-list"
+    else
+      printf '{"result":{"tabs":[]}}\n'
+    fi
     exit 0 ;;
   'tab create')
     # The re-created endpoint. Recording it lets a case prove the pane the
@@ -2212,6 +2318,9 @@ test_herdr_rebind_stays_in_the_recorded_session() {
     return 0
   }
   dir=$HERDR_CASE_DIR
+  # The prior spawn recorded a human label for the tab this rebind is about to
+  # destroy; the republished record must name the tab that actually exists.
+  printf '%s\n' 'herdr_task_label=Stale human title (rl73)' >> "$dir/home/state/rl73.meta"
 
   out=$(run_spawn "$dir" rl73 --relaunch --harness claude) || rc=$?
   log=$(cat "$dir/fake/herdr-log")
@@ -2226,7 +2335,36 @@ test_herdr_rebind_stays_in_the_recorded_session() {
     || fail "the rebound endpoint should be the new pane in the recorded session, got $(meta_field "$dir" rl73 window)"
   [ "$(meta_field "$dir" rl73 herdr_pane_id)" = '%9' ] \
     || fail "the rebound record should name the pane the reclaim minted, got $(meta_field "$dir" rl73 herdr_pane_id)"
+  [ "$(meta_field "$dir" rl73 herdr_task_label)" = 'fm-rl73' ] \
+    || fail "the rebound record must name the tab label it actually minted, got '$(meta_field "$dir" rl73 herdr_task_label)'"
+  [ "$(grep -c '^herdr_task_label=' "$dir/home/state/rl73.meta")" = 1 ] \
+    || fail "the rebound record must carry exactly one herdr_task_label"
   pass "reclaim: a herdr rebind is created in the session the record names, never the ambient one"
+}
+
+# The recorded pane is gone (so this reclaim really rebinds), but the human
+# label an earlier attempt minted still wears a tab the session lists: the
+# rebind's duplicate guard must read state/<id>.herdr-task-labels, the same
+# history the flat fresh path feeds, and refuse rather than mint a second tab
+# for one task.
+test_herdr_rebind_sees_the_attempted_label_history() {
+  local dir out rc=0 log
+  herdr_case_or_skip gone-herdr-hist rl78 fmlab '%none' || {
+    echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  printf '%s\n' 'Stale human title (rl78)' > "$dir/home/state/rl78.herdr-task-labels"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"ws1:t9","label":"Stale human title (rl78)","workspace_id":"ws1"}]}}' \
+    > "$dir/fake/herdr-tab-list"
+
+  out=$(run_spawn "$dir" rl78 --relaunch --harness claude); rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 1 "$rc" "a rebind whose earlier human label still exists should refuse"$'\n'"$out"
+  assert_contains "$out" "'Stale human title (rl78)' already exists" \
+    "the refusal should name the tab recorded in the attempted-label history"
+  assert_not_contains "$log" "tab create" "a refused rebind must not mint a second tab"
+  pass "reclaim: a herdr rebind's duplicate guard sees the recorded attempted-label history"
 }
 
 test_herdr_reclaim_refuses_an_agent_that_came_back() {
@@ -2443,6 +2581,8 @@ test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
+test_spawn_relaunch_preserves_the_recorded_herdr_task_label
+test_spawn_relaunch_skips_the_herdr_row_title_probe
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
@@ -2452,6 +2592,7 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
+test_herdr_rebind_sees_the_attempted_label_history
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner

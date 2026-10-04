@@ -63,6 +63,7 @@ FM_BACKLOG_TRANSITION_SKIP=
 FM_BACKLOG_TRANSITION_ERROR=
 FM_BACKLOG_ROW_RESULT=
 FM_BACKLOG_ROW_STATE=
+FM_BACKLOG_ROW_TITLE=
 FM_BACKLOG_ROW_ERROR=
 # Set by fm_backlog_row_probe on a found row: the tasks-axi hold kind, empty when
 # the row is not held.
@@ -423,17 +424,44 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
   fi
 }
 
+# tasks-axi show renders a scalar field unquoted only when the value avoids
+# every character the serializer quotes (':', '"', ',', backslash) and is not
+# a truncated render; otherwise it emits the JSON-ish quoted form with JSON
+# escapes (\t, \uXXXX, \" , \\). Decode it with the same JSON::PP path this
+# file uses for the body field so a caller sees the value the row actually
+# carries rather than the wire form; a value that fails to decode becomes
+# empty, which keeps the caller on its no-title fallback instead of a mangled
+# title.
+fm_backlog_show_value() {  # <raw-field-value>
+  local value=$1
+  case "$value" in
+    '"'*'"')
+      value=$(printf '%s' "$value" | LC_ALL=C perl -MJSON::PP -e '
+        local $/;
+        my $shown = <STDIN>;
+        my $value = JSON::PP->new->utf8->allow_nonref->decode($shown);
+        binmode STDOUT, ":raw";
+        utf8::encode($value) if utf8::is_utf8($value);
+        print $value;
+      ' 2>/dev/null) || value=
+      ;;
+  esac
+  printf '%s' "$value"
+}
+
 fm_backlog_row_probe() {  # <data-dir> <id>
   local data authorized_data=$1 id=$2 out state held blocked hold_kind command_status source_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
+    FM_BACKLOG_ROW_TITLE=
     FM_BACKLOG_ROW_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
   FM_BACKLOG_ROW_RESULT=error
   FM_BACKLOG_ROW_STATE=
   FM_BACKLOG_ROW_HOLD_KIND=
+  FM_BACKLOG_ROW_TITLE=
   FM_BACKLOG_ROW_ERROR=
   fm_backlog_source_present "$data" "$authorized_data"
   source_status=$?
@@ -441,7 +469,9 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return "$source_status"
   fi
-  out=$(fm_backlog_row_show "$data" "$id")
+  # --full: the default render truncates titles and annotates them, and a
+  # truncated title must never name the tab.
+  out=$(fm_backlog_row_show "$data" "$id" --full)
   command_status=$?
   [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
   if [ "$command_status" -ne 0 ]; then
@@ -460,6 +490,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     return "$command_status"
   fi
   state=$(printf '%s\n' "$out" | sed -n 's/^  state: *//p' | head -1)
+  FM_BACKLOG_ROW_TITLE=$(fm_backlog_show_value "$(printf '%s\n' "$out" | sed -n 's/^  title: *//p' | head -1)")
   held=$(printf '%s\n' "$out" | sed -n 's/^  held: *//p' | head -1)
   blocked=$(printf '%s\n' "$out" | sed -n 's/^  blocked: *//p' | head -1)
   hold_kind=$(printf '%s\n' "$out" | sed -n 's/^  hold_kind: *//p' | head -1)

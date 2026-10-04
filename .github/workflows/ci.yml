@@ -280,6 +280,15 @@ jobs:
           # worktree acquisition (presentation, workspace-per-home, autodetect).
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install tasks-axi for backlog-keeping fixture homes
+        run: |
+          set -eu
+          # The label fixtures in the real-herdr E2E suites keep a markdown
+          # backlog per home, and dispatch refuses a home whose rows cannot be
+          # read through a compatible tasks-axi.
+          command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
+          npm install -g tasks-axi@0.2.6 >/dev/null
+          tasks-axi --version
       - name: Assert Herdr pin and protocol floor
         run: |
           set -eu

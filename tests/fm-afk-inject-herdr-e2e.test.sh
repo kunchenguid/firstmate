@@ -89,7 +89,7 @@ LOG_FILE="$STATE_DIR/submitted.log"
 CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensure failed"
 CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
-TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-afk-e2e-supervisor" /tmp "$SEEDED_TAB_ID") \
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-afk-e2e-supervisor" /tmp "$SEEDED_TAB_ID" afk-e2e-supervisor) \
   || fail "create_task for the scratch supervisor pane failed"
 read -r _TAB_ID PANE_ID <<EOF
 $TASK_IDS
@@ -125,7 +125,7 @@ done
 # e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
 # only watches state/*.status mtimes, no window/pane dependency), but kept for
 # parity so this test's shape matches the tmux e2e's.
-FAKE_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp) \
+FAKE_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp "" fake-c1) \
   || fail "could not create the fake crewmate scratch tab"
 read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
 $FAKE_CREW_IDS
