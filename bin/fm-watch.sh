@@ -16,9 +16,9 @@
 # further out extends the cadence up to the FM_PAUSE_UNTIL_MAX_SECS ceiling.
 # An item held for the captain is never rechecked at all while an away record
 # (state/.afk-contract, never quiet mode's) exists, and with a present captain -
-# attended or in quiet mode - it is rechecked only once its unanswered hold ages
-# past the far longer FM_CAPTAIN_HOLD_RESURFACE_SECS ceiling, because until the
-# captain answers a recheck can only restate their own question.
+# attended or in quiet mode - its unanswered hold surfaces once, then is
+# rechecked at most once per the far longer FM_CAPTAIN_HOLD_RESURFACE_SECS,
+# because until the captain answers a recheck can only restate their own question.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -388,9 +388,9 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 # The separate, far longer ceiling an UNANSWERED captain call is silent for,
 # attended as well as away. A recheck inside it can only restate the captain's
-# own open question back at them, so it is absorbed; past it the hold rejoins
-# the PAUSE_RESURFACE_SECS cadence above so a forgotten one cannot rot
-# invisibly. 0 disables the silence and leaves that cadence alone.
+# own open question back at them, so after its first alarm it is rechecked at
+# most once per this ceiling so a forgotten one cannot rot invisibly. 0 disables
+# the silence and leaves the PAUSE_RESURFACE_SECS cadence alone.
 CAPTAIN_HOLD_RESURFACE_SECS=${FM_CAPTAIN_HOLD_RESURFACE_SECS:-86400}
 case "$CAPTAIN_HOLD_RESURFACE_SECS" in ''|*[!0-9]*) CAPTAIN_HOLD_RESURFACE_SECS=86400 ;; esac
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
@@ -1931,10 +1931,8 @@ stale_wait_record() {  # <window-key>
 # Attended it is the same silence, bounded by a ceiling rather than lifted by a
 # posture: `open` is already the answered test - an answered or released call
 # leaves by the line above - so while it holds, a recheck has nothing to tell the
-# captain but their own unanswered question. Only once the hold ages past
-# CAPTAIN_HOLD_RESURFACE_SECS does it rejoin the ordinary cadence, so a forgotten
-# hold still shows; a hold whose own stamp cannot be read rejoins it immediately,
-# because an unreadable record must not buy open-ended silence.
+# captain but their own unanswered question. It surfaces once, then rechecks at
+# most once per CAPTAIN_HOLD_RESURFACE_SECS, so a forgotten hold still shows.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
@@ -2745,11 +2743,12 @@ resurface_after_downtime() {
     # cycle's arm check re-opens the episode when the backoff has elapsed.
     [ "$now" -ge $((RESURFACE_LAST + delay)) ] || return 0
   fi
+  printf '%s %s %s\n' "$streak" "$now" "$sig" > "$RESURFACE_STREAK_FILE" 2>/dev/null || true
   if [ "$streak" -gt "$RESURFACE_STREAK_CAP" ]; then
-    triage_log "resurface suppressed after $RESURFACE_STREAK_CAP unacknowledged deliveries; supervision continues without re-firing until a wake is acknowledged"
+    [ "$streak" -gt $((RESURFACE_STREAK_CAP + 1)) ] \
+      || triage_log "resurface suppressed after $RESURFACE_STREAK_CAP unacknowledged deliveries; supervision continues without re-firing until a wake is acknowledged"
     return 0
   fi
-  printf '%s %s %s\n' "$streak" "$now" "$sig" > "$RESURFACE_STREAK_FILE" 2>/dev/null || true
   if [ "$streak" -eq "$RESURFACE_STREAK_CAP" ]; then
     wake "check: rearm-resurface unacknowledged $streak times - the queued wake was never acknowledged, so this is the last automatic re-delivery: drain the queue and run its exact WAKE_ACK_REQUIRED command, or supervision keeps running without resurfacing it"
   fi

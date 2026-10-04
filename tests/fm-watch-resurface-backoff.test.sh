@@ -62,6 +62,8 @@ test_unacknowledged_resurface_is_capped() {
 
   resurface_watch_bg "$dir" "$out" 0
   assert_keeps_supervising $! "$out" "past the cap"
+  [ "$(grep -c 'resurface suppressed' "$state/.watch-triage.log" 2>/dev/null)" = 1 ] \
+    || fail "the suppression was not logged exactly once per episode: $(cat "$state/.watch-triage.log" 2>/dev/null)"
 
   # Newly appended work is not the same unanswered wake, so the bound must
   # never silence it: the streak restarts and the next cycle resurfaces at once.
