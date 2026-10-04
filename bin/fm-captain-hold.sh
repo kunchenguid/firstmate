@@ -292,6 +292,7 @@ status_declare_hold() {  # <task-id> <occurrence> <reason>
   [ -f "$STATE/$id.meta" ] || return 0
   status_file="$STATE/$id.status"
   status_is_captain_held "$(last_status_line "$status_file")" && return 0
+  reason=${reason//[$'\r\n']/ }
   line="captain-held [key=captain-hold-$id-$occurrence]: $reason"
   cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width)))
   [ "$cap" -ge 0 ] || cap=0

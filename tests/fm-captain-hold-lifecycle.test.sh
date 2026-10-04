@@ -1213,6 +1213,27 @@ EOF
     "$home/state/$lane.status" >/dev/null \
     || fail "reconcile close did not retract the status-log declaration"
 
+  # A reason spanning several lines still writes one status line, so its
+  # later lines never read as status events of their own.
+  lane=sample-multiline-lane
+  tasks_in "$home" add "$lane" "Scout the multiline sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the multiline lane"
+  write_origin_meta "$home" "$lane"
+  printf 'done: PR ready\n' > "$home/state/$lane.status"
+  run_captain "$home" hold "$lane" \
+    --reason $'Pick the API shape\r\nblocked: on vendor reply' >/dev/null \
+    || fail "could not hold the multiline lane"
+  [ "$(wc -l < "$home/state/$lane.status")" -eq 2 ] \
+    || fail "a multi-line hold reason wrote more than one status line: $(cat "$home/state/$lane.status")"
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
+  [ "$(unstamp_line "$last")" = "captain-held [key=captain-hold-$lane-1]: Pick the API shape  blocked: on vendor reply" ] \
+    || fail "a multi-line hold reason was not folded onto the mirror line: $last"
+  last=$(bash -c '. "$1"; . "$2"; last_worker_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
+  [ "$last" = "done: PR ready" ] \
+    || fail "a multi-line hold reason forged a worker status event: $last"
+
   # The keyed retraction is the hold lifecycle's own namespace, so the
   # divergence guard reads none of this as a captain call closed wrongly.
   diverged_out=$(run_captain "$home" diverged) \
