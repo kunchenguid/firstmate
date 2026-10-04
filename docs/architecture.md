@@ -208,6 +208,8 @@ Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts 
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, the record archive, durable catch-up evidence, the return brief, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker the away session could not fix.
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
 The doorbell line is a shell no-op and is never typed into an endpoint classified as dead or missing; that record surfaces once for recovery instead of walking the re-ring ladder (`bin/fm-task-inbox-lib.sh` header).
+If the selected composer holds only exact copies of that line, a re-ring presses Enter without typing again, and a worker that is working can accept the queued Enter through the shared composer policy.
+Any other composer text stays untouched, and the watcher raises the exhausted-ladder stale wake only after the pane is idle (`bin/fm-task-inbox-lib.sh` and `bin/fm-watch.sh`).
 Its local-only typed plane - harness-native invocations and explicit backend targets - selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful typed sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 Text for a worker to read and commands that drive a worker's process are separate planes.

@@ -20,10 +20,13 @@
 #      acknowledgement resets the ladder for the next message.
 #   5. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
 #      aged message on an idle pane WITHOUT waking firstmate, waits on a busy
-#      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
+#      pane unless its exact doorbell is already pending, stays silent on a
+#      healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, and emits exactly
 #      one stale wake once the ring budget is spent.
-#   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
+#   6. Empty, own, repeated-own, foreign, and busy composers exercise the ring's
+#      submit or protect behavior through its callable interface.
+#   7. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
 set -u
@@ -244,6 +247,90 @@ test_doorbell_rejects_terminal_controls() {
     [ -f "$rec" ] || fail "rejecting a $label path removed the durable record"
   done
   pass "inbox: terminal-control paths are rejected without typing"
+}
+
+test_ring_recovers_only_its_own_pending_doorbell() {
+  local dir state rec line rc actions out
+  dir="$TMP_ROOT/pending-doorbell"; state="$dir/state"
+  mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  line=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  actions="$dir/actions"; : > "$actions"
+  rc=0
+  FM_TEST_LIB="$ROOT/bin/fm-task-inbox-lib.sh" FM_TEST_CAPTURE='› ' \
+    FM_TEST_ACTIONS="$actions" FM_TEST_INITIAL=empty FM_TEST_BUSY=idle \
+    bash -c '
+      . "$FM_TEST_LIB"
+      fm_backend_agent_state() { printf alive; }
+      fm_backend_busy_state() { printf "%s" "$FM_TEST_BUSY"; }
+      fm_backend_composer_state() { printf "%s" "$FM_TEST_INITIAL"; }
+      fm_backend_capture() { printf "%s" "$FM_TEST_CAPTURE"; }
+      fm_backend_send_key() { printf "key:%s\n" "$3" >> "$FM_TEST_ACTIONS"; }
+      fm_backend_send_text_submit() { printf "typed:%s\n" "$3" >> "$FM_TEST_ACTIONS"; printf empty; }
+      fm_task_inbox_ring herdr lab:w1:p1 "$1" test-pane idle
+    ' _ "$rec" || rc=$?
+  [ "$rc" = 0 ] || fail "an empty composer should receive the doorbell, rc=$rc"
+  [ "$(grep -c '^typed:' "$actions")" = 1 ] || fail "an empty composer should be typed exactly once"
+  ! grep -q '^key:' "$actions" || fail "an empty composer should use normal submit machinery"
+
+  : > "$actions"
+  out=$(FM_TEST_ROOT="$ROOT" FM_TEST_LIB="$ROOT/bin/fm-task-inbox-lib.sh" \
+    FM_TEST_CAPTURE="› $line" FM_TEST_ACTIONS="$actions" FM_TEST_INITIAL=pending \
+    FM_TEST_BUSY=idle FM_TEST_CLEAR_ON_KEY=1 bash -c '
+      . "$FM_TEST_LIB"
+      fm_backend_agent_state() { printf alive; }
+      fm_backend_busy_state() { printf "%s" "$FM_TEST_BUSY"; }
+      fm_backend_composer_state() {
+        if [ -e "$FM_TEST_ACTIONS.cleared" ]; then printf empty; else printf "%s" "$FM_TEST_INITIAL"; fi
+      }
+      fm_backend_capture() { printf "%s" "$FM_TEST_CAPTURE"; }
+      fm_backend_send_key() {
+        printf "key:%s\n" "$3" >> "$FM_TEST_ACTIONS"
+        [ "$FM_TEST_CLEAR_ON_KEY" != 1 ] || : > "$FM_TEST_ACTIONS.cleared"
+      }
+      fm_backend_send_text_submit() { printf "typed:%s\n" "$3" >> "$FM_TEST_ACTIONS"; printf empty; }
+      fm_task_inbox_ring herdr lab:w1:p1 "$1" test-pane idle
+    ' _ "$rec") || rc=$?
+  rc=${rc:-0}
+  [ "$rc" = 0 ] || fail "an exact pending doorbell should recover by submitting its existing line, rc=$rc"
+  [ "$(cat "$actions")" = key:Enter ] || fail "own-line recovery should press Enter once and never type again: $(cat "$actions")"
+  rm -f "$actions.cleared"
+
+  : > "$actions"
+  rc=0
+  FM_TEST_LIB="$ROOT/bin/fm-task-inbox-lib.sh" FM_TEST_CAPTURE="› $line $line" \
+    FM_TEST_ACTIONS="$actions" FM_TEST_INITIAL=pending FM_TEST_BUSY=busy \
+    FM_TEST_CLEAR_ON_KEY=0 bash -c '
+      . "$FM_TEST_LIB"
+      fm_backend_agent_state() { printf alive; }
+      fm_backend_busy_state() { printf "%s" "$FM_TEST_BUSY"; }
+      fm_backend_composer_state() { printf "%s" "$FM_TEST_INITIAL"; }
+      fm_backend_capture() { printf "%s" "$FM_TEST_CAPTURE"; }
+      fm_backend_send_key() { printf "key:%s\n" "$3" >> "$FM_TEST_ACTIONS"; }
+      fm_backend_send_text_submit() { printf "typed:%s\n" "$3" >> "$FM_TEST_ACTIONS"; printf empty; }
+      fm_task_inbox_ring herdr lab:w1:p1 "$1" test-pane busy
+    ' _ "$rec" || rc=$?
+  [ "$rc" = 0 ] || fail "a doubled own reminder queued during a working turn should count as delivered, rc=$rc"
+  [ "$(grep -c '^key:Enter$' "$actions")" = 3 ] || fail "doubled own text should receive the bounded Enter-only retry budget"
+  ! grep -q '^typed:' "$actions" || fail "own-line recovery retyped over the pending reminder"
+
+  : > "$actions"
+  rc=0
+  FM_TEST_LIB="$ROOT/bin/fm-task-inbox-lib.sh" FM_TEST_CAPTURE="› $line please keep this draft" \
+    FM_TEST_ACTIONS="$actions" FM_TEST_INITIAL=pending FM_TEST_BUSY=idle \
+    FM_TEST_CLEAR_ON_KEY=0 bash -c '
+      . "$FM_TEST_LIB"
+      fm_backend_agent_state() { printf alive; }
+      fm_backend_busy_state() { printf "%s" "$FM_TEST_BUSY"; }
+      fm_backend_composer_state() { printf "%s" "$FM_TEST_INITIAL"; }
+      fm_backend_capture() { printf "%s" "$FM_TEST_CAPTURE"; }
+      fm_backend_send_key() { printf "key:%s\n" "$3" >> "$FM_TEST_ACTIONS"; }
+      fm_backend_send_text_submit() { printf "typed:%s\n" "$3" >> "$FM_TEST_ACTIONS"; printf empty; }
+      fm_task_inbox_ring herdr lab:w1:p1 "$1" test-pane idle
+    ' _ "$rec" || rc=$?
+  [ "$rc" = 1 ] || fail "foreign text sharing the composer should stay skipped, rc=$rc"
+  [ ! -s "$actions" ] || fail "foreign composer text was submitted or altered: $(cat "$actions")"
+  pass "inbox: empty, exact, doubled, foreign, and working-turn composer states use safe doorbell recovery"
 }
 
 # fm_task_inbox_ring against a backend whose agent classifies dead or missing:
@@ -700,6 +787,7 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
+test_ring_recovers_only_its_own_pending_doorbell
 test_ring_skips_dead_agent
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack

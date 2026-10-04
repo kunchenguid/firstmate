@@ -45,12 +45,15 @@
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
-# FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
-# attempt may ring or be skipped to protect proven pending composer text. After
-# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
-# while a positively dead or missing endpoint skips delivery and the ladder and
-# escalates directly. This library owns only the schedule and escalation marker.
+# the configured grace is due one delivery attempt per grace period.
+# An attempt may ring, retry Enter on this exact pending doorbell, or be skipped
+# to protect other proven pending composer text.
+# After FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates.
+# The caller owns recovery-grade endpoint checks, while a busy pane may retry
+# only its exact pending doorbell.
+# A positively dead or missing endpoint skips delivery and the ladder and
+# escalates directly.
+# This library owns only the schedule and escalation marker.
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
 # the caller surfaces that failure instead of retrying silently; a concurrently
 # removed inbox is a quiet no-op. Escalation deliberately queues the wake before
@@ -68,15 +71,18 @@
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
+#   FM_TASK_INBOX_PENDING_ENTER_RETRIES default 3; Enter-only recovery attempts
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Both dependencies are canonical lint roots in their own right. Keep them as
+# Each dependency is a canonical lint root in its own right. Keep them as
 # analysis boundaries here so ShellCheck's external-source traversal does not
 # recursively duplicate the full backend graph for every inbox consumer.
 # shellcheck source=/dev/null
 . "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
 # shellcheck source=/dev/null
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$_FM_TASK_INBOX_LIB_DIR/fm-composer-lib.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
@@ -269,31 +275,57 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
-# Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
-# composer pre-check, then the backend's submit machinery with a minimal retry
-# budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
-# the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
-# because there our Enter could submit someone's real half-typed content.
-# `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
-# CONSTANT line the worker recovers semantically, while skipping on ambiguous
-# verdicts would starve a harness whose idle screen the classifier cannot
-# positively identify (that classifier is advisory here by design).
+# Ring the doorbell, best-effort, after checking endpoint liveness and the
+# composer state.
+# An exact pending copy of this constant line is ours, so retries press Enter
+# only and use the shared queued-Enter verdict for a visibly working worker.
+# Any other proven pending composer remains untouched and is retried by the
+# watcher later.
+# Empty, pending-unproven, and unknown composers use the backend submit path;
+# ambiguous shapes remain advisory so a harness the classifier cannot read is
+# not starved of steering.
+# Returns 0 when submitted or queued, 1 when a composer is protected, 2 when
+# sending failed, or 3 when the endpoint is positively dead or missing.
+# No return value is delivery proof; the acknowledgement move is the only
+# delivery signal.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} busy_hint=${5:-} line cstate verdict busy
+  local cap caps retries=${FM_TASK_INBOX_PENDING_ENTER_RETRIES:-3} attempt sent=0
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
+  case "$busy_hint" in
+    busy|idle|unknown) busy=$busy_hint ;;
+    *) busy=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null) || busy=unknown ;;
+  esac
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    pending)
+      cap=$(fm_backend_capture "$backend" "$target" 40 "$label" 2>/dev/null) || return 1
+      caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=40')
+      fm_composer_screen_has_exact_repeated_text "$caps" "$cap" "$line" || return 1
+      case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
+      [ "$retries" -gt 0 ] || retries=1
+      [ "$retries" -le 5 ] || retries=5
+      for ((attempt = 0; attempt < retries; attempt++)); do
+        if fm_backend_send_key "$backend" "$target" Enter "$label" 2>/dev/null; then
+          sent=1
+        fi
+        sleep 0.2
+        cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+        [ "$cstate" != empty ] || return 0
+      done
+      [ "$sent" -eq 1 ] || return 2
+      verdict=$(fm_composer_queued_enter_verdict "$cstate" "$busy")
+      [ "$verdict" = empty ] && return 0
+      return 1
+      ;;
+  esac
+  case "$busy" in
+    busy) return 1 ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare
