@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# Behavior tests for fm-provider-reach-probe.sh - the one hard-bounded,
+# non-destructive reachability probe of a named provider endpoint.
+#
+# Two defects this suite pins:
+#
+# 1. Upstream outage was previously visible only by reading worker panes, so
+#    "the endpoint is down" was never a machine-readable finding at an intake.
+#    The three outage shapes the fleet actually recorded must each land on their
+#    own exit status and wording: no address at all (HTTP 000 / NXDOMAIN), a
+#    request that reached the endpoint and was refused (401/403), and an endpoint
+#    that answered successfully (2xx). The last two must never be conflated,
+#    because a refusal proves routing while proving nothing about usability, and a
+#    2xx is recorded as reachable rather than as proof a model or credential works.
+#
+# 2. A probe must not smuggle in routing knowledge or become a service. Every
+#    assertion below runs against local stand-ins only - a fake curl and a fake
+#    resolver on PATH - so no third-party endpoint is ever contacted to justify an
+#    expected value, and the fake curl records every URL it was handed so
+#    "unauthenticated, exactly one request, bounded" are observable facts.
+set -u
+
+# shellcheck source=tests/lib.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SCRIPT="$ROOT/bin/fm-provider-reach-probe.sh"
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+TMP_ROOT=$(fm_test_tmproot fm-provider-reach-probe-tests)
+
+# A sentinel token the probe must never carry anywhere.
+SENTINEL_KEY='SENTINEL-SECRET-MUST-NEVER-APPEAR'
+
+# --- stand-in toolchain -----------------------------------------------------
+#
+# Fake curl: prints FM_FAKE_CURL_CODE as the HTTP code and logs each call's argv.
+# It never opens a socket, so a suite regression cannot turn into real traffic.
+# The stand-ins go in <dir> itself and <dir> is prepended to PATH, because
+# /usr/bin/curl would otherwise shadow a fakebin subdirectory of the same case.
+make_standins() {
+  local dir=$1 fakebin=$1
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+url=''
+out=/dev/null
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -w) shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+printf '%s\n' "$*" >> "${FM_FAKE_CURL_LOG:-/dev/null}"
+printf '%s\n' "$url" >> "${FM_FAKE_CURL_URL_LOG:-/dev/null}"
+# A probe that authenticated would hand the credential on argv or in a header
+# file; record both surfaces so the safety claim is checkable.
+if [ -n "${FM_FAKE_CURL_SEEN_SECRET:-}" ]; then
+  printf 'secret-seen\n' >> "${FM_FAKE_CURL_LOG:-/dev/null}"
+fi
+case "${FM_FAKE_CURL_MODE:-code}" in
+  crash) printf '000\n'; exit 7 ;;
+  hang) sleep 30; printf '200\n'; exit 0 ;;
+  *) printf '%s\n' "${FM_FAKE_CURL_CODE:-200}" ;;
+esac
+SH
+  chmod +x "$fakebin/curl"
+
+  # Fake resolver: rcode/name output shape driven by env, like the real dig.
+  cat > "$fakebin/dig" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_DIG_LOG:-/dev/null}"
+case "${FM_FAKE_DIG_MODE:-address}" in
+  nxdomain) printf 'status: NXDOMAIN\nno answer\n' ; exit 0 ;;
+  empty) printf ';; no addresses\n'; exit 0 ;;
+  fail) printf 'connection failed\n'; exit 9 ;;
+  hang) sleep 30; printf 'ok\n'; exit 0 ;;
+  *) printf '1.2.3.4\n'; exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/dig"
+
+  # jq and quota-axi are present so a regression that reintroduced either
+  # dependency would be exercised rather than silently satisfied.
+  for tool in jq quota-axi; do
+    cat > "$fakebin/$tool" <<SH
+#!/usr/bin/env bash
+printf 'called: $tool\n' >> "\${FM_FAKE_TOOL_LOG:-/dev/null}"
+exit 0
+SH
+    chmod +x "$fakebin/$tool"
+  done
+}
+
+# run_probe <dir> <args...>: probe with the stand-ins armed and DNS pinned to the
+# fake dig, so the resolution phase is deterministic on every host.
+run_probe() {
+  local dir=$1; shift
+  PATH="$dir:$BASE_PATH" \
+    FM_PROVIDER_REACH_DNS_TOOL=dig \
+    FM_FAKE_CURL_URL_LOG="$dir/urls.log" \
+    FM_FAKE_CURL_LOG="$dir/calls.log" \
+    FM_FAKE_DIG_LOG="$dir/dig.log" \
+    FM_FAKE_TOOL_LOG="$dir/tools.log" \
+    "$SCRIPT" "$@"
+}
+
+new_case() {
+  local dir=$1
+  mkdir -p "$dir"
+  make_standins "$dir"
+  : > "$dir/urls.log"; : > "$dir/calls.log"; : > "$dir/dig.log"; : > "$dir/tools.log"
+}
+
+# --- the probe exists and documents its contract ----------------------------
+[ -x "$SCRIPT" ] || fail "bin/fm-provider-reach-probe.sh is missing or not executable"
+
+out=$("$SCRIPT" --help 2>&1); rc=$?
+expect_code 0 "$rc" "help exits 0"
+assert_contains "$out" "routed-auth" "help names the 401/403 verdict"
+assert_contains "$out" "unreachable" "help names the unreachable verdict"
+assert_contains "$out" "renders no verdict" "help states the probe holds no routing judgment"
+
+# --- HTTP 200: routable and answering, and nothing more ---------------------
+tmp=$TMP_ROOT/ok; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=200 FM_FAKE_DIG_MODE=address \
+  FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+  FM_FAKE_TOOL_LOG="$tmp/tools.log" "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 0 "$rc" "http 200 probes as reachable (exit 0)"
+assert_contains "$out" "result=reachable" "http 200 wording is reachable"
+assert_contains "$out" "http=200" "http 200 line carries the code"
+assert_contains "$out" "dns=ok" "a resolved name reports dns=ok"
+assert_not_contains "$out" "available" "a 2xx is never worded as channel-available"
+assert_not_contains "$out" "eligible" "the probe renders no dispatch eligibility"
+
+# --- HTTP 401 / 403: routing proven, usability NOT proven -------------------
+for code in 401 403; do
+  tmp=$TMP_ROOT/auth-$code; new_case "$tmp"
+  out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=$code FM_FAKE_DIG_MODE=address \
+    FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+    "$SCRIPT" --host api.example.invalid 2>&1); rc=$?
+  expect_code 10 "$rc" "http $code exits 10"
+  assert_contains "$out" "result=routed-auth" "http $code wording is routed-auth"
+  assert_contains "$out" "http=$code" "http $code line carries the code"
+  assert_contains "$out" "dns=ok" "http $code still reports a resolved name"
+done
+
+# --- HTTP 000: cannot connect ------------------------------------------------
+tmp=$TMP_ROOT/zero; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=000 FM_FAKE_DIG_MODE=address \
+  FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+  "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 20 "$rc" "http 000 exits 20"
+assert_contains "$out" "result=unreachable" "http 000 wording is unreachable"
+assert_contains "$out" "reason=no_connection" "http 000 names the connection failure"
+assert_not_contains "$out" "routed-auth" "a dead connection is never reported as reachable routing"
+
+# --- HTTP 5xx: answered but unhealthy ---------------------------------------
+tmp=$TMP_ROOT/server; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=502 FM_FAKE_DIG_MODE=address \
+  FM_PROVIDER_REACH_DNS_TOOL=dig "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 11 "$rc" "http 502 exits 11"
+assert_contains "$out" "result=server-error" "http 502 wording is server-error"
+
+# --- NXDOMAIN: no address, so the request phase is skipped ------------------
+tmp=$TMP_ROOT/nxdomain; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=nxdomain FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 20 "$rc" "NXDOMAIN exits 20"
+assert_contains "$out" "dns=nxdomain" "NXDOMAIN is reported as its own finding"
+assert_contains "$out" "result=unreachable" "NXDOMAIN wording is unreachable"
+assert_contains "$out" "http=none" "NXDOMAIN requests nothing over HTTP"
+[ ! -s "$tmp/urls.log" ] || fail "NXDOMAIN path still issued an HTTP request: $(cat "$tmp/urls.log")"
+
+# --- a resolvable name with no address is the same finding ------------------
+tmp=$TMP_ROOT/empty-answer; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=empty FM_PROVIDER_REACH_DNS_TOOL=dig \
+  "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 20 "$rc" "an addressless answer exits 20"
+assert_contains "$out" "dns=nxdomain" "an addressless answer is the no-address class"
+
+# --- a failing resolver is a lookup failure, never a success claim ----------
+tmp=$TMP_ROOT/dns-fail; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=fail FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 20 "$rc" "a failed lookup exits 20"
+assert_contains "$out" "dns=fail" "a failed lookup is its own dns class"
+assert_contains "$out" "result=unreachable" "a failed lookup wording is unreachable"
+
+# --- a missing resolver is disclosed, not invented --------------------------
+tmp=$TMP_ROOT/no-dns-tool; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=200 FM_PROVIDER_REACH_DNS_TOOL=no-such-resolver \
+  "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 0 "$rc" "a missing resolver does not block the HTTP phase"
+assert_contains "$out" "dns=skipped" "a missing resolver reports dns=skipped"
+assert_contains "$out" "dns_tool_missing" "a missing resolver is disclosed in the line"
+
+# --- the bound is real, on both phases --------------------------------------
+tmp=$TMP_ROOT/hang-http; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_MODE=hang FM_FAKE_DIG_MODE=address \
+  FM_PROVIDER_REACH_DNS_TOOL=dig FM_PROVIDER_REACH_PROBE_TIMEOUT=1 "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 20 "$rc" "a hanging endpoint is bounded to unreachable"
+assert_contains "$out" "result=unreachable" "a hanging endpoint wording is unreachable"
+
+tmp=$TMP_ROOT/hang-dns; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=hang FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_PROVIDER_REACH_PROBE_TIMEOUT=1 "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 20 "$rc" "a hanging resolver is bounded"
+assert_contains "$out" "dns=fail" "a hanging resolver reports a lookup failure"
+
+# --- unauthenticated, single request, no credential surface -----------------
+tmp=$TMP_ROOT/unauth; new_case "$tmp"
+PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=200 FM_FAKE_DIG_MODE=address \
+  FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+  FM_FAKE_CURL_LOG="$tmp/calls.log" FM_FAKE_TOOL_LOG="$tmp/tools.log" \
+  API_KEY="$SENTINEL_KEY" TYPESAFE_API_KEY="$SENTINEL_KEY" \
+  "$SCRIPT" xhy >/dev/null 2>&1 || true
+urls=$(cat "$tmp/urls.log")
+assert_contains "$urls" "https://api.xhyapi.com/v1/models" "the registered target probes its recorded base URL"
+[ "$(printf '%s\n' "$urls" | grep -c .)" = 1 ] || fail "expected exactly one HTTP request, got: $urls"
+calls=$(cat "$tmp/calls.log")
+assert_not_contains "$calls" "-H" "the probe sends no auth header"
+assert_not_contains "$calls" "Authorization" "the probe sends no Authorization header"
+assert_not_contains "$calls" "$SENTINEL_KEY" "no ambient credential value reaches the request"
+assert_not_contains "$urls" "key=" "the probe URL carries no query credential"
+[ ! -s "$tmp/tools.log" ] || fail "the probe read quota or jq: $(cat "$tmp/tools.log")"
+
+# --- unknown target and malformed input are refusals, never silent guesses ---
+tmp=$TMP_ROOT/unknown-target; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig "$SCRIPT" nosuchprovider 2>&1); rc=$?
+expect_code 2 "$rc" "an unregistered target is refused"
+assert_contains "$out" "no probe is registered" "the refusal names the missing registration"
+assert_contains "$out" "nosuchprovider" "the refusal echoes what was asked"
+
+tmp=$TMP_ROOT/bad-timeout; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" xhy --timeout 0 2>&1); rc=$?
+expect_code 2 "$rc" "--timeout 0 is refused rather than becoming no deadline"
+assert_contains "$out" "positive integer" "the timeout refusal explains the requirement"
+
+tmp=$TMP_ROOT/dup-timeout; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" xhy --timeout 3 --timeout 4 2>&1); rc=$?
+expect_code 2 "$rc" "a repeated --timeout is refused"
+
+tmp=$TMP_ROOT/extra-arg; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" xhy extra 2>&1); rc=$?
+expect_code 2 "$rc" "an unexpected extra argument is refused"
+
+tmp=$TMP_ROOT/both-targets; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" xhy --host api.example.invalid 2>&1); rc=$?
+expect_code 2 "$rc" "a target and --host together are refused"
+
+tmp=$TMP_ROOT/host-no-authority; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" --host '/not-a-host' 2>&1); rc=$?
+expect_code 2 "$rc" "a host yielding no authority exits invalid-target"
+assert_contains "$out" "result=invalid-target" "an authority-less probe says invalid-target"
+assert_contains "$out" "base_url_has_no_authority" "it names why"
+
+# --- a missing curl is its own outcome, never another one -------------------
+# The curl-absent branch cannot be reached by shrinking PATH on a host whose real
+# curl sits in /usr/bin, which the case directory does not shadow. The suite seam
+# named in the script's header points the request at a missing executable while
+# the PATH `command -v curl` guard still sees the host's own curl, so what is
+# observed is "no usable curl", never a fabricated verdict.
+NO_CURL_SENTINEL=$TMP_ROOT/no-such-curl-xyz
+assert_absent "$NO_CURL_SENTINEL" "the curl stand-in path must not exist"
+tmp=$TMP_ROOT/no-curl; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
+  FM_PROVIDER_REACH_CURL_CMD="$NO_CURL_SENTINEL" "$SCRIPT" --host api.example.invalid 2>&1); rc=$?
+expect_code 64 "$rc" "an unusable curl exits 64"
+assert_contains "$out" "result=tool-missing" "an unusable curl says the tool is absent"
+assert_contains "$out" "dns=ok" "an unusable curl keeps the DNS finding already made"
+assert_not_contains "$out" "result=reachable" "an unusable curl is never reported as a good probe"
+assert_not_contains "$out" "result=unreachable" "an unusable curl is never reported as an outage"
+
+pass "fm-provider-reach-probe.sh distinguishes 000, 401/403, and 200 with stable wording"
