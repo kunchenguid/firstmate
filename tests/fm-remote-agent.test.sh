@@ -147,16 +147,22 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
           marker=$9
           case "$7" in "[Firstmate session marker: $marker]"$'\n\n'*) ;; *) exit 20 ;; esac
           selected_model=
+          followup_session=
           while [ "$#" -gt 0 ]; do
             case "$1" in
               --model) selected_model=$2; shift 2 ;;
+              --session-id) followup_session=$2; shift 2 ;;
               *) shift ;;
             esac
           done
+          stored_marker=$marker
+          if [ -n "$followup_session" ] && [ "${FM_IDA_FAKE_HIDE_FOLLOWUP_MARKER:-0}" = 1 ] && [ -s "$sessions" ]; then
+            stored_marker=$(head -1 "$sessions" | cut -f4)
+          fi
           printf 'command:ida-region-sg-deep-research-create\n' >>"$log"
           printf 'create-model:%s\n' "${selected_model:-omitted}" >>"$log"
           case "$mode" in
-            timeout-created) printf '%s\t%s\trunning\t%s\n' "$session" "$marker" "$marker" >"$sessions"; exit 124 ;;
+            timeout-created) printf '%s\t%s\trunning\t%s\n' "$session" "$stored_marker" "$stored_marker" >"$sessions"; exit 124 ;;
             timeout-zero) exit 124 ;;
             explicit-auth) result='{"status":"error","data":null,"error":{"code":"AUTH_REQUIRED","message":"authentication required"}}' ;;
             renamed-empty)
@@ -164,13 +170,13 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
               result=$(printf '{"status":"error","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"completed without an answer","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
               mcp_error=true
               ;;
-            zero) printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":""},"error":null}' "$session" "$remote_task") ;;
+            zero) printf '%s\t%s\tcompleted\t%s\n' "$session" "$stored_marker" "$stored_marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":""},"error":null}' "$session" "$remote_task") ;;
             step-answer-only)
               printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"
               result=$(printf '{"status":"error","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"completed without a compact answer","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
               mcp_error=true
               ;;
-            *) printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":"%s"},"error":null}' "$session" "$remote_task" "${FM_IDA_FAKE_ANSWER:-Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com}") ;;
+            *) printf '%s\t%s\tcompleted\t%s\n' "$session" "$stored_marker" "$stored_marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":"%s"},"error":null}' "$session" "$remote_task" "${FM_IDA_FAKE_ANSWER:-Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com}") ;;
           esac
           mcp_error=${mcp_error:-false}
           text=$(printf '%s' "$result" | jq -Rs .)
@@ -269,7 +275,8 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
         end;
       def recorded_task_message:
         {id:91,type:8,status:1,visible:true,
-         deep_research_content:{taskId:$task,terminalStatus:task_status}};
+         deep_research_content:{taskId:$task,terminalStatus:task_status},
+         task_result:{task_id:$task,terminal_status:task_status}};
       {status:"success",data:{session:{id:$sid,name:$name,agent_id:9001,agent_name:"iDA Test",latest_task_status:$status},
        messages:([{id:90,type:0,status:0,visible:true,text:$user}]
          + (if $answer=="" then [] else [(recorded_task_message + {text:$answer})] end)
@@ -1546,6 +1553,8 @@ SH
 test_followup_identity_and_unknown_submission() {
   local home fakebin id=ida-followup old_sha creates outcome rc=0
   home=$(new_home followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start >/dev/null \
+    || fail 'could not add canonical followup fixture task'
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'initial followup fixture dispatch'
   wait_phase "$home" "$id" terminal-success || fail 'initial followup fixture terminal'
@@ -1557,8 +1566,10 @@ test_followup_identity_and_unknown_submission() {
   assert_grep 'unsupported-continuation' "$home/unsupported.out" 'missing capability reason'
   [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 1 ] || fail 'capability refusal created a remote turn'
   pass 'unsupported continuation refuses before create without fallback'
-  outcome=$(run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" 2>&1) || fail "followup: $outcome"
-  jq -e '.generation==2 and .provider_state.task_id=="80002" and .provider_state.parent_task_id=="80001"' "$(state_file "$home" "$id")" >/dev/null || fail 'followup did not bind new turn'
+  outcome=$(FM_IDA_FAKE_HIDE_FOLLOWUP_MARKER=1 run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" 2>&1) || fail "followup: $outcome"
+  wait_phase "$home" "$id" terminal-success || fail 'receipt-bound followup with no returned marker did not complete'
+  jq -e '.generation==2 and .provider_state.task_id=="80002" and .provider_state.parent_task_id=="80001" and .provider_checkpoint=="result-verified"' "$(state_file "$home" "$id")" >/dev/null || fail 'followup did not bind and read the exact receipt turn'
+  assert_grep 'Verified iDA answer.' "$home/data/$id/report.md" 'receipt-bound followup result was not read without its marker'
   jq -e '.phase=="terminal-success" and .provider_state.task_id=="80001"' "$home/state/remote-tasks/$id/generations/1.json" >/dev/null || fail 'prior terminal overwritten'
   [ "$old_sha" = "$(shasum -a 256 "$home/data/$id/turn-1-report.md" | cut -d' ' -f1)" ] || fail 'prior report changed'
   run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null || fail 'same followup replay'
@@ -1566,10 +1577,28 @@ test_followup_identity_and_unknown_submission() {
   [ "$creates" = 2 ] || fail "followup replay created $creates total requests"
   pass 'same-session followup freezes prior terminal/report and replays without duplicate create'
 
+  id=ida-followup-baseline
+  home=$(new_home followup-baseline); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start >/dev/null \
+    || fail 'could not add canonical baseline fixture task'
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  REMOTE_TASK_ID=80001
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'baseline fixture dispatch'
+  wait_phase "$home" "$id" terminal-success || fail 'baseline fixture terminal'
+  printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/baseline-replay" 2>&1; then fail 'baseline task was accepted as a new followup turn'; fi
+  assert_grep 'pre-existing turn' "$home/baseline-replay" 'baseline task refusal lost its identity reason'
+  [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 2 ] || fail 'baseline refusal replayed provider create'
+  jq -e '.provider_state.task_id==null and .provider_state.baseline_task_ids==["80001"]' "$(state_file "$home" "$id")" >/dev/null || fail 'baseline task was durably adopted'
+  pass 'a successful receipt cannot bind a pre-existing baseline task'
+
   # A second fresh fixture loses the create response. Session message order
   # and one new turn cannot establish the marker/turn binding.
   id=ida-followup-unknown
   home=$(new_home followup-unknown); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start >/dev/null \
+    || fail 'could not add canonical unknown-receipt fixture task'
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   REMOTE_TASK_ID=80001
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'unknown fixture dispatch'
