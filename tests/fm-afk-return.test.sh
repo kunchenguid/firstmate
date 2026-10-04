@@ -878,6 +878,26 @@ test_statusful_leftover_record_lets_catchup_clear() {
   pass "a leftover record with a readable status file lets return catch-up clear"
 }
 
+# A worker parked at its first prompt has launched (window and spawn token are
+# recorded) but has not appended a status line, so its status file does not exist
+# yet. That is the ordinary state of a fresh worker, not an unreadable status, and
+# it must not hold catch-up. The statusless leftover above, with no window and no
+# spawn token, keeps its gate.
+test_launched_worker_without_a_first_status_line_does_not_gate_catchup() {
+  local dir out
+  dir="$TMP_ROOT/fresh-worker-no-status"
+  install_runner "$dir"
+  printf 'window=synthetic:fm-fresh\nbackend=tmux\nkind=scout\nspawn_gen=s1.1\n' \
+    > "$dir/home/state/fresh.meta"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a launched worker with no status line yet gated return: $out"
+  assert_contains "$out" 'catch-up clear' "a launched worker with no status line yet did not let ordinary work proceed"
+  assert_not_contains "$out" 'status file unreadable:' "a launched worker with no status line yet was reported as an unreadable status"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "a launched worker with no status line yet left the return gate behind"
+  pass "a launched worker that has not written its first status line does not gate return catch-up"
+}
+
 test_return_guard_refuses_while_the_record_exists() {
   local dir out rc
   dir="$TMP_ROOT/guard-record"
@@ -1375,6 +1395,7 @@ test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated
 test_statusless_leftover_record_keeps_catchup_gated_until_cleanup
 test_statusful_leftover_record_lets_catchup_clear
+test_launched_worker_without_a_first_status_line_does_not_gate_catchup
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap

@@ -188,6 +188,15 @@ scan_open_blockers() {  # -> tab-separated blocker rows
     id=$(basename "$meta")
     id=${id%.meta}
     status="$STATE/$id.status"
+    # A launched worker (window and spawn token recorded) that has not appended
+    # its first status line has no status file yet; that is an ordinary state,
+    # so it has no open decision to read and does not hold catch-up. A record
+    # with no window or no spawn token keeps the gate, and so does any status
+    # path that exists but cannot be read.
+    if [ ! -e "$status" ] && [ ! -L "$status" ] \
+      && grep -q '^window=' "$meta" 2>/dev/null && grep -q '^spawn_gen=' "$meta" 2>/dev/null; then
+      continue
+    fi
     if ! status_path_readable "$status"; then
       STATUS_SCAN_ERROR=$status
       return 1
