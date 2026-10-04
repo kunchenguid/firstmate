@@ -614,7 +614,6 @@ tests/fm-agent-process.test.sh 296
 tests/fm-ask-user-authority.test.sh 128
 tests/fm-backend.test.sh 20061
 tests/fm-backlog-atomicity.test.sh 161989
-tests/fm-backlog-read-bound.test.sh 24031
 tests/fm-bearings-snapshot.test.sh 116374
 tests/fm-bootstrap.test.sh 25208
 tests/fm-branch-supervision.test.sh 5729

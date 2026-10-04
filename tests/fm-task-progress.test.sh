@@ -150,6 +150,13 @@ assert_not_contains "$(FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" ready)" "dependent,
 FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" "done" blocker >/dev/null
 assert_contains "$(FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" ready)" "dependent,queued,ship" \
   "completed dependency did not release queued work"
+rc=0
+FM_HOME="$TMP_ROOT/dependencies" FM_DATA_OVERRIDE="$DEP_DATA" bash -c \
+  '. "$1"; fm_cleanup_completion_mode blocker g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" \
+  >/dev/null 2>"$TMP_ROOT/done-without-acceptance.err" || rc=$?
+expect_code 6 "$rc" "Done task without MAIN acceptance"
+assert_grep 'not MAIN-accepted' "$TMP_ROOT/done-without-acceptance.err" \
+  "Done disposition bypassed MAIN semantic acceptance"
 
 done_record='{"acceptance":"The requested behavior passes","current_state":"The outcome is accepted","remaining_gap":"","next_step":""}'
 "$STATE" update-progress first --progress "$done_record" >/dev/null || fail "acceptance update failed"

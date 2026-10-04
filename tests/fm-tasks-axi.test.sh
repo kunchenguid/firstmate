@@ -113,20 +113,19 @@ test_task_directory_symlink_refuses() {
   pass 'canonical wrapper refuses a symlinked task directory'
 }
 
-test_shadow_backlog_diagnostic_remains() {
+test_shadow_backlog_files_are_inert() {
   local dir out
   dir=$(make_split shadow)
-  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
-  [ -z "$out" ] || fail 'home-owned backlog link was reported as a shadow'
   rm "$dir/code/data/backlog.md"
   printf 'retained shadow\n' > "$dir/code/data/backlog.md"
+  printf 'retained archive shadow\n' > "$dir/code/data/done-archive.md"
   out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
-  assert_contains "$out" 'is not this home' 'foreign code-root backlog was not reported'
-  pass 'bootstrap retains the legacy shadow-file diagnostic without making it canonical'
+  [ -z "$out" ] || fail "bootstrap advertised reconciliation for retained legacy files: $out"
+  pass 'bootstrap ignores retained code-root backlog and archive files'
 }
 
 test_canonical_record_local_writes
 test_ambient_file_cannot_redirect
 test_removed_compatibility_arguments_refuse
 test_task_directory_symlink_refuses
-test_shadow_backlog_diagnostic_remains
+test_shadow_backlog_files_are_inert
