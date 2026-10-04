@@ -1334,10 +1334,11 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # RECORD rather than re-derived here, so this function cannot word one kind of
 # wait as another.
 # A wait with a written record is aged from that file, which is when the worker
-# wrote the line - anchored there rather than on a per-window marker for the same
-# reason handle_paused_stale is: an idle pane churns its display (a clock, a
-# token counter), and a marker this deferral kept touching would let that churn
-# reset the cadence. A wait with NO written record publishes no age at all: the
+# wrote the line - anchored there rather than on a marker this deferral keeps
+# touching, for the same reason handle_paused_stale anchors once per declaration:
+# an idle pane churns its display (a clock, a token counter), and a marker
+# refreshed on each pass would let that churn reset the cadence. A wait with NO
+# written record publishes no age at all: the
 # quiet window is the only clock in hand and this deferral resets it on every
 # pass, so a number read from it would never grow and would tell a supervisor
 # that a day-old gate opened four minutes ago. The bounded re-surface still
