@@ -162,11 +162,12 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_task_continuation", "fm_branch_re
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
-// Auxiliary evidence for duplicate/terminal coalescing, not a delivery or
-// acknowledgement boundary. Rows outside this recent window stay unknown, so
-// coalescing keeps an actionable row unless the bounded evidence proves that a
-// newer exact duplicate or terminal disposition supersedes it.
-const OUTCOME_HISTORY_WINDOW = 200;
+// The outcome owner retains this many processed rows in its active store.
+// Every unread and unprocessed row is loaded separately and merged below, so
+// this auxiliary coalescing context is not a pending-work limit. Rows outside
+// it remain unknown and cannot prove completion, acknowledgement, or
+// supersession.
+const OUTCOME_HISTORY_WINDOW = 64;
 const MERGE_NOTE_BOAT = "⛵";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
@@ -184,10 +185,6 @@ const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
 // request cannot become an unbounded loop of empty turns.
 const PROCESSING_TRIGGERED_ATTEMPTS = 2;
-// The outcome owner retains this many processed rows in its active store.
-// Every unread and unprocessed row is loaded separately and merged below, so
-// the history query is supporting context rather than a pending-work limit.
-const OUTCOME_HISTORY_WINDOW = 64;
 // One provider failure rejects immediately to watcher-owned fallback but leaves
 // room for a transient outage to recover on the next wake. A second consecutive
 // provider failure latches the branch off. While latched, main keeps every wake
