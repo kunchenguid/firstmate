@@ -384,9 +384,17 @@ fm_backend_herdr_workspace_label() {
 # compatible if a future herdr build honors it. Never used by
 # fm_backend_herdr_version_check, which is intentionally session-independent
 # (reads only .client.* fields).
+#
+# Every read is refused before it reaches herdr when its shape would harvest
+# (fm_backend_herdr_read_harvests below), so no Firstmate read can scroll a
+# pane a person may be watching.
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   local session=$1 rc=0 err failed_bin selected_bin client_bin=herdr
   shift
+  if fm_backend_herdr_read_harvests "$@"; then
+    echo "error: refusing 'herdr $1 $2' as a text read of recent output: on herdr 0.8.0+ that read scrolls an idle alternate-screen agent's viewport to harvest history; read with --format ansi or --source visible instead (docs/herdr-backend.md \"Passive reads\")" >&2
+    return 2
+  fi
   if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
     client_bin=$(fm_backend_herdr_bin)
   fi
@@ -415,6 +423,42 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   fi
   [ -z "$err" ] || printf '%s\n' "$err" >&2
   return "$rc"
+}
+
+# fm_backend_herdr_read_harvests: succeeds when <args> are a `pane read` or
+# `agent read` that herdr may serve by harvesting history. Herdr 0.8.0+ treats
+# every CLI read as interactive (no client can ask for a passive one), and a
+# TEXT read of the `recent` or `recent-unwrapped` source - herdr's defaults for
+# both - of an idle known agent on the alternate screen with mouse reporting
+# whose viewport is shorter than the requested lines (80 when omitted) is
+# served by injecting real mouse-wheel scrolls into the agent and scrolling
+# back (herdr src/server/headless.rs alt_screen_read_spec and
+# src/server/alt_screen_read.rs; herdr issues #2387 and #2669, closed as
+# expected behavior). An ANSI read or a visible/detection read never harvests.
+# Option parsing mirrors herdr's own: `--opt value` and, for `pane read`,
+# `--opt=value`; `--ansi` and `--raw` select ANSI.
+fm_backend_herdr_read_harvests() {  # <herdr-subcommand-and-args...>
+  case "${1:-} ${2:-}" in
+    'pane read'|'agent read') ;;
+    *) return 1 ;;
+  esac
+  shift 2
+  local source=recent format=text
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source) source=${2:-}; [ "$#" -lt 2 ] || shift ;;
+      --source=*) source=${1#--source=} ;;
+      --format) format=${2:-}; [ "$#" -lt 2 ] || shift ;;
+      --format=*) format=${1#--format=} ;;
+      --ansi|--raw) format=ansi ;;
+    esac
+    shift
+  done
+  [ "$format" = text ] || return 1
+  case "$source" in
+    recent|recent-unwrapped|recent_unwrapped) return 0 ;;
+  esac
+  return 1
 }
 
 # --- client selection --------------------------------------------------------
@@ -3124,25 +3168,46 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
 # is the closest herdr analogue to tmux's scrollback-bounded capture.
 #
-# Verified CLI quirk (herdr-verification-p2.md "pane read --lines bug", v0.7.1):
-# `pane read --source recent --lines N` returns COMPLETELY EMPTY output when N
-# is smaller than the pane's current viewport height (observed threshold ~23
-# rows for a default-sized pane), instead of clamping to the last N lines - it
-# does not merely ignore the bound, it drops the read entirely. This silently
-# broke exactly the small bounded reads this adapter relies on most (the peek
-# and watch tails, the rendered busy-footer read, and the shared inbox
-# pending-line read; the adapter's own composer reads now take the viewport
-# instead, so they need no line count at all). Workaround:
-# always request a generous fetch far above any realistic viewport height, then
-# trim to the caller's requested bound ourselves with `tail`.
+# The read is ANSI and converted to plain text here, because a TEXT recent read
+# is the shape herdr 0.8.0+ may serve by scrolling an idle alternate-screen
+# agent's viewport (fm_backend_herdr_read_harvests, which fm_backend_herdr_cli
+# refuses). An ANSI read returns the same retained rows passively: primary-
+# screen panes keep their scrollback, and an alternate-screen pane (Claude Code
+# fullscreen) yields its viewport, exactly as a passive text read would.
+#
+# The fetch is never below 200 lines: herdr releases before 0.9.0 return
+# COMPLETELY EMPTY output for `--source recent --lines N` when N is smaller
+# than the blank-padded viewport, in text and ANSI alike, because the range
+# counted the blank rows below the cursor (fixed in herdr #3448). Supported
+# releases still include those, so request a generous fetch and trim to the
+# caller's bound locally after conversion.
 fm_backend_herdr_capture() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
-  printf '%s' "$out" | tail -n "$lines"
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
+  printf '%s\n' "$out" | fm_backend_herdr_ansi_to_plain | tail -n "$lines"
+}
+
+# fm_backend_herdr_ansi_to_plain: herdr ANSI read output (stdin) as the plain
+# text herdr's text format would have returned (stdout). Herdr's ANSI rows end
+# in `\r\n`, carry only SGR escapes (its formatter runs with hyperlinks and
+# other extras off), and keep trailing styled blanks, while the text format
+# trims trailing whitespace from each row and drops trailing blank rows. So:
+# strip escapes with the shared CSI owner, trim each row's trailing ASCII and
+# Unicode whitespace (the carriage return included), then drop trailing blank
+# rows. Verified on herdr 0.9.1 against a Claude Code pane:
+# docs/verification/runtime-backends.md "Herdr", Capture row.
+fm_backend_herdr_ansi_to_plain() {
+  local space trim=(-e ':trim' -e 's/[[:space:]]$//')
+  for space in "${FM_COMPOSER_UNICODE_SPACES[@]}"; do
+    trim+=(-e "s/${space}\$//")
+  done
+  trim+=(-e 't trim')
+  fm_composer_strip_ansi | LC_ALL=C sed "${trim[@]}" \
+    | awk '$0 == "" { blank++; next } { while (blank > 0) { print ""; blank-- } print }'
 }
 
 # fm_backend_herdr_visible_capture: the visible viewport only. `--source

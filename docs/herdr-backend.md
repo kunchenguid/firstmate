@@ -22,6 +22,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
+| Why Firstmate's pane reads never scroll a worker | [Passive reads](#passive-reads) |
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
@@ -608,11 +609,20 @@ A right-aligned status token on the composer row stays content for every other c
 The poll density bounds the residual possibility of an extremely fast complete turn.
 A missed native transition falls through to the composer verdict rather than reporting a false swallow.
 
-### Capture size
+### Passive reads
 
-`pane read --lines N` can return empty output when N is below the viewport height.
-The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
-This generous floor is required for the small bounded reads that remain: peek and watch tails, the rendered busy-footer read, and the shared steering-inbox pending-line read.
+Every Firstmate read of a Herdr pane is passive: it never moves the agent's viewport, so a person working directly in a worker pane sees no scrolling from Firstmate's monitoring.
+Herdr 0.8.0 and newer treat every CLI read as interactive.
+A text read of recent output (`--source recent` or `recent-unwrapped`, Herdr's defaults) from an idle agent on the alternate screen with mouse reporting, asking for more rows than its viewport, is served by injecting mouse-wheel scrolls into the agent and scrolling back.
+Herdr documents that as expected behavior and recommends ANSI or visible reads for callers that do not need older text (herdrdev/herdr#2387 and #2669).
+The adapter's herdr command wrapper refuses that read shape before it reaches Herdr, and the bounded capture reads `--format ansi` and converts the result to the same plain text Herdr's text format returns.
+
+Consequently an alternate-screen pane, such as Claude Code fullscreen, yields only its viewport to every Firstmate read, including peek and the launch-progress checks, because such a pane keeps no scrollback inside Herdr.
+Primary-screen panes keep their recent scrollback.
+
+Herdr releases before 0.9.0 return empty output for `pane read --lines N` when N is below the blank-padded viewport height, in both formats.
+The capture owner therefore requests at least 200 lines from Herdr and trims locally to the caller's bound.
+This floor is required on those releases for the small bounded reads: peek and watch tails, the rendered busy-footer read, and the shared steering-inbox pending-line read.
 The adapter's own composer reads are exempt because they read the visible viewport instead, which takes no line count (see [Claude composer proof](#claude-composer-proof)).
 
 ### Native idle state
@@ -838,6 +848,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
+- Firstmate reads of an alternate-screen pane return only its viewport (see [Passive reads](#passive-reads)).
 
 ## Regression entry points
 
