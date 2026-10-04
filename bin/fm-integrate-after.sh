@@ -71,10 +71,9 @@ body_json=$(printf '%s\n' "$row" | sed -n 's/^  body: //p' | head -1)
 body=$(printf '%s\n' "$body_json" | perl -MJSON::PP -e 'local $/; my $v=<STDIN>; $v =~ s/\s+\z//; $v=JSON::PP->new->utf8->allow_nonref->decode($v) if $v =~ /\A"/; binmode STDOUT, ":raw"; utf8::encode($v) if utf8::is_utf8($v); print $v unless $v eq "-"') \
   || fail "cannot decode consumer $consumer body"
 
-# Accept the canonical body relation and the early no-space spelling. A
-# malformed relation is never silently ignored at landing.
-relations=$(printf '%s\n' "$body" | sed -nE 's/^integrate-after:[[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p')
-if printf '%s\n' "$body" | grep -E '^integrate-after:' | grep -Ev '^integrate-after:[[:space:]]*[a-zA-Z0-9][a-zA-Z0-9._-]*[[:space:]]*$' >/dev/null; then
+# A malformed relation is never silently ignored at landing.
+relations=$(printf '%s\n' "$body" | sed -nE 's/^integrate-after: +([^[:space:]]+)[[:space:]]*$/\1/p')
+if printf '%s\n' "$body" | grep -E '^integrate-after:' | grep -Ev '^integrate-after: +[a-zA-Z0-9][a-zA-Z0-9._-]*[[:space:]]*$' >/dev/null; then
   fail "consumer $consumer has a malformed integrate-after relation"
 fi
 

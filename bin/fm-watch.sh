@@ -1650,6 +1650,31 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
+integrate_after_ready_tick() {
+  local statusf task last marker result
+  for statusf in "$STATE"/*.status; do
+    [ -f "$statusf" ] && [ ! -L "$statusf" ] || continue
+    task=${statusf##*/}
+    task=${task%.status}
+    [[ $task =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || continue
+    marker="$STATE/.integrate-after-ready-$task"
+    last=$(status_declared_wait_line "$statusf")
+    if ! status_is_paused "$last" || [[ $last != *'integrate-after: '* ]]; then
+      rm -f "$marker"
+      continue
+    fi
+    [ ! -e "$marker" ] || continue
+    result=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-integrate-after.sh" check "$task" 2>/dev/null) || continue
+    [[ $result == "integration-ready: $task (provider landing confirmed)" ]] || continue
+    FM_INTEGRATE_AFTER_READY_REASON="check: integrate-after ready: $task; confirm final validation and landing order"
+    fm_wake_append check "integrate-after-ready-$task" "$FM_INTEGRATE_AFTER_READY_REASON" || exit 1
+    : > "$marker" || exit 1
+    return 0
+  done
+  return 1
+}
+
 # Apply the busy-pane completed-turn bound to a window whose bound has already
 # crossed, honoring the worker's OWN declared external wait. Prints/queues
 # nothing itself; it only chooses which absorber owns the crossed bound.
@@ -2748,6 +2773,10 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  if integrate_after_ready_tick; then
+    wake "$FM_INTEGRATE_AFTER_READY_REASON"
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).

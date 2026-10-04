@@ -37,6 +37,15 @@ printf '%s\n' "$body" | grep -q 'integrate-after: provider' || fail 'relation wa
 backlog start consumer >/dev/null || fail 'integration relation blocked implementation'
 if tool check consumer > "$TEST_HOME/check.out" 2>&1; then fail 'landing passed before provider Done'; fi
 grep -q 'provider state is queued' "$TEST_HOME/check.out" || fail 'landing refusal did not name provider state'
+printf 'paused: integrate-after: provider, waiting for landing\n' > "$TEST_HOME/state/consumer.status"
+ready_tick() {
+  FM_HOME="$TEST_HOME" FM_STATE_OVERRIDE="$TEST_HOME/state" bash -c '
+    . "$1/bin/fm-watch.sh"
+    integrate_after_ready_tick
+  ' _ "$ROOT"
+}
+if ready_tick; then fail 'consumer was notified before provider landing'; fi
+[ ! -s "$TEST_HOME/state/.wake-queue" ] || fail 'unready consumer queued a notification'
 # A confirmed PR merge releases the gate before teardown moves the provider to Done.
 printf 'pr=https://github.com/example/project/pull/12\n' > "$TEST_HOME/state/provider.meta"
 FM_STATE_OVERRIDE="$TEST_HOME/state" bash -c '
@@ -44,8 +53,20 @@ FM_STATE_OVERRIDE="$TEST_HOME/state" bash -c '
   fm_pr_poll_merge_mark_notified "$2" provider github github.com example/project 12
 ' _ "$ROOT" "$TEST_HOME/state" || fail 'could not stage a confirmed merge notification'
 tool check consumer | grep -q 'provider landing confirmed' || fail 'confirmed PR merge did not release integration'
+ready_tick || fail 'provider landing did not notify paused consumer'
+grep -q 'integrate-after ready: consumer' "$TEST_HOME/state/.wake-queue" || fail 'ready notification was not durable'
+if ready_tick; then fail 'ready notification repeated for an unchanged pause'; fi
+printf 'working: final validation\n' > "$TEST_HOME/state/consumer.status"
+if ready_tick; then fail 'working consumer was notified'; fi
+[ ! -e "$TEST_HOME/state/.integrate-after-ready-consumer" ] || fail 'new work did not clear the notification marker'
 backlog 'done' provider >/dev/null
 tool check consumer | grep -q 'provider landing confirmed' || fail 'Done provider did not release integration'
+printf 'Preserve this note.\nintegrate-after:provider\n' > "$TEST_HOME/body"
+backlog update consumer --body-file "$TEST_HOME/body" >/dev/null
+if tool check consumer > "$TEST_HOME/check.out" 2>&1; then fail 'no-space relation was accepted'; fi
+grep -q 'malformed integrate-after relation' "$TEST_HOME/check.out" || fail 'no-space relation did not fail closed'
+printf 'Preserve this note.\nintegrate-after: provider\n' > "$TEST_HOME/body"
+backlog update consumer --body-file "$TEST_HOME/body" >/dev/null
 tool remove consumer provider >/dev/null
 tool remove consumer provider | grep -q '^unchanged:' || fail 'remove was not idempotent'
 tool check consumer | grep -q 'no integration-only dependencies' || fail 'relation was not removed'
