@@ -1653,8 +1653,8 @@ while :; do
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         # Retained private Relay artifacts are historical evidence, not custom
-        # checks. Never execute an old generated shim through the generic path.
-        rejected_checks="$rejected_checks $c"
+        # checks. Never execute or surface an old generated shim through the
+        # generic path: retained evidence must remain behaviorally inert.
         continue
       else
         id=$(basename "$c" .check.sh)
