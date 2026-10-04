@@ -848,12 +848,14 @@ fm_remote_job_reap_stale() { # <account-home>
       cutoff=$((now - FM_REMOTE_JOB_SEQ_CLAIM_REAP_SECONDS))
       ref=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.seqreap-ref.XXXXXX") || ref=
       if [ -n "$ref" ]; then
-        # touch -t is POSIX; date(1) needs a host-specific epoch conversion.
-        stamp=$(TZ=UTC0 date -d "@$cutoff" +%Y%m%d%H%M.%S 2>/dev/null) \
-          || stamp=$(TZ=UTC0 date -r "$cutoff" +%Y%m%d%H%M.%S 2>/dev/null) \
+        # touch -d ISO-8601 is POSIX; date(1) needs a host-specific epoch
+        # conversion. The beacon sits at the last instant of the cutoff second
+        # so fractional claim mtimes keep the former whole-second expiry.
+        stamp=$(TZ=UTC0 date -d "@$cutoff" +%Y-%m-%dT%H:%M:%S 2>/dev/null) \
+          || stamp=$(TZ=UTC0 date -r "$cutoff" +%Y-%m-%dT%H:%M:%S 2>/dev/null) \
           || stamp=
         if [ -n "$stamp" ]; then
-          TZ=UTC0 touch -t "$stamp" "$ref" 2>/dev/null || stamp=
+          touch -d "$stamp.999999999Z" "$ref" 2>/dev/null || stamp=
         fi
       fi
     fi
@@ -861,8 +863,8 @@ fm_remote_job_reap_stale() { # <account-home>
       tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.seqreap.XXXXXX") || tmp=
       if [ -n "$tmp" ] && printf '%s\n' "$now" > "$tmp" && chmod 600 "$tmp" \
         && mv -f -- "$tmp" "$marker"; then
-        # One directory walk: ! -newer matches mtime <= cutoff (the former
-        # >= age check). Batched rmdir tolerates concurrent mkdir/rmdir races
+        # One directory walk: ! -newer matches whole-second mtime <= cutoff
+        # (the former >= age check). Batched rmdir tolerates concurrent mkdir/rmdir races
         # and non-empty dirs the same way the old per-claim rmdir || true did.
         find "$FM_REMOTE_JOB_SEQ_CLAIMS" -mindepth 1 -maxdepth 1 -type d \
           -name '[0-9]*' ! -name '*[!0-9]*' ! -name 0 \
