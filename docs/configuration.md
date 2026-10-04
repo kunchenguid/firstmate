@@ -901,6 +901,17 @@ When the file is absent, worker launches do not add a board address and retain t
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
 
+## ChatGPT consultation channel (bin/fm-chatgpt-consult.sh)
+
+Firstmate can ask ChatGPT for audit findings and execution plans through a consultation script that POSTs one openai-responses request to the already-running local codex-chatgpt-web bridge and prints the answer.
+This channel is not a Pi provider: it registers nothing with Pi, touches no spawn path, needs no entry in `config/pi-account`, and never executes local tools.
+A low-thinking Pi worker still executes the resulting audit or plan through the ordinary `fm-spawn.sh --effort low` path, which is unchanged.
+`CHATGPT_WEB_BRIDGE_URL` overrides the bridge base URL, and the default is the loopback `http://127.0.0.1:17841/v1`.
+Only loopback overrides are accepted; anything else refuses.
+The bridge lifecycle stays external: Firstmate never installs, authenticates, or repairs the bridge, and an unreachable bridge fails the consultation with a prerequisite report.
+`--thread` is required and is a Firstmate-owned turn-identity id, but it does not by itself carry conversation continuity: the bridge replays prior turns only through `previous_response_id` chaining or history inside the request, and this client sends neither, so every consultation is a self-contained turn and Firstmate includes any prior context it needs considered in the prompt file.
+[`bin/fm-chatgpt-bridge-lib.sh`](../bin/fm-chatgpt-bridge-lib.sh) owns URL resolution, model slug handling, and Codex turn-metadata stamping.
+
 ## Home brief include (config/brief-include.md)
 
 The optional local, gitignored `config/brief-include.md` adds standing worker instructions to every ship and scout brief.

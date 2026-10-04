@@ -166,3 +166,5 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-voice-client.py`     | The laptop end of the spoken interface: capture, playback, and turn timing over SSH; audio devices unverified |
 | `fm_voice_frame.py`      | The wire format both machines share, copied to the laptop beside the client          |
 | `fm_voice_records.py`    | What a spoken answer may read, and the handover that queues real work                |
+| `fm-chatgpt-consult.sh`  | Run one self-contained ChatGPT audit or plan consultation over the loopback codex-chatgpt-web bridge and print the answer |
+| `fm-chatgpt-bridge-lib.sh` | Single owner of the ChatGPT consultation bridge contract: bridge URL resolution, model slug handling, and Codex turn-metadata stamping |
