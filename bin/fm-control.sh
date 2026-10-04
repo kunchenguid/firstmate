@@ -632,7 +632,11 @@ do_exit() {
       die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
       ;;
     *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      if fm_control_composer_structurally_empty "$BACKEND" "$T"; then
+        :
+      else
+        die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      fi
       ;;
   esac
   # The submit verdict is NOT the postcondition here: a successful exit command

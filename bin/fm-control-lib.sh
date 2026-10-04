@@ -429,3 +429,24 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
     *) return 0 ;;
   esac
 }
+
+# fm_control_composer_structurally_empty: the ONE owner of structural safe-empty
+# recovery paths for backends that can PROVE their input state is empty when
+# the visual composer state is unknown or pending-unproven. Returns 0 if proven
+# empty, 1 otherwise.
+fm_control_composer_structurally_empty() {  # <backend> <target>
+  local backend=$1 target=$2
+  case "$backend" in
+    herdr)
+      # Herdr's interactive integrations (OpenCode, Agy) set interactive_ready
+      # to true when they are natively waiting for a prompt. This is a structural
+      # proof that their input buffer is empty, regardless of what the screen
+      # classifier sees.
+      fm_backend_herdr_parse_target "$target" || return 1
+      local out
+      out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+      [ "$(printf '%s' "$out" | jq -r '.result.agent.interactive_ready // false' 2>/dev/null)" = "true" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
