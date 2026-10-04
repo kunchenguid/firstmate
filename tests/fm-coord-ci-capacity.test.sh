@@ -45,6 +45,8 @@ for i in range(1, 6):
     intent(i, "owner/other")
     assert pulse(f"ci-{i}", f"ci-{i}", f"pulse-ci-{i}")["admitted"] is True
 assert len(authorized()) == 5 and heads("active") == [] and heads("queued") == []
+# The worker brief reports every batch's terminal run; without capacity that completion succeeds and releases nothing.
+assert coord("ci-complete", {"request_id": "complete-off", "repo": "owner/other", "base": "main", "head_oid": f"{1:040x}", "batch_id": "ci-1", "conclusion": "success"})["released"] is None
 
 coord("ci-capacity-set", {"request_id": "capacity", "repo": "owner/repo", "capacity": 4})
 for i in range(6, 77):
@@ -278,3 +280,45 @@ assert not any(e["type"] == "ci-pulse-authorized" and e["payload"]["batch_id"] =
 assert heads("active") == ["main-d"] and heads("queued") == []
 PY
 pass 'CI capacity is shared across bases, skips stale queued writers, holds slots through green checks, and frees them on batch completion or lease expiry'
+
+# A batch completes under the full key and head it was admitted for, even after its writer lease expired, the task
+# was readmitted under a new intent, and a different head was published; a refused completion fails, never passes.
+lapse=$tmp/lapse
+mkdir -p "$lapse/src" "$tmp/w/config"
+git -C "$lapse" init -q -b main
+git -C "$lapse" remote add origin git@github.com:owner/lapse.git
+git -C "$lapse" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m base
+git -C "$lapse" update-ref refs/remotes/origin/main HEAD
+printf '{"mode":"shadow","home_id":"w","repos":["owner/lapse"],"enforce_repos":["owner/lapse"],"db":"%s"}\n' "$db" > "$tmp/w/config/coordination.json"
+printf 'Coordination resources: [{"type":"file","name":"src/w.py"}]\n' > "$tmp/w.brief"
+adapter "$tmp/w" dispatch w "$lapse" "$lapse" "$tmp/w.brief" branch/w codex > /dev/null || fail 'w dispatch must be admitted'
+coord ci-capacity-set '{"request_id":"capacity-lapse","repo":"owner/lapse","capacity":1}' > /dev/null
+adapter "$tmp/w" pre-push w "$lapse" > /dev/null || fail 'w must publish its head'
+adapter "$tmp/w" pre-ci w batch-old "$lapse" > /dev/null || fail 'w must take the free CI slot'
+old_head=$(git -C "$lapse" rev-parse HEAD)
+sqlite3 "$db" "UPDATE claims SET expires_mono_ns=0 WHERE intent_id LIKE 'w:%' AND state='active'"
+adapter "$tmp/w" readmit w "$lapse" > /dev/null 2> "$tmp/err" || fail "w must be readmitted after its lease expired: $(cat "$tmp/err")"
+git -C "$lapse" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m next
+adapter "$tmp/w" pre-push w "$lapse" > /dev/null 2> "$tmp/err" || fail "w must publish a new head after readmission: $(cat "$tmp/err")"
+adapter "$tmp/w" ci-complete w batch-old failure > /dev/null 2> "$tmp/err" || fail "the old run must complete its own batch: $(cat "$tmp/err")"
+coord inspect '{}' > "$tmp/inspect.json"
+coord outbox '{"limit":1000}' > "$tmp/outbox.json"
+python3 - "$tmp/inspect.json" "$tmp/outbox.json" "$old_head" <<'PY' || fail 'the old batch must release its slot under its admitted head'
+import json,sys
+assert not [h for h in json.load(open(sys.argv[1]))['ci_heads'] if h['repo']=='owner/lapse']
+done=[e['payload'] for e in json.load(open(sys.argv[2]))['events'] if e['type']=='ci-completed' and e['payload']['repo']=='owner/lapse']
+assert done==[{'repo':'owner/lapse','base':'main','batch_id':'batch-old','head_oid':sys.argv[3],'conclusion':'failure'}], done
+PY
+adapter "$tmp/w" pre-ci w batch-new "$lapse" > /dev/null 2> "$tmp/err" || fail "the new head must take the freed slot: $(cat "$tmp/err")"
+sqlite3 "$db" "UPDATE ci_heads SET admitted_at=0 WHERE repo='owner/lapse'"
+coord ci-capacity-set '{"request_id":"capacity-lapse-expire","repo":"owner/lapse","capacity":1}' > /dev/null
+if adapter "$tmp/w" ci-complete w batch-new success > /dev/null 2> "$tmp/err"; then
+  fail 'a completion the coordinator refuses must not pass as a release'
+fi
+grep -q 'batch holds no active CI slot' "$tmp/err" || fail "a refused completion must say why: $(cat "$tmp/err")"
+adapter "$tmp/w" view > "$tmp/view.json"
+python3 - "$tmp/view.json" <<'PY' || fail 'a refused completion must not stay pending for replay'
+import json,sys
+assert not [p for p in json.load(open(sys.argv[1]))['local_pending'] if p['operation']=='ci-complete']
+PY
+pass 'a batch completes under its admitted head after expiry, readmission and a new head; a refused completion fails'

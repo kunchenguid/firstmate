@@ -637,6 +637,8 @@ class Adapter:
             self.save()
             return
         payload = {k: v for k, v in prior["payload"].items() if k != "request_id"} if prior else {**live, "intent_id": task["intent_id"], "head_oid": task["published_head"], "batch_id": batch_id}
+        # The batch's full key and admitted head outlive any readmission, since its CI slot may still be held.
+        self.state.setdefault("ci_batches", {}).setdefault(f"{task_id}:{batch_id}", {"repo": task["repo"], "base": task["base"], "head_oid": payload["head_oid"]})
         receipt = self.send(key, "pulse-batch", payload)
         self.required(task["repo"], receipt is not None and receipt.get("ok") is True, f"batch {batch_id} pulse is unconfirmed or already issued")
         if receipt and receipt.get("admitted") is False:
@@ -651,20 +653,17 @@ class Adapter:
         """Release this task's CI slot for the batch once its run reaches a terminal conclusion."""
         if conclusion not in {"success", "failure", "cancelled", "timed_out"}:
             raise Usage("ci-complete conclusion must be success, failure, cancelled, or timed_out")
-        task = self.state["tasks"].get(task_id)
-        if not task:
-            raise ValueError(f"{task_id}: no local intent record for CI completion")
-        pulse = self.state["requests"].get(f"{task_id}:pulse:{batch_id}")
-        head = pulse["payload"]["head_oid"] if pulse else task.get("published_head")
+        batch = self.state.get("ci_batches", {}).get(f"{task_id}:{batch_id}")
+        if batch is None:
+            raise ValueError(f"{task_id}: batch {batch_id} has no recorded CI pulse to complete")
         # Keyed outside the task prefix so a readmit keeps it; the lease TTL still frees a slot whose completion never lands.
         key = f"ci-complete:{task_id}:{batch_id}"
-        reply = self.send(key, "ci-complete", {"repo": task["repo"], "base": task["base"], "head_oid": head, "batch_id": batch_id, "conclusion": conclusion})
+        reply = self.send(key, "ci-complete", {**batch, "batch_id": batch_id, "conclusion": conclusion})
         if reply is None and "batch holds no active CI slot" in self.last_error:
-            # Already released (a lost reply or its lease lapsed); nothing is left to resend.
+            # A refusal is never resent; it fails the completion instead of passing as a release.
             self.state["requests"].pop(key, None)
             self.save()
-            return
-        self.required(task["repo"], reply is not None, f"batch {batch_id} completion is unconfirmed")
+        self.required(batch["repo"], reply is not None, f"batch {batch_id} completion is unconfirmed or refused")
 
     def heartbeat(self, task_id):
         task = self.state["tasks"].get(task_id)

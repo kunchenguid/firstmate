@@ -688,6 +688,9 @@ def run_operation(db, op, p):
         require(p.get("conclusion") in {"success", "failure", "cancelled", "timed_out"}, "conclusion must be a terminal CI state")
         # A batch is identified by (repo, base, batch_id); without a base, only a single matching active batch is completed.
         base = token(p["base"], "base") if "base" in p else None
+        if db.execute("SELECT 1 FROM ci_capacity WHERE repo=?", (repo,)).fetchone() is None:
+            # Capacity is opt-in; without it no batch ever holds a slot, so a completion has nothing to release.
+            return {"ok": True, "released": None, "admitted": []}
         rows = db.execute("SELECT * FROM ci_heads WHERE repo=? AND head_oid=? AND batch_id=? AND state='active' AND (? IS NULL OR base_ref=?)", (repo, head, batch_id, base, base)).fetchall()
         require(rows, "batch holds no active CI slot")
         require(len(rows) == 1, "batch is active under several base refs; ci-complete requires base")
