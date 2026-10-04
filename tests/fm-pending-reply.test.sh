@@ -201,6 +201,31 @@ test_completed_turn_no_report_triggers_one_recovery() {
   pass "completed turn with no report triggers exactly one recovery"
 }
 
+# Exit 4 means delivered only for fm-send itself: an arbitrary send hook that
+# exits 4 has no such contract, so the recovery stays failed and survives.
+test_recovery_hook_exit_4_is_not_delivered() {
+  local home state corr
+  home=$(setup_parent hook-exit-4)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=2200
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  exit_4_hook() { return 4; }
+  export -f exit_4_hook
+  export FM_PENDING_REPLY_SEND_HOOK='exit_4_hook'
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "status after a failing hook")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "a hook exiting 4 must not count as a sent recovery"
+  fi
+  [ "$(phase_of "$state" "$corr")" = recovery_failed ] \
+    || fail "phase should be recovery_failed, got $(phase_of "$state" "$corr")"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "a non-fm-send hook exiting 4 leaves the recovery failed"
+}
+
 # A mate waiting on its own open decision is never poked by the recovery; the
 # recovery stays unattempted and runs once the decision closes.
 test_recovery_waits_while_the_mate_has_an_open_decision() {
@@ -2031,6 +2056,7 @@ test_tick_leaves_settled_records_alone
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
+test_recovery_hook_exit_4_is_not_delivered
 test_remote_repost_waits_for_the_reply_channel
 test_mirrored_remote_reply_never_triggers_a_repost
 test_same_basename_self_home_corr_resolves_on_tick

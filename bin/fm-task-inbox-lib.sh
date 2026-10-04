@@ -62,6 +62,17 @@
 # crash or marker failure may produce a rare duplicate rather than silently lose
 # a wake.
 #
+# Composer-held recovery (fm_task_inbox_composer_clear_or_submit): the skip
+# above is only safe while the held line is transient. When the SAME condition
+# holds on every later attempt - one stale line left in an idle composer - the
+# ring skips forever, the ladder's re-rings skip too, and the seat never wakes
+# while every steering record queues unread behind it. bin/fm-send.sh therefore
+# recovers the skip as part of the send itself: clear-or-submit the held text,
+# then ring again. That recovery is a sanctioned mutation of a worker's
+# composer and lives HERE with the doorbell contract, but only the SEND side
+# calls it - the watcher's ladder keeps its narrow skip, because a periodic
+# re-ring must never submit or drop a worker's draft on its own schedule.
+#
 # Retry ring (fm_task_inbox_mark_retry): only while config/wait-no-turns is
 # present. A fire-and-forget record never enters the ladder, but when
 # fm-send's ring at enqueue did not land
@@ -78,9 +89,10 @@
 # Inbox names containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
 #
-# fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
-# other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
-# and tests. No side effects on source beyond its sourced libraries.
+# fm_task_inbox_ring and the composer-held recovery require bin/fm-backend.sh's
+# dispatch (sourced below); the other helpers are dependency-light. Sourced by
+# bin/fm-send.sh, bin/fm-watch.sh, and tests. No side effects on source beyond
+# its sourced libraries.
 #
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
@@ -311,7 +323,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
-# a lost first Enter gets one confirmed retry.
+# a lost first Enter gets one confirmed retry. Other pending text is returned as
+# 1 and left untouched HERE; the send-side recovery below owns what happens to
+# it.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -346,13 +360,114 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   return 0
 }
 
+# The composer's held text, ignoring line wrapping, or nonzero when the
+# endpoint cannot be captured or its content cannot be extracted. The content
+# half of the composer-held contract: fm_task_inbox_composer_holds compares it
+# and fm_task_inbox_composer_clear_or_submit decides from it.
+fm_task_inbox_composer_content() {  # <backend> <target> [expected-label]
+  local cap
+  fm_backend_source "$1" || return 1
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${3:-}" 2>/dev/null) || return 1
+  fm_composer_extract_selected_content styled=0 "$cap"
+}
+
+# The same held text read on the full-viewport basis the composer-state verdict
+# itself uses (bin/fm-backend.sh's visible-capture dispatch), for the recovery
+# to fall back to when the bounded inbox read cannot see the composer. The two
+# reads disagree exactly when a slash-command popup or other overlay occupies
+# the bottom rows and pushes the composer above the bounded window: the state
+# read still sees pending, the bounded read returns nothing, and refusing there
+# would leave that held line blocking every later wake. A backend with no
+# verified viewport read fails this helper, which keeps the refusal (the loud,
+# counted skip) rather than answering with a history-backed screen.
+fm_task_inbox_composer_content_viewport() {  # <backend> <target>
+  local cap
+  fm_backend_source "$1" || return 1
+  cap=$(fm_backend_visible_capture "$1" "$2" 2>/dev/null) || return 1
+  [ -n "$cap" ] || return 1
+  fm_composer_extract_selected_content styled=0 "$cap"
+}
+
 # Whether the composer's content, ignoring line wrapping, is exactly <line>.
 fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
-  local cap held
-  fm_backend_source "$1" || return 1
-  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
-  held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
+  local held
+  held=$(fm_task_inbox_composer_content "$1" "$2" "${4:-}") || return 1
   [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
+}
+
+# fm_task_inbox_composer_clear_or_submit: the send-side recovery for a ring
+# that deferred to foreign pending text (bin/fm-send.sh calls it as part of the
+# send, before its skip path). Returns 0 when the composer no longer holds that
+# text, so the caller may ring again; 1 when the recovery is impossible - a key
+# the backend refuses (the invalid_key class), content the capture cannot read,
+# or text still held after the bounded attempts - which is exactly when the
+# caller owes its loud, countable skip; 2 when the endpoint reports mid-turn,
+# so nothing was touched: its worker is alive and the ordinary re-ring owns the
+# next attempt.
+#
+# The mid-turn gate is the SAME one fm_task_inbox_ring already trusts before it
+# presses Enter on its own stuck doorbell (a native fm_backend_busy_state busy
+# verdict; `unknown` proceeds exactly as the ring proceeds).
+#
+# SUBMIT-vs-DROP rule, owned here: text that still carries a word byte - an
+# ASCII letter or digit, or any non-ASCII byte - is SUBMITTED with Enter. It may
+# be a steer whose submit never landed, and only submitting both preserves it
+# and wakes the endpoint; dropping it would destroy the only copy, because a
+# typed-plane send leaves no inbox record. Contentless text - whitespace, ASCII
+# punctuation, and control bytes only - is DROPPED with Ctrl-U: it cannot be
+# read as words, so the worker gains nothing from receiving it as a message.
+# A non-ASCII prompt glyph or non-Latin text counts as content on purpose: only
+# bytes that could not be words are ever dropped. The rule is deliberately
+# biased toward submitting, because the recovery may never destroy bytes it
+# could not read. Both branches verify the result against a fresh composer
+# verdict instead of trusting the keystroke: a backend that cannot deliver the
+# key refuses loudly and that refusal is the failure signal, never a silent
+# skip.
+fm_task_inbox_composer_clear_or_submit() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 label=${3:-} busy cstate held skeleton attempt
+  busy=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+  [ "$busy" != busy ] || return 2
+  cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+  [ "$cstate" = pending ] || return 0
+  held=$(fm_task_inbox_composer_content "$backend" "$target" "$label") || held=
+  if [ -z "$held" ]; then
+    # The state verdict came from the endpoint's full viewport while the
+    # bounded inbox read can miss a composer an overlay pushed up the screen.
+    # Read the held text on the viewport basis before refusing, so such a
+    # composer is submitted or cleared instead of skipped forever; a backend
+    # with no verified viewport read keeps the refusal below.
+    held=$(fm_task_inbox_composer_content_viewport "$backend" "$target") || return 1
+    [ -n "$held" ] || return 1
+  fi
+  skeleton=$(printf '%s' "$held" | LC_ALL=C tr -d '[:space:][:punct:]' \
+    | LC_ALL=C tr -d '\000-\037\177')
+  if [ -n "$skeleton" ]; then
+    fm_backend_send_key "$backend" "$target" Enter "$label" || return 1
+    sleep 0.3
+    cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+    if [ "$cstate" = pending ] && fm_task_inbox_composer_holds "$backend" "$target" "$held" "$label"; then
+      # A lost Enter gets the ring's own confirmed retry: Enter only, never a
+      # retype, and only while the exact text we submitted is still held.
+      fm_backend_send_key "$backend" "$target" Enter "$label" || return 1
+      sleep 0.3
+      cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+    fi
+    [ "$cstate" != pending ] || return 1
+    return 0
+  fi
+  # Ctrl-U deletes to line start, so a held draft can span several rows: press
+  # it boundedly, re-reading the verdict between presses, and stop the moment
+  # the composer is no longer pending (the same clear idiom bin/backends/herdr.sh
+  # uses after a refused proof).
+  attempt=0
+  while :; do
+    cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+    [ "$cstate" = pending ] || return 0
+    [ "$attempt" -lt 10 ] || return 1
+    fm_backend_send_key "$backend" "$target" C-u "$label" || return 1
+    attempt=$((attempt + 1))
+    sleep 0.2
+  done
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>

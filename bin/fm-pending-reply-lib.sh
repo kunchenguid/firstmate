@@ -122,6 +122,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-send-status-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-send-status-lib.sh"
 # Deliberately undirected: this library consumes no symbols from
 # bin/fm-tmux-lib.sh, so following it under ShellCheck's external-source
 # traversal would expand that graph for zero cross-file checks.
@@ -939,7 +941,7 @@ fm_pending_reply_recovery_message() {  # <record-path>
 fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed delivered attempted grace now age task_id msg parent_home send_status=0
-  local sender_pid sender_identity status_file lock
+  local sender_pid sender_identity status_file lock send_rc=0
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -1001,15 +1003,18 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   if [ -n "${FM_PENDING_REPLY_SEND_HOOK:-}" ]; then
     # Hook receives: task_id message
     # shellcheck disable=SC2086
+    # The hook is an arbitrary command, not fm-send: only its exit 0 counts as
+    # sent; fm-send's exit-4 delivery contract applies to fm-send alone.
     if ! eval "$FM_PENDING_REPLY_SEND_HOOK" "$(printf '%q' "$task_id")" "$(printf '%q' "$msg")"; then
       send_status=1
     fi
   else
     if [ -z "$parent_home" ] || [ ! -d "$parent_home" ]; then
       send_status=1
-    elif ! env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
-      "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg"; then
-      send_status=1
+    else
+      env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+        "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg" || send_rc=$?
+      fm_send_delivered "$send_rc" || send_status=1
     fi
   fi
   if [ "$send_status" = 0 ]; then

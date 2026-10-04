@@ -295,8 +295,9 @@ test_ring_skips_dead_agent() {
 
 # A fake tmux whose pane is a Claude-style composer that keeps its content in
 # FM_FAKE_COMPOSER: literal input appends to it, capture renders it wrapped
-# between rules, and Enter submits it (logged as SUBMIT) unless
-# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow.
+# between rules, Enter submits it (logged as SUBMIT) unless
+# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow, and Ctrl-U
+# clears it (logged as CLEAR).
 make_composer_stub() {  # <dir>
   mkdir -p "$1/fakebin"
   cat > "$1/fakebin/tmux" <<'SH'
@@ -321,6 +322,11 @@ case "${1:-}" in
         echo $((drops - 1)) > "$FM_FAKE_DROP_ENTERS"
       elif [ -s "$FM_FAKE_COMPOSER" ]; then
         printf 'SUBMIT: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
+        : > "$FM_FAKE_COMPOSER"
+      fi
+    elif [ "${1:-}" = C-u ]; then
+      if [ -s "$FM_FAKE_COMPOSER" ]; then
+        printf 'CLEAR: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
         : > "$FM_FAKE_COMPOSER"
       fi
     fi
@@ -392,6 +398,68 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the retry Enter should submit the doorbell once:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the doorbell unsubmitted"
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
+}
+
+# The send-side composer recovery's own contract, exercised through its public
+# interface: contentful held text is submitted, contentless held text is
+# cleared, a backend that refuses the submit fails (return 1) instead of
+# pretending, and a mid-turn endpoint is never touched (return 2). The watcher
+# never calls this - its ladder keeps the narrow skip - which is what makes the
+# mid-turn gate worth pinning here rather than only end to end.
+test_composer_recovery_decisions() {
+  local dir state log composer rc
+  dir="$TMP_ROOT/recovery-decisions"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  log="$dir/send.log"; composer="$dir/composer"
+  recover() {
+    PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_SEND_LOG="$log" \
+      FM_FAKE_COMPOSER="$composer" FM_FAKE_DROP_ENTERS="$dir/drops" bash -c '
+      . "$1"
+      fm_task_inbox_composer_clear_or_submit tmux sess:fm-t1 fm-t1
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh"
+  }
+
+  # Contentful text: submitted, never destroyed.
+  : > "$log"; printf '%s' 'a stale steer whose Enter never landed' > "$composer"
+  rc=0; recover || rc=$?
+  [ "$rc" = 0 ] || fail "contentful held text should submit cleanly, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: a stale steer whose Enter never landed" ] \
+    || fail "the held line should be submitted exactly once:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "a submitted line should leave the composer"
+
+  # Contentless text: cleared, never submitted.
+  : > "$log"; printf '%s' '...' > "$composer"
+  rc=0; recover || rc=$?
+  [ "$rc" = 0 ] || fail "contentless held text should clear cleanly, got rc $rc"
+  [ "$(cat "$log")" = "CLEAR: ..." ] \
+    || fail "contentless text should be cleared, not submitted:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "a cleared line should leave the composer"
+
+  # A refused submit is a failure, not a silent skip.
+  : > "$log"; printf '%s' 'text a backend will not accept' > "$composer"
+  echo 2 > "$dir/drops"
+  rc=0; recover || rc=$?
+  [ "$rc" = 1 ] || fail "an unsubmitable held line should fail with 1, got rc $rc"
+  [ ! -s "$log" ] || fail "a refused submit must not type anything:"$'\n'"$(cat "$log")"
+  [ "$(cat "$composer")" = 'text a backend will not accept' ] \
+    || fail "a refused submit must leave the text in place"
+  rm -f "$dir/drops"
+
+  # Mid-turn: return 2 with nothing touched.
+  : > "$log"; printf '%s' 'a half-typed draft' > "$composer"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_SEND_LOG="$log" \
+    FM_FAKE_COMPOSER="$composer" bash -c '
+    . "$1"
+    fm_backend_busy_state() { printf "busy"; }
+    fm_task_inbox_composer_clear_or_submit tmux sess:fm-t1 fm-t1
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" || rc=$?
+  [ "$rc" = 2 ] || fail "a mid-turn endpoint should return 2, got rc $rc"
+  [ ! -s "$log" ] || fail "a mid-turn composer must not be touched:"$'\n'"$(cat "$log")"
+  [ "$(cat "$composer")" = 'a half-typed draft' ] || fail "a mid-turn draft was changed"
+  pass "inbox: the composer recovery submits content, clears junk, fails loudly, and leaves mid-turn alone"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -960,6 +1028,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_composer_recovery_decisions
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
