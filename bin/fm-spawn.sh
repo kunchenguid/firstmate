@@ -1214,6 +1214,7 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
+SPAWN_COORD_DISPATCHED=0
 SPAWN_ENDPOINT_CLOSED=0
 
 spawn_fresh_commit_rollback() {
@@ -1373,6 +1374,14 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  # A worker that never launched must not keep the coordination claim its
+  # dispatch acquired until the lease expires.
+  if [ "$status" -ne 0 ] && [ "$SPAWN_COORD_DISPATCHED" = 1 ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; }; then
+    SPAWN_COORD_DISPATCHED=0
+    FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" release "$ID" ||
+      echo "warning: could not release $ID coordination claim after aborted spawn" >&2
   fi
   # The per-id spawn lock is retaken so a concurrent spawn of the same id, which
   # reinstalls this strip dir, is never undone. A launched agent whose endpoint
@@ -3066,6 +3075,21 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
+      if [ "$KIND" = ship ] && [ -f "$CONFIG/coordination.json" ]; then
+        coord_home=$(shell_quote "$FM_HOME")
+        coord_adapter=$(shell_quote "$FM_ROOT/bin/fm-coord-adapter.py")
+        coord_id=$(shell_quote "$ID")
+        cat <<EOF
+
+# Advisory coordination for this task
+The local Firstmate enrolled this intent at dispatch when the coordinator was reachable.
+Before any push or /no-mistakes run, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-push $coord_id "\$PWD"\` from this task worktree.
+Before requesting a ci:batch pulse, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-ci $coord_id "\$PWD"\` from this task worktree.
+While actively working, execute \`FM_HOME=$coord_home python3 $coord_adapter heartbeat $coord_id\` about every 60 seconds to renew the claim.
+These calls only record and warn in shadow/advisory mode; report any warning in your ordinary task status so Firstmate can coordinate it.
+If the adapter command is missing or fails, report that visibly in task status; continue the selected delivery path.
+EOF
+      fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
@@ -4332,6 +4356,19 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  # Coordination is deliberately advisory in V1. A refusal, unavailable central
+  # store, or missing adapter is visible but cannot veto the existing spawn gate.
+  # Dispatch runs after the refresh so the intent base is the worker's start commit.
+  if [ "$KIND" = ship ] && [ -f "$CONFIG/coordination.json" ]; then
+    if [ ! -f "$FM_ROOT/bin/fm-coord-adapter.py" ]; then
+      echo "warning: $ID coordination adapter is missing; no intent or claim recorded" >&2
+    else
+      SPAWN_COORD_DISPATCHED=1
+      if ! FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" dispatch "$ID" "$PROJ_ABS" "$WT" "$SOURCE_BRIEF" "$BRANCH" "$HARNESS"; then
+        echo "warning: $ID coordination dispatch failed; no claim is assumed" >&2
+      fi
+    fi
+  fi
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
