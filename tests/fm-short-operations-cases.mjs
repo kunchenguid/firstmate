@@ -374,6 +374,9 @@ try {
   assert.ok(fs.existsSync(replayMarker));assert.ok(!fs.existsSync(path.join(replayState,replayTask+'.meta')));assert.ok(fs.existsSync(reservation));assert.ok(!fs.existsSync(path.join(replayDir,'operation-0.receipt.json')));
   assert.deepEqual(replayCopySnapshot(),replayCopyBefore);
   const replayStarted=JSON.parse(fs.readFileSync(path.join(replayDir,'started.json'))).identity;
+  const replayEffect=JSON.parse(fs.readFileSync(path.join(replayDir,'operation-0.effect.json')));
+  assert.deepEqual(replayEffect.owner,replayStarted,'current cleanup effect records the immutable runner identity');
+  assert.ok(fs.existsSync(reservation),'current owner effect without completion readback remains reserved');
   for(let n=0;n<400;n++){try{if(processIdentity(replayStarted.pid).start!==replayStarted.start)break;}catch{break;}if(n===399)throw Error('cleanup replay fixture runner did not exit');await wait(25);}
   const closeCallsBefore=closeCount(replayEndpoint.root_pane.pane_id);assert.equal(closeCallsBefore,1);
   execFileSync('bash',[path.join(root,'bin/fm-bootstrap.sh')],{env:{...replayEnv,PATH:process.env.PATH,FM_BOOTSTRAP_NETWORK:'skip',HOME:path.join(replayHome,'user-home')},encoding:'utf8',timeout:30000});

@@ -277,10 +277,11 @@ function cleanupOwnerReadback(home,root,step,binding) {
 }
 
 function cleanupPreflightReadback(home,root,request,started,index,step,binding,intent,effect,resultBytes) {
-  // a70ee10e wrote the cleanup marker in the ShortTask runner before invoking
-  // teardown.  The current owner marker is instead a direct child of that
-  // runner.  A missing current marker or the exact legacy shape can use this
-  // preflight readback; a current owner effect cannot.
+  // Cleanup effects record the immutable ShortTask runner identity in both the
+  // old wrapper and current owner-bound paths.  The safe distinction is their
+  // placement: only the old wrapper wrote an effect before teardown's
+  // acceptance guards.  Thus an effect-bearing no-effect settlement also needs
+  // their exact refusal output; every current effect is written after them.
   if(effect&&!equal(effect.owner,started.identity)) return null;
   const dir=path.join(home,'state/short-agents',request.id),outputFile=path.join(dir,`operation-${index}.output.json`);
   const cleanupFile=path.join(home,'state',step.task+'.cleanup.json'),metaFile=path.join(home,'state',step.task+'.meta');
