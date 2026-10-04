@@ -537,6 +537,33 @@ test_relaunch_keeps_the_pr_merge_poll_watching() {
   pass "fm-control relaunch: a registered PR keeps its merge poll, with tracing on and off"
 }
 
+test_a_record_with_a_key_after_pr_names_the_unwatched_task() {
+  local dir out
+  dir=$(new_case pr-warn rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'pr=https://github.com/example/repo/pull/43\ncontrol_relaunch_tx=abc\n' >> "$dir/home/state/rl43.meta"
+  chmod 0600 "$dir/home/state/rl43.meta"
+  out=$(bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    fm_pr_metadata_identity_parse "$2"; fm_pr_metadata_identity_parse "$2"
+  ' _ "$ROOT" "$dir/home/state/rl43.meta" 2>&1)
+  case "$out" in
+    *"task rl43"*"no longer watched"*"bin/fm-pr-check.sh rl43 <pr-url>"*) ;;
+    *) fail "a record corrupted after pr= should name the task and the re-arm command"$'\n'"$out" ;;
+  esac
+  [ "$(printf '%s\n' "$out" | grep -c 'no longer watched')" = 1 ] \
+    || fail "the unwatched diagnostic should appear once per process"$'\n'"$out"
+
+  dir=$(new_case pr-clean rl44)
+  add_ship_task "$dir" rl44 claude
+  printf 'pr=https://github.com/example/repo/pull/44\n' >> "$dir/home/state/rl44.meta"
+  chmod 0600 "$dir/home/state/rl44.meta"
+  out=$(bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$dir/home/state/rl44.meta" 2>&1) \
+    || fail "a clean record should still parse"$'\n'"$out"
+  [ -z "$out" ] || fail "a clean record should print nothing"$'\n'"$out"
+  pass "a record with a key after pr= names the unwatched task once; a clean record is silent"
+}
+
 test_relaunch_without_a_pr_has_no_poll_to_keep() {
   local dir out rc
   dir=$(new_case no-pr rl42)
@@ -2451,6 +2478,7 @@ test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_keeps_the_pr_merge_poll_watching
 test_relaunch_without_a_pr_has_no_poll_to_keep
+test_a_record_with_a_key_after_pr_names_the_unwatched_task
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
