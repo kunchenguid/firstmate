@@ -66,6 +66,29 @@ new_task() {
   chmod 0600 "$home/data/$id/instructions.txt"
 }
 
+new_canonical_task() { # <home> <id> [instruction]
+  local home=$1 id=$2 content=${3:-"PRIVATE_PROMPT_alpha OECID_sensitive"}
+  new_task "$home" "$id" "$content"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start \
+    >/dev/null || fail "could not add canonical iDA fixture task $id"
+}
+
+mark_status_presented() { # <home> <id>
+  local home=$1 id=$2 status="$1/state/$2.status" ident size
+  ident=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1/bin/fm-classify-lib.sh"; _fm_open_decisions_file_ident "$2"' \
+    _ "$ROOT" "$status") || fail "could not identify $id status"
+  size=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1/bin/fm-classify-lib.sh"; _fm_status_file_size "$2"' \
+    _ "$ROOT" "$status") || fail "could not size $id status"
+  printf 'unrelated\tfixture:1:1\t0\t0\n%s\t%s\t%s\t%s\n' \
+    "$id" "$ident" "$size" "$size" >"$home/state/.status-presentation-cursor"
+  : >"$home/state/.seen-${id}_status"
+  : >"$home/state/.hb-surfaced-${id}"
+  : >"$home/state/.subsuper-seen-status-${id}"
+}
+
 state_file() { printf '%s/state/remote-tasks/%s/state.json\n' "$1" "$2"; }
 phase_of() { jq -r '.phase' "$(state_file "$1" "$2")"; }
 
@@ -1471,6 +1494,73 @@ SH
   pass "remote retirement pairs closed/held backlog state and retries interrupted close without losing evidence"
 }
 
+test_canonical_retirement_retires_active_state_and_preserves_provider_evidence() {
+  local home fakebin id=ida-cleanup generation result handled artifact
+  home=$(new_home canonical-retirement-cleanup)
+  fakebin=$(make_fake_bytedcli "$home")
+  write_ida_config "$home"
+  new_canonical_task "$home" "$id"
+  : >"$home/bytedcli.log"
+  : >"$home/sessions.tsv"
+
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null \
+    || fail 'canonical iDA retirement fixture dispatch failed'
+  wait_phase "$home" "$id" terminal-success
+  result=$(find "$home/state/procevent-inbox" -name "ida-$id.*.result" -print -quit)
+  [ -n "$result" ] || fail 'canonical iDA fixture lost its captured provider result'
+  handled=${result%.result}.handled
+  local tries=300
+  while [ ! -f "$handled" ] && [ "$tries" -gt 0 ]; do sleep 0.03; tries=$((tries - 1)); done
+  assert_present "$handled" 'canonical iDA fixture did not record handled evidence'
+  generation=$(jq -r '.generation // 1' "$(state_file "$home" "$id")")
+
+  fm_test_archive_goal "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
+  mark_status_presented "$home" "$id"
+  for artifact in turn-ended progress pi-ext.ts busy-session control-relaunch \
+    control-relaunch.meta-prior control-relaunch.brief-prior control-relaunch.note \
+    reconcile-nudged; do
+    printf 'retire fixture\n' >"$home/state/$id.$artifact"
+  done
+  printf 'retire fixture\n' >"$home/state/.$id.branch-outcome-index"
+  mkdir -p "$home/state/$id.inbox/handled"
+  printf 'schema=fm-task-inbox.v1\n--\nsettled terminal steer\n' \
+    >"$home/state/$id.inbox/001.msg"
+
+  run_ida "$home" "$fakebin" retire "$id" >/dev/null \
+    || fail 'canonical iDA retirement cleanup failed'
+
+  for artifact in meta status turn-ended progress pi-ext.ts busy-session control-relaunch \
+    control-relaunch.meta-prior control-relaunch.brief-prior control-relaunch.note \
+    reconcile-nudged; do
+    assert_absent "$home/state/$id.$artifact" "iDA retirement retained active $artifact"
+  done
+  assert_absent "$home/state/.$id.branch-outcome-index" \
+    'iDA retirement retained the branch-outcome presentation index'
+  assert_absent "$home/state/$id.inbox" 'iDA retirement retained the settled inbox'
+  assert_absent "$home/state/remote-tasks/$id" 'iDA retirement retained provider runtime state'
+  assert_absent "$home/state/$id.cleanup.json" 'iDA retirement retained its active cleanup receipt'
+  assert_absent "$home/state/.seen-${id}_status" 'iDA retirement retained its signal marker'
+  assert_absent "$home/state/.hb-surfaced-${id}" 'iDA retirement retained its heartbeat marker'
+  assert_absent "$home/state/.subsuper-seen-status-${id}" 'iDA retirement retained its daemon marker'
+  assert_grep $'unrelated\tfixture:1:1\t0\t0' "$home/state/.status-presentation-cursor" \
+    'iDA retirement changed an unrelated presentation cursor row'
+  assert_no_grep "$id" "$home/state/.status-presentation-cursor" \
+    'iDA retirement retained its presentation cursor row'
+  assert_present "$result" 'iDA retirement removed the captured provider result'
+  assert_present "$handled" 'iDA retirement removed handled provider evidence'
+  assert_present "$home/data/$id/report.md" 'iDA retirement removed the accepted report'
+  assert_present "$home/data/$id/task.json" 'iDA retirement removed the canonical task record'
+  assert_present "$home/data/$id/remote-execution.json" \
+    'iDA retirement removed immutable provider execution identity'
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" bash -c \
+    '. "$1/bin/fm-cleanup-receipt-lib.sh"; fm_cleanup_receipt read "$2" "$3"' \
+    _ "$ROOT" "$id" "remote-$generation" \
+    | jq -e '.completion.facts.bookkeepingComplete==true' >/dev/null \
+    || fail 'iDA archived cleanup evidence is not readable through its owner'
+  pass 'canonical iDA retirement removes active task state while preserving provider, report, identity, and cleanup evidence'
+}
+
 test_aime_compatibility_and_local_unchanged() {
   local home fakebin out rc=0
   home=$(new_home compatibility); fakebin=$(make_fake_bytedcli "$home")
@@ -1712,6 +1802,10 @@ case "${FM_REMOTE_TEST_CASE:-}" in
     ;;
   retirement)
     test_retirement_pairs_backlog_and_preserves_failed_close
+    exit 0
+    ;;
+  retirement-cleanup)
+    test_canonical_retirement_retires_active_state_and_preserves_provider_evidence
     exit 0
     ;;
   terminal)

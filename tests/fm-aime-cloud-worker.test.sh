@@ -67,6 +67,29 @@ new_task() { # <home> <id> [instruction]
   chmod 0600 "$home/data/$id/instructions.txt"
 }
 
+new_canonical_task() { # <home> <id> [instruction]
+  local home=$1 id=$2 instruction=${3:-"Research the requested topic and return a cited report."}
+  new_task "$home" "$id" "$instruction"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start \
+    >/dev/null || fail "could not add canonical AIME fixture task $id"
+}
+
+mark_status_presented() { # <home> <id>
+  local home=$1 id=$2 status="$1/state/$2.status" ident size
+  ident=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1/bin/fm-classify-lib.sh"; _fm_open_decisions_file_ident "$2"' \
+    _ "$ROOT" "$status") || fail "could not identify $id status"
+  size=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1/bin/fm-classify-lib.sh"; _fm_status_file_size "$2"' \
+    _ "$ROOT" "$status") || fail "could not size $id status"
+  printf 'unrelated\tfixture:1:1\t0\t0\n%s\t%s\t%s\t%s\n' \
+    "$id" "$ident" "$size" "$size" >"$home/state/.status-presentation-cursor"
+  : >"$home/state/.seen-${id}_status"
+  : >"$home/state/.hb-surfaced-${id}"
+  : >"$home/state/.subsuper-seen-status-${id}"
+}
+
 state_file() {
   printf '%s/state/cloud-tasks/%s/state.json\n' "$1" "$2"
 }
@@ -1448,6 +1471,70 @@ test_cloud_retirement_preserves_report() {
   pass "terminal AIME success and failure retirement enforce report and decision safety while preserving ordinary provider failures"
 }
 
+test_canonical_retirement_retires_active_state_and_preserves_provider_evidence() {
+  local home fakebin id=aime-cleanup generation result handled artifact
+  home=$(new_home canonical-retirement-cleanup)
+  fakebin=$(make_fake_bytedcli "$home")
+  write_config "$home" true
+  new_canonical_task "$home" "$id"
+  : >"$home/bytedcli.log"
+
+  dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail 'canonical AIME retirement fixture dispatch failed'
+  wait_phase "$home" "$id" terminal-success 400
+  result=$(find "$home/state/procevent-inbox" -name "aime-$id.*.result" -print -quit)
+  [ -n "$result" ] || fail 'canonical AIME fixture lost its captured provider result'
+  handled=${result%.result}.handled
+  wait_present "$handled" 400 || fail 'canonical AIME fixture did not record handled evidence'
+  generation=$(jq -r '.execution_generation' "$(state_file "$home" "$id")")
+
+  fm_test_archive_goal "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
+  mark_status_presented "$home" "$id"
+  for artifact in turn-ended progress pi-ext.ts busy-session control-relaunch \
+    control-relaunch.meta-prior control-relaunch.brief-prior control-relaunch.note \
+    reconcile-nudged; do
+    printf 'retire fixture\n' >"$home/state/$id.$artifact"
+  done
+  printf 'retire fixture\n' >"$home/state/.$id.branch-outcome-index"
+  mkdir -p "$home/state/$id.inbox/handled"
+  printf 'schema=fm-task-inbox.v1\n--\nsettled terminal steer\n' \
+    >"$home/state/$id.inbox/001.msg"
+
+  retire_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail 'canonical AIME retirement cleanup failed'
+
+  for artifact in meta status turn-ended progress pi-ext.ts busy-session control-relaunch \
+    control-relaunch.meta-prior control-relaunch.brief-prior control-relaunch.note \
+    reconcile-nudged; do
+    assert_absent "$home/state/$id.$artifact" "AIME retirement retained active $artifact"
+  done
+  assert_absent "$home/state/.$id.branch-outcome-index" \
+    'AIME retirement retained the branch-outcome presentation index'
+  assert_absent "$home/state/$id.inbox" 'AIME retirement retained the settled inbox'
+  assert_absent "$home/state/cloud-tasks/$id" 'AIME retirement retained provider runtime state'
+  assert_absent "$home/state/$id.cleanup.json" 'AIME retirement retained its active cleanup receipt'
+  assert_absent "$home/state/.seen-${id}_status" 'AIME retirement retained its signal marker'
+  assert_absent "$home/state/.hb-surfaced-${id}" 'AIME retirement retained its heartbeat marker'
+  assert_absent "$home/state/.subsuper-seen-status-${id}" 'AIME retirement retained its daemon marker'
+  assert_grep $'unrelated\tfixture:1:1\t0\t0' "$home/state/.status-presentation-cursor" \
+    'AIME retirement changed an unrelated presentation cursor row'
+  assert_no_grep "$id" "$home/state/.status-presentation-cursor" \
+    'AIME retirement retained its presentation cursor row'
+  assert_present "$result" 'AIME retirement removed the captured provider result'
+  assert_present "$handled" 'AIME retirement removed handled provider evidence'
+  assert_present "$home/data/$id/report.md" 'AIME retirement removed the accepted report'
+  assert_present "$home/data/$id/task.json" 'AIME retirement removed the canonical task record'
+  assert_present "$home/data/$id/remote-execution.json" \
+    'AIME retirement removed immutable provider execution identity'
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" bash -c \
+    '. "$1/bin/fm-cleanup-receipt-lib.sh"; fm_cleanup_receipt read "$2" "$3"' \
+    _ "$ROOT" "$id" "$generation" \
+    | jq -e '.completion.facts.bookkeepingComplete==true' >/dev/null \
+    || fail 'AIME archived cleanup evidence is not readable through its owner'
+  pass 'canonical AIME retirement removes active task state while preserving provider, report, identity, and cleanup evidence'
+}
+
 test_terminal_disposition_guards_aime_effects() {
   local home fakebin id rc generation
 
@@ -1528,6 +1615,13 @@ SH
     || fail "legacy local retirement arguments changed: $out"
   pass "backend-neutral wrappers preserve local spawn, state, and teardown argument semantics"
 }
+
+case "${FM_AIME_TEST_CASE:-}" in
+  retirement-cleanup)
+    test_canonical_retirement_retires_active_state_and_preserves_provider_evidence
+    exit 0
+    ;;
+esac
 
 test_probe_and_disabled_gate
 test_probe_failures_are_distinct

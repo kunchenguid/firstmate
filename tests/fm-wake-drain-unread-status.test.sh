@@ -263,6 +263,58 @@ test_retired_task_id_starts_new_status_unread() {
   pass "a reused task id starts its replacement status log unread at byte zero"
 }
 
+test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_history() {
+  local dir state status err
+  dir=$(make_case settled-retirement)
+  state="$dir/state"
+  err="$dir/retire.err"
+
+  status="$state/unread.status"
+  prime_cursor "$state" "$status"
+  printf 'note: not yet presented\n' >> "$status"
+  if FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$2" unread --require-settled
+  ' _ "$ROOT" "$state" 2> "$err"; then
+    fail "settled retirement removed a status log with unread bytes"
+  fi
+  grep -F 'has unread status bytes' "$err" >/dev/null \
+    || fail "unread retirement refusal was not explicit: $(cat "$err")"
+  [ -f "$status" ] || fail "unread retirement refusal did not preserve the status log"
+
+  status="$state/decision.status"
+  printf 'needs-decision [key=delivery]: choose destination\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "drain failed while presenting the open-decision fixture"
+  if FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$2" decision --require-settled
+  ' _ "$ROOT" "$state" 2> "$err"; then
+    fail "settled retirement removed a status log with an open decision"
+  fi
+  grep -F 'has an open status decision' "$err" >/dev/null \
+    || fail "open-decision retirement refusal was not explicit: $(cat "$err")"
+  [ -f "$status" ] || fail "open-decision retirement refusal did not preserve the status log"
+
+  status="$state/settled.status"
+  prime_cursor "$state" "$status"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$2" settled --require-settled
+  ' _ "$ROOT" "$state" || fail "settled retirement refused fully presented status history"
+  [ ! -e "$status" ] && [ ! -L "$status" ] \
+    || fail "settled retirement retained fully presented status history"
+  if [ -f "$state/.status-presentation-cursor" ]; then
+    awk -F '\t' '$1 == "settled" { found=1 } END { exit found ? 0 : 1 }' \
+      "$state/.status-presentation-cursor" >/dev/null \
+      && fail "settled retirement retained the task's presentation manifest row"
+  fi
+  pass "settled retirement preserves unread/open status and removes only fully presented closed history"
+}
+
 test_weak_identity_still_presents_and_advances() {
   local dir state out second reader
   dir=$(make_case weak-identity); state="$dir/state"
@@ -382,6 +434,7 @@ test_decision_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
+test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_history
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged

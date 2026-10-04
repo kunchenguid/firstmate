@@ -13,6 +13,14 @@ fm_cleanup_receipt() { # <operation> <task> <generation> [extra args]
       --generation "$generation" "$@"
 }
 
+fm_cleanup_receipt_archive_complete() { # <task> <generation>
+  local id=$1 generation=$2
+  fm_cleanup_receipt archive "$id" "$generation" >/dev/null || return 1
+  # shellcheck source=bin/fm-merge-receipt-lib.sh
+  . "$FM_CLEANUP_RECEIPT_DIR/fm-merge-receipt-lib.sh"
+  fm_merge_receipt_archive "$id"
+}
+
 fm_cleanup_historical_merge_receipt() { # <task> <generation>; emits exact facts or refuses ambiguity
   local id=$1 generation=$2 path
   path="${FM_DATA_OVERRIDE:-${DATA:-${FM_HOME:?}/data}}/$id/lifecycle.json"

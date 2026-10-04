@@ -754,7 +754,7 @@ cmd_cancel() {
 }
 
 cmd_retire() {
-  local id=${1-} source lock report meta_lock generation
+  local id=${1-} source lock report meta_lock generation facts
   [ "$#" -eq 1 ] || usage
   fm_aime_task_id_valid "$id" || die "invalid task id"
   fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
@@ -790,14 +790,33 @@ cmd_retire() {
     . "$SCRIPT_DIR/fm-remote-execution-receipt-lib.sh"
     fm_remote_execution_receipt_record "$DATA" "$id" "$AIME_STATE_EXECUTOR" aime "$generation" \
       || die "cannot retain immutable AIME execution identity"
+    fm_cleanup_receipt create "$id" "$generation" >/dev/null \
+      || die "cannot initialize immutable AIME cleanup evidence"
     source=$(fm_aime_source_id "$id") || die "invalid task id"
     "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null \
       || die "cannot retire the AIME process-event source"
     fm_backlog_remote_retire "$CONFIG" "$DATA" "$id" \
       || die "remote retirement backlog transition failed; execution evidence retained: $FM_BACKLOG_TRANSITION_ERROR"
-    rm -f -- "$STATE/$id.meta" "$STATE/$id.status" "$STATE/$id.turn-ended" \
-      "$STATE/.$id.open-decisions-cursor"
+    _fm_wake_require_classify || die "status presentation retirement is unavailable"
+    status_retire_presentation_task "$STATE" "$id" --require-settled \
+      || die "cannot retire AIME status presentation state"
+    rm -f -- "$STATE/$id.turn-ended" "$STATE/$id.progress" \
+      "$STATE/$id.pi-ext.ts" "$STATE/$id.busy-session" \
+      "$STATE/$id.control-relaunch" "$STATE/$id.control-relaunch.meta-prior" \
+      "$STATE/$id.control-relaunch.brief-prior" "$STATE/$id.control-relaunch.note" \
+      "$STATE/$id.reconcile-nudged" "$STATE/.$id.branch-outcome-index"
+    # Terminal retirement has settled the task and retired its source. Any
+    # leftover steer targets no endpoint; provider captures and their handled
+    # markers live under procevent and are deliberately outside this cleanup.
+    rm -rf -- "$STATE/$id.inbox"
+    rm -f -- "$STATE/$id.meta"
     rm -rf -- "$(fm_aime_task_dir "$id")"
+    facts=$(jq -cn '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:"returned-or-already-absent",bookkeepingComplete:true}') \
+      || die "cannot encode AIME cleanup completion"
+    fm_cleanup_receipt completion-record "$id" "$generation" --facts "$facts" >/dev/null \
+      || die "AIME retirement completed but immutable cleanup completion could not be recorded; read back before retrying effects"
+    fm_cleanup_receipt_archive_complete "$id" "$generation" \
+      || die "AIME retirement completed but its receipts could not be retired from active state"
     printf 'retired: %s report=data/%s/report.md\n' "$id" "$id"
   )
 }

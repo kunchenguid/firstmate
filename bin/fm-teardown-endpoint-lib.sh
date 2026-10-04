@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Endpoint phase owned by fm-teardown.sh, under its lease/control/meta locks.
-# state/<id>.cleanup.json is the sole cleanup receipt: v1 task/spawn
-# binding, exact launch journal hash, and independent phase postconditions.
+# The cleanup-receipt owner resolves the active state/<id>.cleanup.json or its
+# completed data/<id>/cleanup-receipts archive: v1 task/spawn binding, exact
+# launch journal hash, and independent phase postconditions.
 # No operation in this file returns a directory, releases a slot, resets git,
 # traverses/kills processes by path, removes task metadata, or closes a whole
 # workspace. Journal format labels are diagnostic; structural capabilities
@@ -11,16 +12,16 @@
 # Narrow replay hook for the existing backlog-close owner, which already
 # validated the task generation under its metadata lock. No endpoint calls.
 fm_teardown_cleanup_record_closed() {
-  local STATE=$1 ID=$2 DATA=$3 ENDPOINT_GENERATION ENDPOINT_RECEIPT meta="$2"
+  local STATE=$1 ID=$2 DATA=$3 ENDPOINT_GENERATION=${4:-} ENDPOINT_RECEIPT meta="$2"
   # shellcheck source=bin/fm-cleanup-receipt-lib.sh
   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-cleanup-receipt-lib.sh"
   meta="$STATE/$ID.meta"
   if [ -f "$meta" ] && [ ! -L "$meta" ]; then
     ENDPOINT_GENERATION=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
-  else
-    ENDPOINT_GENERATION=$(jq -er '.spawn_gen' "$STATE/$ID.cleanup.json") || return 1
   fi
-  ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
+  [ -n "$ENDPOINT_GENERATION" ] || return 1
+  ENDPOINT_RECEIPT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    fm_cleanup_receipt path "$ID" "$ENDPOINT_GENERATION") || return 1
   teardown_endpoint_receipt record_close confirmed backlog-paired-resource-record-retained
 }
 

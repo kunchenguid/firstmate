@@ -54,4 +54,27 @@ jq -e '.task_id=="current-task" and .execution_generation=="generation-current"'
   "$HOME_DIR/state/$CURRENT.merge-receipts.jsonl" >/dev/null \
   || fail 'current task merge receipt was not recorded independently of rich history'
 
-pass 'merge receipts: historical facts require current-task absence and current receipts ignore retained rich state'
+FM_HOME="$HOME_DIR" bash -c \
+  '. "$1"; fm_merge_receipt_archive "$2"' \
+  _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$CURRENT" \
+  || fail 'completed merge receipt history could not leave active state'
+assert_absent "$HOME_DIR/state/$CURRENT.merge-receipts.jsonl" \
+  'archived merge history remained in active state'
+assert_present "$HOME_DIR/data/$CURRENT/merge-receipts.jsonl" \
+  'archived merge history was not retained with task evidence'
+FM_HOME="$HOME_DIR" bash -c \
+  '. "$1"; fm_merge_receipt_current "$2" "$3" "$4" "$5" >/dev/null' \
+  _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$CURRENT" generation-current \
+  'https://codebase.example.invalid/merge_requests/2' \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  || fail 'original merge owner could not read archived exact-generation evidence'
+FM_HOME="$HOME_DIR" bash -c \
+  '. "$1"; fm_merge_receipt_record "$2" "$3" "$4" "$5"' \
+  _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$CURRENT" generation-current \
+  'https://codebase.example.invalid/merge_requests/2' \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  || fail 'exact archived merge receipt did not replay idempotently'
+assert_absent "$HOME_DIR/state/$CURRENT.merge-receipts.jsonl" \
+  'idempotent archived receipt replay recreated active state'
+
+pass 'merge receipts: completed evidence leaves active state and remains generation-readable without duplicate recreation'
