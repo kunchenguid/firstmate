@@ -433,6 +433,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/model-dispatch-rigor.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },
