@@ -207,6 +207,20 @@ await page.route("**/api/tasks*", async route => {
         title: `Dashboard completed task copy ${String(index + 1).padStart(2, "0")}`,
       })),
     ]);
+    body.tasks.push({
+      id: "reconciliation-task",
+      title: "Dashboard reconciliation task",
+      category: "held",
+      status: "Needs reconciliation",
+      kind: "ship",
+      project: "viewer",
+      wait: "Needs reconciliation",
+      warning: null,
+      hasDocument: false,
+      documentType: null,
+      documentTypes: [],
+      documentModifiedAt: "2026-10-03T00:00:01Z",
+    });
   }
   await route.fulfill({ response, json: body });
 });
@@ -286,11 +300,20 @@ try {
   if (!await page.locator('nav [data-route="dashboard"]').evaluate(element => element.classList.contains("active"))) throw new Error("Dashboard navigation identity was not active");
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4) throw new Error("processing task category was not rendered");
-  if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count()) throw new Error("completed task counter was rendered");
-  if (await page.locator('#sessions .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
+  if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count() !== 1) throw new Error("completed task counter was not rendered");
+  if (await page.locator('#sessions .task-card[data-category="held"]').count() !== 3) throw new Error("held task category was not rendered separately");
   if (await page.locator('#sessions .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
   const completedTaskCount = await page.locator('#sessions .task-card[data-category="completed"]').count();
   if (completedTaskCount !== 41) throw new Error(`dense completed task inventory was not rendered: ${completedTaskCount}`);
+  if (await page.locator('#sessions .task-card[data-category="held"]').filter({ hasText: "Needs reconciliation" }).count() !== 1) throw new Error("Needs reconciliation label was not preserved");
+  const sharedCompletedOrder = await page.locator('#sessions .task-card').evaluateAll(cards => cards
+    .filter(card => card.textContent.includes("Needs reconciliation") || card.textContent.includes("Dashboard completed task"))
+    .map(card => card.textContent.includes("Needs reconciliation") ? "reconciliation" : "completed"));
+  if (sharedCompletedOrder[0] !== "completed" || sharedCompletedOrder.at(-1) !== "reconciliation") throw new Error(`completed and reconciliation tasks did not share title ordering: ${sharedCompletedOrder.join(",")}`);
+  await page.locator("#task-counts").getByRole("button", { name: /Needs reconciliation/ }).click();
+  if (await page.locator('#sessions .task-card').count() !== 1 || !await page.locator('#sessions .task-card').first().textContent().then(text => text.includes("Needs reconciliation"))) throw new Error("Needs reconciliation counter did not filter the task list");
+  await page.getByRole("button", { name: "View all tasks" }).click();
+  if (await page.locator('#sessions .task-card').count() !== 49) throw new Error("View all tasks did not clear the status-card filter");
   const initialTaskCategories = await page.locator('#sessions .task-card').evaluateAll(cards => cards.slice(0, 4).map(card => card.dataset.category));
   if (initialTaskCategories.some(category => category !== "processing")) throw new Error(`processing tasks were buried behind the dense non-processing inventory: ${initialTaskCategories.join(",")}`);
   const processingTaskIds = await page.locator('#sessions .task-card[data-category="processing"] small:first-of-type').allTextContents();
@@ -302,6 +325,7 @@ try {
   await page.locator("#session-search").fill("processing");
   if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4
     || await page.locator('#sessions .task-card:not([data-category="processing"])').count()) throw new Error("task search did not isolate every processing task");
+  if (await page.locator("#task-counts strong").first().textContent() !== "4") throw new Error("status counters did not follow the non-empty task search scope");
   await page.locator("#session-search").fill("");
   await page.locator('#sessions .task-card[data-category="history"]').first().click();
   await page.getByRole("heading", { name: "Archived task brief" }).waitFor({ state: "visible", timeout: 3000 });
@@ -318,7 +342,7 @@ try {
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
-  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "4,2,1") throw new Error("background task refresh did not preserve loaded counts");
+  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "4,2,1,41,1") throw new Error("background task refresh did not preserve loaded counts");
   if (!await dashboardReportCardNode.evaluate(node => node.isConnected)) throw new Error("background task refresh replaced the unchanged task generation before the response");
   if (!await page.locator("#sessions").evaluate(element => element.scrollHeight > element.clientHeight)) throw new Error("dashboard fixture was not tall enough to exercise sidebar scrolling");
   await dashboardReportCard.click();

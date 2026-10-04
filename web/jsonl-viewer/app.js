@@ -144,6 +144,7 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   state.token = "";
   state.sessions = [];
   state.tasks = [];
+  taskStatusFilter = null;
   state.selected = null;
   state.selectedTaskId = null;
   state.selectedTaskDocumentType = null;
@@ -686,11 +687,15 @@ async function applyLocation() {
   configurePage("tasks");
 }
 
-const taskGroups = [
-  ["processing", "Processing"],
-  ["held", "Waiting or blocked"],
-  ["history", "Archived or cancelled"],
-];
+const taskStatusOrder = ["Processing", "Queued", "Waiting", "Blocked", "Parked", "Needs reconciliation", "Completed", "Archived", "Cancelled"];
+let taskStatusFilter = null;
+
+function taskGroups() {
+  const statuses = [...new Set(state.tasks.map(task => task.status))];
+  return statuses.sort((left, right) => (taskStatusOrder.indexOf(left) + 1 || Infinity)
+    - (taskStatusOrder.indexOf(right) + 1 || Infinity) || left.localeCompare(right))
+    .map(status => ({ key: status, label: status, matches: task => task.status === status }));
+}
 
 function taskMatches(task, query) {
   return `${task.id} ${task.title} ${task.status} ${task.kind || ""} ${task.project || ""} ${task.wait || ""} ${task.warning || ""}`.toLowerCase().includes(query);
@@ -738,17 +743,39 @@ function taskCard(task) {
 
 function renderTaskDashboard() {
   elements.taskCounts.replaceChildren();
-  for (const [category, label] of taskGroups) {
-    const count = state.tasks.filter(task => task.category === category).length;
-    const counter = document.createElement("div");
+  const query = elements.sessionSearch.value.toLowerCase();
+  const visibleTasks = state.tasks.filter(task => taskMatches(task, query));
+  for (const group of taskGroups()) {
+    const count = visibleTasks.filter(group.matches).length;
+    const counter = document.createElement("button");
+    counter.type = "button";
     counter.className = "task-count";
+    counter.classList.toggle("active", taskStatusFilter === group.key);
+    counter.setAttribute("aria-pressed", String(taskStatusFilter === group.key));
     const name = document.createElement("span");
-    name.textContent = label;
+    name.textContent = group.label;
     const value = document.createElement("strong");
     value.textContent = state.taskLoaded ? String(count) : "—";
     counter.append(name, value);
+    counter.addEventListener("click", () => {
+      taskStatusFilter = taskStatusFilter === group.key ? null : group.key;
+      state.selectedTaskId = null;
+      state.selectedTaskDocumentType = null;
+      state.taskSelectionGeneration += 1;
+      renderSessions();
+    });
     elements.taskCounts.append(counter);
   }
+  const all = document.createElement("button");
+  all.type = "button";
+  all.className = "quiet task-count-reset";
+  all.textContent = "View all tasks";
+  all.hidden = !taskStatusFilter;
+  all.addEventListener("click", () => {
+    taskStatusFilter = null;
+    renderSessions();
+  });
+  elements.taskCounts.append(all);
   renderTaskDetail();
 }
 
@@ -938,7 +965,7 @@ function renderSessions() {
   const source = elements.source.value;
   const query = elements.sessionSearch.value.toLowerCase();
   if (source === "tasks") {
-    const matches = state.tasks.filter(task => taskMatches(task, query));
+    const matches = state.tasks.filter(task => (!taskStatusFilter || task.status === taskStatusFilter) && taskMatches(task, query));
     elements.sessions.replaceChildren();
     for (const task of matches) elements.sessions.append(taskCard(task));
     if (!matches.length) {
