@@ -532,6 +532,274 @@ JSON
   pass "outcome cache migration preserves legacy endpoint history and captain acknowledgements without using labels as paths"
 }
 
+seed_outcome_history() { # <home> <rows>
+  local home=$1 rows=$2 seq verdict task
+  mkdir -p "$home/state"
+  : > "$home/state/branch-outcomes.jsonl"
+  seq=1
+  while [ "$seq" -le "$rows" ]; do
+    verdict=routine
+    task="task-$seq"
+    case "$seq" in 100|105|112|128) verdict=captain ;; esac
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"fixture","verdict":"%s","summary":"summary-%s","silent":false}\n' \
+      "$seq" "$seq" "$task" "$verdict" "$seq" >> "$home/state/branch-outcomes.jsonl"
+    seq=$((seq + 1))
+  done
+}
+
+test_outcome_retention_keeps_64_processed_and_all_pending_rows() {
+  local empty short exact full active cold unread unprocessed appended out status original_first plan
+  empty="$TMP_ROOT/store-retention-empty"
+  short="$TMP_ROOT/store-retention-short"
+  exact="$TMP_ROOT/store-retention-exact"
+  full="$TMP_ROOT/store-retention-full"
+  mkdir -p "$empty/state"
+  FM_HOME="$empty" "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null \
+    || fail "empty retention apply failed"
+  [ ! -e "$empty/state/.branch-outcomes-base" ] || fail "empty retention invented a base"
+
+  seed_outcome_history "$short" 63
+  printf '63\n' > "$short/state/.branch-outcomes-cursor"
+  printf '63\n' > "$short/state/.branch-outcomes-processed"
+  FM_HOME="$short" "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null \
+    || fail "short retention apply failed"
+  [ "$(wc -l < "$short/state/branch-outcomes.jsonl" | tr -d ' ')" = 63 ] \
+    || fail "fewer than 64 processed rows were compacted"
+
+  seed_outcome_history "$exact" 64
+  printf '64\n' > "$exact/state/.branch-outcomes-cursor"
+  printf '64\n' > "$exact/state/.branch-outcomes-processed"
+  FM_HOME="$exact" "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null \
+    || fail "exact-window retention apply failed"
+  [ "$(wc -l < "$exact/state/branch-outcomes.jsonl" | tr -d ' ')" = 64 ] \
+    || fail "exactly 64 processed rows changed"
+
+  seed_outcome_history "$full" 128
+  sed '1s/^/  /; 1s/$/  /' "$full/state/branch-outcomes.jsonl" > "$full/state/branch-outcomes.spaced"
+  mv "$full/state/branch-outcomes.spaced" "$full/state/branch-outcomes.jsonl"
+  original_first=$(head -n 1 "$full/state/branch-outcomes.jsonl")
+  printf '112\n' > "$full/state/.branch-outcomes-cursor"
+  printf '100\n' > "$full/state/.branch-outcomes-processed"
+  plan=$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" compact --dry-run) \
+    || fail "retention dry-run failed"
+  [ "$(printf '%s\n' "$plan" | jq -c '[.base,.tail,.processed,.retain_processed,.archive_through,.move_rows,.active_rows_after]')" = \
+    '[1,128,100,64,36,36,92]' ] || fail "retention dry-run returned the wrong boundary: $plan"
+  [ "$(wc -l < "$full/state/branch-outcomes.jsonl" | tr -d ' ')" = 128 ] \
+    || fail "retention dry-run changed the active store"
+  FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null \
+    || fail "retention apply failed"
+  active=$(wc -l < "$full/state/branch-outcomes.jsonl" | tr -d ' ')
+  cold=$(wc -l < "$full/state/branch-outcomes-cold.jsonl" | tr -d ' ')
+  [ "$active" = 92 ] || fail "active store has $active rows, not 64 processed plus 28 pending"
+  [ "$cold" = 36 ] || fail "cold store has $cold rows, not the moved processed prefix"
+  [ "$(cat "$full/state/.branch-outcomes-base")" = $'fm-branch-outcomes-base-v1\t37' ] \
+    || fail "active base does not name retained frontier window"
+  [ "$(head -n 1 "$full/state/branch-outcomes.jsonl" | jq -r .seq)" = 37 ] \
+    || fail "frontier-inclusive window did not retain seq 37"
+  [ "$(tail -n 1 "$full/state/branch-outcomes-cold.jsonl" | jq -r .seq)" = 36 ] \
+    || fail "cold prefix did not end immediately before the active base"
+  [ "$(head -n 1 "$full/state/branch-outcomes-cold.jsonl")" = "$original_first" ] \
+    || fail "cold storage reserialized immutable outcome bytes"
+
+  unread=$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "retained unread read failed"
+  [ "$(printf '%s\n' "$unread" | jq -sc 'map(.seq)')" = '[113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128]' ] \
+    || fail "compaction lost or reordered unread rows"
+  unprocessed=$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "retained unprocessed read failed"
+  [ "$(printf '%s\n' "$unprocessed" | jq -sc 'map(.seq)')" = '[105,112]' ] \
+    || fail "compaction lost exact unprocessed membership: $unprocessed"
+  [ "$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" list --seq 1 | jq -r .summary)" = summary-1 ] \
+    || fail "exact cold lookup lost the first immutable row"
+  [ "$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" list --seq 37 | jq -r .summary)" = summary-37 ] \
+    || fail "exact active lookup lost the base row"
+  out=$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" list --seq 130 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact lookup accepted a sequence beyond the durable tail"
+  assert_contains "$out" "exact outcome sequence 130 does not exist" "missing exact lookup lost its identity refusal"
+  [ "$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" list --all | jq -s '.[-1].seq')" = 128 ] \
+    || fail "explicit full history did not join cold and active rows"
+
+  appended=$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-129 --verdict routine --summary summary-129) || fail "post-compaction append failed"
+  [ "$appended" = 129 ] || fail "post-compaction append renumbered the stable sequence"
+  [ "$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" append --once-task \
+    --task task-1 --verdict routine --summary summary-1 --wake fixture)" = 1 ] \
+    || fail "once-task did not find exact cold identity"
+  out=$(FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" append --once-task \
+    --task task-1 --verdict routine --summary changed --wake fixture 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "once-task accepted conflicting cold identity"
+  assert_contains "$out" "conflicting once-task outcome" "cold identity refusal lost its diagnostic"
+
+  rm -f "$full/state/.branch-outcome-index-ready" "$full/state/.task-1.branch-outcome-index"
+  FM_HOME="$full" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "cold index rebuild failed"
+  [ -f "$full/state/.task-1.branch-outcome-index" ] || fail "index rebuild omitted cold-only task provenance"
+  pass "retention keeps exactly 64 processed rows plus every unread and unprocessed row with stable cold lookup"
+}
+
+test_outcome_compaction_serializes_and_recovers_publication() {
+  local home crash ack cold_copy journal_bad mode pid out real_cat seq shim_dir status unprocessed
+  home="$TMP_ROOT/store-retention-concurrent"
+  seed_outcome_history "$home" 128
+  printf '100\n' > "$home/state/.branch-outcomes-cursor"
+  printf '100\n' > "$home/state/.branch-outcomes-processed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null &
+  pid=$!
+  for seq in 129 130 131 132; do
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+      --task "task-$seq" --verdict routine --summary "summary-$seq" >/dev/null &
+  done
+  wait "$pid" || fail "concurrent compaction failed"
+  wait || fail "an append racing compaction failed"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --all | jq -sc '[length,.[0].seq,.[-1].seq]')" = '[132,1,132]' ] \
+    || fail "compaction and append did not serialize to one continuous history"
+
+  for mode in after-cold after-active after-base after-processed; do
+    crash="$TMP_ROOT/store-retention-$mode"
+    seed_outcome_history "$crash" 128
+    printf '112\n' > "$crash/state/.branch-outcomes-cursor"
+    printf '100\n' > "$crash/state/.branch-outcomes-processed"
+    out=$(FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT="$mode" FM_HOME="$crash" \
+      "$ROOT/bin/fm-branch-outcome.sh" compact --apply 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$mode interruption unexpectedly completed: $out"
+    [ -e "$crash/state/.branch-outcomes-compaction" ] || fail "$mode interruption lost its recovery journal"
+    [ "$(FM_HOME="$crash" "$ROOT/bin/fm-branch-outcome.sh" list --all | jq -sc '[length,.[0].seq,.[-1].seq]')" = '[128,1,128]' ] \
+      || fail "$mode recovery did not restore complete history"
+    [ ! -e "$crash/state/.branch-outcomes-compaction" ] || fail "$mode recovery left its journal active"
+  done
+
+  ack="$TMP_ROOT/store-retention-ack-transaction"
+  seed_outcome_history "$ack" 128
+  printf '100\n' > "$ack/state/.branch-outcomes-cursor"
+  printf '99\n' > "$ack/state/.branch-outcomes-processed"
+  out=$(FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT=after-cold FM_HOME="$ack" \
+    "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 100 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "interrupted acknowledgement unexpectedly completed: $out"
+  [ "$(cat "$ack/state/.branch-outcomes-processed")" = 99 ] \
+    || fail "interrupted acknowledgement advanced the marker outside its recovery journal"
+  [ -e "$ack/state/.branch-outcomes-compaction" ] \
+    || fail "interrupted acknowledgement lost its recovery journal"
+  unprocessed=$(FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) \
+    || fail "ordinary read did not recover the acknowledged compaction"
+  [ -z "$unprocessed" ] || fail "recovered acknowledgement left seq 100 unprocessed: $unprocessed"
+  [ "$(cat "$ack/state/.branch-outcomes-processed")" = 100 ] \
+    || fail "recovered acknowledgement did not publish its exact marker"
+  [ "$(head -n 1 "$ack/state/branch-outcomes.jsonl" | jq -r .seq)" = 37 ] \
+    || fail "recovered acknowledgement did not retain the frontier-inclusive window"
+
+  FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-129 --verdict captain --summary summary-129 >/dev/null \
+    || fail "failed-compaction acknowledgement fixture append failed"
+  FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 129 \
+    || fail "failed-compaction acknowledgement fixture read failed"
+  cold_copy="$ack/cold-before-copy-failure.jsonl"
+  cp "$ack/state/branch-outcomes-cold.jsonl" "$cold_copy"
+  shim_dir="$ack/failing-copy-bin"
+  mkdir -p "$shim_dir"
+  real_cat=$(command -v cat)
+  printf '%s\n' '#!/bin/sh' \
+    "case \"\${1:-}\" in */branch-outcomes-cold.jsonl) exit 74 ;; esac" \
+    "exec '$real_cat' \"\$@\"" > "$shim_dir/cat"
+  chmod +x "$shim_dir/cat"
+  out=$(PATH="$shim_dir:$PATH" FM_HOME="$ack" \
+    "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 129 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "acknowledgement ignored a cold-evidence copy failure"
+  [ "$(cat "$ack/state/.branch-outcomes-processed")" = 100 ] \
+    || fail "cold-copy failure advanced the acknowledgement before journal publication"
+  cmp -s "$ack/state/branch-outcomes-cold.jsonl" "$cold_copy" \
+    || fail "cold-copy failure changed historical evidence"
+  [ ! -e "$ack/state/.branch-outcomes-compaction" ] \
+    || fail "cold-copy failure published a compaction journal"
+
+  sed '1s/"seq":1/"seq":2/' "$ack/state/branch-outcomes-cold.jsonl" > "$ack/state/cold.bad"
+  mv "$ack/state/cold.bad" "$ack/state/branch-outcomes-cold.jsonl"
+  out=$(FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 129 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "acknowledgement accepted malformed cold evidence"
+  [ "$(cat "$ack/state/.branch-outcomes-processed")" = 100 ] \
+    || fail "failed compaction advanced the acknowledgement before journal publication"
+  [ ! -e "$ack/state/.branch-outcomes-compaction" ] \
+    || fail "preparation failure published a compaction journal"
+
+  journal_bad="$TMP_ROOT/store-retention-journal-trailing"
+  seed_outcome_history "$journal_bad" 128
+  printf '112\n' > "$journal_bad/state/.branch-outcomes-cursor"
+  printf '100\n' > "$journal_bad/state/.branch-outcomes-processed"
+  FM_BRANCH_OUTCOME_TEST_COMPACTION_INTERRUPT=after-cold FM_HOME="$journal_bad" \
+    "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null 2>&1 || true
+  printf 'trailing-record\n' >> "$journal_bad/state/.branch-outcomes-compaction"
+  out=$(FM_HOME="$journal_bad" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "recovery accepted a trailing compaction-journal record"
+  assert_contains "$out" "compaction journal is malformed" \
+    "trailing-journal refusal lost its diagnostic"
+
+  pass "compaction and acknowledgement serialize with appends and recover or refuse every publication boundary"
+}
+
+test_outcome_retention_refuses_identity_damage_without_loading_cold_normally() {
+  local home malformed_base out status
+  home="$TMP_ROOT/store-retention-corrupt"
+  seed_outcome_history "$home" 128
+  printf '112\n' > "$home/state/.branch-outcomes-cursor"
+  printf '100\n' > "$home/state/.branch-outcomes-processed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null || fail "corruption fixture compaction failed"
+
+  sed '1s/"seq":1/"seq":2/' "$home/state/branch-outcomes-cold.jsonl" > "$home/state/cold.bad"
+  mv "$home/state/cold.bad" "$home/state/branch-outcomes-cold.jsonl"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 64 >/dev/null \
+    || fail "ordinary retained-window read unnecessarily parsed cold evidence"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --seq 37 | jq -r .summary)" = summary-37 ] \
+    || fail "exact active lookup unnecessarily parsed malformed cold evidence"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --seq 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact lookup accepted malformed cold evidence"
+  assert_contains "$out" "cold outcome evidence is malformed" "cold refusal lost its diagnostic"
+
+  sed '1s/"seq":37/"seq":38/' "$home/state/branch-outcomes.jsonl" > "$home/state/active.bad"
+  mv "$home/state/active.bad" "$home/state/branch-outcomes.jsonl"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "ordinary read accepted an active sequence gap"
+  assert_contains "$out" "malformed or non-sequential" "active-gap refusal lost its diagnostic"
+
+  home="$TMP_ROOT/store-retention-behind-base"
+  seed_outcome_history "$home" 128
+  printf '112\n' > "$home/state/.branch-outcomes-cursor"
+  printf '100\n' > "$home/state/.branch-outcomes-processed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" compact --apply >/dev/null \
+    || fail "behind-base fixture compaction failed"
+  printf '1\n' > "$home/state/.branch-outcomes-processed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unprocessed accepted a marker behind the archived prefix"
+  assert_contains "$out" "behind the archived prefix" "behind-base refusal lost its diagnostic"
+  printf '128\n' > "$home/state/.branch-outcome-index-ready"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "processed-init ready shortcut accepted a marker behind the archived prefix"
+  assert_contains "$out" "behind the archived prefix" \
+    "processed-init behind-base refusal lost its diagnostic"
+
+  malformed_base="$TMP_ROOT/store-retention-malformed-base"
+  seed_outcome_history "$malformed_base" 4
+  for invalid_base in not-a-sequence 0; do
+    printf 'fm-branch-outcomes-base-v1\t%s\n' "$invalid_base" > "$malformed_base/state/.branch-outcomes-base"
+    out=$(FM_HOME="$malformed_base" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "ordinary read accepted malformed active base $invalid_base"
+    assert_contains "$out" "outcome base is malformed" "malformed-base refusal lost its diagnostic"
+  done
+  printf 'fm-branch-outcomes-base-v1\t1\ntrailing-record\n' > "$malformed_base/state/.branch-outcomes-base"
+  out=$(FM_HOME="$malformed_base" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "ordinary read accepted a trailing outcome-base record"
+  assert_contains "$out" "outcome base is malformed" "trailing-base refusal lost its diagnostic"
+  pass "active gaps, cold corruption, and behind-base cursors fail closed while normal reads stay on the active store"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -935,6 +1203,9 @@ test_outcome_recent_window_boundaries
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
 test_outcome_index_migration_preserves_legacy_endpoint_records
+test_outcome_retention_keeps_64_processed_and_all_pending_rows
+test_outcome_compaction_serializes_and_recovers_publication
+test_outcome_retention_refuses_identity_damage_without_loading_cold_normally
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

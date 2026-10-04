@@ -162,11 +162,12 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_task_continuation", "fm_branch_re
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
-// Auxiliary evidence for duplicate/terminal coalescing, not a delivery or
-// acknowledgement boundary. Rows outside this recent window stay unknown, so
-// coalescing keeps an actionable row unless the bounded evidence proves that a
-// newer exact duplicate or terminal disposition supersedes it.
-const OUTCOME_HISTORY_WINDOW = 200;
+// The outcome owner retains this many processed rows in its active store.
+// Every unread and unprocessed row is loaded separately and merged below, so
+// this auxiliary coalescing context is not a pending-work limit. Rows outside
+// it remain unknown and cannot prove completion, acknowledgement, or
+// supersession.
+const OUTCOME_HISTORY_WINDOW = 64;
 const MERGE_NOTE_BOAT = "⛵";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
@@ -643,6 +644,12 @@ function coalesceExactOutcomeRows(rows: OutcomeRow[], history: OutcomeRow[] = ro
       candidate.verdict === row.verdict && candidate.summary === row.summary && candidate.silent === row.silent)?.seq;
     return firstMaterialSequence === undefined || firstMaterialSequence > terminal;
   });
+}
+
+function includeRequiredOutcomeRows(history: OutcomeRow[], required: OutcomeRow[]): OutcomeRow[] {
+  const rows = new Map(history.map((row) => [row.seq, row]));
+  required.forEach((row) => rows.set(row.seq, row));
+  return [...rows.values()].sort((left, right) => left.seq - right.seq);
 }
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
@@ -1319,7 +1326,7 @@ export default function (pi: ExtensionAPI) {
       rows.push(row);
     }
     const history = await readOutcomeHistory();
-    return history === null ? null : coalesceExactOutcomeRows(rows, history);
+    return history === null ? null : coalesceExactOutcomeRows(rows, includeRequiredOutcomeRows(history, rows));
   }
 
   async function readOutcomeHistory(): Promise<OutcomeRow[] | null> {
@@ -1545,7 +1552,10 @@ export default function (pi: ExtensionAPI) {
       }
       const history = await readOutcomeHistory();
       if (history === null) return false;
-      const deliveredSequences = new Set(coalesceExactOutcomeRows(parsedUnread, history).map((row) => row.seq));
+      const deliveredSequences = new Set(coalesceExactOutcomeRows(
+        parsedUnread,
+        includeRequiredOutcomeRows(history, parsedUnread),
+      ).map((row) => row.seq));
       for (const row of parsedUnread) {
         // The last cancellation point of this row: everything from here to
         // its mark-read is synchronous delivery plus the awaited script that

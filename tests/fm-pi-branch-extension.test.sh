@@ -6109,6 +6109,108 @@ test_native_compact_continuation_with_installed_session_manager() {
     node "$ROOT/tests/continuation-native.mjs" || fail "installed SDK compact continuation workflow failed"
 }
 
+test_retained_history_window_is_conservative_at_its_edges() {
+  local repo home out status
+  repo="$TMP_ROOT/retained-history-edges-root"
+  home="$TMP_ROOT/retained-history-edges-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  set +e
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, sentToMain, mainEntries, mainTools, defaultSessionCtx, home }; })()`);
+const { fire, settle, sentToMain, mainEntries, mainTools, defaultSessionCtx, home } = globalThis.__t;
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+
+const identity = (n) => n.toString(16).padStart(64, "0");
+const rows = [];
+for (let seq = 1; seq <= 130; seq += 1) {
+  rows.push({ seq, epoch: seq, task: `padding-${seq}`, wake: "fixture", verdict: "routine", summary: `padding-${seq}`, silent: false });
+}
+const replace = (seq, row) => {
+  rows[seq - 1] = {
+    seq, epoch: seq, wake: "fixture", silent: false, ...row,
+    ...(row.taskGeneration ? { statusEndpoint: seq, statusIdent: `fixture-${seq}` } : {}),
+  };
+};
+replace(1, { task: "outside", verdict: "routine", summary: "old repeated material", taskGeneration: "g-outside", evidenceKey: identity(1), taskDisposition: "in_flight" });
+replace(2, { task: "outside", verdict: "routine", summary: "old terminal evidence", taskGeneration: "g-outside", evidenceKey: identity(2), taskDisposition: "archived" });
+replace(67, { task: "inside", verdict: "routine", summary: "hot repeated material", taskGeneration: "g-inside", evidenceKey: identity(3), taskDisposition: "in_flight" });
+replace(68, { task: "inside", verdict: "routine", summary: "hot terminal evidence", taskGeneration: "g-inside", evidenceKey: identity(4), taskDisposition: "done" });
+replace(127, { task: "outside", verdict: "routine", summary: "old repeated material", taskGeneration: "g-outside", evidenceKey: identity(1), taskDisposition: "archived" });
+replace(128, { task: "inside", verdict: "routine", summary: "hot repeated material", taskGeneration: "g-inside", evidenceKey: identity(3), taskDisposition: "done" });
+replace(129, { task: "inside", verdict: "routine", summary: "new material after terminal", taskGeneration: "g-inside", evidenceKey: identity(5), taskDisposition: "done" });
+replace(130, { task: "edge-decision", verdict: "captain", summary: "exact boundary decision remains actionable" });
+writeFileSync(`${home}/state/branch-outcomes.jsonl`, rows.map(JSON.stringify).join("\n") + "\n");
+writeFileSync(`${home}/state/.branch-outcomes-cursor`, "126\n");
+writeFileSync(`${home}/state/.branch-outcomes-processed`, "126\n");
+writeFileSync(`${home}/state/.branch-outcome-index-ready`, "130\n");
+mkdirSync(`${home}/data/edge-decision`, { recursive: true });
+writeFileSync(`${home}/state/edge-decision.meta`, `spawn_gen=g-edge-decision\nproject=${home}/projects/approved\nwindow=fm-edge-decision\n`);
+writeFileSync(`${home}/state/edge-decision.status`, "working: fixture\n");
+writeFileSync(`${home}/data/edge-decision/task.json`, `${JSON.stringify({
+  schema: "fm-task.v1", id: "edge-decision", title: "edge-decision", body: "fixture", state: "done", kind: "ship",
+  repo: "", priority: "", created: "2026-10-04", closed: null, completion: null, hold: null,
+  deferred_until: null, blocked_by: [], links: {}, history: [], updated_at: "2026-10-04T00:00:00Z",
+  progress: { acceptance: "fixture", current_state: "fixture", remaining_gap: "fixture", next_step: "fixture" },
+})}\n`);
+
+await fire("session_start", {}, defaultSessionCtx);
+await settle(() => mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === 130),
+  "edge captain outcome");
+await settle(() => sentToMain.some((item) => item.message.customType === "fm-branch-process"),
+  "edge processing request");
+const routine = sentToMain.filter((item) => item.message.customType === "fm-branch-merge").map((item) => item.message.content);
+if (routine.join("\n") !== "⛵ outside: old repeated material\n⛵ inside: new material after terminal") {
+  throw new Error(`the retained window did not conservatively deliver cold-context uncertainty and suppress only hot-proved obsolete material: ${JSON.stringify(routine)}`);
+}
+const request = sentToMain.filter((item) => item.message.customType === "fm-branch-process").at(-1);
+if (!request?.message.content.includes('sequences="130"')) throw new Error(`exact boundary decision was not requested: ${request?.message.content}`);
+const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+const loaded = await outcomes.execute("load-edge", { sequences: "130" }, undefined, undefined, {});
+if (loaded.isError || !loaded.content[0].text.includes("exact boundary decision remains actionable")) {
+  throw new Error(`exact edge load failed: ${JSON.stringify(loaded)}`);
+}
+const acknowledged = await processed.execute("ack-edge", { sequences: "130" }, undefined, undefined, {});
+if (acknowledged.isError) throw new Error(`exact edge acknowledgement failed: ${JSON.stringify(acknowledged)}`);
+const active = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map(JSON.parse);
+if (active.length !== 64 || active[0].seq !== 67 || active.at(-1).seq !== 130) {
+  throw new Error(`acknowledgement did not retain the frontier-inclusive 64-row window: ${JSON.stringify([active.length, active[0]?.seq, active.at(-1)?.seq])}`);
+}
+process.exit(0);
+EOF
+  )
+  status=$?
+  set -e
+  expect_code 0 "$status" "retained history edge behavior must stay conservative: $out"
+  pass "retained history suppresses only hot-proved obsolete duplicates and preserves cold-context uncertainty, new material, and exact decisions"
+}
+
+test_outcome_retention_with_installed_pi_session() {
+  local home out sdk status
+  sdk="${FM_PI_PACKAGE_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
+  if [ ! -f "$sdk/dist/index.js" ]; then
+    printf 'skip: installed-Pi outcome-retention regression requires installed Pi SDK\n'
+    return
+  fi
+  home="$TMP_ROOT/installed-pi-outcome-retention-home"
+  mkdir -p "$home"
+  set +e
+  out=$(env -u FIRSTMATE_OP -u FM_TASK_ID FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RETENTION_OUTCOME_SCRIPT="$ROOT/bin/fm-branch-outcome.sh" \
+    node "$ROOT/tests/fm-pi-branch-retention-installed.mjs" "$ROOT" "$home" "$sdk" 2>&1)
+  status=$?
+  set -e
+  expect_code 0 "$status" "installed Pi AgentSession must preserve active/cold retention and ordinary admission: $out"
+  case "$out" in
+    *'"retainedProcessedRows":64'*'"runtime":"installed AgentSession + DefaultResourceLoader"'*'"networkCalls":0'*) ;;
+    *) fail "installed Pi retention regression did not report its retention and network boundary: $out" ;;
+  esac
+  pass "installed Pi keeps 64 processed rows, authenticates exact outcomes across compaction, and admits ordinary work"
+}
+
 test_continuation_archive_during_report_settlement() {
   local repo home out status
   repo="$TMP_ROOT/archive-report-root"
@@ -6677,3 +6779,5 @@ test_bounded_outcome_history_keeps_unknown_older_work_live
 test_bounded_outcome_history_in_installed_pi_session
 test_continuation_archive_during_report_settlement
 test_native_compact_continuation_with_installed_session_manager
+test_retained_history_window_is_conservative_at_its_edges
+test_outcome_retention_with_installed_pi_session

@@ -1286,7 +1286,7 @@ families_for_changed_path() {
     bin/fm-task-record.py|bin/fm-task-progress-lib.sh)
       printf '%s\n' "__script__:fm-task-progress.test.sh"
       ;;
-    tests/continuation-native.mjs)
+    tests/continuation-native.mjs|tests/fm-pi-branch-retention-installed.mjs)
       printf '%s\n' "__script__:fm-pi-branch-extension.test.sh"
       ;;
     tests/fm-short-operations-cases.mjs)
