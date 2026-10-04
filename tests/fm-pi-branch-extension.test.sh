@@ -6368,6 +6368,7 @@ for (let seq = 1; seq <= 1000; seq += 1) {
     summary: `padding-${seq}-${"x".repeat(1200)}`, silent: false,
   });
 }
+
 const replace = (seq, row) => {
   rows[seq - 1] = {
     seq, epoch: seq, wake: "fixture", silent: false, ...row,
@@ -6459,6 +6460,28 @@ EOF
     *) fail "bounded history regression did not report its greater-than-1-MiB fixture: $out" ;;
   esac
   pass "$out"
+}
+
+test_bounded_outcome_history_in_installed_pi_session() {
+  local home out sdk status
+  sdk="${FM_PI_PACKAGE_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
+  if [ ! -f "$sdk/dist/index.js" ]; then
+    printf 'skip: installed-Pi bounded outcome history regression requires installed Pi SDK\n'
+    return
+  fi
+  home="$TMP_ROOT/installed-pi-bounded-history-home"
+  mkdir -p "$home"
+  set +e
+  out=$(env -u FIRSTMATE_OP -u FM_TASK_ID FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    node "$ROOT/tests/fm-pi-branch-installed-session.mjs" "$ROOT" "$home" "$sdk" 2>&1)
+  status=$?
+  set -e
+  expect_code 0 "$status" "installed Pi AgentSession must preserve bounded history delivery and ordinary admission: $out"
+  case "$out" in
+    *'"runtime":"installed AgentSession + DefaultResourceLoader"'*'"networkCalls":0'*) ;;
+    *) fail "installed Pi regression did not report its runtime and network boundary: $out" ;;
+  esac
+  pass "installed Pi AgentSession bounds >1 MiB history, authenticates exact outcomes, and admits ordinary work"
 }
 
 test_short_task_success_reaches_main_with_authenticated_body() {
@@ -6651,5 +6674,6 @@ test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 test_exact_notification_coalescing_and_terminal_supersession
 test_bounded_outcome_history_keeps_unknown_older_work_live
+test_bounded_outcome_history_in_installed_pi_session
 test_continuation_archive_during_report_settlement
 test_native_compact_continuation_with_installed_session_manager
