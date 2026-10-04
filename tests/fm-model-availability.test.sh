@@ -14,7 +14,11 @@ esac
 EOF
 cat > "$dir/bin/pi" <<'EOF'
 #!/usr/bin/env bash
-printf 'provider model context\nanthropic claude-fable-5 1M\n'
+case "$2" in
+  anthropic) printf 'provider model context\nanthropic claude-fable-5 1M\n' ;;
+  other) printf 'provider model context\nother other-model 1M\n' ;;
+  claude-fable-5) printf 'provider model context\nanthropic claude-fable-5 1M\n' ;;
+esac
 EOF
 cat > "$dir/bin/pi-signed" <<'EOF'
 #!/usr/bin/env bash
@@ -34,6 +38,12 @@ printf '%s' "$out" | jq -e '.harness == "claude" and .model == "fable" and
 out=$(PATH="$dir/bin:$PATH" "$tool" pi claude-fable-5)
 printf '%s' "$out" | jq -e '.resolution == "available" and .harness == "pi"' >/dev/null \
   || fail "Pi's exact catalog model was not found: $out"
+out=$(PATH="$dir/bin:$PATH" "$tool" pi anthropic/claude-fable-5)
+printf '%s' "$out" | jq -e '.resolution == "available" and .harness == "pi"' >/dev/null \
+  || fail "Pi's qualified catalog model was not found: $out"
+out=$(PATH="$dir/bin:$PATH" "$tool" pi other/claude-fable-5)
+printf '%s' "$out" | jq -e '.resolution == "unsupported-on-this-harness"' >/dev/null \
+  || fail "Pi matched a model from the wrong provider: $out"
 out=$(PATH="$dir/bin:$PATH" "$tool" pi absent-model)
 printf '%s' "$out" | jq -e '.resolution == "unsupported-on-this-harness" and .harness == "pi"' >/dev/null \
   || fail "reachable catalog omission was not kept harness-specific: $out"

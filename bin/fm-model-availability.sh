@@ -25,10 +25,19 @@ catalog_status=unverified
 catalog_source=none
 catalog_rows=''
 if [ "$harness" = pi ] || [ "$harness" = pi-signed ]; then
-  if command -v "$harness" >/dev/null 2>&1 && catalog_rows=$("$harness" --list-models "$model" 2>/dev/null); then
+  catalog_filter=$model
+  catalog_model=$model
+  catalog_provider=''
+  case "$model" in
+    */*) catalog_provider=${model%%/*}; catalog_model=${model#*/}; catalog_filter=$catalog_provider ;;
+  esac
+  if [ -n "$catalog_filter" ] && [ -n "$catalog_model" ] \
+    && command -v "$harness" >/dev/null 2>&1 \
+    && catalog_rows=$("$harness" --list-models "$catalog_filter" 2>/dev/null); then
     catalog_source="$harness --list-models"
     catalog_status=unsupported
-    if printf '%s\n' "$catalog_rows" | awk -v model="$model" 'NR > 1 && $2 == model {found=1} END {exit !found}'; then
+    if printf '%s\n' "$catalog_rows" | awk -v provider="$catalog_provider" -v model="$catalog_model" \
+      'NR > 1 && $2 == model && (provider == "" || $1 == provider) {found=1} END {exit !found}'; then
       catalog_status=available
     fi
   fi

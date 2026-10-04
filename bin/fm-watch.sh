@@ -1651,7 +1651,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 }
 
 integrate_after_ready_tick() {
-  local statusf task last marker probe declaration result
+  local statusf task last marker probe observed generation cached declaration result
   for statusf in "$STATE"/*.status; do
     [ -f "$statusf" ] && [ ! -L "$statusf" ] || continue
     task=${statusf##*/}
@@ -1659,12 +1659,25 @@ integrate_after_ready_tick() {
     [[ $task =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || continue
     marker="$STATE/.integrate-after-ready-$task"
     probe="$STATE/.integrate-after-probed-$task"
-    last=$(status_declared_wait_line "$statusf")
+    observed="$STATE/.integrate-after-observed-$task"
+    generation=$(fm_wake_signal_sig "$statusf") || continue
+    cached=$(cat "$observed" 2>/dev/null || true)
+    if [[ $cached == "$generation"$'\n'* ]]; then
+      declaration=${cached#*$'\n'}
+      if [ "$declaration" = '-' ]; then last=''; else last=${declaration#*:}; fi
+    else
+      last=$(status_declared_wait_line "$statusf")
+      if status_is_paused "$last" && [[ $last == *'integrate-after: '* ]]; then
+        declaration=$(grep -nFx -- "$last" "$statusf" | tail -1)
+      else
+        declaration='-'
+      fi
+      printf '%s\n%s' "$generation" "$declaration" > "$observed" || exit 1
+    fi
     if ! status_is_paused "$last" || [[ $last != *'integrate-after: '* ]]; then
       rm -f "$marker" "$probe"
       continue
     fi
-    declaration="$(grep -nFx -- "$last" "$statusf" | tail -1):$last"
     [ "$(cat "$marker" 2>/dev/null || true)" != "$declaration" ] || continue
     if [ "$(cat "$probe" 2>/dev/null || true)" = "$declaration" ] \
       && [ "$(age_of "$probe")" -lt "$CHECK_INTERVAL" ]; then
@@ -1674,8 +1687,7 @@ integrate_after_ready_tick() {
     result=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-integrate-after.sh" check "$task" 2>/dev/null) || continue
     [[ $result == "integration-ready: $task (provider landing confirmed)" ]] || continue
-    [ "$(status_declared_wait_line "$statusf")" = "$last" ] || continue
-    [ "$(grep -nFx -- "$last" "$statusf" | tail -1):$last" = "$declaration" ] || continue
+    [ "$(fm_wake_signal_sig "$statusf")" = "$generation" ] || continue
     FM_INTEGRATE_AFTER_READY_REASON="check: integrate-after ready: $task; confirm final validation and landing order"
     fm_wake_append check "integrate-after-ready-$task" "$FM_INTEGRATE_AFTER_READY_REASON" || exit 1
     printf '%s' "$declaration" > "$marker" || exit 1
