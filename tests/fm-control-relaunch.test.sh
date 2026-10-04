@@ -537,31 +537,43 @@ test_relaunch_keeps_the_pr_merge_poll_watching() {
   pass "fm-control relaunch: a registered PR keeps its merge poll, with tracing on and off"
 }
 
+parse_pr_record() {  # <meta-file>; one fresh process, like each watcher sweep
+  bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$1" 2>&1
+}
+
 test_a_record_with_a_key_after_pr_names_the_unwatched_task() {
-  local dir out
+  local dir out meta stamp url=https://github.com/example/repo/pull/43
   dir=$(new_case pr-warn rl43)
   add_ship_task "$dir" rl43 claude
-  printf 'pr=https://github.com/example/repo/pull/43\ncontrol_relaunch_tx=abc\n' >> "$dir/home/state/rl43.meta"
-  chmod 0600 "$dir/home/state/rl43.meta"
-  out=$(bash -c '
-    . "$1/bin/fm-pr-lib.sh"
-    fm_pr_metadata_identity_parse "$2"; fm_pr_metadata_identity_parse "$2"
-  ' _ "$ROOT" "$dir/home/state/rl43.meta" 2>&1)
+  meta=$dir/home/state/rl43.meta
+  stamp=$dir/home/state/.rl43.pr-meta-warned
+  printf 'pr=%s\ncontrol_relaunch_tx=abc\n' "$url" >> "$meta"
+  chmod 0600 "$meta"
+  out=$(parse_pr_record "$meta") && fail "a record corrupted after pr= must still be refused"
   case "$out" in
-    *"task rl43"*"no longer watched"*"bin/fm-pr-check.sh rl43 <pr-url>"*) ;;
+    *"task rl43"*"no longer watched"*"bin/fm-pr-check.sh rl43 $url"*) ;;
     *) fail "a record corrupted after pr= should name the task and the re-arm command"$'\n'"$out" ;;
   esac
-  [ "$(printf '%s\n' "$out" | grep -c 'no longer watched')" = 1 ] \
-    || fail "the unwatched diagnostic should appear once per process"$'\n'"$out"
+  out=$(parse_pr_record "$meta") && fail "a record corrupted after pr= must still be refused"
+  [ -z "$out" ] || fail "the next sweep in a new process should stay quiet"$'\n'"$out"
+  printf '%s\n' "$(( $(date +%s) - 21601 ))" > "$stamp"
+  out=$(parse_pr_record "$meta")
+  case "$out" in
+    *"task rl43"*"no longer watched"*) ;;
+    *) fail "an unacted record should be named again after 6 hours"$'\n'"$out" ;;
+  esac
+  out=$(parse_pr_record "$meta")
+  [ -z "$out" ] || fail "the repeated warning should restart the quiet period"$'\n'"$out"
 
   dir=$(new_case pr-clean rl44)
   add_ship_task "$dir" rl44 claude
   printf 'pr=https://github.com/example/repo/pull/44\n' >> "$dir/home/state/rl44.meta"
   chmod 0600 "$dir/home/state/rl44.meta"
-  out=$(bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$dir/home/state/rl44.meta" 2>&1) \
+  out=$(parse_pr_record "$dir/home/state/rl44.meta") \
     || fail "a clean record should still parse"$'\n'"$out"
   [ -z "$out" ] || fail "a clean record should print nothing"$'\n'"$out"
-  pass "a record with a key after pr= names the unwatched task once; a clean record is silent"
+  [ ! -e "$dir/home/state/.rl44.pr-meta-warned" ] || fail "a clean record should leave no warning stamp"
+  pass "a record with a key after pr= names the unwatched task, then stays quiet for 6 hours; a clean record is silent"
 }
 
 test_relaunch_without_a_pr_has_no_poll_to_keep() {

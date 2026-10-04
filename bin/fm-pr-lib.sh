@@ -359,16 +359,20 @@ fm_pr_regular_destination_on_device_or_absent() {
 }
 
 # A record with a foreign key after pr= is refused, which silently unwatches
-# the task's merge. Say so once per file per process, naming the task and the
-# re-arm command, on stderr; never fail harder than the refusal already does.
-FM_PR_META_WARNED=
+# the task's merge. Say so on stderr, naming the task and the re-arm command,
+# then stay quiet for 6 hours via a stamp beside the record, since watchers
+# exit between sweeps; never fail harder than the refusal already does.
 fm_pr_metadata_warn_unwatched() {
-  local file=$1 id
-  case "$FM_PR_META_WARNED" in *"|$file|"*) return 0 ;; esac
-  FM_PR_META_WARNED="$FM_PR_META_WARNED|$file|"
+  local file=$1 url=${2:-<pr-url>} id stamp now last
   id=$(basename -- "$file")
   id=${id%.meta}
-  echo "warning: task $id has a key after pr= in $file, so its PR merge is no longer watched; re-arm with: bin/fm-pr-check.sh $id <pr-url>" >&2
+  stamp="$(dirname -- "$file")/.$id.pr-meta-warned"
+  now=$(date +%s)
+  last=$(cat -- "$stamp" 2>/dev/null)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ $((now - last)) -ge 21600 ] || return 0
+  [ -L "$stamp" ] || printf '%s\n' "$now" 2>/dev/null > "$stamp" || true
+  echo "warning: task $id has a key after pr= in $file, so its PR merge is no longer watched; re-arm with: bin/fm-pr-check.sh $id $url" >&2
   return 0
 }
 
@@ -411,7 +415,7 @@ fm_pr_metadata_identity_parse() {
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
   if [ "$post_pr_invalid" -ne 0 ]; then
-    fm_pr_metadata_warn_unwatched "$file"
+    fm_pr_metadata_warn_unwatched "$file" "$FM_PR_META_URL"
     return 1
   fi
   [ -n "$FM_PR_META_URL" ]
