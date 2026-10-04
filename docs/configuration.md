@@ -580,6 +580,15 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Worker decides routine findings (config/worker-decides-findings)
+
+The optional local, gitignored `config/worker-decides-findings` presence flag opts this home into letting a no-mistakes ship worker answer its own routine ask-user gates without a firstmate round trip.
+With it present, generated and promoted ship briefs tell the worker to fix findings unambiguous toward accepted intent, decline pure style or preference nits outside it, record each self-decided gate's verdicts in one `working:` status line pointing at its findings file, and still escalate every gate the `ask-user-authority` skill classes as genuinely ambiguous.
+With the file absent, briefs keep the rule that every ask-user finding escalates to firstmate.
+The `--yes` ban is unchanged either way.
+`bin/fm-dod-lib.sh` owns the rendered worker policy and `ask-user-authority` owns the classification and firstmate's audit.
+The flag is a home-local preference and is not inherited by secondmate homes.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.

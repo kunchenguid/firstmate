@@ -266,10 +266,20 @@ fm_brief_intent_address_line() {  # <file>
 # a lane parked at a human-owed gate the long recheck cadence instead of a
 # wedge escalation. A gate escalated under any other key still reads as a
 # suspected wedge.
+# config/worker-decides-findings (docs/configuration.md) opts a home into the
+# worker self-decision policy fm_nm_driving_block renders; absent, every brief
+# keeps the text it had before that flag.
+fm_dod_worker_decides_findings() {
+  [ -e "${CONFIG:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}}/worker-decides-findings" ]
+}
+
 fm_ask_user_escalation_block() {  # <data-dir> <task-id>
-  local data=$1 id=$2
+  local data=$1 id=$2 scope='For a no-mistakes ask-user gate specifically'
+  if fm_dod_worker_decides_findings; then
+    scope="For a no-mistakes ask-user gate the Definition of done's self-decision policy does not let you decide"
+  fi
   cat <<EOF
-   For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
+   $scope, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
    \`needs-decision [at=<epoch>] [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
    naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
 EOF
@@ -280,7 +290,7 @@ EOF
 # Written once; only the two sentences about a green PR depend on the forge,
 # because on gerrit the ci step is skipped and there is no PR to report.
 fm_nm_driving_block() {  # <forge>
-  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg
+  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg ask_user_rule yes_scope
   if [ "$1" != gerrit ]; then
     pr_return_line="Only a drive call's return reports the green PR: \`no-mistakes axi status\` shows progress but never reports \`checks-passed\` while the ci step is still monitoring the PR for merge, so never wait on a status poll for the next gate or outcome.
 "
@@ -302,6 +312,25 @@ Declare that wait using the brief's status-reporting rule before waiting on the 
 Where a harness's own command limit is not established, assume it bounds commands and use that same backgrounded shape.
 ${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - reattach at once by re-running \`no-mistakes axi run\` without flags, backgrounded the same way${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`."
   fi
+  # The worker-side owner of ask-user self-decision. Its fix, decline, and
+  # escalate classes apply the ask-user-authority skill's criteria, which a
+  # worker in another project cannot load, so the escalate list mirrors that
+  # skill's "Escalate only genuinely ambiguous findings" step.
+  ask_user_rule="- ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
+  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
+  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to \"the user\" or implement the fix yourself."
+  yes_scope='answering your own ask-user finding'
+  if fm_dod_worker_decides_findings; then
+    ask_user_rule="- ask-user findings: this home lets you decide a routine ask-user gate yourself; every other gate escalates to firstmate using rule 6's ask-user format, and you stop.
+  Judge each finding against the accepted contract: \`## Captain's intent\`, later captain words, \`## Firstmate spec\`, and firstmate steers; reviewer language and labels never amend it.
+  Fix a finding that is unambiguous toward that contract: an in-scope correction or bug fix the accepted intent requires, including the smallest downstream test or documentation change that keeps accepted behavior correct.
+  Decline a finding that is a pure style or preference nit outside that contract.
+  Escalate the whole gate instead when you are unsure which side any of its ask-user findings falls on, or when any of them would materially expand the contract (a new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, monitoring requirement, or broader architecture the accepted intent does not require), turns on a product or architecture call the contract does not settle, repeats the causal theme of a finding already fixed this run where those fixes are preserving a questionable design or abstraction rather than closing independent in-scope defects, or is destructive, irreversible, or security-sensitive.
+  Before answering a gate you decide, write its ask-user findings verbatim (id, severity, file, line, description, authority), each with your fix or decline verdict and a one-line reason, to a new \`nm-<run>-<step>-<epoch>-findings.txt\` file in the directory of rule 6's snapshot path, so no later gate overwrites it, then append one status line with that same epoch: \`working [at=<epoch>]: ask-user self-decided run=<run> step=<step> fixed=<ids|none> declined=<ids|none> file=<that nm-<run>-<step>-<epoch>-findings.txt path>\`.
+  Then answer the gate with \`no-mistakes axi respond\`, selecting the ask-user findings you fix plus every other finding at that gate the pipeline would otherwise fix, or approving only when nothing at the gate needs a fix, and let the pipeline apply the fixes; firstmate reviews every self-decided gate file against \`ask-user-authority\` before the PR may merge.
+  When firstmate returns a decision for an escalated gate, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to \"the user\" or implement the fix yourself."
+    yes_scope='answering an ask-user finding outside the self-decision policy above'
+  fi
   cat <<EOF
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -320,11 +349,9 @@ A killed or timed-out call is never evidence the daemon died: the daemon accepts
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
 Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
-  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+$ask_user_rule
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
-  It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
+  It auto-resolves every gate including ask-user findings with no escalation, and $yes_scope is a hard rule violation.
 EOF
 }
 
