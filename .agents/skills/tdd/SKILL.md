@@ -43,5 +43,4 @@ Never write every test first and then every implementation.
 
 ## Relation to no-mistakes' test-quality rule
 
-Tests written here also follow no-mistakes' test-quality rule, which owns what a test may assert.
-Both rules aim at tests that prove behavior rather than implementation detail; the source-text rule is the stricter set.
+The test-quality rule in the no-mistakes skill (outside this repository) owns test-authority boundaries; this skill's rules reconcile with it rather than restating it.
