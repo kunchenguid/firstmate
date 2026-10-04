@@ -526,6 +526,10 @@ test_home_seed_no_projects_end_to_end() {
   assert_grep 'projects: ;' "$home/data/secondmates.md" "project-less registry did not render an empty projects field"
   [ "$(cat "$sub/.fm-secondmate-home")" = fdev ] || fail "project-less seed did not mark the subhome"
   assert_present "$sub/data/charter.md" "project-less seed did not copy the charter"
+  assert_present "$sub/data/backlog.md" "seed did not create the secondmate backlog before publication"
+  assert_present "$sub/state/home-summary.json" "seed did not publish the home summary after creating the backlog"
+  jq -e '.valid == true and .invalidity.kind == null' "$sub/state/home-summary.json" >/dev/null \
+    || fail "seed published an invalid summary after creating the backlog"
   [ -z "$(ls -A "$sub/projects" 2>/dev/null)" ] || fail "project-less seed cloned a project"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after project-less seed"
 

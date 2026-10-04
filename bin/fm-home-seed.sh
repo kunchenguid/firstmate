@@ -671,6 +671,10 @@ seed_rollback() {
     fi
   fi
 
+  if [ "${SEED_BACKLOG_CREATED:-0}" = 1 ] && [ -n "${SEED_HOME:-}" ] && [ -f "$SEED_HOME/data/backlog.md" ]; then
+    rm -f -- "$SEED_HOME/data/backlog.md"
+  fi
+
   if [ -n "${SEED_BACKUP_DIR:-}" ]; then
     restore_seed_file "$SEED_PARENT_REG_EXISTED" "$SEED_BACKUP_DIR/parent-secondmates.md" "$REG"
     rm -rf -- "$SEED_BACKUP_DIR" 2>/dev/null || true
@@ -860,6 +864,7 @@ seed_home() {
   SEED_HOME_CREATED=0
   SEED_HOME_ACQUIRED=0
   SEED_HOME_BACKED_UP=0
+  SEED_BACKLOG_CREATED=0
   SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
   SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
   : > "$SEED_CREATED_PROJECTS_FILE"
@@ -901,6 +906,15 @@ seed_home() {
     fi
   fi
   mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
+  if [ -L "$home/data/backlog.md" ] || { [ -e "$home/data/backlog.md" ] && [ ! -f "$home/data/backlog.md" ]; }; then
+    echo "error: secondmate backlog must be a regular file inside the home: $home/data/backlog.md" >&2
+    return 1
+  fi
+  if [ ! -e "$home/data/backlog.md" ]; then
+    printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md.tmp.$$"
+    mv -f -- "$home/data/backlog.md.tmp.$$" "$home/data/backlog.md"
+    SEED_BACKLOG_CREATED=1
+  fi
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"
@@ -980,6 +994,9 @@ seed_home() {
   mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" "$FM_ROOT/bin/fm-home-summary-refresh.sh" --best-effort || true
   SEED_COMMITTED=1
   seed_registry_lock_release
   trap - EXIT
