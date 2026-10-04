@@ -668,38 +668,62 @@ SH
 chmod +x "$REARM_SOURCE"
 pe_rearm() { FM_REARM_SOURCE="$REARM_SOURCE" pe_adapter "$HRECYCLE" "$@"; }
 recycle_registration="$HRECYCLE/state/procevent/recycle-src.source"
+recycle_case="a concurrent re-arm cannot recycle a live relistening source's claimed registration"
+RECYCLE_PROBES=100
+# The hold directory exists before any inode is freed, so it never takes one.
+recycle_hold="$TMP_ROOT/recycle-probes"
+mkdir -p "$recycle_hold"
+# Creates probe files in the registry directory, holding every one so each takes
+# a different free inode, until one receives <identity> (status 0) or the probe
+# budget is exhausted (status 1).
+recycle_probe() {  # <identity>
+  local probe
+  for _ in $(seq 1 "$RECYCLE_PROBES"); do
+    probe=$(mktemp "$HRECYCLE/state/procevent/.probe.XXXXXX") || fail "cannot create a recycle probe"
+    mv -- "$probe" "$recycle_hold/"
+    [ "$(file_identity "$recycle_hold/${probe##*/}")" = "$1" ] && return 0
+  done
+  return 1
+}
 pe_rearm register rearming recycle-src -- "$REARM_SOURCE" >/dev/null
-pe_rearm start recycle-src > "$TMP_ROOT/recycle.out" 2>&1 &
-recycle_pid=$!
-for round in 1 2; do
-  wait_for_lines "$HRECYCLE/polls" "$round" || fail "the re-arming runner never polled (round $round)"
-  claimed=$(file_identity "$recycle_registration") || fail "the claimed registration is missing (round $round)"
-  pe_rearm register rearming recycle-src -- "$REARM_SOURCE" >/dev/null
-  probes="$TMP_ROOT/recycle-probes-$round"
-  mkdir -p "$probes"
-  for _ in $(seq 1 100); do
-    probe=$(mktemp "$HRECYCLE/state/procevent/.probe.XXXXXX")
-    mv -- "$probe" "$probes/"
-    [ "$(file_identity "$probes/${probe##*/}")" != "$claimed" ] \
-      || fail "a new file received the claimed registration's identity while its runner held the claim (round $round)"
+# Control: the probes only prove the pin where this directory hands a freed
+# inode back within the budget. Filesystems that never recycle inodes (tmpfs,
+# APFS) cannot reproduce the race, so the case is skipped there, not passed.
+recycle_control=$(mktemp "$HRECYCLE/state/procevent/.control.XXXXXX")
+control_identity=$(file_identity "$recycle_control")
+rm -f -- "$recycle_control"
+if ! recycle_probe "$control_identity"; then
+  rm -f -- "$recycle_hold"/.probe.*
+  pe_rearm retire recycle-src >/dev/null
+  printf 'skip: %s: no freed inode was reused within %s files\n' "$recycle_case" "$RECYCLE_PROBES"
+else
+  rm -f -- "$recycle_hold"/.probe.*
+  pe_rearm start recycle-src > "$TMP_ROOT/recycle.out" 2>&1 &
+  recycle_pid=$!
+  for round in 1 2; do
+    wait_for_lines "$HRECYCLE/polls" "$round" || fail "the re-arming runner never polled (round $round)"
+    claimed=$(file_identity "$recycle_registration") || fail "the claimed registration is missing (round $round)"
+    pe_rearm register rearming recycle-src -- "$REARM_SOURCE" >/dev/null
+    recycle_probe "$claimed" \
+      && fail "a new file received the claimed registration's identity while its runner held the claim (round $round)"
+    rm -f -- "$recycle_hold"/.probe.*
+    : > "$HRECYCLE/trigger"
+    for _ in $(seq 1 300); do
+      [ "$(grep -c '^captured:' "$TMP_ROOT/recycle.out")" -ge "$round" ] && break
+      sleep 0.1
+    done
+    [ "$(grep -c '^captured:' "$TMP_ROOT/recycle.out")" -ge "$round" ] \
+      || fail "re-arming capture $round never completed: $(cat "$TMP_ROOT/recycle.out")"
+    assert_not_contains "$(cat "$TMP_ROOT/recycle.out")" "retired: recycle-src" \
+      "the runner retired a fresh re-registration as its own claimed registration"
+    assert_present "$recycle_registration" \
+      "a relistening source lost its registration after a concurrent re-arm (round $round)"
   done
-  rm -rf -- "$probes"
-  : > "$HRECYCLE/trigger"
-  for _ in $(seq 1 300); do
-    [ "$(grep -c '^captured:' "$TMP_ROOT/recycle.out")" -ge "$round" ] && break
-    sleep 0.1
-  done
-  [ "$(grep -c '^captured:' "$TMP_ROOT/recycle.out")" -ge "$round" ] \
-    || fail "re-arming capture $round never completed: $(cat "$TMP_ROOT/recycle.out")"
-  assert_not_contains "$(cat "$TMP_ROOT/recycle.out")" "retired: recycle-src" \
-    "the runner retired a fresh re-registration as its own claimed registration"
-  assert_present "$recycle_registration" \
-    "a relistening source lost its registration after a concurrent re-arm (round $round)"
-done
-kill -0 "$recycle_pid" 2>/dev/null || fail "the re-arming runner stopped listening"
-pe_rearm retire recycle-src >/dev/null
-wait "$recycle_pid" 2>/dev/null || true
-pass "a concurrent re-arm cannot recycle a live relistening source's claimed registration"
+  kill -0 "$recycle_pid" 2>/dev/null || fail "the re-arming runner stopped listening"
+  pe_rearm retire recycle-src >/dev/null
+  wait "$recycle_pid" 2>/dev/null || true
+  pass "$recycle_case"
+fi
 
 HRETFAIL="$TMP_ROOT/hretfail"; new_home "$HRETFAIL"
 fm_test_track_procevent_home "$HRETFAIL"
