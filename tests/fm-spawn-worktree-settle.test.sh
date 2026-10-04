@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, the isolation wait loop after `treehouse get`, bounded by
+# FM_SPAWN_ISOLATION_WAIT_SECS).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -26,6 +27,8 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
+# Cases below expect the default bound unless they set their own.
+unset FM_SPAWN_ISOLATION_WAIT_SECS
 
 # make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
 # query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
@@ -218,12 +221,54 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   assert_contains "$out" "repository's primary checkout" \
     "the refusal did not say why that path was rejected"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  assert_contains "$out" "within 60s" "the refusal did not report the default 60-second bound"
+  [ "$(cat "$COUNTFILE")" -eq 60 ] || fail "default wait polled $(cat "$COUNTFILE") times, expected 60"
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
+}
+
+# FM_SPAWN_ISOLATION_WAIT_SECS replaces the default bound, and the refusal
+# reports the bound actually used.
+test_isolation_wait_is_configurable() {
+  local rec id out status
+  id=settle-wait-configured-z5
+  rec=$(make_primary_case settle-wait-configured "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(FM_SPAWN_ISOLATION_WAIT_SECS=3 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+  assert_contains "$out" "within 3s" "the refusal did not report the configured bound"
+  [ "$(cat "$COUNTFILE")" -eq 3 ] || fail "configured wait polled $(cat "$COUNTFILE") times, expected 3"
+  pass "FM_SPAWN_ISOLATION_WAIT_SECS bounds the isolation wait"
+}
+
+# A malformed bound, including an explicitly empty one or a bound too short for
+# the two matching readings isolation needs, refuses before any pane is launched
+# or read.
+test_invalid_isolation_wait_refuses() {
+  local rec id out status bad
+  for bad in '' 1 abc 0 -5 1.5 007; do
+    id=settle-wait-bad-z6
+    rm -rf "$TMP_ROOT/settle-wait-bad"
+    rec=$(make_primary_case settle-wait-bad "$id" 0)
+    read_settle_record "$rec"
+    out=$(FM_SPAWN_ISOLATION_WAIT_SECS=$bad run_settle_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn accepted FM_SPAWN_ISOLATION_WAIT_SECS='$bad'"$'\n'"$out"
+    assert_contains "$out" "FM_SPAWN_ISOLATION_WAIT_SECS must be an integer number of seconds of at least 2" \
+      "spawn did not explain the malformed bound '$bad'"
+    [ ! -e "$COUNTFILE" ] || fail "malformed bound '$bad' still read the pane"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "malformed bound '$bad' published task metadata"
+  done
+  pass "a malformed FM_SPAWN_ISOLATION_WAIT_SECS refuses before launch"
 }
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_isolation_wait_is_configurable
+test_invalid_isolation_wait_refuses
 
 echo "# all fm-spawn-worktree-settle tests passed"
