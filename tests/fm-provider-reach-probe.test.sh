@@ -186,6 +186,23 @@ expect_code 20 "$rc" "a failed lookup exits 20"
 assert_contains "$out" "dns=fail" "a failed lookup is its own dns class"
 assert_contains "$out" "result=unreachable" "a failed lookup wording is unreachable"
 
+# --- the default resolver list never names a tool it calls wrongly ----------
+# macOS ships /usr/bin/dscacheutil, and `-q host` is not one of its categories: it
+# prints its usage block and exits 64 for every name. A candidate list that led with
+# it recorded "resolver errored" (dns=fail rc=64) for names dig and host both answer
+# NXDOMAIN, so the false shape itself is pinned here, on this host's real tools.
+default_list=$(sed -nE 's/^[[:space:]]*for tool in \$\{FM_PROVIDER_REACH_DNS_TOOL:-([^}]*)\}.*/\1/p' "$SCRIPT")
+assert_contains "$default_list" "/usr/bin/dig" "the default list leads with dig"
+case "$default_list" in
+  *dscacheutil*) fail "the default resolver list still names dscacheutil, which it cannot call correctly" ;;
+esac
+if [ -x /usr/bin/dscacheutil ]; then
+  # First-hand proof of why it is excluded: the call this probe used answers usage.
+  ds_out=$(/usr/bin/dscacheutil -q host -a api.example.invalid 2>&1); ds_rc=$?
+  assert_contains "$ds_out" "Usage:" "dscacheutil rejects the category this probe passed"
+  [ "$ds_rc" -ne 0 ] || fail "dscacheutil returned success where it was expected to error"
+fi
+
 # --- a missing resolver is disclosed, not invented --------------------------
 tmp=$TMP_ROOT/no-dns-tool; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=200 FM_PROVIDER_REACH_DNS_TOOL=no-such-resolver \
