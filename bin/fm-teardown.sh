@@ -237,6 +237,12 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
+# Returned-slot submodules: Treehouse's return leaves submodules on whatever pin the
+# task had, so after a successful return teardown syncs every stale pin that passes
+# bin/fm-wake-lib.sh's fm_submodule_stale_pins test with the returned base, and the
+# slot goes back clean. A slot it cannot sync is reported and left out of rotation;
+# that never fails the teardown.
+#
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
 # delete, or backend kill below - a still-active run or a leaked process may
@@ -1864,6 +1870,35 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Treehouse's return moves the worktree onto the default branch without touching
+# submodules, so a submodule the task left on another pin now reads as modified,
+# and Treehouse never hands a dirty slot out again. Put such pins on the ones the
+# returned base records, so the slot goes back clean. Only stale pins that pass
+# bin/fm-wake-lib.sh's fm_submodule_stale_pins test are moved; anything else is
+# left exactly as the return left it. Never fails the teardown: the task's own
+# cleanup is already done, and a slot left dirty is only out of rotation.
+teardown_sync_returned_submodules() { # <worktree>
+  local worktree=$1 status
+  [ -f "$worktree/.gitmodules" ] || return 0
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain 2>/dev/null) || {
+    echo "warning: could not inspect returned worktree $worktree; leaving it as the return left it" >&2
+    return 0
+  }
+  [ -n "$status" ] || return 0
+  if ! fm_submodule_stale_pins "$worktree" "$status"; then
+    echo "warning: returned worktree $worktree is not clean and was left as is; Treehouse will not hand it out again until it is" >&2
+    return 0
+  fi
+  if fm_submodule_sync_stale_pins "$worktree" \
+     && status=$(git -C "$worktree" status --porcelain 2>/dev/null) \
+     && [ -z "$status" ]; then
+    printf '%s' "$FM_SUBMODULE_STALE_PIN_LINES" | sed 's/^/teardown: synced returned worktree: /'
+    return 0
+  fi
+  printf '%s' "$FM_SUBMODULE_STALE_PIN_LINES" | sed 's/^/warning: /' >&2
+  echo "warning: could not sync the submodules of returned worktree $worktree with its base; Treehouse will not hand it out again until they match" >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -3280,6 +3315,7 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+            teardown_sync_returned_submodules "$child_wt"
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
           else
             child_return_rc=$?
@@ -3615,6 +3651,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  # A pool slot is still under the Treehouse project lock here, so no spawn can
+  # take it before its submodules match the returned base.
+  teardown_sync_returned_submodules "$WT"
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place

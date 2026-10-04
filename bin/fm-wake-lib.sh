@@ -1609,6 +1609,88 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Submodule pins on a pooled slot.
+#
+# Treehouse moves a slot's superproject with `git read-tree --reset -u` on both
+# `get` and `return`, and neither touches submodules; a slot Git creates with
+# `git worktree add` starts with every submodule unpopulated. So each move of a
+# slot across a changed gitlink leaves the submodule checked out on the pin the
+# previous base recorded. Git then reports the slot as modified (" M <path>"),
+# Treehouse never hands a dirty slot out again, and the pool grows by one slot
+# per such move until max_trees refuses every spawn. bin/fm-spawn.sh and
+# bin/fm-teardown.sh therefore sync submodules right after each point where the
+# slot's base was just moved, and both judge a leftover pin with the one test
+# below.
+#
+# A stale pin is safe to move exactly when this test passes: the submodule's own
+# tree is clean, and the commit it has checked out is contained in one of its
+# remotes, and it has no nested submodules (in its checkout or at the recorded
+# commit). fm_submodule_sync_stale_pins then checks the recorded pin out on a
+# detached HEAD whatever update mode the project configures, so no branch is
+# rebased, merged, moved, or removed and nothing reachable from a ref is lost.
+# The containment check reads local refs only and never fetches, so it stays
+# usable offline; that is why the callers decide separately whether they know
+# where the pin came from.
+
+# Succeeds only when every entry of <porcelain-status> is a submodule whose
+# checkout passes that test and sits on a different commit than the worktree's
+# HEAD records. Then FM_SUBMODULE_STALE_PIN_PATHS holds those submodule paths and
+# FM_SUBMODULE_STALE_PIN_LINES one line per submodule, "submodule '<path>' is
+# checked out at <have>, but this base records <want>", for the caller to report.
+# Both are left empty whenever the test fails.
+fm_submodule_stale_pins() {  # <worktree> <porcelain-status>
+  local worktree=$1 status=$2 line path want have prefix unpushed lines=
+  local -a paths=()
+  FM_SUBMODULE_STALE_PIN_LINES=
+  FM_SUBMODULE_STALE_PIN_PATHS=()
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case $line in ' M '*) path=${line#' M '} ;; *) return 1 ;; esac
+    [ "$(git -C "$worktree" ls-files --stage -- "$path" 2>/dev/null | cut -c1-6)" = 160000 ] || return 1
+    # An unpopulated submodule directory resolves to the superproject, which
+    # would answer every question below about the wrong repository.
+    prefix=$(git -C "$worktree/$path" rev-parse --show-prefix 2>/dev/null) || return 1
+    [ -z "$prefix" ] || return 1
+    [ -z "$(git -C "$worktree/$path" status --porcelain 2>/dev/null)" ] || return 1
+    want=$(git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
+    have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
+    [ "$want" != "$have" ] || return 1
+    # A commit reachable from a remote-tracking ref has landed; one reachable
+    # from none is of unknown origin and is never moved.
+    unpushed=$(git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not --remotes -- 2>/dev/null) || return 1
+    [ -z "$unpushed" ] || return 1
+    # A submodule with nested submodules is never synced: neither its current
+    # checkout nor the commit this base records may carry a .gitmodules. The
+    # fetch only makes the recorded commit inspectable; it moves nothing.
+    [ ! -e "$worktree/$path/.gitmodules" ] || return 1
+    git -C "$worktree/$path" cat-file -e "$want^{commit}" 2>/dev/null \
+      || git -C "$worktree/$path" fetch --quiet >/dev/null 2>&1 || true
+    git -C "$worktree/$path" cat-file -e "$want^{commit}" 2>/dev/null || return 1
+    ! git -C "$worktree/$path" cat-file -e "$want:.gitmodules" 2>/dev/null || return 1
+    paths+=("$path")
+    lines+="submodule '$path' is checked out at $have, but this base records $want"$'\n'
+  done <<EOF
+$status
+EOF
+  [ -n "$lines" ] || return 1
+  # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+  FM_SUBMODULE_STALE_PIN_LINES=$lines
+  # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+  FM_SUBMODULE_STALE_PIN_PATHS=("${paths[@]}")
+}
+
+# Check the pins fm_submodule_stale_pins just approved out at the commits the
+# worktree's HEAD records, fetching a missing commit on demand. Always on a
+# detached HEAD (see above). Returns git's own verdict; callers read the
+# worktree's status afterwards to decide what it means.
+fm_submodule_sync_stale_pins() {  # <worktree>
+  local worktree=$1
+  # The lines and the paths are set together, and an unset array trips `set -u`.
+  [ -n "${FM_SUBMODULE_STALE_PIN_LINES:-}" ] || return 0
+  local -a paths=("${FM_SUBMODULE_STALE_PIN_PATHS[@]}")
+  git -C "$worktree" submodule --quiet update --checkout -- "${paths[@]}" >/dev/null
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
