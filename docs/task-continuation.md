@@ -44,7 +44,10 @@ Supervision routes that action to the correct existing worker.
 The passing test did not erase the gap.
 If the worker exits, the session compacts, or the conversation changes topic, `progress-list` scans the canonical records once and `progress` reads the named task record directly.
 
-After review and any corrections, MAIN compares the final artifacts with the acceptance method. Only MAIN may clear both `remaining_gap` and `next_step`. Delivery, merge authority, decisions, and cleanup can still prevent retirement even after semantic acceptance.
+After review and any corrections, MAIN compares the final artifacts with the acceptance method.
+Only MAIN may clear both `remaining_gap` and `next_step`, and it clears them once the requested outcome is semantically accepted even when delivery or resource cleanup remains pending.
+Delivery, merge authority, decisions, and cleanup retain their own records and guards instead of becoming a new business goal gap.
+A captain hold remains an independent disposition constraint: cleanup verifies its decision inventory and retains the held task row, but the hold does not revoke an already recorded semantic acceptance.
 
 Healthy unchanged execution and deliberate external waits stay quiet. A material result with an authorized remaining gap continues through an existing worker or action owner. A genuine authority decision, unresolved blocker, or failed exact-effect readback remains visible. Continued pursuit has no finite retry quota, but it never broadens the original authority or replays an uncertain effect.
 
@@ -96,6 +99,23 @@ Viewer classification uses the canonical task disposition as the business author
 Endpoint cleanup binds the exact task, executor generation, Herdr session, and pane. It refuses conflicting ownership and never closes a whole workspace. Copy disposal is independent: primary, shared, dirty, unintegrated, or unverified copies remain available with an explicit cleanup disposition. Only an exclusive clean copy proved integrated into the default branch can be returned or removed. A pending or uncertain disposal requires exact readback before any further effect.
 
 Historical private files, reports, operation receipts, dirty copies, and unlanded work remain untouched. Removing the rich lifecycle subsystem does not authorize deleting or rewriting them.
+
+### Cleanup guard boundary and failure history
+
+The October 2026 repeated cleanup failure had two separate causes. Commit `4f852e49` made the compact record authoritative and rejected the still-held task as not accepted; that exposed the stale progress wording but did not create the reservation. Earlier commit `a70ee10e` wrote a cleanup effect marker before calling teardown, so that preflight refusal had no refused/no-effect receipt and retained the resource reservation. A replacement request then correctly refused the occupied resource. The continuation change therefore contributed to the first refusal, while the earlier ShortTask effect boundary caused the repeated refusal.
+
+The cleanup checks remain deliberately split:
+
+| Current fact and owner | Risk protected | Refusal or safe outcome |
+|---|---|---|
+| MAIN's canonical acceptance, with no hold or only an exact `captain` hold | An executor result, commit, PR, or success exit must not accept an unmet goal | Other holds, blockers, or a business gap refuse; a captain hold retains its task row after resource cleanup |
+| Current-generation merge receipt for a ship, or report plus decision gate for a scout | Cleanup must not grant merge authority or discard an undelivered result | Missing or mismatched delivery proof refuses |
+| Exact task generation, endpoint binding, and exclusive reservation | A stale task must not close a reused pane or race another owner | Identity conflict, a live owner, or an unknown effect refuses |
+| Exact endpoint readback, independently from copy disposition | Pane retirement must not imply that a copy is disposable | The correct pane may retire while a primary, shared, dirty, unintegrated, or unverified copy is retained |
+| Owner receipt after the mutation boundary | An intent is not proof that an effect occurred | Completed cleanup settles from exact owner facts; current pre-effect refusal records `refused`; uncertainty remains reserved |
+| Durable acceptance-preflight refusal plus unchanged task binding, no cleanup record, a dead runner, and an exact endpoint state of present or dead | Repair the missing-receipt crash window without guessing from stderr or exit status alone; an effect-bearing case additionally requires the runner-owned marker shape shared by the old wrapper and current cleanup CLI, while the exact refusal can only be emitted before the current owner's first effect boundary | This conjunction records a refused/no-effect settlement; any other post-effect output, unknown endpoint state, or conflicting fact preserves the reservation |
+
+These are behavior boundaries, not keyword classification. In particular, there is no “cleanup-only” bypass, no automatic acceptance from `done`, and no relaxation for unknown effects or unsafe copies. `tests/fm-task-progress.test.sh` covers captain versus non-captain holds; `tests/fm-short-operations-cases.mjs` covers the legacy false-effect settlement, uncertain-evidence retention, normal accepted cleanup, completed readback, and replay idempotence; endpoint and copy safety remain covered by `tests/fm-teardown-endpoint-safety.test.sh`.
 
 ## Executable evidence
 

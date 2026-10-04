@@ -160,6 +160,32 @@ assert_grep 'not MAIN-accepted' "$TMP_ROOT/done-without-acceptance.err" \
 
 done_record='{"acceptance":"The requested behavior passes","current_state":"The outcome is accepted","remaining_gap":"","next_step":""}'
 "$STATE" update-progress first --progress "$done_record" >/dev/null || fail "acceptance update failed"
+"$TASKS" hold first --reason "accepted result still has a captain call" --kind captain >/dev/null \
+  || fail "accepted hold failed"
+assert_equals captain "$("$STATE" progress first | jq -r '.task_hold_kind')" \
+  "progress projection lost the exact captain hold kind"
+FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_cleanup_completion_mode first g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" >/dev/null \
+  || fail "captain hold incorrectly revoked semantic cleanup acceptance"
+FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_task_progress_completion_guard first' _ "$ROOT/bin/fm-task-progress-lib.sh" >/dev/null \
+  || fail "task progress guard rejected accepted captain hold"
+"$TASKS" unhold first >/dev/null || fail "accepted unhold failed"
+"$TASKS" hold first --reason "operator parked this accepted task" --kind parked >/dev/null \
+  || fail "parked hold failed"
+rc=0
+FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_cleanup_completion_mode first g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" \
+  >/dev/null 2>"$TMP_ROOT/parked-cleanup.err" || rc=$?
+expect_code 6 "$rc" "accepted task with a non-captain hold"
+assert_grep 'not MAIN-accepted' "$TMP_ROOT/parked-cleanup.err" \
+  "non-captain hold bypassed cleanup admission"
+rc=0
+FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_task_progress_completion_guard first' _ "$ROOT/bin/fm-task-progress-lib.sh" \
+  >/dev/null 2>"$TMP_ROOT/parked-progress.err" || rc=$?
+expect_code 6 "$rc" "progress guard with a non-captain hold"
+"$TASKS" unhold first >/dev/null || fail "parked unhold failed"
 FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
   '. "$1"; fm_cleanup_completion_mode first g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" >/dev/null \
   || fail "cleanup consumer rejected semantic acceptance"

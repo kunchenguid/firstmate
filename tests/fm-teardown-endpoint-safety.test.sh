@@ -916,7 +916,7 @@ test_completed_endpoint_ignores_historical_admission_gates() {
     local expected="s-$id"
     [ "$variant" != wrong-generation ] || expected=another-generation
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
-      FM_SUPERVISION_ACTOR=short PATH="$dir/fakebin:$PATH" \
+      PATH="$dir/fakebin:$PATH" \
       "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "$expected" \
       > "$dir/stdout" 2> "$dir/stderr" || rc=$?
     case "$variant" in
@@ -956,12 +956,40 @@ test_completed_copy_preservation_ignores_force() {
       git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid commit -qm unlanded
     fi
     stage_archived_action "$dir" "$id" cleanup uncertain
+    printf '#!/bin/sh\nexit 0\n' > "$dir/home/state/$id.check.sh"
+    printf 'trusted fixture\n' > "$dir/home/state/$id.check-trust"
+    chmod 600 "$dir/home/state/$id.check.sh" "$dir/home/state/$id.check-trust"
     run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || fail "completed $variant window was blocked: $(cat "$dir/stderr")"
     assert_present "$dir/runtime.log.w1:p-$id.closed" 'completed pane was not closed'
     assert_present "$dir/worktree/sentinel" 'force bypassed completed-copy preservation'
     assert_absent "$dir/home/state/$id.meta" 'completed resource record was not archived'
+    assert_absent "$dir/home/state/$id.check.sh" 'completed cleanup left its executable check registered'
+    assert_absent "$dir/home/state/$id.check-trust" 'completed cleanup left its check trust binding registered'
   done
-  pass 'completed dirty and unlanded copies remain even when the legacy force flag is supplied'
+  pass 'completed cleanup retires check artifacts while dirty and unlanded copies remain even when force is supplied'
+}
+
+test_completed_unsafe_check_refuses_before_effect() {
+  local dir id external rc artifact
+  for artifact in check.sh pr-poll-merge-notified; do
+    id="completed-unsafe-${artifact//./-}"
+    dir=$(make_case "$id")
+    write_herdr_meta "$dir/home/state/$id.meta" \
+      "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    stage_archived_action "$dir" "$id" cleanup uncertain
+    external="$dir/external-check"
+    printf 'preserve external target\n' > "$external"
+    ln -s "$external" "$dir/home/state/$id.$artifact"
+    rc=0
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "unsafe completed $artifact artifact was removed"
+    assert_contains "$(cat "$dir/stderr")" 'unsafe task PR-check artifact' \
+      "unsafe completed $artifact did not fail at the authenticated-artifact boundary"
+    assert_present "$external" "unsafe $artifact cleanup changed its external target"
+    assert_present "$dir/home/state/$id.meta" "unsafe $artifact cleanup retired task metadata"
+    [ ! -s "$dir/runtime.log" ] || fail "unsafe $artifact cleanup reached the endpoint"
+  done
+  pass 'completed cleanup preserves authentication and refuses unsafe check artifacts before effects'
 }
 
 test_completed_pool_uncertain_ownership_retains_copy() {
@@ -1104,6 +1132,7 @@ SH
 test_retained_copy_only_followthrough
 test_completed_pool_uncertain_ownership_retains_copy
 test_completed_copy_preservation_ignores_force
+test_completed_unsafe_check_refuses_before_effect
 test_completed_endpoint_ignores_historical_admission_gates
 
 test_open_goal_preserves_resources_before_cleanup

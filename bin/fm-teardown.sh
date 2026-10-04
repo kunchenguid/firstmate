@@ -6,8 +6,9 @@
 # Accepted/archived tasks close only the exact recorded pane and archive their
 # resource record independently of copy disposal. Shared, primary, dirty,
 # unintegrated or unverified copies stay; reports/status/outcomes stay outside
-# the disposable copy. Historical journal/UI/continuation/short binding checks
-# do not admit this completed path. The detailed legacy contract below applies
+# the disposable copy. Historical journal/UI/continuation records do not admit
+# this completed path; a current ShortTask still proves its exact grant at the
+# owner boundary. The detailed legacy contract below applies
 # to records without an accepted/archived goal.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
@@ -346,14 +347,61 @@ backlog_refresh_reminder() {
   fi
 }
 
+validate_pr_poll_cleanup() {
+  local state_dir=$1 id=$2 state_device artifact has_artifact=0
+  fm_task_id_path_safe "$id" || return 0
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
+      || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
+        && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
+    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
+    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
+      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
+      return 1
+    }
+  fi
+}
+
+remove_pr_poll_artifacts() {
+  local state_dir=$1 id=$2
+  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
+  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
+}
+
 # Completed goals retire their recorded endpoint independently of disposable
-# copy removal. No historical journal, agent UI, continuation or operation
-# binding is an admission gate here. Shared, dirty or unlanded copies stay.
+# copy removal. No historical journal, agent UI or continuation record is an
+# admission gate here. The current resource owner still serializes the effect.
+# Shared, dirty or unlanded copies stay.
 # Active/legacy tasks retain the ordinary teardown contract below.
 # shellcheck source=bin/fm-cleanup-receipt-lib.sh
 . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
+# shellcheck source=bin/fm-short-owner-lib.sh
+. "$SCRIPT_DIR/fm-short-owner-lib.sh"
 teardown_completed_task() (
-  local meta="$STATE/$ID.meta" lock copy project session pane other disposition=returned-or-already-absent facts
+  local meta="$STATE/$ID.meta" lock copy project session pane presence other disposition=returned-or-already-absent facts
   local COPY_DISPOSITION COPY_REASON binding
   local WT PROJ KIND MODE PR_URL dirty generation backlog_status=0 captain_status=0 captain_out marker
   local copy_lock='' copy_lock_held=0
@@ -375,6 +423,7 @@ teardown_completed_task() (
   generation=$(fm_meta_get "$meta" spawn_gen)
   fm_cleanup_completion_guard "$ID" "$generation" || exit $?
   fm_cleanup_delivery_guard "$ID" "$generation" "$meta" || exit $?
+  validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
   MODE=$(fm_meta_get "$meta" mode)
   PR_URL=$(fm_meta_get "$meta" pr)
   [ -n "$MODE" ] || MODE=no-mistakes
@@ -388,10 +437,17 @@ teardown_completed_task() (
     fi
   done
   fm_backend_source herdr || exit 1
-  case "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" in
+  presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
+  case "$presence" in
+    present|dead) ;;
+    *) echo 'REFUSED: exact endpoint cannot be resolved' >&2; exit 1 ;;
+  esac
+  # Every admission and identity check above is read-only. Record the exact
+  # owner effect only now, before the first endpoint or bookkeeping mutation.
+  fm_short_owner_effect || exit 1
+  case "$presence" in
     present) fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || exit 1 ;;
     dead) ;;
-    *) echo 'REFUSED: exact endpoint cannot be resolved' >&2; exit 1 ;;
   esac
   if [ "$ENDPOINT_ONLY" = 1 ]; then
     local ENDPOINT_GENERATION ENDPOINT_RECEIPT META=$meta
@@ -448,6 +504,10 @@ teardown_completed_bookkeeping() {
   PROJ=$(fm_meta_get "$meta" project)
   [ -n "$KIND" ] || KIND=ship
   [ -n "$MODE" ] || MODE=no-mistakes
+  # Retire the exact task's authenticated watcher artifacts before its
+  # resource metadata disappears. This is ordinary cleanup bookkeeping, not a
+  # reason to weaken watcher authentication or infer a broader target.
+  remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     if ! fm_backlog_meta_spawn_gen "$meta" "$STATE"; then
       echo "error: completed cleanup could not bind $ID's backlog transition to its task generation ($FM_BACKLOG_TRANSITION_ERROR)" >&2
@@ -558,6 +618,11 @@ teardown_retained_copy() (
 )
 if [ "$COPY_ONLY" = 1 ]; then teardown_retained_copy; exit $?; fi
 
+# The same exact resource owner serializes accepted/archived cleanup and the
+# ordinary legacy path. A short child proves its immutable grant here; MAIN
+# refuses an existing short reservation instead of racing it.
+trap fm_short_owner_release EXIT
+fm_short_owner_enter cleanup "$ID" || exit 1
 if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
   completed_generation=$(fm_meta_get "$STATE/$ID.meta" spawn_gen)
   if fm_cleanup_completion_guard "$ID" "$completed_generation" >/dev/null 2>&1; then
@@ -578,10 +643,6 @@ fi
 # leases).
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-# shellcheck source=bin/fm-short-owner-lib.sh
-. "$SCRIPT_DIR/fm-short-owner-lib.sh"
-trap fm_short_owner_release EXIT
-fm_short_owner_enter cleanup "$ID" || exit 1
 if [ "${FM_SUPERVISION_ACTOR:-}" = short ] && { [ -n "$FORCE" ] || [ "${LEGACY_RECORD_GIVEN:-0}" != 0 ]; }; then
   echo "error: short cleanup cannot discard or manufacture legacy identity" >&2
   exit 1
@@ -866,50 +927,6 @@ retire_busy_state() {
   elif [ -f "$state_dir/$id.busy-gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --current-gen
   fi
-}
-
-validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 state_device artifact has_artifact=0
-  fm_task_id_path_safe "$id" || return 0
-  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    has_artifact=1
-  done
-  [ "$has_artifact" -eq 1 ] || return 0
-  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
-  state_device=$(fm_pr_file_device "$state_dir") || return 1
-  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
-      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
-      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
-      || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
-        && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then
-      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
-      return 1
-    fi
-  done
-  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
-    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
-    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
-      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
-      return 1
-    }
-  fi
-}
-
-remove_pr_poll_artifacts() {
-  local state_dir=$1 id=$2
-  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
-  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
-  fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
-  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
 }
 
 inspectable_git_worktree() {
