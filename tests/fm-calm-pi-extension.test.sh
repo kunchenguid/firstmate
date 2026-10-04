@@ -1664,6 +1664,10 @@ async function assertStockHtmlRendering(command, submitData) {
   terminalInputHandler(submitData);
   const htmlRenderer = createToolHtmlRenderer({
     getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    // Pi 1.0.2 renamed this dependency to getToolRenderers; pass both so stock
+    // export rendering resolves on old and new Pi (a full definition satisfies
+    // either key because it carries renderCall/renderResult).
+    getToolRenderers: (name) => tools.find((tool) => tool.name === name),
     theme,
     cwd: process.cwd(),
   });
@@ -1695,6 +1699,8 @@ editorText = "/export remapped.html";
 terminalInputHandler("\r");
 const unmatchedRenderer = createToolHtmlRenderer({
   getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  // Dual key for the same Pi 1.0.2 getToolRenderers rename; see above.
+  getToolRenderers: (name) => tools.find((tool) => tool.name === name),
   theme,
   cwd: process.cwd(),
 });
