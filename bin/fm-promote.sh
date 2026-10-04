@@ -255,6 +255,10 @@ The mode-specific Definition of done below is the current delivery contract.
 # Current ship safety rule
 EOF
   fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE"
+  cat <<EOF
+Never end a turn on an announced next step: take it in the same turn with your tools instead of stopping on the announcement, or report \`${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}:\`/\`blocked:\` with the reason.
+Drive your own validation and delivery path: beyond the handoff your Definition of done names, wait for no approval you did not request through \`needs-decision\`.
+EOF
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
