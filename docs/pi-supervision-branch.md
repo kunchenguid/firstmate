@@ -93,7 +93,7 @@ No continuation path creates a second scheduler, task store or lifecycle progres
 
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility, while [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.
   A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch; a check-kind triggering close stays on main except for a task-scoped iDA process result whose queue key, payload, private captured result and adapter files, remote-agent metadata, durable iDA task state, session marker, and available provider identities all match exactly.
-  Malformed, path-unsafe, unresolvable, mismatched-provider, mismatched-task, and mismatched-result iDA-looking rows keep the ordinary main path, as do merge-confirmation polls, Relay mentions, credential/auth failures, and every other check class.
+  Malformed, path-unsafe, unresolvable, mismatched-provider, mismatched-task, and mismatched-result iDA-looking rows keep the ordinary main path, as do merge-confirmation polls, credential/auth failures, and every other check class.
   No acceptor (extension absent or branch broken) keeps today's wake-to-main path for the close, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
   A busy branch also declines a newly arrived iDA result unless its live grant already contains that exact row, so an unowned result falls back to main instead of waiting between actors.
   A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the identical treatment even though it keeps the ordinary `signal` kind.
@@ -259,7 +259,7 @@ Only a scan already flagged as possibly captain-relevant emits the bare `heartbe
 
 A heartbeat is never vetoed or ridden into main by a co-present main-owned check row or decision-owned signal/stale row.
 Those rows are permanently main-owned in every mode, while a valid identity-bound iDA result remains branch-owned: main-owned rows are excluded from what the branch may claim and left queued for main, which is woken for each on its own watcher cycle, so nothing starves by being left behind.
-Deferring the fleet review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet, and that coupling is gone.
+Deferring the fleet review to main merely because some unrelated merge poll happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet, and that coupling is gone.
 What all-or-nothing guarantees is that the branch takes every branch-ownable unread row or none of them.
 A structurally valid unresolved task row is main-only and does not contaminate that safe subset; an unknown row kind or unreadable queue still defers the whole review to main.
 The branch runs its normal operating procedure for the wake (`bin/fm-branch-prompt.sh` "Handling a wake") and performs the deeper fleet review that main previously performed.

@@ -116,10 +116,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/fmx-respond/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/harness-adapters/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -337,10 +333,6 @@
     },
     {
       "path": "docs/verification/remote-agents.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/public-followup.md",
       "audience": "maintainer-verification"
     },
     {

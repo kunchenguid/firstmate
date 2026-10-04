@@ -350,7 +350,7 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-review-diff.test.sh|fm-teardown.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-bearings-snapshot.test.sh|\
@@ -362,8 +362,7 @@ family_for_basename() {
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
     fm-pi-branch-extension.test.sh|\
     fm-procevent-when.test.sh|fm-procevent.test.sh|\
-    fm-live-gate.test.sh|\
-    fm-public-followup.test.sh|\
+    fm-live-gate.test.sh|fm-relay-removal.test.sh|\
     fm-spawn-pool-base-freshen.test.sh|\
     fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
     fm-inbox.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
@@ -439,7 +438,6 @@ tests/fm-spawn-batch.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
 tests/fm-transition-lib.test.sh
-tests/fm-x-mode.test.sh
 EOF
 }
 
@@ -469,7 +467,6 @@ tests/fm-spawn-batch.test.sh 2265
 tests/fm-supervision-instructions.test.sh 297
 tests/fm-test-run.test.sh 92944
 tests/fm-transition-lib.test.sh 99
-tests/fm-x-mode.test.sh 31870
 EOF
 }
 
@@ -508,7 +505,6 @@ EOF
 list_portable_parallel_2() {
   cat <<'EOF'
 tests/fm-captain-hold-lifecycle.test.sh
-tests/fm-x-mode.test.sh
 tests/fm-arm-pretool-check.test.sh
 tests/fm-backend-herdr.test.sh
 tests/fm-crew-state.test.sh
@@ -664,7 +660,7 @@ tests/fm-periodic-stow.test.sh 21332
 tests/fm-pr-check-security.test.sh 172215
 tests/fm-procevent-when.test.sh 17392
 tests/fm-procevent.test.sh 69715
-tests/fm-public-followup.test.sh 196745
+tests/fm-relay-removal.test.sh 1000
 tests/fm-profile-array-dispatch-live-e2e.test.sh 50
 tests/fm-readable-documents-live-e2e.test.sh 8400
 tests/fm-stow-local-skill-live-e2e.test.sh 8400
@@ -1394,8 +1390,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' watcher-wake-lock
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
-    bin/fm-x-*|bin/fm-check*)
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
     bin/fm-nm-run-lib.sh)

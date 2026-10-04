@@ -10,7 +10,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 [ "$#" -eq 0 ] || { echo "usage: $(basename "$0")" >&2; exit 2; }
@@ -25,8 +24,7 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 
-# jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
-# "missing jq -> silent no-op" degrade). Without it we cannot safely read the
+# jq is the repo's established JSON dependency. Without it we cannot safely read the
 # loop-guard field, so we must never block - fail open, not noisy.
 command -v jq >/dev/null 2>&1 || exit 0
 
@@ -68,10 +66,8 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
 fi
 
 block_stop() {
-  local x_mode reason rule
-  x_mode=0
-  [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --x-mode "$x_mode" --repair-line 2>/dev/null \
+  local reason rule
+  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
@@ -83,8 +79,6 @@ block_stop() {
       printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
       printf '●  %s registered custom check(s), but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_CHECKS" "$FM_SUP_BEACON_DESC"
-    else
-      printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"

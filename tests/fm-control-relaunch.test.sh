@@ -30,7 +30,6 @@ CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
-X_LINK="$ROOT/bin/fm-x-link.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
@@ -158,6 +157,8 @@ EOF
     echo "model=default"
     echo "effort=default"
   } > "$home/state/$id.meta"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Relaunch fixture $id" \
+    --kind ship --start >/dev/null || fail "could not seed canonical task record for $id"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
@@ -242,7 +243,7 @@ for path in "$@"; do
 done
 if [ -n "${FM_FAKE_META_WRITER_TARGET:-}" ] \
    && [ "$target_path" = "$FM_FAKE_META_WRITER_TARGET" ] \
-   && grep -q '^x_request=' "$source_path" 2>/dev/null; then
+   && grep -q '^concurrent_marker=' "$source_path" 2>/dev/null; then
   : > "$FM_FAKE_META_WRITER_READY"
   while [ ! -e "$FM_FAKE_META_WRITER_RELEASE" ]; do /bin/sleep 0.01; done
 fi
@@ -264,18 +265,17 @@ SH
   chmod +x "$1/fakebin/rm"
 }
 
-# Give a case home a real backlog carrying <id>, so the relaunch path's paired
-# backlog transition (bin/fm-backlog-transition-lib.sh) is live rather than
-# skipped for want of a backlog file.
+# Put the case home's canonical task record in the requested state.
 seed_backlog() {  # <case-dir> <id> <queued|in_flight>
-  local dir=$1 id=$2 want=$3 file="$1/home/data/backlog.md"
-  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$file"
-  tasks-axi add "$id" "relaunch fixture task" --kind ship --file "$file" >/dev/null
-  [ "$want" != in_flight ] || tasks-axi start "$id" --file "$file" >/dev/null
+  local dir=$1 id=$2 want=$3
+  if [ "$want" = queued ]; then
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" "done" "$id" >/dev/null
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" reopen "$id" >/dev/null
+  fi
 }
 
 backlog_state() {  # <case-dir> <id>
-  tasks-axi show "$2" --file "$1/home/data/backlog.md" 2>/dev/null |
+  FM_HOME="$1/home" "$ROOT/bin/fm-tasks-axi.sh" show "$2" 2>/dev/null |
     sed -n 's/^  state: *//p' | head -1
 }
 
@@ -406,7 +406,7 @@ test_relaunch_preserves_durable_task_metadata() {
   {
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=feature/relaunch'
-    printf '%s\n' 'x_request=request-19'
+    printf '%s\n' 'custom_marker=request-19'
     printf '%s\n' 'decisions_reviewed=1'
   } >> "$dir/home/state/rl19.meta"
 
@@ -416,85 +416,11 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task PR must survive relaunch"
   [ "$(meta_field "$dir" rl19 pr_head)" = "feature/relaunch" ] \
     || fail "the task PR head must survive relaunch"
-  [ "$(meta_field "$dir" rl19 x_request)" = "request-19" ] \
-    || fail "the task X request must survive relaunch"
+  [ "$(meta_field "$dir" rl19 custom_marker)" = "request-19" ] \
+    || fail "unknown durable task metadata must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
-}
-
-test_relaunch_serializes_concurrent_durable_metadata_publication() {
-  local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
-  dir=$(new_case metadata-race rl28)
-  add_ship_task "$dir" rl28 pi
-  printf '%s\n' "$$" > "$dir/home/state/.lock"
-  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
-  make_mv_failure_stub "$dir"
-  prepare="$dir/trace-prepare"
-  launch_release="$dir/trace-release"
-  waiting="$dir/meta-writer-waiting"
-  ready="$dir/meta-writer-ready"
-  release="$dir/meta-writer-release"
-  FM_REAL_MV=$(command -v mv) \
-    FM_FAKE_TRACE_PREPARE="$prepare" \
-    FM_FAKE_TRACE_RELEASE="$launch_release" \
-    run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
-  control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$prepare" ] || {
-    kill "$control_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
-  }
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_REAL_MV="$(command -v mv)" \
-    FM_FAKE_LOCK_WAITING="$waiting" \
-    FM_FAKE_META_WRITER_TARGET="$dir/home/state/rl28.meta" \
-    FM_FAKE_META_WRITER_READY="$ready" \
-    FM_FAKE_META_WRITER_RELEASE="$release" \
-    "$X_LINK" rl28 request-28 --carry-count 1 --carry-ts 1700000000 \
-      --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
-  link_pid=$!
-  i=0
-  while [ ! -e "$waiting" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$waiting" ] && [ ! -e "$ready" ] || {
-    : > "$launch_release"
-    : > "$release"
-    wait "$link_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
-    fail "a durable metadata writer was not blocked during relaunch delivery"
-  }
-  : > "$launch_release"
-  i=0
-  while [ ! -e "$ready" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$ready" ] || {
-    kill "$link_pid" "$control_pid" 2>/dev/null || true
-    wait "$link_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
-    fail "durable metadata writer did not resume after relaunch delivery committed"
-  }
-  : > "$release"
-  wait "$link_pid"; rc=$?
-  expect_code 0 "$rc" "concurrent X metadata publication should serialize"$'\n'"$(cat "$dir/link.out")"
-  wait "$control_pid"; rc=$?
-  expect_code 0 "$rc" "relaunch should complete before serialized metadata publication"$'\n'"$(cat "$dir/control.out")"
-  [ "$(meta_field "$dir" rl28 x_request)" = request-28 ] \
-    || fail "relaunch erased metadata published concurrently through the X interface"
-  [ "$(meta_field "$dir" rl28 x_followups)" = 1 ] \
-    || fail "relaunch erased the concurrent follow-up count"
-  traceparent=$(meta_field "$dir" rl28 traceparent)
-  fm_trace_context_valid "$traceparent" \
-    || fail "concurrent metadata publication erased the replacement's trace carrier"
-  pass "fm-control relaunch: delivery and concurrent task metadata publication serialize"
 }
 
 test_disabled_relaunch_clears_prior_trace_context() {
@@ -740,6 +666,8 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       echo "model=default"
       echo "effort=default"
     } > "$home/state/$id.meta"
+    FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Promoted scout fixture $id" \
+      --kind scout --start >/dev/null || fail "$mode: could not seed canonical scout task"
     printf '%s\n' "fm-$id" > "$dir/fake/windows"
     printf '%s' "$dir/wt" > "$dir/fake/cwd"
 
@@ -760,12 +688,10 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     assert_grep 'Any earlier "Never push" or scout-only delivery language in this file is superseded' "$launch" \
       "$mode: the replacement launch left the stale scout prohibition readable at face value"
     case "$mode" in
-      direct-PR)
+      direct-PR|review-PR)
         rule="1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR." ;;
       local-only)
         rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`." ;;
-      *)
-        rule='1. Never push to the default branch. Never merge a PR.' ;;
     esac
     assert_grep "$rule" "$launch" \
       "$mode: the replacement launch did not receive the current ship push and merge safety rule"
@@ -870,39 +796,6 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
   assert_grep "carry this forward" "$dir/home/data/rl13/brief.md" \
     "the progress note must survive so a later recovery still has it"
   pass "fm-control relaunch: a launch failure after the stop keeps the prior record and reports the real state"
-}
-
-test_prepublication_failure_keeps_concurrent_durable_metadata() {
-  local dir control_pid link_out rc i=0
-  dir=$(new_case rollback-race rl30)
-  add_ship_task "$dir" rl30 pi
-  printf '%s' "$dir/proj" > "$dir/fake/cwd"
-  FM_FAKE_CWD_RACE_READY="$dir/cwd-race-ready" \
-    run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
-      > "$dir/control.out" &
-  control_pid=$!
-  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$dir/cwd-race-ready" ] || {
-    kill "$control_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach its pre-publication endpoint check"
-  }
-  link_out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$X_LINK" rl30 request-30 --carry-count 2 --carry-ts 1700000000 \
-      --carry-platform x --carry-max 280 2>&1); rc=$?
-  expect_code 0 "$rc" "concurrent durable metadata publication should succeed"$'\n'"$link_out"
-  wait "$control_pid"; rc=$?
-  expect_code 1 "$rc" "the staged pre-publication launch failure should fail closed"
-  [ "$(meta_field "$dir" rl30 x_request)" = request-30 ] \
-    || fail "rollback erased the concurrent X request"
-  [ "$(meta_field "$dir" rl30 x_followups)" = 2 ] \
-    || fail "rollback erased the concurrent follow-up count"
-  [ "$(journal_field "$dir" rl30 rollback)" = prior-record-kept ] \
-    || fail "pre-publication rollback should leave the live record untouched"
-  pass "fm-control relaunch: unpublished rollback keeps concurrent durable metadata"
 }
 
 test_post_publication_launch_failure_keeps_the_new_record() {
@@ -1286,7 +1179,7 @@ test_relaunch_refuses_terminal_task_before_stopping_agent() {
   dir=$(new_case terminal rl42)
   add_ship_task "$dir" rl42 pi
   seed_backlog "$dir" rl42 in_flight
-  tasks-axi "done" rl42 --file "$dir/home/data/backlog.md" >/dev/null \
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" "done" rl42 >/dev/null \
     || fail "terminal relaunch fixture could not complete its task row"
 
   out=$(run_control "$dir" rl42 relaunch --note "must not resume terminal work") || rc=$?
@@ -1303,7 +1196,6 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
-test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
@@ -1322,7 +1214,6 @@ test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_keeps_the_prior_record_and_reports_it
-test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase

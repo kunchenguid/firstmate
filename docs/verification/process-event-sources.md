@@ -51,7 +51,6 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | bounded home sweep | a non-mutating full-tree preflight precedes teardown, then registrations and claim-only owned sources retire through the ordinary safe path at each home-removal boundary |
 | sweep refusal | uncertain identity preserves the runner, claim, registration, home, lease, and parent retirement evidence for retry |
 | foreign ownership | sweeping one home removes its registration without signaling or releasing another home's live claim |
-| teardown refusal ordering | a later public-followup refusal retains the home and its active process-event registration without invoking its sweep |
 | healthy-home invariance | homes with no registration or owned runner claim retain ordinary registration-only supervision and teardown behavior |
 | source-only supervision | a registered source with no task metadata trips the shared predicate and general guard |
 | argv integrity | an argument containing spaces survives as one argument, a shell-looking argument is passed literally with no interpretation, and an unrepresentable newline is rejected at registration |

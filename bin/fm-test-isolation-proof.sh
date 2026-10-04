@@ -171,7 +171,6 @@ tests/fm-spawn-batch.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
 tests/fm-transition-lib.test.sh
-tests/fm-x-mode.test.sh
 EOF
 }
 

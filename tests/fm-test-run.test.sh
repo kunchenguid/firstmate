@@ -1251,14 +1251,14 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
   # map has never seen - the shape of any test added tomorrow.
-  for script in fm-procevent.test.sh fm-public-followup.test.sh fm-zz-unmapped-fixture.test.sh; do
+  for script in fm-procevent.test.sh fm-live-gate.test.sh fm-zz-unmapped-fixture.test.sh; do
     printf '#!/usr/bin/env bash\necho "ok - %s fixture"\n' "$script" >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
 
   set +e
   (cd "$repo" && bin/fm-test-run.sh --jobs 2 \
-    tests/fm-procevent.test.sh tests/fm-public-followup.test.sh) \
+    tests/fm-procevent.test.sh tests/fm-live-gate.test.sh) \
     >"$tmp/family.out" 2>"$tmp/family.err"
   rc=$?
   set -e

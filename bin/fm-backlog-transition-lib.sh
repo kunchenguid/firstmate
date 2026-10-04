@@ -24,8 +24,7 @@
 #
 # SCOPE. fm_backlog_transition_applies excludes historical persistent-home
 # records; every ordinary transition addresses `data/<id>/task.json` through
-# fm-tasks-axi.sh. Backend addressing below belongs only to the independent
-# public-followup obligation passthrough.
+# fm-tasks-axi.sh.
 #
 # CRASH RECOVERY. Only teardown needs a durable record: it removes the meta and
 # with it the completion links, so a process killed between the two halves would
@@ -126,19 +125,6 @@ fm_backlog_data_absolute() {
   printf '%s\n' "$data"
 }
 
-fm_backlog_file() {  # <data-dir>
-  local data
-  data=$(fm_backlog_data_absolute "$1") || {
-    FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
-    return 1
-  }
-  if [ "$data" = / ]; then
-    printf '/backlog.md\n'
-  else
-    printf '%s/backlog.md\n' "$data"
-  fi
-}
-
 # The directory a backlog's own `.tasks.toml` is resolved from.
 fm_backlog_root() {  # <data-dir>
   local data parent
@@ -178,32 +164,6 @@ fm_backlog_data_relative() {  # <data-dir>
 }
 
 
-# Resolve how the owning home's backlog is addressed, for reads and mutations
-# alike: sets FM_BACKLOG_AXI_ROOT to the cd target and FM_BACKLOG_AXI_FILE to
-# the markdown --file path, empty for every other backend. This is the single
-# place that decision is made. A markdown backlog is addressed as
-# <data>/backlog.md so the change lands in the home that owns the task
-# regardless of the caller's working directory; any other configured adapter
-# is addressed by that root alone, because --file would override the adapter's
-# own workspace path. The caller invokes fm_tasks_axi inside its own subshell
-# - the bound wrapper execs, so a nested subshell here would add a process
-# layer between tasks-axi and the caller, which the lock-holding callers'
-# interruption contract counts on not existing.
-fm_backlog_tasks_axi_addressing() {  # <data-dir>
-  FM_BACKLOG_AXI_FILE=
-  local data root backend
-  data=$(fm_backlog_data_absolute "$1") || return $?
-  root=$(fm_backlog_root "$data") || return $?
-  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
-    FM_BACKLOG_TRANSITION_ERROR=$backend
-    return 2
-  }
-  FM_BACKLOG_AXI_ROOT=$root
-  if [ "$backend" = markdown ]; then
-    FM_BACKLOG_AXI_FILE=$(fm_backlog_file "$data") || return 1
-  fi
-}
-
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
   local data authorized_data=$2 kind=$3
   FM_BACKLOG_TRANSITION_SKIP=
@@ -230,10 +190,8 @@ fm_tasks_axi_timeout_expired() {  # <status>
   return 1
 }
 
-# Print one row's `tasks-axi show` output (plus stderr) from the addressing
-# fm_backlog_tasks_axi_addressing resolved, with `--file` only for the markdown
-# backend. Addressing or backend-resolution errors return before tasks-axi runs;
-# otherwise its exit status is preserved. Extra flags (--full) pass through.
+# Print one canonical row's output (plus stderr) through fm-tasks-axi.sh.
+# Its exit status is preserved and extra flags (--full) pass through.
 #
 # Every read is bounded, because a wedged backend read here is what blinds a
 # whole session start: bin/fm-bootstrap.sh's reconcile and close-replay sweeps

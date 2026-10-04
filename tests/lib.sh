@@ -63,7 +63,7 @@ unset FM_TRAEX_HARNESS
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
 # resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that
 # seeds a temp home with bare `tasks-axi` would silently write the operator's
-# live backlog instead - tests/fm-public-followup.test.sh did exactly that. Every
+# live backlog instead. Every
 # fixture addresses its own data/backlog.md through its copied .tasks.toml, an
 # explicit --file, or bin/fm-tasks-axi.sh; a case that verifies the wrapper
 # against an ambient override sets TASKS_AXI_FILE itself.

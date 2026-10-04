@@ -115,7 +115,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // (via writeEligibleRowsSnapshot) hands it.
 //
 // The one branch-owned check class is a fully identity-bound task-scoped iDA
-// process result. Merge-confirmation polls, Relay mentions, credential/auth
+// process result. Merge-confirmation polls, credential/auth
 // failures, malformed iDA-looking rows, and every other check class never veto
 // a scan in either mode. They are excluded from eligibleSeqs and left queued
 // for main, which is woken for each on that check's own watcher cycle, so

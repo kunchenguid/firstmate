@@ -1079,12 +1079,11 @@ EOF
     expect_code 0 "$status" "the $label check class must stay on main: $out"
     [ -z "$out" ] || fail "Pi main-only check test ($label) printed output: $out"
   done <<'CLASSES'
-relay-mention|check: x-mention 1234567890
 credential-failure|check: gh auth check failed; re-authenticate before dispatch
 merge-confirmation|check: task-a.check.sh: PR merged
 real-board-answer|check: procevent lavish lavish-abcdef0123456789 1
 CLASSES
-  pass "every main-only check class still reaches main, never the supervision branch"
+  pass "every supported main-only check class still reaches main, never the supervision branch"
 }
 
 test_pi_routes_only_valid_ida_result_checks_to_branch() {
