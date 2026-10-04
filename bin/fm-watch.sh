@@ -1224,12 +1224,38 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
   printf '%s\037%s\037%s\037%s\037%s' "$1" "$2" "$3" "$4" "$5"
 }
 
+# A worker whose work is finished and whose pull request is open is WAITING, not
+# wedged: it has nothing left to do until a human merges or reviews. The records
+# already say so - the task's latest status event is `done` and it names a PR, or
+# the task's metadata recorded one - so no flag is added that could drift from
+# them. A later event of any other verb (a `working:` resume, a blocker) is the
+# worker saying it moved again, which ends the evidence on its own.
+# It is evidence only while an agent could still be there: an endpoint proven
+# dead or missing is left to wedge_dead_record, which reports it once and tells
+# the supervisor to check for unlanded work, and every unreadable verdict keeps
+# the unchanged ladder. A worker that stopped mid-change never wrote `done`, so
+# it never qualifies.
+wedge_finished_awaiting_pr() {  # <task> <window> <status-file>
+  local task=$1 win=$2 statusf=$3 last note agent_state
+  last=$(last_status_line "$statusf")
+  [ "$(status_line_verb "$last")" = "done" ] || return 1
+  note=$(status_line_note "$last")
+  case "$note" in
+    *https://*/pull/[0-9]*|*"published for review"*) ;;
+    *) fm_pr_metadata_identity_parse "$STATE/$task.meta" || return 1 ;;
+  esac
+  [ -n "$win" ] || return 1
+  agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || return 1
+  case "$agent_state" in dead|missing) return 1 ;; esac
+  return 0
+}
+
 # The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
 # read at the one moment it decides anything: when an escalation is about to
 # fire. Two records answer it, and they are independent: the worker's own status
-# line - a declared `paused:` external wait, or a verified `captain-held`
-# transfer - and, when that line explains nothing, the crew's authoritative
-# current state.
+# line - a finished `done` delivery whose PR is open (wedge_finished_awaiting_pr),
+# a declared `paused:` external wait, or a verified `captain-held` transfer -
+# and, when that line explains nothing, the crew's authoritative current state.
 #
 # The generated brief promises that declaring one buys the long recheck cadence
 # instead of a wedge, and the wedge timer is reachable while that declaration
@@ -1296,10 +1322,14 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # so it is taken only behind a first fold read that finds some open
 # `needs-decision` at all, and only in the at-threshold branch - at most once per
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
-wedge_wait_evidence() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf run
+wedge_wait_evidence() {  # <task> [<window>] -> one wait_record on stdout
+  local task=$1 win=${2-} last until statusf run
   [ -n "$task" ] || return 1
   statusf="$STATE/$task.status"
+  if wedge_finished_awaiting_pr "$task" "$win" "$statusf"; then
+    wait_record 'finished, PR open' 'awaiting review or merge, the work is done'       supervisor 'review or merge the PR, then tear the task down' "$statusf"
+    return 0
+  fi
   last=$(status_declared_wait_line "$statusf")
   if status_is_captain_held "$last"; then
     wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
@@ -1531,7 +1561,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fm_epoch_seconds_to age
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if evidence=$(wedge_wait_evidence "$task") &&
+        if evidence=$(wedge_wait_evidence "$task" "$win") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
         fi

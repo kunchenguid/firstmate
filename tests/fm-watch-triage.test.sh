@@ -3641,6 +3641,75 @@ test_wedge_defer_refuses_a_half_filled_wait_record() {
 }
 
 
+# A finished worker whose PR is open is waiting on a human, not wedged. The records
+# already say it: the latest status event is `done` and names the PR. A lane that
+# never finished, one that resumed after its done, and one whose agent is gone must
+# all stay loud, so each is pinned beside the quiet case.
+test_finished_worker_with_open_pr_is_waiting_not_wedged() {
+  local dir state fakebin out capture window key n
+  local working='state: working · source: run-step · ci running'
+  local pr='https://github.com/example/proj/pull/42'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  dir=$(wedge_threshold_fixture finished-open-pr "done [at=1]: PR $pr checks green" 0 1000)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "a finished worker with an open PR wedge-escalated at threshold $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a finished worker with an open PR queued a wedge wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a finished worker with an open PR counted wedge escalations"
+
+  # Its recheck is its own kind, so a reader can tell it from a hold or a wedge.
+  dir=$(wedge_threshold_fixture finished-open-pr-recheck "done [at=1]: PR $pr checks green" 2000 1000)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a finished worker with an open PR was never rechecked on the long cadence"
+  grep -F 'finished, PR open' "$out" >/dev/null \
+    || fail "the recheck did not name a finished worker waiting on its PR: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "the finished-worker recheck was worded as a possible wedge"
+  grep -F 'awaiting the captain' "$out" >/dev/null \
+    && fail "the finished-worker recheck was worded as a captain hold"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the finished-worker recheck"
+
+  # A done with no PR is the pipeline handoff, not a finished delivery.
+  dir=$(wedge_threshold_fixture finished-no-pr 'done [at=1]: ready for validation' 0 1000)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a done with no PR stopped escalating"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "a done with no PR lost the wedge ladder: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the no-PR escalation"
+
+  # A worker that resumed after its done is moving again, so the evidence ends.
+  dir=$(wedge_threshold_fixture finished-then-resumed "done [at=1]: PR $pr checks green
+working [at=2]: fixing review feedback" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a worker that resumed after done stopped escalating"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "a worker that resumed after done lost the wedge ladder: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the resumed-worker escalation"
+
+  # No agent and a recorded PR: not the waiting case, the gone-agent report owns it.
+  dir=$(wedge_threshold_fixture finished-agent-gone "done [at=1]: PR $pr checks green" 0 1000)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  gone_endpoint_env dead; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a finished worker whose agent is gone was silenced"
+  grep -F 'finished, PR open' "$out" >/dev/null \
+    && fail "a gone agent was treated as a worker waiting on its PR: $(cat "$out")"
+  grep -F 'agent dead' "$out" >/dev/null \
+    || fail "a gone agent lost its dead-agent report: $(cat "$out")"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "a finished worker with an open PR waits quietly, while no-PR, resumed, and gone-agent lanes stay loud"
+}
+
 # --- a record whose agent is GONE reports once, instead of alarming forever ---
 # Observed on a live fleet: two finished lanes reached 226 and 203 CONSECUTIVE
 # wedge escalations, one alarm roughly every FM_STALE_ESCALATE_SECS, indefinitely -
@@ -6678,6 +6747,7 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_finished_worker_with_open_pr_is_waiting_not_wedged
 test_gone_endpoint_reports_once_instead_of_escalating_forever
 test_live_and_unproven_endpoints_still_wedge_escalate
 test_gone_report_rearms_when_the_endpoint_comes_back
