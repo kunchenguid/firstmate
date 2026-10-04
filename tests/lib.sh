@@ -103,10 +103,10 @@ pass() {
 # real caller, never a subshell.
 
 # fm_test_tmpdir: directory used for registries and fixture roots.
-# Honors TMPDIR when it is a usable absolute path that is not a git worktree
-# root. A TMPDIR pointed at a repository root (or a relative path that resolves
-# there) would place `.fm-test-*` registries beside tracked files; a concurrent
-# `git add -A` during a live suite has committed them. Fall back to /tmp then.
+# Resolves absolute or relative TMPDIR to an existing physical directory,
+# falling back to /tmp if resolution fails or the directory contains .git.
+# Keep registries out of git worktree roots so concurrent git add -A cannot
+# accidentally stage live test state.
 fm_test_tmpdir() {
   local base=${TMPDIR:-/tmp} physical
   base=${base%/}
