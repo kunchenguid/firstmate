@@ -1226,12 +1226,14 @@ test_unsupported_forge_url_is_never_recorded_as_a_failure() {
   local home out host_url label
   # Cover the unsupported URL on both sides of the supported one, because the
   # two orderings fail differently. Rotation sorts by URL and the frozen clock's
-  # offset is zero, so a bitbucket.org host lands ahead of github.com and a
-  # gitlab.com host lands behind it. Ahead, nothing precedes the URL, so the
-  # ordering guards against the poll aborting on its own first iteration.
-  # Behind, a supported URL has already run, so the ordering is what catches the
-  # URL inheriting that previous result and reporting it as a failure.
-  for host_url in https://bitbucket.org/o/r/pull-requests/2 https://gitlab.com/o/r/-/merge_requests/2; do
+  # offset is zero, so a git.example.com host lands ahead of github.com and a
+  # gitlab.com host lands behind it. Both are GitLab-shaped merge request URLs,
+  # so ownership keeps them and the poll really reaches each one. Ahead, nothing
+  # precedes the URL, so the ordering guards against the poll aborting on its
+  # own first iteration. Behind, a supported URL has already run, so the
+  # ordering is what catches the URL inheriting that previous result and
+  # reporting it as a failure.
+  for host_url in https://git.example.com/o/r/-/merge_requests/2 https://gitlab.com/o/r/-/merge_requests/2; do
     label=${host_url#https://}; label=${label%%/*}; label=${label%%.*}
     home=$(new_home "unsupported-poll-$label")
     forge_home "$home"
@@ -1244,7 +1246,7 @@ test_unsupported_forge_url_is_never_recorded_as_a_failure() {
     [ ! -e "$home/data/unsupported/contributions.json" ] \
       || fail "$host_url recorded forge evidence: $(cat "$home/data/unsupported/contributions.json")"
     [ ! -s "$home/state/.wake-queue" ] || fail "$host_url enqueued a wake"
-    grep -qE 'bitbucket|gitlab' "$home/forge/calls" && fail "$host_url was read"
+    grep -qE 'example|gitlab' "$home/forge/calls" && fail "$host_url was read"
     # The supported URL is observed only if the unsupported one neither
     # consumed the budget nor stopped the poll, which also proves the poll
     # reached past it rather than ending early.
