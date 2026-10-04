@@ -16,8 +16,17 @@
 # between audit and planning, and the bridge daemon lifecycle. The worker is
 # an ordinary low-thinking spawn (fm-spawn.sh with --effort low) and never
 # touches the bridge; nothing in the dispatch path starts, stops, or probes
-# it. The bridge is the already-installed codex-chatgpt-web daemon and is
-# never installed, authenticated, or repaired here.
+# it. The prompt handoff belongs to dispatch: right after a successful spawn,
+# dispatch steers the stored stage prompt (the audit prompt for --stage
+# audit, the plan for --stage plan) to that worker through fm-send.sh,
+# addressed at the spawn's first positional task id taken from the args after
+# --, and refuses before launching when that id cannot be determined. A
+# failed spawn records last_error, leaves the phase at <stage>-dispatch, and
+# exits nonzero; record-worker-failure likewise returns the phase to
+# <stage>-dispatch (never toward the next stage) so the same stage retries
+# cleanly through dispatch. The bridge is the already-installed
+# codex-chatgpt-web daemon and is never installed, authenticated, or
+# repaired here.
 #
 # State file: $FM_HOME/data/<task-id>/chatgpt-loop.json, one JSON object with
 # task_id, objective, context, thread, phase, iteration, audit_prompt,
@@ -37,9 +46,10 @@
 # bridge failure the phase is unchanged (retryable), last_error records the
 # cause, and dispatch issues nothing.
 #
-# Test seam: FM_CHATGPT_LOOP_SPAWN overrides the fm-spawn.sh path, and
-# FM_CHATGPT_LOOP_CONSULT overrides the fm-chatgpt-consult.sh path. Both
-# default to the sibling scripts beside this file. docs/configuration.md
+# Test seam: FM_CHATGPT_LOOP_SPAWN overrides the fm-spawn.sh path,
+# FM_CHATGPT_LOOP_CONSULT overrides the fm-chatgpt-consult.sh path, and
+# FM_CHATGPT_LOOP_SEND overrides the fm-send.sh path. All three default to
+# the sibling scripts beside this file. docs/configuration.md
 # "ChatGPT consultation channel" owns the user-facing contract.
 set -u
 
@@ -52,6 +62,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SPAWN="${FM_CHATGPT_LOOP_SPAWN:-$LIBDIR/fm-spawn.sh}"
 CONSULT_BIN="${FM_CHATGPT_LOOP_CONSULT:-$LIBDIR/fm-chatgpt-consult.sh}"
+SEND="${FM_CHATGPT_LOOP_SEND:-$LIBDIR/fm-send.sh}"
 BRIDGE_PID_FILE="$STATE/chatgpt-loop-bridge.pid"
 
 usage() {
@@ -250,17 +261,51 @@ cmd_dispatch() {
       return 2
     fi
   done
+  # The prompt handoff target is fm-spawn's first positional task id from the
+  # args after --. Refuse before launching when it cannot be determined.
+  local worker_task=""
+  for a in "${spawn_args[@]}"; do
+    case "$a" in
+      -*) ;;
+      *) worker_task=$a; break ;;
+    esac
+  done
+  [ -n "$worker_task" ] || { printf 'fm-chatgpt-loop: cannot determine the worker task id from the dispatch args; nothing launched, no state changed\n' >&2; return 2; }
   # The low-thinking worker is this workflow's definition: always --effort low.
   # Bridge lifecycle stays Firstmate-owned: the worker environment never
   # carries the bridge URL, and nothing here starts, stops, or probes it.
-  env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_PROMPT_COPY -u FM_CHATGPT_LOOP_DAEMON_DIR "$SPAWN" "${spawn_args[@]}" --effort low || return $?
+  local stage_prompt rc send_err phase_next
   if [ "$stage" = audit ]; then
-    write_field "$file" phase audit-worker || return 1
+    stage_prompt=$(read_field "$file" audit_prompt)
+    phase_next=audit-worker
   else
-    write_field "$file" phase plan-worker || return 1
+    stage_prompt=$(read_field "$file" plan)
+    phase_next=plan-worker
   fi
+  if env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_SEND -u FM_CHATGPT_LOOP_PROMPT_COPY -u FM_CHATGPT_LOOP_DAEMON_DIR "$SPAWN" "${spawn_args[@]}" --effort low; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    write_field "$file" last_error "worker $stage spawn failure: fm-spawn exited $rc" || return 1
+    printf 'fm-chatgpt-loop: %s worker spawn failed for task %s (exit %s); phase unchanged at %s-dispatch\n' "$stage" "$task" "$rc" "$stage" >&2
+    return "$rc"
+  fi
+  # Handoff: deliver the stored stage prompt to the spawned worker through the
+  # ordinary durable steering path, right after launch.
+  if send_err=$("$SEND" "$worker_task" "$stage_prompt" 2>&1); then
+    :
+  else
+    rc=$?
+    write_field "$file" phase "$phase_next" || return 1
+    write_field "$file" last_error "worker $stage prompt delivery failed: $send_err" || return 1
+    printf 'fm-chatgpt-loop: spawned the %s worker for task %s, but the prompt handoff to %s failed: %s\n' "$stage" "$task" "$worker_task" "$send_err" >&2
+    return "$rc"
+  fi
+  write_field "$file" phase "$phase_next" || return 1
   write_field "$file" last_error "" || return 1
-  printf 'dispatched %s worker for task %s with --effort low\n' "$stage" "$task"
+  printf 'dispatched %s worker for task %s with --effort low and delivered the %s prompt to %s\n' "$stage" "$task" "$stage" "$worker_task"
 }
 
 cmd_record_findings() {
@@ -325,7 +370,8 @@ cmd_record_worker_failure() {
   want="$stage-worker"
   require_phase "$file" "$want" "$task" || return 1
   write_field "$file" last_error "worker $stage failure: $reason" || return 1
-  printf 'recorded %s worker failure for task %s; phase unchanged at %s\n' "$stage" "$task" "$want" >&2
+  write_field "$file" phase "$stage-dispatch" || return 1
+  printf 'recorded %s worker failure for task %s; phase returned to %s-dispatch for retry\n' "$stage" "$task" "$stage" >&2
   return 1
 }
 
@@ -388,12 +434,7 @@ bridge_daemon_dir() {
 }
 
 cmd_bridge_start() {
-  case " $* " in
-    *' install '*|*' setup '*|*' login '*|*' uninstall '*)
-      printf 'fm-chatgpt-loop: bridge start refuses install/setup/login/uninstall verbs; the bridge is already installed and authenticated externally\n' >&2
-      return 2
-      ;;
-  esac
+  [ $# -eq 0 ] || { printf 'fm-chatgpt-loop: bridge start takes no arguments; installation and authentication stay external\n' >&2; return 2; }
   if [ -f "$BRIDGE_PID_FILE" ]; then
     local old
     old=$(cat "$BRIDGE_PID_FILE" 2>/dev/null)
@@ -427,12 +468,7 @@ cmd_bridge_start() {
 }
 
 cmd_bridge_stop() {
-  case " $* " in
-    *' install '*|*' setup '*|*' login '*|*' uninstall '*)
-      printf 'fm-chatgpt-loop: bridge stop refuses install/setup/login/uninstall verbs\n' >&2
-      return 2
-      ;;
-  esac
+  [ $# -eq 0 ] || { printf 'fm-chatgpt-loop: bridge stop takes no arguments; never killing a foreign process\n' >&2; return 2; }
   [ -f "$BRIDGE_PID_FILE" ] || { printf 'fm-chatgpt-loop: no loop-owned bridge instance to stop; never killing a foreign process\n' >&2; return 1; }
   local pid
   pid=$(cat "$BRIDGE_PID_FILE" 2>/dev/null)

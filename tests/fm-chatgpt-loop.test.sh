@@ -66,7 +66,9 @@ stop_stub() {
 }
 
 # make_spawn_stub <dir>: writes a stub spawn that records its argv and
-# environment, then exits 0. Exports FM_CHATGPT_LOOP_SPAWN at it.
+# environment, then exits 0, plus a stub fm-send that records the steering
+# target and delivered message, then exits 0. Exports FM_CHATGPT_LOOP_SPAWN
+# and FM_CHATGPT_LOOP_SEND at them.
 make_spawn_stub() {
   local dir=$1
   cat > "$dir/fm-spawn-stub.sh" <<'SH'
@@ -76,8 +78,21 @@ env > "$STUB_SPAWN_DIR/env.txt"
 exit "${STUB_SPAWN_EXIT:-0}"
 SH
   chmod +x "$dir/fm-spawn-stub.sh"
+  cat > "$dir/fm-send-stub.sh" <<'SH'
+#!/usr/bin/env bash
+target=$1
+shift
+{
+  printf 'target: %s\n' "$target"
+  printf 'message:\n%s\n' "$*"
+} > "$STUB_SEND_DIR/send.txt"
+exit "${STUB_SEND_EXIT:-0}"
+SH
+  chmod +x "$dir/fm-send-stub.sh"
   export FM_CHATGPT_LOOP_SPAWN="$dir/fm-spawn-stub.sh"
   export STUB_SPAWN_DIR="$dir"
+  export FM_CHATGPT_LOOP_SEND="$dir/fm-send-stub.sh"
+  export STUB_SEND_DIR="$dir"
 }
 
 new_task_files() {
@@ -104,6 +119,10 @@ test_full_loop_happy_path() {
   bash "$LOOP" dispatch --stage audit --task happy -- mytask myproj --mode local-only --yolo off >/dev/null
   [ "$(loop_phase happy)" = "audit-worker" ] || fail "an audit dispatch must advance to audit-worker"
   assert_contains "$(cat "$dir/argv.txt")" "--effort low" "the audit stage must dispatch a low-thinking worker"
+  assert_contains "$(cat "$dir/send.txt")" "target: mytask" "the audit prompt must be steered to the spawn's first positional task id"
+  assert_contains "$(cat "$dir/send.txt")" "User objective:" "the delivered audit prompt must be the stored stage prompt"
+  assert_contains "$(cat "$dir/send.txt")" "Fix the two failing CI checks" "the audit prompt must reach the worker's input"
+  grep -Eiq 'CHATGPT_WEB_BRIDGE_URL|codex-chatgpt-web|17841|17911|fm-chatgpt|127\.0\.0\.1' "$dir/send.txt" && fail "the delivered audit prompt must carry no bridge reference"
   printf 'worker found two flaky tests\n' > "$dir/findings.txt"
   pid=$(start_stub "$dir")
   bash "$LOOP" record-findings --task happy --file "$dir/findings.txt" >/dev/null
@@ -114,6 +133,9 @@ test_full_loop_happy_path() {
   bash "$LOOP" dispatch --stage plan --task happy -- mytask myproj --mode local-only --yolo off >/dev/null
   [ "$(loop_phase happy)" = "plan-worker" ] || fail "a plan dispatch must advance to plan-worker"
   assert_contains "$(cat "$dir/argv.txt")" "--effort low" "the plan stage must dispatch a low-thinking worker"
+  assert_contains "$(cat "$dir/send.txt")" "target: mytask" "the plan must be steered to the spawn's first positional task id"
+  assert_contains "$(cat "$dir/send.txt")" "stubbed consultation answer" "the execution plan must reach the worker's input"
+  grep -Eiq 'CHATGPT_WEB_BRIDGE_URL|codex-chatgpt-web|17841|17911|fm-chatgpt|127\.0\.0\.1' "$dir/send.txt" && fail "the delivered plan must carry no bridge reference"
   printf 'worker fixed both checks\n' > "$dir/result.txt"
   bash "$LOOP" record-result --task happy --file "$dir/result.txt" >/dev/null
   [ "$(loop_phase happy)" = "complete" ] || fail "a recorded result must complete the task"
@@ -177,10 +199,35 @@ test_worker_failure_recorded() {
   local out rc
   out=$(bash "$LOOP" record-worker-failure --task workerfail --stage audit --reason "worker exited 1" 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "a worker failure record must exit nonzero"
-  [ "$(loop_phase workerfail)" = "audit-worker" ] || fail "a worker failure must not silently advance the phase"
+  [ "$(loop_phase workerfail)" = "audit-dispatch" ] || fail "a worker failure must return to the failed stage's dispatch phase with no advance to the next consultation"
   assert_contains "$(jq -r '.last_error' "$HOME_DIR/data/workerfail/chatgpt-loop.json")" "worker exited 1" "a worker failure must record its reason"
-  assert_contains "$out" "audit-worker" "a worker failure must surface the held phase"
-  pass "a worker failure is recorded and surfaced without a silent phase advance"
+  assert_contains "$out" "audit-dispatch" "a worker failure must surface the returned dispatch phase"
+  rm -f "$dir/argv.txt" "$dir/send.txt"
+  bash "$LOOP" dispatch --stage audit --task workerfail -- t p --mode local-only --yolo off >/dev/null; rc=$?
+  [ "$rc" -eq 0 ] || fail "a recorded worker failure must leave the same stage re-dispatchable"
+  [ "$(loop_phase workerfail)" = "audit-worker" ] || fail "the retry dispatch must advance to audit-worker"
+  pass "a worker failure returns to dispatch, records last_error, and the stage retries"
+}
+
+test_spawn_failure_recorded() {
+  local dir=$TMP_ROOT/spawnfail
+  mkdir -p "$dir"
+  new_task_files
+  make_spawn_stub "$dir"
+  local pid rc
+  pid=$(start_stub "$dir")
+  bash "$LOOP" init --task spawnfail --objective-file "$TMP_ROOT/objective.txt" >/dev/null
+  bash "$LOOP" consult --stage audit --task spawnfail >/dev/null
+  stop_stub "$pid"
+  STUB_SPAWN_EXIT=7 bash "$LOOP" dispatch --stage audit --task spawnfail -- t p --mode local-only --yolo off >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed spawn must exit nonzero"
+  [ "$(loop_phase spawnfail)" = "audit-dispatch" ] || fail "a failed spawn must leave the phase at audit-dispatch with no advance"
+  assert_contains "$(jq -r '.last_error' "$HOME_DIR/data/spawnfail/chatgpt-loop.json")" "spawn failure" "a failed spawn must record last_error"
+  [ ! -f "$dir/send.txt" ] || fail "a failed spawn must deliver no prompt"
+  bash "$LOOP" dispatch --stage audit --task spawnfail -- t p --mode local-only --yolo off >/dev/null; rc=$?
+  [ "$rc" -eq 0 ] || fail "a failed spawn must leave the same stage re-dispatchable"
+  [ "$(loop_phase spawnfail)" = "audit-worker" ] || fail "the retry dispatch must advance to audit-worker"
+  pass "a failed spawn records last_error, holds the dispatch phase, and the stage retries"
 }
 
 test_wrong_phase_refuses() {
@@ -229,13 +276,18 @@ test_bridge_verbs_refused() {
   [ "$rc" -ne 0 ] || fail "bridge setup must refuse"
   out=$(bash "$LOOP" bridge start login 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "bridge start with setup verbs must refuse"
-  pass "bridge install and setup verbs refuse"
+  out=$(bash "$LOOP" bridge start auth 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "bridge start with an arbitrary extra argument must refuse"
+  out=$(bash "$LOOP" bridge stop auth 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "bridge stop with an arbitrary extra argument must refuse"
+  pass "bridge install and setup verbs and any extra start/stop argument refuse"
 }
 
 test_full_loop_happy_path
 test_plan_consult_carries_explicit_context
 test_consult_failure_is_retryable
 test_worker_failure_recorded
+test_spawn_failure_recorded
 test_wrong_phase_refuses
 test_worker_never_touches_bridge
 test_bridge_verbs_refused
