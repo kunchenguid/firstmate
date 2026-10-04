@@ -162,6 +162,11 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_task_continuation", "fm_branch_re
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
+// Auxiliary evidence for duplicate/terminal coalescing, not a delivery or
+// acknowledgement boundary. Rows outside this recent window stay unknown, so
+// coalescing keeps an actionable row unless the bounded evidence proves that a
+// newer exact duplicate or terminal disposition supersedes it.
+const OUTCOME_HISTORY_WINDOW = 200;
 const MERGE_NOTE_BOAT = "⛵";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
@@ -1318,7 +1323,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function readOutcomeHistory(): Promise<OutcomeRow[] | null> {
-    const listed = await runOutcomeScript(["list", "--all"]);
+    const listed = await runOutcomeScript(["list", "--recent", String(OUTCOME_HISTORY_WINDOW)]);
     if (!listed.ok) return null;
     const rows: OutcomeRow[] = [];
     for (const line of listed.stdout.split("\n")) {
