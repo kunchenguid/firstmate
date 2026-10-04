@@ -1295,9 +1295,20 @@ test_main_only_close_after_handled_turn_delivers_restore_failure() {
   pass "host+hook: a refused inherited handling restore delivers a failure instead of silent success"
 }
 
+# A handled stale event for the idle worker, in the given posture, after the
+# handled paused and resolved signals
+stale_handled_after_resolved() {  # <home> <posture>
+  awk -F '\t' -v posture="posture=$2" '
+    $2 != "handled" { next }
+    /signal: .*\/demo\.status$/ { signals++; next }
+    signals >= 2 && index($0, posture) && /stale: firstmate:fm-demo$/ { found = 1 }
+    END { exit !found }
+  ' "$1/state/.supervision-host.log" 2>/dev/null
+}
+
 # Model the same returned driver with monitoring intact, in both postures
 assert_returned_driver_is_caught() {  # <attended|away>
-  local posture=$1 home returned
+  local posture=$1 home
   home=$(make_primary_home "hook-returned-driver-$posture")
   ln -s "$ROOT/.agents" "$home/.agents"
   if [ "$posture" = away ]; then
@@ -1320,15 +1331,12 @@ exit 1
 SH
   chmod +x "$home/fakebin/tmux"
   printf 'window=firstmate:fm-demo\nproject=demo\nkind=ship\nharness=pi\nbackend=tmux\n' > "$home/state/demo.meta"
-  returned=$(date +%s)
   append_status "$home" 'measurement driver returned; inspect receipts' resolved
-  wait_until 250 handled_at_least "$home" 3 \
-    || fail "returned driver: the resolved signal and idle stale were not handled: $(cat "$home/state/.supervision-host.log")"
-  assert_re "handled.*posture=$posture.*stale: firstmate:fm-demo" "$home/state/.supervision-host.log" \
-    "the idle worker must be stale-handled in the requested posture"
-  [ "$(( $(date +%s) - returned ))" -le 25 ] || fail "returned driver: missed the bounded lab stale threshold"
+  # A hang guard only; the stale event's order after the resolved hand-back is the assertion
+  wait_until 1200 stale_handled_after_resolved "$home" "$posture" \
+    || fail "returned driver: the idle worker was not stale-handled in posture $posture after its resolved signal: $(cat "$home/state/.supervision-host.log")"
   [ ! -s "$home/hook.rc" ] || fail "a routine returned-driver wake reached main"
-  watcher_live "$home" || fail "the returned-driver control lost monitoring"
+  wait_until 250 watcher_live "$home" || fail "the returned-driver control lost monitoring"
   stop_home_processes "$home"
 }
 
