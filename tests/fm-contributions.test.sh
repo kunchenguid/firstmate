@@ -1037,6 +1037,7 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
     home=$(new_home "arm-budget-$mode")
     forge_home "$home"
     wrap_forge "$home"
+    /bin/date +%s > "$home/forge/clock"
     mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
     cp "$home/data/delivery/contributions.json" "$home/prior.json"
     printf 'hang\n' > "$home/forge/fault"
