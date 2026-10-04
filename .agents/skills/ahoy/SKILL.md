@@ -45,7 +45,7 @@ Give the captain a concise session-only recap without gathering fresh state.
    If neither ordinary events nor visibly open decisions exist, say directly in one sentence that nothing happened after the previous captain message.
 
 8. After the normal recap, when the existing visibly open decision inventory contains decisions, begin a guided decision-clearing flow by presenting only the single open decision judged most impactful by the first mate.
-   Make clear that impact ordering is the first mate's judgment rather than a mechanical score.
+   Say the ordering is the first mate's pick.
    Give enough escalation-quality context to decide easily: the decision, why it matters, the options, and a recommendation.
 9. When the captain answers the presented decision, present the next highest-impact decision from that existing inventory in the same form.
    Continue one decision at a time until none remain, without starting this flow when the inventory is empty.

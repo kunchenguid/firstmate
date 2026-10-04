@@ -16,7 +16,12 @@
 # is green at the exact current head commit, where github_checks_not_green below
 # owns what makes a check green and judges each one by its current run, and
 # every unwaived check the forge requires for the base branch has reported at
-# that head. A required check that never reported is absent from the checks
+# that head. When mergeable is the only failing condition and reads UNKNOWN,
+# meaning GitHub has not finished recomputing it, the caller re-reads and
+# re-checks every condition after a short bounded wait instead of refusing;
+# once that bound is spent it reports mergeability still pending rather than
+# unmergeable, with the same nonzero exit as any other refusal.
+# A required check that never reported is absent from the checks
 # list rather than red, so github_read_required_contexts below reads the
 # required set from classic branch protection and active rulesets. Check-run
 # requirements retain their producer app binding: a same-named check run from another app cannot
@@ -95,7 +100,9 @@
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
-# state/.afk-contract exists any green merge may proceed under away authority:
+# an away record exists (a quiet-mode record is a present captain, so its
+# merges stay attended: bin/fm-afk-contract.sh mode) any green merge may
+# proceed under away authority:
 # the record's presence is the whole mechanical fact, and which merge the
 # captain's away words meant is the supervision session's reading
 # (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
@@ -724,10 +731,12 @@ github_required_checks_missing() {
 }
 
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
-# Sets FM_PR_MERGE_HEAD to the verified head on success.
+# Sets FM_PR_MERGE_HEAD to the verified head on success. Returns 3, rather than
+# the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
+# caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
   local json fields line red name covered missing unreported producers runs
-  local total=0 named=0 refusals=''
+  local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base='' default_branch=''
 
   if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
@@ -810,7 +819,7 @@ FIELDS
     || refusals="$refusals  - the pull request is a draft
 "
   [ "$mergeable" = MERGEABLE ] \
-    || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not MERGEABLE
+    || mergeable_refusal="  - mergeable is \"${mergeable:-unreadable}\", not MERGEABLE
 "
   [ "$merge_state" != DIRTY ] \
     || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
@@ -869,6 +878,13 @@ EOF
     done <<EOF
 $missing
 EOF
+  fi
+
+  if [ -n "$mergeable_refusal" ]; then
+    if [ -z "$refusals" ] && [ "$mergeable" = UNKNOWN ]; then
+      return 3
+    fi
+    refusals="$refusals$mergeable_refusal"
   fi
 
   if [ -n "$refusals" ]; then
@@ -1147,7 +1163,7 @@ hold_away_record_for_merge() {
 
 require_current_away_authority() {
   FM_PR_AWAY_POSTURE=false
-  if fm_afk_contract_present "$STATE"; then
+  if fm_afk_contract_away_present "$STATE"; then
     FM_PR_AWAY_POSTURE=true
     if [ "$PROVIDER" = github ] && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
       echo "error: --auto is attended-only; while the away-posture record exists only a synchronous merge may run under its authority lock" >&2
@@ -1427,7 +1443,35 @@ case "$PROVIDER" in
       merge_args=(--squash)
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
-    github_verify_mergeable || exit 1
+    # mergeable reads UNKNOWN for a short while after a push or base-branch
+    # change while GitHub recomputes it; retry a bounded number of times,
+    # re-reading and re-checking every live condition on each attempt, rather
+    # than refusing a pull request that is simply still being computed. The
+    # delay is capped at 0-10 seconds so the wait stays short under the lock.
+    mergeable_retry_delay=${FM_PR_GITHUB_MERGEABLE_RETRY_DELAY:-3}
+    case "$mergeable_retry_delay" in
+      [0-9] | 10) ;;
+      *) mergeable_retry_delay=3 ;;
+    esac
+    mergeable_attempt=1
+    while :; do
+      mergeable_status=0
+      github_verify_mergeable || mergeable_status=$?
+      if [ "$mergeable_status" -eq 0 ]; then
+        break
+      fi
+      if [ "$mergeable_status" -ne 3 ] || [ "$mergeable_attempt" -ge 5 ]; then
+        break
+      fi
+      sleep "$mergeable_retry_delay"
+      mergeable_attempt=$((mergeable_attempt + 1))
+    done
+    if [ "$mergeable_status" -ne 0 ]; then
+      if [ "$mergeable_status" -eq 3 ]; then
+        printf 'error: mergeability for %s is still being computed by GitHub; retry shortly\n' "$URL" >&2
+      fi
+      exit 1
+    fi
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1

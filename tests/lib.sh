@@ -320,6 +320,10 @@ fi
 # lets a live guard drive the real fm-spawn/fm-send/fm-teardown from inside a
 # no-mistakes gate worktree instead of being refused by
 # bin/fm-gate-refuse-lib.sh.
+#
+# Every path that lets a live run proceed also exports DISABLE_AUTOUPDATER=1,
+# so a live harness invocation never lets Claude Code's auto-updater rewrite
+# the installed binary out from under the host.
 
 fm_live_gate() {
   local policy=$1 vars=$2
@@ -383,6 +387,7 @@ fm_live_gate() {
     exit 0
   done
 
+  export DISABLE_AUTOUPDATER=1
   return 0
 }
 

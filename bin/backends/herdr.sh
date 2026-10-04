@@ -3001,6 +3001,30 @@ fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace
   [ "$matches" = "$workspace_id" ]
 }
 
+# fm_backend_herdr_projection_token_workspace_gone: true only when the named
+# session's workspace list was read and parsed successfully and no workspace
+# label still carries the journal's token. A version 1 attempt journal binds no
+# pane, so its projected workspace is confirmed gone only by this token absence;
+# any read or jq error - including a malformed entry that leaves the query
+# ambiguous - is unknown, not gone, so the session-start sweep keeps the journal.
+fm_backend_herdr_projection_token_workspace_gone() {  # <session> <journal> <task-id>
+  local session=$1 journal=$2 id=$3 token list verdict
+  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  # A single jq verdict: "unknown" when the list is not an array or any entry is
+  # not an object with an absent/string label (a malformed entry could itself be
+  # the token-bearing workspace in a shape we cannot read), "present" when a
+  # label carries the token, else "gone". jq errors and empty output both fall
+  # through the guard below to unknown, keeping the journal.
+  verdict=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" '
+    if (.result.workspaces | type) != "array" then "unknown"
+    elif any(.result.workspaces[]; (type != "object") or (has("label") and (.label | type != "string"))) then "unknown"
+    elif any(.result.workspaces[]; (.label // "") | endswith($suffix)) then "present"
+    else "gone"
+    end' 2>/dev/null) || return 1
+  [ "$verdict" = "gone" ]
+}
+
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself
 # contains a colon, e.g. "w1:p2") on the FIRST colon only. Sets
 # FM_BACKEND_HERDR_SESSION and FM_BACKEND_HERDR_PANE for the caller.
@@ -3339,6 +3363,11 @@ fm_backend_herdr_proof_lines() {  # <text>
 # viewport is the one bound that always contains the composer.
 # Styled capture is preferred. An empty or failed styled read falls through to
 # the plain capture so a missing ANSI format does not look like an empty draft.
+# This read serves only the Claude payload proof, so the grok-tuned
+# dark-truecolor ghost strip is off (FM_COMPOSER_GHOST_LUMA_MAX=0): Claude
+# 2.1.283 draws a typed slash command in muted grey 38;2;112;112;112 (verified
+# live), which that strip dropped, judging a typed /exit unsent. Claude's own
+# ghost suggestion is SGR-2 dim and is still stripped.
 fm_backend_herdr_composer_content() {  # <target>
   local target=$1 cap caps
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
@@ -3348,7 +3377,7 @@ fm_backend_herdr_composer_content() {  # <target>
   else
     return 1
   fi
-  fm_composer_extract_selected_content "$caps" "$cap"
+  FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap"
 }
 
 # fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a

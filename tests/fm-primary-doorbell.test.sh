@@ -556,6 +556,20 @@ test_opted_in_owner_runs_the_host_in_the_arms_place() {
   pass "doorbell owner: an opted-in home runs the supervision host park (primary kiro-cli, served lock pid) instead of the arm"
 }
 
+# The inherited opt-out (config/supervision-host-off) wins over the engine
+# line, as on every other primary (bin/fm-supervision-engine-lib.sh gate).
+test_opted_out_owner_runs_the_arm_not_the_host() {
+  new_case hostoff
+  opt_in_host
+  : > "$H/config/supervision-host-off"
+  start_kiro
+  start_owner
+  sleep 0.5
+  assert_equals "$(count '^host-start n=')" 0 "an opted-out owner started the supervision host"
+  end_case
+  pass "doorbell owner: config/supervision-host-off keeps the watcher arm even with config/supervision-host present"
+}
+
 test_host_close_rings_with_an_empty_queue_and_writes_the_note() {
   local s r
   new_case hostclose
@@ -623,6 +637,7 @@ test_host_death_rings_its_queued_rows() {
 }
 
 test_opted_in_owner_runs_the_host_in_the_arms_place
+test_opted_out_owner_runs_the_arm_not_the_host
 test_host_close_rings_with_an_empty_queue_and_writes_the_note
 test_host_stand_down_is_a_failed_start
 test_host_owns_rows_while_it_runs

@@ -53,8 +53,9 @@
 #     doorbell-owner: FAILED - <why>         exit 1
 #   fm-primary-doorbell.sh run      the owner loop (started by ensure, detached)
 #
-# SUPERVISION HOST. When the home opted in (config/supervision-host, read at
-# every cycle), each cycle runs `bin/fm-supervision-host.sh park` in the arm's
+# SUPERVISION HOST. When the home runs the host (fm_supervision_host_enabled:
+# config/supervision-host and no config/supervision-host-off, read at every
+# cycle), each cycle runs `bin/fm-supervision-host.sh park` in the arm's
 # place, with FM_SUPERVISION_HOST_PRIMARY=kiro-cli and the served pid as
 # FM_SUPERVISION_HOST_SERVED_PID, because this owner runs outside the primary's
 # process tree and the host proves ownership through the endpoint record
@@ -116,6 +117,8 @@ FAILURE_COOLDOWN=$(positive_int "${FM_PRIMARY_DOORBELL_FAILURE_COOLDOWN:-}" 300)
 . "$SCRIPT_DIR/fm-primary-endpoint-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-supervision-engine-lib.sh
+. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 
 # The live owner's pid, or fail. A lock whose recorded pid is dead or whose
 # recorded identity no longer matches is not a live owner.
@@ -291,7 +294,7 @@ ring_if_pending() {
 start_arm() {  # <predecessor-arm-pid>
   CHILD_OUT=$(mktemp "$STATE/.primary-doorbell-arm.XXXXXX") || return 1
   CHILD_MODE=arm
-  [ ! -f "$CONFIG/supervision-host" ] || CHILD_MODE=host
+  ! fm_supervision_host_enabled "$CONFIG" kiro-cli || CHILD_MODE=host
   (
     # shellcheck source=/dev/null # Operator-local Relay settings.
     [ ! -f "$CONFIG/x-mode.env" ] || . "$CONFIG/x-mode.env"

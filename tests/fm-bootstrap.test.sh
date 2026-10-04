@@ -45,7 +45,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -380,8 +380,9 @@ ROWS
 }
 
 test_lavish_axi_min_version() {
-  local label version mode case_dir fakebin out unavailable n
+  local label version mode case_dir fakebin out unavailable upgrade n
   unavailable='PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.77; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish'
+  upgrade='BOOTSTRAP_INFO: lavish-axi >=0.1.80 enables confirmed board replies; this older compatible version retains the legacy reply path, but upgrade to prevent handing back a board before its reply is accepted'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -398,20 +399,24 @@ test_lavish_axi_min_version() {
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      upgrade)
+        [ "$out" = "$upgrade" ] || fail "$label: expected '$upgrade', got: $out" ;;
       unavailable)
         [ "$out" = "$unavailable" ] || fail "$label: expected '$unavailable', got: $out" ;;
     esac
   done <<'ROWS'
 absent lavish-axi permits text fallback^absent^unavailable
-minimum lavish-axi version is accepted^0.1.77^empty
-newer lavish-axi patch is accepted^0.1.78^empty
+lavish-axi reply feature floor is accepted^0.1.80^empty
+older compatible lavish-axi retains boards and recommends upgrade^0.1.79^upgrade
+minimum legacy board version is accepted with upgrade advice^0.1.77^upgrade
+newer lavish-axi patch is accepted^0.1.81^empty
 newer lavish-axi minor is accepted^0.2.0^empty
 newer lavish-axi major is accepted^1.0.0^empty
-the patch just below the floor permits text fallback^0.1.76^unavailable
+the patch just below the board compatibility floor permits text fallback^0.1.76^unavailable
 much older lavish-axi minor permits text fallback^0.0.9^unavailable
 unparseable lavish-axi version permits text fallback^lavish-axi development build^unavailable
 ROWS
-  pass "bootstrap permits nonvisual work without compatible lavish-axi and retains its presentation floor"
+  pass "bootstrap preserves legacy Lavish boards while recommending synchronous reply support"
 }
 
 test_tasks_axi_min_version() {
