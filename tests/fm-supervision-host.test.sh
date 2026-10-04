@@ -1138,7 +1138,7 @@ make_primary_home() {  # <name>
   local home
   home=$(make_home "$1" attended)
   git init -q "$home"
-  : > "$home/AGENTS.md"
+  ln -s "$ROOT/AGENTS.md" "$home/AGENTS.md"
   ln -s "$ROOT/bin" "$home/bin"
   printf '%s\n' "$home"
 }
