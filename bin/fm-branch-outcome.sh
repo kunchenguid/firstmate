@@ -501,7 +501,11 @@ compact_locked() {
   # The active segment has already been validated as a gap-free sequence, so
   # row counts identify the exact prefix without parsing or reserializing it.
   # This preserves the immutable original JSONL bytes in cold storage.
-  { [ ! -s "$COLD_STORE" ] || cat "$COLD_STORE"; head -n "$move_rows" "$STORE"; } > "$COMPACTION_COLD" || return 1
+  : > "$COMPACTION_COLD" || return 1
+  if [ -s "$COLD_STORE" ]; then
+    cat "$COLD_STORE" >> "$COMPACTION_COLD" || return 1
+  fi
+  head -n "$move_rows" "$STORE" >> "$COMPACTION_COLD" || return 1
   tail -n "+$((move_rows + 1))" "$STORE" > "$COMPACTION_ACTIVE" || return 1
   write_base_prepared "$new_base" || return 1
   write_processed_prepared "$new_processed" || return 1
@@ -1053,7 +1057,7 @@ case "$CMD" in
       echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
       exit 1
     fi
-    if [ "$ALL" = true ] || [ -n "$EXACT" ]; then
+    if [ "$ALL" = true ]; then
       if ! validate_cold_store; then
         fm_lock_release "$LOCK"
         echo "error: refusing historical read because cold outcome evidence is malformed" >&2
@@ -1066,6 +1070,11 @@ case "$CMD" in
     elif [ -n "$EXACT" ]; then
       BASE_SEQ=$(read_base) || { fm_lock_release "$LOCK"; exit 1; }
       if [ "$EXACT" -lt "$BASE_SEQ" ]; then
+        if ! validate_cold_store; then
+          fm_lock_release "$LOCK"
+          echo "error: refusing historical read because cold outcome evidence is malformed" >&2
+          exit 1
+        fi
         FOUND=$(jq -c --argjson seq "$EXACT" 'select(.seq == $seq)' "$COLD_STORE")
       else
         FOUND=$(jq -c --argjson seq "$EXACT" 'select(.seq == $seq)' "$STORE")

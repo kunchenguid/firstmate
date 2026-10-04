@@ -637,7 +637,7 @@ test_outcome_retention_keeps_64_processed_and_all_pending_rows() {
 }
 
 test_outcome_compaction_serializes_and_recovers_publication() {
-  local home crash ack failed journal_bad mode pid out status seq unprocessed
+  local home crash ack cold_copy journal_bad mode pid out real_cat seq shim_dir status unprocessed
   home="$TMP_ROOT/store-retention-concurrent"
   seed_outcome_history "$home" 128
   printf '100\n' > "$home/state/.branch-outcomes-cursor"
@@ -693,6 +693,26 @@ test_outcome_compaction_serializes_and_recovers_publication() {
     || fail "failed-compaction acknowledgement fixture append failed"
   FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 129 \
     || fail "failed-compaction acknowledgement fixture read failed"
+  cold_copy="$ack/cold-before-copy-failure.jsonl"
+  cp "$ack/state/branch-outcomes-cold.jsonl" "$cold_copy"
+  shim_dir="$ack/failing-copy-bin"
+  mkdir -p "$shim_dir"
+  real_cat=$(command -v cat)
+  printf '%s\n' '#!/bin/sh' \
+    "case \"\${1:-}\" in */branch-outcomes-cold.jsonl) exit 74 ;; esac" \
+    "exec '$real_cat' \"\$@\"" > "$shim_dir/cat"
+  chmod +x "$shim_dir/cat"
+  out=$(PATH="$shim_dir:$PATH" FM_HOME="$ack" \
+    "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 129 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "acknowledgement ignored a cold-evidence copy failure"
+  [ "$(cat "$ack/state/.branch-outcomes-processed")" = 100 ] \
+    || fail "cold-copy failure advanced the acknowledgement before journal publication"
+  cmp -s "$ack/state/branch-outcomes-cold.jsonl" "$cold_copy" \
+    || fail "cold-copy failure changed historical evidence"
+  [ ! -e "$ack/state/.branch-outcomes-compaction" ] \
+    || fail "cold-copy failure published a compaction journal"
+
   sed '1s/"seq":1/"seq":2/' "$ack/state/branch-outcomes-cold.jsonl" > "$ack/state/cold.bad"
   mv "$ack/state/cold.bad" "$ack/state/branch-outcomes-cold.jsonl"
   out=$(FM_HOME="$ack" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 129 2>&1)
@@ -731,6 +751,8 @@ test_outcome_retention_refuses_identity_damage_without_loading_cold_normally() {
   mv "$home/state/cold.bad" "$home/state/branch-outcomes-cold.jsonl"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 64 >/dev/null \
     || fail "ordinary retained-window read unnecessarily parsed cold evidence"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --seq 37 | jq -r .summary)" = summary-37 ] \
+    || fail "exact active lookup unnecessarily parsed malformed cold evidence"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --seq 1 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "exact lookup accepted malformed cold evidence"
