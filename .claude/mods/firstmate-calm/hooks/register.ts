@@ -1,4 +1,4 @@
-// Firstmate Calm for Claude Code: the hooks module of the `firstmate-calm` mod.
+// Firstmate Calm for Claude Code: the hooks module of the Calm mod, whose plugin name is `fm`.
 //
 // A Claude Code "mod" is a plugin whose behavior lives in one hooks module. Claude Code
 // may load this module through its rollout flag or `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`,
@@ -26,6 +26,15 @@
 // engine. A toggle invalidates every hooked drawing, so rows already on screen redraw.
 // The boat is painted in Claude Code's own theme colors: the family is read from the
 // `theme` setting at load and re-read when a `config.set` changes it.
+//
+// Supervision notes, whether Calm is on or off, as Pi shows them regardless of Calm: a
+// slow timer follows the outcome store's display tail copy and the supervision host's
+// latch, and `$.ui.log` appends one dim line per new outcome or latch change, never
+// sent to the model. The first tail copy a session sees, at `session.start` or later,
+// replays the outcomes unread or unprocessed at `session.start` that this session has
+// not already shown. The mod only reads the Firstmate home: the drain remains the one
+// presenter that marks outcomes read.
+// ../lib/fm-branch-notes.ts owns every line and which rows are due.
 //
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
 // draw restored rows before `session.start`, so every hook awaits that session's load of
@@ -55,6 +64,18 @@ import {
   userTextOperationalRecord,
   workingNoteKey,
 } from "../lib/fm-calm-presentation.ts";
+import {
+  firstmateStateDirectory,
+  hostHealthNote,
+  newOutcomeNotes,
+  parseHostHealth,
+  parseOutcomeMarker,
+  parseOutcomeTail,
+  recordSessionShownThrough,
+  replayOutcomeNotes,
+  sessionShownThrough,
+  type HostHealth,
+} from "../lib/fm-branch-notes.ts";
 
 /** The slash command the mod serves, the same name as Pi's `/calm`. */
 const CALM_COMMAND = "calm";
@@ -76,6 +97,35 @@ let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
+/** How often the supervision notes check the store's tail copy and the host's latch. */
+const BRANCH_NOTES_POLL_MS = 3000;
+/**
+ * A file changed this recently may be replaced again within its timestamp's resolution
+ * at the same size, so its size and time do not yet prove a later read unchanged.
+ */
+const SETTLED_MS = 5000;
+/**
+ * The mod's store key for the sequence each session has followed the store through:
+ * Claude Code 2.1.283 keeps `$.ui.log` lines in the session and restores them on
+ * `--continue`, so a resumed session replays only what it has not already shown.
+ */
+const BRANCH_NOTES_SHOWN_KEY = "supervision-notes-shown-through";
+// What the notes have shown in this session; each `session.start` replaces it.
+type NotesState = {
+  state: string;
+  tailStamp: string | undefined;
+  healthStamp: string | undefined;
+  lastSeen: number | undefined;
+  cursor: number;
+  processed: number;
+  shown: number;
+  health: HostHealth | undefined;
+  sessionId: string | undefined;
+  remembered: number | undefined;
+};
+let notes: NotesState | undefined;
+let notesTimer: { cancel(): void } | undefined;
+let notesPolling = false;
 
 function isActivated($: EngineInterface): Promise<boolean> {
   if (activation === undefined) {
@@ -87,8 +137,11 @@ function isActivated($: EngineInterface): Promise<boolean> {
   return activation;
 }
 
+// A missing file is checked first because every rejected read or stat is an error in
+// Claude Code's debug log, and the supervision notes look for absent files every tick.
 async function readText($: EngineInterface, path: string): Promise<string | undefined> {
   try {
+    if (!(await $.fs.exists(path))) return undefined;
     return await $.fs.read(path);
   } catch {
     return undefined;
@@ -186,6 +239,129 @@ function doorbellIsOperational($: EngineInterface, text: string): Promise<boolea
   return verdict;
 }
 
+/**
+ * A file's text with the size and time it was read at, or undefined when it is missing or
+ * unchanged. A file too recently changed has no stamp, so the next check reads it again.
+ */
+async function readIfChanged(
+  $: EngineInterface,
+  path: string,
+  stamp: string | undefined,
+): Promise<{ stamp: string | undefined; text: string } | undefined> {
+  let current: string;
+  let settled: boolean;
+  try {
+    if (!(await $.fs.exists(path))) return undefined;
+    const stat = await $.fs.stat(path);
+    current = `${stat.size}:${stat.mtimeMs}`;
+    settled = (await $.clock.now()) - stat.mtimeMs >= SETTLED_MS;
+  } catch {
+    return undefined;
+  }
+  if (current === stamp) return undefined;
+  const text = await readText($, path);
+  return text === undefined ? undefined : { stamp: settled ? current : undefined, text };
+}
+
+/** Replay the due outcomes, then follow the store from its current tail. */
+async function startNotes($: EngineInterface): Promise<void> {
+  const state = firstmateStateDirectory(
+    {
+      FM_HOME: await $.env.get("FM_HOME"),
+      FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
+      FM_STATE_OVERRIDE: await $.env.get("FM_STATE_OVERRIDE"),
+    },
+    $.plugin.root,
+  );
+  const sessionId = await $.session.id().catch(() => undefined);
+  const health = await readIfChanged($, `${state}/.supervision-host-health`, undefined);
+  const current: NotesState = {
+    state,
+    tailStamp: undefined,
+    healthStamp: health?.stamp,
+    lastSeen: undefined,
+    cursor: parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-cursor`)),
+    processed: parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-processed`)),
+    shown: sessionId === undefined ? 0 : sessionShownThrough(await readStored($), sessionId),
+    health: parseHostHealth(health?.text),
+    sessionId,
+    remembered: undefined,
+  };
+  await followTail($, current);
+  notes = current;
+  if (notesTimer === undefined) {
+    notesTimer = $.clock.every(BRANCH_NOTES_POLL_MS, () => {
+      void pollNotes($);
+    });
+  }
+}
+
+/**
+ * A line per outcome the tail copy gained. The first tail this session sees is the
+ * startup replay, whether it existed at session start or appeared later, judged against
+ * the read cursor and processed marker as they were at session start: a row read or
+ * processed before then is never shown, and one the drain read since still is.
+ */
+async function followTail($: EngineInterface, current: NotesState): Promise<void> {
+  const tail = await readIfChanged($, `${current.state}/.branch-outcomes-tail.jsonl`, current.tailStamp);
+  if (tail === undefined) return;
+  current.tailStamp = tail.stamp;
+  const rows = parseOutcomeTail(tail.text);
+  let lines: string[];
+  if (current.lastSeen === undefined) {
+    lines = replayOutcomeNotes(rows, current.cursor, current.processed, current.shown);
+    current.lastSeen = rows[rows.length - 1]?.seq;
+  } else {
+    const fresh = newOutcomeNotes(rows, current.lastSeen);
+    lines = fresh.lines;
+    current.lastSeen = fresh.lastSeen;
+  }
+  for (const line of lines) $.ui.log(line);
+  await rememberShown($, current);
+}
+
+async function readStored($: EngineInterface): Promise<unknown> {
+  try {
+    return await $.store.get(BRANCH_NOTES_SHOWN_KEY);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record how far this session has followed the store, when that moved. */
+async function rememberShown($: EngineInterface, current: NotesState): Promise<void> {
+  if (current.sessionId === undefined || current.lastSeen === undefined || current.lastSeen === current.remembered) return;
+  try {
+    await $.store.set(
+      BRANCH_NOTES_SHOWN_KEY,
+      recordSessionShownThrough(await readStored($), current.sessionId, current.lastSeen),
+    );
+    current.remembered = current.lastSeen;
+  } catch {
+    // An unwritable store only means a later resume may replay a line again.
+  }
+}
+
+/** One slow tick: a line per outcome appended since the last, and a latch change's note. */
+async function pollNotes($: EngineInterface): Promise<void> {
+  const current = notes;
+  if (current === undefined || notesPolling) return;
+  notesPolling = true;
+  try {
+    await followTail($, current);
+    const health = await readIfChanged($, `${current.state}/.supervision-host-health`, current.healthStamp);
+    if (health !== undefined) {
+      current.healthStamp = health.stamp;
+      const next = parseHostHealth(health.text);
+      const note = hostHealthNote(current.health, next);
+      if (next !== undefined) current.health = next;
+      if (note !== undefined) $.ui.log(note);
+    }
+  } finally {
+    notesPolling = false;
+  }
+}
+
 /** A zero-height drawing: the row contributes nothing to the transcript's layout. */
 function hiddenRow($: EngineInterface, e: RenderInput): RenderElement {
   const { Box } = $.ui.resolve(e);
@@ -196,6 +372,8 @@ export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
     if (!(await isActivated($))) return next(e);
     await resetSession($);
+    // Notes that cannot start leave Calm and the transcript exactly as they were.
+    await startNotes($).catch(() => undefined);
     await $.command.register({
       name: CALM_COMMAND,
       description: "Toggle Firstmate's Calm transcript presentation and working ship.",

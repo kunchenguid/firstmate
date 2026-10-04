@@ -451,7 +451,7 @@ install_omp_extension_fixture() {  # <repo>
   mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$repo/node_modules/typebox"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$repo/.pi/extensions/lib/"
-  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-supervision-engine-lib.sh" "$repo/bin/"
   chmod +x "$repo/bin/fm-operational-input.sh"
   printf '{"name":"typebox","type":"module","exports":"./index.js"}\n' > "$repo/node_modules/typebox/package.json"
   printf 'export const Type = { Object(p) { return { type: "object", properties: p }; } };\n' > "$repo/node_modules/typebox/index.js"
@@ -581,13 +581,22 @@ EOF
 # An opted-in home spawns the supervision host in the arm's place; its streamed
 # status line drives readiness and the handling handoff, and a handed-back
 # wake is delivered with every host line and the away note.
-test_watch_extension_runs_the_supervision_host() {
-  local repo home log out status
-  repo="$TMP_ROOT/watch-host/repo"; home="$TMP_ROOT/watch-host/home"; log="$TMP_ROOT/watch-host/arm.log"
+test_watch_extension_runs_the_supervision_host() {  # [away|quiet]
+  local kind=${1:-away} repo home log out status f
+  repo="$TMP_ROOT/watch-host-$kind/repo"; home="$TMP_ROOT/watch-host-$kind/home"; log="$TMP_ROOT/watch-host-$kind/arm.log"
   install_omp_extension_fixture "$repo"
   mkdir -p "$home/state" "$home/config"
   : > "$home/config/supervision-host"
-  : > "$home/state/.afk-contract"
+  if [ "$kind" = quiet ]; then
+    # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+    # QUIET): the extension asks the record owner, so the same handback carries
+    # no away note.
+    for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do cp "$ROOT/bin/$f" "$repo/bin/$f"; done
+    FM_HOME="$home" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+      || fail "fixture: could not record quiet mode"
+  else
+    : > "$home/state/.afk-contract"
+  fi
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
@@ -612,7 +621,7 @@ sleep 30
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
-    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+    RECORD_KIND="$kind" EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { writeFileSync, readFileSync } from "node:fs";
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -641,9 +650,12 @@ for (const needle of [
   "signal: omp-host done",
   "supervision-host: the away session could not take this wake: fixture; this wake is yours",
   "supervision-host: outcome 1 for demo [captain]: fixture",
-  "not from the captain: it is not a return",
 ]) {
   if (!sent[0].m.includes(needle)) throw new Error(`the follow-up lacks '${needle}': ${sent[0].m}`);
+}
+const awayNote = sent[0].m.includes("not from the captain: it is not a return");
+if (process.env.RECORD_KIND === "quiet" ? awayNote : !awayNote) {
+  throw new Error(`the away note must appear exactly under an away record (${process.env.RECORD_KIND}): ${sent[0].m}`);
 }
 await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
 await handlers.get("session_shutdown")({}, {});
@@ -651,9 +663,64 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "omp watch extension host mode: $out"
+  expect_code 0 "$status" "omp watch extension host mode ($kind record): $out"
   [ -z "$out" ] || fail "omp watch extension host test printed output: $out"
-  pass ".omp watch extension: an opted-in home runs the supervision host and relays every host line"
+  pass ".omp watch extension: an opted-in home runs the supervision host and relays every host line ($kind record)"
+}
+
+# The omp owner stays file-gated: a home without config/supervision-host, or
+# one opted out by config/supervision-host-off, spawns the plain arm and never the host.
+test_watch_extension_keeps_the_arm_without_the_file_or_with_off() {
+  local line label repo home log out status
+  for line in - off; do
+    label=${line#-}; label=${label:-absent}
+    repo="$TMP_ROOT/watch-host-gate-$label/repo"; home="$TMP_ROOT/watch-host-gate-$label/home"; log="$TMP_ROOT/watch-host-gate-$label/arm.log"
+    install_omp_extension_fixture "$repo"
+    mkdir -p "$home/state" "$home/config"
+    [ "$line" = - ] || : > "$home/config/supervision-host-off"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+printf 'plain-arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+sleep 30
+SH
+    cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'host=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+sleep 30
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+      EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { existsSync, writeFileSync, readFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null;
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage() { return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 60 && !existsSync(process.env.FM_ARM_LOG); i += 1) await new Promise((r) => setTimeout(r, 100));
+const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+if (rows.length === 0 || !rows.every((row) => row.startsWith("plain-arm="))) {
+  throw new Error(`a home that does not run the host must spawn only the plain arm: ${rows.join(" | ")}`);
+}
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "omp watch extension gate ($label): $out"
+    [ -z "$out" ] || fail "omp watch extension gate test printed output ($label): $out"
+  done
+  pass ".omp watch extension: a home without config/supervision-host or with an off file keeps the plain arm"
 }
 
 # A host cycle boundary can close with only a "supervision-host:" line; left
@@ -805,5 +872,7 @@ test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
 test_watch_extension_runs_the_supervision_host
+test_watch_extension_runs_the_supervision_host quiet
+test_watch_extension_keeps_the_arm_without_the_file_or_with_off
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole

@@ -1028,11 +1028,11 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
     printf '\n' >>"$repo/$script"
   done
   printf '%s\n' \
+    tests/fm-kimi-harness.test.sh \
     tests/fm-muse-harness.test.sh \
     tests/fm-brief.test.sh \
     tests/fm-captain-hold-lifecycle.test.sh \
     tests/fm-lint.test.sh \
-    tests/fm-kimi-harness.test.sh \
     tests/fm-operational-input.test.sh >"$tmp/expected"
   for selection in family all changed scripts; do
     case "$selection" in
@@ -1157,7 +1157,7 @@ test_portable_serial_shards_partition_the_serial_lane() {
 }
 
 test_portable_serial_hint_coverage_is_reported_and_bounded() {
-  local out serial unhinted
+  local out serial unhinted max budget
   # Shards are packed from measured duration hints, so an unmeasured script is
   # placed on a guess. Enough of them and the partition still looks balanced by
   # script count while one shard carries far more real work than another and
@@ -1178,7 +1178,56 @@ test_portable_serial_hint_coverage_is_reported_and_bounded() {
   # this trips (docs/fm-test-portable-shards.md).
   [ "$((unhinted * 100))" -le "$((serial * 15))" ] \
     || fail "$unhinted of $serial portable serial scripts lack a measured hint; refresh them"
-  pass "coverage guard reports and bounds the unmeasured portable serial share"
+  # A complete partition can still overflow a CI job. Assert the runner's
+  # modeled packing target through its executable interface, not source hints.
+  max=$(printf '%s\n' "$out" | sed -n 's/.*serial_max_ms=\([0-9][0-9]*\).*/\1/p')
+  budget=$(printf '%s\n' "$out" | sed -n 's/.*serial_budget_ms=\([0-9][0-9]*\).*/\1/p')
+  [ -n "$max" ] && [ -n "$budget" ] \
+    || fail "coverage summary must carry serial packing and budget: $out"
+  [ "$budget" -eq 1200000 ] || fail "packing must leave ten minutes of the normal CI tier"
+  [ "$max" -gt 0 ] && [ "$max" -le "$budget" ] \
+    || fail "largest serial shard packs ${max}ms above the ${budget}ms target"
+  pass "coverage guard bounds the unmeasured share and serial packing within twenty minutes"
+}
+
+test_portable_serial_packing_budget_boundary() {
+  local tmp repo script weight out rc
+  tmp=$(fm_test_tmproot fm-test-run-packing-boundary)
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  # Preserve the real inventory and packing policy without executing suites.
+  # Only the fixture's measured timing input changes at the boundary.
+  while IFS= read -r script; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
+  done < <("$RUNNER" --list --all)
+
+  for weight in 1200000 1200001; do
+    cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+    python3 - "$repo/bin/fm-test-run.sh" "$weight" <<'PY' \
+      || fail "could not seed the fixture's measured timing input"
+from pathlib import Path
+import re, sys
+runner = Path(sys.argv[1])
+runner.write_text(re.sub(
+    r"(?m)^tests/fm-watch-triage\.test\.sh [0-9]+$",
+    f"tests/fm-watch-triage.test.sh {sys.argv[2]}",
+    runner.read_text(),
+))
+PY
+    out=$(bash "$repo/bin/fm-test-run.sh" --check-coverage 2>&1) && rc=0 || rc=$?
+    if [ "$weight" -eq 1200000 ]; then
+      expect_code 0 "$rc" "packing exactly at the budget must be accepted"
+      assert_contains "$out" "FM_TEST_COVERAGE ok" "boundary coverage did not pass"
+      assert_contains "$out" "serial_max_ms=1200000" "fixture did not pack exactly at the budget"
+      assert_contains "$out" "serial_budget_ms=1200000" "fixture changed the packing budget"
+    else
+      expect_code 1 "$rc" "packing one millisecond above the budget must be refused"
+      assert_contains "$out" "largest portable serial shard packs 1200001ms above the 1200000ms target" \
+        "over-budget refusal did not explain the modeled excess"
+      assert_not_contains "$out" "FM_TEST_COVERAGE ok" "over-budget packing reported success"
+    fi
+  done
+  pass "serial packing accepts the exact budget and refuses one millisecond above it"
 }
 
 test_portable_serial_shard_lane_refusals() {
@@ -1805,6 +1854,7 @@ test_portable_shard_union_and_coverage_guard
 test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
+test_portable_serial_packing_budget_boundary
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family

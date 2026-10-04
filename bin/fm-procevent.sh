@@ -29,7 +29,10 @@
 #            Record a worker-owned built-in source. Its one source record
 #            persists across rounds, and re-registration by the same task
 #            acknowledges nonterminal captured rounds without touching the
-#            source claim. Terminal rounds are concluded with `handled`.
+#            source claim. Terminal rounds are concluded with `handled`. A
+#            staged `--agent-reply-file` is handed to the adapter's
+#            `deliver-reply` under the source lock once the task is eligible,
+#            so a refused arm never posts it and a failed post publishes no registration.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -551,8 +554,8 @@ cmd_register() {
 cmd_register_task() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
-  local pending_rounds=0
-  local -a argv=()
+  local pending_rounds=0 delivered
+  local -a argv=() kept=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
   fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
@@ -641,6 +644,30 @@ cmd_register_task() {
       [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
       fm_procevent_source_lock_release "$id"
       die "cannot read the registration this re-arm replaces: $id"
+    fi
+  fi
+  if [ -n "$reply_dest" ]; then
+    delivered=0
+    "$(adapter_script "$adapter")" deliver-reply "${argv[@]:1}" || delivered=$?
+    if [ "$delivered" -eq 0 ]; then
+      rm -f -- "$reply_dest"
+      reply_dest=''
+      kept=()
+      i=0
+      while [ "$i" -lt "${#argv[@]}" ]; do
+        if [ "${argv[$i]}" = --agent-reply-file ]; then
+          i=$((i + 2))
+        else
+          kept+=("${argv[$i]}")
+          i=$((i + 1))
+        fi
+      done
+      argv=("${kept[@]}")
+    elif [ "$delivered" -ne 3 ]; then
+      [ -z "$prior_record" ] || rm -f -- "$prior_record"
+      rm -f -- "$reply_dest"
+      fm_procevent_source_lock_release "$id"
+      die "cannot arm source $id: its staged reply was not delivered"
     fi
   fi
   if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then
@@ -782,7 +809,7 @@ cmd_register_extension() {
 # and drains until `fm_procevent_mark_handled` records it.
 publish_result() {  # <result-file>
   local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
-  local ring_backend ring_target ring_meta active
+  local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
   fm_procevent_source_id_valid "$id" || return 1
@@ -810,20 +837,28 @@ publish_result() {  # <result-file>
         unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
         message="Lavish review feedback is captured for task $owner_task at $result. Read it with bin/fm-procevent-lavish.sh read $result, apply the round, and re-arm the board with the reply."
       fi
+      # Snapshot the records that already exist (active and handled) before
+      # the idempotent write, so a dedup match - including one already
+      # acknowledged in handled/ - is never treated as new. Only a write
+      # that actually creates a fresh record rings; an already-acknowledged
+      # record is never moved back out of handled/, and re-delivery of a
+      # still-unacknowledged one is left to the inbox re-ring ladder.
+      inbox_dir=$(fm_task_inbox_dir "$STATE" "$owner_task")
+      handled_dir=$(fm_task_inbox_handled_dir "$STATE" "$owner_task")
+      pre_existing=$(printf '%s\n' "$inbox_dir"/*.msg "$handled_dir"/*.msg 2>/dev/null)
       record=$(fm_task_inbox_write_idempotent "$STATE" "$owner_task" "$message" 2>/dev/null || true)
-      case "$record" in
-        */handled/*)
-          active=${record%/handled/*}/${record##*/}
-          if mv -- "$record" "$active" 2>/dev/null; then
-            record=$active
-          else
-            record=''
-          fi
-          ;;
-      esac
       [ -n "$record" ] && status=0
-      fm_procevent_source_lock_release "$id"
+      new_record=0
       if [ "$status" -eq 0 ]; then
+        new_record=1
+        while IFS= read -r existing; do
+          [ "$existing" = "$record" ] && { new_record=0; break; }
+        done <<EOF
+$pre_existing
+EOF
+      fi
+      fm_procevent_source_lock_release "$id"
+      if [ "$new_record" -eq 1 ]; then
         ring_meta="$STATE/$owner_task.meta"
         if [ -f "$ring_meta" ] && [ ! -L "$ring_meta" ]; then
           ring_backend=$(fm_backend_of_meta "$ring_meta" 2>/dev/null || true)

@@ -190,6 +190,12 @@
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
+#   A --secondmate launch of a Firstmate-seeded home (the existing
+#   .fm-secondmate-home marker validate_firstmate_home_for_spawn already requires)
+#   also adds --approve when that help advertises it, so the first unattended
+#   launch does not stall on Pi's "Trust project folder?" dialog for that home
+#   path; --approve is session-scoped to the launch cwd and does not rewrite the
+#   operator's trust.json. Ordinary Pi worker launches never receive --approve.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   Devin is worker-only: --permission-mode dangerous and
@@ -313,7 +319,9 @@
 #   pins to 1 with a literal assignment so it survives the cleared environment
 #   even on a host that never had it set.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
-#   assignments still apply inside the filtered environment. Raw commands must
+#   assignments still apply inside the filtered environment, including the
+#   FM_TASK_INBOX export every launch carries (the absolute state/<id>.inbox
+#   path the steering doorbell names). Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
@@ -352,6 +360,9 @@
 #                  supplies its own trailing space, empty never used)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
+#     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
+#                  that executable advertises the flag (empty otherwise; session
+#                  trust for the launch cwd only, never a trust.json rewrite)
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
 #                  reports (relaunch_resume_args below owns it; it supplies its
@@ -1547,6 +1558,7 @@ spawn_refuse_if_away_spend_cap() {
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
   FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
+  [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = away ] || return 0
   cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
@@ -1562,15 +1574,16 @@ spawn_refuse_if_away_spend_cap() {
     exit 1
   fi
 }
-# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while the
-# away-posture record exists, a fresh ordinary spawn refuses for BOTH actors
-# once this home already holds that many ordinary task records, counted the
-# same way the return brief counts tasks live at return (every state/*.meta
-# whose kind is not secondmate). A relaunch replaces a worker that already
-# counts, and a secondmate is a persistent home rather than spend, so both are
-# exempt. Checked before any endpoint, worktree, or record exists, so a refusal
-# costs nothing to unwind; rechecked after the task-set lock so two fresh
-# spawns cannot both publish from a stale count.
+# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while an
+# away record exists (never a quiet-mode one, whose captain is present and
+# spends as attended: bin/fm-afk-contract.sh mode), a fresh ordinary spawn
+# refuses for BOTH actors once this home already holds that many ordinary task
+# records, counted the same way the return brief counts tasks live at return
+# (every state/*.meta whose kind is not secondmate). A relaunch replaces a
+# worker that already counts, and a secondmate is a persistent home rather than
+# spend, so both are exempt. Checked before any endpoint, worktree, or record
+# exists, so a refusal costs nothing to unwind; rechecked after the task-set
+# lock so two fresh spawns cannot both publish from a stale count.
 spawn_refuse_if_away_spend_cap
 spawn_require_relocated_queued_work() {
   local actor
@@ -1891,6 +1904,17 @@ pi_supports_tui_mode() {
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
 }
 
+# Same help-probe shape as pi_supports_tui_mode for the session-scoped project
+# trust flag. A seeded secondmate home carries tracked .pi/extensions that gate
+# Pi behind "Trust project folder?" on first launch; --approve trusts that
+# launch cwd for the run without rewriting ~/.pi/agent/trust.json.
+pi_supports_approve() {
+  local executable=$1 help
+  help=$("$executable" --help 2>&1) || return 1
+  # Pi prints "--approve, -a"; allow comma (and any non-token char) after the name.
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--approve([^[:alnum:]_-]|$)'
+}
+
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
 # {"models":[{"provider","id","selector":"<provider>/<id>",...}]} for built-in and
 # auto-discovered providers only; it never lists a provider an extension
@@ -2043,7 +2067,7 @@ launch_template() {
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
-    printf '%s' '__PIBIN____PITUIMODE____PIRESUME__'
+    printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
@@ -2309,6 +2333,15 @@ pi | pi-signed)
     PI_TUI_MODE=' --tui-mode regular'
   fi
   LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
+  # Seeded-home signal is .fm-secondmate-home (required by
+  # validate_firstmate_home_for_spawn before any secondmate launch reaches
+  # the pane). Session-only --approve; never expand to a parent path or
+  # rewrite the operator trust store.
+  PI_APPROVE=
+  if [ "$KIND" = secondmate ] && pi_supports_approve "$PI_BIN"; then
+    PI_APPROVE=' --approve'
+  fi
+  LAUNCH=${LAUNCH//__PIAPPROVE__/$PI_APPROVE}
   LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
   ;;
 cursor)
@@ -5216,7 +5249,23 @@ fi
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
+# Every launch also exports the absolute path of this task's steering inbox, so
+# the constant doorbell line (bin/fm-task-inbox-lib.sh) can name
+# "$FM_TASK_INBOX" instead of a path that grows with the home's depth. Like the
+# kill switch below it is an export statement, so it survives a compound raw
+# launch and the launch-env-allowlist `env -i` wrapper.
+LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
+# When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
+# own environment, carry it into the launch command text so Claude Code's
+# auto-updater cannot rewrite the shared binary during a live run. Embedding the
+# assignment - like COMPACT_ADVISER_DISABLE above - rather than leaning on
+# ambient inheritance is what survives a pre-existing backend daemon that
+# constructs the pane command without the gate's environment. It is gated on the
+# value being set here so ordinary spawns are unchanged.
+if [ -n "${DISABLE_AUTOUPDATER:-}" ]; then
+  LAUNCH="export DISABLE_AUTOUPDATER=$(shell_quote "$DISABLE_AUTOUPDATER"); $LAUNCH"
+fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi

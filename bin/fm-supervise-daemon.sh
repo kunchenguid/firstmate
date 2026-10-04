@@ -57,17 +57,18 @@
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
 #     reads idle or busy; only a status append that stops declaring the wait
 #     ends that routing. A captain-held transfer is not rechecked at all while
-#     the away-posture record (state/.afk-contract) exists: nobody is there to
-#     answer it, and the return brief lists it.
+#     an away record (state/.afk-contract, never quiet mode's) exists: nobody
+#     is there to answer it, and the return brief lists it.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
-#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
-#     state/*.status for a captain-relevant line the per-wake classifier might
-#     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps the
+#     state dir's task status logs for a captain-relevant line the per-wake
+#     classifier might have missed (e.g. a status verb outside CAPTAIN_RE) and
+#     escalates it.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
@@ -107,7 +108,7 @@
 #                                   recheck (default 14400, four hours); an
 #                                   `until` time cannot extend this bound, and a
 #                                   captain-held transfer is never rechecked
-#                                   while the away-posture record exists
+#                                   while an away record exists
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -1184,8 +1185,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
 #     -> escalate a recheck digest naming which human the wait is on, and reset
 #     the window (repeating bounded re-surface, never a wedge).
-#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
-#     captain-relevant line the per-wake classifier missed and escalate it.
+#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
+#     the block below and escalate what it finds; that block owns its file set.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
   now=$(_now)
@@ -1285,7 +1286,7 @@ housekeeping() {  # <state>
     due="$state/.subsuper-pause-until-due-$key"
     until=
     bounded_until=0
-    if status_is_captain_held "$last" && fm_afk_contract_present "$state"; then
+    if status_is_captain_held "$last" && fm_afk_contract_away_present "$state"; then
       continue
     fi
     if until=$(status_paused_until "$last"); then
@@ -1339,11 +1340,17 @@ housekeeping() {  # <state>
   #     because the event this backstop most needs to catch is precisely one a
   #     later routine append has already moved past; fm-classify-lib.sh's span
   #     read decides relevance, and the classified-through offset is the dedup.
+  #     A remote mate's own parent channel is not a self-home task status log,
+  #     so it is excluded here exactly as in the watcher's twin backstop
+  #     (fm-watch.sh heartbeat_scan_finds_actionable); the home-shape-aware
+  #     resolution lives in status_scan_parent_channel_exclude.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local event record rest endpoint ident rc
+    local event record rest endpoint ident rc exclude
+    exclude=$(status_scan_parent_channel_exclude "$state")
     for f in "$state"/*.status; do
       [ -e "$f" ] || [ -L "$f" ] || continue
+      [ "$f" = "$exclude" ] && continue
       task=$(basename "$f"); task="${task%.status}"
       record=$(status_span_first_actionable_record "$f" \
         "$(status_seen_offset "$state" "$task")")

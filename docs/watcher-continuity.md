@@ -30,7 +30,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
 | Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
-On a non-Pi primary, a home opted into the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
+On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
 ### Pi, omp, and OpenCode adapters
 
@@ -42,6 +42,7 @@ Each adapter:
 - Preserves one child or scheduled retry at a time.
 - Applies bounded exponential retry after an unexpected or failed close.
 
+Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
 ### Pi session replacement
@@ -82,6 +83,7 @@ It re-arms by parking that awaited hook on `bin/fm-watch-arm.sh` and returning a
 ### Claude Stop hook
 
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
+Do not run the hook as a manual arm from a tool turn: a short-lived tool process cannot own its park; its header and help own the invocation contract.
 The hook fires on every Stop.
 On each Stop, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
@@ -118,9 +120,9 @@ The Claude turn-end guard owns that notice commit contract, the monotonic failur
 
 ### Supervision host
 
-On a non-Pi primary, a home opted into the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
+On a non-Pi primary, a home that runs the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
 The host owns successive watcher cycles through the same arm.
-The host's successor and pass-through lifecycle is owned by [supervision-host.md](supervision-host.md#postures); the arm's recovery and acknowledgement contracts below still apply.
+[supervision-host.md](supervision-host.md#failure-direction) owns the hand-back's downtime restoration, including when the successor already exited; the arm's recovery and acknowledgement contracts below still apply.
 
 ## Actionable wake ordering
 
@@ -132,14 +134,19 @@ After an actionable Pi, omp, or OpenCode child close, the adapter:
 
 1. Waits for the predecessor process to close.
 2. Starts and verifies one singleton successor.
-3. Confirms the handling handoff against that successor before scheduling the follow-up.
+3. Confirms the handling handoff before scheduling the follow-up: Pi confirms against the restoration's own recovery token, while omp and OpenCode confirm against the current successor.
 4. Delivers the original wake.
 
 A complete Pi reason line can be observed while the predecessor is still finishing durable cleanup.
 That line is retained for replacement handoff, but the adapter never treats that already-ready predecessor as its own successor.
 
-If the handoff confirmation fails, the adapter retries it once against the current generation and successor.
-A failed confirmation is a restoration failure: the adapter classifies the error, retires a successor that is no longer alive, and surfaces exactly one typed message.
+If the handoff confirmation fails, the adapter retries it once: Pi against that same token, omp and OpenCode against the current generation and successor.
+A failed confirmation is a restoration failure: the adapter classifies the error and surfaces exactly one typed message.
+Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
+On Pi a generation mismatch means a newer pipeline superseded this delivery mid-restore, so the wake routes like a confirmed delivery, with no failure appendix, and nothing is retired.
+An already-acknowledged episode confirms as a no-op when the confirmation names its generation, because the drain acknowledged it after the successor started but before the confirmation ran.
+The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, and confirmation targets and results to state/.watch-extension.log, a bounded record that never changes supervision behavior.
+docs/configuration.md owns the knob's default and accepted values.
 A failed confirmation is never swallowed.
 
 ### Readiness timeout and retry
@@ -206,6 +213,7 @@ In its `--claude` mode it cooperates with the auto-arm.
 
 A recovery episode is one generation of the `state/.watcher-down` marker.
 It is retired only by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`.
+The away return brief treats a still-open handling episode as a wake in progress, not watcher downtime; an open downtime episode remains a gap.
 
 ### Announcement
 
@@ -224,6 +232,9 @@ A downtime republication of a pending episode reuses its generation.
 A watcher close leaves an announced downtime episode announced, while a successful durable append opens a fresh pending generation so a live watcher can recover the new work.
 An announced handling episode becomes pending downtime on the same generation because its handling turn may have been interrupted.
 That handling republication gives a successor exactly one recovery presentation without orphaning the acknowledgement already printed for that generation.
+A watcher stopped so an arm can take its cycle over (`bin/fm-watch-arm.sh --take-over`) publishes downtime like any close, but the taking arm restores an acknowledged episode that stop reopened only when the taken-over arm's cycle-ledger row for that exact arm and watcher records the watcher ending by the take-over's TERM and no wake was appended in between.
+The taking arm waits within a short bound for that row; a missing row or any other signal leaves downtime for the fresh cycle's ordinary recovery wake, while take-over still proceeds.
+Any other episode is left for the next cycle's arm check.
 
 ### What an acknowledgement retires
 
@@ -420,6 +431,9 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 - Repeated transitions with exactly one live cycle.
 - Disappearance of the shutting-down refusal after a valid replacement activates.
 - Terminal quit still refusing late rearm.
+- A mid-restore marker advance that delivers the wake with no rejection appendix, offers it to an accepting supervision branch like a confirmed delivery, and records the attempt and the confirm result in the bounded extension log when opted in.
+- A failed confirmation for a stale successor that spares a newer arm started by a repair.
+- A repair, a scheduled retry, and a deferred close over a dead-but-unclosed arm child that each start a fresh arm instead of stalling.
 
 The guard and session-start suites prove that active generation evidence tolerates a fresh-beacon handoff.
 They also prove that a legacy or handoff-phase watcher marker from an absent replacement extension still raises the outage diagnostic.
@@ -439,6 +453,9 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
 - The self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
+- The already-acknowledged confirmation no-op for a matching generation, with its mismatched-generation, dead-pid, and lock-mismatch rejections preserved.
+- The manual-restart generation churn that makes a confirmation for the churned generation report a mismatch, which an arm check without a reopen leaves in place.
+- A take-over that stays quiet after a confirmed TERM, still surfaces queued work and self-exit downtime, and attaches without stopping a cycle the named arm does not own.
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.

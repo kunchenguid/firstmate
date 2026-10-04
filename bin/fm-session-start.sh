@@ -39,6 +39,9 @@
 #   3. wake-drain     - presents durable wakes and advances recovery handling
 #                       state, so it only runs when locked. The local bounded
 #                       inactive-outcome startup scan runs in the deferred worker.
+#                       First, on every harness and away posture, it seeds the
+#                       outcome store's display tail copy when that is absent
+#                       (bin/fm-branch-outcome.sh seed-tail).
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -368,6 +371,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-hold-reason-lib.sh
+. "$SCRIPT_DIR/fm-hold-reason-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -467,7 +472,7 @@ print_backlog_manual_compact() {
         }
       }
     }
-  ' "$path"
+  ' "$path" | fm_hold_reason_decode_stream markdown
 }
 
 # tasks-axi closes every listing with its own help block. This section composes
@@ -519,11 +524,11 @@ print_backlog_tasks_axi_compact() {
     printf 'compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to %s; task bodies omitted)\n' \
       "$QUEUED_LIMIT"
     printf '\nin flight:\n'
-    printf '%s\n' "$in_flight" | strip_axi_help
+    printf '%s\n' "$in_flight" | fm_hold_reason_decode_stream | strip_axi_help
     printf '\nheld (captain- or time-gated; an in-flight item that is also held appears in both groups):\n'
-    printf '%s\n' "$held" | strip_axi_help
+    printf '%s\n' "$held" | fm_hold_reason_decode_stream | strip_axi_help
     printf '\nblocked queued:\n'
-    printf '%s\n' "$blocked" | strip_axi_help
+    printf '%s\n' "$blocked" | fm_hold_reason_decode_stream | strip_axi_help
     printf '\nready queued (dispatchable now):\n'
     print_ready_queued_bounded "$ready"
     return 0
@@ -772,6 +777,7 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-branch-outcome.sh" seed-tail >/dev/null 2>&1 || true
   # Pi supervision-branch recovery, locked path only: clear leases whose
   # supervising session died, and surface outcomes the branch stored durably
   # that never reached main (docs/pi-supervision-branch.md). Gated to the
@@ -933,9 +939,16 @@ done
 subsection "AFK"
 # The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
 # still marks a running daemon on the harnesses that launch one.
+# A quiet record (bin/fm-afk-contract.sh mode) is a present captain: it holds
+# nothing for a return.
 if [ -f "$STATE/.afk-contract" ]; then
-  printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
-    "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
+  if [ "$("$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = quiet ]; then
+    printf 'present - quiet mode recorded at %s (the captain is present and nothing is held for a return: requested actions proceed under ordinary attended authority; only an explicit /quiet off exits it)' \
+      "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
+  else
+    printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
+      "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
+  fi
   if [ -e "$STATE/.afk" ]; then
     if [ "$AFK_MODE" = quiet ]; then
       printf '; the quiet daemon owns the watcher.\n'
