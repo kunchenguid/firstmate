@@ -49,7 +49,9 @@ Only MAIN may clear both `remaining_gap` and `next_step`, and it clears them onc
 Delivery, merge authority, decisions, and cleanup retain their own records and guards instead of becoming a new business goal gap.
 A captain hold remains an independent disposition constraint: cleanup verifies its decision inventory and retains the held task row, but the hold does not revoke an already recorded semantic acceptance.
 
-Healthy unchanged execution and deliberate external waits stay quiet. A material result with an authorized remaining gap continues through an existing worker or action owner. A genuine authority decision, unresolved blocker, or failed exact-effect readback remains visible. Continued pursuit has no finite retry quota, but it never broadens the original authority or replays an uncertain effect.
+Healthy unchanged execution and deliberate external waits stay quiet. A material result with an authorized remaining gap continues through an existing worker or action owner. The same task-record token and executor observation receives at most two unchanged continuation offers, then one visible coordination escalation, then no further offer until its record, executor, or disposition materially changes. This pacing bounds duplicate observation; it is not a task retry limit and does not abandon authorized work.
+
+If an existing owner refuses and no supported action remains, MAIN replaces the unexecutable next step with an existing canonical hold. The hold names who is responsible, the exact action or decision required, and the observable condition that clears it. A task blocker uses the task-record hold owner; a captain decision uses the captain-hold owner. A material result, changed executor evidence, or cleared disposition re-enters ordinary continuation. Continued pursuit never broadens authority or replays an uncertain effect.
 
 ## Supervision and notification delivery
 
@@ -58,15 +60,18 @@ A compact projection token may admit one branch supervision turn for the exact t
 The branch can read the projection and route an already-authorized next step through an existing owner, but it cannot edit progress or accept the goal.
 
 The durable wake queue and branch outcome sequence remain delivery owners.
-Acknowledging a presented notification is sequence-bound and does not enroll or reconcile another goal record.
+One targeted read can load several exact outcome sequences together with their current canonical task projection and executor identity. MAIN acknowledges the exact sequence membership it actually loaded and handled; the acknowledgement rechecks outcome content, task token, and executor digest, and refuses a concurrent revision until MAIN reloads it. This is a derived observation, not another persisted task truth.
+Acknowledging a presented notification does not enroll or reconcile another goal record.
 Re-presenting unchanged work does not create a second goal wake.
 Topic switches and reloads recover from the canonical task record rather than transcript history.
 
-`fm_task_continuation` exposes only `read` and `update`.
+`fm_task_continuation` exposes `read`, `update`, and `hold`. `hold` does not execute an action or invent authority; it records the existing blocker or captain-decision disposition only after supported actions are exhausted.
 When requirements change, MAIN edits the original `brief.md` through its ordinary file tools so `## Captain's intent` contains the consolidated processed requirement while the rest of the task contract remains intact.
 The edited prose preserves the intended scope without claiming to be a verbatim quote, and MAIN separately refreshes compact progress and relays the change to the worker.
 There is no dedicated intent-update tool, source-message selector, mapping, receipt, or intent history.
 Cross-task work returns to MAIN, which uses the existing durable handoff owner rather than a branch-side lifecycle patch.
+
+For a clean accepted finish, the supervision outcome is a compact authenticated completion capsule. MAIN still makes one semantic-acceptance and authority decision; it may then grant one bounded chain that invokes the existing merge, sync, and cleanup owners and returns their combined receipts. Each owner keeps its identity, lease, authority, uncertain-effect, and preservation guards. Unsupported activation, a genuine blocker, or an uncertain operation stops with the exact remaining gap instead of replaying the chain.
 
 ## Existing owners remain authoritative
 
@@ -93,6 +98,8 @@ Empty `remaining_gap` and `next_step` mean MAIN has semantically accepted the re
 Explicit archive is a separate terminal business action.
 It does not imply remote cancellation or provider success.
 Viewer classification uses the canonical task disposition as the business authority and continues to warn when remote facts are unconfirmed.
+
+If the exact task is explicitly completed or archived after a continuation admission but before the branch reports, unchanged goal/progress and resume-state evidence settles that admission as durably superseded. The branch neither reopens the task nor manufactures a missing-outcome failure. A changed nonterminal record, pending decision, mismatched executor identity, or uncertain effect still follows the ordinary reconciliation path.
 
 [`fm-task-retire.sh`](../bin/fm-task-retire.sh) and [`fm-teardown.sh`](../bin/fm-teardown.sh) keep business completion separate from physical cleanup. They require current compact acceptance or explicit archive, then use delivery and cleanup owners for their own checks. A ship still needs the correct current-generation merge receipt; a scout still needs its report and decision gate.
 

@@ -1106,7 +1106,7 @@ EOF
     *"PR https://example.com/pr/9 checks green, ready for review"*) fail "the processing request redundantly loaded the exact summary already held by the visible anchor: $body" ;;
   esac
   case "$body" in
-    *"do not re-drain, re-run, or acknowledge the wake."*"call fm_branch_processed with through=3 exactly once."*"never counts as processing."*) ;;
+    *"do not re-drain, re-run, or acknowledge the wake."*"call fm_branch_processed with sequences=\"3\" exactly once."*"never counts as processing."*) ;;
     *) fail "the processing request body lost the event-ownership boundary or the sequence-bound acknowledgement duty: $body" ;;
   esac
   if ./bin/fm-operational-input.sh kind < "$home/state/delivered-routine-note" >/dev/null 2>&1; then
@@ -1309,8 +1309,8 @@ for (let seq = 2; seq <= 5; seq += 1) {
 if (processingRequests[1].message.content.includes("healthy resource report: CPU 12%, memory 41%")) {
   throw new Error(`the widened processing request reloaded repeated summary content: ${processingRequests[1].message.content}`);
 }
-if (!processingRequests[1].message.content.includes("through=5")) {
-  throw new Error(`the widened processing request lost its highest acknowledgement key: ${processingRequests[1].message.content}`);
+if (!processingRequests[1].message.content.includes('sequences="2,3,4,5"')) {
+  throw new Error(`the widened processing request lost its exact acknowledgement membership: ${processingRequests[1].message.content}`);
 }
 if (fleetOperations.length !== 10 || fleetOperations.some((operation) => operation.status !== 0)) {
   throw new Error(`fleet event ownership repeated or failed work: ${JSON.stringify(fleetOperations)}`);
@@ -1355,11 +1355,12 @@ mainEntries.push(
 );
 const summary1 = "Completed diagnosis: the cursor trusted an unrelated assistant response.";
 const seq1 = Number(outcomeScript(["append", "--task", "email-intake", "--verdict", "captain", "--summary", summary1]));
+const row1 = JSON.parse(outcomeScript(["list", "--recent", "1"]));
 // Crash boundary: appendEntry persisted, but mark-read did not happen.
 mainEntries.push({
   type: "custom",
   customType: "fm-branch-visible-outcome",
-  data: { version: 1, seq: seq1, task: "email-intake", verdict: "captain", summary: summary1, silent: false },
+  data: { version: 1, ...row1 },
 });
 await fire("session_start", {}, defaultSessionCtx);
 if (outcomeScript(["unread"]) !== "") throw new Error("reload did not advance the cursor after finding the persisted entry");
@@ -1406,10 +1407,11 @@ if (rendered.text !== `⚓ [seq ${seq1}] email-intake: ${summary1}`) {
 
 // A reused sequence with different content cannot be treated as delivery.
 const seq3 = Number(outcomeScript(["append", "--task", "task-conflict", "--verdict", "captain", "--summary", "authoritative summary"]));
+const row3 = JSON.parse(outcomeScript(["list", "--recent", "1"]));
 mainEntries.push({
   type: "custom",
   customType: "fm-branch-visible-outcome",
-  data: { version: 1, seq: seq3, task: "task-conflict", verdict: "captain", summary: "different summary", silent: false },
+  data: { version: 1, ...row3, summary: "different summary" },
 });
 await fire("session_shutdown", {});
 await fire("session_start", {}, defaultSessionCtx);
@@ -1431,14 +1433,26 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented() {
   local repo home out status
   repo="$TMP_ROOT/processing-turn-root"
   home="$TMP_ROOT/processing-turn-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state" "$home/config" "$home/data"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus }; })()`);
-const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus, realRoot }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus, realRoot } = globalThis.__t;
 import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const taskCommand = (name, args) => {
+  const result = spawnSync(`${realRoot}/bin/${name}`, args, { encoding: "utf8", env: { ...process.env, FM_HOME: home } });
+  if (result.status !== 0) throw new Error(`${name} failed: ${result.stderr}`);
+  return result;
+};
+taskCommand("fm-tasks-axi.sh", ["add", "task-f", "Observe exact batch identity", "--kind", "ship", "--body", "Batch fixture", "--start"]);
+taskCommand("fm-task-state.sh", ["update-progress", "task-f", "--progress", JSON.stringify({
+  acceptance: "The exact batch is processed once", current_state: "Initial observation",
+  remaining_gap: "MAIN handling remains", next_step: "Process the authenticated outcome",
+})]);
 
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
@@ -1617,12 +1631,13 @@ if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqE, seqF])) {
 await runOf();
 if (requests().length !== beforePair + 2) throw new Error("the widened sequence was not presented at the run boundary");
 const latest = requests().at(-1).message.content;
-if (!latest.includes(`[seq ${seqE}] task=branch-driver`) || !latest.includes(`[seq ${seqF}] task=task-f`) || !latest.includes(`through=${seqF}`)) {
-  throw new Error(`the widened request did not cover every unprocessed sequence with the highest key: ${latest}`);
+if (!latest.includes(`[seq ${seqE}] task=branch-driver`) || !latest.includes(`[seq ${seqF}] task=task-f`) || !latest.includes(`sequences="${seqE},${seqF}"`)) {
+  throw new Error(`the widened request did not cover every unprocessed sequence with exact membership: ${latest}`);
 }
 const exactPair = await outcomes.execute("read-exact-pair", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
 const exactPairText = exactPair.content.map((item) => item.text ?? "").join("\n");
 if (exactPair.isError || !exactPairText.includes(`"seq":${seqE}`) || !exactPairText.includes(`"seq":${seqF}`)
+    || !exactPairText.includes('"task_observation"')
     || !exactPairText.includes("PR https://example.com/pr/e is ready for review")
     || !exactPairText.includes("worker blocked on a missing credential")) {
   throw new Error(`exact multi-outcome recovery failed: ${JSON.stringify(exactPair)}`);
@@ -1631,6 +1646,22 @@ const beforePairRepeat = requests().length;
 await runOf();
 if (requests().length !== beforePairRepeat + 1 || requests().at(-1).options.triggerTurn !== true) {
   throw new Error("the second presentation of the widened sequence set did not open its own turn");
+}
+taskCommand("fm-task-state.sh", ["update-progress", "task-f", "--progress", JSON.stringify({
+  acceptance: "The exact batch is processed once", current_state: "Concurrent material revision",
+  remaining_gap: "Reload the targeted observation", next_step: "Reload before acknowledgement",
+})]);
+const staleBatch = await processed.execute("ack-stale-batch", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
+if (!staleBatch.isError || !staleBatch.content.some((item) => item.type === "text" && item.text.includes("task revision or executor identity changed"))) {
+  throw new Error(`a concurrent task revision was silently batch-acknowledged: ${JSON.stringify(staleBatch)}`);
+}
+const refreshedPair = await outcomes.execute("reload-exact-pair", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
+if (refreshedPair.isError || !refreshedPair.content.some((item) => item.type === "text" && item.text.includes("Concurrent material revision"))) {
+  throw new Error(`the changed task observation could not be reloaded: ${JSON.stringify(refreshedPair)}`);
+}
+const wrongMembership = await processed.execute("ack-wrong-membership", { sequences: String(seqE) }, undefined, undefined, {});
+if (!wrongMembership.isError || !wrongMembership.content.some((item) => item.type === "text" && item.text.includes(`exact sequence membership must be ${seqE},${seqF}`))) {
+  throw new Error(`a partial exact-membership acknowledgement was accepted: ${JSON.stringify(wrongMembership)}`);
 }
 const partial = await processed.execute("ack-partial", { through: seqE }, undefined, undefined, {});
 if (partial.isError) throw new Error(`partial acknowledgement failed: ${JSON.stringify(partial)}`);
@@ -6065,19 +6096,205 @@ test_native_compact_continuation_with_installed_session_manager() {
   printf '#!/bin/sh\nprintf "watcher: healthy pid=1 (beacon 0s)\\n"\n' > "$repo/bin/fm-watch-arm.sh"
   # shellcheck disable=SC2016 # The fixture wrapper expands these values when it runs.
   printf '#!/bin/sh\nexec "$REAL_ROOT/bin/fm-task-state.sh" "$@"\n' > "$repo/bin/fm-task-state.sh"
+  # shellcheck disable=SC2016 # The fixture wrapper expands these values when it runs.
+  printf '#!/bin/sh\nexec "$REAL_ROOT/bin/fm-tasks-axi.sh" "$@"\n' > "$repo/bin/fm-tasks-axi.sh"
   chmod +x "$repo/bin/fm-watch-arm.sh"
   chmod +x "$repo/bin/fm-task-state.sh"
+  chmod +x "$repo/bin/fm-tasks-axi.sh"
   FM_HOME="$home" FM_NATIVE_SDK="$sdk" REAL_ROOT="$ROOT" \
     FM_ROOT_OVERRIDE="$repo" FM_NATIVE_WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
     PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" \
     node "$ROOT/tests/continuation-native.mjs" || fail "installed SDK compact continuation workflow failed"
 }
 
+test_continuation_archive_during_report_settlement() {
+  local repo home out status
+  repo="$TMP_ROOT/archive-report-root"
+  home="$TMP_ROOT/archive-report-home"
+  mkdir -p "$home/state" "$home/config" "$home/data"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, settle, home, realRoot, defaultSessionCtx, outcomeScript }; })()`);
+const { pi, fire, settle, home, realRoot, defaultSessionCtx, outcomeScript } = globalThis.__t;
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const periodic = (await import(pathToFileURL(`${process.env.FM_ROOT_OVERRIDE}/.pi/extensions/fm-periodic-stow.ts`).href)).default;
+periodic(pi);
+defaultSessionCtx.sessionManager.getSessionId = () => "archive-report-main";
+defaultSessionCtx.sessionManager.getLeafId = () => "archive-report-leaf";
+defaultSessionCtx.hasPendingMessages = () => false;
+defaultSessionCtx.isIdle = () => true;
+defaultSessionCtx.hasUI = false;
+defaultSessionCtx.ui = { getEditorText: () => "" };
+const mainLeaf = { type: "message", id: "archive-report-leaf", parentId: null, message: { role: "assistant", content: "ready" } };
+defaultSessionCtx.sessionManager.getEntries().push(mainLeaf);
+defaultSessionCtx.sessionManager.getBranch = (id) => id === mainLeaf.id ? [mainLeaf] : [];
+writeFileSync(defaultSessionCtx.sessionManager.getSessionFile(), `${JSON.stringify(mainLeaf)}\n`);
+
+const command = (name, args) => {
+  const result = spawnSync(`${realRoot}/bin/${name}`, args, { encoding: "utf8", env: { ...process.env, FM_HOME: home } });
+  if (result.status !== 0) throw new Error(`${name} ${args.join(" ")} failed: ${result.stderr}`);
+  return result;
+};
+mkdirSync(`${home}/fakebin`, { recursive: true });
+writeFileSync(`${home}/fakebin/herdr`, `#!/bin/sh
+case "$1 $2" in
+  'status --json') echo '{"client":{"version":"0.7.3","protocol":14},"server":{"running":true}}' ;;
+  'pane read') printf '╭────╮\\n│    │\\n╰────╯\\n' ;;
+  *) echo '{}' ;;
+esac
+`);
+chmodSync(`${home}/fakebin/herdr`, 0o755);
+process.env.PATH = `${home}/fakebin:${process.env.PATH}`;
+const seed = (task) => {
+  mkdirSync(`${home}/data/${task}`, { recursive: true });
+  writeFileSync(`${home}/data/${task}/brief.md`, `# Task\n## Captain's intent\nFinish ${task}\n\n## Firstmate spec\nPreserve exact terminal identity\n`);
+  command("fm-tasks-axi.sh", ["add", task, `Finish ${task}`, "--kind", "ship", "--body", "Archive-during-report fixture", "--start"]);
+  command("fm-task-state.sh", ["update-progress", task, "--progress", JSON.stringify({
+    acceptance: "The exact terminal disposition is retained", current_state: "Worker result is ready",
+    remaining_gap: "MAIN disposition remains", next_step: "Inspect the result and settle the task",
+  })]);
+  writeFileSync(`${home}/state/${task}.meta`, `spawn_gen=g-${task}\nkind=ship\nexecutor=local-agent\nproject=${home}/projects/approved\nworktree=${home}/projects/approved\nbackend=herdr\nwindow=fixture-session:fixture-pane\nherdr_session=fixture-session\nherdr_workspace_id=fixture-workspace\nherdr_tab_id=fixture-tab\nherdr_pane_id=fixture-pane\nharness=pi\nendpoint_task_id=${task}\n`);
+  writeFileSync(`${home}/state/${task}.busy-gen`, `g-${task}\n`);
+  writeFileSync(`${home}/state/${task}.busy-state`, `v1 gen=g-${task} seq=1 state=idle source=pi-ext event=turn-end ts=1\n`);
+  writeFileSync(`${home}/state/${task}.status`, "done: worker result ready\n");
+};
+
+seed("archive-task");
+await fire("session_start", {}, defaultSessionCtx);
+let prompts = 0;
+globalThis.__fmOnBranchPrompt = async ({ text }) => {
+  if (!text.startsWith("FIRSTMATE TASK CONTINUATION:")) return;
+  prompts += 1;
+  if (text.includes("archive-task")) {
+    command("fm-tasks-axi.sh", ["archive", "archive-task"]);
+    return;
+  }
+  if (text.includes("drift-task")) {
+    command("fm-task-state.sh", ["update-progress", "drift-task", "--progress", JSON.stringify({
+      acceptance: "The exact terminal disposition is retained", current_state: "A material nonterminal revision appeared",
+      remaining_gap: "The changed work needs reconciliation", next_step: "Reconcile the changed task revision",
+    })]);
+  }
+};
+
+await fire("agent_before_settle", {}, defaultSessionCtx);
+try {
+  await settle(() => prompts >= 1, "archive continuation prompt");
+} catch (error) {
+  const progress = command("fm-task-state.sh", ["progress", "archive-task"]).stdout.trim();
+  const executor = command("fm-task-state.sh", ["--durable-only", "archive-task"]).stdout.trim();
+  const tracePath = `${home}/state/branch-routing-trace.jsonl`;
+  throw new Error(`${String(error)}; progress=${progress}; executor=${executor}; trace=${existsSync(tracePath) ? readFileSync(tracePath, "utf8") : "absent"}; main=${JSON.stringify(defaultSessionCtx.sessionManager.getEntries())}`);
+}
+
+await settle(() => (globalThis.__fmSessionManagers ?? []).some((manager) => manager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-terminal-settlement" && entry.data.task === "archive-task")),
+"archive-only terminal settlement");
+const settled = (globalThis.__fmSessionManagers ?? []).flatMap((manager) => manager.getEntries())
+  .filter((entry) => entry.customType === "fm-task-continuation-terminal-settlement");
+if (settled.length !== 1 || settled[0].data.result !== "superseded-before-report" || settled[0].data.disposition !== "archived") {
+  throw new Error(`archive-only settlement was not retained exactly once: ${JSON.stringify(settled)}`);
+}
+if (outcomeScript(["list", "--recent", "20"]).split("\n").some((line) => line && JSON.parse(line).task === "archive-task")) {
+  throw new Error("archive-only settlement manufactured a missing-outcome error");
+}
+
+seed("drift-task");
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => prompts >= 2, "material-drift continuation prompt");
+await settle(() => outcomeScript(["list", "--recent", "20"]).split("\n").some((line) => {
+  if (!line) return false;
+  const row = JSON.parse(line);
+  return row.task === "drift-task" && row.verdict === "captain" && row.summary.includes("continuation settled without a durable outcome");
+}), "material-drift reconciliation outcome");
+if ((globalThis.__fmSessionManagers ?? []).flatMap((manager) => manager.getEntries())
+  .some((entry) => entry.customType === "fm-task-continuation-terminal-settlement" && entry.data.task === "drift-task")) {
+  throw new Error("material nonterminal drift was silenced as archive-only settlement");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "archive-during-report settlement must distinguish archival-only from material nonterminal drift: $out"
+  pass "archive during continuation report retains a superseded terminal disposition while material nonterminal drift still reconciles"
+}
+
+test_exact_notification_coalescing_and_terminal_supersession() {
+  local repo home out status
+  repo="$TMP_ROOT/outcome-coalesce-root"
+  home="$TMP_ROOT/outcome-coalesce-home"
+  mkdir -p "$home/state" "$home/config" "$home/data/task-c"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { bus, fire, settle, home, outcomeScript, sentToMain, mainEntries, defaultSessionCtx }; })()`);
+const { bus, fire, settle, home, outcomeScript, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/task-c.meta`, "spawn_gen=g-task-c\n");
+writeFileSync(`${home}/state/task-c.status`, "working: observer stable\n");
+const taskRecord = (state) => writeFileSync(`${home}/data/task-c/task.json`, JSON.stringify({
+  schema: "fm-task.v1", id: "task-c", title: "Task C", body: "fixture", state, kind: "ship",
+  progress: { acceptance: "fixture", current_state: "fixture", remaining_gap: "fixture", next_step: "fixture" },
+}));
+taskRecord("in_flight");
+await fire("session_start", {}, defaultSessionCtx);
+const append = (...args) => Number(outcomeScript(["append", "--task", "task-c", ...args]));
+const first = append("--verdict", "routine", "--summary", "unchanged observer", "--material-key", "rev-a");
+const duplicate = append("--verdict", "routine", "--summary", "unchanged observer", "--material-key", "rev-a");
+const substantive = append("--verdict", "routine", "--summary", "new ordered note", "--silent", "false", "--material-key", "rev-a");
+taskRecord("archived");
+const terminal = append("--verdict", "captain", "--summary", "verified terminal disposition", "--material-key", "rev-terminal");
+const answer = append("--verdict", "captain", "--summary", "new decision answer remains visible", "--material-key", "rev-answer");
+bus.emit("firstmate:outcomes-ready", {});
+await settle(() => mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length === 2,
+  "coalesced captain delivery");
+await settle(() => sentToMain.some((item) => item.message.content?.includes("new ordered note")),
+  "substantive routine delivery");
+
+const audit = outcomeScript(["list", "--recent", "20"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+if (audit.length !== 5 || audit.map((row) => row.seq).join(",") !== [first, duplicate, substantive, terminal, answer].join(",")) {
+  throw new Error(`coalescing rewrote append-only audit evidence: ${JSON.stringify(audit)}`);
+}
+if (audit.some((row) => row.taskGeneration !== "g-task-c" || !row.evidenceKey || !row.taskDisposition)) {
+  throw new Error(`outcome identity fields were not retained: ${JSON.stringify(audit)}`);
+}
+const routine = sentToMain.filter((item) => item.message.customType === "fm-branch-merge");
+if (routine.length !== 1 || !routine[0].message.content.includes("new ordered note") ||
+    routine.some((item) => item.message.content.includes("unchanged observer"))) {
+  throw new Error(`terminal disposition did not supersede only repeated obsolete observations: ${JSON.stringify(routine)}`);
+}
+const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
+if (visible.map((entry) => entry.data.seq).join(",") !== `${terminal},${answer}` ||
+    !visible.some((entry) => entry.data.summary.includes("new decision answer"))) {
+  throw new Error(`new decision content was coalesced with terminal delivery: ${JSON.stringify(visible)}`);
+}
+await settle(() => sentToMain.some((item) => item.message.customType === "fm-branch-process"),
+  "coalesced processing request");
+const request = sentToMain.find((item) => item.message.customType === "fm-branch-process");
+if (!request || !request.message.content.includes(`sequences="${terminal},${answer}"`) ||
+    request.message.content.includes(`[seq ${first}]`) || request.message.content.includes(`[seq ${duplicate}]`)) {
+  throw new Error(`processing request did not carry the exact surviving identities: ${JSON.stringify(request)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "exact duplicate delivery coalescing and terminal supersession must preserve mixed substantive evidence: $out"
+  pass "exact duplicate notifications coalesce, terminal disposition supersedes obsolete repeated observations, and mixed substantive evidence stays live"
+}
+
 test_short_task_success_reaches_main_with_authenticated_body() {
   local repo home out status
   repo="$TMP_ROOT/short-result-root"
   home="$TMP_ROOT/short-result-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state" "$home/config" "$home/data"
   install_pi_branch_extension_fixture "$repo"
   set +e
   out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -6261,4 +6478,6 @@ test_delivery_keeps_the_event_loop_live_and_ordered
 test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
+test_exact_notification_coalescing_and_terminal_supersession
+test_continuation_archive_during_report_settlement
 test_native_compact_continuation_with_installed_session_manager

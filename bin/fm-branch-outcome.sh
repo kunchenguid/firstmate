@@ -6,13 +6,16 @@
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
-#     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
+#     "statusEndpoint":N,"statusIdent":"...","taskGeneration":"...",
+#     "taskDisposition":"...","evidenceKey":"..."}. `evidenceKey` binds the exact producer material
+#     revision (or the captured wake/status revision when no producer key is
+#     supplied), while `taskGeneration` binds its executor generation. Legacy rows without `silent`
 #     or status provenance remain valid and are treated as visible.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted.
-#     Historical rows with rich-lifecycle identity fields remain readable, but
-#     append never creates or reuses that retired shape.
+#     Historical rows with the same identity fields remain readable; current
+#     append uses them only for delivery coalescing, never as lifecycle state.
 #     The read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
@@ -64,7 +67,7 @@
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--silent true|false] [--once-task]
+#       --summary <text> [--wake <text>] [--silent true|false] [--material-key <text>] [--once-task]
 #     Append one outcome record; prints the assigned seq.
 #     --once-task returns the existing row for an identical task/summary/verdict/
 #     wake, refusing conflicting reuse. This is a terminal-producer retry key.
@@ -105,6 +108,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
+DATA_ROOT=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
 LOCK="$STATE/.branch-outcomes.lock"
@@ -114,7 +118,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--material-key <text>] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -139,6 +143,17 @@ json_escape() { # <text> -> escaped JSON string content on stdout
       gsub(/[\001-\010\013\014\016-\037]/, "", line)
       print line
     }'
+}
+
+sha256_text() { # <text>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    echo "error: shasum or sha256sum is required" >&2
+    return 1
+  fi
 }
 
 read_cursor() {
@@ -194,6 +209,10 @@ last_seq() {
            or (keys == ["epoch", "evidenceKey", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "taskGeneration", "verdict", "wake"]
              and (.evidenceKey | type == "string" and test("^[a-f0-9]{64}$"))
              and (.taskGeneration | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")))
+           or (keys == ["epoch", "evidenceKey", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "taskDisposition", "taskGeneration", "verdict", "wake"]
+             and (.evidenceKey | type == "string" and test("^[a-f0-9]{64}$"))
+             and (.taskGeneration | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"))
+             and (.taskDisposition | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")))
            or (keys == ["epoch", "evidenceKey", "lifecycleRevision", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "taskGeneration", "verdict", "wake"]
              and (.evidenceKey | type == "string" and test("^[a-f0-9]{64}$"))
              and (.taskGeneration | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"))
@@ -443,6 +462,7 @@ case "$CMD" in
     WAKE=''
     SILENT=false
     ONCE_TASK=false
+    MATERIAL_KEY=''
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --once-task) ONCE_TASK=true; shift ;;
@@ -451,6 +471,7 @@ case "$CMD" in
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
+        --material-key) MATERIAL_KEY=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
@@ -491,11 +512,18 @@ case "$CMD" in
     fi
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
+    TASK_GENERATION=$(sed -n 's/^spawn_gen=//p' "$STATE/$TASK.meta" 2>/dev/null | head -1)
+    case "$TASK_GENERATION" in ''|*[!A-Za-z0-9._-]*) TASK_GENERATION=none ;; esac
+    TASK_DISPOSITION=$(jq -er '.state | select(type == "string" and length > 0)' "$DATA_ROOT/$TASK/task.json" 2>/dev/null || printf 'unknown\n')
+    case "$TASK_DISPOSITION" in *[!A-Za-z0-9._-]*) TASK_DISPOSITION=unknown ;; esac
+    EVIDENCE_KEY=$(sha256_text "$TASK|$TASK_GENERATION|$TASK_DISPOSITION|$MATERIAL_KEY|$WAKE|$CAPTURED_STATUS_ENDPOINT|$CAPTURED_STATUS_IDENT") \
+      || { fm_lock_release "$LOCK"; exit 1; }
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","taskGeneration":"%s","taskDisposition":"%s","evidenceKey":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" "$(json_escape "$TASK_GENERATION")" \
+      "$(json_escape "$TASK_DISPOSITION")" "$EVIDENCE_KEY" >> "$STORE"
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still
