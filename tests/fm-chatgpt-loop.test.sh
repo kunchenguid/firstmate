@@ -387,7 +387,7 @@ SH
   [ "$rc" -eq 0 ] || fail "bridge stop must stop the loop-owned instance: $out"
   assert_contains "$out" "stopped" "bridge stop must report stopping the loop-owned instance"
   dead=0
-  for i in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     kill -0 "$pid" 2>/dev/null || { dead=1; break; }
     sleep 0.1
   done
