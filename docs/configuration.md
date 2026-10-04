@@ -1119,6 +1119,11 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
 - Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 
+**What this file cannot express**
+
+The schema has no health, reachability, or outage predicate, and none can be added without new machinery: both consumers enumerate exactly the keys above (`crew_dispatch_validate` in `bin/fm-bootstrap.sh`, the resolver preflight in `bin/fm-dispatch-resolve.sh`), the resolver forwards only `--harness`, `--model`, and `--effort` to a spawn, and neither consumer runs an external check or observes an endpoint. A provider whose endpoint does not resolve can still report ample quota, so `floor` remains a capacity declaration rather than a liveness one.
+When upstream availability must actually be known at an intake, collect it with `bin/fm-provider-reach-probe.sh --help`, which returns one bounded unauthenticated DNS-plus-HTTP finding per exit status; `docs/verification/provider-reach.md` owns what each class proves and does not prove. Routing that evidence onto a candidate stays the judgment procedure in `quota-array-dispatch`.
+
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 
 **Validation and diagnostics**
