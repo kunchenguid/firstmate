@@ -647,7 +647,7 @@ const invokeContinuation = async () => {
   const current = JSON.parse(read.stdout);
   order.push("continuation-update");
   const update = spawnSync(`${process.env.REAL_ROOT}/bin/fm-task-state.sh`,
-    ["update-progress", "target", "--expected-token", current.record_token, "--progress",
+    ["update-progress", "target", "--progress",
       JSON.stringify({ acceptance: "read and update complete", current_state: "verified",
         remaining_gap: "ordinary branch still pending", next_step: "release fixture branch" })],
     { env: commandEnv, encoding: "utf8" });

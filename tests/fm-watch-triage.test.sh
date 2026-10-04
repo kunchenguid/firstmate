@@ -1697,7 +1697,6 @@ test_main_accepted_compact_task_stays_terminal_and_quiet() {
   current=$(FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" progress accepted) \
     || fail 'accepted watcher progress read failed'
   FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" update-progress accepted \
-    --expected-token "$(printf '%s' "$current" | jq -r .record_token)" \
     --progress '{"acceptance":"The requested result is reviewed","current_state":"MAIN accepted the result","remaining_gap":"","next_step":""}' \
     >/dev/null || fail 'accepted watcher progress update failed'
   printf 'done: implementation returned\n' > "$state/accepted.status"
@@ -2366,7 +2365,7 @@ make_hold_home() {  # <name> <status-line> <hold|nohold>
   mkdir -p "$dir/data" "$dir/config"
   cp "$ROOT/.tasks.toml" "$dir/.tasks.toml" || return 1
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
-  (cd "$dir" && tasks-axi add held-merge 'delivered work' --file data/backlog.md) >/dev/null 2>&1 \
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add held-merge 'delivered work' --kind ship --start >/dev/null 2>&1 \
     || return 1
   if [ "$hold" = hold ]; then
     run_hold "$dir" hold held-merge --reason 'awaiting the captain on the merge' || return 1

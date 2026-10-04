@@ -220,10 +220,10 @@ done_keep = 0
 EOF
 
   task_in "$dir" add archived-blocker 'Archived blocker' --kind scout --start >/dev/null
-  task_in "$dir" 'done' archived-blocker --report data/archived-blocker/report.md --keep 0 >/dev/null
+  task_in "$dir" 'done' archived-blocker --report data/archived-blocker/report.md >/dev/null
   printf 'needs-decision [key=old]: historical blocker must not reopen execution\n' > "$state/archived-blocker.status"
 
-  task_in "$dir" add parked-blocker 'Parked blocker' --kind scout --queue >/dev/null
+  task_in "$dir" add parked-blocker 'Parked blocker' --kind scout >/dev/null
   task_in "$dir" hold parked-blocker --reason 'explicit archive boundary' --kind parked >/dev/null
   printf 'blocked [key=old-wait]: historical wait must not reopen execution\n' > "$state/parked-blocker.status"
 
@@ -232,11 +232,11 @@ EOF
   printf 'needs-decision [key=unknown]: preserve an unclassified integrity problem\n' > "$state/unknown-decision.status"
 
   task_in "$dir" add archived-outcome 'Archived outcome' --kind scout --start >/dev/null
-  task_in "$dir" 'done' archived-outcome --report data/archived-outcome/report.md --keep 0 >/dev/null
+  task_in "$dir" 'done' archived-outcome --report data/archived-outcome/report.md >/dev/null
   printf 'done: meaningful result was never handed off\n' > "$state/archived-outcome.status"
 
   task_in "$dir" add archived-note 'Archived note' --kind scout --start >/dev/null
-  task_in "$dir" 'done' archived-note --report data/archived-note/report.md --keep 0 >/dev/null
+  task_in "$dir" 'done' archived-note --report data/archived-note/report.md >/dev/null
   printf 'note: unread answer from archived work stays visible once\n' > "$state/archived-note.status"
 
   append_wake "$state" signal archived-blocker.status 'signal: archived blocker' \

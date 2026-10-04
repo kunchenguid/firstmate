@@ -542,9 +542,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_reports == 1 then empty else {surface:"full scout-report inventory", reveal:"--all-reports"} end),
         (if $all_landed == 0 and ($landed_sorted | length) > ($done | length) then {surface:("landed showing \($done | length) of \($landed_sorted | length)"), reveal:"--all-landed"} else empty end),
         ((($snap.main_inventory.orphan_in_flight // []) | length) as $n
-         | if $n > 0 then {surface:("main in-flight backlog item(s) have no child metadata: \($n)"), reveal:"inspect main data/backlog.md In flight vs state/*.meta"} else empty end),
+         | if $n > 0 then {surface:("main in-flight task record(s) have no child metadata: \($n)"), reveal:"inspect canonical data/<task>/task.json records vs state/*.meta"} else empty end),
         ((($snap.main_inventory.unstructured_current_count // 0)) as $n
-         | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
+         | if $n > 0 then {surface:("main unstructured current task record(s): \($n)"), reveal:"inspect canonical data/<task>/task.json records"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (($retained_all | length) as $n
          | (($retained_all | length) - ($retained_open | length)) as $historical_n

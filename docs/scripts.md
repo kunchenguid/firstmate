@@ -68,7 +68,6 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes and exit on actionable ones |
 | `fm-inactive-reconcile.sh` | Reconcile long-inactive direct crewmate terminal outcomes without forge access |
 | `fm-task-record.py`      | Own one atomic business and progress record per task plus unified on-demand list/filter reads |
-| `fm-task-import.sh`      | Import retained markdown backlog/archive evidence through the fleet snapshot parser |
 | `fm-task-progress-lib.sh` | Project MAIN-owned continuation from the canonical per-task record |
 | `fm-task-state.sh`       | Read provider-aware task state, compact per-task progress, and historical lifecycle recovery interfaces |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |

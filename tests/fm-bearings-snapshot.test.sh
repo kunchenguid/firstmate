@@ -61,17 +61,13 @@ SH
 
 write_fixture() {
   local home=$1
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-- [ ] ship-task - Ship Task (repo: alpha) (kind: ship) (since 2026-09-26)
-
-## Queued
-- [ ] queued-task - Queued Task blocked-by: ship-task (repo: alpha) (kind: ship) (since 2026-09-27)
-
-## Done
-- [x] scout-done - Scout Report data/scout-done/report.md (repo: alpha) (kind: scout) (reported 2026-09-25)
-- [x] ship-done - Shipped https://github.com/example/repo/pull/7 (repo: alpha) (kind: ship) (merged 2026-09-24)
-EOF
+  task_in "$home" add ship-task 'Ship Task' --repo alpha --kind ship --start >/dev/null
+  task_in "$home" add queued-task 'Queued Task' --repo alpha --kind ship >/dev/null
+  task_in "$home" block queued-task --by ship-task >/dev/null
+  task_in "$home" add scout-done 'Scout Report' --repo alpha --kind scout --start >/dev/null
+  task_in "$home" "done" scout-done --report data/scout-done/report.md >/dev/null
+  task_in "$home" add ship-done 'Shipped' --repo alpha --kind ship --start >/dev/null
+  task_in "$home" "done" ship-done --pr https://github.com/example/repo/pull/7 >/dev/null
   printf '# Report\n' > "$home/data/scout-done/report.md"
   fm_test_write_herdr_meta "$home/state/ship-task.meta" \
     "window=fmtest:w1:p1" "endpoint_task_id=ship-task" \
@@ -153,7 +149,7 @@ test_terminal_and_parked_canonical_records_are_not_underway() {
   home=$(make_home canonical-dispositions)
   fakebin=$(make_fakebin "$home")
 
-  task_in "$home" add parked-residual 'Parked residual' --kind scout --queue >/dev/null
+  task_in "$home" add parked-residual 'Parked residual' --kind scout >/dev/null
   task_in "$home" hold parked-residual --reason 'synthetic parked disposition' --kind parked >/dev/null
   write_task_meta "$home" parked-residual p-active-stale-parked
 
@@ -228,38 +224,25 @@ test_legacy_backend_config_does_not_override_canonical_disposition() {
 }
 
 test_mixed_history_stays_compact_and_long_decision_has_targeted_read() {
-  local home fakebin default expanded targeted targeted_toon missing rc gen
-  command -v tasks-axi >/dev/null 2>&1 || {
-    pass "skipped targeted task projection regression: tasks-axi not installed"
-    return
-  }
+  local home fakebin default expanded targeted targeted_toon missing rc gen body
   home=$(make_home targeted-context)
   fakebin=$(make_fakebin "$home")
-  mkdir -p "$home/records" "$home/data/actionable-choice"
-  cat > "$home/.tasks.toml" <<'EOF'
-backend = "markdown"
-
-[markdown]
-path = "data/backlog.md"
-archive = "records/completed.md"
-done_keep = 1
+  mkdir -p "$home/data/actionable-choice"
+  body="$home/actionable-body"
+  cat > "$body" <<'EOF'
+Option A requires a restored authenticated read-only GUI session.
+Option B requires a timestamped campaign-level export for all twenty-two named groups.
+Evidence: data/actionable-choice/report.md.
 EOF
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-
-## Queued
-- [ ] actionable-choice - Choose the exact TikTok recovery input (repo: alpha) (kind: scout) (since 2026-09-29) (hold: Choose either option A: restore the authenticated read-only GUI session, or option B: provide the complete timestamped campaign-level export for all twenty-two named groups; an older snapshot is not current-state evidence.) (hold-kind: captain)
-  Option A requires a restored authenticated read-only GUI session.
-  Option B requires a timestamped campaign-level export for all twenty-two named groups.
-  Evidence: data/actionable-choice/report.md.
-
-## Done
-EOF
-  cat > "$home/records/completed.md" <<'EOF'
-## Archived 2026-09
-- [x] archive-old - Historical completed task (repo: alpha) (kind: scout) (reported 2026-09-01)
-- [x] archive-quiet - Historical completed task without open work (repo: alpha) (kind: scout) (reported 2026-09-02)
-EOF
+  task_in "$home" add actionable-choice 'Choose the exact TikTok recovery input' \
+    --repo alpha --kind scout --body-file "$body" >/dev/null
+  task_in "$home" hold actionable-choice \
+    --reason 'Choose either option A: restore the authenticated read-only GUI session, or option B: provide the complete timestamped campaign-level export for all twenty-two named groups; an older snapshot is not current-state evidence.' \
+    --kind captain >/dev/null
+  task_in "$home" add archive-old 'Historical completed task' --repo alpha --kind scout --start >/dev/null
+  task_in "$home" archive archive-old --report data/archive-old/report.md >/dev/null
+  task_in "$home" add archive-quiet 'Historical completed task without open work' --repo alpha --kind scout --start >/dev/null
+  task_in "$home" archive archive-quiet --report data/archive-quiet/report.md >/dev/null
   printf '# exact evidence\n' > "$home/data/actionable-choice/report.md"
   write_task_meta "$home" actionable-choice p-idle-choice
   printf 'yolo=off\n' >> "$home/state/actionable-choice.meta"
@@ -319,7 +302,9 @@ EOF
   assert_contains "$targeted_toon" "Option B requires a timestamped campaign-level export" \
     "targeted TOON lost the complete second option"
 
-  sed -i 's/an older snapshot is not current-state evidence/a newly supplied export must still be read back before acceptance/' "$home/data/backlog.md"
+  task_in "$home" hold actionable-choice \
+    --reason 'Choose either option A: restore the authenticated read-only GUI session, or option B: provide the complete timestamped campaign-level export for all twenty-two named groups; a newly supplied export must still be read back before acceptance.' \
+    --kind captain >/dev/null
   targeted=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-09-29T12:01:00Z "$BEARINGS" --json --task actionable-choice) \
     || fail "refreshed targeted task read failed"
   printf '%s\n' "$targeted" | jq -e '

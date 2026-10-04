@@ -6,7 +6,7 @@
 #   fm-task-state.sh <task-id>
 #   fm-task-state.sh --durable-only <task-id>
 #   fm-task-state.sh progress <task-id>
-#   fm-task-state.sh update-progress <task-id> [--expected-token LEGACY_TOKEN] --progress '<json>'
+#   fm-task-state.sh update-progress <task-id> --progress '<json>'
 #   fm-task-state.sh progress-list
 #
 # Legacy metadata and explicit executor=local-agent records delegate unchanged
@@ -31,7 +31,7 @@ if [ "${1:-}" = --durable-only ]; then
   shift
 fi
 # Compact progress reads and updates one canonical per-task record without
-# backend refresh. --expected-token is inert compatibility.
+# backend refresh.
 case "${1:-}" in
   progress-list)
     [ "$#" -eq 1 ] || exit 2
@@ -51,11 +51,9 @@ case "${1:-}" in
     shift
     progress_id=${1:-}; [ -n "$progress_id" ] || exit 2
     shift
-    task_progress_expected=''
     task_progress_json=''
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        --expected-token) task_progress_expected=${2:-}; shift 2 ;;
         --progress) task_progress_json=${2:-}; shift 2 ;;
         *) exit 2 ;;
       esac
@@ -64,7 +62,7 @@ case "${1:-}" in
     # shellcheck source=bin/fm-task-progress-lib.sh
     . "$SCRIPT_DIR/fm-task-progress-lib.sh"
     # shellcheck disable=SC2031 # The sourced implementation uses a subshell by design.
-    fm_task_progress_update "$progress_id" "$task_progress_expected" "$task_progress_json"
+    fm_task_progress_update "$progress_id" "$task_progress_json"
     exit $?
     ;;
 esac

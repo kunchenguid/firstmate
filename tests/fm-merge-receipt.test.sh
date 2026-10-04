@@ -40,13 +40,9 @@ jq -e --arg task "$TASK" '
 
 CURRENT=current-task
 mkdir -p "$HOME_DIR/data/$CURRENT"
-cat >"$HOME_DIR/.tasks.toml" <<'EOF'
-backend = "markdown"
-[markdown]
-path = "data/backlog.md"
-EOF
-printf '## In flight\n- [ ] current-task - Current task (kind: ship)\n  body\n\n## Queued\n\n## Done\n' \
-  >"$HOME_DIR/data/backlog.md"
+FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" add "$CURRENT" 'Current task' \
+  --kind ship --body 'Current canonical merge receipt fixture.' --start >/dev/null \
+  || fail 'current canonical task fixture could not be created'
 printf '{malformed retained rich history\n' >"$HOME_DIR/data/$CURRENT/lifecycle.json"
 FM_HOME="$HOME_DIR" bash -c \
   '. "$1"; fm_merge_receipt_record "$2" "$3" "$4" "$5"' \

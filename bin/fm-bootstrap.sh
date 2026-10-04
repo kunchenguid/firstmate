@@ -765,24 +765,6 @@ detect_local_config() {
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
-  detect_code_root_backlog_fork
-}
-
-# Shadow-backlog check. When this home's data directory is not the code root's,
-# a code-root data/backlog.md or data/done-archive.md that is not this home's
-# own file is a queue a cwd-relative tasks-axi write has already forked; a link
-# into the home does not survive such a write (docs/configuration.md "Backlog
-# backend" owns why). Detect-only: neither copy is a safe winner, so nothing is
-# merged here.
-detect_code_root_backlog_fork() {
-  local name root_copy
-  [ "$FM_ROOT/data" -ef "$DATA" ] && return 0
-  for name in backlog.md done-archive.md; do
-    root_copy="$FM_ROOT/data/$name"
-    [ -e "$root_copy" ] || [ -L "$root_copy" ] || continue
-    [ "$root_copy" -ef "$DATA/$name" ] && continue
-    echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; tasks-axi wrote the code root instead of this home, so rows in it may be missing here - merge it into this home's copy and move it aside"
-  done
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle

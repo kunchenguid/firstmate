@@ -623,13 +623,10 @@ fm_test_base_path_sans() {
 # A synthetic MAIN acceptance for provider-retirement fixtures, separate from
 # process terminal state and the independent captain-hold gate.
 fm_test_archive_goal() { # <home> <task>
-  local fixture_home=$1 task=$2 current token fixture_data
+  local fixture_home=$1 task=$2 fixture_data
   fixture_data=${FM_DATA_OVERRIDE:-$fixture_home/data}
-  current=$(FM_HOME="$fixture_home" FM_DATA_OVERRIDE="$fixture_data" \
-    "$ROOT/bin/fm-task-state.sh" progress "$task") || fail 'fixture progress read failed'
-  token=$(printf '%s' "$current" | jq -r .record_token)
   FM_HOME="$fixture_home" FM_DATA_OVERRIDE="$fixture_data" \
-    "$ROOT/bin/fm-task-state.sh" update-progress "$task" --expected-token "$token" --progress \
+    "$ROOT/bin/fm-task-state.sh" update-progress "$task" --progress \
       '{"acceptance":"The synthetic provider result is reviewed","current_state":"Fixture supervisor accepted the retained result","remaining_gap":"","next_step":""}' \
       >/dev/null || fail 'fixture semantic acceptance failed'
 }

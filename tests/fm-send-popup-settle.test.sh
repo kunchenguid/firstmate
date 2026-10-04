@@ -49,7 +49,7 @@ native_direct() {  # <label> <harness|--explicit> <message> [selector-form]
   local label=$1 harness=$2 msg=$3
   local selector_form=${4:-legacy}
   local dir fb log send_log home target rc meta_id
-  dir="$TMP_ROOT/case-$RANDOM"; mkdir -p "$dir/state"
+  dir="$TMP_ROOT/case-$RANDOM"; mkdir -p "$dir/state" "$dir/data"
   fb=$(make_stubs "$dir"); log="$dir/sleep.log"; send_log="$dir/send.log"; home="$dir"
   if [ "$harness" = --explicit ]; then
     target="sess:w1:p1"
@@ -68,6 +68,7 @@ native_direct() {  # <label> <harness|--explicit> <message> [selector-form]
         ;;
     esac
     fm_test_write_herdr_meta "$home/state/$meta_id.meta" "window=sess:w1:p1" "harness=$harness"
+    FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$meta_id" "Popup fixture $meta_id" --kind ship --start >/dev/null
   fi
   : > "$log"; : > "$send_log"
   env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
@@ -87,9 +88,10 @@ native_direct() {  # <label> <harness|--explicit> <message> [selector-form]
 rides_inbox() {  # <label> <harness> <message>
   local label=$1 harness=$2 msg=$3
   local dir fb log send_log home rc
-  dir="$TMP_ROOT/case-$RANDOM"; mkdir -p "$dir/state"
+  dir="$TMP_ROOT/case-$RANDOM"; mkdir -p "$dir/state" "$dir/data"
   fb=$(make_stubs "$dir"); log="$dir/sleep.log"; send_log="$dir/send.log"; home="$dir"
   fm_test_write_herdr_meta "$home/state/popupcase.meta" "window=sess:w1:p1" "harness=$harness"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add popupcase 'Popup inbox fixture' --kind ship --start >/dev/null
   : > "$log"; : > "$send_log"
   env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" FM_SEND_LOG="$send_log" \

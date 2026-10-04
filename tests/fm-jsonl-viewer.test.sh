@@ -55,6 +55,13 @@ cat > "$HOME_FIXTURE/data/done-archive.md" <<'MARKDOWN'
 ## Archived 2026-09
 - [x] archived-task - Archived historical task (repo: viewer) (kind: ship)
 MARKDOWN
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add task-one 'Processing task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add held-task 'Held task' --repo viewer --kind ship >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" block held-task --by upstream-task >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add completed-task 'Accepted completed task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add archived-task 'Archived historical task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" archive archived-task >/dev/null
 mkdir -p "$HOME_FIXTURE/data/cancelled-task" "$HOME_FIXTURE/data/invalid-lifecycle-task"
 cat > "$HOME_FIXTURE/data/cancelled-task/lifecycle.json" <<'JSON'
 {"schema":"fm-task-lifecycle.v2","task_id":"cancelled-task","disposition":"archived","assessment":{"authority_ref":"retained explicit stop"}}
@@ -312,16 +319,15 @@ jq -e '.reports | any(.source == "report" and .id == "_task-two" and .label == "
 jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlinked report path was discovered"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks.json"
-# Explicit archived rows remain visible without consulting a second task record.
+# Retained lifecycle-only rows never reconstruct a missing canonical task.
 jq -e '
   (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report" and .documentTypes == ["report","brief"]))
     and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null and .documentTypes == []))
     and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief" and .documentTypes == ["brief"]))
     and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
-    and (.tasks | any(.id == "cancelled-task" and .category == "history" and .status == "Cancelled" and (.warning | contains("Remote status unconfirmed"))))
-    and (.tasks | all(.id != "invalid-lifecycle-task"))
+    and (.tasks | all(.id != "cancelled-task" and .id != "invalid-lifecycle-task"))
     and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","wait","warning"]))
-' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve authoritative processing, completed, held, archived, and document states"
+' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve canonical task states or ignore lifecycle-only rows"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-cached.json"
 jq -e '.cacheHit == true and (.cacheAgeMs | type) == "number"' "$TMP_ROOT/tasks-cached.json" >/dev/null \
@@ -369,8 +375,7 @@ printf '\nChanged report body.\n' >> "$REPORT_DIR/report.md"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report-changed.json"
 jq -e '(.content | contains("Changed report body.")) and .size > 0' "$TMP_ROOT/report-changed.json" >/dev/null || fail "changed task report was not refreshed"
 
-sed -i 's/## In flight/## In flight\n\n## Done/; /task-one - Processing task/d' "$HOME_FIXTURE/data/backlog.md"
-sed -i '/Accepted completed task/a\- [x] task-one - Processing task (repo: viewer) (kind: ship)' "$HOME_FIXTURE/data/backlog.md"
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" task-one >/dev/null
 sleep 6
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-refreshed.json"
 jq -e '.cacheHit == true and .refreshing == true and (.tasks | any(.id == "task-one" and .category == "processing"))' "$TMP_ROOT/tasks-refreshed.json" >/dev/null \

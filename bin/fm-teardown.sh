@@ -338,23 +338,13 @@ backlog_done_args() {
 # invariant). This prints what already happened, so the follow-up wording stays
 # only where a human still owes the edit.
 backlog_refresh_reminder() {
-  local backlog_display root backend=markdown
-  if root=$(fm_backlog_root "$DATA"); then
-    backend=$(fm_tasks_axi_backend "$root") || return 2
-  fi
-  if [ "$backend" != markdown ]; then
-    backlog_display="this home's configured tasks-axi backend (data directory $DATA)"
-  elif backlog_display=$(fm_backlog_file "$DATA"); then
-    :
-  else
-    backlog_display="${DATA%/}/backlog.md"
-  fi
+  local backlog_display="${DATA%/}/$ID/task.json"
   if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
-    printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
+    printf '%s\n' "Task: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
   elif [ "$BACKLOG_CLOSED" = 1 ]; then
-    printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Task: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
-    printf '%s\n' "Backlog: $ID just finished ($BACKLOG_SKIP_REASON). Update $backlog_display - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Task: $ID just finished ($BACKLOG_SKIP_REASON). Update $backlog_display, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
 }
 
@@ -378,7 +368,10 @@ teardown_completed_task() (
   [ -z "$ENDPOINT_EXPECTED_GEN" ] || [ "$(fm_meta_get "$meta" spawn_gen)" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
   KIND=$(fm_meta_get "$meta" kind)
   [ -n "$KIND" ] || KIND=ship
-  [ "$KIND" != secondmate ] || exit 1
+  [ "$KIND" != secondmate ] || {
+    echo "REFUSED: task $ID is a historical secondmate record; automatic teardown is no longer supported and its home was left untouched" >&2
+    exit 1
+  }
   copy=$(fm_backend_meta_exact_value "$meta" worktree) || exit 1
   project=$(fm_backend_meta_exact_value "$meta" project) || exit 1
   generation=$(fm_meta_get "$meta" spawn_gen)
@@ -566,9 +559,41 @@ teardown_retained_copy() (
   printf 'copy-only %s: %s (%s); business disposition and endpoint unchanged\n' "$ID" "$COPY_DISPOSITION" "$COPY_REASON"
 )
 if [ "$COPY_ONLY" = 1 ]; then teardown_retained_copy; exit $?; fi
+
+PUBLIC_FOLLOWUP_HOME=$FM_HOME
+PUBLIC_FOLLOWUP_STATE=$STATE
+PUBLIC_FOLLOWUP_WORK_HOME=main
+PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
+PUBLIC_FOLLOWUP_GUARD_CHECKED=0
+if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
+  PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+fi
+
+teardown_public_followup_guard() {
+  [ "$PUBLIC_FOLLOWUP_GUARD_CHECKED" = 0 ] || return 0
+  PUBLIC_FOLLOWUP_GUARD_CHECKED=1
+  if [ "$FORCE" != "--force" ] \
+    && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
+    && [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
+    && fm_pf_has_registrations "$PUBLIC_FOLLOWUP_STATE"; then
+    if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$PUBLIC_FOLLOWUP_HOME" FM_STATE_OVERRIDE="$PUBLIC_FOLLOWUP_STATE" \
+        "$SCRIPT_DIR/fm-public-followup.sh" guard-work "$PUBLIC_FOLLOWUP_WORK_HOME" "$ID" 2>/dev/null); then
+      echo "REFUSED: task $ID still owes a public reply through the myfirstmate relay." >&2
+      printf '%s\n' "$PUBLIC_FOLLOWUP_BLOCKING" >&2
+      echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with bin/fm-tasks-axi.sh public-followup waive, or use --force after explicit discard approval." >&2
+      exit 1
+    fi
+  fi
+}
+
 if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
   completed_generation=$(fm_meta_get "$STATE/$ID.meta" spawn_gen)
   if fm_cleanup_completion_guard "$ID" "$completed_generation" >/dev/null 2>&1; then
+    teardown_public_followup_guard
+    X_REQUEST=$(grep '^x_request=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ -n "$X_REQUEST" ]; then
+      echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
+    fi
     teardown_completed_task
     exit $?
   fi
@@ -683,20 +708,18 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
+[ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+[ "$TEARDOWN_META_KIND" != secondmate ] || {
+  echo "REFUSED: task $ID is a historical secondmate record; automatic teardown is no longer supported and its home was left untouched" >&2
+  exit 1
+}
 fm_control_require_recoverable_harness "$(fm_meta_get "$META" harness)" || exit 1
 # Ordinary compact continuation retains semantic acceptance in the canonical
-# per-task business and progress record. Historical tasks without that record
-# or an embedded legacy block keep the prior landed-work cleanup behavior below.
+# per-task business and progress record.
 # shellcheck source=bin/fm-task-progress-lib.sh
 . "$SCRIPT_DIR/fm-task-progress-lib.sh"
 fm_task_progress_completion_guard "$ID" || exit $?
-TEARDOWN_CANONICAL_RECORD=1
-if fm_task_progress_current_absent "$ID"; then
-  TEARDOWN_CANONICAL_RECORD=0
-else
-  progress_record_status=$?
-  [ "$progress_record_status" -eq 1 ] || exit "$progress_record_status"
-fi
 ENDPOINT_PHASE_DONE=0
 if [ "$ENDPOINT_ONLY" = 1 ]; then
   # This branch is before all worktree, slot, branch and record retirement
@@ -721,12 +744,6 @@ if [ "$ENDPOINT_ONLY" = 1 ]; then
   ENDPOINT_SESSION_LOCK=
   ENDPOINT_PHASE_DONE=1
 fi
-TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
-[ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
-[ "$TEARDOWN_META_KIND" != secondmate ] || {
-  echo "REFUSED: task $ID is a historical secondmate record; automatic teardown is no longer supported and its home was left untouched" >&2
-  exit 1
-}
 TEARDOWN_META_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
 TEARDOWN_LEGACY_PENDING=0
 TEARDOWN_LEGACY_ACCEPTED=0
@@ -735,9 +752,7 @@ TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
-if [ "$TEARDOWN_CANONICAL_RECORD" = 0 ]; then
-  TEARDOWN_BACKLOG_SKIP_REASON="historical task has no canonical business record"
-elif fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
+if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
   TEARDOWN_BACKLOG_APPLIES=1
 else
   TEARDOWN_BACKLOG_GATE_STATUS=$?
@@ -865,14 +880,6 @@ if [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; then
     TEARDOWN_META_SPAWN_GEN="legacy-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   fi
   TEARDOWN_LEGACY_ACCEPTED=1
-fi
-
-PUBLIC_FOLLOWUP_HOME=$FM_HOME
-PUBLIC_FOLLOWUP_STATE=$STATE
-PUBLIC_FOLLOWUP_WORK_HOME=main
-PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
-if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
-  PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
 fi
 
 meta_value() {
@@ -1661,18 +1668,7 @@ fi
 # reconcilable. Refuse while this home still owes a public reply for exactly this
 # work. Both gates live in bin/fm-public-followup-lib.sh, so a home that never
 # opted into the myfirstmate relay runs one [ -f ] test and nothing else here.
-if [ "$FORCE" != "--force" ] \
-  && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
-  && [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
-  && fm_pf_has_registrations "$PUBLIC_FOLLOWUP_STATE"; then
-  if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$PUBLIC_FOLLOWUP_HOME" FM_STATE_OVERRIDE="$PUBLIC_FOLLOWUP_STATE" \
-      "$SCRIPT_DIR/fm-public-followup.sh" guard-work "$PUBLIC_FOLLOWUP_WORK_HOME" "$ID" 2>/dev/null); then
-    echo "REFUSED: task $ID still owes a public reply through the myfirstmate relay." >&2
-    printf '%s\n' "$PUBLIC_FOLLOWUP_BLOCKING" >&2
-    echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with bin/fm-tasks-axi.sh public-followup waive, or use --force after explicit discard approval." >&2
-    exit 1
-  fi
-fi
+teardown_public_followup_guard
 
 # Non-blocking: a delivered public loop is not a teardown refusal (guard-work
 # already passed), but tearing down a ship whose PR merged while a loop is still

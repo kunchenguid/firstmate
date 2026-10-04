@@ -216,7 +216,7 @@ def progress_projection(record: dict[str, Any]) -> dict[str, Any]:
     return {"task_id": record["id"], "goal": record["title"], "task_state": record["state"],
             "task_held": "no" if record["hold"] is None else "yes",
             "task_blocked": "no" if not record["blocked_by"] else "yes",
-            "recorded": relation == "exact" and bool(progress["acceptance"]) and bool(progress["current_state"]),
+            "recorded": bool(progress["acceptance"]) and bool(progress["current_state"]),
             "context_relation": relation, **progress, "record_token": token}
 
 
@@ -263,7 +263,6 @@ def parser() -> argparse.ArgumentParser:
     for name in ("kind", "repo", "priority", "body", "body_file"):
         add.add_argument("--" + name.replace("_", "-"))
     add.add_argument("--start", action="store_true")
-    add.add_argument("--queue", action="store_true")
     show_parser = sub.add_parser("show"); show_parser.add_argument("id"); show_parser.add_argument("--full", action="store_true")
     listing = sub.add_parser("list"); listing.add_argument("--state"); listing.add_argument("--limit", type=int, default=10000)
     listing.add_argument("--blocked", action="store_true"); listing.add_argument("--fields")
@@ -271,9 +270,6 @@ def parser() -> argparse.ArgumentParser:
     for command in ("start", "done", "reopen", "archive", "unhold"):
         item = sub.add_parser(command); item.add_argument("id")
         item.add_argument("--pr"); item.add_argument("--report"); item.add_argument("--note")
-        if command == "done":
-            item.add_argument("--keep", type=int)
-            item.add_argument("--no-prune", action="store_true")
     update = sub.add_parser("update"); update.add_argument("id")
     for name in ("title", "body", "body_file", "kind", "repo", "priority", "pr", "report", "note"):
         update.add_argument("--" + name.replace("_", "-"))
@@ -287,89 +283,18 @@ def parser() -> argparse.ArgumentParser:
     progress_update_view = sub.add_parser("update-progress-view"); progress_update_view.add_argument("id"); progress_update_view.add_argument("--progress", required=True)
     sub.add_parser("progress-list")
     sub.add_parser("inventory")
-    prune = sub.add_parser("prune"); prune.add_argument("--keep", type=int, required=True)
-    imported = sub.add_parser("import-snapshot")
-    imported.add_argument("--snapshot", required=True, type=Path)
-    imported.add_argument("--archive", action="store_true")
     return result
-
-
-def import_snapshot(data: Path, snapshot_path: Path, archived: bool) -> int:
-    snapshot = json.loads(snapshot_path.read_bytes())
-    rows = snapshot.get("backlog", {}).get("records") if isinstance(snapshot, dict) else None
-    if not isinstance(rows, list):
-        raise Refusal("snapshot has no backlog record inventory")
-    imported = 0
-    for row in rows:
-        if not isinstance(row, dict) or not row.get("structured"):
-            if isinstance(row, dict) and str(row.get("raw") or "").strip():
-                raise Refusal("legacy source contains an unstructured task row")
-            continue
-        task_id = text(row.get("id"), "legacy task id")
-        body_lines = row.get("body_lines") if isinstance(row.get("body_lines"), list) else []
-        progress = row.get("compact_progress")
-        if not isinstance(progress, dict) or not set(PROGRESS_FIELDS).issubset(progress):
-            progress = {name: "" for name in PROGRESS_FIELDS}
-        else:
-            progress = {name: progress[name] for name in PROGRESS_FIELDS}
-        links: dict[str, str] = {}
-        if isinstance(row.get("pr_url"), str): links["pr"] = row["pr_url"]
-        if isinstance(row.get("report_path"), str): links["report"] = row["report_path"]
-        artifact_index = 0
-        for value in row.get("links", []) if isinstance(row.get("links"), list) else []:
-            if not isinstance(value, str) or value in links.values():
-                continue
-            artifact_index += 1
-            links[f"artifact_{artifact_index}"] = value
-        state = "archived" if archived else row.get("state")
-        if state not in STATES:
-            raise Refusal(f"legacy task {task_id} has unsupported state {state}")
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        hold = None
-        if row.get("hold_reason"):
-            hold = {"reason": str(row["hold_reason"]), "kind": str(row.get("hold_kind") or "captain"),
-                    "until": row.get("hold_until") if isinstance(row.get("hold_until"), str) else None,
-                    "set": row.get("hold_set") if isinstance(row.get("hold_set"), str) else None}
-        completion = row.get("completion") if isinstance(row.get("completion"), dict) else None
-        if not completion or completion.get("verb") not in ("done", "merged", "reported") or not isinstance(completion.get("date"), str):
-            completion = None
-        closed = completion["date"] if completion else None
-        record = {"schema": "fm-task.v1", "id": task_id, "title": text(row.get("title"), "legacy title"),
-                  "body": "\n".join(str(item) for item in body_lines), "state": state,
-                  "kind": str(row.get("kind") or "task"), "repo": str(row.get("repo") or ""),
-                  "priority": str(row.get("priority") or ""), "created": str(row.get("since") or date.today().isoformat()),
-                  "closed": closed, "completion": completion, "hold": hold,
-                  "deferred_until": row.get("hold_until") if isinstance(row.get("hold_until"), str) else None,
-                  "blocked_by": [str(item) for item in row.get("blocked_by_ids", [])],
-                  "links": links, "history": [str(item) for item in body_lines],
-                  "progress": progress, "updated_at": now}
-        path = task_path(data, task_id)
-        if path.exists():
-            existing, _ = read(data, task_id)
-            comparable = dict(record); comparable["updated_at"] = existing["updated_at"]
-            if existing != validate(comparable, task_id):
-                raise Refusal(f"legacy task {task_id} conflicts with an existing task record")
-            continue
-        write(data, record); imported += 1
-    print(json.dumps({"imported": imported}, separators=(",", ":")))
-    return 0
 
 
 def main() -> int:
     args = parser().parse_args()
     data: Path = args.data
     try:
-        if args.command == "import-snapshot":
-            return import_snapshot(data, args.snapshot, args.archive)
         if args.command == "add":
             path = task_path(data, args.id)
             if path.exists():
                 raise Refusal(f"task already exists: {args.id}")
             write(data, new_record(args.id, args.title, args)); return 0
-        if args.command == "prune":
-            # Canonical records retain full history; the old retention flag is
-            # accepted as a no-op compatibility bridge.
-            return 0
         if args.command in ("list", "ready", "inventory", "progress-list"):
             items = records(data)
             if args.command == "inventory":

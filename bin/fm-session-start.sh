@@ -6,7 +6,7 @@
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/captain.md and
 # data/learnings.md, then run
-# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, selected identity
+# fm-lock.sh, fm-wake-drain.sh, then read canonical task records, selected identity
 # fields from every state/*.meta, classified by its authoritative task-record
 # disposition, and the newest event from every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
@@ -43,7 +43,7 @@
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - one de-duplicated compact backlog inventory, one
+#   6. fleet digest   - one de-duplicated compact task inventory, one
 #                       identity-complete summary for every state/*.meta, the
 #                       newest state/*.status event with a direct full-log
 #                       pointer, durable provider state with explicit freshness
@@ -124,7 +124,7 @@
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
-# BACKLOG DIGEST: the startup listing is a RECOVERY input, not a reporting
+# TASK DIGEST: the startup listing is a RECOVERY input, not a reporting
 # surface, so it carries what this turn can act on and nothing else.
 #   - `done` rows are never listed. Retained completion history belongs to the
 #     reporting surfaces (bin/fm-bearings-snapshot.sh, /ahoy), and at startup it
@@ -140,23 +140,14 @@
 #     deep queue costs a counter rather than kilobytes.
 #     (This replaces FM_SESSION_START_BACKLOG_LIMIT, which bounded the whole
 #     listing indiscriminately and so could drop a held or blocked row.)
-# When compatible tasks-axi is selected and available, the shared tasks-axi
-# backend probe remains the compatibility owner and this script asks
-# `tasks-axi list` for the compact identity fields plus blocked_by, hold_kind,
-# and hold_reason, never body. The groups are the tool's own filters
+# The canonical task-record wrapper supplies compact identity fields plus
+# blocked_by, hold_kind, and hold_reason, never body. The groups are its filters
 # (`--state in_flight`, `--state held`, `--state queued --blocked`, and
 # `tasks-axi ready`), so this script never reimplements task state; the groups
 # can overlap; the inventory de-duplicates those memberships into one row and
 # labels that row with every matching category.
-# When manual mode is selected, or tasks-axi is unavailable or incompatible,
-# this script prints only backlog section headings and item title lines, so
-# title-line hold and blocked-by metadata remain visible while indented bodies
-# stay out of the startup digest; the same never-bound-a-held-or-blocked-row
-# rule applies, recognized there from the title line's own hold/blocked-by
-# markers.
-# Full bodies are targeted follow-up only: `bin/fm-tasks-axi.sh show <id> --full` when
-# compatible tasks-axi is available, or `data/backlog.md` when the file body is
-# truly needed.
+# Full bodies are targeted follow-up only through
+# `bin/fm-tasks-axi.sh show <id> --full`.
 #
 # LATEST STATUS EVENTS: each task contributes only its newest status line, and
 # bin/fm-line-cap-lib.sh bounds that line's length. This projection is safe
@@ -382,7 +373,7 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
-# the backlog inventory and again inside the fm-bootstrap.sh child, which reports
+# bootstrap and the public-followup owner, which report
 # an incompatible build as MISSING. Computing it once and handing it to that
 # child collapses six subprocesses to three. fm-tasks-axi-lib.sh owns both reuse
 # layers and the one-hop consumption rule that keeps the verdict out of any
@@ -422,78 +413,14 @@ print_file_or_absent() {
   fi
 }
 
-print_backlog_pointer() {
-  printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full; retained legacy evidence remains in data/backlog.md when present.\n'
+print_task_pointer() {
+  printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full.\n'
 }
 
-# A queued title line whose own text already marks it held or blocked. The
-# manual renderer has no task model, so this is the only signal it gets, and it
-# is the one tasks-axi's markdown backend writes: "(hold: ...)", "(hold-kind:
-# ...)", and "blocked-by: ...". Bracket expressions rather than backslashes,
-# because awk's -v applies escape processing before the regex is ever compiled.
-MANUAL_KEEP_RE='[(]hold|blocked-by:'
-
-print_backlog_manual_compact() {
-  local path=$1 reason=$2
-  printf 'compact backlog listing (%s; done rows omitted; every in-flight, held, and blocked title line kept; other queued bounded to %s; indented task bodies omitted)\n' \
-    "$reason" "$QUEUED_LIMIT"
-  awk -v max="$QUEUED_LIMIT" -v keep_re="$MANUAL_KEEP_RE" '
-    function state_for_heading(line, heading) {
-      heading = line
-      sub(/^##[[:space:]]+/, "", heading)
-      sub(/[[:space:]]+$/, "", heading)
-      if (heading == "In flight") return "in_flight"
-      if (heading == "Queued") return "queued"
-      if (heading == "Done") return "done"
-      return ""
-    }
-    /^##[[:space:]]+/ {
-      state = state_for_heading($0)
-      # The Done heading is recognized so its items are skipped, never printed.
-      if (state != "" && state != "done") print $0
-      next
-    }
-    state == "in_flight" && /^[-*][[:space:]]+/ { in_flight++; print $0; next }
-    state == "done" && /^[-*][[:space:]]+/ { done_total++; next }
-    state == "queued" && /^[-*][[:space:]]+/ {
-      queued_total++
-      if ($0 ~ keep_re) { gated++; print $0; next }
-      if (plain_shown < max) { plain_shown++; print $0 }
-      next
-    }
-    END {
-      plain_total = queued_total - gated
-      if (in_flight + queued_total + done_total == 0) {
-        print "(no backlog item title lines found)"
-      } else {
-        printf "(shown %d in-flight, %d held or blocked queued, %d of %d other queued title line(s); %d done row(s) omitted)\n", \
-          in_flight, gated, plain_shown, plain_total, done_total
-        if (plain_total > plain_shown) {
-          printf "(%d more queued - raise FM_SESSION_START_QUEUED_LIMIT or read data/backlog.md for the rest)\n", plain_total - plain_shown
-        }
-      }
-    }
-  ' "$path"
-}
-
-# tasks-axi closes every listing with its own help block. This section composes
-# four listings, so keeping them would repeat the same pointers four times, once
-# per group, each carrying this home's full backlog path. The section prints one
-# equivalent pointer of its own (print_backlog_pointer), so the per-group help
-# blocks stop at their `help[` header instead.
-strip_axi_help() {
-  awk '/^help\[/ { exit } { print }'
-}
-
-# Bound the dispatchable-now listing without rewriting the tool's own rendering:
-# `tasks-axi ready` rows are the indented lines under its ready[N]{...} header,
-# and every other line it prints (its count, its public-followup line) passes
-# through untouched. Whatever is cut is disclosed exactly.
+# Bound the dispatchable-now listing without rewriting the canonical reader's rendering.
 print_ready_queued_bounded() {
   local ready=$1
-  printf '%s\n' "$ready" | awk -v max="$QUEUED_LIMIT" '
-    /^help\[/ { exit }
-    /^ready\[/ { rows = 1; print; next }
+  printf '%s\n' "$ready" | awk -v max="$QUEUED_LIMIT" '    /^ready\[/ { rows = 1; print; next }
     rows && /^[[:space:]]/ {
       total++
       if (shown < max) { print; shown++ }
@@ -511,108 +438,61 @@ print_ready_queued_bounded() {
   '
 }
 
-print_backlog_tasks_axi_compact() {
-  local path=$1 in_flight held blocked ready err
-  if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
-    if ! in_flight=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state in_flight --fields "$BACKLOG_FIELDS" 2>&1); then
-      err=$in_flight
-    elif ! held=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state held --fields "$BACKLOG_FIELDS" 2>&1); then
-      err=$held
-    elif ! blocked=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1); then
-      err=$blocked
-    elif ! ready=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>&1); then
-      err=$ready
-    fi
-  else
-    if ! in_flight=$(tasks-axi list --file "$path" --state in_flight --fields "$BACKLOG_FIELDS" 2>&1); then
-      err=$in_flight
-    elif ! held=$(tasks-axi list --file "$path" --state held --fields "$BACKLOG_FIELDS" 2>&1); then
-      err=$held
-    elif ! blocked=$(tasks-axi list --file "$path" --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1); then
-      err=$blocked
-    elif ! ready=$(tasks-axi ready --file "$path" 2>&1); then
-      err=$ready
-    fi
+print_task_records_compact() {
+  local in_flight held blocked ready err=''
+  if ! in_flight=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state in_flight --fields "$BACKLOG_FIELDS" 2>&1); then
+    err=$in_flight
+  elif ! held=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state held --fields "$BACKLOG_FIELDS" 2>&1); then
+    err=$held
+  elif ! blocked=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1); then
+    err=$blocked
+  elif ! ready=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>&1); then
+    err=$ready
   fi
-  if [ -z "${err:-}" ]; then
-    printf 'compact backlog inventory (tasks-axi; done rows omitted; in-flight, held, and blocked membership de-duplicated; ready queued bounded to %s; task bodies omitted)\n' \
-      "$QUEUED_LIMIT"
-    printf '\nactive, held, and blocked (one row per task):\n'
-    {
-      printf '@@category=in_flight\n%s\n' "$in_flight"
-      printf '@@category=held\n%s\n' "$held"
-      printf '@@category=blocked\n%s\n' "$blocked"
-    } | awk '
-      /^@@category=/ { category = substr($0, 12); rows = 0; next }
-      /^tasks\[/ { rows = 1; next }
-      /^help\[/ { rows = 0; next }
-      rows && /^[[:space:]]/ {
-        row = $0
-        sub(/^[[:space:]]+/, "", row)
-        id = row
-        sub(/,.*/, "", id)
-        if (!(id in seen)) {
-          seen[id] = 1
-          order[++count] = id
-          record[id] = row
-          categories[id] = category
-        } else if (index("+" categories[id] "+", "+" category "+") == 0) {
-          categories[id] = categories[id] "+" category
-        }
-        next
-      }
-      END {
-        printf "tasks[%d]{categories,id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:\n", count
-        for (i = 1; i <= count; i++) {
-          id = order[i]
-          printf "  %s,%s\n", categories[id], record[id]
-        }
-      }
-    '
-    printf '\nready queued (dispatchable now):\n'
-    print_ready_queued_bounded "$ready"
-    return 0
+  if [ -n "$err" ]; then
+    printf 'canonical task record listing failed:\n%s\n' "$err"
+    return 1
   fi
-  printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
-  printf '%s\n' "$err"
-  print_backlog_manual_compact "$path" "fallback"
+  printf 'compact canonical task inventory (terminal records omitted; in-flight, held, and blocked membership de-duplicated; ready queued bounded to %s; task bodies omitted)\n' \
+    "$QUEUED_LIMIT"
+  printf '\nactive, held, and blocked (one row per task):\n'
+  {
+    printf '@@category=in_flight\n%s\n' "$in_flight"
+    printf '@@category=held\n%s\n' "$held"
+    printf '@@category=blocked\n%s\n' "$blocked"
+  } | awk '    /^@@category=/ { category = substr($0, 12); rows = 0; next }
+    /^tasks\[/ { rows = 1; next }
+    rows && /^[[:space:]]/ {
+      row = $0
+      sub(/^[[:space:]]+/, "", row)
+      id = row
+      sub(/,.*/, "", id)
+      if (!(id in seen)) {
+        seen[id] = 1
+        order[++count] = id
+        record[id] = row
+        categories[id] = category
+      } else if (index("+" categories[id] "+", "+" category "+") == 0) {
+        categories[id] = categories[id] "+" category
+      }
+      next
+    }
+    END {
+      printf "tasks[%d]{categories,id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:\n", count
+      for (i = 1; i <= count; i++) {
+        id = order[i]
+        printf "  %s,%s\n", categories[id], record[id]
+      }
+    }
+  '
+  printf '\nready queued (dispatchable now):\n'
+  print_ready_queued_bounded "$ready"
+  print_task_pointer
 }
 
-print_backlog_compact() {
-  local path=$1 label=$2 canonical_ids mixed
-  subsection "$label"
-  if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
-    print_backlog_tasks_axi_compact "$path"
-    if [ -s "$path" ]; then
-      canonical_ids=$(python3 "$FM_ROOT/bin/fm-task-record.py" --data "$DATA" inventory \
-        | jq -c '[.tasks[].id]') || return 1
-      mixed=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
-        FM_CONFIG_OVERRIDE="$CONFIG" "$FM_ROOT/bin/fm-fleet-snapshot.sh" --json --unfinished) || return 1
-      printf 'legacy-only unfinished tasks retained during partial migration:\n'
-      printf '%s' "$mixed" | jq -r --argjson canonical "$canonical_ids" '
-        [.backlog.records[] | select(.structured == true and (.id as $id | $canonical | index($id) | not))]
-        | if length == 0 then "(none)"
-          else .[] | "  " + .id + "," + .state + "," + .title end'
-    fi
-    print_backlog_pointer
-    return
-  fi
-  if [ -f "$path" ]; then
-    if [ -s "$path" ]; then
-      if fm_tasks_axi_backend_available "$CONFIG"; then
-        print_backlog_tasks_axi_compact "$path"
-      elif fm_backlog_backend_manual "$CONFIG"; then
-        print_backlog_manual_compact "$path" "manual backend"
-      else
-        print_backlog_manual_compact "$path" "tasks-axi unavailable or incompatible"
-      fi
-      print_backlog_pointer
-    else
-      printf '(present, empty)\n'
-    fi
-  else
-    printf 'ABSENT\n'
-  fi
+print_task_records() {
+  subsection "canonical task records (data/<task>/task.json)"
+  print_task_records_compact
 }
 
 print_latest_status() {
@@ -1002,11 +882,11 @@ stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below represents these startup sources once: selected identity fields
-from every state/*.meta, a de-duplicated compact data/backlog.md inventory, the
+from every state/*.meta, a de-duplicated compact canonical task inventory, the
 newest event from every state/*.status,
 data/projects.md, data/captain.md, and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
-data/backlog.md or state/*.status: re-reading everything defeats the entire
+data/*/task.json or state/*.status: re-reading everything defeats the entire
 point of this command.
 
 Go to a source directly only when:
@@ -1014,8 +894,8 @@ Go to a source directly only when:
   - its contents looked unparseable or corrupt,
   - omitted metadata fields or older status events are needed (each task prints
     its full metadata and status-log paths), or a status line was capped,
-  - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
-  - the backlog listing disclosed omitted queued items and this turn needs them,
+  - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full),
+  - the task listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
     turn needs their verdict (bin/fm-startup-network.sh report),
   - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
@@ -1027,7 +907,7 @@ EOF
 # truncated tail must never take.
 stage fleet-state
 section "FLEET STATE"
-print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
+print_task_records
 
 print_work_inventory
 

@@ -40,6 +40,27 @@ write_followup_meta() {
   fm_write_meta "$file" "${args[@]}"
 }
 
+accept_followup_task() {  # <home> <task-id>
+  local home=$1 id=$2
+  if [ ! -f "$home/data/$id/task.json" ]; then
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" \
+      add "$id" "public follow-up fixture $id" --kind ship --start >/dev/null \
+      || fail "could not create canonical task $id"
+  fi
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-task-state.sh" \
+    update-progress "$id" --progress \
+      '{"acceptance":"The fixture operation is complete","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":""}' \
+    >/dev/null || fail "could not record MAIN acceptance for $id"
+}
+
+record_followup_delivery() {  # <home> <task-id> <generation>
+  local home=$1 id=$2 generation=$3
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" bash -c \
+    '. "$1"; fm_merge_receipt_record "$2" "$3" local:main fixture-head' \
+    _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$id" "$generation" >/dev/null \
+    || fail "could not record delivery receipt for $id"
+}
+
 make_followup_terminal() {
   local fb=$1
   cat > "$fb/herdr" <<'SH'
@@ -724,6 +745,8 @@ echo "$*" >> "$FAKE_TASKS_AXI_LOG"
 exit 99
 SH
   chmod +x "$home/fakebin/tasks-axi"
+  accept_followup_task "$home" work-disabled
+  record_followup_delivery "$home" work-disabled public-followup-fixture
   write_followup_meta "$home/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
@@ -814,10 +837,8 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
   local home rc
   home=$(make_home cleanup-guard)
   seed_commitment "$home" pf-guard req-guard discord main ship-task
-  tasks_in "$home" add ship-task "ship guarded by its public follow-up" --kind ship >/dev/null \
-    || fail "could not add the guarded ship to its home's backlog"
-  tasks_in "$home" start ship-task >/dev/null \
-    || fail "could not mark the guarded ship In flight"
+  accept_followup_task "$home" ship-task
+  record_followup_delivery "$home" ship-task public-followup-guard
   write_followup_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/gone" \
@@ -1512,10 +1533,8 @@ test_retention_creates_no_false_teardown_refusal() {
   local home home2 rc out registry tmp
   home=$(make_home retain-teardown)
   seed_commitment "$home" pf-retain req-retain discord main ship-retain
-  tasks_in "$home" add ship-retain "ship with a retained delivered registration" --kind ship >/dev/null \
-    || fail "could not add the retained-registration ship to its home's backlog"
-  tasks_in "$home" start ship-retain >/dev/null \
-    || fail "could not mark the retained-registration ship In flight"
+  accept_followup_task "$home" ship-retain
+  record_followup_delivery "$home" ship-retain public-followup-retain
   write_followup_meta "$home/state/ship-retain.meta" \
     "window=firstmate:fm-ship-retain" \
     "worktree=$home/projects/gone" \
@@ -1672,10 +1691,8 @@ test_prechange_registration_is_open_and_unrechainable() {
 test_x_request_teardown_warns_when_final_unposted() {
   local home rc
   home=$(make_home xreq-warn)
-  tasks_in "$home" add linked-task "ship with a legacy Relay request link" --kind ship >/dev/null \
-    || fail "could not add the legacy-link ship to its home's backlog"
-  tasks_in "$home" start linked-task >/dev/null \
-    || fail "could not mark the legacy-link ship In flight"
+  accept_followup_task "$home" linked-task
+  record_followup_delivery "$home" linked-task public-followup-legacy-link
   write_followup_meta "$home/state/linked-task.meta" \
     "window=firstmate:fm-linked-task" \
     "worktree=$home/projects/gone" \

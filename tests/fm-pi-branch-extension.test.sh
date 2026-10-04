@@ -4761,7 +4761,7 @@ command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`, ["pr
 if (command.status !== 0) throw new Error(`progress fixture read failed: ${command.stderr}`);
 const progress = JSON.parse(command.stdout);
 command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`, ["update-progress", "task-a",
-  "--expected-token", progress.record_token, "--progress", JSON.stringify({ acceptance: "The existing contract passes",
+  "--progress", JSON.stringify({ acceptance: "The existing contract passes",
     current_state: "Validation requested a review decision", remaining_gap: "The finding is unresolved",
     next_step: "Classify the finding against the accepted intent" })],
   { encoding: "utf8", env: { ...process.env, FM_HOME: process.env.FM_HOME, FM_SUPERVISION_ACTOR: "main" } });

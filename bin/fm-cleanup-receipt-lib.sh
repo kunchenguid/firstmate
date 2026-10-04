@@ -13,22 +13,6 @@ fm_cleanup_receipt() { # <operation> <task> <generation> [extra args]
       --generation "$generation" "$@"
 }
 
-fm_cleanup_historical_disposition() { # <task> <generation>; emits accepted|archived
-  local id=$1 generation=$2 path
-  path="${FM_DATA_OVERRIDE:-${DATA:-${FM_HOME:?}/data}}/$id/lifecycle.json"
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  jq -er --arg id "$id" --arg generation "$generation" '
-    select((.schema == "fm-task-lifecycle.v1" or .schema == "fm-task-lifecycle.v2") and
-      .task_id == $id and .execution_generation == $generation and
-      (.disposition == "accepted" or .disposition == "archived")) |
-    .disposition
-  ' "$path"
-}
-
-fm_cleanup_historical_terminal() { # <task> <generation>; read-only compatibility fact
-  fm_cleanup_historical_disposition "$1" "$2" >/dev/null
-}
-
 fm_cleanup_historical_merge_receipt() { # <task> <generation>; emits exact facts or refuses ambiguity
   local id=$1 generation=$2 path
   path="${FM_DATA_OVERRIDE:-${DATA:-${FM_HOME:?}/data}}/$id/lifecycle.json"
@@ -43,7 +27,7 @@ fm_cleanup_historical_merge_receipt() { # <task> <generation>; emits exact facts
 }
 
 fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
-  local id=$1 generation=$2 data=${FM_DATA_OVERRIDE:-${DATA:-${FM_HOME:?}/data}} projection values snapshot disposition progress_error progress_status=0
+  local id=$1 projection progress_error progress_status=0
   # shellcheck source=bin/fm-task-progress-lib.sh
   . "$FM_CLEANUP_RECEIPT_DIR/fm-task-progress-lib.sh"
   progress_error=$(mktemp "${TMPDIR:-/tmp}/fm-cleanup-progress.XXXXXX") || return 1
@@ -54,22 +38,11 @@ fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
     if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = archived ]; then
       printf 'archived\n'; return 0
     fi
-    if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = "done" ]; then
-      printf 'accepted\n'; return 0
-    fi
     if printf '%s' "$projection" | jq -e '
-      .recorded == true and .task_state == "in_flight" and .task_held == "no" and
-       .task_blocked == "no" and .remaining_gap == "" and .next_step == ""' >/dev/null; then
-      printf 'accepted\n'; return 0
-    fi
-    values=$(fm_task_progress_values "$id") || return $?
-    # Backlog disposition may deactivate branch routing without changing
-    # MAIN's four fields, so an empty gap remains authoritative.
-    # Legacy Done rows that predate compact progress retain their terminal fact.
-    if [ "$values" != null ] && printf '%s' "$projection" | jq -e \
-        '(.context_relation == "exact" or .context_relation == "disposition_only") and
-         .acceptance != "" and .current_state != "" and
-         .remaining_gap == "" and .next_step == ""' >/dev/null; then
+      .recorded == true and
+      ((.task_state == "in_flight" and .task_held == "no" and .task_blocked == "no") or
+       .task_state == "done") and
+      .remaining_gap == "" and .next_step == ""' >/dev/null; then
       printf 'accepted\n'; return 0
     fi
     echo "REFUSED: compact task $id is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup" >&2
@@ -85,23 +58,7 @@ fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
     fi
     return "$progress_status"
   }
-  # A unique checked Done/archive row is the existing explicit business
-  # disposition owner after the active row has already closed.
-  # shellcheck source=bin/fm-task-disposition-lib.sh
-  . "$FM_CLEANUP_RECEIPT_DIR/fm-task-disposition-lib.sh"
-  snapshot=$(fm_task_disposition_snapshot "$data") || return 1
-  disposition=$(fm_task_disposition_for "$snapshot" "$id" 2>/dev/null || true)
-  case "$disposition" in
-    done) printf 'accepted\n'; return 0 ;;
-    archive_done) printf 'archived\n'; return 0 ;;
-  esac
-  # Historical compatibility is last and only for a task proven absent from
-  # the current original-task source. It preserves an immutable terminal or
-  # archive fact; it never overrides, enrolls, or mutates ordinary progress.
-  if disposition=$(fm_cleanup_historical_disposition "$id" "$generation"); then
-    printf '%s\n' "$disposition"; return 0
-  fi
-  echo "REFUSED: task $id has neither MAIN-accepted compact progress nor explicit archived completion" >&2
+  echo "REFUSED: task $id has no canonical task record; cleanup cannot infer acceptance or archive state" >&2
   return 6
 )
 

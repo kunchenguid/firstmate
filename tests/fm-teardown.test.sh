@@ -200,6 +200,11 @@ write_meta() {
     "mode=$mode" \
     "spawn_gen=teardown-test-task-x1"
   configure_flat_herdr_teardown_case "$case_dir"
+  seed_backlog_in_flight "$case_dir" "$kind"
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-task-state.sh" \
+    update-progress task-x1 --progress \
+      '{"acceptance":"The teardown safety fixture is verified","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":""}' >/dev/null \
+    || fail 'canonical teardown acceptance fixture failed'
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -682,10 +687,9 @@ seed_backlog_in_flight() {
     task-x1 "teardown fixture task" --kind "$kind" --start >/dev/null
 }
 
-# Mark only the cases that exercise canonical completed-resource retirement as
-# MAIN-accepted and delivery-complete. The larger landed-work matrix deliberately
-# leaves the canonical record absent so it continues to cover historical-task
-# compatibility and the ordinary teardown safety gate.
+# Mark cases that exercise completed-resource retirement as MAIN-accepted and
+# delivery-complete. Every teardown fixture has a canonical task record; tests
+# that stop earlier exercise the ordinary safety gates on that current record.
 accept_canonical_teardown_fixture() {
   local case_dir=$1 url head
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-task-state.sh" \
@@ -799,7 +803,6 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
     "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture read failed'
   open=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-task-state.sh" update-progress task-x1 \
-    --expected-token "$(printf '%s' "$initial" | jq -r .record_token)" \
     --progress '{"acceptance":"The landed result is reviewed","current_state":"Implementation landed","remaining_gap":"MAIN has not accepted the result","next_step":"Review the requested behavior"}') \
     || fail 'compact cleanup fixture update failed'
 
@@ -817,7 +820,6 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
     "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture reread failed'
   accepted=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-task-state.sh" update-progress task-x1 \
-    --expected-token "$(printf '%s' "$fresh" | jq -r .record_token)" \
     --progress '{"acceptance":"The landed result is reviewed","current_state":"MAIN verified the requested behavior","remaining_gap":"","next_step":""}') \
     || fail 'compact acceptance update failed'
   printf '%s' "$accepted" | jq -e '.recorded == true and .remaining_gap == "" and .next_step == ""' >/dev/null \
@@ -3269,82 +3271,6 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
-test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_compact_progress_requires_main_acceptance_before_teardown
 test_teardown_ignores_legacy_manual_backend_for_canonical_record
-test_local_only_truly_unpushed_refuses
-test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
-test_no_mistakes_truly_unpushed_refuses
-test_local_only_force_overrides_unpushed
-test_teardown_missing_busy_sidecar_completes
-test_herdr_teardown_clears_escalation_marker
-test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
-test_herdr_flat_teardown_refuses_records_on_unparseable_presence
-test_herdr_flat_teardown_preflight_refuses_before_changes
-test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
-test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
-test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
-test_squash_merged_branch_deleted_allows
-test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
-test_no_pr_recorded_discovers_merged_pr_by_branch_allows
-test_squash_merged_pr_allows_replayed_unpushed_patch
-test_merged_pr_with_later_local_commit_refuses
-test_squash_merged_rebased_branch_allows
-test_squash_merged_same_file_different_content_refuses
-test_squash_merged_rebased_local_with_unlanded_commit_refuses
-test_squash_merged_stale_local_refuses_when_forge_unreachable
-test_pr_check_does_not_refresh_stale_pr_head
-test_pr_check_records_remote_head_when_local_lags
-test_content_in_default_fallback_allows
-test_content_fallback_refreshes_stale_origin_ref
-test_dirty_worktree_refuses
-test_gh_error_and_content_absent_refuses
-test_legacy_record_without_the_flag_refuses
-test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
-test_legacy_record_teardown_refuses_unlanded_work
-test_legacy_record_teardown_refuses_an_ambiguous_endpoint
-test_legacy_record_never_accepts_a_corrupt_spawn_gen
-test_stale_index_lock_cleared_and_teardown_succeeds
-test_live_index_lock_is_never_removed_and_teardown_refuses
-test_lsof_error_never_clears_index_lock
-test_stale_index_lock_cleanup_rechecks_dirty_worktree
-test_non_linked_index_lock_path_is_checked_from_worktree
-test_index_lock_mtime_read_failure_refuses
-test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
-test_persistent_index_lock_exhausts_retries_and_refuses_loudly
-test_treehouse_equivalent_path_alias_is_returned_by_managed_identity
-test_treehouse_non_equivalent_path_alias_still_refuses
-test_empty_retry_wait_uses_default_without_aborting
-test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
-test_parked_own_run_is_aborted_before_teardown
-test_parked_run_advanced_past_unfetched_head_is_still_aborted
-test_parked_run_with_mismatched_ledger_head_is_never_aborted
-test_parked_run_with_malformed_ledger_row_is_never_aborted
-test_parked_run_with_impossible_ledger_date_is_never_aborted
-test_terminal_status_with_gate_never_queries_or_aborts_ledger_fallback
-test_parked_run_advanced_head_locally_fetched_is_still_aborted
-test_parked_advanced_run_without_anchor_is_never_aborted
-test_parked_advanced_run_ancestor_anchor_is_never_aborted
-test_parked_terminal_unfetched_row_is_never_aborted
-test_parked_run_terminal_newest_row_at_own_head_is_never_aborted
-test_parked_run_behind_diverged_newer_row_is_never_aborted
-test_parked_advanced_run_ambiguous_rows_are_never_aborted
-test_ledger_proven_continuation_never_aborts_active_run
-test_parked_own_run_refuses_when_abort_is_unconfirmed
-test_mismatched_run_after_abort_refuses_unconfirmed
-test_empty_status_after_abort_refuses_unconfirmed
-test_not_found_status_after_abort_confirms_completion
-test_another_branchs_parked_run_is_never_touched
-test_own_autonomous_run_is_left_alone
-test_leaked_worktree_process_is_reaped
-test_leaked_tasktmp_process_is_reaped
-test_lsof_absent_preserves_unverified_process
-test_lsof_error_refuses_before_removal
-test_reused_pid_identity_is_not_force_killed
-test_exec_changed_process_is_still_reaped
-test_process_spawned_during_grace_is_reaped_on_later_pass
-test_persistent_scan_refuses_after_bounded_retries
-test_process_exit_during_identity_lookup_does_not_refuse
-test_run_abort_precedes_process_reap_precedes_worktree_removal

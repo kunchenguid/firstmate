@@ -97,13 +97,15 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         const progress = await command(["progress", id]);
         if (!progress?.remaining_gap || !progress.next_step) continue;
         if (!progress.recorded) {
-          const reason = progress.task_state === "done"
-            ? "Done row retains a nonempty compact gap; MAIN must reopen/start it before routing the recorded next step"
-            : "task brief, executor generation, hold, block, or disposition changed; MAIN must refresh compact progress before continuation";
+          const reason = "canonical task progress is absent or incomplete; MAIN must restore the original goal context before continuation";
           const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${reason}`).digest("hex");
           reconciliations.push({ task_id: id, reason, key });
           continue;
         }
+        // A hold or dependency is the current task disposition, not stale
+        // progress. Keep the descriptive fields readable without manufacturing
+        // a continuation action that bypasses the waiting owner.
+        if (progress.task_held === "yes" || progress.task_blocked === "yes") continue;
         const current = await runCommandAsync("bash", [join(root, "bin/fm-task-state.sh"), "--durable-only", id], {
           env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_DATA_OVERRIDE: data }, maxBuffer: 64 * 1024,
         });
@@ -327,15 +329,18 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 
   registerFirstmateTool(pi, {
     name: "fm_task_continuation", label: "Task continuation",
-    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step. A read token may be returned by older callers but is not an update precondition. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, or accepts a goal from process success.",
+    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, or accepts a goal from process success.",
     executionMode: "sequential",
     parameters: Type.Object({ action: Type.Union([Type.Literal("read"), Type.Literal("update")]),
-      task: Type.String(), record_token: Type.Optional(Type.String()),
+      task: Type.String(),
       progress: Type.Optional(Type.Object({ acceptance: Type.String(), current_state: Type.String(),
-        remaining_gap: Type.String(), next_step: Type.String() })) }),
+        remaining_gap: Type.String(), next_step: Type.String() }, { additionalProperties: false }))
+    }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, _ctx: ExtensionContext) {
       try {
         if (!owns()) throw new Error("this session does not own the fleet lock");
+        const unsupported = Object.keys(params).filter(key => !["action", "task", "progress"].includes(key));
+        if (unsupported.length) throw new Error(`unsupported compact continuation argument: ${unsupported.join(", ")}`);
         let result: unknown;
         if (params.action === "read") {
           if (!atom(params.task)) throw new Error("read requires an existing canonical task id");
@@ -344,10 +349,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           if (!atom(params.task) || !params.progress) {
             throw new Error("update requires task and compact progress fields");
           }
-          const args = ["update-progress", params.task];
-          if (params.record_token) args.push("--expected-token", params.record_token);
-          args.push("--progress", JSON.stringify(params.progress));
-          result = await command(args);
+          result = await command(["update-progress", params.task, "--progress", JSON.stringify(params.progress)]);
         } else {
           throw new Error("unsupported compact continuation action");
         }

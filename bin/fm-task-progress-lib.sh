@@ -35,8 +35,8 @@ fm_task_progress_values() ( # <task>
   printf '%s' "$FM_TASK_PROGRESS_RECORD" | jq -c '.progress'
 )
 
-fm_task_progress_update() ( # <task> <inert-legacy-token> <progress-json>
-  local id=$1 progress=$3 record
+fm_task_progress_update() ( # <task> <progress-json>
+  local id=$1 progress=$2 record
   [ "${FM_SUPERVISION_ACTOR:-main}" = main ] || {
     echo 'REFUSED: task progress belongs to MAIN' >&2
     exit 6
@@ -66,9 +66,8 @@ fm_task_progress_completion_guard() ( # <task>
   local projection file
   file=$(fm_task_progress_file "$1") || return $?
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-    # Historical homes that have not activated per-task records retain their
-    # existing cleanup compatibility until explicit import.
-    return 0
+    echo "REFUSED: task $1 has no canonical task record" >&2
+    return 6
   fi
   projection=$(fm_task_progress_read "$1") || return $?
   printf '%s' "$projection" | jq -e '

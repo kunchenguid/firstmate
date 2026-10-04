@@ -10,7 +10,7 @@ TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
 # The fixture binds normal task records to Herdr; historical refusal is
 # covered by fm-retired-backends.test.sh, without weakening these lock tests.
 write_herdr_meta() {
-  local file=$1 arg id window='' binding=0 generation=0
+  local file=$1 arg id home kind=ship window='' binding=0 generation=0
   shift
   id=$(basename "$file" .meta)
   local args=()
@@ -19,13 +19,29 @@ write_herdr_meta() {
       window=*:fm-*) window="window=isolated:w1:p-$id"; args+=("$window") ;;
       endpoint_task_id=*) binding=1; args+=("$arg") ;;
       spawn_gen=*) generation=1; args+=("$arg") ;;
+      kind=*) kind=${arg#kind=}; args+=("$arg") ;;
       *) args+=("$arg") ;;
     esac
   done
   [ "$binding" = 1 ] || args+=("endpoint_task_id=$id")
   [ "$generation" = 1 ] || args+=("spawn_gen=s-$id")
   fm_write_meta "$file" "backend=herdr" "herdr_session=isolated" \
-    "herdr_workspace_id=w1" "herdr_tab_id=w1:t-$id" "herdr_pane_id=w1:p-$id" "${args[@]}"
+    "herdr_workspace_id=w1" "herdr_tab_id=w1:t-$id" "herdr_pane_id=w1:p-$id" \
+    "${args[@]}" "decisions_reviewed=1" "decision_keys="
+  home=$(cd "$(dirname "$file")/.." && pwd -P)
+  mkdir -p "$home/data"
+  if [ ! -f "$home/data/$id/task.json" ]; then
+    FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" \
+      "Endpoint fixture $id" --kind "$kind" --start >/dev/null \
+      || fail "canonical endpoint task fixture failed: $id"
+    FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" --progress \
+      '{"acceptance":"The endpoint fixture outcome is verified","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":""}' \
+      >/dev/null || fail "canonical endpoint acceptance fixture failed: $id"
+  fi
+  if [ "$kind" = scout ] && [ ! -f "$home/data/$id/report.md" ]; then
+    mkdir -p "$home/data/$id"
+    printf 'Accepted endpoint fixture report\n' >"$home/data/$id/report.md"
+  fi
 }
 
 make_case() {  # <name>
@@ -61,6 +77,10 @@ SH
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
+case "$1 ${2:-}" in
+  'status ') printf '1 available\n' ;;
+  'enter --print-path') realpath "$(dirname "$FM_RUNTIME_LOG")/pool/${3:?}/project" ;;
+esac
 exit 0
 SH
   chmod +x "$TMP_ROOT/$dir/fakebin/herdr" "$TMP_ROOT/$dir/fakebin/treehouse"
@@ -120,9 +140,11 @@ backend = "markdown"
 path = "data/backlog.md"
 EOF
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" \
-    'Completed cleanup fixture' --kind ship --body 'Preserve operation receipts.' --start >/dev/null \
-    || fail 'fixture task creation failed'
+  if [ ! -f "$dir/home/data/$id/task.json" ]; then
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" \
+      'Completed cleanup fixture' --kind ship --body 'Preserve operation receipts.' --start >/dev/null \
+      || fail 'fixture task creation failed'
+  fi
   fm_test_archive_goal "$dir/home" "$id"
   url="https://github.com/example/firstmate/pull/1"
   head=1111111111111111111111111111111111111111
@@ -224,12 +246,17 @@ test_control_lock_contention_refuses_before_mutation() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" --progress \
+    '{"acceptance":"The lock test completes","current_state":"The lifecycle action is still active","remaining_gap":"The control lock must be observed","next_step":"Wait for the current lifecycle action"}' \
+    >/dev/null
   lock="$dir/home/state/.control-$id.lock"
   (
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$lock" || exit 1
+    trap 'fm_lock_release "$lock"' EXIT
     sleep 30
+    :
   ) &
   holder=$!
   while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
@@ -268,6 +295,9 @@ test_non_pool_teardown_ignores_task_set_lock() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/missing-worktree" "project=$dir/project" "kind=scout"
+  mkdir -p "$dir/home/data/$id"
+  printf 'Accepted non-pool fixture report\n' >"$dir/home/data/$id/report.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null
   lock="$dir/home/state/.task-set.lock"
   ready="$dir/task-set-lock-ready"
   (
@@ -304,6 +334,9 @@ test_metadata_lock_serializes_destructive_cleanup() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  mkdir -p "$dir/home/data/$id"
+  printf 'Accepted metadata-lock fixture report\n' >"$dir/home/data/$id/report.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null
   lock="$dir/home/state/.meta-$id.lock"
   ready="$dir/meta-lock-ready"
   release="$dir/meta-lock-release"
@@ -457,29 +490,31 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   rc=$?
   set -e
 
-  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot a second task record still holds"
+  [ "$rc" -eq 0 ] || fail "completed cleanup could not retire its own endpoint beside a shared slot: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reused pool slot"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a second task record still holds"
   assert_present "$dir/home/state/$other.meta" "teardown removed the live task's record"
-  assert_present "$dir/home/state/$id.meta" "teardown removed the stale task's record before refusing"
-  [ ! -s "$dir/runtime.log" ] \
-    || fail "teardown reached the runtime on a contested pool slot: $(cat "$dir/runtime.log")"
-  assert_contains "$(cat "$dir/stderr")" "$other" \
-    "refusal should name the other task holding the slot"
+  assert_absent "$dir/home/state/$id.meta" "completed cleanup retained its own stale task record"
+  assert_present "$dir/runtime.log.w1:p-$id.closed" "completed cleanup did not close its exact endpoint"
+  assert_absent "$dir/runtime.log.w1:p-$other.closed" "completed cleanup closed the other task endpoint"
+  ! grep -Fq 'treehouse <return>' "$dir/runtime.log" \
+    || fail "completed cleanup returned a slot still held by another task"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
-  pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
+  pass "fm-teardown: completed cleanup retires only its own endpoint while a shared pool slot remains protected"
 }
 
 test_sole_slot_record_still_tears_down() {
-  local dir id=sole-task worker
+  local dir id=sole-task worker pool_copy
 
   dir=$(make_case slot-sole)
   mark_case_as_treehouse_pool "$dir"
+  rm -f "$dir/worktree/sentinel"
+  pool_copy=$(readlink -f "$dir/worktree")
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$pool_copy" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$id"
   # A neighbouring task on its OWN slot must not look like a collision.
   mkdir -p "$dir/other-worktree"
@@ -495,23 +530,25 @@ test_sole_slot_record_still_tears_down() {
   assert_present "$dir/home/state/neighbour.meta" "uncontested teardown removed the neighbour's record"
   kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+    || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log"); $(cat "$dir/stdout"); reason=$(jq -r '.phases.directory_return.reason_code' "$dir/home/state/$id.cleanup.json")"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
-  local dir id=moved-task
+  local dir id=moved-task pool_copy
 
   dir=$(make_case slot-endpoint-moved)
   mark_case_as_treehouse_pool "$dir"
+  rm -f "$dir/worktree/sentinel"
+  pool_copy=$(readlink -f "$dir/worktree")
   mkdir -p "$dir/other-directory"
   # The exact recorded worker may legitimately cd outside its worktree. Its
   # endpoint identity still owns the lifecycle; cwd alone must not brick it.
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$pool_copy" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$id"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
@@ -534,23 +571,23 @@ assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
   assert_present "$dir/pool/1/project/.git" "$description: the reassigned slot's checkout was removed"
   ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "$description: the reassigned slot was returned to the pool: $(cat "$dir/runtime.log")"
-  assert_contains "$(cat "$dir/stderr")" "$other" \
-    "$description: the warning should name the task the slot was reassigned to"
-  assert_contains "$(cat "$dir/stderr")" "reassigned" \
-    "$description: the warning should name the reassignment as the cause"
+  jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-claimed-elsewhere"' \
+    "$dir/home/state/$id.cleanup.json" >/dev/null \
+    || fail "$description: the durable cleanup receipt did not record reassigned slot ownership"
 }
 
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
-  local dir id=stale-task other=reassigned-task worker rc
+  local dir id=stale-task other=reassigned-task worker rc pool_copy
 
   # Dirty slot, --force, and a live worker inside it: --force authorizes
   # discarding this task's unlanded work, which is already gone with the slot,
   # never the other task's live work.
   dir=$(make_case slot-reassigned)
   mark_case_as_treehouse_pool "$dir"
+  pool_copy=$(readlink -f "$dir/worktree")
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$pool_copy" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   # Staged in this shell, not a command substitution: a background child of a
   # $(...) subshell does not outlive it, and the point of this worker is to be
@@ -567,24 +604,21 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reassigned pool slot"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another task had claimed"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "dirty reassigned slot with --force"
-  assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
-    "the warning should name the claimant's home"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
-  # The same reassignment on a CLEAN slot: a landed ship task torn down without
-  # --force, which is the shape of the real incident. A clean, fully landed copy
-  # passes every unlanded-work check, so only the ownership determination can
-  # keep this slot out of the pool; a guard keyed off dirtiness would return it
-  # and destroy the live task's copy.
+  # The same reassignment on a CLEAN completed task without --force. Only the
+  # ownership determination keeps this slot out of the pool; a guard keyed off
+  # dirtiness would return it and destroy the live task's copy.
   dir=$(make_case slot-reassigned-clean)
   mark_case_as_treehouse_pool "$dir"
   rm -f "$dir/worktree/sentinel"
+  pool_copy=$(readlink -f "$dir/worktree")
   [ -z "$(git -C "$dir/worktree" status --porcelain)" ] \
     || fail "clean-slot fixture is not clean: $(git -C "$dir/worktree" status --porcelain)"
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    "worktree=$pool_copy" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   ( cd "$dir/worktree" && exec sleep 30 ) &
   worker=$!
@@ -595,7 +629,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
+  [ "$rc" -eq 0 ] || fail "teardown of a clean task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
   kill "$worker" 2>/dev/null || true
@@ -605,37 +639,42 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   # so it refuses rather than guessing the slot is still this task's.
   dir=$(make_case slot-claim-unreadable)
   mark_case_as_treehouse_pool "$dir"
+  pool_copy=$(readlink -f "$dir/worktree")
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$pool_copy" "project=$dir/project" "kind=scout"
   printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner"
 
   set +e
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot whose claim could not be read"
+  [ "$rc" -eq 0 ] || fail "completed cleanup could not retire its endpoint with an unreadable slot claim: $(cat "$dir/stderr")"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot whose claim could not be read"
   assert_present "$dir/pool/1/.fm-slot-owner" "teardown removed an unreadable slot claim"
-  assert_present "$dir/home/state/$id.meta" "teardown removed the task record on an unreadable claim"
-  [ ! -s "$dir/runtime.log" ] \
-    || fail "teardown reached the runtime on an unreadable slot claim: $(cat "$dir/runtime.log")"
-  assert_contains "$(cat "$dir/stderr")" "$dir/pool/1/.fm-slot-owner" \
-    "unreadable-claim refusal should name the claim file to inspect"
+  assert_absent "$dir/home/state/$id.meta" "completed cleanup retained active metadata on an unreadable claim"
+  assert_present "$dir/runtime.log.w1:p-$id.closed" "completed cleanup did not retire its exact endpoint"
+  ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'unreadable slot claim allowed a return'
+  jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-owner-unproved"' \
+    "$dir/home/state/$id.cleanup.json" >/dev/null \
+    || fail 'unreadable slot claim was not preserved as a durable cleanup reason'
 
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
-# Only an exact task/generation claim authorizes slot return. Historical slots
-# without a claim retain their directory and task record for reconciliation.
+# Only an exact task/generation claim authorizes slot return. Completed tasks
+# without a claim retire their endpoint and active metadata while retaining the
+# directory and a durable cleanup receipt for reconciliation.
 test_own_claim_tears_down_and_absent_claim_is_retained() {
-  local dir id=owned-task
+  local dir id=owned-task pool_copy
 
   dir=$(make_case slot-claim-own)
   mark_case_as_treehouse_pool "$dir"
+  rm -f "$dir/worktree/sentinel"
+  pool_copy=$(readlink -f "$dir/worktree")
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$pool_copy" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$id"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
@@ -647,23 +686,25 @@ test_own_claim_tears_down_and_absent_claim_is_retained() {
 
   dir=$(make_case slot-claim-absent)
   mark_case_as_treehouse_pool "$dir"
+  pool_copy=$(readlink -f "$dir/worktree")
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$pool_copy" "project=$dir/project" "kind=scout"
 
   set +e
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "teardown accepted an unclaimed pool slot without positive ownership"
-  assert_present "$dir/home/state/$id.meta" "unclaimed-slot teardown removed the cleanup obligation"
+  [ "$rc" -eq 0 ] || fail "completed cleanup could not retire its endpoint for an unclaimed slot: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "unclaimed-slot completed cleanup retained active metadata"
   assert_present "$dir/worktree/sentinel" "unclaimed-slot teardown changed the recorded directory"
-  [ ! -s "$dir/runtime.log" ] \
-    || fail "unclaimed-slot teardown reached the runtime: $(cat "$dir/runtime.log")"
-  assert_contains "$(cat "$dir/stderr")" "has no slot-owner claim" \
-    "unclaimed-slot refusal should name the missing positive identity"
+  assert_present "$dir/runtime.log.w1:p-$id.closed" "unclaimed-slot cleanup did not retire its endpoint"
+  ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'unclaimed slot was returned without positive ownership'
+  jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-owner-unproved"' \
+    "$dir/home/state/$id.cleanup.json" >/dev/null \
+    || fail 'unclaimed slot was not retained with a durable ownership reason'
 
-  pass "fm-teardown: an exact claim returns its slot while an unclaimed slot retains its cleanup obligation"
+  pass "fm-teardown: an exact claim returns its slot while an unclaimed completed slot retains only its copy obligation"
 }
 
 test_historical_secondmate_record_refuses_without_mutation() {
@@ -711,13 +752,14 @@ backend = "markdown"
 path = "data/backlog.md"
 EOF
     printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
-    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" \
-      'Open cleanup fixture' --kind scout --body 'Continue until the requested result is accepted.' --start >/dev/null \
-      || fail 'open-goal task creation failed'
+    if [ ! -f "$dir/home/data/$id/task.json" ]; then
+      FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" \
+        'Open cleanup fixture' --kind scout --body 'Continue until the requested result is accepted.' --start >/dev/null \
+        || fail 'open-goal task creation failed'
+    fi
     current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress "$id") \
       || fail 'open-goal progress read failed'
     FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" \
-      --expected-token "$(printf '%s' "$current" | jq -r .record_token)" \
       --progress '{"acceptance":"The requested result is reviewed","current_state":"Only a partial milestone exists","remaining_gap":"The final result is not accepted","next_step":"Continue the authorized work"}' \
       >/dev/null || fail 'open-goal progress update failed'
     # Retained private rich state from an older scope must never override the
@@ -767,13 +809,14 @@ backend = "markdown"
 path = "data/backlog.md"
 EOF
   printf '## In flight\n\n## Queued\n\n## Done\n' >"$dir/home/data/backlog.md"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" 'Done with open gap' \
-    --kind scout --body 'Keep working until MAIN accepts the result.' --start >/dev/null \
-    || fail 'done-open-gap task creation failed'
+  if [ ! -f "$dir/home/data/$id/task.json" ]; then
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" 'Done with open gap' \
+      --kind scout --body 'Keep working until MAIN accepts the result.' --start >/dev/null \
+      || fail 'done-open-gap task creation failed'
+  fi
   current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress "$id") \
     || fail 'done-open-gap progress read failed'
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" \
-    --expected-token "$(printf '%s' "$current" | jq -r .record_token)" \
     --progress '{"acceptance":"MAIN reviews the complete result","current_state":"Only a partial report exists","remaining_gap":"The complete result is still missing","next_step":"Continue the authorized work"}' \
     >/dev/null || fail 'done-open-gap progress update failed'
   FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" "done" "$id" \
@@ -785,7 +828,7 @@ EOF
     PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
     >"$dir/stdout" 2>"$dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail 'Done row with a raw open gap reached cleanup'
-  assert_contains "$(cat "$dir/stderr")" 'compact task done-open-gap is not MAIN-accepted' \
+  assert_contains "$(cat "$dir/stderr")" 'task done-open-gap is not MAIN-accepted' \
     'Done-row refusal did not preserve the raw compact gap'
   assert_present "$dir/home/state/$id.meta" 'Done-row refusal removed task metadata'
   [ ! -s "$dir/runtime.log" ] || fail 'Done-row refusal reached the endpoint'
@@ -799,6 +842,7 @@ test_explicit_archive_skips_success_delivery_gate() {
     "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   mkdir -p "$dir/home/data/$id"
   printf 'Stopped before a successful report\n' >"$dir/home/data/$id/brief.md"
+  rm -f "$dir/home/data/$id/report.md"
   cat >"$dir/home/.tasks.toml" <<'EOF'
 backend = "markdown"
 [markdown]
@@ -809,6 +853,11 @@ EOF
   printf '%s\n' '## Archived 2026-10' '' \
     '- [x] archived-without-delivery - Explicitly stopped scout (kind: scout)' \
     >"$dir/home/data/done-archive.md"
+  if [ ! -f "$dir/home/data/$id/task.json" ]; then
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" \
+      'Explicitly stopped scout' --kind scout --start >/dev/null
+  fi
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" archive "$id" >/dev/null
   FM_HOME="$dir/home" "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null
 
   rc=0
@@ -826,6 +875,7 @@ test_absent_current_row_with_open_history_refuses() {
   dir=$(make_case historical-open)
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  rm -f "$dir/home/data/$id/task.json"
   mkdir -p "$dir/home/data/$id"
   printf 'Retained historical task\n' >"$dir/home/data/$id/brief.md"
   jq -n --arg id "$id" --arg generation "s-$id" \
@@ -838,13 +888,13 @@ test_absent_current_row_with_open_history_refuses() {
     PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
     >"$dir/stdout" 2>"$dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail 'open retained history fell through to legacy teardown'
-  assert_contains "$(cat "$dir/stderr")" 'neither MAIN-accepted compact progress nor explicit archived completion' \
-    'open-history refusal did not preserve the missing terminal fact'
+  assert_contains "$(cat "$dir/stderr")" 'has no canonical task record' \
+    'open-history refusal did not require the canonical task record'
   [ "$(shasum "$dir/home/data/$id/lifecycle.json")" = "$before" ] \
     || fail 'open-history refusal rewrote private lifecycle evidence'
   assert_present "$dir/home/state/$id.meta" 'open-history refusal removed task metadata'
   [ ! -s "$dir/runtime.log" ] || fail 'open-history refusal reached the endpoint'
-  pass 'fm-teardown: absent current rows require exact terminal history before cleanup'
+  pass 'fm-teardown: absent canonical records are not reconstructed from retained lifecycle history'
 }
 
 test_completed_endpoint_ignores_historical_admission_gates() {
@@ -879,8 +929,8 @@ test_completed_endpoint_ignores_historical_admission_gates() {
         assert_present "$dir/runtime.log.w1:p-$id.closed" 'exact completed pane was not closed'
         jq -e '.phases.pane_close.state=="confirmed"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'endpoint absence was not recorded'
         assert_absent "$dir/home/data/$id/lifecycle.json" 'endpoint closure recreated rich lifecycle state'
-        grep -Fq -- "$id" "$dir/home/data/backlog.md" \
-          || fail 'endpoint-only closure lost the original task record'
+        assert_present "$dir/home/data/$id/task.json" \
+          'endpoint-only closure lost the canonical task record'
         ;;
     esac
     assert_present "$dir/home/state/$id.meta" 'endpoint-only cleanup erased the task record'
@@ -946,7 +996,7 @@ test_completed_pool_uncertain_ownership_retains_copy() {
 }
 
 test_retained_copy_only_followthrough() {
-  local dir id variant before_runtime before_report rc copy_path
+  local dir id variant before_runtime before_report before_task rc copy_path
   for variant in dirty unlanded shared primary identity-changed disposal-interruption disposal-before-effect; do
     id="copy-followthrough-$variant"
     dir=$(make_case "$id")
@@ -973,6 +1023,7 @@ test_retained_copy_only_followthrough() {
     run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || fail "retained copy setup failed: $(cat "$dir/stderr")"
     assert_absent "$dir/home/state/$id.meta" 'retirement kept completed execution metadata active'
     before_runtime=$(cat "$dir/runtime.log")
+    before_task=$(shasum "$dir/home/data/$id/task.json")
     jq -e '.copy_binding.copy.inode>0 and .phases.directory_return.state=="retained"' \
       "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'exact retained copy identity was not durable before metadata retirement'
     if [ "$variant" = identity-changed ]; then
@@ -996,8 +1047,8 @@ test_retained_copy_only_followthrough() {
     esac
     [ "$(shasum "$dir/home/data/$id/report.md")" = "$before_report" ] || fail 'copy follow-through changed the report'
     assert_absent "$dir/home/data/$id/lifecycle.json" 'copy-only recreated rich lifecycle state'
-    grep -Fq -- "- [x] $id -" "$dir/home/data/backlog.md" \
-      || fail 'copy-only changed completed task evidence'
+    [ "$(shasum "$dir/home/data/$id/task.json")" = "$before_task" ] \
+      || fail 'copy-only changed completed canonical task evidence'
     if [ "$variant" = dirty ] || [ "$variant" = disposal-interruption ] || [ "$variant" = disposal-before-effect ]; then
       # One actual relevant release: commit and integrate the original copy.
       git -C "$dir/worktree" add sentinel

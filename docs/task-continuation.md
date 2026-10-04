@@ -29,10 +29,8 @@ The update path does not acquire a task lease or metadata lock, refresh a fleet 
 
 Reads still return an opaque `record_token` for a supervision branch to bind one admission to the exact projection it read.
 It is not an update precondition, concurrency protocol, semantic evidence, or persisted field.
-The legacy `--expected-token` update argument is accepted but inert while existing callers migrate.
 
-Legacy embedded progress is imported only through the explicit migration owner.
-The old backlog and archive remain inert recovery evidence and are not rewritten or deleted.
+The old backlog and archive remain inert evidence and are not read, rewritten, or deleted by task/progress operations.
 Historical rich lifecycle files may stay on disk unchanged.
 New work does not create them, ordinary historical-task progress does not read or update them, and notification acknowledgement does not require inspect, assess, or reconcile.
 Operation owners may read a historical file only to recover a concrete immutable fact such as an old merge receipt or terminal cleanup authority; they never enroll, migrate, or reactivate it.
@@ -102,7 +100,7 @@ Historical private files, reports, operation receipts, dirty copies, and unlande
 ## Executable evidence
 
 [`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) covers one-file CRUD, filtered inventory, atomic publication, unchanged-write elision, MAIN-only updates, restart recovery, held-lock independence, terminal safety, snapshot derivation, and semantic-acceptance consumers.
-[`tests/fm-task-import.test.sh`](../tests/fm-task-import.test.sh) covers full legacy inventory import and unchanged source evidence.
+The same suite verifies retained backlog/archive files cannot supply task or progress data and a missing canonical record is not reconstructed.
 
 The Pi branch and primary suites cover compact admission, MAIN-only acceptance, quiet unchanged work, reload recovery, and sequence-bound outcome delivery. Send, handoff, control, remote-agent, merge, retirement, viewer, and teardown suites cover their own authority, generation, readback, archive, and unsafe-copy boundaries.
 

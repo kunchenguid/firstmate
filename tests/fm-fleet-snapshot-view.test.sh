@@ -71,6 +71,9 @@ test_main_home_inventory_and_historical_refusal() {
 ## Done
 - [x] done-task - Done Task https://github.com/example/repo/pull/7 (repo: alpha) (kind: ship) (merged 2026-09-25)
 EOF
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add ship-task 'Ship Task' --kind ship --start >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add queued-task 'Queued Task' --kind ship >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" block queued-task --by ship-task >/dev/null
   fm_test_write_herdr_meta "$home/state/ship-task.meta" \
     "window=fmtest:w1:p1" "endpoint_task_id=ship-task" \
     "backend=herdr" "herdr_session=fmtest" "herdr_workspace_id=w1" \
@@ -134,8 +137,23 @@ EOF
 ## Archived 2026-09
 - [x] archived-task - Archived Task (repo: alpha) (kind: ship)
 EOF
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add active-task 'Active Task' --kind ship --start >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add queued-task 'Queued Task' --kind ship >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add parked-task 'Parked Task' --kind ship >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" hold parked-task --kind parked --reason 'Parked fixture' >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add done-task 'Done Task' --kind ship --start >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" update-progress done-task --progress \
+    '{"acceptance":"MAIN verifies the requested result","current_state":"Only an intermediate result exists","remaining_gap":"Acceptance is still unmet","next_step":"Continue the authorized work"}' >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "done" done-task >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add archived-task 'Archived Task' --kind ship >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" archive archived-task >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add closed-working 'Closed But Working Task' --kind ship --start >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "done" closed-working >/dev/null
   for id in active-task queued-task done-task archived-task ambiguous-task unknown-task; do
     printf 'kind=secondmate\nproject=alpha\n' > "$home/state/$id.meta"
+  done
+  for id in active-task queued-task done-task archived-task; do
+    printf 'kind=ship\nproject=alpha\n' > "$home/state/$id.meta"
   done
   mkdir -p "$home/projects/parked-task" "$home/projects/closed-working"
   fm_test_write_herdr_meta "$home/state/parked-task.meta" \
@@ -157,7 +175,7 @@ EOF
       and (.tasks | any(.id == "done-task" and .record_disposition == "done" and .retained_record == true
         and .backlog.compact_progress.remaining_gap == "Acceptance is still unmet"))
       and (.tasks | any(.id == "archived-task" and .record_disposition == "archive_done" and .retained_record == true))
-      and (.tasks | any(.id == "ambiguous-task" and .record_disposition == "ambiguous"))
+      and (.tasks | any(.id == "ambiguous-task" and .record_disposition == "unknown"))
       and (.tasks | any(.id == "unknown-task" and .record_disposition == "unknown"))
       and (.tasks | any(.id == "parked-task" and .record_disposition == "parked" and .current_state.state == "working"))
       and (.tasks | any(.id == "closed-working" and .record_disposition == "done" and .current_state.state == "working" and .retained_record == false))
@@ -212,6 +230,8 @@ test_targeted_snapshot_observes_only_one_task() {
 
 ## Done
 EOF
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add target-task 'Target Task' --kind ship --start >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add other-task 'Other Task' --kind ship --start >/dev/null
   for item in target-task:p-target other-task:p-other; do
     id=${item%%:*}
     pane=${item##*:}

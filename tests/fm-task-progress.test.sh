@@ -30,6 +30,31 @@ assert_not_contains "$listed" "second," "filtered list included a queued task"
 inventory=$(python3 "$ROOT/bin/fm-task-record.py" --data "$HOME_DIR/data" inventory) || fail "unified inventory read failed"
 assert_equals $'first\nsecond' "$(printf '%s' "$inventory" | jq -r '.tasks[].id')" "inventory did not aggregate both task records"
 
+LEGACY_HOME="$TMP_ROOT/legacy-only"
+mkdir -p "$LEGACY_HOME/data" "$LEGACY_HOME/state"
+printf '## In flight\n\n- [ ] legacy-only - Legacy goal\n\n## Queued\n\n## Done\n' > "$LEGACY_HOME/data/backlog.md"
+printf '## Archived 2026-10\n\n- [x] archived-only - Archived goal\n' > "$LEGACY_HOME/data/done-archive.md"
+rc=0
+out=$(FM_HOME="$LEGACY_HOME" FM_DATA_OVERRIDE="$LEGACY_HOME/data" "$STATE" progress legacy-only 2>&1) || rc=$?
+expect_code 1 "$rc" "legacy-only progress read"
+assert_contains "$out" 'code: NOT_FOUND' "legacy backlog supplied progress without a canonical record"
+assert_equals 0 "$(FM_HOME="$LEGACY_HOME" FM_DATA_OVERRIDE="$LEGACY_HOME/data" "$STATE" progress-list | jq '.tasks|length')" \
+  "legacy backlog supplied unfinished task discovery"
+assert_equals 0 "$(FM_HOME="$LEGACY_HOME" FM_DATA_OVERRIDE="$LEGACY_HOME/data" "$ROOT/bin/fm-fleet-snapshot.sh" --json | jq '.backlog.records|length')" \
+  "legacy backlog or archive supplied fleet task data"
+rc=0
+FM_HOME="$LEGACY_HOME" FM_DATA_OVERRIDE="$LEGACY_HOME/data" bash -c \
+  '. "$1"; fm_task_progress_completion_guard legacy-only' _ "$ROOT/bin/fm-task-progress-lib.sh" \
+  >/dev/null 2>"$TMP_ROOT/missing-canonical.err" || rc=$?
+expect_code 6 "$rc" "missing canonical completion guard"
+assert_grep 'no canonical task record' "$TMP_ROOT/missing-canonical.err" \
+  "missing canonical record was silently reconstructed"
+assert_absent "$ROOT/bin/fm-task-import.sh" "legacy import command remains advertised as executable"
+rc=0
+python3 "$ROOT/bin/fm-task-record.py" --data "$LEGACY_HOME/data" import-snapshot \
+  --snapshot "$LEGACY_HOME/data/backlog.md" >/dev/null 2>&1 || rc=$?
+expect_code 2 "$rc" "removed import-snapshot command"
+
 # Empty progress is absence of semantic acceptance, never permission to clean up.
 # shellcheck source=bin/fm-task-progress-lib.sh
 . "$ROOT/bin/fm-task-progress-lib.sh"
@@ -50,8 +75,10 @@ assert_absent "$HOME_DIR/data/backlog.md" "progress update created a shared back
 
 mtime=$(stat -c %Y "$first")
 sleep 1
-"$STATE" update-progress first --expected-token inert --progress "$record" >/dev/null \
-  || fail "identical progress update failed"
+rc=0
+out=$("$STATE" update-progress first --expected-token obsolete --progress "$record" 2>&1) || rc=$?
+expect_code 2 "$rc" "obsolete expected-token argument"
+"$STATE" update-progress first --progress "$record" >/dev/null || fail "identical progress update failed"
 assert_equals "$mtime" "$(stat -c %Y "$first")" "identical progress update rewrote the task record"
 
 out=$(FM_SUPERVISION_ACTOR=branch "$STATE" update-progress first --progress "$record" 2>&1)
@@ -95,7 +122,7 @@ assert_equals first "$("$STATE" progress-list | jq -r '.tasks[]')" \
 
 "$TASKS" hold first --reason "captain decision" --kind captain >/dev/null || fail "hold failed"
 held=$("$STATE" progress first) || fail "held progress read failed"
-printf '%s' "$held" | jq -e '.task_held=="yes" and .recorded==false and .next_step=="Run final review"' >/dev/null \
+printf '%s' "$held" | jq -e '.task_held=="yes" and .recorded==true and .context_relation=="disposition_only" and .next_step=="Run final review"' >/dev/null \
   || fail "held task lost progress or remained routeable"
 aged_snapshot=$(FM_SNAPSHOT_NOW=2026-11-30T00:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
   || fail "aged canonical hold snapshot failed"
@@ -105,7 +132,7 @@ printf '%s' "$aged_snapshot" | jq -e '
 "$TASKS" unhold first >/dev/null || fail "unhold failed"
 "$TASKS" block first --by second >/dev/null || fail "dependency block failed"
 blocked=$("$STATE" progress first) || fail "blocked progress read failed"
-printf '%s' "$blocked" | jq -e '.task_blocked=="yes" and .recorded==false' >/dev/null \
+printf '%s' "$blocked" | jq -e '.task_blocked=="yes" and .recorded==true and .context_relation=="disposition_only"' >/dev/null \
   || fail "dependency block did not disable continuation routing"
 "$TASKS" unblock first --by second >/dev/null || fail "dependency unblock failed"
 
@@ -123,6 +150,13 @@ assert_not_contains "$(FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" ready)" "dependent,
 FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" "done" blocker >/dev/null
 assert_contains "$(FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" ready)" "dependent,queued,ship" \
   "completed dependency did not release queued work"
+rc=0
+FM_HOME="$TMP_ROOT/dependencies" FM_DATA_OVERRIDE="$DEP_DATA" bash -c \
+  '. "$1"; fm_cleanup_completion_mode blocker g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" \
+  >/dev/null 2>"$TMP_ROOT/done-without-acceptance.err" || rc=$?
+expect_code 6 "$rc" "Done task without MAIN acceptance"
+assert_grep 'not MAIN-accepted' "$TMP_ROOT/done-without-acceptance.err" \
+  "Done disposition bypassed MAIN semantic acceptance"
 
 done_record='{"acceptance":"The requested behavior passes","current_state":"The outcome is accepted","remaining_gap":"","next_step":""}'
 "$STATE" update-progress first --progress "$done_record" >/dev/null || fail "acceptance update failed"

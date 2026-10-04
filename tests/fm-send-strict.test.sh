@@ -46,7 +46,7 @@ SH
 
 setup_home() {  # <name> -> echoes home dir
   local home="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/data"
   printf '%s\n' "$home"
 }
 
@@ -55,6 +55,7 @@ test_exact_lane_id_send_still_works() {
   dir="$TMP_ROOT/exact"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home exact); err="$dir/send.err"; log="$dir/endpoint.log"; : > "$log"
   fm_write_meta "$home/state/mpf-lane-m8.meta" "window=sess:w1:p-mpf-lane-m8" "backend=herdr" "kind=ship"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add mpf-lane-m8 'Exact send fixture' --kind ship --start >/dev/null
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_ENDPOINT_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" mpf-lane-m8 "lost dispatch" >/dev/null 2>"$err"; rc=$?
@@ -102,6 +103,7 @@ test_prefixless_herdr_pane_id_fails() {
   fb=$(make_stubs "$dir"); home=$(setup_home herdr); err="$dir/send.err"; log="$dir/endpoint.log"; : > "$log"
   fm_write_meta "$home/state/nudge.meta" \
     "window=default:wB:p2" "backend=herdr" "herdr_session=default" "herdr_pane_id=wB:p2" "kind=ship"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add nudge 'Prefixless send fixture' --kind ship --start >/dev/null
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_ENDPOINT_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" wB:p2 "nudge" >/dev/null 2>"$err"; rc=$?
@@ -148,6 +150,7 @@ test_healthy_fm_id_send_still_works() {
   dir="$TMP_ROOT/healthy"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home healthy); err="$dir/send.err"; log="$dir/endpoint.log"; : > "$log"
   fm_write_meta "$home/state/lane-ok.meta" "window=sess:w1:p-lane-ok" "backend=herdr" "kind=ship" "harness=codex"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add lane-ok 'Healthy send fixture' --kind ship --start >/dev/null
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_ENDPOINT_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" fm-lane-ok "hello captain" >/dev/null 2>"$err"; rc=$?
@@ -174,6 +177,7 @@ test_key_send_exit_status_follows_delivery() {
   dir="$TMP_ROOT/key-exit"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home keyexit); err="$dir/send.err"; log="$dir/endpoint.log"; : > "$log"
   fm_write_meta "$home/state/lane-key.meta" "window=sess:w1:p-lane-key" "backend=herdr" "kind=ship"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add lane-key 'Key send fixture' --kind ship --start >/dev/null
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_ENDPOINT_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" lane-key --key Escape >/dev/null 2>"$err"; rc=$?

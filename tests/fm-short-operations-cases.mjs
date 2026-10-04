@@ -348,17 +348,18 @@ execFileSync('bash',['-c','. "$1/tests/fixtures.sh"; fm_test_fake_herdr_spawn "$
 const replayEnv={...process.env,FM_HOME:replayHome,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:replayState,FM_DATA_OVERRIDE:replayData,FM_CONFIG_OVERRIDE:path.join(replayHome,'config'),FM_FAKE_HERDR_STATE:path.join(recoveryRoot,'state.json'),FM_HERDR_LOG:path.join(recoveryRoot,'herdr.log'),HERDR_SESSION:'fixture'};
 const compactAccept=(task,env)=>{
   const current=JSON.parse(execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'progress',task],{env,encoding:'utf8'}));
-  execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'update-progress',task,'--expected-token',current.record_token,'--progress',JSON.stringify({acceptance:'The completed cleanup behavior is verified',current_state:'The task result is semantically accepted',remaining_gap:'',next_step:''})],{env});
+  execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'update-progress',task,'--progress',JSON.stringify({acceptance:'The completed cleanup behavior is verified',current_state:'The task result is semantically accepted',remaining_gap:'',next_step:''})],{env});
 };
-const addCompactTask=(task,title,env)=>execFileSync('tasks-axi',['add',task,title,'--kind','ship','--repo','sample','--start','--file',path.join(env.FM_DATA_OVERRIDE,'backlog.md')],{env});
+const canonicalTasks=(env,...args)=>execFileSync('bash',[path.join(root,'bin/fm-tasks-axi.sh'),...args],{env,encoding:'utf8'});
+const addCompactTask=(task,title,env)=>canonicalTasks(env,'add',task,title,'--kind','ship','--repo','sample','--start');
 const recordMerge=(task,generation,project,env)=>execFileSync('bash',['-c','. "$1"; fm_merge_receipt_record "$2" "$3" local:fixture "$4"','fixture',path.join(root,'bin/fm-merge-receipt-lib.sh'),task,generation,git('-C',project,'rev-parse','HEAD')],{env});
 const replayEndpoint=JSON.parse(execFileSync(path.join(recoveryBin,'herdr'),['workspace','create','--cwd',path.join(tmp,'idle'),'--label','cleanup-replay'],{env:replayEnv,encoding:'utf8'})).result;
 fs.writeFileSync(path.join(replayState,replayTask+'.meta'),`kind=ship\nmode=local-only\nspawn_gen=${replayGeneration}\nwindow=fixture:${replayEndpoint.root_pane.pane_id}\nendpoint_task_id=${replayTask}\nworktree=${replayCopy}\nproject=${replayProject}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=${replayEndpoint.workspace.workspace_id}\nherdr_tab_id=${replayEndpoint.tab.tab_id}\nherdr_pane_id=${replayEndpoint.root_pane.pane_id}\n`);
-const realTasksAxi=execFileSync('which',['tasks-axi'],{env:replayEnv,encoding:'utf8'}).trim(),tasksFailure=path.join(recoveryRoot,'done-failed'),tasksLog=path.join(recoveryRoot,'tasks.log');
-execFileSync(realTasksAxi,['add',replayTask,'Cleanup backlog replay','--kind','ship','--repo','sample','--start','--file',path.join(replayData,'backlog.md')],{env:replayEnv});
+const realPython=execFileSync('which',['python3'],{env:replayEnv,encoding:'utf8'}).trim(),tasksFailure=path.join(recoveryRoot,'done-failed');
+addCompactTask(replayTask,'Cleanup backlog replay',replayEnv);
 compactAccept(replayTask,replayEnv);
 recordMerge(replayTask,replayGeneration,replayProject,replayEnv);
-fs.writeFileSync(path.join(recoveryBin,'tasks-axi'),`#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(tasksLog)}\nif [ "\${1:-}" = done ] && [ ! -e ${JSON.stringify(tasksFailure)} ]; then : > ${JSON.stringify(tasksFailure)}; exit 1; fi\nexec ${JSON.stringify(realTasksAxi)} "$@"\n`,{mode:0o755});
+fs.writeFileSync(path.join(recoveryBin,'python3'),`#!/usr/bin/env bash\nif [ "\${4:-}" = done ] && [ ! -e ${JSON.stringify(tasksFailure)} ]; then : > ${JSON.stringify(tasksFailure)}; exit 1; fi\nexec ${JSON.stringify(realPython)} "$@"\n`,{mode:0o755});
 const replayService=new ShortAgents(replayHome,root),replayInput=req('cleanup-backlog-replay',[{action:'cleanup',task:replayTask}]),priorPath=process.env.PATH;
 process.env.PATH=recoveryBin+path.delimiter+priorPath;
 try {
@@ -374,7 +375,7 @@ try {
   const closeCallsBefore=closeCount(replayEndpoint.root_pane.pane_id);assert.equal(closeCallsBefore,1);
   execFileSync('bash',[path.join(root,'bin/fm-bootstrap.sh')],{env:{...replayEnv,PATH:process.env.PATH,FM_BOOTSTRAP_NETWORK:'skip',HOME:path.join(replayHome,'user-home')},encoding:'utf8',timeout:30000});
   assert.ok(!fs.existsSync(replayMarker));
-  assert.match(execFileSync(realTasksAxi,['show',replayTask,'--file',path.join(replayData,'backlog.md')],{env:replayEnv,encoding:'utf8'}),/state:\s+done/);
+  assert.match(canonicalTasks(replayEnv,'show',replayTask),/state:\s+done/);
   const cleanupAfterReplay=JSON.parse(fs.readFileSync(path.join(replayState,replayTask+'.cleanup.json'))),cleanupFacts=cleanupAfterReplay.completion.facts;
   assert.equal(cleanupAfterReplay.completion.spawn_gen,replayGeneration);assert.equal(cleanupFacts.copyDisposition,'retained-dirty');
   await replayService.reconcile();
@@ -387,17 +388,17 @@ try {
   fs.mkdirSync(path.join(replayData,boundaryTask));fs.writeFileSync(path.join(replayData,boundaryTask,'brief.md'),'Completed cleanup success-boundary fixture\n');fs.writeFileSync(path.join(replayData,boundaryTask,'report.md'),'Preserved success-boundary report\n');
   const boundaryEndpoint=JSON.parse(execFileSync(path.join(recoveryBin,'herdr'),['workspace','create','--cwd',path.join(tmp,'idle'),'--label','cleanup-success-boundary'],{env:replayEnv,encoding:'utf8'})).result;
   fs.writeFileSync(path.join(replayState,boundaryTask+'.meta'),`kind=ship\nmode=local-only\nspawn_gen=${boundaryGeneration}\nwindow=fixture:${boundaryEndpoint.root_pane.pane_id}\nendpoint_task_id=${boundaryTask}\nworktree=${boundaryCopy}\nproject=${replayProject}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=${boundaryEndpoint.workspace.workspace_id}\nherdr_tab_id=${boundaryEndpoint.tab.tab_id}\nherdr_pane_id=${boundaryEndpoint.root_pane.pane_id}\n`);
-  execFileSync(realTasksAxi,['add',boundaryTask,'Cleanup success boundary','--kind','ship','--repo','sample','--start','--file',path.join(replayData,'backlog.md')],{env:replayEnv});
+  addCompactTask(boundaryTask,'Cleanup success boundary',replayEnv);
   compactAccept(boundaryTask,replayEnv);
   recordMerge(boundaryTask,boundaryGeneration,replayProject,replayEnv);
-  const realPython=execFileSync('which',['python3'],{env:{...replayEnv,PATH:priorPath},encoding:'utf8'}).trim(),receiptFailure=path.join(recoveryRoot,'receipt-failed');
+  const receiptFailure=path.join(recoveryRoot,'receipt-failed');
   fs.writeFileSync(path.join(recoveryBin,'python3'),`#!/usr/bin/env bash\nif [ "\${2:-}" = completion-record ] && [ ! -e ${JSON.stringify(receiptFailure)} ]; then : > ${JSON.stringify(receiptFailure)}; kill -KILL "\$\$"; fi\nexec ${JSON.stringify(realPython)} "$@"\n`,{mode:0o755});
   const boundaryInput=req('cleanup-success-boundary',[{action:'cleanup',task:boundaryTask}]),boundaryOperation=replayService.submit(boundaryInput);let boundaryResult;
   for(let n=0;n<12000;n++){boundaryResult=replayService.status(boundaryOperation.id);if(boundaryResult.finishedAt)break;await wait(25);}
   assert.equal(boundaryResult.state,'blocked');
   const boundaryDir=replayService.dir(boundaryOperation.id),boundaryMarker=path.join(replayState,boundaryTask+'.backlog-close'),boundaryReservation=resource(replayHome,boundaryInput.operations.steps[0]).file;
   assert.ok(fs.existsSync(boundaryMarker));assert.ok(!fs.existsSync(path.join(replayState,boundaryTask+'.meta')));assert.ok(fs.existsSync(boundaryReservation));assert.ok(!fs.existsSync(path.join(boundaryDir,'operation-0.receipt.json')));
-  assert.match(execFileSync(realTasksAxi,['show',boundaryTask,'--file',path.join(replayData,'backlog.md')],{env:replayEnv,encoding:'utf8'}),/state:\s+done/);
+  assert.match(canonicalTasks(replayEnv,'show',boundaryTask),/state:\s+done/);
   const boundaryBeforeReplay=JSON.parse(fs.readFileSync(path.join(replayState,boundaryTask+'.cleanup.json')));assert.equal(boundaryBeforeReplay.completion,undefined);
   const boundaryStarted=JSON.parse(fs.readFileSync(path.join(boundaryDir,'started.json'))).identity;
   for(let n=0;n<400;n++){try{if(processIdentity(boundaryStarted.pid).start!==boundaryStarted.start)break;}catch{break;}if(n===399)throw Error('cleanup success-boundary fixture runner did not exit');await wait(25);}
