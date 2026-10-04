@@ -36,8 +36,8 @@ CREATE TABLE ci_heads_v9 (
   event_id TEXT REFERENCES events(event_id),
   admitted_at INTEGER,
   UNIQUE (repo, base_ref, batch_id),
-  UNIQUE (repo, head_oid)
+  UNIQUE (repo, base_ref, head_oid)
 );
-INSERT OR IGNORE INTO ci_heads_v9(seq,repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id,admitted_at) SELECT seq,repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id,admitted_at FROM ci_heads ORDER BY seq;
+INSERT INTO ci_heads_v9(seq,repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id,admitted_at) SELECT seq,repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id,admitted_at FROM ci_heads ORDER BY seq;
 DROP TABLE ci_heads;
 ALTER TABLE ci_heads_v9 RENAME TO ci_heads

@@ -109,7 +109,7 @@ for lineage in step3-v5 prior-v6 prior-v8; do
   if [ "$lineage" = prior-v8 ]; then
     sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/004.sql"
     sqlite3 "$db" "$prior_v8_capacity"
-    rows="$rows INSERT INTO ci_capacity(repo,base_ref,capacity) VALUES('owner/repo','main',2),('owner/repo','release',3); INSERT INTO ci_heads(repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id) VALUES('owner/repo','main','prior-batch','prior-intent','$head_a','active',1,'prior-event');"
+    rows="$rows INSERT INTO ci_capacity(repo,base_ref,capacity) VALUES('owner/repo','main',2),('owner/repo','release',3); INSERT INTO events(event_id,event_type,payload_json,created_at) VALUES('prior-release-event','ci-pulse-authorized','{}','2026-01-01T00:00:00+00:00'); INSERT INTO ci_heads(repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id) VALUES('owner/repo','main','prior-batch','prior-intent','$head_a','active',1,'prior-event'),('owner/repo','release','prior-release-batch','prior-intent','$head_a','active',1,'prior-release-event');"
     version=8
   fi
   sqlite3 "$db" "$rows PRAGMA user_version=$version;"
@@ -122,9 +122,13 @@ for lineage in step3-v5 prior-v6 prior-v8; do
   [ "$(sqlite3 "$db" "SELECT request_id||' '||result_json FROM requests")" = 'prior-request {"ok":true}' ] || fail "a $lineage upgrade must keep its request receipts"
   coord ci-capacity-set '{"request_id":"capacity-prior","repo":"owner/repo","capacity":3}' > /dev/null || fail "a $lineage database must accept per-repository CI capacity"
   if [ "$lineage" = prior-v8 ]; then
-    [ "$(sqlite3 "$db" "SELECT batch_id||' '||state||' '||(admitted_at>0) FROM ci_heads")" = "prior-batch active 1" ] || fail 'a prior v8 upgrade must keep its active CI head under a slot lease'
+    # The old shape allowed one head active under two base refs; the upgrade must keep both slots.
+    [ "$(sqlite3 "$db" "SELECT group_concat(base_ref||' '||batch_id||' '||state||' '||(admitted_at>0),',') FROM (SELECT * FROM ci_heads ORDER BY seq)")" = "main prior-batch active 1,release prior-release-batch active 1" ] || fail 'a prior v8 upgrade must keep every active CI head under a slot lease'
     reject ci-complete "{\"request_id\":\"complete-prior-other\",\"repo\":\"owner/repo\",\"head_oid\":\"$head_a\",\"batch_id\":\"other-batch\",\"conclusion\":\"success\"}" 'a prior v8 CI head must complete only under its own batch'
     coord ci-complete "{\"request_id\":\"complete-prior\",\"repo\":\"owner/repo\",\"head_oid\":\"$head_a\",\"batch_id\":\"prior-batch\",\"conclusion\":\"success\"}" > /dev/null || fail 'a prior v8 active CI head must complete after upgrade'
+    [ "$(sqlite3 "$db" "SELECT batch_id||' '||state FROM ci_heads")" = "prior-release-batch active" ] || fail 'completing one base ref batch must leave the other base ref slot held'
+    coord ci-complete "{\"request_id\":\"complete-prior-release\",\"repo\":\"owner/repo\",\"head_oid\":\"$head_a\",\"batch_id\":\"prior-release-batch\",\"conclusion\":\"failure\"}" > /dev/null || fail 'the second base ref batch of a prior v8 head must complete after upgrade'
+    [ "$(sqlite3 "$db" "SELECT count(*) FROM ci_heads")" = 0 ] || fail 'both prior v8 CI slots must be released by their own completions'
   fi
   [ "$(field "$(coord init)" schema_version)" = 9 ] || fail "a $lineage database must stay at the current schema on a second init"
 done
