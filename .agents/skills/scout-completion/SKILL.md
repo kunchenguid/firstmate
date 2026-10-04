@@ -25,7 +25,7 @@ A wide refactor whose blast radius cannot land green as a vertical slice uses ex
 
 ## Prototype deliverable
 
-When a design question cannot be settled in prose, a scout may deliver a prototype: throwaway code that answers that one question, either a single shareable HTML file for state or logic, or several radically different UI variants toggled on one route.
+When a design question cannot be settled in prose, a scout may deliver a prototype: throwaway code that answers that one question, as a single shareable HTML file for state or logic.
 Throwaway constrains how the code is written, not whether it survives.
 The report points to the prototype as a primary source on a named branch that outlives the scout's worktree, and the validated decision folds into the real code on the ship that follows.
 A prototype never becomes a PR, because a scout never produces one, and it does not authorize implementation.

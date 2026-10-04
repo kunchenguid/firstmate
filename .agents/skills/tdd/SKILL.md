@@ -43,8 +43,6 @@ Never write every test first and then every implementation.
 
 ## Relation to no-mistakes' test-quality rule
 
-The no-mistakes test-quality rule forbids tests whose only evidence is reading or matching implementation source.
-The implementation-coupling rule above is that same rule applied during the build instead of at validation, so the two are one rule and this skill does not add a second one.
-A test that greps source or snapshots incidental output breaks both.
+Tests written here also follow no-mistakes' test-quality rule, which owns what a test may assert.
 
 For a regression, reproduce the reported failure first: the test should fail before the fix and pass after it.
