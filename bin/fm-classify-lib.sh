@@ -1060,8 +1060,9 @@ status_presentation_marker_commit() {
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
 
-status_retire_presentation_task() {  # <state> <task-id>
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
+status_retire_presentation_task() {  # <state> <task-id> [--require-settled|--check-settled]
+  local state=$1 task=$2 mode=${3:-} lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
+  local status_file="$1/$2.status" size presented open
   local signal_marker heartbeat_marker daemon_marker
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -1101,6 +1102,47 @@ EOF
   fi
 
   fm_lock_acquire_wait "$lock" || return 1
+  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ]; } \
+    && [ ! -e "$status_file" ] && [ ! -L "$status_file" ] \
+    && { [ -e "$state/.$task.open-decisions-cursor" ] \
+      || [ -L "$state/.$task.open-decisions-cursor" ]; }; then
+    echo "REFUSED: task $task status is missing while its decision cursor remains; preserving its presentation state" >&2
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ]; } \
+    && { [ -e "$status_file" ] || [ -L "$status_file" ]; }; then
+    if [ ! -f "$status_file" ] || [ ! -r "$status_file" ] || [ -L "$status_file" ]; then
+      echo "REFUSED: task $task status is unsafe; preserving its presentation state" >&2
+      fm_lock_release "$lock"
+      return 1
+    fi
+    open=$(status_open_decisions "$status_file") || {
+      echo "REFUSED: task $task decisions are unreadable; preserving its presentation state" >&2
+      fm_lock_release "$lock"
+      return 1
+    }
+    if [ -n "$open" ]; then
+      echo "REFUSED: task $task has an open status decision; preserving its presentation state" >&2
+      fm_lock_release "$lock"
+      return 1
+    fi
+    size=$(_fm_status_file_size "$status_file") || {
+      echo "REFUSED: task $task status size is unreadable; preserving its presentation state" >&2
+      fm_lock_release "$lock"
+      return 1
+    }
+    presented=$(status_presentation_cursor_offset "$status_file") || {
+      echo "REFUSED: task $task presentation cursor is unreadable; preserving its presentation state" >&2
+      fm_lock_release "$lock"
+      return 1
+    }
+    if [ "$presented" != "$size" ]; then
+      echo "REFUSED: task $task has unread status bytes; preserving its presentation state" >&2
+      fm_lock_release "$lock"
+      return 1
+    fi
+  fi
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
       rc=1
@@ -1121,11 +1163,14 @@ EOF
       done <<EOF
 $data
 EOF
-      if [ "$rc" -eq 0 ]; then mv -f "$tmp" "$manifest" || rc=1; fi
+      if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ]; then
+        mv -f "$tmp" "$manifest" || rc=1
+      fi
       [ "$rc" -eq 0 ] || rm -f "$tmp"
+      [ "$mode" != --check-settled ] || rm -f "$tmp"
     fi
   fi
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
       "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
   fi

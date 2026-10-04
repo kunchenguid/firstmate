@@ -105,6 +105,26 @@ fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox/handled' "$1" "$2"
 }
 
+# Refuse retirement while an instruction still waits for worker
+# acknowledgement. The caller holds the task metadata lock (or has proved the
+# metadata absent), which serializes every supported writer; a concurrent
+# worker acknowledgement can only turn a conservative refusal into a safe
+# retry. Handoff settlement is checked separately by its own owner.
+fm_task_inbox_retirement_guard() {  # <state-dir> <task-id>
+  local dir record
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  [ ! -e "$dir" ] && [ ! -L "$dir" ] && return 0
+  [ -d "$dir" ] && [ ! -L "$dir" ] || {
+    echo "REFUSED: task $2 inbox is unsafe; preserving task state" >&2
+    return 1
+  }
+  for record in "$dir"/*.msg; do
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    echo "REFUSED: task $2 has an unhandled inbox record; preserve and acknowledge it before retirement" >&2
+    return 1
+  done
+}
+
 # Numeric sequence of one record basename, or fail for a non-record name.
 fm_task_inbox_seq_of() {  # <basename>
   local n=${1%.msg}

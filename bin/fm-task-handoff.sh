@@ -8,6 +8,7 @@
 #   fm-task-handoff.sh retry-task <target-task>
 #   fm-task-handoff.sh retry-all
 #   fm-task-handoff.sh inspect <handoff-id>
+#   fm-task-handoff.sh retirement-check <target-task>
 #
 # This is the narrow cross-task companion to fm-send.sh. Ordinary same-task
 # steering still uses fm-send. A cross-task caller records the complete body,
@@ -81,7 +82,7 @@ HANDOFF_STATUS="$HANDOFF_ROOT/status"
 HANDOFF_LOCK="$STATE/.fm-lease-command.lock"
 
 usage() {
-  echo "usage: fm-task-handoff.sh send <source-task> <target-task> --id <handoff-id> <text...> | retry <handoff-id> | retry-task <target-task> | retry-all | inspect <handoff-id>" >&2
+  echo "usage: fm-task-handoff.sh send <source-task> <target-task> --id <handoff-id> <text...> | retry <handoff-id> | retry-task <target-task> | retry-all | inspect <handoff-id> | retirement-check <target-task>" >&2
   exit 2
 }
 
@@ -141,6 +142,98 @@ handoff_state() {  # <id>
     case "$line" in state=*) printf '%s' "${line#state=}"; return 0 ;; esac
   done < "$file"
   printf 'pending'
+}
+
+handoff_status_field() {  # <status-file> <field>
+  local file=$1 field=$2 line
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "$field="*) printf '%s' "${line#*=}"; return 0 ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+# Read-only retirement proof for every handoff targeting one task. Rejected
+# work remains durable but needs no delivery. Pending/retryable work refuses;
+# `delivered` is only transport state and becomes retirement-safe after the
+# exact inbox record has moved to handled/ under the same handoff identity and
+# captured target generation.
+handoff_retirement_check_locked() {  # <target-task>
+  local target=$1 record record_target handoff_id handoff_state_value status_file
+  local inbox_root inbox_record relative base handled recorded_handoff target_generation inbox_generation
+  [ ! -e "$HANDOFF_RECORDS" ] && [ ! -L "$HANDOFF_RECORDS" ] && return 0
+  [ -d "$HANDOFF_RECORDS" ] && [ ! -L "$HANDOFF_RECORDS" ] || {
+    echo "REFUSED: task handoff records are unsafe; preserving task $target state" >&2
+    return 1
+  }
+  inbox_root="$STATE/$target.inbox"
+  for record in "$HANDOFF_RECORDS"/*.msg; do
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    if [ ! -f "$record" ] || [ -L "$record" ]; then
+      echo "REFUSED: task handoff record is unsafe; preserving task $target state" >&2
+      return 1
+    fi
+    record_target=$(handoff_record_field "$record" target 2>/dev/null || true)
+    [ -n "$record_target" ] || {
+      echo "REFUSED: task handoff record has no target; preserving task $target state" >&2
+      return 1
+    }
+    [ "$record_target" = "$target" ] || continue
+    handoff_id=${record##*/}; handoff_id=${handoff_id%.msg}
+    status_file=$(handoff_status_path "$handoff_id")
+    handoff_state_value=$(handoff_state "$handoff_id")
+    case "$handoff_state_value" in
+      rejected) continue ;;
+      pending|retryable-refusal)
+        echo "REFUSED: task $target has pending handoff $handoff_id ($handoff_state_value); preserve and reconcile it before retirement" >&2
+        return 1
+        ;;
+      delivered) ;;
+      *)
+        echo "REFUSED: task $target handoff $handoff_id has malformed state '$handoff_state_value'; preserve and reconcile it before retirement" >&2
+        return 1
+        ;;
+    esac
+    inbox_record=$(handoff_status_field "$status_file" inbox_record 2>/dev/null || true)
+    case "$inbox_record" in
+      "$inbox_root/"*) relative=${inbox_record#"$inbox_root/"} ;;
+      *)
+        echo "REFUSED: task $target handoff $handoff_id has no exact inbox delivery path; delivered is not handled" >&2
+        return 1
+        ;;
+    esac
+    case "$relative" in
+      handled/*) base=${relative#handled/} ;;
+      */*)
+        echo "REFUSED: task $target handoff $handoff_id has an unsafe inbox delivery path; preserving it" >&2
+        return 1
+        ;;
+      *) base=$relative ;;
+    esac
+    fm_task_inbox_seq_of "$base" >/dev/null 2>&1 || {
+      echo "REFUSED: task $target handoff $handoff_id has an invalid inbox record name; preserving it" >&2
+      return 1
+    }
+    handled="$inbox_root/handled/$base"
+    if [ -e "$inbox_root/$base" ] || [ -L "$inbox_root/$base" ]; then
+      echo "REFUSED: task $target handoff $handoff_id is delivered but not handled; preserve its sole instruction" >&2
+      return 1
+    fi
+    [ -f "$handled" ] && [ ! -L "$handled" ] || {
+      echo "REFUSED: task $target handoff $handoff_id is delivered without handled inbox evidence; preserve and reconcile it" >&2
+      return 1
+    }
+    recorded_handoff=$(fm_task_inbox_handoff_id "$handled" 2>/dev/null || true)
+    target_generation=$(handoff_record_field "$record" target_generation 2>/dev/null || true)
+    inbox_generation=$(fm_task_inbox_execution_generation "$handled" 2>/dev/null || true)
+    if [ "$recorded_handoff" != "$handoff_id" ] || [ -z "$target_generation" ] \
+      || [ "$inbox_generation" != "$target_generation" ]; then
+      echo "REFUSED: task $target handoff $handoff_id handled evidence does not match its delivery identity; preserving it" >&2
+      return 1
+    fi
+  done
 }
 
 handoff_write_state() {  # <id> <state> <reason> [inbox-record]
@@ -440,6 +533,11 @@ case "$CMD" in
     TARGET=$1
     handoff_valid_atom "$TARGET" || usage
     ;;
+  retirement-check)
+    [ "$#" -eq 1 ] || usage
+    TARGET=$1
+    handoff_valid_atom "$TARGET" || usage
+    ;;
   retry-all)
     [ "$#" -eq 0 ] || usage
     ;;
@@ -460,6 +558,16 @@ if [ "$CMD" = inspect ]; then
   [ ! -f "$STATUS_FILE" ] || cat "$STATUS_FILE"
   cat "$RECORD"
   exit 0
+fi
+
+if [ "$CMD" = retirement-check ]; then
+  if [ ! -e "$HANDOFF_RECORDS" ] && [ ! -L "$HANDOFF_RECORDS" ]; then
+    exit 0
+  fi
+  fm_lock_acquire_wait "$HANDOFF_LOCK"
+  trap 'fm_lock_release "$HANDOFF_LOCK"' EXIT
+  handoff_retirement_check_locked "$TARGET"
+  exit $?
 fi
 
 # Lease release and session-start sweep call the scoped retry commands even in

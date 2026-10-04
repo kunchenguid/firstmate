@@ -1010,8 +1010,18 @@ fm_backlog_completed_cleanup_receipt() {
   if ! declare -F fm_cleanup_receipt >/dev/null 2>&1; then
     . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-cleanup-receipt-lib.sh"
   fi
+  # Record closure and final facts before moving the task-owned receipts out of
+  # routine state scans. The pending-close marker remains until all three owner
+  # operations succeed, so an interrupted replay retries without endpoint or
+  # copy effects.
+  # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+  . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-teardown-endpoint-lib.sh"
   FM_HOME="${FM_HOME:?}" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-    fm_cleanup_receipt completion-record "$id" "$generation" --facts "$facts" >/dev/null
+    fm_teardown_cleanup_record_closed "$state" "$id" "$data" "$generation" || return 1
+  FM_HOME="${FM_HOME:?}" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    fm_cleanup_receipt completion-record "$id" "$generation" --facts "$facts" >/dev/null || return 1
+  FM_HOME="${FM_HOME:?}" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    fm_cleanup_receipt_archive_complete "$id" "$generation"
 }
 
 fm_backlog_replay_transition() {
@@ -1090,7 +1100,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
     fi
     # shellcheck source=bin/fm-teardown-endpoint-lib.sh
     . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-teardown-endpoint-lib.sh"
-    fm_teardown_cleanup_record_closed "$state" "$id" "$data" || return 1
+    fm_teardown_cleanup_record_closed "$state" "$id" "$data" "$marker_spawn_gen" || return 1
     fm_backlog_close_marker_remove "$marker" "$state" || return 1
     if [ "$cleanup_kind" = retain ]; then FM_BACKLOG_CLOSE_REPLAY_RESULT=retained_incomplete
     else FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete

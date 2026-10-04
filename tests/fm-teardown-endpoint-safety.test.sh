@@ -4,9 +4,81 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
+
+read_cleanup_receipt() { # <home> <task> <generation>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_DATA_OVERRIDE="$1/data" bash -c \
+    '. "$1/bin/fm-cleanup-receipt-lib.sh"; fm_cleanup_receipt read "$2" "$3"' \
+    _ "$ROOT" "$2" "$3"
+}
+
+seed_presented_runtime() { # <home> <task> <meta>
+  local home=$1 task=$2 meta=$3 status="$1/state/$2.status" ident size gen
+  printf 'done: accepted fixture\n' > "$status"
+  ident=$(_fm_open_decisions_file_ident "$status") || fail "could not identify $task status"
+  size=$(_fm_status_file_size "$status") || fail "could not size $task status"
+  printf '%s\t%s\t%s\t%s\n' "$task" "$ident" "$size" "$size" \
+    >> "$home/state/.status-presentation-cursor"
+  : > "$(status_signal_seen_marker_path "$home/state" "$task")"
+  : > "$(status_heartbeat_seen_marker_path "$home/state" "$task")"
+  : > "$(status_daemon_seen_marker_path "$home/state" "$task")"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" "$task") \
+    || fail "could not arm $task busy generation"
+  printf 'busy_gen=%s\n' "$gen" >> "$meta"
+  printf '{"schema":"fm-busy-session.v1","task":"%s","gen":"%s"}\n' "$task" "$gen" \
+    > "$home/state/$task.busy-session"
+  printf 'version=3\ntask_id=%s\nprojection_id=abcdefghijklmnopqrstuv\n' "$task" \
+    > "$home/state/$task.herdr-presentation"
+  mkdir -p "$home/state/$task.inbox/handled"
+  printf 'schema=fm-task-inbox.v1\n--\nsettled by accepted retirement\n' \
+    > "$home/state/$task.inbox/handled/001.msg"
+}
+
+test_public_retirement_preserves_pending_inbox_and_delivered_handoff() {
+  local dir id=pending-retirement rc=0 inbox handoff_id=delivery-pending
+  dir=$(make_case pending-retirement)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  inbox="$dir/home/state/$id.inbox"
+  mkdir -p "$inbox/handled"
+  printf 'schema=fm-task-inbox.v1\nexecution_generation=s-%s\n--\npending instruction\n' "$id" \
+    >"$inbox/001.msg"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$ROOT/bin/fm-task-retire.sh" "$id" \
+    >"$dir/pending.out" 2>"$dir/pending.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'public local retirement deleted an unhandled inbox instruction'
+  assert_grep 'unhandled inbox record' "$dir/pending.err" \
+    'public local retirement did not explain the pending inbox refusal'
+  assert_present "$inbox/001.msg" 'public local retirement removed the pending instruction'
+  assert_present "$dir/home/state/$id.meta" 'pending inbox refusal removed task metadata'
+  [ ! -s "$dir/runtime.log" ] || fail 'pending inbox refusal reached the runtime endpoint'
+
+  mkdir -p "$dir/home/state/task-handoffs/records" "$dir/home/state/task-handoffs/status"
+  printf 'schema=fm-task-handoff.v1\nid=%s\nfrom=source\ntarget=%s\ntarget_generation=s-%s\n--\npending instruction\n' \
+    "$handoff_id" "$id" "$id" >"$dir/home/state/task-handoffs/records/$handoff_id.msg"
+  printf 'schema=fm-task-handoff.v1\nstate=delivered\ninbox_record=%s\n' "$inbox/001.msg" \
+    >"$dir/home/state/task-handoffs/status/$handoff_id.state"
+  printf 'schema=fm-task-inbox.v1\nexecution_generation=s-%s\nhandoff=%s\n--\npending instruction\n' \
+    "$id" "$handoff_id" >"$inbox/001.msg"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$ROOT/bin/fm-task-retire.sh" "$id" \
+    >"$dir/handoff.out" 2>"$dir/handoff.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'public local retirement treated delivered handoff as handled'
+  assert_grep 'delivered but not handled' "$dir/handoff.err" \
+    'public local retirement did not use the handoff acknowledgement owner'
+  assert_present "$inbox/001.msg" 'delivered-unhandled handoff lost its sole inbox instruction'
+  assert_present "$dir/home/state/task-handoffs/records/$handoff_id.msg" \
+    'delivered-unhandled refusal removed the handoff record'
+  assert_present "$dir/home/state/$id.meta" 'delivered-unhandled refusal removed task metadata'
+  [ ! -s "$dir/runtime.log" ] || fail 'delivered-unhandled refusal reached the runtime endpoint'
+  pass 'public local retirement preserves pending inbox and delivered-unhandled handoff instructions'
+}
 # The fixture binds normal task records to Herdr; historical refusal is
 # covered by fm-retired-backends.test.sh, without weakening these lock tests.
 write_herdr_meta() {
@@ -530,7 +602,7 @@ test_sole_slot_record_still_tears_down() {
   assert_present "$dir/home/state/neighbour.meta" "uncontested teardown removed the neighbour's record"
   kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log"); $(cat "$dir/stdout"); reason=$(jq -r '.phases.directory_return.reason_code' "$dir/home/state/$id.cleanup.json")"
+    || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log"); $(cat "$dir/stdout"); reason=$(read_cleanup_receipt "$dir/home" "$id" "s-$id" | jq -r '.phases.directory_return.reason_code')"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
   pass "fm-teardown: a task that solely holds its slot still returns it"
@@ -571,8 +643,8 @@ assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
   assert_present "$dir/pool/1/project/.git" "$description: the reassigned slot's checkout was removed"
   ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "$description: the reassigned slot was returned to the pool: $(cat "$dir/runtime.log")"
-  jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-claimed-elsewhere"' \
-    "$dir/home/state/$id.cleanup.json" >/dev/null \
+  read_cleanup_receipt "$dir/home" "$id" "s-$id" \
+    | jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-claimed-elsewhere"' >/dev/null \
     || fail "$description: the durable cleanup receipt did not record reassigned slot ownership"
 }
 
@@ -655,8 +727,8 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   assert_absent "$dir/home/state/$id.meta" "completed cleanup retained active metadata on an unreadable claim"
   assert_present "$dir/runtime.log.w1:p-$id.closed" "completed cleanup did not retire its exact endpoint"
   ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'unreadable slot claim allowed a return'
-  jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-owner-unproved"' \
-    "$dir/home/state/$id.cleanup.json" >/dev/null \
+  read_cleanup_receipt "$dir/home" "$id" "s-$id" \
+    | jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-owner-unproved"' >/dev/null \
     || fail 'unreadable slot claim was not preserved as a durable cleanup reason'
 
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
@@ -700,8 +772,8 @@ test_own_claim_tears_down_and_absent_claim_is_retained() {
   assert_present "$dir/worktree/sentinel" "unclaimed-slot teardown changed the recorded directory"
   assert_present "$dir/runtime.log.w1:p-$id.closed" "unclaimed-slot cleanup did not retire its endpoint"
   ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'unclaimed slot was returned without positive ownership'
-  jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-owner-unproved"' \
-    "$dir/home/state/$id.cleanup.json" >/dev/null \
+  read_cleanup_receipt "$dir/home" "$id" "s-$id" \
+    | jq -e '.phases.directory_return.state=="retained" and .phases.directory_return.reason_code=="pool-slot-owner-unproved"' >/dev/null \
     || fail 'unclaimed slot was not retained with a durable ownership reason'
 
   pass "fm-teardown: an exact claim returns its slot while an unclaimed completed slot retains only its copy obligation"
@@ -905,6 +977,7 @@ test_completed_endpoint_ignores_historical_admission_gates() {
     write_herdr_meta "$dir/home/state/$id.meta" \
       "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
     stage_archived_action "$dir" "$id" cleanup uncertain
+    seed_presented_runtime "$dir/home" "$id" "$dir/home/state/$id.meta"
     mkdir -p "$dir/home/data/$id"
     printf 'Retained completed report\n' > "$dir/home/data/$id/report.md"
     case "$variant" in
@@ -965,6 +1038,16 @@ test_completed_copy_preservation_ignores_force() {
     assert_absent "$dir/home/state/$id.meta" 'completed resource record was not archived'
     assert_absent "$dir/home/state/$id.check.sh" 'completed cleanup left its executable check registered'
     assert_absent "$dir/home/state/$id.check-trust" 'completed cleanup left its check trust binding registered'
+    for artifact in busy-gen busy-session busy-state cleanup.json herdr-presentation merge-receipts.jsonl meta status; do
+      assert_absent "$dir/home/state/$id.$artifact" "completed cleanup retained active $artifact"
+    done
+    assert_absent "$dir/home/state/$id.inbox" 'completed cleanup retained its settled inbox'
+    read_cleanup_receipt "$dir/home" "$id" "s-$id" \
+      | jq -e '.completion.facts.bookkeepingComplete==true' >/dev/null \
+      || fail 'completed cleanup evidence was not readable after active-state retirement'
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" bash -c \
+      '. "$1/bin/fm-merge-receipt-lib.sh"; fm_merge_receipt_current "$2" "$3" >/dev/null' \
+      _ "$ROOT" "$id" "s-$id" || fail 'merge evidence was not readable after active-state retirement'
   done
   pass 'completed cleanup retires check artifacts while dirty and unlanded copies remain even when force is supplied'
 }
@@ -1052,8 +1135,12 @@ test_retained_copy_only_followthrough() {
     assert_absent "$dir/home/state/$id.meta" 'retirement kept completed execution metadata active'
     before_runtime=$(cat "$dir/runtime.log")
     before_task=$(shasum "$dir/home/data/$id/task.json")
-    jq -e '.copy_binding.copy.inode>0 and .phases.directory_return.state=="retained"' \
-      "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'exact retained copy identity was not durable before metadata retirement'
+    read_cleanup_receipt "$dir/home" "$id" "s-$id" \
+      | jq -e '.copy_binding.copy.inode>0 and .phases.directory_return.state=="retained"' >/dev/null \
+      || fail 'exact retained copy identity was not durable before metadata retirement'
+    assert_absent "$dir/home/state/$id.cleanup.json" 'completed cleanup receipt remained in active state'
+    assert_absent "$dir/home/state/$id.merge-receipts.jsonl" 'completed merge receipt remained in active state'
+    assert_present "$dir/home/data/$id/merge-receipts.jsonl" 'merge evidence was not archived with the task'
     if [ "$variant" = identity-changed ]; then
       mv "$dir/worktree" "$dir/original-retained-copy"
       mkdir "$dir/worktree"
@@ -1106,12 +1193,15 @@ SH
             "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" > "$dir/pending.out" 2> "$dir/pending.err" || rc=$?
           [ "$rc" -ne 0 ] || fail 'pending existing copy disposal was blindly retried'
           assert_present "$dir/worktree/sentinel" 'uncertain existing copy was removed on retry'
-          jq -e '.phases.directory_return.state=="pending"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'pending copy obligation was lost'
+          read_cleanup_receipt "$dir/home" "$id" "s-$id" \
+            | jq -e '.phases.directory_return.state=="pending"' >/dev/null \
+            || fail 'pending copy obligation was lost'
           [ "$(cat "$dir/runtime.log")" = "$before_runtime" ] || fail 'pending copy replayed endpoint'
           continue
         fi
         assert_absent "$dir/worktree" 'fixture did not interrupt after the actual disposal effect'
-        jq -e '.phases.directory_return.state=="pending"' "$dir/home/state/$id.cleanup.json" >/dev/null \
+        read_cleanup_receipt "$dir/home" "$id" "s-$id" \
+          | jq -e '.phases.directory_return.state=="pending"' >/dev/null \
           || fail 'uncertain disposal lost its retained intent'
         rm "$dir/fakebin/git"
       fi
@@ -1119,7 +1209,9 @@ SH
         "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" > "$dir/released.out" 2> "$dir/released.err" \
         || fail "eligible retained copy was not disposed: $(cat "$dir/released.err")"
       assert_absent "$dir/worktree" 'eligible retained copy remains after confirmed disposal'
-      jq -e '.phases.directory_return.state=="confirmed"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'copy disposal was not confirmed'
+      read_cleanup_receipt "$dir/home" "$id" "s-$id" \
+        | jq -e '.phases.directory_return.state=="confirmed"' >/dev/null \
+        || fail 'copy disposal was not confirmed'
       FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
         "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" >/dev/null || fail 'copy-only confirmed retry did not converge'
       [ "$(cat "$dir/runtime.log")" = "$before_runtime" ] || fail 'later copy follow-through repeated endpoint effects'
@@ -1139,6 +1231,7 @@ test_open_goal_preserves_resources_before_cleanup
 test_done_row_with_raw_open_gap_stays_unfinished
 test_explicit_archive_skips_success_delivery_gate
 test_absent_current_row_with_open_history_refuses
+test_public_retirement_preserves_pending_inbox_and_delivered_handoff
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

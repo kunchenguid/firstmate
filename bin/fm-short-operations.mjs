@@ -267,8 +267,16 @@ function cleanupOwnerReadback(home,root,step,binding) {
   const meta=path.join(home,'state',step.task+'.meta');
   try {fs.lstatSync(meta);return null;}
   catch(error) {if(error.code!=='ENOENT') throw error;}
-  const cleanupFile=path.join(home,'state',step.task+'.cleanup.json');
-  if(!exists(cleanupFile)) return null;
+  let cleanupFile;
+  try {
+    cleanupFile=execFileSync('bash',['-c','. "$1"; fm_cleanup_receipt path "$2" "$3"',
+      'short-cleanup-readback',path.join(root,'bin/fm-cleanup-receipt-lib.sh'),step.task,binding.spawn_gen],
+    {encoding:'utf8',env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state')}}).trim();
+  } catch(error) {
+    const detail=String(error.stderr??'').trim();
+    if(detail.startsWith('REFUSED: missing cleanup evidence:')) return null;
+    fail(detail||'cleanup receipt owner readback refused');
+  }
   const cleanupBytes=fs.readFileSync(cleanupFile,'utf8'),record=JSON.parse(cleanupBytes);
   if(record?.schema!=='fm-task-cleanup.v1'||record.task_id!==step.task||record.spawn_gen!==binding.spawn_gen) fail('cleanup owner generation changed');
   const proof=record.completion;
@@ -334,6 +342,13 @@ function settleCleanupLocked(home,request,started,index,step) {
   } else if(!(request.acceptedAt<=started.at&&started.at<=intent.at&&intent.at<=result.finishedAt)) fail('short cleanup preflight chronology is invalid');
   const expectedMarkers=resources(home,step).map(({file,target})=>({file,record:{home,id:request.id,nonce:request.nonce,index,target}}));
   for(const marker of expectedMarkers) if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed');
+  const readback=effect?cleanupOwnerReadback(home,root,step,binding):null;
+  if(readback) {
+    if(!equal(read(requestFile),request)||fs.readFileSync(resultFile,'utf8')!==resultBytes||!equal(read(intentFile),intent)||!equal(read(effectFile),effect)||fs.readFileSync(readback.cleanupFile,'utf8')!==readback.cleanupBytes) fail('short cleanup settlement evidence changed during readback');
+    for(const marker of expectedMarkers) if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed during readback');
+    if(!publish(receiptFile,{id:request.id,nonce:request.nonce,index,action:'cleanup',state:'completed',at:Date.now(),executor:processIdentity(process.pid),settlement:'dead-owner-cleanup-readback',effectExecutor:effect.owner,evidence:readback.evidence})) fail('operation completion receipt changed during settlement');
+    return operationReceipts(dir).find(value=>value.index===index);
+  }
   const noEffect=cleanupPreflightReadback(home,root,request,started,index,step,binding,intent,effect,resultBytes);
   if(noEffect) {
     const settlement=effect?'dead-owner-legacy-cleanup-preflight-readback':'dead-owner-cleanup-preflight-readback';
@@ -343,12 +358,7 @@ function settleCleanupLocked(home,request,started,index,step) {
     return operationReceipts(dir).find(value=>value.index===index);
   }
   if(!effect)return null;
-  const readback=cleanupOwnerReadback(home,root,step,binding);
-  if(!readback) return null;
-  if(!equal(read(requestFile),request)||fs.readFileSync(resultFile,'utf8')!==resultBytes||!equal(read(intentFile),intent)||!equal(read(effectFile),effect)||fs.readFileSync(readback.cleanupFile,'utf8')!==readback.cleanupBytes) fail('short cleanup settlement evidence changed during readback');
-  for(const marker of expectedMarkers) if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed during readback');
-  if(!publish(receiptFile,{id:request.id,nonce:request.nonce,index,action:'cleanup',state:'completed',at:Date.now(),executor:processIdentity(process.pid),settlement:'dead-owner-cleanup-readback',effectExecutor:effect.owner,evidence:readback.evidence})) fail('operation completion receipt changed during settlement');
-  return operationReceipts(dir).find(value=>value.index===index);
+  return null;
 }
 
 function settleMergeLocked(home,root,id,index,expectedMergeCommit) {

@@ -274,6 +274,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -347,48 +349,40 @@ backlog_refresh_reminder() {
   fi
 }
 
-validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 state_device artifact has_artifact=0
-  fm_task_id_path_safe "$id" || return 0
-  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    has_artifact=1
-  done
-  [ "$has_artifact" -eq 1 ] || return 0
-  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
-  state_device=$(fm_pr_file_device "$state_dir") || return 1
-  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
-      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
-      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
-      || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
-        && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then
-      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
-      return 1
-    fi
-  done
-  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
-    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
-    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
-      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
-      return 1
-    }
+validate_pr_poll_cleanup() { fm_pr_poll_cleanup_validate "$@"; }
+remove_pr_poll_artifacts() { fm_pr_poll_cleanup_remove "$1" "$2" "$SCRIPT_DIR/fm-pr-poll.sh"; }
+
+retire_busy_state() {
+  local state_dir=$1 id=$2 gen=${3:-}
+  if [ -n "$gen" ]; then
+    "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --gen "$gen"
+  elif [ -f "$state_dir/$id.busy-gen" ]; then
+    "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --current-gen
   fi
 }
 
-remove_pr_poll_artifacts() {
-  local state_dir=$1 id=$2
-  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
-  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
-  fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
-  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
+# Retire one task's volatile local runtime projections after its owning
+# lifecycle path has proved that the exact endpoint/resource generation is
+# finished. Status retirement stays with fm-classify-lib.sh so the fleet
+# presentation manifest and all per-consumer markers move atomically with the
+# log. Callers must already hold the task metadata lock; this keeps steering
+# writers and task-id reuse outside the cleanup window.
+retire_task_runtime_state() {  # <state-dir> <task-id> [busy-generation]
+  local state_dir=$1 id=$2 busy_gen=${3:-}
+  fm_task_inbox_retirement_guard "$state_dir" "$id" || return 1
+  retire_busy_state "$state_dir" "$id" "$busy_gen" || return 1
+  status_retire_presentation_task "$state_dir" "$id" --require-settled || return 1
+  rm -f "$state_dir/$id.turn-ended" "$state_dir/$id.progress" \
+    "$state_dir/$id.pi-ext.ts" "$state_dir/$id.busy-session" \
+    "$state_dir/$id.herdr-presentation" \
+    "$state_dir/$id.control-relaunch" "$state_dir/$id.control-relaunch.meta-prior" \
+    "$state_dir/$id.control-relaunch.brief-prior" "$state_dir/$id.control-relaunch.note" \
+    "$state_dir/$id.reconcile-nudged" \
+    "$state_dir/.$id.branch-outcome-index" || return 1
+  # The steering inbox belongs to the retired endpoint. Complete retirement
+  # has already settled delivery/acceptance, so any leftover instruction is
+  # explicitly moot rather than evidence authorizing more work.
+  rm -rf "$state_dir/$id.inbox"
 }
 
 # Completed goals retire their recorded endpoint independently of disposable
@@ -407,11 +401,14 @@ teardown_completed_task() (
   local copy_lock='' copy_lock_held=0
   local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
   local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-task-handoff.sh" retirement-check "$ID" || exit 1
   lock=$(fm_meta_lock_path "$meta") || exit 1
   fm_lock_acquire_wait "$lock"
   trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi' EXIT
   fm_backend_validate_task_endpoint "$meta" "$ID" || exit 1
   [ -z "$ENDPOINT_EXPECTED_GEN" ] || [ "$(fm_meta_get "$meta" spawn_gen)" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
+  fm_task_inbox_retirement_guard "$STATE" "$ID" || exit 1
   KIND=$(fm_meta_get "$meta" kind)
   [ -n "$KIND" ] || KIND=ship
   [ "$KIND" != secondmate ] || {
@@ -493,7 +490,7 @@ teardown_completed_task() (
 
 )
 teardown_completed_bookkeeping() {
-  local meta=$1 generation=$2 disposition=$3 facts marker captain_out captain_status=0 backlog_status=0
+  local meta=$1 generation=$2 disposition=$3 facts marker captain_out captain_status=0 backlog_status=0 busy_gen
   local KIND MODE PR_URL WT PROJ
   local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
   local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
@@ -504,10 +501,16 @@ teardown_completed_bookkeeping() {
   PROJ=$(fm_meta_get "$meta" project)
   [ -n "$KIND" ] || KIND=ship
   [ -n "$MODE" ] || MODE=no-mistakes
+  facts=$(jq -cn --arg disposition "$disposition" \
+    '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}') \
+    || exit 1
   # Retire the exact task's authenticated watcher artifacts before its
   # resource metadata disappears. This is ordinary cleanup bookkeeping, not a
   # reason to weaken watcher authentication or infer a broader target.
   remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+  busy_gen=$(fm_meta_get "$meta" busy_gen)
+  [ -n "$busy_gen" ] || busy_gen=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
+  retire_task_runtime_state "$STATE" "$ID" "$busy_gen" || exit 1
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     if ! fm_backlog_meta_spawn_gen "$meta" "$STATE"; then
       echo "error: completed cleanup could not bind $ID's backlog transition to its task generation ($FM_BACKLOG_TRANSITION_ERROR)" >&2
@@ -555,13 +558,17 @@ teardown_completed_bookkeeping() {
     BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
     fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
   fi
-  rm -f "$STATE/.$ID.branch-outcome-index"
-  teardown_endpoint_receipt record_close confirmed completed-record-retired || exit 1
-  facts=$(jq -cn --arg disposition "$disposition" '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}')
-  fm_cleanup_receipt completion-record "$ID" "$generation" --facts "$facts" >/dev/null || {
-    echo 'actionable: cleanup completed but cleanup-owner evidence could not be recorded; read back before retrying effects' >&2
-    return 1
-  }
+  if [ "$BACKLOG_CLOSED" != 1 ]; then
+    teardown_endpoint_receipt record_close confirmed completed-record-retired || exit 1
+    fm_cleanup_receipt completion-record "$ID" "$generation" --facts "$facts" >/dev/null || {
+      echo 'actionable: cleanup completed but cleanup-owner evidence could not be recorded; read back before retrying effects' >&2
+      return 1
+    }
+    fm_cleanup_receipt_archive_complete "$ID" "$generation" || {
+      echo 'actionable: cleanup completed but its receipts could not be retired from active state; retry exact task retirement' >&2
+      return 1
+    }
+  fi
   printf 'teardown %s complete (exact pane absent; copy=%s; report retained)\n' "$ID" "$disposition"
   backlog_refresh_reminder
   if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
@@ -587,9 +594,8 @@ teardown_retained_copy() (
   trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi; fm_lease_guard_release' EXIT
   fm_lock_acquire_wait "$lock" || exit 1
   [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] || { echo 'REFUSED: retire execution metadata before copy-only follow-through' >&2; exit 1; }
-  receipt=$(jq -ce 'select(.schema=="fm-task-cleanup.v1")' "$STATE/$ID.cleanup.json") || exit 1
-  generation=$(printf '%s' "$receipt" | jq -r '.spawn_gen')
-  [ "$generation" = "$ENDPOINT_EXPECTED_GEN" ] || { echo 'REFUSED: retained copy generation conflict' >&2; exit 1; }
+  generation=$ENDPOINT_EXPECTED_GEN
+  receipt=$(fm_cleanup_receipt read "$ID" "$generation") || exit 1
   readback=$(fm_cleanup_receipt copy-read "$ID" "$generation") || exit 1
   if printf '%s' "$receipt" | jq -e '.preservation_ref!=null' >/dev/null; then
     echo 'retained copy preservation settled; no disposal replay'; exit 0
@@ -598,7 +604,7 @@ teardown_retained_copy() (
   [ "$phase" != confirmed ] || { echo 'retained copy already disposed; no effects repeated'; exit 0; }
   absent=$(printf '%s' "$readback" | jq -r '.absent')
   ENDPOINT_GENERATION=$generation
-  ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
+  ENDPOINT_RECEIPT=$(fm_cleanup_receipt path "$ID" "$generation") || exit 1
   # shellcheck source=bin/fm-teardown-endpoint-lib.sh
   . "$SCRIPT_DIR/fm-teardown-endpoint-lib.sh"
   if [ "$absent" = true ]; then
@@ -729,6 +735,8 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-task-handoff.sh" retirement-check "$ID" || exit 1
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
@@ -736,6 +744,7 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+fm_task_inbox_retirement_guard "$STATE" "$ID" || exit 1
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 [ "$TEARDOWN_META_KIND" != secondmate ] || {
@@ -919,15 +928,6 @@ meta_value() {
 # owned by bin/fm-control-lib.sh, so teardown and the control plane's relaunch
 # retire the same artifact rather than each carrying its own copy of the path.
 
-
-retire_busy_state() {
-  local state_dir=$1 id=$2 gen=${3:-}
-  if [ -n "$gen" ]; then
-    "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --gen "$gen"
-  elif [ -f "$state_dir/$id.busy-gen" ]; then
-    "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --current-gen
-  fi
-}
 
 inspectable_git_worktree() {
   local target=$1 top
@@ -1885,18 +1885,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-status_retire_presentation_task "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.busy-session" \
-  "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/$ID.reconcile-nudged" \
-  "$STATE/.$ID.branch-outcome-index"
-# The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
-# retired endpoint; teardown only runs after landing is confirmed, so any
-# leftover unhandled steer here is moot rather than unlanded work.
-rm -rf "$STATE/$ID.inbox"
+retire_task_runtime_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held
@@ -1931,8 +1920,11 @@ fm_cleanup_receipt completion-record "$ID" "$TEARDOWN_META_SPAWN_GEN" --facts \
 }
 if [ "$ENDPOINT_PHASE_DONE" = 1 ]; then
   teardown_endpoint_receipt record_close confirmed metadata-removed-report-retained || exit 1
-  rm -f "$HERDR_PRESENTATION_JOURNAL"
 fi
+fm_cleanup_receipt_archive_complete "$ID" "$TEARDOWN_META_SPAWN_GEN" || {
+  echo 'actionable: cleanup completed but its receipts could not be retired from active state; retry exact task retirement' >&2
+  exit 1
+}
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "${FM_SUPERVISION_ACTOR:-}" != short ] && [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then

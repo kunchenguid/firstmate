@@ -1237,3 +1237,50 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
 }
+
+# Validate and retire the complete task-local PR polling family. Callers hold
+# their task lifecycle lock; this owner keeps exact-file and retirement-receipt
+# checks identical for ordinary teardown and historical state-only cleanup.
+fm_pr_poll_cleanup_validate() {  # <state> <task-id>
+  local state_dir=$1 id=$2 state_device artifact has_artifact=0
+  fm_pr_task_id_valid "$id" || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
+      || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
+        && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
+    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
+    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
+      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
+      return 1
+    }
+  fi
+}
+
+fm_pr_poll_cleanup_remove() {  # <state> <task-id> <poll-program>
+  local state_dir=$1 id=$2 poll_program=$3
+  fm_pr_poll_cleanup_validate "$state_dir" "$id" || return 1
+  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$poll_program" || return 1
+  fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"
+}

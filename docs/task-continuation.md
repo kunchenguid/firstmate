@@ -103,6 +103,20 @@ If the exact task is explicitly completed or archived after a continuation admis
 
 [`fm-task-retire.sh`](../bin/fm-task-retire.sh) and [`fm-teardown.sh`](../bin/fm-teardown.sh) keep business completion separate from physical cleanup. They require current compact acceptance or explicit archive, then use delivery and cleanup owners for their own checks. A ship still needs the correct current-generation merge receipt; a scout still needs its report and decision gate.
 
+Normal local and remote retirement also removes that task's volatile status presentation and runtime projections through their existing owners.
+The status owner holds the presentation lock and refuses retirement while status bytes are unread or a decision is open.
+The inbox owner refuses while any instruction is unhandled, and the handoff owner treats `delivered` as transport state rather than acknowledgement until the exact generation-bound inbox record exists under `handled/`.
+The runtime owner removes task-scoped busy, session, control, handled inbox history, progress, and presentation projections only after endpoint/resource retirement and accepted completion are proven.
+Cleanup and merge receipts move from active `state/` paths into task-owned archives under `data/<task>/`, and their original readers continue to resolve exact generations there.
+Reports, canonical task records, remote-execution identity, provider captures and handled evidence, and retained copies remain outside this cleanup.
+
+There is no fleet sweeper or inference-based historical deletion command.
+For one already-retired task, MAIN may run `fm-task-retire.sh <task-id> --historical-state dry-run --generation <generation>` and then repeat it with `apply`.
+This state-only path requires absent execution metadata, an absent canonical record, an exact task-and-generation legacy terminal lifecycle record, immutable completed-cleanup evidence, no pending inbox/handoff/lease/short operation/backlog transition/provider runtime, and fully presented status with no open decision.
+A canonical `done` or `archived` row cannot authorize this path because the current schema has no execution generation and therefore cannot distinguish a reopened task ID from the old completed instance.
+It calls the existing status, runtime, poll, inbox, handoff, and receipt owners; it performs no provider, endpoint, copy, backlog, or business-state action.
+Missing metadata, a final `done` line, an absent pane, age, or an old generation receipt alone is not terminal authority, and any failed proof keeps the historical record in place.
+
 Endpoint cleanup binds the exact task, executor generation, Herdr session, and pane. It refuses conflicting ownership and never closes a whole workspace. Copy disposal is independent: primary, shared, dirty, unintegrated, or unverified copies remain available with an explicit cleanup disposition. Only an exclusive clean copy proved integrated into the default branch can be returned or removed. A pending or uncertain disposal requires exact readback before any further effect.
 
 Historical private files, reports, operation receipts, dirty copies, and unlanded work remain untouched. Removing the rich lifecycle subsystem does not authorize deleting or rewriting them.

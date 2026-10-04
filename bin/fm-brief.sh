@@ -173,7 +173,10 @@ shell_quote() {
   printf "'"
 }
 
-STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+STATUS_APPEND=$(shell_quote "$FM_ROOT/bin/fm-status-append.sh")
+STATUS_TASK_ID=$(shell_quote "$ID")
+STATUS_HOME=$(shell_quote "$FM_HOME")
+STATUS_STATE=$(shell_quote "$STATE")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 
 # The receive-and-ack half of the steering-inbox contract, included in every
@@ -253,7 +256,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`FM_HOME=$STATUS_HOME FM_STATE_OVERRIDE=$STATUS_STATE $STATUS_APPEND $STATUS_TASK_ID "{state}: {one short line}"\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
@@ -318,7 +321,7 @@ $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`FM_HOME=$STATUS_HOME FM_STATE_OVERRIDE=$STATUS_STATE $STATUS_APPEND $STATUS_TASK_ID "{state}: {one short line}"\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the

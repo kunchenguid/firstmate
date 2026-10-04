@@ -72,6 +72,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 2; }
@@ -578,9 +580,14 @@ cmd_abandon() (
 )
 
 cmd_retire() {
-  local id=${1-} report source lock meta_lock generation
+  local id=${1-} report source lock meta_lock generation facts
   [ "$#" -eq 1 ] || usage
   lock=$(fm_remote_task_lock_path "$id")
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-task-handoff.sh" retirement-check "$id" \
+    || die 'iDA task has unsettled cross-task delivery; preserving retirement state'
+  fm_task_inbox_retirement_guard "$STATE" "$id" \
+    || die 'iDA task has unhandled inbox instructions; preserving retirement state'
   (
     # Same order as continuation: lease, metadata, provider state.
     # shellcheck source=bin/fm-lease-lib.sh
@@ -591,6 +598,8 @@ cmd_retire() {
     fm_lock_acquire_wait "$meta_lock" || die "cannot lock task metadata"
     fm_lock_acquire_wait "$lock" || die "cannot lock iDA task"
     fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+    fm_task_inbox_retirement_guard "$STATE" "$id" \
+      || die 'iDA task received an unhandled inbox instruction during retirement; preserving it'
     generation=$(jq -r '.generation // 1' "$REMOTE_STATE_FILE")
     # shellcheck source=bin/fm-cleanup-receipt-lib.sh
     . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
@@ -604,12 +613,32 @@ cmd_retire() {
     . "$SCRIPT_DIR/fm-remote-execution-receipt-lib.sh"
     fm_remote_execution_receipt_record "$DATA" "$id" remote-agent ida "remote-$generation" \
       || die "cannot retain immutable iDA execution identity"
+    fm_cleanup_receipt create "$id" "remote-$generation" >/dev/null \
+      || die "cannot initialize immutable iDA cleanup evidence"
     source=$(fm_remote_source_id ida "$id")
     "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null || die "cannot retire iDA process-event source"
     fm_backlog_remote_retire "$CONFIG" "$DATA" "$id" \
       || die "remote retirement backlog transition failed; execution evidence retained: $FM_BACKLOG_TRANSITION_ERROR"
-    rm -f -- "$STATE/$id.meta" "$STATE/$id.status" "$STATE/$id.turn-ended" "$STATE/.$id.open-decisions-cursor"
+    _fm_wake_require_classify || die "status presentation retirement is unavailable"
+    status_retire_presentation_task "$STATE" "$id" --require-settled \
+      || die "cannot retire iDA status presentation state"
+    rm -f -- "$STATE/$id.turn-ended" "$STATE/$id.progress" \
+      "$STATE/$id.pi-ext.ts" "$STATE/$id.busy-session" \
+      "$STATE/$id.control-relaunch" "$STATE/$id.control-relaunch.meta-prior" \
+      "$STATE/$id.control-relaunch.brief-prior" "$STATE/$id.control-relaunch.note" \
+      "$STATE/$id.reconcile-nudged" "$STATE/.$id.branch-outcome-index"
+    # The retired source owns any late captured result and handled marker.
+    # Remaining inbox records target no endpoint and are explicitly settled by
+    # this terminal retirement instead of being treated as new work.
+    rm -rf -- "$STATE/$id.inbox"
+    rm -f -- "$STATE/$id.meta"
     rm -rf -- "$(fm_remote_task_dir "$id")"
+    facts=$(jq -cn '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:"returned-or-already-absent",bookkeepingComplete:true}') \
+      || die "cannot encode iDA cleanup completion"
+    fm_cleanup_receipt completion-record "$id" "remote-$generation" --facts "$facts" >/dev/null \
+      || die "iDA retirement completed but immutable cleanup completion could not be recorded; read back before retrying effects"
+    fm_cleanup_receipt_archive_complete "$id" "remote-$generation" \
+      || die "iDA retirement completed but its receipts could not be retired from active state"
     printf 'retired: %s report=data/%s/report.md\n' "$id" "$id"
   )
 }
