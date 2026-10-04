@@ -24,6 +24,17 @@ The classes below are the shapes this home has actually recorded from the regist
 | resolver tool absent | `dns=skipped`, then the HTTP verdict | per HTTP | nothing about DNS; disclosed as `dns_tool_missing` | - |
 | no usable curl executable | `tool-missing` | 64 | this surface could not be probed | any claim about the endpoint |
 
+## Resolver candidates and one recorded misclassification
+
+The default candidate list is `/usr/bin/dig` then `/usr/bin/host`; `FM_PROVIDER_REACH_DNS_TOOL` overrides it with one tool or a preference list, which is also what keeps the suite deterministic on every host.
+
+It previously led with macOS's `/usr/bin/dscacheutil`, called as `-q host -a <name>`.
+That is not one of its directory-service categories, so it answered **every** name with its usage block and exit 64, and because those calls come first in the list they set the DNS phase: an NXDOMAIN endpoint was recorded as `dns=fail dns_detail=rc=64` - "the resolver errored" - rather than "the name resolves to nothing".
+The exit verdict stayed 20 by fallthrough, so the class was right and the shape was wrong.
+Reproduced first-hand on this host: `dscacheutil -q host -a api.xhyapi.com` prints usage and exits 64 while `dig` reports `status: NXDOMAIN` and `host` reports `not found: 3(NXDOMAIN)` for the same name.
+A reader must therefore treat `dns=fail rc=<code>` from any build before this correction as an unusable lookup, not as evidence about the endpoint.
+`tests/fm-provider-reach-probe.test.sh` now pins the candidate list so a tool the probe cannot call correctly cannot re-enter it.
+
 Two asymmetries are load-bearing and are the reason the verdicts are not collapsed into exit-success:
 
 - A `401`/`403` shares no meaning with a `000`. The first is a live endpoint refusing an unauthenticated request; the second is the signature of an unreachable provider. Recording either as "down", or the first as "up", would misroute the next dispatch decision.

@@ -63,8 +63,9 @@
 #                                     used. Zero is rejected because `timeout 0`
 #                                     and the Perl fallback's `alarm 0` both mean
 #                                     "no deadline".
-#   FM_PROVIDER_REACH_DNS_TOOL        override the resolver CLI (default:
-#                                     /usr/bin/dscacheutil, then dig, then host).
+#   FM_PROVIDER_REACH_DNS_TOOL        override the resolver CLI, or a
+#                                     whitespace-separated preference list (default:
+#                                     /usr/bin/dig, then /usr/bin/host).
 #                                     Tests use it to keep DNS deterministic.
 #   FM_TEST_SEAM                      when 1, allow FM_PROVIDER_REACH_CURL_CMD to
 #                                     name the curl executable, so a suite can
@@ -208,18 +209,18 @@ dns_probe() {
   local tool out rc first
   # The override is one tool or a whitespace-separated preference list; unset
   # means this host's own candidates in order.
-  for tool in ${FM_PROVIDER_REACH_DNS_TOOL:-/usr/bin/dscacheutil dig host}; do
+  for tool in ${FM_PROVIDER_REACH_DNS_TOOL:-/usr/bin/dig /usr/bin/host}; do
     [ -n "$tool" ] || continue
     case "$tool" in
       /*) [ -x "$tool" ] || continue ;;
       *) command -v "$tool" >/dev/null 2>&1 || continue ;;
     esac
-    case "$tool" in
-      */dscacheutil)
-        out=$(fm_run_timed "$TIMEOUT" "$tool" -q host -a "$AUTHORITY" 2>/dev/null </dev/null) && rc=0 || rc=$? ;;
-      *)
-        out=$(fm_run_timed "$TIMEOUT" "$tool" "$AUTHORITY" 2>/dev/null </dev/null) && rc=0 || rc=$? ;;
-    esac
+    # Both candidates take the bare authority and no category argument. macOS
+    # ships /usr/bin/dscacheutil, whose `-q` requires a valid directory-service
+    # category (`host` is not one), so it answers any name with its usage block
+    # and exit 64; calling it here recorded "the resolver errored" for names that
+    # `dig` and `host` both reported as NXDOMAIN. It is therefore not a candidate.
+    out=$(fm_run_timed "$TIMEOUT" "$tool" "$AUTHORITY" 2>/dev/null </dev/null) && rc=0 || rc=$?
     if [ "$rc" -eq 124 ]; then
       printf 'fail timeout_after_%ss\n' "$TIMEOUT"
       return 0
