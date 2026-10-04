@@ -215,8 +215,31 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+test_ask_user_gate_materializes_once() {
+  command -v tasks-axi >/dev/null 2>&1 || return 0
+  local dir state out snapshot rows
+  dir=$(make_case ask-user-hold)
+  state="$dir/state"
+  out="$dir/drain.out"
+  mkdir -p "$dir/data/task-ask" "$dir/config"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add task-ask 'Ask-user origin' --kind ship --repo sample >/dev/null
+  snapshot="$dir/data/task-ask/nm-run-findings.txt"
+  printf 'id: f-one\nauthority: ask-user\ndescription: Scope.\n' > "$snapshot"
+  printf 'needs-decision [key=nm-run-review]: ask-user findings=f-one file=%s\n' "$snapshot" > "$state/task-ask.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'ask-user drain failed'
+  rows=$(FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" list --fields body)
+  printf '%s\n' "$rows" | grep -q 'Review ask-user finding for task-ask' || fail 'ask-user gate had no backlog row'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'repeat ask-user drain failed'
+  rows=$(FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" list --fields body)
+  [ "$(printf '%s\n' "$rows" | grep -c 'Review ask-user finding for task-ask')" -eq 1 ] \
+    || fail 'repeat drain duplicated the ask-user hold'
+  pass 'new ask-user findings create one durable Firstmate-owned hold'
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
+test_ask_user_gate_materializes_once
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library

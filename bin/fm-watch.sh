@@ -1158,8 +1158,8 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
 # declared `until` time that has just passed re-surface at once), while the
 # throttle keeps the cadence between repeats.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
-  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [once-marker]
+  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} once_marker=${7:-}
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$min_age" ] || return 0
@@ -1167,6 +1167,7 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
+  [ -z "$once_marker" ] || printf '%s' "$scope" > "$once_marker"
   wake "$reason"
 }
 
@@ -1457,14 +1458,17 @@ clear_write_tracking() {  # <window-key>
 # file exists. The incarnation half re-arms a relaunch: a successor's own later
 # death is reported in full even when its dead display hashes identically to the
 # reported one. Only when no incarnation token is readable for the task does the
-# pane hash stand in as the discriminator - an unreadable token must never mean
-# re-report on every threshold, so that fallback keeps today's hash-keyed absorb,
+# pane hash stands in as the discriminator. A completed worker's status-record
+# signature is a steadier fallback across a churning stopped pane; a new done
+# append changes that signature and re-arms the report. An unreadable token must
+# never mean
+# re-report on every threshold, so other paths keep today's hash-keyed absorb,
 # with the residual that a record-less successor dying into a byte-identical dead
 # display stays absorbed. Under one unchanged incarnation a dead pane's static
 # display absorbs on every threshold either way.
 # Returns 0 when it has handled the window, 1 to escalate on the unchanged path.
-wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-hash> <task>
-  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 task=$6 key marker agent_state detail reason gen id
+wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-hash> <task> [stable-fallback]
+  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 task=$6 stable_fallback=${7:-} key marker agent_state detail reason gen id
   key=$(window_key "$win")
   marker="$STATE/.dead-reported-$key"
   agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
@@ -1476,7 +1480,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   # Re-arm the idle timer on BOTH paths below, so the backend probe above stays on
   # its once-per-STALE_ESCALATE_SECS budget instead of running on every poll.
   date +%s > "$since_file"
-  id=$hash
+  id=${stable_fallback:-$hash}
   if gen=$(fm_busy_current_gen "$STATE" "$task"); then
     id=$gen
   fi
@@ -1626,7 +1630,23 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
+  # The first long-cadence recheck is durable. Repeating a specifically marked,
+  # unchanged integration dependency adds no action for Firstmate; liveness is
+  # still checked by pause_state_class on later polls, and a new declaration
+  # re-arms this. Other paused work keeps its existing periodic rechecks.
+  if [ "$(window_kind "$win")" != secondmate ] && status_is_paused "$last" \
+    && [[ $last == *'integrate-after: '* ]] \
+    && [ "$(cat "$STATE/.integration-rechecked-$key" 2>/dev/null || true)" = "$declaration" ]; then
+    triage_log "absorbed unchanged declared pause after its first recheck: $win"
+    return 0
+  fi
+  if [ "$(window_kind "$win")" != secondmate ] && status_is_paused "$last" \
+    && [[ $last == *'integrate-after: '* ]]; then
+    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" \
+      "$declaration" "$min_age" "$STATE/.integration-rechecked-$key"
+  else
+    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
+  fi
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -1701,7 +1721,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
 
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" "$STATE/.integration-rechecked-$key"
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
@@ -3087,6 +3107,12 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = 'done' ] \
+              && wedge_dead_record "$w" "$ssf" 'completed worker' 0 "$h" "$task" \
+                "$(status_observed_signature "$STATE/$task.status")"; then
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

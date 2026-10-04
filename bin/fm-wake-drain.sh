@@ -466,7 +466,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line file intake item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
   if [ -n "$snapshot" ]; then
@@ -478,6 +478,19 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
+    # A worker's ask-user event is durable in its status log, but an event log
+    # alone cannot own a decision. Materialize one parked Firstmate work item
+    # before presenting it. Promotion to captain remains a separate judgment.
+    if [ "$verb" = needs-decision ] && [ "$key" != default ]; then
+      case "$note" in
+        'ask-user findings='*' file='*)
+          file=${note##* file=}
+          if ! intake=$("$SCRIPT_DIR/fm-ask-user-intake.sh" ensure "$task" "$key" "$file" 2>&1); then
+            printf 'ASK-USER INTAKE FAILED: %s %s\n' "$task" "$intake" || return 1
+          fi
+          ;;
+      esac
+    fi
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"

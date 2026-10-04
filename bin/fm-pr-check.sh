@@ -67,6 +67,12 @@ if [ "$KIND" = secondmate ]; then
   echo "error: $ID is a secondmate, not a delivery lane - $URL was reported on its status channel but belongs to a task in the mate's own home, which arms its own merge watch" >&2
   exit 1
 fi
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-integrate-after.sh" check "$ID" >/dev/null || {
+    echo "error: PR readiness refused until integration-only providers have landed" >&2
+    exit 1
+  }
+fi
 
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
