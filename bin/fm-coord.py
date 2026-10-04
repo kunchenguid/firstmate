@@ -686,8 +686,12 @@ def run_operation(db, op, p):
         head = oid(p.get("head_oid"), "head_oid")
         batch_id = token(p.get("batch_id"), "batch_id")
         require(p.get("conclusion") in {"success", "failure", "cancelled", "timed_out"}, "conclusion must be a terminal CI state")
-        row = db.execute("SELECT * FROM ci_heads WHERE repo=? AND head_oid=? AND batch_id=? AND state='active'", (repo, head, batch_id)).fetchone()
-        require(row is not None, "batch holds no active CI slot")
+        # A batch is identified by (repo, base, batch_id); without a base, only a single matching active batch is completed.
+        base = token(p["base"], "base") if "base" in p else None
+        rows = db.execute("SELECT * FROM ci_heads WHERE repo=? AND head_oid=? AND batch_id=? AND state='active' AND (? IS NULL OR base_ref=?)", (repo, head, batch_id, base, base)).fetchall()
+        require(rows, "batch holds no active CI slot")
+        require(len(rows) == 1, "batch is active under several base refs; ci-complete requires base")
+        row = rows[0]
         event_id = complete_ci(db, request_id, row, p["conclusion"])
         return {"ok": True, "released": row["batch_id"], "admitted": promote_ci(db, request_id, repo), "event_id": event_id}
     if op == "merge-guard":

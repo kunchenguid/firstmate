@@ -38,7 +38,7 @@ def pulse(name, batch, request_id):
     return coord("pulse-batch", {**owner, "request_id": request_id, "head_oid": head, "batch_id": batch})
 def complete(name, conclusion, request_id, ok=True, batch=None):
     owner, head = live[name]
-    return coord("ci-complete", {"request_id": request_id, "repo": "owner/repo", "head_oid": head, "batch_id": batch or name, "conclusion": conclusion}, ok)
+    return coord("ci-complete", {"request_id": request_id, "repo": "owner/repo", "base": "main", "head_oid": head, "batch_id": batch or name, "conclusion": conclusion}, ok)
 
 # Off by default: with no configured capacity every head is admitted at once.
 for i in range(1, 6):
@@ -128,7 +128,7 @@ if adapter "$tmp/y" pre-ci y batch-y "$repo" > /dev/null 2> "$tmp/err"; then
   fail 'a queued batch must stay refused until a slot completes'
 fi
 head_x=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["x"]["published_head"])' "$tmp/x/state/fm-coord-adapter.json")
-coord ci-complete "$(printf '{"request_id":"complete-x","repo":"owner/gated","head_oid":"%s","batch_id":"batch-x","conclusion":"failure"}' "$head_x")" > /dev/null
+coord ci-complete "$(printf '{"request_id":"complete-x","repo":"owner/gated","base":"main","head_oid":"%s","batch_id":"batch-x","conclusion":"failure"}' "$head_x")" > /dev/null
 # The poll after admission lost its reply; replay then receives the authorization.
 lose_poll() {
   python3 - "$tmp/$1/state/fm-coord-adapter.json" "$1" <<'PY'
@@ -169,7 +169,7 @@ git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit
 adapter "$tmp/z" pre-push z "$repo" > /dev/null || fail 'z must publish its head'
 adapter "$tmp/z" pre-ci z batch-z "$repo" > /dev/null 2>&1 && fail 'z must queue behind the active head'
 head_y=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["y"]["published_head"])' "$tmp/y/state/fm-coord-adapter.json")
-coord ci-complete "$(printf '{"request_id":"complete-y","repo":"owner/gated","head_oid":"%s","batch_id":"batch-y","conclusion":"success"}' "$head_y")" > /dev/null
+coord ci-complete "$(printf '{"request_id":"complete-y","repo":"owner/gated","base":"main","head_oid":"%s","batch_id":"batch-y","conclusion":"success"}' "$head_y")" > /dev/null
 lose_poll z
 sqlite3 "$db" "UPDATE claims SET expires_mono_ns=0 WHERE intent_id LIKE 'z:%' AND state='active'"
 if adapter "$tmp/z" pre-ci z batch-z "$repo" > /dev/null 2> "$tmp/err"; then
@@ -202,11 +202,11 @@ for i in (1, 2):
     coord("pulse-batch", {**owner, "request_id": f"pulse-{name}", "head_oid": f"e{i:039x}", "batch_id": name})
 with sqlite3.connect(db) as source, sqlite3.connect(older) as target:
     source.backup(target)
-assert coord("ci-complete", {"request_id": "complete-rec-1", "repo": "owner/rec", "head_oid": f"e{1:039x}", "batch_id": "rec-1", "conclusion": "success"})["admitted"] == ["rec-2"]
+assert coord("ci-complete", {"request_id": "complete-rec-1", "repo": "owner/rec", "base": "main", "head_oid": f"e{1:039x}", "batch_id": "rec-1", "conclusion": "success"})["admitted"] == ["rec-2"]
 subprocess.run(["mv", older, db], check=True)
 coord("recover", {"confirm": "FENCE_AND_REENROLL"})
 assert [h["batch_id"] for h in coord("inspect", {})["ci_heads"] if h["repo"] == "owner/rec"] == ["rec-1"]
-assert coord("ci-complete", {"request_id": "complete-rec-1-restored", "repo": "owner/rec", "head_oid": f"e{1:039x}", "batch_id": "rec-1", "conclusion": "success"})["admitted"] == []
+assert coord("ci-complete", {"request_id": "complete-rec-1-restored", "repo": "owner/rec", "base": "main", "head_oid": f"e{1:039x}", "batch_id": "rec-1", "conclusion": "success"})["admitted"] == []
 events = coord("outbox", {"limit": 1000})["events"]
 assert sum(e["type"] == "ci-pulse-authorized" and e["payload"]["batch_id"] == "rec-2" for e in events) == 0
 PY
@@ -256,7 +256,7 @@ coord("queue-synced", {**common, "request_id": "sync-main-a", "head_contains_bas
 coord("queue-validated", {**common, "request_id": "validate-main-a", "validation_passed": True, "validation_id": "v-main-a"})
 coord("queue-checks", {**common, "request_id": "checks-main-a", "protection_available": False, "checks": [{"name": "Lint", "head_oid": head, "conclusion": "success"}]})
 assert heads("active") == ["main-a"] and heads("queued") == ["release-b", "gone-c", "main-d"], (heads("active"), heads("queued"))
-assert coord("ci-complete", {"request_id": "complete-main-a", "repo": "owner/heal", "head_oid": head, "batch_id": "main-a", "conclusion": "success"})["admitted"] == ["release-b"]
+assert coord("ci-complete", {"request_id": "complete-main-a", "repo": "owner/heal", "base": "main", "head_oid": head, "batch_id": "main-a", "conclusion": "success"})["admitted"] == ["release-b"]
 assert heads("active") == ["release-b"] and heads("queued") == ["gone-c", "main-d"], (heads("active"), heads("queued"))
 assert pulse("release-b")["admitted"] is True
 
