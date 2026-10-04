@@ -57,6 +57,28 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+//
+// Interrupted-run recovery (stated once here):
+// A follow-up waits in omp's queue until the run ends. An Escape while omp
+// shows its working animation moves every queued user message into the editor
+// (merged ahead of any draft, each segment joined by one blank line), aborts
+// with the user-interrupt reason, and suppresses omp's follow-up-only resume,
+// so the wake sits unsent in the composer. An empty Enter mid-run aborts the
+// same way without the restore, stranding the wake in omp's queue. On a plain
+// agent_end (never willContinue) this file waits for omp to settle, then:
+//   1. idle, nothing queued, and the editor holds an unconsumed wake's exact
+//      text: exactly that text leaves the editor, every other character (a
+//      captain's queued message or draft) stays byte for byte, and the token
+//      is released from unconsumedWakes so the ordinary pending pipeline
+//      delivers the wake again;
+//   2. idle, messages still queued, and no unconsumed wake in the editor: one
+//      operational steer, never a second copy of a wake, starts a turn; a
+//      queued steer clears the suppression, and omp delivers the stranded
+//      wakes after it. Each stranded wake earns at most one steer.
+// Each agent_end is checked once, and only the latest one pending settle acts.
+// A blind Enter from the parent is never safe here because the restored text
+// can hold what the captain typed; tests/fm-omp-interrupt-live-e2e.test.sh
+// re-checks omp's restore and strand behavior against a real omp.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -78,6 +100,13 @@ type ExtensionAPI = {
   sendUserMessage: (content: string, options?: { deliverAs?: string }) => unknown;
   registerCommand?: (name: string, command: { description: string; handler: (args: string, ctx: any) => Promise<void> | void }) => void;
   registerTool?: (tool: Record<string, unknown>) => void;
+};
+
+// The documented handler context members the interrupted-run recovery reads.
+type OmpHandlerContext = {
+  isIdle?: () => boolean;
+  hasPendingMessages?: () => boolean;
+  ui?: { getEditorText?: () => string; setEditorText?: (text: string) => void };
 };
 
 type ArmResult = {
@@ -131,6 +160,11 @@ type SessionGeneration = {
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
   deferredClose: { message: string; predecessorArmPid: string } | null;
+  // Unconsumed wake tokens that already earned one continuation steer after an
+  // empty-Enter abort stranded them in omp's queue.
+  steeredWakes: Set<string>;
+  // Bumped on every plain agent_end so only the latest settle check acts.
+  interruptCheck: number;
 };
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -158,6 +192,7 @@ const armReadyTimeoutMs = positiveInteger(
 );
 const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, 30000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const interruptSettleMs = positiveInteger("FM_OMP_INTERRUPT_SETTLE_MS", 300);
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";
 
@@ -487,6 +522,8 @@ function createGeneration(): SessionGeneration {
     cleanupFailure: "",
     unconsumedWakes: new Map(),
     deferredClose: null,
+    steeredWakes: new Set(),
+    interruptCheck: 0,
   };
 }
 
@@ -590,6 +627,7 @@ export default function (pi: ExtensionAPI) {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
       owner.unconsumedWakes.delete(token);
+      owner.steeredWakes.delete(token);
       wake.pending.delivered = true;
       try {
         finishPendingActionable(owner, wake.pending);
@@ -599,6 +637,53 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
+  }
+
+  // The interrupted-run recovery stated in this file's header, run once per
+  // plain agent_end after omp settles.
+  async function recoverInterruptedRun(owner: SessionGeneration, ctx: OmpHandlerContext | undefined): Promise<void> {
+    if (!generationIsLive(owner) || owner.unconsumedWakes.size === 0) return;
+    const check = ++owner.interruptCheck;
+    await new Promise<void>((resolveSettle) => {
+      const timer = setTimeout(resolveSettle, interruptSettleMs);
+      timer.unref();
+    });
+    if (!generationIsLive(owner) || owner.interruptCheck !== check) return;
+    // omp reads not idle inside a natural agent_end; after the settle wait an
+    // omp still running a turn or drain is left alone.
+    if (typeof ctx?.isIdle !== "function" || ctx.isIdle() !== true) return;
+    const editor: unknown = ctx.ui?.getEditorText?.();
+    if (typeof editor !== "string") return;
+    const queued = ctx.hasPendingMessages?.() === true;
+    let remaining = editor;
+    const restored: string[] = [];
+    for (const [token, wake] of owner.unconsumedWakes) {
+      const start = remaining.indexOf(wake.content);
+      if (start < 0) continue;
+      remaining = remaining.slice(0, start) + remaining.slice(start + wake.content.length);
+      restored.push(token);
+    }
+    if (restored.length > 0) {
+      // A restore moves every queued user message, so anything still queued
+      // is not this shape; a wake in the editor is never sent twice.
+      if (queued || typeof ctx.ui?.setEditorText !== "function") return;
+      ctx.ui.setEditorText(remaining);
+      for (const token of restored) {
+        owner.unconsumedWakes.delete(token);
+        owner.steeredWakes.delete(token);
+      }
+      await processPendingActionables(owner);
+      return;
+    }
+    if (!queued) return;
+    const stranded = [...owner.unconsumedWakes.keys()].filter((token) => !owner.steeredWakes.has(token));
+    if (stranded.length === 0) return;
+    for (const token of stranded) owner.steeredWakes.add(token);
+    const steer = encodeFirstmateOperationalInput(
+      "watcher",
+      "Firstmate supervision continues in a new turn: an interrupted run left Firstmate watcher wakes queued, and they follow this message. Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
+    );
+    await pi.sendUserMessage(steer, { deliverAs: "steer" });
   }
 
   function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {
@@ -1105,6 +1190,14 @@ export default function (pi: ExtensionAPI) {
     const message = (event as { message?: { role?: unknown; content?: unknown } })?.message;
     if (!message || message.role !== "user") return;
     consumeWake(generation, userMessageText(message.content));
+  });
+  pi.on?.("agent_end", (event, ctx) => {
+    if (event && typeof event === "object" && "willContinue" in event && event.willContinue === true) return;
+    const owner = generation;
+    void recoverInterruptedRun(owner, ctx).catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      surfaceFailure(owner, `watcher: FAILED - omp extension could not recover a wake an interrupted run left unsent\n${detail}`);
+    });
   });
 
   pi.on?.("session_start", async () => {
