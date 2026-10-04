@@ -327,6 +327,37 @@ test_outcome_sequence_conflicts_fail_closed() {
   pass "middle sequence conflicts fail closed for every store read and append"
 }
 
+test_outcome_recent_window_boundaries() {
+  local count home store out lines first last expected
+  for count in 0 199 200 201; do
+    home="$TMP_ROOT/store-recent-$count"
+    mkdir -p "$home/state"
+    store="$home/state/branch-outcomes.jsonl"
+    if [ "$count" -gt 0 ]; then
+      awk -v count="$count" 'BEGIN {
+        for (seq = 1; seq <= count; seq++) {
+          printf "{\"seq\":%d,\"epoch\":%d,\"task\":\"task-%d\",\"wake\":\"\",\"verdict\":\"routine\",\"summary\":\"row-%d\",\"silent\":false}\n", seq, seq, seq, seq
+        }
+      }' > "$store"
+    fi
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 200) \
+      || fail "recent-window read failed at history size $count"
+    lines=$(printf '%s\n' "$out" | awk 'NF { n++ } END { print n + 0 }')
+    expected=$count
+    [ "$expected" -le 200 ] || expected=200
+    [ "$lines" -eq "$expected" ] \
+      || fail "recent-window history size $count returned $lines rows, expected $expected"
+    if [ "$count" -gt 0 ]; then
+      first=$(printf '%s\n' "$out" | head -n 1 | jq -r .seq)
+      last=$(printf '%s\n' "$out" | tail -n 1 | jq -r .seq)
+      [ "$first" -eq "$((count - expected + 1))" ] \
+        || fail "recent-window history size $count began at seq $first"
+      [ "$last" -eq "$count" ] || fail "recent-window history size $count ended at seq $last"
+    fi
+  done
+  pass "recent outcome reads cover empty, below-window, exact-window, and above-window histories"
+}
+
 test_outcome_non_jsonl_layout_fails_closed() {
   local home store snapshot out status
   home="$TMP_ROOT/store-physical-layout-home"
@@ -900,6 +931,7 @@ test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
 test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
+test_outcome_recent_window_boundaries
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
 test_outcome_index_migration_preserves_legacy_endpoint_records

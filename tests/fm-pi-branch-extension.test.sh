@@ -6335,6 +6335,132 @@ EOF
   pass "exact duplicate notifications coalesce, terminal disposition supersedes obsolete repeated observations, and mixed substantive evidence stays live"
 }
 
+test_bounded_outcome_history_keeps_unknown_older_work_live() {
+  local repo home out sdk status
+  sdk="${FM_PI_PACKAGE_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
+  if [ ! -f "$sdk/dist/index.js" ]; then
+    printf 'skip: bounded outcome history regression requires installed Pi SDK\n'
+    return
+  fi
+  repo="$TMP_ROOT/bounded-outcome-history-root"
+  home="$TMP_ROOT/bounded-outcome-history-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" PI_PACKAGE_DIR="$sdk" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, home, sentToMain, mainTools, defaultSessionCtx }; })()`);
+const { pi, fire, dispatch, settle, home, sentToMain, mainTools, defaultSessionCtx } = globalThis.__t;
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { SessionManager } = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+const installedSession = SessionManager.inMemory(home);
+defaultSessionCtx.sessionManager = installedSession;
+pi.appendEntry = (customType, data) => installedSession.appendCustomEntry(customType, data);
+const mainEntries = () => installedSession.getEntries();
+
+const identity = (n) => n.toString(16).padStart(64, "0");
+const rows = [];
+for (let seq = 1; seq <= 1000; seq += 1) {
+  rows.push({
+    seq, epoch: seq, task: `padding-${seq}`, wake: "fixture", verdict: "routine",
+    summary: `padding-${seq}-${"x".repeat(1200)}`, silent: false,
+  });
+}
+const replace = (seq, row) => {
+  rows[seq - 1] = {
+    seq, epoch: seq, wake: "fixture", silent: false, ...row,
+    ...(row.taskGeneration ? { statusEndpoint: seq, statusIdent: `fixture-${seq}` } : {}),
+  };
+};
+replace(100, { task: "old-decision", verdict: "captain", summary: "older unprocessed decision remains actionable" });
+replace(500, { task: "outside-first", verdict: "routine", summary: "outside-window first material", taskGeneration: "g-outside-first", evidenceKey: identity(1), taskDisposition: "in_flight" });
+replace(700, { task: "outside-terminal", verdict: "routine", summary: "outside-window terminal", taskGeneration: "g-outside-terminal", evidenceKey: identity(2), taskDisposition: "archived" });
+replace(850, { task: "inside-old", verdict: "routine", summary: "inside-window obsolete material", taskGeneration: "g-inside-old", evidenceKey: identity(3), taskDisposition: "in_flight" });
+replace(900, { task: "outside-first", verdict: "routine", summary: "inside-window terminal", taskGeneration: "g-outside-first", evidenceKey: identity(4), taskDisposition: "archived" });
+replace(901, { task: "inside-old", verdict: "routine", summary: "inside-window terminal", taskGeneration: "g-inside-old", evidenceKey: identity(5), taskDisposition: "done" });
+replace(950, { task: "outside-terminal", verdict: "routine", summary: "inside-window new material", taskGeneration: "g-outside-terminal", evidenceKey: identity(6), taskDisposition: "in_flight" });
+replace(997, { task: "outside-first", verdict: "routine", summary: "outside-window first material", taskGeneration: "g-outside-first", evidenceKey: identity(1), taskDisposition: "archived" });
+replace(998, { task: "outside-terminal", verdict: "routine", summary: "inside-window new material", taskGeneration: "g-outside-terminal", evidenceKey: identity(6), taskDisposition: "in_flight" });
+replace(999, { task: "inside-old", verdict: "routine", summary: "inside-window obsolete material", taskGeneration: "g-inside-old", evidenceKey: identity(3), taskDisposition: "done" });
+replace(1000, { task: "new-decision", verdict: "captain", summary: "new exact decision remains visible" });
+const store = rows.map((row) => JSON.stringify(row)).join("\n") + "\n";
+if (Buffer.byteLength(store) <= 1024 * 1024) throw new Error("fixture did not exceed the historical 1 MiB failure boundary");
+writeFileSync(`${home}/state/branch-outcomes.jsonl`, store);
+writeFileSync(`${home}/state/.branch-outcomes-cursor`, "996\n");
+writeFileSync(`${home}/state/.branch-outcomes-processed`, "99\n");
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+for (const task of ["old-decision", "new-decision"]) {
+  mkdirSync(`${home}/data/${task}`, { recursive: true });
+  writeFileSync(`${home}/state/${task}.meta`, `spawn_gen=g-${task}\n`);
+  writeFileSync(`${home}/state/${task}.status`, "working: fixture\n");
+  writeFileSync(`${home}/data/${task}/task.json`, `${JSON.stringify({
+    schema: "fm-task.v1", id: task, title: task, body: "fixture", state: "in_flight", kind: "ship",
+    repo: "", priority: "", created: "2026-10-04", closed: null, completion: null, hold: null,
+    deferred_until: null, blocked_by: [], links: {}, history: [], updated_at: "2026-10-04T00:00:00Z",
+    progress: { acceptance: "fixture", current_state: "fixture", remaining_gap: "fixture", next_step: "fixture" },
+  })}\n`);
+}
+
+await fire("session_start", {}, defaultSessionCtx);
+await settle(() => mainEntries().some((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === 1000),
+  "new captain outcome from a greater-than-1-MiB history");
+await settle(() => sentToMain.some((item) => item.message.customType === "fm-branch-process"),
+  "ordered old and new captain processing request");
+const routine = sentToMain.filter((item) => item.message.customType === "fm-branch-merge");
+if (routine.map((item) => item.message.content).join("\n") !==
+    "⛵ outside-first: outside-window first material\n⛵ outside-terminal: inside-window new material") {
+  throw new Error(`bounded history did not conservatively retain unknown older evidence or preserve ordered new material: ${JSON.stringify(routine)}`);
+}
+if (routine.some((item) => item.message.content.includes("inside-window obsolete material"))) {
+  throw new Error("bounded history failed to suppress material proved obsolete wholly inside the window");
+}
+const request = sentToMain.filter((item) => item.message.customType === "fm-branch-process").at(-1);
+if (!request?.message.content.includes('sequences="100,1000"') ||
+    request.message.content.indexOf("[seq 100] task=old-decision") > request.message.content.indexOf("[seq 1000] task=new-decision")) {
+  throw new Error(`older unprocessed work and the new decision were not presented in exact sequence order: ${request?.message.content}`);
+}
+const visible = mainEntries().filter((entry) => entry.customType === "fm-branch-visible-outcome");
+if (visible.length !== 1 || visible[0].data.seq !== 1000 || visible[0].data.summary !== "new exact decision remains visible") {
+  throw new Error(`new sequence-keyed visible outcome was not exact: ${JSON.stringify(visible)}`);
+}
+const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+const loaded = await outcomes.execute("load-bounded-history", { sequences: "100,1000" }, undefined, undefined, {});
+if (loaded.isError || !loaded.content[0].text.includes('"seq":100') || !loaded.content[0].text.includes('"seq":1000')) {
+  throw new Error(`exact sequence authentication failed: ${JSON.stringify(loaded)}`);
+}
+const acknowledged = await processed.execute("ack-bounded-history", { sequences: "100,1000" }, undefined, undefined, {});
+if (acknowledged.isError || readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== "1000") {
+  throw new Error(`exact acknowledgement failed after bounded retrieval: ${JSON.stringify(acknowledged)}`);
+}
+
+let finishPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const offer = dispatch("signal: ordinary eligible admission after bounded outcome recovery");
+if (!offer.accepted) throw new Error(`ordinary eligible admission remained unhealthy: ${offer.declineReason}`);
+await settle(() => typeof finishPrompt === "function", "ordinary eligible branch prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+const admitted = await report.execute("bounded-admission-report", {
+  task: "branch-driver", verdict: "routine", summary: "ordinary eligible admission recovered",
+}, undefined, undefined, {});
+if (admitted.isError) throw new Error(`ordinary eligible admission could not persist its outcome: ${JSON.stringify(admitted)}`);
+finishPrompt();
+await offer.settlement;
+console.log(`bounded history kept output below the 1 MiB guard for ${Buffer.byteLength(store)} bytes of durable audit history`);
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "bounded recent history must preserve conservative delivery and ordinary admission: $out"
+  case "$out" in
+    *"bounded history kept output below the 1 MiB guard"*) ;;
+    *) fail "bounded history regression did not report its greater-than-1-MiB fixture: $out" ;;
+  esac
+  pass "$out"
+}
+
 test_short_task_success_reaches_main_with_authenticated_body() {
   local repo home out status
   repo="$TMP_ROOT/short-result-root"
@@ -6524,5 +6650,6 @@ test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 test_exact_notification_coalescing_and_terminal_supersession
+test_bounded_outcome_history_keeps_unknown_older_work_live
 test_continuation_archive_during_report_settlement
 test_native_compact_continuation_with_installed_session_manager
