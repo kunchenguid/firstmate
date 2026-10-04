@@ -10,6 +10,10 @@
 #     equivalent patch id in the PR head). An optional base also requires the PR
 #     to have merged into that branch. fleet-sync passes its default branch.
 #     Teardown passes none, so a PR merged into another task branch still counts.
+#     An optional landed ref narrows "not on any remote" to "not in that ref".
+#     fleet-sync passes its default ref, because it deletes the branch and a
+#     commit held only by an unmerged remote branch has not landed. Teardown
+#     passes none, because it also accepts remote reachability.
 #   - fm_branch_landed_content_in_ref: a 3-way merge of the default ref with the
 #     commit yields the default ref's own tree, so the commit introduces nothing
 #     the default branch lacks (its change landed via squash).
@@ -74,9 +78,10 @@ fm_branch_landed_patch_id() {  # <repo> <commit>
 
 # True when every commit of <commit> that no remote-tracking ref holds has an
 # equivalent patch id in the PR head's own range. Commits a remote already holds
-# stay reachable there, so only the remote-less ones need a match.
-fm_branch_landed_unpushed_patches_in() {  # <repo> <commit> <pr-head>
-  local repo=$1 current=$2 pr_head=$3 base pr_patch_ids commit patch_id unpushed
+# stay reachable there, so only the remote-less ones need a match. With
+# <landed-ref>, only commits that ref holds skip the match.
+fm_branch_landed_unpushed_patches_in() {  # <repo> <commit> <pr-head> [<landed-ref>]
+  local repo=$1 current=$2 pr_head=$3 landed_ref=${4:-} base pr_patch_ids commit patch_id unpushed
   current=$(git -C "$repo" rev-parse --verify "$current^{commit}" 2>/dev/null) || return 1
   base=$(git -C "$repo" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
@@ -88,7 +93,11 @@ fm_branch_landed_unpushed_patches_in() {  # <repo> <commit> <pr-head>
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$repo" log --format=%H "$current" --not --remotes -- 2>/dev/null) || return 1
+  if [ -n "$landed_ref" ]; then
+    unpushed=$(git -C "$repo" log --format=%H "$current" --not "$landed_ref" -- 2>/dev/null) || return 1
+  else
+    unpushed=$(git -C "$repo" log --format=%H "$current" --not --remotes -- 2>/dev/null) || return 1
+  fi
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -103,10 +112,11 @@ EOF
 # Is the PR named by <target> merged, with a head that contains <commit>? Asks
 # GitHub for the PR state, head, and URL from <repo>, and echoes the resolved PR
 # URL on success. With <base>, the PR must also have merged into that branch.
+# With <landed-ref>, the patch match skips only commits that ref holds.
 # Returns non-zero when the PR is not merged, merged into another base, the
 # commit is not contained in the PR head, or any gh or git error occurs.
-fm_branch_landed_in_merged_pr() {  # <repo> <target> <commit> [<base>]
-  local repo=$1 target=$2 commit=$3 required_base=${4:-} view state remainder head resolved_url base current
+fm_branch_landed_in_merged_pr() {  # <repo> <target> <commit> [<base>] [<landed-ref>]
+  local repo=$1 target=$2 commit=$3 required_base=${4:-} landed_ref=${5:-} view state remainder head resolved_url base current
   local fields=state,headRefOid,url query='.state + "\t" + .headRefOid + "\t" + .url'
   [ -n "$target" ] || return 1
   if [ -n "$required_base" ]; then
@@ -134,7 +144,7 @@ fm_branch_landed_in_merged_pr() {  # <repo> <target> <commit> [<base>]
   fm_branch_landed_ensure_commit "$repo" "$target" "$head" || return 1
   current=$(git -C "$repo" rev-parse --verify "$commit^{commit}" 2>/dev/null) || return 1
   if ! git -C "$repo" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
-    fm_branch_landed_unpushed_patches_in "$repo" "$current" "$head" || return 1
+    fm_branch_landed_unpushed_patches_in "$repo" "$current" "$head" "$landed_ref" || return 1
   fi
   printf '%s' "$resolved_url"
 }

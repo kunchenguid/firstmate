@@ -32,7 +32,9 @@
 # default. A task branch pushed from a separate worktree (the no-mistakes shape)
 # has no upstream, so it survives unless FM_FLEET_PRUNE_MERGED=1 opts in; then it
 # is pruned only on a squash-merge content proof or a head that contains it of a
-# PR merged into main. A PR merged into another base keeps the branch. Unpushed work, the checked-out branch, a branch with a worktree, and the
+# PR merged into main. A PR merged into another base keeps the branch, as does
+# a commit only another unmerged remote branch holds. A SHA-256 clone prunes too.
+# Unpushed work, the checked-out branch, a branch with a worktree, and the
 # default branch always survive, and FM_FLEET_PRUNE=0 disables every prune.
 # The prune runs after the fast-forward, and bootstrap's time-bounded refresh
 # keeps the content proof but makes no PR lookups.
@@ -66,15 +68,16 @@ commit_file() {
 
 # build_pair <home> <name>: create projects/<name>, a clone of a fresh bare origin
 # with one commit on main, plus a side "work-<name>" repo wired to that origin for
-# advancing it later. Portable branch naming (no init -b) for older git.
+# advancing it later. Portable branch naming (no init -b) for older git. An
+# optional <object-format> (sha1 or sha256) picks the hash every repo uses.
 build_pair() {
-  local home=$1 name=$2 work remote clone remote_abs
+  local home=$1 name=$2 format=${3:-sha1} work remote clone remote_abs
   work="$home/work-$name"
   remote="$home/remotes/$name.git"
   clone="$home/projects/$name"
   mkdir -p "$home/remotes"
 
-  git init -q "$work"
+  git init -q --object-format="$format" "$work"
   git -C "$work" symbolic-ref HEAD refs/heads/main
   commit_file "$work" file.txt v0 C0
 
@@ -996,6 +999,49 @@ test_unpushed_commit_without_worktree_survives() {
   pass "a branch with an unpushed commit and no worktree survives the opted-in prune"
 }
 
+test_unlanded_commit_held_by_another_remote_branch_survives() {
+  local home clone fakebin out wt pr_head
+  home=$(new_home)
+  clone=$(build_pair "$home" remoteheld)
+  # fm/stack builds on fm/other, whose commit sits on origin/fm/other but never
+  # landed. fm/stack's own commit matches the merged PR's head patch, so a proof
+  # that skips every remote-held commit would wrongly call fm/stack landed.
+  push_task_branch "$home" remoteheld fm/other a.txt unlanded >/dev/null
+  wt="$home/wt-remoteheld-stack"
+  git -C "$clone" worktree add -q --no-track -b fm/stack "$wt" origin/fm/other
+  commit_file "$wt" b.txt landed "stacked work"
+  git -C "$clone" worktree remove "$wt"
+  pr_head=$(push_task_branch "$home" remoteheld fm/stack-pr b.txt landed)
+  squash_merge_and_delete "$home" remoteheld fm/stack-pr b.txt landed
+  fakebin=$(prune_fakebin "$home" remoteheld "$pr_head")
+
+  out=$(FM_FLEET_PRUNE_MERGED=1 run_sync_prune "$home" "$fakebin" "$clone")
+
+  [ -s "$fakebin/pr-calls.log" ] || fail "fixture: the merged-PR proof should have looked up the PR"
+  assert_not_contains "$out" "pruned fm/stack " "a branch holding an unlanded remote-held commit must not prune"
+  branch_exists "$clone" fm/stack || fail "a branch whose earlier commit never landed must survive"
+  pass "a branch holding an unlanded commit another remote branch holds survives the opted-in prune"
+}
+
+test_sha256_landed_branch_pruned_when_opted_in() {
+  local home clone fakebin out err
+  home=$(new_home)
+  # SHA-256 ids are 64 hex digits, past the 40 that SHA-1 abbreviation caps.
+  clone=$(build_pair "$home" sha256 sha256)
+  fakebin=$(prune_fakebin "$home" sha256)
+  push_task_branch "$home" sha256 fm/task a.txt a >/dev/null
+  squash_merge_and_delete "$home" sha256 fm/task a.txt a
+
+  err="$home/sha256.err"
+  out=$(PATH="$fakebin:$PATH" FM_FLEET_PRUNE_MERGED=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+
+  assert_contains "$out" "sha256: pruned fm/task (landed, no upstream)" "a SHA-256 landed branch should prune"
+  if branch_exists "$clone" fm/task; then fail "a landed branch in a SHA-256 clone should be pruned"; fi
+  assert_not_contains "$(cat "$err")" "tip changed" "a SHA-256 prune must not report a tip change"
+  pass "a landed branch with no upstream in a SHA-256 clone is pruned when opted in"
+}
+
 test_checked_out_landed_branch_survives() {
   local home clone fakebin out
   home=$(new_home)
@@ -1101,6 +1147,8 @@ test_merged_pr_no_upstream_branch_pruned_when_opted_in
 test_bootstrap_refresh_prunes_on_content_proof_without_pr_lookups
 test_pr_merged_into_non_default_base_keeps_branch
 test_unpushed_commit_without_worktree_survives
+test_unlanded_commit_held_by_another_remote_branch_survives
+test_sha256_landed_branch_pruned_when_opted_in
 test_checked_out_landed_branch_survives
 test_landed_branch_with_worktree_survives
 test_default_branch_without_upstream_survives
