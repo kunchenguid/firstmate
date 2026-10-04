@@ -37,19 +37,24 @@ function ui() {
 }
 
 test('fast-jev falls back without a key and sends no request', async () => {
-  const entry = hooks().find(([event]) => event === 'session.compact');
-  const handler = entry.at(-1);
-  let fallback = false;
-  let requests = 0;
-  await handler({
-    http: { async fetch() { requests += 1; throw new Error('unexpected request'); } },
-    env: { async get() { return undefined; } },
-    settings: { async read() { return {}; } },
-    session: { async cwd() { return safetyRoot; } },
-    ui: ui(),
-  }, { messages: fixtureMessages() }, async () => { fallback = true; return 'default'; });
-  assert.equal(fallback, true);
-  assert.equal(requests, 0);
+  const root = await mkdtemp(join(process.cwd(), '.fast-jev-no-key-test-'));
+  try {
+    const entry = hooks().find(([event]) => event === 'session.compact');
+    const handler = entry.at(-1);
+    let fallback = false;
+    let requests = 0;
+    await handler({
+      http: { async fetch() { requests += 1; throw new Error('unexpected request'); } },
+      env: { async get() { return undefined; } },
+      settings: { async read() { return {}; } },
+      session: { async cwd() { return root; } },
+      ui: ui(),
+    }, { messages: fixtureMessages() }, async () => { fallback = true; return 'default'; });
+    assert.equal(fallback, true);
+    assert.equal(requests, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('fast-jev preserves conversation text and configured goals in state', () => {
