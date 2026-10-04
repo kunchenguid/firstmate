@@ -71,6 +71,9 @@ The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the 
 cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
 
+Secondmate homes are supported on cmux: a `--secondmate` spawn stands up that home's own workspace, titled with its `2ndmate-<id>` home label, by scoping the create call to the secondmate's `FM_HOME` exactly as the tmux and herdr backends do.
+cmux has no recovery-grade agent-process classifier yet, so a secondmate on cmux uses the generic ordinary-launch recovery semantics rather than a verified liveness probe.
+
 ```text
 backend=cmux
 window=<workspace-uuid>:<surface-uuid>

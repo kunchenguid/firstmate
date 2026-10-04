@@ -1086,18 +1086,57 @@ test_list_live_filters_by_title_prefix() {
   pass "fm_backend_cmux_list_live: lists only this home's scoped task workspaces using plain fm-<id> labels"
 }
 
-# --- fm-spawn.sh: --secondmate refuses backend=cmux --------------------------
+# --- fm-spawn.sh: --secondmate on backend=cmux creates a 2ndmate-scoped workspace -
 
-test_secondmate_spawn_refuses_cmux_backend() {
-  local dir state data config projects out status
-  dir="$TMP_ROOT/secondmate-refuse"; state="$dir/state"; data="$dir/data"; config="$dir/config"; projects="$dir/projects"
+# cmux now supports secondmate spawns: fm-spawn.sh shadows FM_HOME to the
+# secondmate's own home for the create call, so fm_backend_cmux_create_task
+# scopes the workspace title to "fm-2ndmate-<id>-<rest>" via fm_backend_hometag.
+# This covers that create behavior directly (the FM_HOME-scoped create fm-spawn
+# relies on), using the same fakebin pattern as the ordinary create tests.
+test_create_task_scopes_workspace_to_secondmate_home() {
+  local dir sm fb out title
+  dir="$TMP_ROOT/create-task-secondmate"; mkdir -p "$dir/responses"
+  sm="$dir/sm-home"; mkdir -p "$sm"
+  printf 'sm-one\n' > "$sm/.fm-secondmate-home"
+  # The scoped title must carry the secondmate's 2ndmate-<id> home label.
+  title=$(cmux_expected_scoped_title fm-sm-one "$sm")
+  case "$title" in
+    fm-2ndmate-sm-one-*) : ;;
+    *) fail "expected a 2ndmate-scoped title, got '$title'" ;;
+  esac
+  # 1: pre-create duplicate check -> none. 2: new-workspace (silent).
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 3: post-create id resolution lists the workspace under its scoped title.
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  # 4: default surface for the new workspace.
+  cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HOME="$sm" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-sm-one /tmp/sm-home' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "secondmate create_task should echo '<workspace_id> <surface_id>', got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--name'$'\x1f'"$title" \
+    "secondmate create_task did not create a workspace under the 2ndmate-scoped title"
+  pass "fm_backend_cmux_create_task: scopes a secondmate home's workspace under its 2ndmate-<id> title"
+}
+
+# fm-spawn.sh must no longer refuse --secondmate on backend=cmux at the backend
+# guard. We cannot drive a full secondmate launch here (it needs a seeded home
+# and a live harness), so this asserts the specific removed refusal message is
+# gone: the spawn now fails later (missing seeded home), never with the old
+# "backend=cmux does not support --secondmate" refusal.
+test_secondmate_spawn_not_refused_at_cmux_backend_guard() {
+  local dir state data config projects out
+  dir="$TMP_ROOT/secondmate-cmux-allowed"; state="$dir/state"; data="$dir/data"; config="$dir/config"; projects="$dir/projects"
   mkdir -p "$state" "$data" "$config" "$projects"
   out=$( FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_PROJECTS_OVERRIDE="$projects" \
     "$ROOT/bin/fm-spawn.sh" sm-cmux-test --secondmate --backend cmux 2>&1 )
-  status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn.sh should refuse a --secondmate spawn with --backend cmux"
-  assert_contains "$out" "does not support --secondmate" "fm-spawn.sh did not report the cmux secondmate refusal"
-  pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
+  case "$out" in
+    *"does not support --secondmate"*)
+      fail "fm-spawn.sh still refuses backend=cmux for --secondmate at the backend guard: $out" ;;
+    *) : ;;
+  esac
+  pass "fm-spawn.sh: no longer refuses backend=cmux for --secondmate at the backend guard"
 }
 
 # shellcheck source=/dev/null
@@ -1163,4 +1202,5 @@ test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
-test_secondmate_spawn_refuses_cmux_backend
+test_create_task_scopes_workspace_to_secondmate_home
+test_secondmate_spawn_not_refused_at_cmux_backend_guard

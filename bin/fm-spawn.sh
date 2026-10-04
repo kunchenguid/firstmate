@@ -103,7 +103,8 @@
 #   prints a loud stderr notice; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. cmux supports --secondmate spawns (scoping the
+#   secondmate home's workspace by FM_HOME like herdr); orca does not yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -1661,10 +1662,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fm_backend_source "$BACKEND" || exit 1
   if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=orca does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
   if [ "$BACKEND" = orca ]; then
@@ -3803,7 +3800,21 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    # fm_backend_cmux_create_task scopes the workspace title by home via
+    # fm_backend_cmux_home_label -> fm_backend_hometag, which reads the
+    # .fm-secondmate-home marker at FM_HOME. For every KIND except secondmate,
+    # this process's own FM_HOME is already the right home. A --secondmate spawn
+    # is the one case that is not: it is the PRIMARY's fm-spawn.sh process
+    # launching a DIFFERENT home (PROJ_ABS, validated above as the secondmate's
+    # home), so FM_HOME here still names the primary. Shadow it to PROJ_ABS for
+    # just this call (bash restores it after the prefixed simple command) so the
+    # workspace lands under the secondmate's own "2ndmate-<id>" title rather than
+    # the primary's "firstmate" one - the same scoping herdr applies above.
+    if [ "$KIND" = secondmate ]; then
+      CMUX_TASK_IDS=$(FM_HOME="$PROJ_ABS" fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    else
+      CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    fi
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
