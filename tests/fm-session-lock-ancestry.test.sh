@@ -1222,21 +1222,27 @@ test_refusal_never_offers_stop_for_a_session_that_conflicts_with_the_recorded_id
   pass "lock refusal: a lock pid now owned by a different session is named without a stop command"
 }
 
-test_refusal_prefers_the_recorded_session_id_over_the_pid_match() {
-  local dir bin out
-  holder_world sid-first "$NAMED_CLAUDE" SID-OWNER; dir=$HOLDER_HOME
+test_refusal_names_both_the_recorded_session_and_the_lock_pid_session() {
+  local dir bin out lock_pid
+  holder_world both-rows "$NAMED_CLAUDE" SID-OWNER; dir=$HOLDER_HOME
   bin=$(make_agents_stub "$dir")
   cat > "$dir/agents.json" <<EOF
 [{"pid":$HOLDER_PID,"id":"cc33dd44","kind":"background","sessionId":"SID-NEWCOMER","name":"Unrelated newcomer","status":"idle","state":"done"},
  {"pid":424242,"id":"ee55ff66","kind":"background","sessionId":"SID-OWNER","name":"Recorded owner","status":"idle","state":"blocked"}]
 EOF
+  lock_pid=$(cat "$dir/state/.lock")
   out=$(lock_from_other_session "$dir" "$bin")
   stop_holder
+  assert_contains "$out" "RC=1" "a live holder must still refuse the lock"
   assert_contains "$out" 'lock holder: Claude Code background session "Recorded owner" (id ee55ff66, status idle, state blocked)' \
-    "the recorded session id must win over a pid match"
-  assert_not_contains "$out" "Unrelated newcomer" "a pid-matched row with a conflicting session id must not be chosen over the recorded session"
-  assert_not_contains "$out" "claude stop cc33dd44" "the conflicting session must never be offered claude stop"
-  pass "lock refusal: the recorded session id is preferred over a pid match"
+    "the session recorded beside the lock must be named"
+  assert_contains "$out" "lock holder: matched by the recorded session id SID-OWNER; that session is listed under pid 424242, not the lock pid $lock_pid" \
+    "the recorded session must be reported as listed under a different pid"
+  assert_contains "$out" "lock holder: the lock pid $lock_pid now belongs to a different session, Claude Code background session \"Unrelated newcomer\" (id cc33dd44, status idle, state done), not the session SID-OWNER recorded beside the lock" \
+    "the session running at the live lock pid must be named too"
+  assert_not_contains "$out" "claude stop" "neither row may be offered claude stop as a way to free the lock"
+  assert_not_contains "$out" "kill" "the refusal must never suggest signalling a pid"
+  pass "lock refusal: the recorded session and the session at the lock pid are both named, with no stop promise"
 }
 
 test_refusal_for_an_interactive_holder_never_offers_claude_stop() {
@@ -1419,7 +1425,7 @@ test_verified_reclaim_keeps_new_sidecar
 test_refusal_names_a_background_holder_and_its_stop_command
 test_refusal_matches_the_recorded_session_id_when_the_pid_differs
 test_refusal_never_offers_stop_for_a_session_that_conflicts_with_the_recorded_id
-test_refusal_prefers_the_recorded_session_id_over_the_pid_match
+test_refusal_names_both_the_recorded_session_and_the_lock_pid_session
 test_refusal_for_an_interactive_holder_never_offers_claude_stop
 test_refusal_says_plainly_when_no_session_lists_the_live_pid
 test_refusal_without_a_usable_lookup_is_exactly_todays_diagnostic
