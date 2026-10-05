@@ -1254,12 +1254,16 @@ test_teardown_removes_poll_artifacts() {
   local dir fakebin artifact counterpart rc
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
+  write_task_meta "$dir" task-a
+  fm_test_archive_goal "$dir/home" task-a
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" archive task-a >/dev/null || fail "teardown business acceptance failed"
   fm_test_write_herdr_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
+    'spawn_gen=fixture-g1' \
     'mode=local-only'
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
@@ -1270,7 +1274,8 @@ test_teardown_removes_poll_artifacts() {
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "teardown cleanup fixture failed"
+    || fail "teardown cleanup fixture failed: $(cat "$dir/teardown.err")"
+  [ "$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress task-a | jq -r .task_state)" = archived ] || fail "teardown changed canonical archival"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
@@ -1278,12 +1283,16 @@ test_teardown_removes_poll_artifacts() {
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
+  write_task_meta "$dir" task-a
+  fm_test_archive_goal "$dir/home" task-a
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" archive task-a >/dev/null || fail "teardown business acceptance failed"
   fm_test_write_herdr_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
+    'spawn_gen=fixture-g1' \
     'mode=local-only' \
     'pr=https://github.com/o/r/pull/18'
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/18
@@ -1303,12 +1312,16 @@ test_teardown_removes_poll_artifacts() {
   for artifact in check.sh pr-poll; do
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
+    write_task_meta "$dir" task-a
+    fm_test_archive_goal "$dir/home" task-a
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" archive task-a >/dev/null || fail "teardown business acceptance failed"
     fm_test_write_herdr_meta "$dir/home/state/task-a.meta" \
       'window=firstmate:fm-task-a' \
       'endpoint_task_id=task-a' \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
+      'spawn_gen=fixture-g1' \
       'mode=local-only'
     if [ "$artifact" = check.sh ]; then
       counterpart=pr-poll
@@ -2300,6 +2313,11 @@ SH
     || fail "replacement: replacement merge lost its attended authority"
   pass "poll retirement preserves a replacement authority record"
 }
+
+if [ "${FM_PR_CHECK_TEST_CASE:-}" = teardown ]; then
+  test_teardown_removes_poll_artifacts
+  exit 0
+fi
 
 if [ "${FM_PR_CHECK_TEST_CASE:-}" = valid-recording ]; then
   test_valid_recording_and_merge_derivation
