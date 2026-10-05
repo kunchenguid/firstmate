@@ -16,8 +16,10 @@
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
 # Reads use gh's active account. Only when the local, default-off presence
-# flag config/contributions-owner-account exists and the repo is not found for
-# that account (HTTP 404), the observation retries every read once as the
+# flag config/contributions-owner-account exists and the core read is refused
+# for that account as not found (HTTP 404) or as a permission denial (HTTP 403
+# that is not a primary or secondary rate limit), the observation retries every
+# read once as the
 # logged-in gh account whose login equals the repo owner, via gh auth token -u
 # passed as GH_TOKEN to those reads only; the active account never changes and
 # no token is printed. Without the flag, on any other refusal, or with no such
@@ -261,7 +263,9 @@ observe() { # canonical GitHub URL -> normalized JSON
   if ! forge api "$endpoint" > "$TMP/core.json"; then
     # Opted in, an active account that cannot see the repo gets one retry as
     # the logged-in account named like the repo owner; the active account stays.
-    [ -e "$CONFIG/contributions-owner-account" ] && [ "$BUDGET_EXHAUSTED" -eq 0 ] && grep -Fq 'HTTP 404' "$TMP/forge.err" \
+    # A rate-limited 403 is not a visibility refusal and never fetches a token.
+    [ -e "$CONFIG/contributions-owner-account" ] && [ "$BUDGET_EXHAUSTED" -eq 0 ] \
+      && { grep -Fq 'HTTP 404' "$TMP/forge.err" || { grep -Fq 'HTTP 403' "$TMP/forge.err" && ! grep -Fiq 'rate limit' "$TMP/forge.err"; }; } \
       && owner_token "${part%%/*}" || return 1
     rm -f -- "$TMP/forge-unavailable"
     forge api "$endpoint" > "$TMP/core.json" || return 1
