@@ -54,8 +54,8 @@ SAIL='◿│◣'
 # the level glyphs the cue leads with.
 EFFORT_RULE='────────'
 
-# Claude Code 2.1.280 asks to confirm the first raise of effort after a turn, because the
-# conversation is cached at the level in force; its cursor starts on the option that switches.
+# Claude Code 2.1.280 asks to confirm the first change of effort after a reply while the
+# conversation's prompt cache is warm; its cursor starts on the option that switches.
 EFFORT_CONFIRM='Change effort level?'
 
 effort_confirmation_open() {  # <screen text>
@@ -720,8 +720,8 @@ enter
 sleep 2
 turned_down='this build asked no confirmation, so no change was turned down'
 # Where Claude Code confirms the change, turning it down keeps the level, and the next step
-# after a request has proved that offers the same level again rather than passing it over as
-# one the model declined.
+# after a request has proved that offers the same level again: the cycle never passes a level
+# over, because nothing it can see tells a turned-down change from a level the model refused.
 if effort_confirmation_open "$(screen)"; then
   asked=$(screen | sed -n 's/.*Yes, switch to \([a-z]*\).*/\1/p' | head -1)
   [ -n "$asked" ] || fail "Claude Code $CLAUDE_VERSION confirmed an effort change without naming the level"

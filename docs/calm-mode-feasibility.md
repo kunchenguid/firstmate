@@ -1051,26 +1051,28 @@ A probe in the guard's own tmux shape that submits one Sonnet turn, and a probe 
 Two more facts were read out of the installed 2.1.280 binary rather than probed.
 
 - The confirmation is not limited to raises.
-  It is raised for any change that resolves to a different level, once the conversation holds messages and the session's output-token count is above zero and differs from the count at the last confirmed change.
-  A new session therefore asks nothing before its first reply, while a resumed one restores its token counts with its transcript and can ask from its first change.
+  It is raised for any change that resolves to a different level, while the session's output-token count is above zero and differs from the count at the last confirmed change, and while the conversation's prompt cache is warm.
+  Warm means prompt caching is on for the main model and less than its time-to-live, five minutes or one hour, has passed since the later of the last assistant reply and the last main-thread request.
+  A new session therefore asks nothing before its first reply, a resumed one restores its token counts with its transcript and can ask from its first change if it resumes within the time-to-live, and once the cache has expired a change applies without asking.
 - `/effort` saves only `low`, `medium`, `high`, and `xhigh`, as `modelSettings.<model>.effortLevel`.
   `max` reports `(this session only)` and saves nothing.
   A level above the cap from the settings, the organization, or the model catalog is set to that cap instead, reported as `Effort '<asked>' exceeds the cap for <model> set by your settings or organization; set to '<cap>' instead`, and that saves nothing either.
 
 Before this build the mod read a step that asked for a level and left the session where it already was as a level the model declined, so turning a change down at that confirmation made the ramp pass the level over until a request named another model.
-A first revision of this fix judged a step by the entry the run saved for the session's model, and that entry cannot tell the two apart.
-`max` and capped levels are never saved, so a real cap went unlearned.
-The settings are shared with every other session on the machine and ignore a session launched with `--effort`, so an entry that already named the asked level made a turned-down change read as taken, and learned as a decline.
-The mod now reads nothing from the settings about a step.
-After a reply, a step that leaves the session where it was looks the same whether it was turned down or capped, so it records nothing, and the next lap offers that level again.
-Only a step taken before the conversation holds any reply, which nothing can turn down, can show a decline, and the session's first request settles it.
+Two revisions of this fix tried to keep that decline memory, and both still guessed.
+The first judged a step by the entry the run saved for the session's model, which cannot tell: `max` and capped levels are never saved, and the settings are shared with every other session on the machine and ignore a session launched with `--effort`, so an entry that already named the asked level made a turned-down change read as taken.
+The second learned a decline only from a step taken before the session's first reply, where no confirmation can be raised, but the captain moving the level back through the effort slider or the model picker before that reply looks exactly the same, and the decline it recorded was never dropped.
+No surface the mod already uses carries an explicit refusal: `/effort` reports one only in its own output, and a `command.run` result carries no denial.
+So the mod now learns nothing from a step at all: it reads nothing from the settings about one, keeps no declined levels, and has no notice for a ramp with nothing left on it.
+Every level stays on the ramp, and a level the model or plan does not offer costs one extra press per lap.
+This supersedes the decline memory in the 2026-09-17 record above, and the settings check, decline memory, nothing-left notice, and test world that saves every level described in the earlier commit messages of the branch that shipped this cue; none of them is present behavior.
 The live guard accepts the confirmation wherever an effort change can raise it, including the restore on exit, and where the build asks it, the guard turns the first raise down, proves the level kept, and proves the next step after a turn offers the same level again.
 The live run below was taken against the first revision.
-The path it drives, a change turned down after a reply, records nothing under either revision, and the guard has not been re-run since.
+The path it drives, a change turned down after a reply, records nothing under any revision, and the guard has not been re-run since.
 
 ```text
 $ bash tests/fm-calm-claude-mod.test.sh
-ok - the effort-level policy cycles the ramp and wraps, passes over the levels a session declined, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, and treats only a request that can report the selected level as proof of what is in force
+ok - the effort-level policy cycles the ramp and wraps without skipping a level, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, and treats only a request that can report the selected level as proof of what is in force
 
 $ bash tests/fm-calm-claude-mod-plugin.test.sh
 ok - Claude Code 2.1.280 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings, /calm, and the effort cue's band, press, and commands while logging supervision notes

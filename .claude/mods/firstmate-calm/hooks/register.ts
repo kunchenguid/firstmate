@@ -129,25 +129,9 @@ let effortLevel: EffortLevel | undefined;
 // while the cue itself waits for proof. It is deliberately independent of Calm: the cue
 // draws with Calm on and off alike, and no effort path reads or writes `calm`.
 let effortSelected: EffortLevel | undefined;
-// The levels declined on the model now in use, so the ramp stops offering them: a step asked
-// for a level that nothing could have turned down, and the next request proved the session
-// had stayed where it was. Which levels exist is the model's business, so all of this is
-// forgotten as soon as a request names a different model than the one it was learned under.
-// It lives and dies with the session, is written to no file, and never reaches the cue, which
-// goes on naming only what a request proved. `effortAsked` is the step still waiting for that
-// proof, `effortModel` is the model the rest was learned under, and `effortExhausted`
-// remembers that the captain has already been told nothing is left to step to, so a held
-// keystroke says it once and says it again only once that has changed.
-const effortDeclined = new Set<EffortLevel>();
-let effortAsked: { wanted: EffortLevel; from: EffortLevel } | undefined;
+// The model the last main-loop request named, so a request for another model, which the model
+// picker makes without raising any event, can be told apart from one for the same model.
 let effortModel: string | undefined;
-let effortExhausted = false;
-// Whether the conversation may already hold a reply. From then on Claude Code can ask to
-// confirm an effort change, and a change turned down there leaves the session exactly where a
-// level the model does not offer would, with nothing a mod can see telling the two apart. A
-// step taken while this is still false cannot have been turned down, so it is the only kind
-// whose stay at the old level is read as a decline.
-let effortConfirmable = false;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
@@ -243,7 +227,6 @@ function showEffort($: EngineInterface, level: EffortLevel | undefined): void {
  */
 function selectedEffort($: EngineInterface, level: EffortLevel | undefined): void {
   effortSelected = level;
-  effortAsked = undefined;
   showEffort($, undefined);
 }
 
@@ -259,16 +242,11 @@ async function load($: EngineInterface): Promise<void> {
   calm = parseCalmPreference(await readText($, preferencePath));
   palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
   try {
-    const messages = await $.session.messages();
-    // A restored conversation already holds replies, so Claude Code can confirm an effort
-    // change from the first one this session makes.
-    if (messages.length > 0) effortConfirmable = true;
-    const restored = classifyRestoredTranscript(messages);
+    const restored = classifyRestoredTranscript(await $.session.messages());
     for (const note of restored.workingNotes) workingNotes.add(note);
     for (const reply of restored.finalReplies) finalReplies.add(reply);
   } catch {
-    // A transcript that cannot be read leaves restored narration visible, and may hold replies.
-    effortConfirmable = true;
+    // A transcript that cannot be read leaves restored narration visible; nothing else changes.
   }
   if (ticker === undefined) {
     ticker = $.clock.every(CALM_WORKING_SHIP_TICK_MS, () => {
@@ -296,11 +274,7 @@ async function resetSession($: EngineInterface): Promise<void> {
   palette = CALM_SHIP_RASTER_PALETTES.light;
   effortLevel = undefined;
   effortSelected = undefined;
-  effortDeclined.clear();
-  effortAsked = undefined;
   effortModel = undefined;
-  effortExhausted = false;
-  effortConfirmable = false;
   await ensureLoaded($);
 }
 
@@ -320,17 +294,13 @@ function invalidateDrawings($: EngineInterface): void {
  * unknown the step is not taken at all and says so, because guessing would move a setting
  * the captain did not ask to move.
  *
- * Claude Code declines a level this plan or model does not offer by saying so in its own
- * output rather than by failing, so the decline is read from what the next request proves:
- * a step that asked for one level and left the session where it already was asked for a
- * level the model in use cannot have. The ramp passes over those until a request names
- * another model, and while nothing is left to step to the keystroke says so instead of
- * doing nothing, once per such stretch rather than once per press.
- *
- * That reading holds only for a step nothing could have turned down. Once the conversation
- * may hold a reply, Claude Code can ask to confirm the change, and `No, go back` leaves the
- * session exactly where a decline would, so such a step records nothing: the level stays on
- * the ramp, and the next lap offers it again.
+ * Claude Code declines a level this plan or model does not offer, or sets the highest level
+ * allowed instead, by saying so in its own output rather than by failing, and no event
+ * carries that output. A request that later shows the session where it was proves nothing
+ * either: a change turned down at Claude Code's own confirmation, and one made back through
+ * the effort slider or the model picker, look exactly the same. So the cycle learns nothing
+ * from a step, every level stays on the ramp, and a level the model does not offer costs one
+ * press per lap.
  *
  * The selection is recorded before the command is run, so a second keystroke during the run
  * steps from the level this one is selecting rather than repeating it; a run the host
@@ -349,15 +319,7 @@ async function cycleEffort($: EngineInterface): Promise<void> {
     $.ui.toast("Effort unchanged: the level this session is running is not known until its first turn.");
     return;
   }
-  const wanted = cycleEffortLevel(from, effortDeclined);
-  if (wanted === undefined) {
-    if (!effortExhausted) {
-      effortExhausted = true;
-      $.ui.toast("Effort unchanged: every other level on the ramp was declined here.");
-    }
-    return;
-  }
-  effortExhausted = false;
+  const wanted = cycleEffortLevel(from);
   const shown = effortLevel;
   selectedEffort($, wanted);
   try {
@@ -369,9 +331,7 @@ async function cycleEffort($: EngineInterface): Promise<void> {
       showEffort($, shown);
     }
     $.ui.toast(`Effort unchanged: ${reason}`);
-    return;
   }
-  if (effortSelected === wanted && !effortConfirmable) effortAsked = { wanted, from };
 }
 
 /** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
@@ -638,31 +598,14 @@ export const register: Register = (on) => {
     // no request can report - proves nothing, and the cue names none. A subagent's step
     // carries its own effort, not the session's, so only the main loop's is read.
     if (e.agentId === undefined) {
-      // A request for another model settles nothing about the one before it: which levels
-      // exist, which were declined, and where a step would start are all its own. Before the
-      // first request no model has been learned, and everything held so far was learned in
-      // this session under its own model, so only a model that differs from a learned one
-      // reconsiders it.
-      if (effortModel !== undefined && e.model !== effortModel) {
-        effortDeclined.clear();
-        effortAsked = undefined;
-        effortSelected = undefined;
-        effortExhausted = false;
-      }
+      // A request for another model settles nothing about the one before it: where a step
+      // would start is its own. Before the first request no model has been learned, and the
+      // level selected so far was selected in this session under its own model, so only a
+      // model that differs from a learned one reconsiders it.
+      if (effortModel !== undefined && e.model !== effortModel) effortSelected = undefined;
       effortModel = e.model;
       const confirmed = confirmedEffortLevel(effortSelected, normalizeEffortLevel(e.effort));
-      // This request settles the step waiting on it or nothing does: its reply is what lets
-      // Claude Code ask to confirm every change after it.
-      const asked = effortAsked;
-      effortAsked = undefined;
-      effortConfirmable = true;
-      if (confirmed !== undefined) {
-        if (asked !== undefined && asked.wanted !== asked.from && confirmed === asked.from) {
-          effortDeclined.add(asked.wanted);
-        }
-        if (confirmed !== effortSelected) effortExhausted = false;
-        effortSelected = confirmed;
-      }
+      if (confirmed !== undefined) effortSelected = confirmed;
       showEffort($, confirmed);
     }
     const stream = next(e);

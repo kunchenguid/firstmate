@@ -87,26 +87,21 @@ export function normalizeEffortLevel(value: unknown): EffortLevel | undefined {
 }
 
 /**
- * The next level one cycle step selects, wrapping from the top back to the bottom, or
- * undefined when every other level on the ramp is one `declined` names.
+ * The next level one cycle step selects, wrapping from the top back to the bottom.
  *
  * A step always starts from a level, never from nothing: a caller that does not know where
  * the session is must find that out rather than pass a guess, because a guessed start would
  * step the session somewhere the captain did not ask for. A level outside the cycle, such as
  * `ultracode`, is a known place off the ramp, and the ramp resumes at its first entry.
  *
- * `declined` holds the levels this session has already refused to take. Stepping onto one
- * again would leave the keystroke doing nothing the captain can see, so the ramp passes over
- * them; the level the session is already on is passed over for the same reason. This decides
- * only what to ask for next and says nothing about what is in force.
+ * Every level on the ramp stays on it. Claude Code reports a level it will not take only in
+ * its own output, which no event carries, so nothing here can know a level is refused, and a
+ * level a model does not offer costs one press per lap rather than being passed over on a
+ * guess. This decides only what to ask for next and says nothing about what is in force.
  */
-export function cycleEffortLevel(current: EffortLevel, declined: ReadonlySet<EffortLevel>): EffortLevel | undefined {
+export function cycleEffortLevel(current: EffortLevel): EffortLevel {
   const at = (EFFORT_CYCLE as readonly string[]).indexOf(current);
-  for (let step = 1; step <= EFFORT_CYCLE.length; step += 1) {
-    const level = EFFORT_CYCLE[(at + step + EFFORT_CYCLE.length) % EFFORT_CYCLE.length];
-    if (level !== undefined && level !== current && !declined.has(level)) return level;
-  }
-  return undefined;
+  return EFFORT_CYCLE[(at + 1) % EFFORT_CYCLE.length] ?? EFFORT_CYCLE[0];
 }
 
 /**

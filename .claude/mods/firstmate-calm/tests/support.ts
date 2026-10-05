@@ -54,6 +54,8 @@ export type World = {
   effort: () => string;
   /** A reply has arrived, so Claude Code asks to confirm the next effort change. */
   reply: () => void;
+  /** Move the level with no command the mod sees, as the effort slider and the model picker do. */
+  setEffort: (level: string) => void;
   /** Rewrite the settings `$.settings.read()` answers, as another session on the machine does. */
   writeSettings: (settings: unknown) => void;
 };
@@ -177,8 +179,9 @@ export function world(on: On, options: WorldOptions = {}): World {
   });
   const saved = (settings ?? {}) as { effortLevel?: string; modelSettings?: Record<string, { effortLevel?: string }> };
   let effort = options.effort ?? saved.modelSettings?.[model]?.effortLevel ?? saved.effortLevel ?? "high";
-  // Claude Code 2.1.280 asks to confirm an effort change once the conversation holds a reply,
-  // and asks again after each later reply; a change it confirmed lets the rest through.
+  // Claude Code 2.1.280 asks to confirm an effort change while the conversation's prompt cache
+  // is warm, which this world takes to be any time after a reply, and asks again after each
+  // later reply; a change it confirmed lets the rest through.
   let replied = (options.messages ?? []).length > 0;
   let confirmed = false;
   // The bottom of every `command.run` chain the mod raises or forwards: what the engine
@@ -259,6 +262,9 @@ export function world(on: On, options: WorldOptions = {}): World {
     reply: () => {
       replied = true;
       confirmed = false;
+    },
+    setEffort: (level) => {
+      effort = level;
     },
     writeSettings: (next) => {
       settings = next;

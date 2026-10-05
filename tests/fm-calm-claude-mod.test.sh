@@ -610,30 +610,21 @@ check(JSON.stringify(effort.EFFORT_CYCLE) === JSON.stringify(["low", "medium", "
 check(!effort.EFFORT_CYCLE.includes("ultracode"), "ultracode turns workflows on, so a blind cycle must not reach it");
 
 // The cycle steps up one and wraps at the top.
-const none = new Set();
 const walked = [];
 let at = "low";
-for (let step = 0; step < 6; step += 1) { at = effort.cycleEffortLevel(at, none); walked.push(at); }
+for (let step = 0; step < 6; step += 1) { at = effort.cycleEffortLevel(at); walked.push(at); }
 check(JSON.stringify(walked) === JSON.stringify(["medium", "high", "xhigh", "max", "low", "medium"]), \`cycle walked \${walked.join(",")}\`);
 
 // A level the cycle does not visit is a known place off the ramp, and the ramp resumes at its first entry.
-check(effort.cycleEffortLevel("ultracode", none) === "low", "ultracode starts the ramp");
+check(effort.cycleEffortLevel("ultracode") === "low", "ultracode starts the ramp");
 
-// Every level on the cycle is reachable by stepping, so the ramp climbs without stalling.
+// Every level on the cycle is reachable by stepping, so the ramp climbs without stalling or skipping.
 const reached = new Set();
 let climbing = "low";
-for (let step = 0; step < effort.EFFORT_CYCLE.length; step += 1) { climbing = effort.cycleEffortLevel(climbing, none); reached.add(climbing); }
+for (let step = 0; step < effort.EFFORT_CYCLE.length; step += 1) { climbing = effort.cycleEffortLevel(climbing); reached.add(climbing); }
 check(reached.size === effort.EFFORT_CYCLE.length, \`the ramp reached \${[...reached].join(",")}\`);
-
-// A level this session declined is passed over, and the step still climbs past it.
-check(effort.cycleEffortLevel("xhigh", new Set(["max"])) === "low", "a declined max is passed over");
-check(effort.cycleEffortLevel("high", new Set(["xhigh", "max"])) === "low", "two declined levels are passed over");
-check(effort.cycleEffortLevel("low", new Set(["medium", "high", "xhigh"])) === "max", "the step reaches the first level left");
-// The level in force is never the answer, and neither is a ramp with nothing left to ask for.
-check(effort.cycleEffortLevel("high", new Set(["low", "medium", "xhigh", "max"])) === undefined, "nothing left to ask for");
-check(effort.cycleEffortLevel("high", new Set(effort.EFFORT_CYCLE)) === undefined, "every level declined");
 for (const level of effort.EFFORT_CYCLE) {
-  check(effort.cycleEffortLevel(level, none) !== level, \`\${level} must not step onto itself\`);
+  check(effort.cycleEffortLevel(level) !== level, \`\${level} must not step onto itself\`);
 }
 
 // The saved level a first step climbs from: this model's own entry, then the saved default.
@@ -717,7 +708,7 @@ console.log("effort-ok");
 JS
   out=$(run_node "$TMP_ROOT/effort.mjs" 2>&1) || fail "effort-level policy: $out"
   assert_contains "$out" "effort-ok" "the effort-level policy check did not complete"
-  pass "the effort-level policy cycles the ramp and wraps, passes over the levels a session declined, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, and treats only a request that can report the selected level as proof of what is in force"
+  pass "the effort-level policy cycles the ramp and wraps without skipping a level, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, and treats only a request that can report the selected level as proof of what is in force"
 }
 
 test_plugin_shape

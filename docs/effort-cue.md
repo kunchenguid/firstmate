@@ -53,12 +53,11 @@ Three paths change it, and all three move Claude Code's real setting:
 A command the plugin sees leaves the cue at `◌ effort ?` until the next request of a turn carries whatever level took effect.
 Running `/effort` is not proof that it took: Claude Code can decline a level your plan or your model does not offer, or set the highest level allowed instead, and it says so in its own output rather than by failing.
 So the cue never names the level that was asked for, only a level a request carried.
-Before the conversation holds any reply, nothing can turn a step down, so a step taken then that left the session where it already was asked for a level the model in use cannot have, and the cycle passes over that level from then on.
-Which levels exist is the model's business, so those declines are forgotten as soon as a request runs another model.
-After the first reply a step can be turned down at Claude Code's own confirmation, described below, and that looks exactly like a level the model does not offer, so no step after it is read as a decline: a level that stays where it was is still on the ramp, and the next lap asks for it again.
+The cycle learns nothing from a step either: no event tells the plugin that Claude Code declined a level, and a request that shows the session where it was looks the same whether the level was declined, the change was turned down at Claude Code's own confirmation described below, or you moved it back with the effort slider or the model picker.
+So a level your model or plan does not offer stays on the ramp, the press that asks for it leaves the level where Claude Code's own message says, and the next press steps on: cycling past such a level takes one extra press each lap.
 For every other way the level moves, see [What the cue can know](#what-the-cue-can-know).
 
-The cycle visits `low`, `medium`, `high`, `xhigh`, and `max`, minus any the model in use has declined.
+The cycle visits `low`, `medium`, `high`, `xhigh`, and `max`.
 It deliberately skips `ultracode`, because Claude Code's own slider describes that level as `xhigh + workflows`: stepping into it would turn multi-agent orchestration on as a side effect of a keystroke.
 It also skips `auto`, which is a choice to let Claude Code pick per turn rather than a point on the ramp.
 Both stay available through `/effort`.
@@ -71,9 +70,9 @@ When nothing is saved, or the model's own saved level is something the ramp cann
 
 If Claude Code refuses to run `/effort` at all, a transient notice says so, and the cue keeps naming the level the last request carried.
 
-Claude Code 2.1.280 asks you to confirm the first change of effort after each reply, because the conversation is cached at the level in force, so a step taken after a reply is one press and then `enter` on `Yes`.
-A new session asks nothing until its first reply, while a resumed one can ask from its first change.
-Choosing `No, go back` keeps the level you had, and it is not read as the model declining the level you turned down: the next press offers that level again.
+Claude Code 2.1.280 asks you to confirm the first change of effort after each reply while the conversation's prompt cache is warm, because a change makes the next message re-read the whole history, so such a step is one press and then `enter` on `Yes`.
+A new session asks nothing until its first reply, a resumed one can ask from its first change if it resumes while the cache is still warm, and once the cache has expired a change applies without asking.
+Choosing `No, go back` keeps the level you had, and the next press offers the same level again.
 
 ### Binding it to one key
 

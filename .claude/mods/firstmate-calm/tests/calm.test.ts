@@ -613,22 +613,59 @@ describe("the effort cue", () => {
     }
   });
 
-  test("passes over a level declined before the conversation held any reply", async ($, on) => {
+  test("keeps offering a level the model caps, before the first reply and after it", async ($, on) => {
     const w = world(on, { settings: savedFor("xhigh"), effortCap: "xhigh" });
     const { journal } = w;
     stepper(on);
     await $.session.start(sessionStart);
-    // With no reply yet nothing can turn the step down, so Claude Code setting the capped `max`
-    // to `xhigh` instead is the only way the session's first request can still prove `xhigh`.
+    // Claude Code sets the capped `max` to `xhigh` instead and says so only in its own output, so
+    // the request after it looks exactly like a change made back by hand: `max` stays on the ramp.
+    for (let lap = 0; lap < 2; lap += 1) {
+      await press($);
+      expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "max" });
+      await turn($, w);
+      expect(await cueLabel($)).toBe("◕ xhigh");
+    }
+    // A second press before the next request steps on past it, so the ramp never sticks there.
     await press($);
-    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "max" });
-    await turn($, w);
-    expect(await cueLabel($)).toBe("◕ xhigh");
     await press($);
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "low" });
+    expect(journal.toasts.filter((toast) => toast.startsWith("Effort unchanged"))).toHaveLength(0);
+  });
+
+  test("keeps offering a level the slider moved back from before the session's first request", async ($, on) => {
+    const w = world(on, { settings: savedFor("high") });
+    const { journal } = w;
+    stepper(on);
+    await $.session.start(sessionStart);
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
+    // A bare `/effort` opens the slider, which moves the level back without naming one.
+    await $.command.run(command("effort", ""));
+    w.setEffort("high");
+    await turn($, w);
+    expect(await cueLabel($)).toBe("◑ high");
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
+  });
+
+  test("keeps offering a level the model picker moved back from, and names it once a request carries it", async ($, on) => {
+    const w = world(on, { settings: savedFor("high") });
+    const { journal } = w;
+    stepper(on);
+    await $.session.start(sessionStart);
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
+    // The model picker, opened by its own key, moves the level back and raises no event at all.
+    w.setEffort("high");
+    await turn($, w);
+    w.setEffort("xhigh");
+    await turn($, w);
+    expect(await cueLabel($)).toBe("◕ xhigh");
+    w.setEffort("high");
     await turn($, w);
     await press($);
-    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "medium" });
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
   });
 
   test("keeps offering a level the session does take", async ($, on) => {
@@ -692,26 +729,6 @@ describe("the effort cue", () => {
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "high" });
   });
 
-  test("offers a capped level again once the conversation holds a reply", async ($, on) => {
-    const w = world(on, { settings: savedFor("xhigh"), effortCap: "xhigh" });
-    const { journal } = w;
-    stepper(on);
-    await $.session.start(sessionStart);
-    await turn($, w);
-    // After a reply, staying at `xhigh` looks the same whether `max` was capped or turned down.
-    for (let lap = 0; lap < 2; lap += 1) {
-      await press($);
-      expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "max" });
-      await turn($, w);
-      expect(await cueLabel($)).toBe("◕ xhigh");
-    }
-    // A second press before the next request steps on past it, so the ramp never sticks there.
-    await press($);
-    await press($);
-    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "low" });
-    expect(journal.toasts.filter((toast) => toast.startsWith("Effort unchanged"))).toHaveLength(0);
-  });
-
   test("names max once a request carries it, although Claude Code saves it nowhere", async ($, on) => {
     const w = world(on, { settings: savedFor("xhigh") });
     const { journal } = w;
@@ -724,38 +741,6 @@ describe("the effort cue", () => {
     expect(effortCueOf(await $.ui.render(abovePrompt()))).toMatchObject({ label: "● max", color: "fastMode" });
     await press($);
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "low" });
-  });
-
-  test("reads no decline from the first step of a resumed conversation", async ($, on) => {
-    const w = world(on, {
-      settings: savedFor("high"),
-      turnDown: true,
-      messages: [{ role: "assistant", text: "Done.", toolUses: [] }],
-    });
-    const { journal } = w;
-    stepper(on);
-    await $.session.start(sessionStart);
-    // The restored conversation already holds a reply, so even this first step can be turned down.
-    await press($);
-    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
-    await turn($, w);
-    expect(await cueLabel($)).toBe("◑ high");
-    await press($);
-    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
-  });
-
-  test("forgets the declines when a request names another model, and steps again", async ($, on) => {
-    const w = world(on, { settings: savedFor("xhigh"), effortCap: "xhigh" });
-    const { journal } = w;
-    stepper(on);
-    await $.session.start(sessionStart);
-    await press($);
-    await turn($, w);
-    expect(journal.runs.map((run) => run.args)).toEqual(["max"]);
-    // The next request runs another model, picked without any command, which declined nothing.
-    await turn($, w, "claude-opus-5");
-    await press($);
-    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "max" });
   });
 
   test("/effort-cycle leaves no output row of its own, because /effort draws its own", async ($, on) => {
