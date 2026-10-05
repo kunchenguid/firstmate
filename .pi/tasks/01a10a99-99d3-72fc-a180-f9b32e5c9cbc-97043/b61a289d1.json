@@ -1,0 +1,29 @@
+{
+  "id": "b61a289d1",
+  "name": "Relaunch poll regression",
+  "command": "mkdir -p /Users/weima/.no-mistakes/evidence/01M459GFACRZMM87VCJN5EEHH5 && bash tests/fm-remote-secondmate-relaunch.test.sh > /Users/weima/.no-mistakes/evidence/01M459GFACRZMM87VCJN5EEHH5/fm-remote-secondmate-relaunch.log 2>&1",
+  "description": "Run the focused remote relaunch and PR poll authentication regression suite.",
+  "status": "completed",
+  "outputPath": ".pi/tasks/01a10a99-99d3-72fc-a180-f9b32e5c9cbc-97043/b61a289d1.output",
+  "cwd": "/Users/weima/.no-mistakes/worktrees/d19b4aa23d77/01M459GFACRZMM87VCJN5EEHH5",
+  "startTime": 1791179222405,
+  "endTime": 1791179224089,
+  "exitCode": 0,
+  "signal": null,
+  "pid": 3181,
+  "bytesWritten": 0,
+  "isAgent": false,
+  "surviveReload": false,
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 600,
+  "shellPolicy": {
+    "policy": "inherit",
+    "executable": "/bin/zsh",
+    "argvPrefix": [
+      "-c"
+    ],
+    "dialect": "posix"
+  }
+}

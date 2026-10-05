@@ -1,0 +1,30 @@
+{
+  "id": "b65f8778f",
+  "name": "PR poll regression",
+  "command": "mkdir -p /Users/weima/.no-mistakes/evidence/01M459GFACRZMM87VCJN5EEHH5 && bash tests/fm-pr-check-security.test.sh > /Users/weima/.no-mistakes/evidence/01M459GFACRZMM87VCJN5EEHH5/fm-pr-check-security.log 2>&1",
+  "description": "Run the focused PR poll and watcher regression suite.",
+  "status": "killed",
+  "outputPath": ".pi/tasks/01a10a99-99d3-72fc-a180-f9b32e5c9cbc-97043/b65f8778f.output",
+  "cwd": "/Users/weima/.no-mistakes/worktrees/d19b4aa23d77/01M459GFACRZMM87VCJN5EEHH5",
+  "startTime": 1791179222402,
+  "endTime": 1791179243895,
+  "exitCode": 143,
+  "signal": null,
+  "pid": 3180,
+  "bytesWritten": 0,
+  "isAgent": false,
+  "surviveReload": false,
+  "error": "Killed during Pi session shutdown (quit)",
+  "notified": false,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 600,
+  "shellPolicy": {
+    "policy": "inherit",
+    "executable": "/bin/zsh",
+    "argvPrefix": [
+      "-c"
+    ],
+    "dialect": "posix"
+  }
+}
