@@ -215,6 +215,10 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Dialog recognition lives in the composer owner. shellcheck does not follow
+# this source: the watcher graph must not absorb the classifier AST.
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -3042,6 +3046,15 @@ EOF
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
+        elif dialog=$(fm_composer_blocking_dialog "$tail40"); then
+          # A non-paused secondmate never reaches this branch. The idle
+          # exemption above still skips that pane, so a secondmate parked
+          # on this picker stays quiet.
+          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+            fm_wake_append stale "$w" "stale: $w (blocked on a prompt: $dialog)" || exit 1
+            printf '%s' "$h" > "$sf"
+            wake "stale: $w (blocked on a prompt: $dialog)"
+          fi
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before,
           # except that a captain-held pane is never handed over while the

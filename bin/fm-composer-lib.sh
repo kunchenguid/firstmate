@@ -1671,9 +1671,77 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
+# Prints the name and returns 0 only when every fixed string of one recorded
+# dialog is present together. One string is not enough, because worker prose
+# can quote a heading. A miss returns 1 and prints nothing.
+# Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
+# is still running opens this picker, and its selected row is Exit and stop tasks.
+fm_composer_blocking_dialog() {  # <screen> -> dialog name
+  local screen=${1-} plain
+  [ -n "$screen" ] || return 1
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  if printf '%s\n' "$plain" | grep -F -q 'Background work is running' \
+    && printf '%s\n' "$plain" | grep -F -q 'Exit and stop tasks' \
+    && printf '%s\n' "$plain" | grep -F -q 'Enter to confirm'; then
+    printf '%s' 'Claude background-task exit picker'
+    return 0
+  fi
+  return 1
+}
+
+# A command substitution drops a shell variable, and every composer read runs
+# inside one. The name is therefore written to FM_COMPOSER_DIALOG_SINK when
+# that path is set. The classifier verdict is unchanged.
+fm_composer_note_blocking_dialog() {  # <screen>
+  local name=
+  if name=$(fm_composer_blocking_dialog "$1"); then
+    if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+      printf '%s' "$name" > "$FM_COMPOSER_DIALOG_SINK" || return 1
+    fi
+    return 0
+  fi
+  if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    : > "$FM_COMPOSER_DIALOG_SINK" || return 1
+  fi
+  return 1
+}
+
+# fm_composer_blocking_dialog_noted: print the name the latest classify wrote
+# to the sink. Returns 1 when the sink is unset or empty.
+fm_composer_blocking_dialog_noted() {
+  [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ] || return 1
+  [ -s "$FM_COMPOSER_DIALOG_SINK" ] || return 1
+  cat "$FM_COMPOSER_DIALOG_SINK"
+}
+
+# Empty the sink, creating it when the caller has not. Sets
+# FM_COMPOSER_DIALOG_OWNED=1 only for a sink this call created, so a caller
+# that shares the path can still read the name after this function returns.
+fm_composer_dialog_sink_prepare() {
+  FM_COMPOSER_DIALOG_OWNED=0
+  if [ -z "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    FM_COMPOSER_DIALOG_SINK=$(mktemp "${TMPDIR:-/tmp}/fm-composer-dialog.XXXXXX") || return 1
+    FM_COMPOSER_DIALOG_OWNED=1
+    return 0
+  fi
+  : > "$FM_COMPOSER_DIALOG_SINK"
+}
+
+fm_composer_dialog_sink_release() {
+  trap - RETURN
+  if [ "${FM_COMPOSER_DIALOG_OWNED:-}" = 1 ]; then
+    rm -f "$FM_COMPOSER_DIALOG_SINK"
+    FM_COMPOSER_DIALOG_SINK=
+    FM_COMPOSER_DIALOG_OWNED=0
+  fi
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
+  # Note the dialog before any early return so a pending picker is still named.
+  fm_composer_note_blocking_dialog "$screen" || true
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
@@ -1791,10 +1859,19 @@ EOF
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
   local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
+  # The first Enter can open a picker. A later Enter would confirm it.
+  fm_composer_dialog_sink_prepare || { printf 'unknown'; return 0; }
+  if [ "$FM_COMPOSER_DIALOG_OWNED" = 1 ]; then
+    trap 'fm_composer_dialog_sink_release' RETURN
+  fi
   while :; do
     "$send_key_fn" "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
     state=$("$state_fn" "$target" "$expected_label")
+    if fm_composer_blocking_dialog_noted >/dev/null; then
+      printf 'unknown'
+      return 0
+    fi
     case "$state" in
       pending|pending-unproven) ;;
       *) printf '%s' "$state"; return 0 ;;

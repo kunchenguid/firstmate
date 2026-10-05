@@ -344,6 +344,34 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
+
+test_exit_picker_refuses_confirming_enter() {
+  local dir fakebin composer sent vfile enters
+  dir="$TMP_ROOT/exit-picker"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$composer"
+  : > "$sent"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 3 0 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = unknown ] || fail "exit picker should return unknown, got '$(cat "$vfile")'"
+  enters=$(grep -c '^Enter$' "$sent" || true)
+  [ "$enters" -eq 1 ] || fail "exit picker should get one Enter, got $enters"
+  pass "fm_tmux_submit_enter_core: the Claude background-task exit picker gets no confirming Enter"
+}
+
+test_exit_picker_refuses_confirming_enter
 test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try

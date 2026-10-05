@@ -1080,3 +1080,58 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# The selected row sits on cursor row 1 so a tmux read whose cursor is that
+# row, and a cursorless read, both still see unsubmitted text.
+exit_picker_screen() {
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel'
+}
+
+fm_test_picker_send() {
+  printf 'Enter\n' >> "$FM_TEST_PICKER_ENTERS"
+}
+
+fm_test_picker_state() {
+  fm_composer_classify_screen 'styled=1' "$FM_TEST_PICKER_SCREEN" 1
+}
+
+test_background_exit_picker_stays_pending_and_blocks_retry() {
+  local screen out rc sink enters
+  screen=$(exit_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the recorded picker should match"
+  [ "$out" = 'Claude background-task exit picker' ] || fail "dialog name was '$out'"
+  out=$(fm_composer_blocking_dialog 'Background work is running'); rc=$?
+  [ "$rc" -eq 1 ] || fail "a heading alone must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' 'Background work is running' 'Exit and stop tasks')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "two of the three strings must not match"
+  sink=$(mktemp)
+  FM_COMPOSER_DIALOG_SINK=$sink
+  out=$(fm_composer_classify_screen 'styled=1' "$screen" 1)
+  [ "$out" = pending ] || fail "cursor on the selected row should stay pending, got '$out'"
+  [ "$(cat "$sink")" = 'Claude background-task exit picker' ] || fail "classify should note the dialog, got '$(cat "$sink")'"
+  out=$(fm_composer_classify_screen 'styled=1' "$screen")
+  [ "$out" = pending ] || fail "a styled cursorless picker should stay pending, got '$out'"
+  unset FM_COMPOSER_DIALOG_SINK
+  rm -f "$sink"
+  FM_TEST_PICKER_SCREEN=$screen
+  FM_TEST_PICKER_ENTERS=$(mktemp)
+  : > "$FM_TEST_PICKER_ENTERS"
+  out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_picker_state win 3 0)
+  enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+  [ "$out" = unknown ] || fail "a picker must stop the retry as unknown, got '$out'"
+  [ "$enters" -eq 1 ] || fail "a picker must receive one Enter, got $enters"
+  rm -f "$FM_TEST_PICKER_ENTERS"
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "the Claude background-task exit picker stays pending and receives no confirming Enter"
+}
+
+test_background_exit_picker_stays_pending_and_blocks_retry

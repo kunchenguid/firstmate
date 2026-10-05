@@ -3377,6 +3377,7 @@ fm_backend_herdr_composer_content() {  # <target>
   else
     return 1
   fi
+  fm_composer_note_blocking_dialog "$cap" || true
   FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap"
 }
 
@@ -3431,6 +3432,11 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content
+  # The first Enter can open a picker. A later Enter would confirm it.
+  fm_composer_dialog_sink_prepare || { printf 'unknown'; return 0; }
+  if [ "$FM_COMPOSER_DIALOG_OWNED" = 1 ]; then
+    trap 'fm_composer_dialog_sink_release' RETURN
+  fi
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
   # unless the composer, empty before the send, shows this payload. A suffix
@@ -3487,7 +3493,12 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       esac
       # Native stayed idle. Composer empty is positive delivery (a landed
       # Claude turn that never flipped agent_status). Proven pending retries.
+      # A picker that classifies pending must not receive that retry.
       verdict=$(fm_backend_herdr_composer_state "$target")
+      if fm_composer_blocking_dialog_noted >/dev/null; then
+        printf 'unknown'
+        return 0
+      fi
       case "$verdict" in
         empty) printf 'empty'; return 0 ;;
         pending|pending-unproven) ;;
@@ -3496,6 +3507,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     else
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
+      if fm_composer_blocking_dialog_noted >/dev/null; then
+        printf 'unknown'
+        return 0
+      fi
       if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
         && [ "$footer_baseline" = idle ] \
         && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then

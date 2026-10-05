@@ -4286,6 +4286,71 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   pass "a non-paused secondmate retains normal stale suppression"
 }
 
+exit_picker_capture() {
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel'
+}
+
+test_exit_picker_stale_names_the_dialog() {
+  local dir state fakebin out capture_file statusf window key sig pid
+  dir=$(make_case exit-picker-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/exit-picker.status"
+  window="test:fm-exit-picker"
+  exit_picker_capture > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/exit-picker.meta"
+  printf 'working: implementing\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-exit-picker_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "exit picker did not wake: $(cat "$out")"; }
+  grep -Fx "stale: $window (blocked on a prompt: Claude background-task exit picker)" "$out" >/dev/null \
+    || { reap "$pid"; fail "exit picker wake did not name the dialog: $(cat "$out")"; }
+  grep -F "stale: $window (blocked on a prompt: Claude background-task exit picker)" "$state/.wake-queue" >/dev/null \
+    || fail "exit picker wake was not queued"
+  pass "an ordinary worker parked on the background-task exit picker raises a stale wake that names it"
+}
+
+test_secondmate_exit_picker_stays_quiet() {
+  local dir state fakebin out capture_file statusf window key sig pid
+  dir=$(make_case secondmate-exit-picker); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-picker.status"
+  window="test:fm-secondmate-picker"
+  exit_picker_capture > "$capture_file"
+  printf 'window=%s\nkind=secondmate\nharness=claude\nbackend=tmux\n' "$window" > "$state/secondmate-picker.meta"
+  printf 'working: the parent supervises this secondmate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-picker_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher left a secondmate parked on the exit picker: $(cat "$out")"
+  fi
+  if grep -F 'blocked on a prompt' "$out" >/dev/null; then
+    reap "$pid"
+    fail "a secondmate exit picker was named: $(cat "$out")"
+  fi
+  if [ -f "$state/.wake-queue" ] && grep -F 'blocked on a prompt' "$state/.wake-queue" >/dev/null; then
+    fail "a secondmate exit picker was queued"
+  fi
+  reap "$pid"
+  pass "a non-paused secondmate parked on the exit picker stays quiet"
+}
+
 test_secondmate_unpause_clears_pause_tracking() {
   local dir state fakebin out statusf window key pid
   dir=$(make_case secondmate-unpause-clears); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6717,6 +6782,8 @@ test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
+test_exit_picker_stale_names_the_dialog
+test_secondmate_exit_picker_stays_quiet
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state

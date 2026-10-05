@@ -1264,6 +1264,20 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9.0 proves and submits a typed /exit behind its command popup
 ```
 
+### Claude background-task exit picker
+
+Measured 2026-10-05 against Claude Code 2.1.289 in an isolated tmux session.
+The Herdr lab was not running, so the Herdr path is covered by the existing fakes.
+Typing `/exit` while a background shell is still running opens a picker whose selected row is "Exit and stop tasks" and whose footer is "Enter to confirm · Esc to cancel".
+That screen still classifies as pending, the same verdict as unsubmitted composer text.
+A second Enter would confirm the selected row.
+Submit retries now stop after the Enter that opened the picker and report unknown.
+Exit reports that the worker is blocked on the Claude background-task exit picker and does not type another Enter.
+The watcher raises the existing stale wake once per unchanged screen, with that dialog name in the reason.
+A non-paused secondmate still skips pane staleness, so a secondmate parked on this picker still looks idle.
+That exemption is unchanged.
+No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

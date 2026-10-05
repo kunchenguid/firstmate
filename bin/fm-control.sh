@@ -204,6 +204,9 @@ control_cleanup() {
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
   fi
+  if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    rm -f "$FM_COMPOSER_DIALOG_SINK"
+  fi
   if declare -F fm_lease_guard_release >/dev/null 2>&1; then
     fm_lease_guard_release || true
   fi
@@ -390,6 +393,13 @@ require_state_verified_backend() {  # <verb>
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
 }
 
+# refuse_blocking_prompt: the screen is a dialog a confirming Enter would
+# answer. Name it and stop. Do not type Escape or an option: both dismiss
+# or choose.
+refuse_blocking_prompt() {  # <dialog-name>
+  die "task $ID is blocked on a prompt: $1. Refusing to type Enter into it."
+}
+
 # rendered_matches <ere>: whether any row of the visible viewport matches.
 # An unreadable viewport is a no, so every caller treats it as missing proof.
 rendered_matches() {  # <ere>
@@ -557,7 +567,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
+  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -624,8 +634,17 @@ do_exit() {
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
   fi
+  FM_COMPOSER_DIALOG_SINK=$STATE/$ID.composer-dialog
+  : > "$FM_COMPOSER_DIALOG_SINK" \
+    || die "task $ID's dialog check could not be recorded"
   composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
     || composer_state=unknown
+  # The classify that filled the sink ran in a subshell, so read the file
+  # rather than a function that subshell sourced.
+  if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
+    refuse_blocking_prompt "$dialog"
+  fi
   case "$composer_state" in
     empty) ;;
     pending)
@@ -645,6 +664,15 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
+  # The submitting Enter can open the picker. The agent is still alive, and
+  # another Enter would confirm the selected row. A dead agent may leave the
+  # same text behind; that is not a prompt still waiting.
+  if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
+    if [ "$(agent_state)" != dead ]; then
+      refuse_blocking_prompt "$dialog"
+    fi
+  fi
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }

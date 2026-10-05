@@ -4431,6 +4431,29 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   pass "fm_backend_herdr_send_text_submit: a slash-command popup's placeholder fill on Enter #1 never flips agent_status to working, so it does not short-circuit as submitted; Enter #2 is retried and lands it"
 }
 
+test_send_text_submit_refuses_confirming_enter_on_exit_picker() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-exit-picker"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_submit_claude_prefix "$resp" "/exit"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/exit" 3 0.01 0.01' "$ROOT" )
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  [ "$out" = unknown ] || fail "the exit picker should stop the retry as unknown, got '$out'; log: $(cat "$log")"
+  [ "$enter_count" -eq 1 ] || fail "the exit picker should get one Enter, got $enter_count; log: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: the Claude background-task exit picker gets no confirming Enter"
+}
+
 test_send_text_submit_confirms_blocked_after_enter() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5954,6 +5977,7 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter
+test_send_text_submit_refuses_confirming_enter_on_exit_picker
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_pending_is_queued_enter
 test_send_text_submit_preexisting_working_does_not_confirm_failed_enter
