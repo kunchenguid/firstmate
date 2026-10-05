@@ -17,6 +17,8 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# A PR whose live title or body fails bin/fm-pr-description-check.sh is refused
+# the same way, recording and arming nothing; the merge-time re-record skips it.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -106,6 +108,15 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
     echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
     exit 1
   fi
+fi
+
+# The live PR title and body must pass the description guard before anything is
+# recorded, so a leaked or off-template description is never reported ready
+# (bin/fm-pr-description-check.sh owns the checks and their scope). The
+# merge-time re-record skips it: the PR was already accepted as ready.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && ! "$SCRIPT_DIR/fm-pr-description-check.sh" "$ID" "$URL" >&2; then
+  echo "error: $URL was not recorded as ready because its description failed the PR description guard" >&2
+  exit 1
 fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true

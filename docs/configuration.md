@@ -573,6 +573,20 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
 
+## PR description guard (config/pr-description-deny)
+
+Before a project task's pull request is recorded or reported ready, `bin/fm-pr-check.sh` runs `bin/fm-pr-description-check.sh` against the live PR title and body and refuses the PR while any check fails.
+The guard covers GitHub pull requests on clones under this home's `projects/` directory; firstmate's own PRs are out of scope.
+It requires the repository's PR template headings, a conventional title carrying the ticket key when the branch or registered branch prefix implies one, and no internal fleet wording or validation-tool footer.
+Each failure names the offending line, and the worker fixes the PR on the forge and runs the check again.
+
+The optional local, gitignored `config/pr-description-deny` file lists third-party product names that must not appear in PR titles or prose, one literal term per line, with blank lines and `#` comments ignored.
+Matching is case-insensitive on whole words.
+Inline code spans, fenced code blocks, and text the repository's own PR template ships are exempt.
+With the file absent the deny list is empty.
+The list is home-local and is not inherited by secondmate homes.
+The script header owns the exact checks, exemptions, and exit codes.
+
 ## Waiting worker spends no turns (config/wait-no-turns)
 
 The optional local, gitignored `config/wait-no-turns` presence flag opts this home into keeping a waiting worker from spending turns until it is answered.
