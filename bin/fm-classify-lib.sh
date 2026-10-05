@@ -559,6 +559,15 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # discarded and rebuilt from byte 0 under the new reading.
 FM_OPEN_DECISIONS_FOLD_VERSION=5
 
+# Resolve the host stat dialect once per shell invocation. These helpers are
+# hot across every status-presentation stage, and repeating uname for each
+# identity, size, and mtime read adds process fanout without adding safety.
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  _FM_STATUS_STAT_STYLE=darwin
+else
+  _FM_STATUS_STAT_STYLE=other
+fi
+
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   local f=$1 epoch birth ident
@@ -566,7 +575,7 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
     "$FM_STATUS_IDENTITY_READER" "$f"
     return
   fi
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_STATUS_STAT_STYLE" = darwin ]; then
     ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
     epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
     if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
@@ -585,7 +594,7 @@ _fm_status_file_size() {  # <status-file>
     "$FM_STATUS_SIZE_READER" "$f"
     return
   fi
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_STATUS_STAT_STYLE" = darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%z' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%s' "$f" 2>/dev/null
@@ -594,7 +603,7 @@ _fm_status_file_size() {  # <status-file>
 
 _fm_status_file_mtime() {  # <status-file>
   local f=$1
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_STATUS_STAT_STYLE" = darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%m' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%Y' "$f" 2>/dev/null
@@ -776,6 +785,70 @@ status_presentation_snapshot() {  # <state>
     [ -n "$ident" ] || return 1
     printf '%s\t%s\t%s\n' "$task" "$size" "$ident" || return 1
   done
+}
+
+# Bind one validated cursor-manifest read to one already-captured status
+# snapshot. The output extends each snapshot row with the trusted presentation
+# and outcome-backstop offsets:
+#   <task> <endpoint> <status-ident> <presented-offset> <backstop-offset>
+# A changed status identity or stale offset resets that task to zero. The
+# manifest itself is checked before and after the single parse so replacement
+# or truncation cannot mix generations. When no fleet manifest exists, legacy
+# per-task cursors retain their standalone migration behavior.
+status_presentation_context() {  # <state> <task-and-endpoint-snapshot>
+  local state=$1 snapshot=$2 manifest before_ident before_size after_ident after_size snapshot_file rc=0
+  local task endpoint ident f presented
+  manifest="$state/.status-presentation-cursor"
+  if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
+    while IFS=$(printf '\t') read -r task endpoint ident; do
+      [ -n "$task" ] || continue
+      f="$state/$task.status"
+      presented=$(status_presentation_cursor_offset "$f") || return 1
+      printf '%s\t%s\t%s\t%s\t0\n' "$task" "$endpoint" "$ident" "$presented" || return 1
+    done <<EOF
+$snapshot
+EOF
+    return 0
+  fi
+  [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  before_ident=$(_fm_open_decisions_file_ident "$manifest") || return 1
+  before_size=$(_fm_status_file_size "$manifest") || return 1
+  before_size=${before_size//[[:space:]]/}
+  case "$before_size" in ''|*[!0-9]*) return 1 ;; esac
+  snapshot_file="$state/.status-presentation.snapshot.$$"
+  printf '%s\n' "$snapshot" > "$snapshot_file" || return 1
+  LC_ALL=C awk -F '\t' -v OFS='\t' '
+    FILENAME == ARGV[1] {
+      if (NF == 0 || (NF == 1 && $1 == "")) next
+      if (NF != 4 || $1 == "" || $2 == "" || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || seen[$1]++) exit 2
+      cursor_ident[$1] = $2
+      presented[$1] = $3
+      backstop[$1] = $4
+      next
+    }
+    {
+      if (NF != 3 || $1 == "" || $2 !~ /^[0-9]+$/ || $3 == "") exit 2
+      p = 0
+      b = 0
+      if (($1 in cursor_ident) && cursor_ident[$1] == $3) {
+        p = presented[$1]
+        b = backstop[$1]
+        if (p > $2) p = 0
+        if (b > $2) b = 0
+      }
+      print $1, $2, $3, p, b
+    }
+  ' "$manifest" "$snapshot_file" || rc=$?
+  after_ident=$(_fm_open_decisions_file_ident "$manifest") || rc=1
+  after_size=$(_fm_status_file_size "$manifest") || rc=1
+  after_size=${after_size//[[:space:]]/}
+  rm -f "$snapshot_file"
+  [ "$rc" -eq 0 ] || return 1
+  case "$after_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$before_ident" = "$after_ident" ] && [ "$before_size" = "$after_size" ] || return 1
+  if [ -n "${FM_STATUS_MANIFEST_READ_PROBE:-}" ]; then
+    printf 'context\t%s\n' "$before_size" >> "$FM_STATUS_MANIFEST_READ_PROBE" || return 1
+  fi
 }
 
 # Read the latest non-blank event through one captured presentation endpoint.
@@ -1178,18 +1251,21 @@ EOF
   return "$rc"
 }
 
-status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
-  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
-  while IFS=$(printf '\t') read -r task endpoint ident; do
+status_acknowledge_presented_snapshot() {  # <state> <snapshot-or-context> [<fully-presented-task-ids>]
+  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident offset backstop f lines line safe contextual
+  while IFS=$(printf '\t') read -r task endpoint ident offset backstop; do
     [ -n "$task" ] || continue
+    contextual=false
+    [ -n "$offset" ] && contextual=true
+    if [ -z "$offset" ]; then offset=$(status_presentation_cursor_offset "$state/$task.status") || return 1; fi
+    [ -n "$backstop" ] || backstop=$(status_outcome_backstop_cursor_offset "$state/$task.status") || return 1
     safe=false
     case "
 $fully_presented
 " in *$'\n'"$task"$'\n'*) safe=true ;; esac
     if [ "$safe" = false ]; then
       f="$state/$task.status"
-      offset=$(status_presentation_cursor_offset "$f") || return 1
-      lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+      lines=$(status_new_lines_since_cursor "$f" "$endpoint" "$offset") || return 1
       # Once any informational line in this span is presented fleet-wide, the
       # contiguous cursor may advance through the captured endpoint. Routine
       # lines remain unacknowledged only while they are the sole unread content,
@@ -1206,17 +1282,21 @@ $lines
 EOF
       if [ "$safe" = false ]; then endpoint=$offset; fi
     fi
-    printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" || return 1
+    if [ "$contextual" = true ]; then
+      printf '%s\t%s\t%s\t%s\t%s\n' "$task" "$endpoint" "$ident" "$offset" "$backstop" || return 1
+    else
+      printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" || return 1
+    fi
   done <<EOF
 $snapshot
 EOF
 }
 
-status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
+status_commit_presentation_snapshot() {  # <state> <snapshot-or-context>
+  local state=$1 snapshot=$2 task endpoint ident presented backstop f cur_ident size tmp acknowledged_task acknowledged_endpoint
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
-  while IFS=$(printf '\t') read -r task endpoint ident; do
+  while IFS=$(printf '\t') read -r task endpoint ident presented backstop; do
     [ -n "$task" ] || continue
     case "$endpoint" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
@@ -1228,7 +1308,9 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
-    backstop=$(status_outcome_backstop_cursor_offset "$f") || { rm -f "$tmp"; return 1; }
+    if [ -z "$backstop" ]; then
+      backstop=$(status_outcome_backstop_cursor_offset "$f") || { rm -f "$tmp"; return 1; }
+    fi
     while IFS=$(printf '\t') read -r acknowledged_task acknowledged_endpoint; do
       if [ "$acknowledged_task" = "$task" ]; then backstop=$acknowledged_endpoint; fi
     done <<EOF
@@ -1355,12 +1437,12 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # changed status identity reads the current file from offset 0; malformed or
 # unreadable cursor state fails the scan. Symlinks and unreadable status files
 # print nothing.
-status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0
+status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>] [<validated-start-offset>]
+  local f=$1 captured_end=${2:-} offset=${3:-} cf size actual_size chunk_file line rc=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   chunk_file="$cf.unread.$$"
-  offset=$(status_presentation_cursor_offset "$f") || return 1
+  if [ -z "$offset" ]; then offset=$(status_presentation_cursor_offset "$f") || return 1; fi
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac
   actual_size=$(_fm_status_file_size "$f") || return 1
   actual_size=${actual_size//[[:space:]]/}
@@ -1416,12 +1498,12 @@ EOF
   return 0
 }
 
-scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f lines line
-  while IFS=$(printf '\t') read -r task endpoint ident; do
+scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot-or-context>
+  local state=$1 snapshot=$2 task endpoint ident offset backstop f lines line
+  while IFS=$(printf '\t') read -r task endpoint ident offset backstop; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
-    lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+    lines=$(status_new_lines_since_cursor "$f" "$endpoint" "$offset") || return 1
     [ -n "$lines" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue

@@ -413,6 +413,57 @@ test_snapshot_failure_is_visible() {
   pass "snapshot failures are reported visibly"
 }
 
+test_warm_manifest_is_parsed_once_per_presentation() {
+  local dir state out probe i task reads
+  dir=$(make_case one-manifest-parse); state="$dir/state"; out="$dir/drain.out"; probe="$dir/manifest-reads"
+  i=1
+  while [ "$i" -le 20 ]; do
+    task=$(printf 'reuse-%02d' "$i")
+    printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
+    i=$((i + 1))
+  done
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "bootstrap drain failed while creating the warm cursor manifest"
+  i=1
+  while [ "$i" -le 20 ]; do
+    task=$(printf 'reuse-%02d' "$i")
+    printf 'note: new %s\n' "$task" >> "$state/$task.status"
+    i=$((i + 1))
+  done
+
+  FM_STATUS_MANIFEST_READ_PROBE="$probe" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "instrumented warm-manifest drain failed"
+  reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
+  [ "$reads" -eq 1 ] \
+    || fail "one presentation parsed its warm cursor manifest $reads times: $(cat "$probe")"
+  grep -F 'reuse-01 note: new reuse-01' "$out" >/dev/null \
+    || fail "single-parse presentation lost the first unread note: $(cat "$out")"
+  grep -F 'reuse-20 note: new reuse-20' "$out" >/dev/null \
+    || fail "single-parse presentation lost the last unread note: $(cat "$out")"
+  pass "one warm presentation parses the cursor manifest once and preserves fleet output"
+}
+
+test_duplicate_manifest_row_refuses_without_advancing() {
+  local dir state out manifest original duplicate
+  dir=$(make_case duplicate-manifest); state="$dir/state"; out="$dir/drain.out"
+  printf 'note: bootstrap duplicate fixture\n' > "$state/duplicate.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "bootstrap drain failed while creating the duplicate-row fixture"
+  manifest="$state/.status-presentation-cursor"
+  original=$(cat "$manifest")
+  duplicate=${original%%$'\n'*}
+  printf '%s\n' "$duplicate" >> "$manifest"
+  printf 'note: must remain unread after refusal\n' >> "$state/duplicate.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "duplicate-row refusal changed the top-level empty-queue compatibility exit"
+  grep -F 'STATUS PRESENTATION INCOMPLETE: status cursor manifest could not be read safely.' "$out" >/dev/null \
+    || fail "duplicate cursor row did not fail closed visibly: $(cat "$out")"
+  [ "$(awk -F '\t' '$1 == "duplicate" { count++ } END { print count + 0 }' "$manifest")" -eq 2 ] \
+    || fail "refused duplicate manifest was unexpectedly replaced"
+  pass "a duplicate cursor row refuses presentation without advancing its receipt"
+}
+
 test_open_decisions_fold_is_unchanged() {
   local dir state out
   dir=$(make_case open-decisions-regression)
@@ -506,6 +557,8 @@ test_settled_retirement_refuses_orphan_decision_cursor
 test_status_append_serializes_with_retirement
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
+test_warm_manifest_is_parsed_once_per_presentation
+test_duplicate_manifest_row_refuses_without_advancing
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue
