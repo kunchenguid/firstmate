@@ -66,9 +66,14 @@
 # ready-for-pr. Labels are matched case-insensitively and exactly.
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
-# contribution author) and issue transitions to ready-for-pr persist as pending
-# before any wake. poll appends ordinary durable check wakes through fm-wake-lib
-# and emits only newly durable signals for the authenticated check to surface.
+# contribution author and this home's own authenticated login, read once per
+# poll with `gh api user`; a repository this home owns would otherwise turn
+# every thank-you it posts into a wake) and issue transitions to ready-for-pr
+# persist as pending before any wake. Self-authored events still enter seen, so
+# a later poll whose login lookup fails or runs out of budget (login unknown,
+# no self exclusion) does not re-wake them. poll appends ordinary durable check
+# wakes through fm-wake-lib and emits only newly durable signals for the
+# authenticated check to surface.
 # ack removes
 # only the named pending token. A crash after enqueue can duplicate a wake but
 # cannot consume the pending signal. Source bodies are data, never commands.
@@ -231,6 +236,19 @@ wait_forges() { # background forge pids from one independent read wave
   return "$rc"
 }
 
+SELF_LOGIN_RESOLVED=0
+SELF_LOGIN=''
+resolve_self_login() { # the authenticated forge login, once per process within the poll budget; empty when unknown
+  local remaining
+  [ "$SELF_LOGIN_RESOLVED" -eq 0 ] || return 0
+  SELF_LOGIN_RESOLVED=1
+  remaining=$((DEADLINE - $(date +%s)))
+  [ "$remaining" -gt 0 ] || return 0
+  [ "$remaining" -le 5 ] || remaining=5
+  SELF_LOGIN=$(fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api user --jq .login 2>/dev/null | head -n 1 || true)
+  case "$SELF_LOGIN" in *[!A-Za-z0-9_-]*) SELF_LOGIN='' ;; esac
+}
+
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
@@ -380,6 +398,7 @@ poll() {
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   while IFS=$'\t' read -r -a row; do
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
+    resolve_self_login
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
@@ -398,7 +417,7 @@ poll() {
         ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
       if [ "$observed" -eq 0 ]; then
-        jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
+        jq -n --arg now "$NOW" --arg self "$SELF_LOGIN" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
@@ -406,7 +425,7 @@ poll() {
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
-            pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
+            pending:(($old.pending // []) + [$events[] | select($self == "" or .author != $self) | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"

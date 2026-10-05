@@ -138,6 +138,7 @@ case "$*" in
     printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
   'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
   'api repos/o/r') printf '{"permissions":{"push":false}}\n' ;;
+  'api user --jq .login') [ ! -e "$FORGE/self-unknown" ] || exit 1; printf 'selfuser\n' ;;
   *) printf 'unexpected gh fixture call: %s\n' "$*" >&2; exit 1 ;;
 esac
 SH
@@ -187,6 +188,33 @@ test_incoming_signal() { # comment|review|inline
   printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "maintainer"' >/dev/null \
     || fail 'supervisor cannot retrieve captured signal'
   pass "new maintainer $type wakes once and stays pending until acknowledged"
+}
+
+test_own_comment_is_not_a_signal() {
+  local home out
+  home=$(new_home "own-comment")
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the owned delivery'
+  registered_checks "$home" >/dev/null
+  jq -n '[{id:21,user:{login:"selfuser"},author_association:"OWNER",body:"Landed: merge abc1234, thank you",
+    html_url:"https://github.com/o/r/pull/8#issuecomment-21",updated_at:"2026-09-16T08:02:00Z"},
+    {id:22,user:{login:"maintainer"},author_association:"OWNER",body:"Please clarify the contract",
+    html_url:"https://github.com/o/r/pull/8#issuecomment-22",updated_at:"2026-09-16T08:03:00Z"}]' \
+    > "$home/forge/comments.json"
+  registered_checks "$home" >/dev/null
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "maintainer"' >/dev/null \
+    || fail "a comment by this home's own login counted as a maintainer signal: $out"
+  : > "$home/forge/self-unknown"
+  jq '. + [{id:23,user:{login:"maintainer"},author_association:"OWNER",body:"One more thing",
+    html_url:"https://github.com/o/r/pull/8#issuecomment-23",updated_at:"2026-09-16T08:04:00Z"}]' \
+    "$home/forge/comments.json" > "$home/forge/comments.next" && mv "$home/forge/comments.next" "$home/forge/comments.json"
+  registered_checks "$home" >/dev/null
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$out" | jq -e 'length == 2 and all(.[]; .author == "maintainer")' >/dev/null \
+    || fail "an already seen own comment woke again once the login was unknown: $out"
+  pass 'an own-login comment never becomes pending, even once the login turns unknown, while another maintainer still wakes'
 }
 
 test_ready_issue_wake() {
@@ -1017,6 +1045,7 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
     home=$(new_home "arm-budget-$mode")
     forge_home "$home"
     wrap_forge "$home"
+    /bin/date +%s > "$home/forge/clock"
     mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
     cp "$home/data/delivery/contributions.json" "$home/prior.json"
     printf 'hang\n' > "$home/forge/fault"
@@ -1099,7 +1128,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_own_comment_is_not_a_signal test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
