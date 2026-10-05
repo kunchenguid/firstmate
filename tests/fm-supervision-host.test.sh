@@ -435,6 +435,9 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   assert_contains "$out" "finish with the bin/fm-branch-report.sh command." "the wake prompt must name the host's report surface"
   assert_contains "$out" "POSTURE: AWAY." "an away wake prompt must carry the posture tail"
   assert_contains "$out" "    merge nothing" "the away tail must carry the record's read-back verbatim"
+  assert_contains "$out" '"Postures" section' "the away tail must point at the prompt's Postures section"
+  assert_contains "$out" "bin/fm-send.sh and bin/fm-control.sh" "the away tail must carry the steering the Postures section grants"
+  grep -Fq -- '- `bin/fm-send.sh` and `bin/fm-control.sh`:' "$ROOT/bin/fm-branch-prompt.sh" || fail "the Postures section the away tail points at lost its steering grant"
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"
 }
 
