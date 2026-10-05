@@ -855,14 +855,15 @@ done
   || fail "the ownership-loss worker did not stop"
 rm -rf -- "$LOST_STATE/worker.lock"
 kill -CONT "$LOST_TERM_PID"
-LOST_READY_BEFORE=$(file_inode "$LOST_STATE/worker.ready")
-for _ in $(seq 1 100); do
-  LOST_READY_AFTER=$(file_inode "$LOST_STATE/worker.ready")
-  [ -n "$LOST_READY_AFTER" ] && [ "$LOST_READY_AFTER" != "$LOST_READY_BEFORE" ] && break
-  sleep 0.05
+# The independent heartbeat may already have verified ownership before the
+# lock was removed. Let that in-flight refresh expire through the public
+# probe's 10-second freshness window instead of racing it with a backdated file.
+for _ in $(seq 1 80); do
+  ( FM_REMOTE_JOB_STATE_ROOT="$LOST_STATE"; fm_remote_job_probe "$LOST_HOME" ) || break
+  sleep 0.25
 done
-[ -n "${LOST_READY_AFTER:-}" ] && [ "$LOST_READY_AFTER" != "$LOST_READY_BEFORE" ] \
-  || fail "a worker with no ownership lock stopped publishing heartbeats before TERM"
+! ( FM_REMOTE_JOB_STATE_ROOT="$LOST_STATE"; fm_remote_job_probe "$LOST_HOME" ) \
+  || fail "a worker without its ownership lock kept readiness fresh"
 assert_absent "$LOST_STATE/worker.lock" "the ownership lock reappeared before TERM"
 kill -TERM "$LOST_TERM_PID"
 for _ in $(seq 1 100); do
@@ -1137,8 +1138,9 @@ pass "an ousted worker in shutdown leaves the replacement quarantine untouched"
 
 # An idle worker must not busy-poll its queue: between passes it sleeps one
 # second, so its only steady cost is that sleep and the once-a-second heartbeat
-# plus the periodic sweep, which the 2-second stage reap age pulls in to every
-# 2 seconds. Every external command the worker runs by name goes through a
+# (including its lock-owner validation and state preparation) plus the periodic
+# sweep, which the 2-second stage reap age pulls in to every 2 seconds.
+# Every external command the worker runs by name goes through a
 # counting shim, which makes the exec rate observable without privileges.
 QUIET_HOME="$TMP_ROOT/quiet-account"
 QUIET_STATE="$TMP_ROOT/quiet-state"
@@ -1185,7 +1187,10 @@ quiet_measure() { # <label> <max-sleeps>
   sleeps=$(grep -cx sleep "$QUIET_EXEC_LOG" || true)
   [ "$sleeps" -le "$2" ] \
     || fail "$1 kept polling with sleep ($sleeps sleeps in 4s)"
-  [ "$execs" -le 80 ] \
+  # Allow the independent heartbeat's bounded ownership checks as well as
+  # sweeps at either edge of the window; the sleep limit still rejects fast
+  # queue polling independently of this external-command budget.
+  [ "$execs" -le 120 ] \
     || fail "$1 ran $execs commands in 4s; expected only heartbeats and sweeps"$'\n'"$(sort "$QUIET_EXEC_LOG" | uniq -c)"
 }
 # fm_remote_job_probe must keep reading an idle worker as ready: its heartbeat
