@@ -39,8 +39,14 @@ Accepting persists to `~/.gemini/trustedFolders.json`, so the spawn's environmen
 ## Credential precondition, and the wedge it causes
 
 A Gemini worker needs a credential it can use without a dialog, and firstmate does not manage one.
-Export `GEMINI_API_KEY` into the environment BEFORE the session-provider daemon starts, or complete `gemini`'s own sign-in.
-The daemon matters: a long-lived tmux or Herdr server hands panes the environment it was started with, so a key exported after that server came up never reaches a worker.
+For API-key authentication, export `GEMINI_API_KEY` before the session-provider daemon starts or complete `gemini`'s own sign-in.
+For Vertex ADC authentication, set `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and `GOOGLE_GENAI_USE_VERTEXAI` in Firstmate's invoking environment.
+Each new Gemini spawn or relaunch pins those four Vertex variables from the invoking environment, including explicitly empty values, so a long-lived tmux or Herdr server cannot replace them with stale or project-specific values; the ADC file itself must remain readable from the worker host.
+An absent Vertex variable is explicitly unset in the worker, clearing stale pane-side values and preserving API-key and stored-login authentication.
+This explicit launch assignment also survives `config/launch-env-allowlist` without admitting the four names for other harnesses.
+Existing workers keep their environment; no daemon restart is required.
+[`fm-spawn-dispatch-profile.test.sh`](../../../../../tests/fm-spawn-dispatch-profile.test.sh) and [`fm-control-relaunch.test.sh`](../../../../../tests/fm-control-relaunch.test.sh) verify the emitted launch environment and relaunch boundary.
+The daemon still matters for `GEMINI_API_KEY`, which is not explicitly pinned: a key exported after that server came up never reaches a worker.
 The headless probe `gemini --skip-trust -p '<prompt>'` exits 41 with `you must specify the GEMINI_API_KEY environment variable` when no credential is resolvable, which is the cheapest pre-dispatch confirmation.
 A first run also shows an auth-method picker (`How would you like to authenticate for this project?`, default `● 2. Use Gemini API Key`); answering it once writes `security.auth.selectedType` to the user `settings.json` and it does not return.
 

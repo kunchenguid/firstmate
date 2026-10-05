@@ -1458,6 +1458,125 @@ SH
   done
 }
 
+test_gemini_vertex_environment_is_scoped_to_its_launch() {
+  local rec id out status launch expected result adc probe
+  id=gemini-vertex-env
+  rec=$(make_spawn_case "$id" gemini "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/launch-env-allowlist"
+  cat > "$FAKEBIN_DIR/gemini" <<'SH'
+#!/bin/sh
+printf '%s\n' "${GOOGLE_APPLICATION_CREDENTIALS-unset}" \
+  "${GOOGLE_CLOUD_PROJECT-unset}" "${GOOGLE_CLOUD_LOCATION-unset}" \
+  "${GOOGLE_GENAI_USE_VERTEXAI-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/gemini"
+  probe="$FAKEBIN_DIR/gemini"
+  # This synthetic path proves that launch quoting cannot execute shell text.
+  adc="$CASE_DIR/creds 'quoted' \$(touch $CASE_DIR/SHOULD_NOT_EXIST)"
+  out=$(GOOGLE_APPLICATION_CREDENTIALS="$adc" GOOGLE_CLOUD_PROJECT=sample-project \
+    GOOGLE_CLOUD_LOCATION=us-central1 GOOGLE_GENAI_USE_VERTEXAI=true \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Gemini Vertex spawn should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" TERM=xterm \
+    GOOGLE_APPLICATION_CREDENTIALS=wrong-path GOOGLE_CLOUD_PROJECT=wrong-project \
+    GOOGLE_CLOUD_LOCATION=wrong-location GOOGLE_GENAI_USE_VERTEXAI=false \
+    /bin/sh -c "$launch") || fail "Gemini Vertex launch did not execute"
+  expected=$(printf '%s\n' "$adc" sample-project us-central1 true)
+  [ "$result" = "$expected" ] || fail "Gemini Vertex launch did not preserve its task environment"
+  [ ! -e "$CASE_DIR/SHOULD_NOT_EXIST" ] || fail "Gemini Vertex path executed shell text"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'Gemini spawn with empty allowlist; executed worker receives:\n%s\n' "$result"
+  fi
+
+  id=gemini-vertex-unset
+  rec=$(make_spawn_case "$id" gemini "$id")
+  read_case_record "$rec"
+  cp "$probe" "$FAKEBIN_DIR/gemini"
+  out=$(unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT \
+    GOOGLE_CLOUD_LOCATION GOOGLE_GENAI_USE_VERTEXAI
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Gemini without Vertex configuration should still spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" TERM=xterm \
+    GOOGLE_APPLICATION_CREDENTIALS=wrong-path GOOGLE_CLOUD_PROJECT=wrong-project \
+    GOOGLE_CLOUD_LOCATION=wrong-location GOOGLE_GENAI_USE_VERTEXAI=false \
+    /bin/sh -c "$launch") || fail "Gemini without Vertex configuration did not execute"
+  [ "$result" = $'unset\nunset\nunset\nunset' ] \
+    || fail "Gemini launch retained stale Vertex configuration from its pane"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'Gemini spawn without Vertex settings; stale pane values become:\n%s\n' "$result"
+  fi
+
+  id=codex-vertex-isolation
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  out=$(GOOGLE_APPLICATION_CREDENTIALS="$adc" GOOGLE_CLOUD_PROJECT=sample-project \
+    GOOGLE_CLOUD_LOCATION=us-central1 GOOGLE_GENAI_USE_VERTEXAI=true \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn with Vertex ambient environment should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  cp "$probe" "$FAKEBIN_DIR/codex"
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
+    GOOGLE_APPLICATION_CREDENTIALS=pane-adc GOOGLE_CLOUD_PROJECT=pane-project \
+    GOOGLE_CLOUD_LOCATION=pane-location GOOGLE_GENAI_USE_VERTEXAI=false \
+    /bin/sh -c "$launch") || fail "Codex isolation launch did not execute"
+  [ "$result" = $'pane-adc\npane-project\npane-location\nfalse' ] \
+    || fail "Gemini environment forwarding changed a Codex worker's environment"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'Codex spawn preserves its own pane environment:\n%s\n' "$result"
+  fi
+  pass "Gemini Vertex settings survive the daemon and allowlist boundary without reaching other harnesses"
+}
+
+test_gemini_vertex_fallback_preserves_authentication_inputs() {
+  local policy rec id out launch result expected
+  for policy in ambient allowlist; do
+    id="gemini-auth-$policy"
+    rec=$(make_spawn_case "$id" gemini "$id")
+    read_case_record "$rec"
+    if [ "$policy" = allowlist ]; then
+      printf 'GEMINI_API_KEY\n' > "$HOME_DIR/config/launch-env-allowlist"
+    fi
+    cat > "$FAKEBIN_DIR/gemini" <<'SH'
+#!/bin/sh
+printf 'vertex=%s\nadc=%s\napi-key=%s\n' "${GOOGLE_GENAI_USE_VERTEXAI-unset}" \
+  "${GOOGLE_APPLICATION_CREDENTIALS-unset}" "${GEMINI_API_KEY+set}"
+[ -r "$HOME/.gemini/settings.json" ] && printf 'stored-settings=readable\n'
+printf 'cwd=%s\n' "$PWD"
+SH
+    chmod +x "$FAKEBIN_DIR/gemini"
+    mkdir -p "$HOME_DIR/user-home/.gemini"
+    printf '{"security":{"auth":{"selectedType":"oauth-personal"}}}\n' \
+      > "$HOME_DIR/user-home/.gemini/settings.json"
+    out=$(unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT \
+      GOOGLE_CLOUD_LOCATION GOOGLE_GENAI_USE_VERTEXAI
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    expect_code 0 "$?" "Gemini fallback spawn failed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    result=$(cd "$WT_DIR" && env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
+      GEMINI_API_KEY=synthetic-test-key GOOGLE_APPLICATION_CREDENTIALS=stale \
+      GOOGLE_GENAI_USE_VERTEXAI=true /bin/sh -c "$launch") \
+      || fail "Gemini fallback launch did not execute"
+    expected=$(printf 'vertex=unset\nadc=unset\napi-key=set\nstored-settings=readable\ncwd=%s' "$WT_DIR")
+    [ "$result" = "$expected" ] || fail "Gemini fallback changed authentication inputs: $result"
+    result=$(cd "$WT_DIR" && env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
+      GOOGLE_APPLICATION_CREDENTIALS=stale GOOGLE_GENAI_USE_VERTEXAI=true \
+      /bin/sh -c "$launch") || fail "Gemini stored-login launch did not execute"
+    expected=$(printf 'vertex=unset\nadc=unset\napi-key=\nstored-settings=readable\ncwd=%s' "$WT_DIR")
+    [ "$result" = "$expected" ] || fail "Gemini stored-login inputs changed: $result"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf 'Gemini stored-login inputs (%s policy), executed from project workdir:\n%s\n' "$policy" "$result"
+      printf 'Same launch with synthetic API key: key remains set; contents never emitted.\n'
+    fi
+  done
+  pass "Gemini clears stale Vertex selection while preserving API-key and stored-login inputs"
+}
+
 test_launch_environment_invalid_config_refuses() {
   local rec id bad out status
   id=env-invalid
@@ -1951,5 +2070,7 @@ test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks
 test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_gemini_vertex_environment_is_scoped_to_its_launch
+test_gemini_vertex_fallback_preserves_authentication_inputs
 
 echo "# all fm-spawn-dispatch-profile tests passed"
