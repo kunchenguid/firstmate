@@ -814,6 +814,38 @@ test_worker_account_pin_follows_the_relaunch() {
   pass "fm-control relaunch: the replacement follows the home's current worker account pin"
 }
 
+test_recorded_api_key_opt_in_follows_the_relaunch() {
+  local dir out rc id=rl-apikey
+  dir=$(new_case apikey "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'api_key=allow\n' >> "$dir/home/state/$id.meta"
+  out=$(ANTHROPIC_API_KEY=sk-ant-relaunch-test \
+    run_control "$dir" "$id" relaunch --note "deliberate API billing"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a task that opted in to API billing should carry the opt-in"$'\n'"$out"
+  assert_not_contains "$out" "would reach the claude worker" \
+    "the recorded opt-in must keep the guard from refusing the replacement"
+  [ "$(grep -c '^api_key=' "$dir/home/state/$id.meta")" = 1 ] \
+    || fail "the relaunched record must carry exactly one api_key line"$'\n'"$(cat "$dir/home/state/$id.meta")"
+  [ "$(meta_field "$dir" "$id" api_key)" = allow ] \
+    || fail "the relaunched record must keep api_key=allow"
+  assert_contains "$(cat "$dir/fake/literal")" "Firstmate operational input waiting: read" \
+    "the replacement agent should have been launched"
+  pass "fm-control relaunch: a recorded api_key=allow opt-in is carried to the replacement launch"
+}
+
+test_spawn_relaunch_without_the_opt_in_drops_the_recorded_api_key() {
+  local dir out rc id=rl-apikey-drop
+  dir=$(new_case apikey-drop "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'api_key=allow\n' >> "$dir/home/state/$id.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 0 "$rc" "a relaunch without the opt-in and without a key should succeed"$'\n'"$out"
+  assert_no_grep "^api_key=" "$dir/home/state/$id.meta" \
+    "a relaunch that does not opt in must not inherit the previous api_key=allow line"
+  pass "fm-spawn --relaunch: a replacement that does not opt in drops the recorded api_key line"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -2403,6 +2435,8 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
+test_recorded_api_key_opt_in_follows_the_relaunch
+test_spawn_relaunch_without_the_opt_in_drops_the_recorded_api_key
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
