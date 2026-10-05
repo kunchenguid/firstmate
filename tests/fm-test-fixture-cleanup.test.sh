@@ -119,10 +119,10 @@ test_orphan_sweep_respects_fixture_ownership() {
   active_dir=$(cat "$dirfile")
   touch -t 202001010000 "$active_dir/.fm-test-fixture"
 
-  stale_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-stale.XXXXXX")
+  stale_dir=$(mktemp -d "$FM_TEST_TMPDIR/fm-test-cleanup-stale.XXXXXX")
   printf '%s\n%s\n' "$$" reused-process-identity > "$stale_dir/.fm-test-fixture"
   touch -t 202001010000 "$stale_dir/.fm-test-fixture"
-  fresh_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-fresh.XXXXXX")
+  fresh_dir=$(mktemp -d "$FM_TEST_TMPDIR/fm-test-cleanup-fresh.XXXXXX")
   : > "$fresh_dir/.fm-test-fixture"
 
   bash -c '
@@ -146,7 +146,7 @@ test_orphan_sweep_respects_fixture_ownership() {
 
 test_orphan_sweep_reaps_read_only_package_tree() {
   local stale_dir package_dir
-  stale_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-read-only.XXXXXX")
+  stale_dir=$(mktemp -d "$FM_TEST_TMPDIR/fm-test-cleanup-read-only.XXXXXX")
   package_dir="$stale_dir/packages/extension"
   mkdir -p "$package_dir"
   printf '%s\n%s\n' "$$" reused-process-identity > "$stale_dir/.fm-test-fixture"
@@ -164,9 +164,55 @@ test_orphan_sweep_reaps_read_only_package_tree() {
   pass "the orphan sweep reaps read-only package fixtures"
 }
 
+test_registries_avoid_git_worktree_root() {
+  # A TMPDIR pointed at a repository root used to place live `.fm-test-*`
+  # registries beside tracked files. A concurrent git add during a suite then
+  # committed them (observed on the claim-walk CI fix round). The helper must
+  # keep registries and fixture roots outside that root for the whole run.
+  local harness repo dirfile child_dir pid tries entry
+  harness=$(fm_test_tmproot fm-test-cleanup-gitroot-harness)
+  repo="$harness/repo"
+  dirfile="$harness/child-dir"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  bash -c '
+    export TMPDIR="$1"
+    # shellcheck source=tests/lib.sh
+    . "$2"
+    d=$(fm_test_tmproot fm-test-cleanup-gitroot)
+    printf "%s\n" "$d" > "$3"
+    # Hold the suite open so a concurrent add would see any root-side leak.
+    while :; do sleep 0.1; done
+  ' _ "$repo" "$LIB" "$dirfile" &
+  pid=$!
+  tries=0
+  while [ "$tries" -lt 100 ]; do
+    [ -s "$dirfile" ] && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -s "$dirfile" ] || fail "the git-root TMPDIR child never published its fixture root"
+  child_dir=$(cat "$dirfile")
+  assert_present "$child_dir" "the git-root TMPDIR child did not create a fixture root"
+  case "$child_dir" in
+    "$repo"|"$repo"/*)
+      fail "fm_test_tmproot placed a fixture root inside the git worktree root: $child_dir"
+      ;;
+  esac
+  for entry in "$repo"/.fm-test-cleanup.* "$repo"/.fm-test-procevent.* "$repo"/.fm-test-watcher.*; do
+    [ ! -e "$entry" ] || fail "a live test registry landed in the git worktree root: $entry"
+  done
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  assert_absent "$child_dir" \
+    "the git-root TMPDIR child's fixture root survived SIGTERM"
+  pass "test registries and fixture roots stay out of a git worktree TMPDIR"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership
 test_orphan_sweep_reaps_read_only_package_tree
+test_registries_avoid_git_worktree_root
