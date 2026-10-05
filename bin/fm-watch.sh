@@ -118,6 +118,10 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   check: ready work waiting with no worker working: <ids> - start each or record why it waits
+#                          a secondmate home's heartbeat found dispatchable
+#                          queued work (fm-tasks-axi.sh ready) while none of its
+#                          workers is provably working; once per new ready set
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -2345,6 +2349,32 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# Heartbeat idle-lead check: 0 when this is a secondmate home, its backlog has
+# dispatchable queued work, none of its workers is provably working, and that
+# ready set differs from the one last surfaced. Sets READY_WORK_IDS. An empty
+# ready set forgets the last one so the same work surfaces again if it returns.
+# A lead that went idle with ready work otherwise has no trigger: an absorbed
+# heartbeat never reads the backlog.
+ready_work_waits_idle() {
+  local meta task
+  READY_WORK_IDS=
+  [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] || return 1
+  READY_WORK_IDS=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null \
+    | awk '/^ready\[[0-9]+\]/ { on = 1; next } on && /^  / { sub(/^  /, ""); split($0, f, ","); print f[1]; next } { on = 0 }' \
+    | sort | paste -sd ' ' -)
+  if [ -z "$READY_WORK_IDS" ]; then
+    rm -f "$STATE/.ready-work-surfaced"
+    return 1
+  fi
+  [ "$(cat "$STATE/.ready-work-surfaced" 2>/dev/null)" != "$READY_WORK_IDS" ] || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    task=${meta##*/}
+    crew_is_provably_working "${task%.meta}" && return 1
+  done
+  return 0
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -3310,6 +3340,12 @@ EOF
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
+    elif ready_work_waits_idle; then
+      reason="check: ready work waiting with no worker working: $READY_WORK_IDS - start each or record why it waits"
+      fm_wake_append check ready-work "$reason" || exit 1
+      touch "$STATE/.last-heartbeat"
+      printf '%s\n' "$READY_WORK_IDS" > "$STATE/.ready-work-surfaced"
+      wake "$reason"
     else
       if ! mark_all_captain_relevant_surfaced; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1
