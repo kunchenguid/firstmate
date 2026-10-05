@@ -1682,8 +1682,14 @@ integrate_after_ready_tick() {
       episode=$previous_episode
       [ "$declaration" = "$previous" ] || episode=$((episode + 1))
       observed_tmp=$(mktemp "$observed.XXXXXX") || exit 1
-      printf '%s\n%s\n%s' "$generation" "$declaration" "$episode" > "$observed_tmp" \
-        && mv -f "$observed_tmp" "$observed" || { rm -f "$observed_tmp"; exit 1; }
+      if ! printf '%s\n%s\n%s' "$generation" "$declaration" "$episode" > "$observed_tmp"; then
+        rm -f "$observed_tmp"
+        exit 1
+      fi
+      if ! mv -f "$observed_tmp" "$observed"; then
+        rm -f "$observed_tmp"
+        exit 1
+      fi
     fi
     if ! status_is_paused "$last" || [[ $last != *'integrate-after: '* ]]; then
       rm -f "$marker" "$probe"
