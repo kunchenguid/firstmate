@@ -286,12 +286,15 @@ if ! awk -v title_file="$WORK/title" -v body_file="$WORK/body" \
       if (parts[1] + 0 < top) top = parts[1] + 0
     }
     if ((getline line < title_file) > 0) check("title", line, 0)
-    n = 0; fence = 0
+    n = 0; fence = 0; comment = 0
     while ((getline line < body_file) > 0) {
       n++
       if (line ~ /^ ? ? ?(```|~~~)/) { fence = !fence; check("body line " n, line, 1); continue }
       check("body line " n, line, fence)
       if (fence) continue
+      # A heading hidden in an HTML comment is invisible, so it does not count.
+      if (comment) { if (index(line, "-->")) comment = 0; continue }
+      if (index(line, "<!--") && !index(substr(line, index(line, "<!--")), "-->")) { comment = 1; continue }
       h = heading(line)
       if (h != "") { split(h, parts, SUBSEP); seen[parts[2]] = 1 }
     }

@@ -146,6 +146,13 @@ assert_not_contains "$OUT" 'Not a heading' "a heading inside a template code fen
 assert_not_contains "$OUT" '### Notes' "a deeper template heading is not top level"
 pass "a body missing a top-level template heading fails and names it"
 
+d=$(new_case commented-heading)
+printf '## Summary\n\nFix.\n\n<!--\n## Test plan\n-->\n' > "$d/fx/body"
+run_check "$d"
+expect_code 1 "$RC" "a heading inside a multi-line HTML comment does not count"
+assert_contains "$OUT" 'body: missing template heading: ## Test plan' "the hidden heading is reported missing"
+pass "a template heading hidden in a body HTML comment is reported missing"
+
 d=$(new_case heading-case)
 printf '## summary\n\nFix.\n\n## TEST PLAN\n\nRan it.\n' > "$d/fx/body"
 run_check "$d"
