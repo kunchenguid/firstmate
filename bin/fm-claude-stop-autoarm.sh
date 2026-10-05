@@ -349,6 +349,15 @@ stopfailure_notify_once() {
     || rm -f "$STOPFAILURE_RECORD.tmp" 2>/dev/null || true
 }
 
+# True while the episode's retry time is still ahead.
+stopfailure_hold_pending() {
+  local retry_at
+  [ -e "$STOPFAILURE_RECORD" ] || return 1
+  retry_at=$(stopfailure_field retry_at)
+  case "$retry_at" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(date +%s)" -lt "$retry_at" ]
+}
+
 # Hold an impending exit 2 until the episode's retry time, whichever event
 # started this generation. Ends early when a normal Stop cleared the record or
 # this generation lost ownership (its commit then refuses anyway), and never
@@ -356,11 +365,8 @@ stopfailure_notify_once() {
 # when there was nothing to wait for. After a real wait, AFK or a vanished need
 # is honored here exactly as at the end of the arm cycle.
 stopfailure_backoff() {
-  local retry_at waited=0
-  while [ -e "$STOPFAILURE_RECORD" ]; do
-    retry_at=$(stopfailure_field retry_at)
-    case "$retry_at" in ''|*[!0-9]*) break ;; esac
-    [ "$(date +%s)" -lt "$retry_at" ] || break
+  local waited=0
+  while stopfailure_hold_pending; do
     [ "$SECONDS" -lt "$HOLD_LIMIT" ] || break
     fm_autoarm_still_owner "$STATE" "$MY_GEN" || break
     waited=1
@@ -697,11 +703,13 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  # The host owns its own successors and stops its cycle before handing back.
+  # The host owns its own successors and stops its cycle before handing back,
+  # which can leave no watcher; a backoff hold needs one cycling meanwhile.
   if [ "$HOST_MODE" -eq 0 ]; then
     start_handling_successor "$CLOSED_ARM_PID" || true
+  elif stopfailure_hold_pending; then
+    start_handling_successor "$$" || true
   fi
-  # The successor (or the host's own) keeps the watcher cycling meanwhile.
   stopfailure_backoff
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'

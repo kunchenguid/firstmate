@@ -1828,6 +1828,46 @@ test_stopfailure_backoff_holds_parked_generation_until_normal_stop() {
   pass "auto-arm: a parked generation holds its rewake through a StopFailure backoff and releases on the next normal Stop"
 }
 
+# The host hands its close back with no successor (exit_to_main stops its
+# cycle), so a StopFailure backoff hold must start a watcher cycle of its own
+# and keep it alive while the hold runs, then rewake once.
+test_stopfailure_host_handback_holds_with_a_live_watcher() {
+  local dir rc successor
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-host-hold")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" handed-back
+  write_arm_fixture "$dir" actionable
+  : > "$dir/state/successor-park"
+  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=4 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >"$FM_HOME/state/hook.out" 2>&1 &
+    hook=$!
+    i=0
+    while [ ! -s "$FM_HOME/state/successor-ran" ]; do
+      [ "$i" -lt 100 ] || exit 90
+      sleep 0.05
+      i=$((i + 1))
+    done
+    kill -0 "$hook" 2>/dev/null && : > "$FM_HOME/state/hook-held"
+    sed -n "s/^arm=\([0-9]*\) .*$/\1/p" "$FM_HOME/state/successor-ran" | head -n 1 > "$FM_HOME/state/successor-pid"
+    kill -0 "$(cat "$FM_HOME/state/successor-pid")" 2>/dev/null && : > "$FM_HOME/state/successor-alive"
+    wait "$hook"
+    echo "$?" > "$FM_HOME/state/hook-rc"
+  '; rc=$?
+  successor=$(cat "$dir/state/successor-pid" 2>/dev/null || true)
+  rm -f "$dir/state/successor-park"
+  expect_code 0 "$rc" "host hold scenario did not complete"
+  assert_present "$dir/state/host-ran" "the StopFailure did not run the supervision host"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the plain foreground arm ran instead of the host"
+  assert_present "$dir/state/hook-held" "the hook had already exited when the hold's watcher started"
+  assert_present "$dir/state/successor-alive" "no live watcher cycle ${successor:-none} was running during the backoff hold"
+  [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] || fail "exactly one watcher cycle must start for the hold: $(cat "$dir/state/successor-ran")"
+  [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the held handback must still rewake once, got rc $(cat "$dir/state/hook-rc")"
+  assert_contains "$(cat "$dir/state/hook.out")" "Claude API error (rate_limit, failure 1 in a row)" "the held rewake must name the backoff"
+  pass "auto-arm: a host hand-back held for a StopFailure backoff keeps a watcher cycle live during the hold"
+}
+
 test_stopfailure_non_retryable_notifies_parent_once() {
   local parent dir main out status lines
   parent="$TMP_ROOT/stopfailure-parent"
@@ -1939,6 +1979,7 @@ test_active_in_marked_secondmate_home
 test_stopfailure_registration_rewakes_after_backoff
 test_stopfailure_backoff_doubles_to_cap_and_resets_on_stop
 test_stopfailure_backoff_holds_parked_generation_until_normal_stop
+test_stopfailure_host_handback_holds_with_a_live_watcher
 test_stopfailure_non_retryable_notifies_parent_once
 test_stopfailure_keeps_the_stop_gates
 test_long_poll_grace_reaches_arm_wrapper
