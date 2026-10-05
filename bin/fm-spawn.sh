@@ -389,6 +389,9 @@
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
 # as for a crewmate. Muse, gemini, agy, devin, and rovo are refused as secondmates.
+# A raw launch command for a claude, pi, pi-signed, or omp secondmate is not armed
+# and retires any arm an earlier launch of that mate left, so its verdict is unknown:
+# the raw command carries no --settings or -e flag to load the wiring.
 # A claude secondmate gets no Stop busy hook; its home's tracked Stop guard is its
 # only Stop writer, through the .fm-busy-stop pointer in that home. A home whose
 # guard predates that pointer keeps the ordinary Stop idle hook instead.
