@@ -2540,6 +2540,14 @@ fm_backend_herdr_agent_state() {  # <target> [<meta> <task-id>]
   esac
 }
 
+# fm_backend_herdr_agent_exited: fm_backend_agent_exited for Herdr - the pane's
+# process view is shell-only (fm_backend_herdr_pane_process_state's `shell`),
+# whatever its registration says. A gone or unreadable pane is not proof.
+fm_backend_herdr_agent_exited() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 1
+  [ "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = shell ]
+}
+
 # fm_backend_herdr_endpoint_absence_recheck: re-read <target> with its own
 # session's server running, and print the resulting fm_backend_agent_state
 # verdict. For a recovery that is about to RE-CREATE an endpoint, this is the

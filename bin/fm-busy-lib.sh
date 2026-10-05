@@ -53,12 +53,12 @@
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
-#   1b. any busy verdict below whose present endpoint the recovery-grade
-#      fm_backend_agent_state proves agent-free (a shell-only pane)
-#      -> dead agent-exited. A harness that crashes or is killed never
-#      posts its own idle event, so its last busy record would otherwise
-#      read busy until the turn-age bound, however long the pane has sat at
-#      a bare shell. Every verdict short of that proof keeps busy unchanged.
+#   1b. any busy verdict below whose present endpoint fm_backend_agent_exited
+#      proves shell-only at the process level -> dead agent-exited. A
+#      harness that crashes or is killed never posts its own idle event, so
+#      its last busy record would otherwise read busy until the turn-age
+#      bound, however long the pane has sat at a bare shell. Every verdict
+#      short of that proof keeps busy unchanged.
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source,
 #      UNLESS the record is still the untouched seed fm-spawn wrote at arm
@@ -1021,15 +1021,16 @@ fm_busy_launch_prompt_parked() {  # <harness>
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown|dead plus the producing source (see header). Process state
 # is probed only to refute a busy verdict (precedence 1b), through
-# fm_backend_agent_state when the caller has sourced bin/fm-backend.sh; a
-# caller without it keeps the record's verdict. Only a present endpoint proved
-# agent-free refutes; a missing endpoint stays its caller's own check, and an
-# ambiguous, unreadable, or unverified one stays busy.
+# fm_backend_agent_exited when the caller has sourced bin/fm-backend.sh; a
+# caller without it keeps the record's verdict. Only a present endpoint whose
+# process view is shell-only refutes; a missing endpoint stays its caller's own
+# check, and any unproven read stays busy.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local verdict
   verdict=$(fm_busy_classify_semantic "$@")
-  if [ "${verdict%% *}" = busy ] && command -v fm_backend_agent_state >/dev/null 2>&1; then
-    [ "$(fm_backend_agent_state "$1" "$2" 2>/dev/null)" = dead ] && verdict='dead agent-exited'
+  if [ "${verdict%% *}" = busy ] && command -v fm_backend_agent_exited >/dev/null 2>&1 \
+    && fm_backend_agent_exited "$1" "$2" 2>/dev/null; then
+    verdict='dead agent-exited'
   fi
   printf '%s' "$verdict"
 }
