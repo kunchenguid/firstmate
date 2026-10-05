@@ -108,6 +108,10 @@ FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_STAGE_REAP_SECONDS=${FM_REMOTE_JOB_STAGE_REAP_SECONDS:-600}
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_SECONDS=86400
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_INTERVAL=3600
+# procps recomputes lstart from the kernel boot time, so a clock step moves
+# the string for a process that is still alive. Legacy records stay valid
+# across a small step. A reused pid is much farther from the stored start.
+FM_REMOTE_JOB_START_SKEW_SECONDS=${FM_REMOTE_JOB_START_SKEW_SECONDS:-300}
 # shellcheck disable=SC2034 # Shared protocol constant consumed by the worker and sourcing callers.
 FM_REMOTE_JOB_PREEMPTED_EXIT=76
 FM_REMOTE_JOB_OPERATOR_PATH=
@@ -667,7 +671,7 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   }
   case "$command" in fm-*.sh) ;; *) FM_REMOTE_JOB_ERROR="remote job command is outside the fm-*.sh namespace"; return 1 ;; esac
   case "$command" in */*|*..*) FM_REMOTE_JOB_ERROR="remote job command contains a path or traversal"; return 1 ;; esac
-  owner_start=$(fm_remote_job_process_start "$$") || {
+  owner_start=$(fm_remote_job_process_start_token "$$") || {
     FM_REMOTE_JOB_ERROR="cannot establish remote job staging ownership"
     return 1
   }
@@ -808,13 +812,12 @@ fm_remote_job_path_mtime() { # <path>
 }
 
 fm_remote_job_stage_owner_alive() { # <stage-dir>
-  local stage=$1 pid recorded_start actual_start
+  local stage=$1 pid recorded_start
   pid=$(fm_remote_job_read_single_line "$stage/.owner-pid" 64 2>/dev/null) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$recorded_start" = "$actual_start" ]
+  fm_remote_job_start_matches "$recorded_start" "$pid"
 }
 
 fm_remote_job_reap_stale() { # <account-home>
@@ -977,6 +980,77 @@ fm_remote_job_process_start() {
   printf '%s\n' "$value"
 }
 
+# Stable identity for a live process. On Linux, field 22 of /proc/pid/stat
+# (start ticks since boot) does not move when btime does, and it changes when
+# the pid is reused. Elsewhere the kernel-recorded lstart string is the token.
+fm_remote_job_process_start_token() { # <pid>
+  local pid=$1 stat rest ticks
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/stat" ]; then
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    rest=${stat##*)}
+    rest=${rest#" "}
+    ticks=$(printf '%s\n' "$rest" | awk '{print $20}')
+    case "$ticks" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'stat:%s\n' "$ticks"
+    return 0
+  fi
+  fm_remote_job_process_start "$pid"
+}
+
+fm_remote_job_process_is_zombie() { # <pid>
+  local pid=$1 stat rest state ps_bin
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/stat" ]; then
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    rest=${stat##*)}
+    rest=${rest#" "}
+    state=${rest%% *}
+    [ "$state" = Z ]
+    return
+  fi
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  state=$("$ps_bin" -p "$pid" -o stat= 2>/dev/null) || return 1
+  state=$(printf '%s' "$state" | tr -d '[:space:]')
+  case "$state" in Z*) return 0 ;; *) return 1 ;; esac
+}
+
+fm_remote_job_lstart_epoch() { # <lstart text>
+  local text=$1 epoch normalized
+  [ -n "$text" ] || return 1
+  case "$text" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  normalized=$(printf '%s' "$text" | tr -s ' ')
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+    epoch=$(date -j -f '%a %b %e %H:%M:%S %Y' "$normalized" '+%s' 2>/dev/null) || \
+      epoch=$(date -j -f '%a %b %d %H:%M:%S %Y' "$normalized" '+%s' 2>/dev/null) || return 1
+  else
+    epoch=$(date -d "$normalized" '+%s' 2>/dev/null) || return 1
+  fi
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$epoch"
+}
+
+# One comparison for every recorded start: the lock, a staged owner, a claim,
+# a lane, and a recorded supervisor or process group. Exact token or exact
+# lstart matches. A legacy lstart within the skew bound still matches, so a
+# clock step does not look like pid reuse.
+fm_remote_job_start_matches() { # <recorded> <pid>
+  local recorded=$1 pid=$2 actual lstart legacy_epoch live_epoch delta skew
+  [ -n "$recorded" ] || return 1
+  actual=$(fm_remote_job_process_start_token "$pid" 2>/dev/null) || return 1
+  [ "$recorded" = "$actual" ] && return 0
+  case "$recorded" in stat:*) return 1 ;; esac
+  lstart=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
+  [ "$recorded" = "$lstart" ] && return 0
+  skew=${FM_REMOTE_JOB_START_SKEW_SECONDS:-300}
+  case "$skew" in ''|*[!0-9]*) return 1 ;; esac
+  legacy_epoch=$(fm_remote_job_lstart_epoch "$recorded") || return 1
+  live_epoch=$(fm_remote_job_lstart_epoch "$lstart") || return 1
+  delta=$((legacy_epoch - live_epoch))
+  if [ "$delta" -lt 0 ]; then delta=$((-delta)); fi
+  [ "$delta" -le "$skew" ]
+}
+
 fm_remote_job_process_command() {
   local pid=$1 ps_bin value
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
@@ -1070,14 +1144,13 @@ fm_remote_job_read_single_line() {
 
 # The pid, start time, and command recorded in <dir> still name one live process.
 fm_remote_job_recorded_owner_alive() { # <dir>
-  local dir=$1 pid recorded_start actual_start recorded_command actual_command
+  local dir=$1 pid recorded_start recorded_command actual_command
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   pid=$(fm_remote_job_read_single_line "$dir/pid" 64 2>/dev/null) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$dir/start" 256 2>/dev/null) || return 1
-  actual_start=$(fm_remote_job_process_start "$pid") || return 1
-  [ "$recorded_start" = "$actual_start" ] || return 1
+  fm_remote_job_start_matches "$recorded_start" "$pid" || return 1
   recorded_command=$(fm_remote_job_read_single_line "$dir/command" 8192 2>/dev/null) || return 1
   actual_command=$(fm_remote_job_process_command "$pid") || return 1
   [ "$recorded_command" = "$actual_command" ] || return 1
@@ -1229,7 +1302,7 @@ fm_remote_job_reload_lock_acquire() { # <lock-link>
   FM_REMOTE_JOB_RELOAD_OWNER=
   (umask 077; mkdir "$owner") 2>/dev/null || return 1
   if ! printf '%s\n' "$pid" > "$owner/pid" ||
-    ! fm_remote_job_process_start "$pid" > "$owner/start" ||
+    ! fm_remote_job_process_start_token "$pid" > "$owner/start" ||
     ! fm_remote_job_process_command "$pid" > "$owner/command"; then
     rm -rf -- "$owner"
     return 1

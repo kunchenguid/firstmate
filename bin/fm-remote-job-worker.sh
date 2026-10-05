@@ -165,7 +165,7 @@ worker_publish_identity() { # <identity>
 worker_publish_lock_owner() {
   local pid start command pid_tmp start_tmp command_tmp
   pid=${BASHPID:-$$}
-  start=$(fm_remote_job_process_start "$pid") || return 1
+  start=$(fm_remote_job_process_start_token "$pid") || return 1
   command=$(fm_remote_job_process_command "$pid") || return 1
   pid_tmp=$(umask 077; mktemp "$WORKER_LOCK/.pid.XXXXXX") || return 1
   start_tmp=$(umask 077; mktemp "$WORKER_LOCK/.start.XXXXXX") || { rm -f -- "$pid_tmp"; return 1; }
@@ -373,13 +373,15 @@ worker_signal_process_or_group() { # process|group <signal> <pid>
 }
 
 worker_supervisor_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start
+  local job=$1 pid=$2 recorded_start
   recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
+  if fm_remote_job_start_matches "$recorded_start" "$pid"; then
+    return 0
+  fi
+  if ! fm_remote_job_process_start_token "$pid" >/dev/null 2>&1; then
     worker_process_or_group_alive process "$pid" && return 2
     return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
+  fi
   return 1
 }
 
@@ -389,15 +391,17 @@ worker_supervisor_identity_status() { # <job-dir> <pid>
 # recorded group stale; an unreadable live leader stays indeterminate so the
 # stop loop retries rather than signaling or declaring the group dead.
 worker_group_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
+  local job=$1 pid=$2 recorded_start file="$1/.claim/group_start"
   [ -e "$file" ] || [ -L "$file" ] || return 3
   recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
+  if fm_remote_job_start_matches "$recorded_start" "$pid"; then
+    return 0
+  fi
+  if ! fm_remote_job_process_start_token "$pid" >/dev/null 2>&1; then
     kill -0 "$pid" 2>/dev/null && return 2
     worker_process_or_group_alive group "$pid" && return 0
     return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
+  fi
   return 1
 }
 
@@ -486,10 +490,9 @@ worker_stop_recorded_execution() { # <job-dir>
 # stays running-with-a-dead-owner for the replacement worker's orphan recovery,
 # exactly as a crashed single-process worker's job did.
 worker_lane_identity_matches() { # <pid> <start>
-  local pid=$1 start=$2 actual_start
+  local pid=$1 start=$2
   [ -n "$start" ] || return 1
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$actual_start" = "$start" ]
+  fm_remote_job_start_matches "$start" "$pid"
 }
 
 worker_stop_active_execution() {
@@ -589,7 +592,7 @@ worker_claim() { # <job-dir>
   [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
   (umask 077; mkdir "$claim") || return 1
   pid=${BASHPID:-$$}
-  start=$(fm_remote_job_process_start "$pid") || { rmdir "$claim" 2>/dev/null || true; return 1; }
+  start=$(fm_remote_job_process_start_token "$pid") || { rmdir "$claim" 2>/dev/null || true; return 1; }
   pid_tmp=$(umask 077; mktemp "$claim/.owner.XXXXXX") || { rmdir "$claim" 2>/dev/null || true; return 1; }
   start_tmp=$(umask 077; mktemp "$claim/.owner_start.XXXXXX") || {
     rm -f -- "$pid_tmp"
@@ -606,7 +609,7 @@ worker_claim() { # <job-dir>
 }
 
 worker_claim_owner_alive() { # <job-dir>
-  local job=$1 claim="$1/.claim" owner pid recorded_start actual_start
+  local job=$1 claim="$1/.claim" owner pid recorded_start
   [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
   owner="$claim/owner"
   fm_remote_job_regular_bounded "$owner" 64 || return 1
@@ -614,8 +617,7 @@ worker_claim_owner_alive() { # <job-dir>
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -e "$claim/owner_start" ] || [ -L "$claim/owner_start" ]; then
     recorded_start=$(fm_remote_job_read_single_line "$claim/owner_start" 256 2>/dev/null) || return 1
-    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-    [ "$recorded_start" = "$actual_start" ]
+    fm_remote_job_start_matches "$recorded_start" "$pid"
     return
   fi
   kill -0 "$pid" 2>/dev/null
@@ -709,7 +711,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   ) &
   group_pid=$!
   set +m
-  group_start=$(fm_remote_job_process_start "$group_pid") || {
+  group_start=$(fm_remote_job_process_start_token "$group_pid") || {
     worker_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
@@ -992,7 +994,10 @@ worker_reap_finished_lanes() {
   while [ "$i" -lt "$count" ]; do
     pid=${WORKER_LANE_PIDS[$i]}
     start=${WORKER_LANE_STARTS[$i]}
-    if worker_lane_identity_matches "$pid" "$start"; then
+    # A running lane is not finished. Waiting on a start-token mismatch
+    # blocked this loop until that lane exited, which let another serve
+    # reclaim the lock. Reap only a process that has actually exited.
+    if kill -0 "$pid" 2>/dev/null && ! fm_remote_job_process_is_zombie "$pid"; then
       live_homes+=("${WORKER_LANE_HOMES[$i]}")
       live_pids+=("$pid")
       live_starts+=("$start")
@@ -1027,7 +1032,7 @@ worker_lane_execute() { # <account-home> <job-dir>
   local supervisor_pid supervisor_start pid_tmp start_tmp
   worker_claim "$job" || return 0
   supervisor_pid=${BASHPID:-$$}
-  supervisor_start=$(fm_remote_job_process_start "$supervisor_pid") || {
+  supervisor_start=$(fm_remote_job_process_start_token "$supervisor_pid") || {
     worker_publish_result "$job" 125 || true
     return 0
   }
@@ -1094,7 +1099,7 @@ worker_start_lane() { # <job-dir> <home>
   "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" &
   lane_pid=$!
   WORKER_ACTIVITY=1
-  lane_start=$(fm_remote_job_process_start "$lane_pid" 2>/dev/null || true)
+  lane_start=$(fm_remote_job_process_start_token "$lane_pid" 2>/dev/null || true)
   WORKER_LANE_HOMES+=("$home")
   WORKER_LANE_PIDS+=("$lane_pid")
   WORKER_LANE_STARTS+=("$lane_start")
@@ -1228,6 +1233,10 @@ main() {
   WORKER_FAST_REMAINING=0
   WORKER_ACTIVITY=1
   while :; do
+    if ! worker_shutdown_owns_lock; then
+      worker_error "worker ownership lock was taken by another serve; stopping"
+      worker_exit_lost_lock
+    fi
     # The independent heartbeat keeps readiness fresh through slow serving
     # passes while ownership remains verifiable.
     if ! kill -0 "$WORKER_HEARTBEAT_PID" 2>/dev/null &&
