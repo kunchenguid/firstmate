@@ -3201,9 +3201,9 @@ fm_backend_herdr_capture() {  # <target> <lines>
 # rows. Verified on herdr 0.9.1 against a Claude Code pane:
 # docs/verification/runtime-backends.md "Herdr", Capture row.
 fm_backend_herdr_ansi_to_plain() {
-  local space trim=(-e ':trim' -e 's/[[:space:]]$//')
+  local space trim=(-e 's/[[:space:]][[:space:]]*$//' -e ':trim')
   for space in "${FM_COMPOSER_UNICODE_SPACES[@]}"; do
-    trim+=(-e "s/${space}\$//")
+    trim+=(-e "s/[[:space:]]*${space}\$//")
   done
   trim+=(-e 't trim')
   fm_composer_strip_ansi | LC_ALL=C sed "${trim[@]}" \
