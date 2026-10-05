@@ -12,7 +12,7 @@
 #        fm-integrate-after.sh --help
 # `add` and `remove` preserve all unrelated body text and are idempotent.
 # A provider archived out of tasks-axi's visible Done list is not guessed to
-# have landed: remove its relation only after verifying its landing evidence.
+# have landed. This command also requires a readable provider row for remove.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

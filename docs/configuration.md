@@ -355,11 +355,10 @@ Do not register a Beads `types.custom` `captain` type for this: captain is a hol
 When the automatic transition gate applies, dispatch and completion each move the work item in the same run that creates or removes its task record.
 The ordinary successful path therefore keeps the backlog and live task set in sync ([`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh)).
 Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight item in this home; a missing, Done, held, or dependency-blocked item is refused before any endpoint or local copy is created.
-`bin/fm-integrate-after.sh` records integration-only dependencies as `integrate-after: <provider-id>` lines in the existing task body, so a frozen-contract consumer remains dispatchable while `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse landing until the provider is Done or its recorded PR has a confirmed merge notification.
-Workers waiting at the final integration checkpoint declare `paused: integrate-after: <provider-id>`; the watcher surfaces the initial wait and one long-cadence recheck, then quiets an unchanged declaration.
-It checks readiness on the bounded check cadence and queues one durable Firstmate notification for each pause declaration when the provider is ready or the relation has been removed after landing verification; the notification asks Firstmate to resume final validation and landing in order.
-Its `add`, `remove`, and `check` commands preserve older task bodies; rows without this relation and pre-backlog task records remain unchanged, while `blocked-by` keeps its implementation-blocking semantics.
-An archived or unreadable provider cannot prove landing and makes `check` refuse until the relation is removed after independent landing verification.
+`bin/fm-integrate-after.sh` records integration-only dependencies as `integrate-after: <provider-id>` lines in the existing task body, so a frozen-contract consumer remains dispatchable while PR readiness, PR merge, and local landing refuse to proceed until the provider is Done or its recorded PR has a confirmed merge notification.
+Workers waiting at the final integration checkpoint declare `paused: integrate-after: <provider-id>`; [architecture.md](architecture.md#event-driven-supervision) owns how the watcher rechecks and notifies Firstmate when the wait clears.
+Its `add`, `remove`, and `check` commands preserve unrelated body text; rows without this relation and pre-backlog task records remain unchanged, while `blocked-by` keeps its implementation-blocking semantics.
+An archived or unreadable provider cannot prove landing, so `check` refuses; `remove` also requires a readable provider row, even when independent landing evidence is available.
 
 [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) refuses `add --start` and its `create --start` alias.
 Either would place a row In flight without a task record, status file, or inbox, counting it as live work that nobody is doing.
