@@ -660,6 +660,7 @@ tests/fm-periodic-stow.test.sh 21332
 tests/fm-pr-check-security.test.sh 172215
 tests/fm-procevent-when.test.sh 17392
 tests/fm-procevent.test.sh 69715
+tests/fm-quota.test.sh 2045
 tests/fm-relay-removal.test.sh 1000
 tests/fm-profile-array-dispatch-live-e2e.test.sh 50
 tests/fm-readable-documents-live-e2e.test.sh 8400

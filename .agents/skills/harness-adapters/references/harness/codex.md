@@ -9,7 +9,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Busy state | See the version-independent native-state and exact-process contract in [architecture](../../../../../docs/architecture.md#busy-state-is-semantic-per-adapter), with current evidence in [semantic busy state](../../../../../docs/verification/supervision.md#semantic-busy-state). |
 | Exit command | `/quit`; the control plane preserves its composer ordering guard, submits it once through the native prompt API, and proves exit from agent state as documented in [agent lifecycle control](../../../../../docs/agent-control.md). |
 | Interrupt | Single Escape. |
-| Skill invocation | `$<skill>`, for example `$no-mistakes`; Codex rejects `/<skill>` as "Unrecognized command". |
+| Skill invocation | `$<skill>`, for example `$readable-documents`; Codex rejects `/<skill>` as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertised only the first four values while omitting `max`; current codex-cli 0.153.4 catalog data at `${CODEX_HOME:-~/.codex}/models_cache.json` advertises `max` for `gpt-5.6-luna`, which Firstmate passes for that model. |

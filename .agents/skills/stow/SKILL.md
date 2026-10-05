@@ -27,7 +27,7 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 ```markdown
 - Treehouse pool slots share one repo, so workers must create their task branch before editing. <!--a:2026-08-03-->
-- Never restart the shared no-mistakes daemon while runs are active. <!--P-->
+- Never discard unlanded work. <!--P-->
 - Codex writes its trust prompt to stderr, not stdout. <!--a:2026-07-28/6-->
 ```
 
