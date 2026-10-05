@@ -23,6 +23,7 @@ Collect successful per-script measurements for every member before calculating a
 
 `tests/fm-supervision-host.test.sh` uses 789123 ms from run 36669175457, after the merged [host runtime fix](https://github.com/kunchenguid/firstmate/pull/6179), rather than its pre-fix maximum of 1065298 ms.
 That post-fix value has only one sample in this baseline, so further green runs must establish its variance.
+Later green runs measured it from 814245 to 1510110 ms, and run [37277783490](https://github.com/kunchenguid/firstmate/actions/runs/37277783490) reached the 30-minute serial job cap at 1551953 ms, so the suite is split in two: `tests/fm-supervision-host.test.sh` keeps its first 55 cases (767522 ms in that run, from its per-case `ok` markers) and `tests/fm-supervision-host-lifecycle.test.sh` sources it for the remaining 18 (784430 ms).
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains its separate 5121 ms measurement from 2026-09-06T21:02Z instead of a portable capability skip.
 The session-start hint retains its pre-optimization maximum until CI measures the shorter fixture-only home-summary bound; do not discount a local speedup from CI packing weights.
 
