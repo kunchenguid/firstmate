@@ -100,6 +100,62 @@ async function sendRecord(path, record, botId, recover) {
 	}
 }
 
+// Post one plain message, split into Discord's 2000-character limit. A nonce
+// rides the first chunk only, so it identifies the whole post for the read-back
+// in priorMessage() without making each chunk a separate event.
+async function postPlain(channelId, message, nonce) {
+	let receipt = null;
+	for (let offset = 0; offset < message.length;) {
+		let end = Math.min(offset + 2000, message.length);
+		if (end < message.length && /[\uD800-\uDBFF]/.test(message[end - 1])) end--;
+		const body = { content: message.slice(offset, end), allowed_mentions: { parse: [] } };
+		if (offset === 0 && nonce) {
+			body.nonce = nonce;
+			body.enforce_nonce = true;
+		}
+		const response = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+			method: "POST",
+			headers: { ...apiHeaders, "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(10000),
+		});
+		if (!response.ok) throw new Error(`Discord API returned HTTP ${response.status}`);
+		receipt = await response.json();
+		if (typeof receipt.id !== "string" || receipt.channel_id !== channelId) {
+			throw new Error("Discord API returned an invalid report receipt");
+		}
+		offset = end;
+	}
+	return receipt.id;
+}
+
+// Post one completed-task outcome through the same durable identity contract a
+// decision uses: a content-addressed outbox record written with an exclusive
+// create before the POST, and a nonce Discord itself deduplicates. That is what
+// makes a completion land exactly once across a replayed status line, two
+// concurrent senders, a failed delivery, and a crash between the POST and its
+// receipt - the read-back in priorMessage() then adopts the message that did
+// land instead of posting a second one.
+async function postCompletion(recordPath, record, botId, recover) {
+	if (recover) {
+		const message = await priorMessage(record, botId);
+		if (message) {
+			saveRecord(recordPath, { ...record, state: "sent", message_id: message.id });
+			return message.id;
+		}
+	}
+	const sending = { ...record, state: "sending", attempted_at: Math.floor(Date.now() / 1000) };
+	saveRecord(recordPath, sending);
+	try {
+		const messageId = await postPlain(record.channel_id, record.message, record.nonce);
+		saveRecord(recordPath, { ...sending, state: "sent", message_id: messageId });
+		return messageId;
+	} catch (error) {
+		saveRecord(recordPath, { ...sending, state: "failed" });
+		throw error;
+	}
+}
+
 function decisionPrompt(trigger) {
 	return ({
 		"captain-hold": "보류된 작업을 어떻게 진행할지",
@@ -111,43 +167,73 @@ function decisionPrompt(trigger) {
 
 async function main() {
   if (reportMode) {
-    const [reportChannelId, reportMessage] = process.argv.slice(3);
+    const [reportChannelId, reportMessage, reportEventId] = process.argv.slice(3);
     if (!token || !/^\d+$/.test(reportChannelId || "") || !reportMessage) {
       throw new Error("report requires a bot token, numeric channel id, and a non-empty message");
     }
-    let receipt;
-    for (let offset = 0; offset < reportMessage.length;) {
-      let end = Math.min(offset + 2000, reportMessage.length);
-      if (end < reportMessage.length && /[\uD800-\uDBFF]/.test(reportMessage[end - 1])) end--;
-      const content = reportMessage.slice(offset, end);
-      const response = await fetch(`https://discord.com/api/v10/channels/${reportChannelId}/messages`, {
-        method: "POST",
-        headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json", "User-Agent": "FirstmateDiscordSelfHosted/1.0" },
-        body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!response.ok) throw new Error(`Discord API returned HTTP ${response.status}`);
-      receipt = await response.json();
-      if (typeof receipt.id !== "string" || receipt.channel_id !== reportChannelId) {
-        throw new Error("Discord API returned an invalid report receipt");
+    // An event id makes this a completion outcome, which gets the durable
+    // exactly-once contract above. Without one the caller wants a fresh
+    // one-off post every time (the on-demand fleet snapshot), so it stays a
+    // plain delivery.
+    if (reportEventId) {
+      if (!existsSync(contextDir)) mkdirSync(contextDir, { recursive: true, mode: 0o700 });
+      const eventId = `completion\0${reportEventId}`;
+      const digest = createHash("sha256").update(eventId).digest("hex");
+      const recordPath = join(contextDir, `discord-completion-${digest}.json`);
+      const nonce = digest.slice(0, 25);
+      // The exclusive create is the concurrency claim: exactly one sender wins
+      // it and owns the delivery, so a racing sender never posts a second copy.
+      // A record that already exists belongs to someone else - sent, in flight,
+      // or awaiting the retry sweep - and is left to that owner.
+      let created = false;
+      try {
+        writeFileSync(recordPath, JSON.stringify({
+          schema: "fm-discord-completion-notification.v1",
+          kind: "completion-notification",
+          state: "pending",
+          event_id: digest,
+          event: reportEventId,
+          message: reportMessage,
+          channel_id: reportChannelId,
+          nonce,
+          recorded_at: Math.floor(Date.now() / 1000),
+        }), { flag: "wx", mode: 0o600 });
+        created = true;
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
       }
-      offset = end;
+      let record;
+      try {
+        record = JSON.parse(readFileSync(recordPath, "utf8"));
+      } catch {
+        throw new Error("existing completion notification record is unreadable");
+      }
+      if (!created) {
+        console.log(record.message_id || record.nonce);
+        return;
+      }
+      console.log(await postCompletion(recordPath, record, await getBotId(), false));
+      return;
     }
-    console.log(receipt.id);
+    console.log(await postPlain(reportChannelId, reportMessage));
     return;
   }
   if (retryPending) {
 		if (!existsSync(contextDir)) return;
 		const pending = [];
 		for (const name of readdirSync(contextDir)) {
-			if (!name.startsWith("discord-notify-") || !name.endsWith(".json")) continue;
+			if (!name.startsWith("discord-notify-") && !name.startsWith("discord-completion-")) continue;
+			if (!name.endsWith(".json")) continue;
 			const path = join(contextDir, name);
 			try {
 				const record = JSON.parse(readFileSync(path, "utf8"));
-				if (record.schema !== "fm-discord-decision-notification.v1" || !["pending", "failed", "sending"].includes(record.state)) continue;
-				if (!record.nonce || !record.channel_id || !Array.isArray(record.options)) continue;
+				const completion = record.schema === "fm-discord-completion-notification.v1";
+				if (!completion && record.schema !== "fm-discord-decision-notification.v1") continue;
+				if (!["pending", "failed", "sending"].includes(record.state)) continue;
+				if (!record.nonce || !record.channel_id) continue;
+				if (!completion && !Array.isArray(record.options)) continue;
 				if (record.state === "sending" && Date.now() - Number(record.attempted_at || record.recorded_at) * 1000 < staleSendingMs) continue;
-				pending.push([path, record]);
+				pending.push([path, record, completion]);
 			} catch (error) {
 				console.error(`fm-discord-notify: ${error instanceof Error ? error.message : "Discord retry failed"}`);
 				process.exitCode = 1;
@@ -155,9 +241,10 @@ async function main() {
 		}
 		if (pending.length === 0) return;
 		const botId = await getBotId();
-		for (const [path, record] of pending) {
+		for (const [path, record, completion] of pending) {
 			try {
-				await sendRecord(path, record, botId, true);
+				if (completion) await postCompletion(path, record, botId, true);
+				else await sendRecord(path, record, botId, true);
 			} catch (error) {
 				console.error(`fm-discord-notify: ${error instanceof Error ? error.message : "Discord retry failed"}`);
 				process.exitCode = 1;

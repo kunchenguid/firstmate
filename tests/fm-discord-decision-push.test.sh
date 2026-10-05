@@ -41,6 +41,27 @@ exec "$FM_TEST_REAL_NODE" --input-type=module -e '
 ' "$script" "$@"
 SH
   chmod +x "$home/fake-bin/node"
+  cat > "$home/fake-bin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_DISCORD_FAKE_CREW_STATE:-state: done · source: fake}"
+SH
+  chmod +x "$home/fake-bin/fm-crew-state.sh"
+}
+
+discord_path_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
+discord_path_links() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %l "$1"
+  else
+    stat -c %h "$1"
+  fi
 }
 test_no_token_is_inert() {
   local home out rc
@@ -62,7 +83,7 @@ test_quiet_report_posts_plain_snapshot() {
   make_fake_node "$home"
   log="$home/posts.jsonl"
   FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
-    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token \
     "$ROOT/bin/fm-discord-notify.sh" --report ' 1000000000000000001 ' $'현황\n진행 중: 작업 A' >/dev/null \
     || fail "plain report post failed"
@@ -548,12 +569,12 @@ test_pr_push_names_gitlab_project() {
 test_done_status_sends_plain_report() {
   local home log body
   home="$TMP_ROOT/done-status"
-  mkdir -p "$home/state/x-context"
-  chmod 700 "$home/state" "$home/state/x-context"
+  mkdir -p "$home/state"
+  chmod 700 "$home/state"
   make_fake_node "$home"
   log="$home/posts.jsonl"
   FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
-    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
     "$ROOT/bin/fm-discord-notify-status.sh" task-a \
       'done: wired up the new endpoint' >/dev/null \
@@ -563,49 +584,259 @@ test_done_status_sends_plain_report() {
   body=$(jq -r '.payload.content' "$log")
   assert_contains "$body" "task-a" "done report includes task id"
   assert_contains "$body" "wired up the new endpoint" "done report includes the note text"
+  [ -n "$(find "$home/state/x-context" -name 'discord-completion-*.json' -print -quit)" ] \
+    || fail "done status did not record its successful delivery"
   pass "a done status line sends a plain Discord report with the worker's note"
 }
 
-test_blocked_status_sends_plain_report() {
-  local home log body
+test_done_record_is_private_valid_json() {
+  local home log note expected_note record
+  home="$TMP_ROOT/done-private-record"
+  mkdir -p "$home/state"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  note='quote " slash \ line one'
+  note="$note"$'\n''line two'
+  expected_note='quote " slash \ line one line two'
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a "done: $note" >/dev/null \
+    || fail "private done record delivery failed"
+  record=$(find "$home/state/x-context" -type f -name 'discord-completion-*.json' -print -quit)
+  [ -n "$record" ] && [ -f "$record" ] && [ ! -L "$record" ] \
+    || fail "done record is not a regular file"
+  assert_equals "700" "$(discord_path_mode "$home/state/x-context")" "done record directory is private"
+  assert_equals "600" "$(discord_path_mode "$record")" "done record is private"
+  assert_equals "1" "$(discord_path_links "$record")" "done record has one link"
+  jq -e . "$record" >/dev/null || fail "done record is not valid JSON"
+  assert_equals "sent" "$(jq -r .state "$record")" "a delivered completion is marked sent"
+  assert_equals "fm-discord-completion-notification.v1" "$(jq -r .schema "$record")" "completion record schema"
+  assert_contains "$(jq -r .message "$record")" "$expected_note" "done record preserves escaped note data"
+  pass "a done record is private valid JSON and marked sent only after delivery"
+}
+
+test_nonterminal_done_status_sends_no_report() {
+  local home log
+  home="$TMP_ROOT/active-pr-monitoring-status"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" \
+    FM_DISCORD_FAKE_CREW_STATE='state: working · source: run-step · validating' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: background verification continues' >/dev/null \
+    || fail "nonterminal done status classification failed"
+  [ ! -s "$log" ] || fail "nonterminal done status sent a Discord notification"
+  pass "a nonterminal done status sends no notification"
+}
+
+test_pr_awaiting_merge_done_status_sends_no_report() {
+  local home log
+  home="$TMP_ROOT/pr-awaiting-merge-status"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" \
+    FM_DISCORD_FAKE_CREW_STATE='state: done · source: run-step · checks green · pr: awaiting merge decision' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: background verification continues' >/dev/null \
+    || fail "PR-awaiting-merge done status classification failed"
+  [ ! -s "$log" ] || fail "PR-awaiting-merge done status sent a Discord notification"
+  pass "a PR-awaiting-merge done status sends no notification"
+}
+
+test_failed_done_delivery_retries() {
+  local home log
+  home="$TMP_ROOT/done-delivery-retry"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  if FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    FM_DISCORD_FAKE_POST_STATUS=500 PATH="$home/fake-bin:$BASE_PATH" \
+    FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DISCORD_BOT_TOKEN=fake-token \
+    FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: wired up the new endpoint' >/dev/null 2>&1; then
+    fail "failed completion delivery returned success"
+  fi
+  assert_equals "failed" \
+    "$(jq -r .state "$(find "$home/state/x-context" -name 'discord-completion-*.json' -print -quit)")" \
+    "a failed completion stays retryable in the outbox"
+  # Re-reading the same status line must not double-post; the retry sweep is the
+  # single owner of redelivery, exactly as it is for a decision.
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: wired up the new endpoint' >/dev/null \
+    || fail "re-reading a failed completion reported failure"
+  assert_equals "1" "$(wc -l < "$log" | tr -d '[:space:]')" "re-reading a failed completion does not double-post"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token \
+    "$ROOT/bin/fm-discord-notify.sh" --retry-pending >/dev/null \
+    || fail "the retry sweep did not redeliver the failed completion"
+  assert_equals "2" "$(wc -l < "$log" | tr -d '[:space:]')" "the retry sweep redelivers a failed completion"
+  assert_equals "sent" \
+    "$(jq -r .state "$(find "$home/state/x-context" -name 'discord-completion-*.json' -print -quit)")" \
+    "a redelivered completion is marked sent"
+  pass "a failed completion delivery is retried by the sweep, not by a re-read"
+}
+
+test_unconfigured_done_status_is_silent_and_retryable() {
+  local home log
+  home="$TMP_ROOT/done-unconfigured"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  PATH="$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN='' "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+    'done: wired up the new endpoint' >/dev/null \
+    || fail "unconfigured completion returned failure"
+  [ -z "$(find "$home/state/x-context" -name 'discord-completion-*.json' -print -quit 2>/dev/null)" ] \
+    || fail "unconfigured completion was marked delivered"
+  PATH="$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=not-a-channel \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: wired up the new endpoint' >/dev/null \
+    || fail "malformed Discord channel returned failure"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: wired up the new endpoint' >/dev/null \
+    || fail "completion did not retry after Discord was configured"
+  assert_equals "1" "$(wc -l < "$log" | tr -d '[:space:]')" "unconfigured completion is retried when configured"
+  pass "an unconfigured completion is silent and remains retryable"
+}
+
+test_blocked_status_sends_no_report() {
+  local home log
   home="$TMP_ROOT/blocked-status"
   mkdir -p "$home/state/x-context"
   chmod 700 "$home/state" "$home/state/x-context"
   make_fake_node "$home"
   log="$home/posts.jsonl"
   FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
-    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
     "$ROOT/bin/fm-discord-notify-status.sh" task-b \
       'blocked: waiting on API credentials' >/dev/null \
     || fail "blocked status classification failed"
-  assert_equals "1" "$(wc -l < "$log" | tr -d '[:space:]')" "blocked status sends exactly one report"
-  assert_contains "$(jq -r '.url' "$log")" "1000000000000000001" "blocked status sends to configured channel"
-  body=$(jq -r '.payload.content' "$log")
-  assert_contains "$body" "task-b" "blocked report includes task id"
-  assert_contains "$body" "waiting on API credentials" "blocked report includes the note text"
-  pass "a blocked status line sends a plain Discord report with the worker's note"
+  [ ! -s "$log" ] || fail "blocked status sent a Discord notification"
+  pass "a blocked status line sends no Discord notification"
 }
 
-test_failed_status_sends_plain_report() {
-  local home log body
+test_failed_status_sends_no_report() {
+  local home log
   home="$TMP_ROOT/failed-status"
   mkdir -p "$home/state/x-context"
   chmod 700 "$home/state" "$home/state/x-context"
   make_fake_node "$home"
   log="$home/posts.jsonl"
   FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
-    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
     "$ROOT/bin/fm-discord-notify-status.sh" task-c \
       'failed: build script exited 1' >/dev/null \
     || fail "failed status classification failed"
-  assert_equals "1" "$(wc -l < "$log" | tr -d '[:space:]')" "failed status sends exactly one report"
-  assert_contains "$(jq -r '.url' "$log")" "1000000000000000001" "failed status sends to configured channel"
-  body=$(jq -r '.payload.content' "$log")
-  assert_contains "$body" "task-c" "failed report includes task id"
-  assert_contains "$body" "build script exited 1" "failed report includes the note text"
-  pass "a failed status line sends a plain Discord report with the worker's note"
+  [ ! -s "$log" ] || fail "failed status sent a Discord notification"
+  pass "a failed status line sends no Discord notification"
+}
+
+test_done_status_lands_once_across_concurrent_senders() {
+  local home log pids=0 i
+  home="$TMP_ROOT/done-concurrent"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  # Two senders racing the same completion is the replay/concurrency case the
+  # exclusive-create outbox record exists for: the nonce makes Discord itself
+  # collapse a second POST, and only one record can exist.
+  for i in 1 2 3 4; do
+    FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+      PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+      "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+        'done: wired up the new endpoint' >/dev/null 2>&1 &
+    pids=$((pids + 1))
+  done
+  i=0
+  while [ "$i" -lt "$pids" ]; do wait -n 2>/dev/null || wait; i=$((i + 1)); done
+  assert_equals "1" "$(find "$home/state/x-context" -name 'discord-completion-*.json' | wc -l | tr -d ' ')" \
+    "concurrent completions share one outbox record"
+  assert_equals "1" "$(wc -l < "$log" | tr -d '[:space:]')" \
+    "concurrent completions post exactly one message"
+  pass "a completion lands exactly once even when senders race"
+}
+
+test_done_status_recovers_from_a_crash_before_its_receipt() {
+  local home log record nonce
+  home="$TMP_ROOT/done-post-crash"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: wired up the new endpoint' >/dev/null \
+    || fail "completion delivery failed"
+  record=$(find "$home/state/x-context" -name 'discord-completion-*.json' -print -quit)
+  nonce=$(jq -r .nonce "$record")
+  # Simulate the crash window: the message reached Discord, but the process died
+  # before it could stamp the receipt. The record reads sending, the retry
+  # read-backs by nonce, adopts the message already there, and does not repost.
+  jq -c '.state="sending" | del(.message_id) | .attempted_at=1' "$record" > "$record.tmp" \
+    && mv "$record.tmp" "$record"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    FM_DISCORD_FAKE_MESSAGES="[{\"id\":\"1352000000000000500\",\"channel_id\":\"1000000000000000001\",\"author\":{\"id\":\"9000000000000000001\"},\"nonce\":\"$nonce\",\"timestamp\":\"2030-01-01T00:00:00.000Z\"}]" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify.sh" --retry-pending >/dev/null \
+    || fail "retry of a crashed completion failed"
+  assert_equals "1" "$(wc -l < "$log" | tr -d '[:space:]')" \
+    "a crashed completion is adopted from history instead of reposted"
+  assert_equals "sent" "$(jq -r .state "$record")" "the adopted completion is marked sent"
+  assert_equals "1352000000000000500" "$(jq -r .message_id "$record")" "the adopted completion records its real message id"
+  pass "a completion that crashed before its receipt is adopted, not reposted"
+}
+
+test_done_status_deduplicates_repeated_lines() {
+  local home log
+  home="$TMP_ROOT/done-dedup"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: wired up the new endpoint' >/dev/null \
+    || fail "done status classification failed"
+  assert_equals "1" "$(wc -l < "$log" | tr -d '[:space:]')" "first done status sends exactly one report"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_CREW_STATE_BIN="$home/fake-bin/fm-crew-state.sh" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+      'done: wired up the new endpoint' >/dev/null \
+    || fail "done status classification failed"
+  assert_equals "1" "$(wc -l < "$log" | tr -d '[:space:]')" "duplicate done status does not send again"
+  pass "a repeated done status line does not produce duplicate Discord posts"
 }
 
 test_no_token_is_inert
@@ -630,5 +861,13 @@ test_ask_user_escalation_hold_carries_finding_text
 test_pr_push_requires_yolo_off
 test_pr_push_names_gitlab_project
 test_done_status_sends_plain_report
-test_blocked_status_sends_plain_report
-test_failed_status_sends_plain_report
+test_done_record_is_private_valid_json
+test_done_status_lands_once_across_concurrent_senders
+test_done_status_recovers_from_a_crash_before_its_receipt
+test_nonterminal_done_status_sends_no_report
+test_pr_awaiting_merge_done_status_sends_no_report
+test_failed_done_delivery_retries
+test_unconfigured_done_status_is_silent_and_retryable
+test_blocked_status_sends_no_report
+test_failed_status_sends_no_report
+test_done_status_deduplicates_repeated_lines

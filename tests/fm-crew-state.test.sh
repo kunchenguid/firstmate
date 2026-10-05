@@ -1165,6 +1165,7 @@ test_ci_ready_done_log_beats_monitoring_run() {
   assert_contains "$out" "state: done" "ci-ready status log -> done"
   assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
   assert_contains "$out" "checks green" "ci-ready detail preserves the report"
+  assert_contains "$out" " · $FM_PR_AWAITS_MERGE_DECISION" "ci-ready status log marks the open PR"
   assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
   pass "ci-ready status log beats monitoring run"
 }
@@ -1191,6 +1192,7 @@ EOF
   assert_contains "$out" "state: done" "green ci-monitor run -> done"
   assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
   assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
+  assert_contains "$out" " · $FM_PR_AWAITS_MERGE_DECISION" "green ci-monitor marks the open PR"
   assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
   pass "ci-monitoring run with checks already green surfaces done"
 }
@@ -1207,6 +1209,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   assert_contains "$out" "state: done" "top-level ci with green log -> done"
   assert_contains "$out" "source: run-step" "top-level ci green -> run-step source"
   assert_contains "$out" "checks green" "top-level ci green detail mentions checks green"
+  assert_contains "$out" " · $FM_PR_AWAITS_MERGE_DECISION" "top-level ci green marks the open PR"
   assert_not_contains "$out" "state: working" "top-level ci green must not stay working"
   pass "top-level ci status uses ci log green marker"
 }
@@ -1961,6 +1964,7 @@ daemon shutting down"
   assert_contains "$out" "state: done" "orphaned ci monitor after green must read done, not failed"
   assert_contains "$out" "source: run-step" "reclassified held run stays run-step sourced"
   assert_contains "$out" "https://github.com/o/r/pull/203" "PR URL surfaced from the run"
+  assert_contains "$out" " · $FM_PR_AWAITS_MERGE_DECISION" "held run marks the open PR"
   assert_not_contains "$out" "state: failed" "monitor death must not read as a failed run"
   pass "orphaned ci monitor after green reads as held-for-merge done"
 }
@@ -1977,6 +1981,7 @@ daemon shutting down"
   local out; out=$(run_crew_state "$d" feat-ci-orphan2)
   assert_contains "$out" "state: done" "status-only failed orphaned monitor after green reads done"
   assert_contains "$out" "https://github.com/o/r/pull/203" "PR URL surfaced from the run"
+  assert_contains "$out" " · $FM_PR_AWAITS_MERGE_DECISION" "status-only held run marks the open PR"
   pass "status-only failed orphaned ci monitor after green reads done"
 }
 

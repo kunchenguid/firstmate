@@ -120,7 +120,11 @@ SH
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+  # FM_HOME is pinned, not resolved: left unset it becomes the code root, which
+  # is the primary checkout when this suite runs there, and the notifier then
+  # loads that checkout's real bot token and posts this suite's status fixtures
+  # to a live public channel.
+  PATH="$fakebin:$PATH" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \

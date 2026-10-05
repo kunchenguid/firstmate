@@ -68,6 +68,26 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Neutralize the public-surface credentials for every test. The captain's
+# question "what is this actually" and any "still working" note are the two
+# shapes that must never appear in a public thread, and both arrive by exactly
+# this route: a script that resolves its home and then posts. So does every other
+# live public surface (Discord, the Relay pairing token, an explicit env-file
+# redirect). None of it may be inherited from the operator's shell: a suite that
+# sets only FM_STATE_OVERRIDE leaves FM_HOME resolving to the primary checkout,
+# whose .env carries the real bot token, and a status fixture written by a test
+# is then a real public post. That happened - fixture strings from
+# tests/fm-watch-triage.test.sh reached the captain's live Discord channel.
+# Every suite that wants a credential sets its own, against its own temp home.
+unset FM_DISCORD_BOT_TOKEN FM_DISCORD_CHANNEL_ID FM_DISCORD_ALLOWED_CHANNELS \
+  FM_DISCORD_EXCLUDE_CHANNELS FM_DISCORD_ALLOW_DMS FM_DISCORD_AUTHORIZED_USER_IDS \
+  FMX_PAIRING_TOKEN FMX_RELAY_URL FMX_DRY_RUN FMX_ENV_FILE FMX_REPORT_URL \
+  FMX_BUDGET_URL FMX_PLATFORM
+# A leftover override would redirect even a suite's own temp home at a real
+# account, so remove it for the whole run rather than per case.
+FM_HOME_OVERRIDE=
+unset FM_HOME_OVERRIDE
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -284,6 +304,15 @@ trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
 trap 'fm_test_cleanup; exit 129' HUP
 trap 'fm_test_cleanup; exit 131' QUIT
+
+# Give every suite a credential-free home before it invokes any production
+# script.  Clearing credential variables is not enough: scripts also source
+# "$FM_HOME/.env", and an inherited operator home may contain live Discord or
+# Relay credentials.  Suites remain free to replace FM_HOME with a case home.
+FM_TEST_DEFAULT_HOME=$(fm_test_tmproot fm-test-home) || return 1
+: > "$FM_TEST_DEFAULT_HOME/.env"
+export FM_TEST_DEFAULT_HOME
+export FM_HOME="$FM_TEST_DEFAULT_HOME"
 
 # fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
 # prior run that was killed hard enough to skip the traps above (e.g. a

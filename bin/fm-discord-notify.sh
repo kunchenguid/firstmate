@@ -2,6 +2,14 @@
 # Send one firstmate-initiated decision to the configured self-hosted Discord channel.
 # `perm-ask` carries a real OpenCode permission request; its key is `perm-<request-id>`.
 # Usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready|perm-ask> <task-id> <key> <summary> <option|option...> <recommendation> [status-task-id]
+#        fm-discord-notify.sh --report <channel-id> <message> [event-id]
+#        fm-discord-notify.sh --retry-pending
+#
+# A --report carrying an event id is a completed-task outcome: it is bound to a
+# durable outbox record and a Discord nonce, so it is delivered exactly once even
+# across a replay, a concurrent sender, a failed POST, or a crash before the
+# receipt. Omitting the event id keeps the unrecorded one-off delivery the
+# on-demand fleet snapshot wants.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,8 +22,21 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 retry_pending=0
 report_mode=0
 if [ "${1:-}" = --report ]; then
-  [ "$#" -eq 3 ] || { echo "usage: fm-discord-notify.sh --report <channel-id> <message>" >&2; exit 2; }
+  [ "$#" -eq 3 ] || [ "$#" -eq 4 ] \
+    || { echo "usage: fm-discord-notify.sh --report <channel-id> <message> [event-id]" >&2; exit 2; }
   report_mode=1
+  # A stable event id makes this a completed-task outcome and binds it to the
+  # durable exactly-once outbox; without one the caller wants a fresh post every
+  # time (the on-demand fleet snapshot), so it stays an unrecorded delivery.
+  report_event=${4:-}
+  if [ -n "$report_event" ]; then
+    case "$report_event" in
+      .* | *[!A-Za-z0-9._-]*)
+        echo "fm-discord-notify: report event id must be a safe token" >&2
+        exit 2
+        ;;
+    esac
+  fi
 elif [ "${1:-}" = --retry-pending ]; then
   [ "$#" -eq 1 ] || { echo "usage: fm-discord-notify.sh --retry-pending" >&2; exit 2; }
   retry_pending=1
@@ -43,7 +64,7 @@ if [ "$report_mode" -eq 1 ]; then
   case "$channel_id" in ''|*[!0-9]*) echo "fm-discord-notify: report channel id is invalid" >&2; exit 2 ;; esac
   [ -n "$3" ] || { echo "fm-discord-notify: report message is empty" >&2; exit 2; }
   export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_DISCORD_BOT_TOKEN="$FM_DISCORD_TOKEN"
-  exec node "$SCRIPT_DIR/fm-discord-notify.js" --report "$channel_id" "$3"
+  exec node "$SCRIPT_DIR/fm-discord-notify.js" --report "$channel_id" "$3" ${report_event:+"$report_event"}
 fi
 
 if [ "$retry_pending" -eq 1 ]; then

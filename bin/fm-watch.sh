@@ -2228,9 +2228,11 @@ signal_files_actionable() {  # <status-file> ...
 }
 
 # Push the captain-facing transitions that originate in worker status logs:
-# yolo-off PR-ready, plus done/blocked/failed plain reports. Captain holds and
-# local PR registration publish directly at their durable mutation sites,
-# where their identities are authoritative.
+# yolo-off PR-ready, plus a terminal completion. Captain holds and local PR
+# registration publish directly at their durable mutation sites, where their
+# identities are authoritative. Routine blocked/failed status is deliberately
+# not pushed: the captain's Discord channel carries only what needs their choice
+# and what finished.
 signal_discord_decision_notifications() {  # <status-file> ...
   local f start size chunk line task verb key
   for f in "$@"; do
