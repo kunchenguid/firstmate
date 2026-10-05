@@ -1167,15 +1167,15 @@ test_refusal_names_a_background_holder_and_its_stop_command() {
   holder_world background "$NAMED_CLAUDE" SID-HOLDER; dir=$HOLDER_HOME
   bin=$(make_agents_stub "$dir")
   cat > "$dir/agents.json" <<EOF
-[{"pid":1,"cwd":"/elsewhere","kind":"interactive","sessionId":"other","name":"Unrelated","status":"busy"},
- {"pid":$HOLDER_PID,"id":"ab12cd34","cwd":"/work/home","kind":"background","sessionId":"SID-HOLDER","name":"Leftover background run","status":"idle","state":"done"}]
+[{"pid":1,"kind":"interactive","sessionId":"other","name":"Unrelated","status":"busy"},
+ {"pid":$HOLDER_PID,"id":"ab12cd34","kind":"background","sessionId":"SID-HOLDER","name":"Leftover background run","status":"idle","state":"done"}]
 EOF
   out=$(lock_from_other_session "$dir" "$bin")
   stop_holder
   assert_contains "$out" "RC=1" "a live holder must still refuse the lock"
   assert_contains "$out" "error: another live firstmate session holds the lock (pid $(cat "$dir/state/.lock"), session SID-HOLDER); operate read-only until resolved" \
     "the existing refusal line must stay exactly as before"
-  assert_contains "$out" 'lock holder: Claude Code background session "Leftover background run" (id ab12cd34, status idle, state done, cwd /work/home)' \
+  assert_contains "$out" 'lock holder: Claude Code background session "Leftover background run" (id ab12cd34, status idle, state done)' \
     "the refusal did not name the background holder"
   assert_contains "$out" "lock holder: to end that session and free the lock, run: claude stop ab12cd34" \
     "the refusal did not give the exact stop command"
@@ -1197,19 +1197,22 @@ test_refusal_matches_the_recorded_session_id_when_the_pid_differs() {
     "a session-id match did not name the session"
   assert_contains "$out" "lock holder: matched by the recorded session id SID-FORKED; that session is listed under pid 424242, not the lock pid" \
     "a session-id-only match must say so instead of implying the pid matched"
-  assert_contains "$out" "claude stop fe98dc76" "a session-id match must still give the stop command"
-  pass "lock refusal: a holder listed under another pid is matched by the recorded session id and says so"
+  assert_contains "$out" "lock holder: stopping or exiting that session may not free the lock, because the lock pid $(cat "$dir/state/.lock") is not its listed process; the lock still counts as held" \
+    "a session-id-only match must say ending that session may not free the lock"
+  assert_not_contains "$out" "free the lock, run: claude stop" "a session-id-only match must not promise that claude stop frees the lock"
+  assert_not_contains "$out" "kill" "a session-id-only match must never suggest killing a pid"
+  pass "lock refusal: a holder listed under another pid is matched by the recorded session id and does not promise the lock frees"
 }
 
 test_refusal_for_an_interactive_holder_never_offers_claude_stop() {
   local dir bin out
   holder_world interactive "$NAMED_CLAUDE"; dir=$HOLDER_HOME
   bin=$(make_agents_stub "$dir")
-  printf '[{"pid":%s,"cwd":"/w","kind":"interactive","sessionId":"SID-I","name":"firstmate-7","status":"busy"}]\n' "$HOLDER_PID" \
+  printf '[{"pid":%s,"kind":"interactive","sessionId":"SID-I","name":"firstmate-7","status":"busy"}]\n' "$HOLDER_PID" \
     > "$dir/agents.json"
   out=$(lock_from_other_session "$dir" "$bin")
   stop_holder
-  assert_contains "$out" 'lock holder: Claude Code interactive session "firstmate-7" (status busy, cwd /w)' \
+  assert_contains "$out" 'lock holder: Claude Code interactive session "firstmate-7" (status busy)' \
     "the refusal did not name the interactive holder"
   assert_contains "$out" "exit that interactive session from its own terminal" "an interactive holder needs its own way out"
   assert_not_contains "$out" "claude stop" "claude stop addresses background sessions only"
