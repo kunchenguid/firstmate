@@ -1071,7 +1071,7 @@ Every level stays on the ramp: a press made before the next request steps on pas
 This supersedes the decline memory in the 2026-09-17 record above, and the settings check, decline memory, nothing-left notice, and test world that saves every level described in the earlier commit messages of the branch that shipped this cue; none of them is present behavior.
 The live guard accepts the confirmation wherever an effort change can raise it, including the restore on exit, and where the build asks it, the guard turns the first raise down, proves the level kept, and proves the next step after a turn offers the same level again.
 The live run below was taken against the first revision.
-The path it drives, a change turned down after a reply, records nothing under any revision, and the guard has not been re-run since.
+The path it drives, a change turned down after a reply, records nothing under any revision, and the guard was not re-run on 2.1.280 after that; its next live run is in the 2.1.289 record below.
 
 ```text
 $ bash tests/fm-calm-claude-mod.test.sh
@@ -1093,7 +1093,7 @@ ok - Claude Code 2.1.280 (Claude Code) names a level in the effort cue only once
 
 The shared Claude Code moved from 2.1.280 to 2.1.289 during this work, and 2.1.289 is the version the effort cue is now tested against.
 The 2.1.280 record above stays as dated history.
-Its change confirmation was not observed again on 2.1.289, because no step was taken after a reply in this round.
+Its change confirmation was observed again on 2.1.289, in the live guard run recorded at the end of this section.
 
 How the install moved is the first bound recorded here.
 A manual check launched Claude Code 2.1.280 with a throwaway `CLAUDE_CONFIG_DIR` to try the `ctrl+tab` binding without editing the captain's own `keybindings.json`.
@@ -1194,8 +1194,12 @@ It runs in two parts.
 - The cue under `/effort auto` after a proven level is `NOT RUN` on this engine, because that command would rewrite the captain's saved level; the plugin suite covers it.
 - The section records the sha256 of the captain's `settings.json` and `keybindings.json` before it starts, and fails if either differs when it ends.
 
-The corrected guard has not been run live from this head.
-Its own pass lines on 2.1.289 are recorded here when the worker runs it under the switch and the containment above.
+The corrected guard ran live on 2.1.289 on 2026-10-05 from 22:35:06Z to 22:37:29Z, under the switch and the containment above, and exited 0 with the five pass lines below.
+Its first section recorded that the engine loaded the hooks module through its own rollout flag and the mod stayed inert.
+Its effort section ran both parts, the login part on `claude-sonnet-5`, and printed only the cue under `/effort auto` as `NOT RUN`.
+That run also met the change confirmation on 2.1.289: after a reply at a proven `xhigh`, `/effort-cycle` opened `Change effort level?` with `1. Yes, switch to max` and `2. No, go back`.
+Turning it down kept `xhigh`, the next step after a request offered `max` again, and accepting it set `max` for the session only.
+The captain's `settings.json` and `keybindings.json` kept the sha256 values above, the shared package tree had the same digest before and after the run, and `claude --version` of the shared install still read 2.1.289 afterwards.
 
 ```text
 $ claude --version
@@ -1207,4 +1211,11 @@ ok - the effort-level policy cycles the ramp and wraps without skipping a level,
 $ bash tests/fm-calm-claude-mod-plugin.test.sh
 ok - Claude Code 2.1.289 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings, /calm, and the effort cue's band, press, and commands while logging supervision notes
 ok - Claude Code 2.1.289 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, the clock-driven working ship, supervision notes, and the effort cue's proof-only display, colors, cycle from the saved level, survey yield, and auto
+
+$ FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
+ok - Claude Code 2.1.289 (Claude Code) with the flag unset (the engine loaded the hooks module through its own rollout flag and the mod stayed inert): no /calm, no effort cue, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.289 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.289 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
+ok - Claude Code 2.1.289 (Claude Code) with Calm off shows the supervision notes: the session-start anchor for an unprocessed captain outcome, a sailboat for a new routine outcome, an anchor for a new captain outcome, and the latch-trip note, each behind the fm: label, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each anchor once
+ok - Claude Code 2.1.289 (Claude Code) effort cue, in a throwaway configuration with no login: the cue draws above the prompt and names no level before a request, ctrl+tab bound to command:effort-cycle steps the real level from the saved high to xhigh, max, and around to low, /effort-cycle steps it to medium, the band's own focus-and-press keys step from the captain's own /effort max around to low, the cue claims no level after any of them, and no hook of the mod is skipped; with the login on claude-sonnet-5, started with --effort so nothing is saved: a request proves low and xhigh and the cue names each in a color of its own, the step after a reply asks for max, which the cue names in a third color only once a request has carried it, and offers max again after its change was turned down at Claude Code's confirmation; NOT RUN on this engine: the cue under /effort auto after a proven level, because that command would rewrite the captain's saved level; the captain's settings.json (sha256 cad6fa0347e40893997a3e1d58a18ee94ecc1b3a5c48d47a8d1e2f85c10e630c) and keybindings.json (sha256 4b01db1eeb5484d059a88daa8dc38ff9c8af2a346a948f0f4c40671d4f185af3) are unchanged
 ```
