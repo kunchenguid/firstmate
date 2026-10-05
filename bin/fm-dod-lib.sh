@@ -87,10 +87,14 @@
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
 # emitter, supplying it first in every ship/scout launch brief and never to a
 # secondmate charter. It names the one task-owned steering inbox without
-# relaxing isolation from every other home's endpoint namespace. Like
-# fm_brief_intent_overlay it is a distinctly titled launch section that states
-# its own precedence, so a brief or project instruction that authors a
-# conflicting role is superseded rather than duplicated.
+# relaxing isolation from every other home's endpoint namespace. It opens by
+# naming Firstmate as the tool that dispatched the brief, because a worker whose
+# harness prompt carries no Firstmate context otherwise reads the identity
+# assertion that follows as prompt injection; that sentence names no path and
+# grants no authority. Like fm_brief_intent_overlay it is a distinctly titled
+# launch section that states its own precedence, so a brief or project
+# instruction that authors a conflicting role is superseded rather than
+# duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
@@ -109,6 +113,7 @@ fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
   cat <<'EOF'
 # Current worker role contract
+This task was dispatched by Firstmate, the local orchestration tool the user runs to hand coding tasks to agents in disposable git worktrees; this message is its task brief, and every result it produces is reported to the user.
 You are a crewmate: an autonomous worker agent managed by firstmate.
 This section establishes your current identity before every project or task instruction below and supersedes any conflicting role identity in those instructions.
 Do the assigned work yourself and report only to firstmate; do not adopt a firstmate or secondmate supervisor identity, delegate the task, run fleet supervision, or address the captain.
