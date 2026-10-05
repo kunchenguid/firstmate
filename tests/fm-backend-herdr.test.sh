@@ -1119,7 +1119,7 @@ SH
   out=$(run_with_clients "$dir" "$dir/stale:$dir/current" \
     'fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/modern.out" || exit 1
      fm_backend_herdr_cli fresh status --json > "$FM_HERDR_PAIR_DIR/fresh-status.out" || exit 1
-     fm_backend_herdr_cli fresh server > "$FM_HERDR_PAIR_DIR/server.out" || exit 1
+     ( fm_backend_herdr_cli fresh server ) > "$FM_HERDR_PAIR_DIR/server.out" || exit 1
      touch "$FM_HERDR_PAIR_DIR/switched"
      fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/legacy.out" || exit 1
      printf "%s|%s|%s|%s|%s" "$(cat "$FM_HERDR_PAIR_DIR/modern.out")" "$(jq -r .server.running "$FM_HERDR_PAIR_DIR/fresh-status.out")" "$(cat "$FM_HERDR_PAIR_DIR/server.out")" "$(cat "$FM_HERDR_PAIR_DIR/legacy.out")" "${FM_BACKEND_HERDR_BIN:-PATH-default}"')
@@ -4154,6 +4154,66 @@ test_composer_state_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real composer text reads pending"
 }
 
+# make_herdr_stall_fakebin: a `herdr` whose `pane read` and `agent get` never
+# answer and whose `server` runs on, recording every long-lived pid to
+# <dir>/pids so the test reaps them. `status` reports running only after
+# `server` has started, so server_ensure takes its real launch path.
+make_herdr_stall_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  status) if [ -e "$dir/up" ]; then echo '{"server":{"running":true}}'; else echo '{"server":{"running":false}}'; fi ;;
+  server) touch "$dir/up"; echo \$\$ >> "$dir/pids"; exec sleep 30 ;;
+  *) echo \$\$ >> "$dir/pids"; exec sleep 30 ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# Verified live (2026-10-05): a composer read that hit a herdr which never
+# answered held fm-secondmate-restart open for over an hour. The read must end
+# within FM_BACKEND_HERDR_READ_TIMEOUT and report unknown. The outer timeout
+# only turns a regression into a failure instead of a hung suite.
+test_composer_state_stalled_read_returns_unknown_within_bound() {
+  local dir fb out start elapsed
+  dir="$TMP_ROOT/composer-stall"; mkdir -p "$dir"
+  fb=$(make_herdr_stall_fakebin "$dir")
+  start=$SECONDS
+  # shellcheck disable=SC2016 # expanded by the inner bash
+  out=$( PATH="$fb:$PATH" FM_BACKEND_HERDR_READ_TIMEOUT=1 timeout -k 1 15 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  elapsed=$(( SECONDS - start ))
+  xargs kill 2>/dev/null < "$dir/pids"
+  [ "$out" = unknown ] || fail "a stalled pane read must report unknown, got '$out' after ${elapsed}s"
+  [ "$elapsed" -le 6 ] || fail "a stalled pane read must end within its bound, took ${elapsed}s"
+  [ ! -e "$dir/up" ] || fail "a passive composer read must never start a herdr server"
+  pass "fm_backend_herdr_composer_state: a stalled herdr read ends within the bound as unknown and starts no server"
+}
+
+# Verified live (2026-10-05): the subshell that launched a herdr server stayed
+# alive waiting on it while holding its caller's output pipe, so any
+# `x=$(...)` around a server start never saw EOF and hung for the server's
+# whole life (one probe: 1h16m). The call is redirected the way real callers
+# redirect it: bash then keeps a saved copy of the pipe, which the waiting
+# subshell inherited.
+test_server_ensure_releases_callers_pipe() {
+  local dir fb out start elapsed
+  dir="$TMP_ROOT/server-pipe"; mkdir -p "$dir"
+  fb=$(make_herdr_stall_fakebin "$dir")
+  start=$SECONDS
+  # shellcheck disable=SC2016 # expanded by the inner bash
+  out=$( PATH="$fb:$PATH" timeout -k 1 15 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmstall 2>/dev/null; echo "rc=$?"' "$ROOT" 2>&1 )
+  elapsed=$(( SECONDS - start ))
+  xargs kill 2>/dev/null < "$dir/pids"
+  [ "$out" = rc=0 ] || fail "server_ensure should start the server and report success, got '$out'"
+  [ "$elapsed" -le 6 ] || fail "starting a server must not hold the caller's output open, took ${elapsed}s"
+  pass "fm_backend_herdr_server_ensure: a started server does not hold its caller's output pipe open"
+}
+
 # Issue #3436: Grok 1.0.5's real bottom border is three columns wider than
 # the aligned top and content rows. Herdr has no cursor anchor, so the old
 # geometry verdict was unknown even when this composer was genuinely idle.
@@ -6385,6 +6445,8 @@ test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head
 test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063
 test_send_text_submit_refuses_marked_digest_missing_its_head
 test_composer_state_claude_slash_popup_pushes_composer_above_tail_window
+test_composer_state_stalled_read_returns_unknown_within_bound
+test_server_ensure_releases_callers_pipe
 test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted
 test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
