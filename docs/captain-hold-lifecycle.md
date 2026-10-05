@@ -85,7 +85,7 @@ A standing mirror also stays the lane's declared wait (`status_declared_wait_lin
 A transfer counts as the declared wait only while it is the lane's last event.
 A mirror or transfer is settled once a retraction under its own key follows it, and `last_status_line` in `bin/fm-hold-status-lib.sh` then reads past both lines to the worker's last event, whatever is appended afterwards.
 So a settled lane is done, paused, or failed again, or back on the `needs-decision` its transfer answered, to every reader that routes through that function instead of looking like a quiet worker, and the declared-wait read still finds a pause that sits under the settled pair.
-Readers of the worker's own state - `fm-crew-state.sh` and the terminal-outcome ledger in `bin/fm-inactive-reconcile.sh` - read past both mirror lines at any time, and past a settled transfer the same way, through `last_worker_status_line`; under a standing mirror, crew state's `status_current_line` also reads past other keys' `resolved` lines to the worker's standing pause or latest other event, never a `resolved` line, so a hold never changes a lane's reported state or re-reports an outcome it already delivered.
+Readers of the worker's own state - `fm-crew-state.sh` and the terminal-outcome ledger in `bin/fm-inactive-reconcile.sh` - read past both mirror lines at any time, and past a settled transfer the same way, through `last_worker_status_line`; under a standing mirror, crew state's `status_current_line` also reads past `resolved` lines to the worker's standing pause or latest other event, never a `resolved` line or a decision one of those lines answered, so a hold never changes a lane's reported state or re-reports an outcome it already delivered.
 
 ### Answering a call (`answer`)
 
