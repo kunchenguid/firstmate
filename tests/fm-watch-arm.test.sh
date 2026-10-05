@@ -944,6 +944,63 @@ test_append_wakes_live_announced_watcher() {
   pass "watch-arm: appending work reopens an announced empty recovery"
 }
 
+test_append_wakes_live_handling_successor() {
+  local phase=$1 dir home state fakebin predecessor successor generation watcher_pid pair
+  dir=$(make_case "append-$phase-handling-successor")
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  printf 'done: predecessor wake\n' > "$state/predecessor.status"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "predecessor did not surface its wake"
+  predecessor=$ARM_PID
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/successor-arm.out" "$predecessor"
+  successor=$ARM_PID
+  is_live_non_zombie "$successor" || fail "handling successor did not stay live"
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  watcher_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).* recovery-generation=.*$/\1/p' "$dir/successor-arm.out")
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
+    --watcher-pid "$watcher_pid" || fail "could not confirm predecessor delivery"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "could not present predecessor wake"
+  pair=$(drain_ack_pair "$dir/drain.err") || fail "predecessor drain omitted acknowledgement"
+  if [ "$phase" = after ]; then
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "${pair%%$'\t'*}" \
+      --recovery-generation "${pair##*$'\t'}" || fail "could not acknowledge predecessor wake"
+    [ ! -s "$state/.wake-queue" ] || fail "predecessor acknowledgement left queued work"
+  fi
+  is_live_non_zombie "$successor" || fail "drain stopped the handling successor"
+  ! grep -F 'check: rearm-resurface' "$dir/successor-arm.out" >/dev/null \
+    || fail "handling successor recursively announced the predecessor wake"
+
+  append_wake "$state" check inbox:successor 'check: inbox note after predecessor handling' \
+    || fail "could not append inbox wake to live handling successor"
+  case "$(cat "$state/.watcher-down")" in
+    pending:downtime:*|announced:downtime:*) ;;
+    *) fail "append did not publish recoverable downtime" ;;
+  esac
+  wait_for_exit "$successor" 80 \
+    || fail "live handling successor stranded the appended inbox wake"
+  grep -F 'check: rearm-resurface' "$dir/successor-arm.out" >/dev/null \
+    || fail "handling successor did not resurface the appended inbox wake"
+  grep "$(printf '\tcheck\tinbox:successor\t')" "$state/.wake-queue" >/dev/null \
+    || fail "resurfacing consumed the unhandled inbox wake"
+  if [ "$phase" = during ]; then
+    [ "$(recovery_marker_generation "$state/.watcher-down")" = "$generation" ] \
+      || fail "append replaced the outstanding handling generation"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "${pair%%$'\t'*}" \
+      --recovery-generation "${pair##*$'\t'}" || fail "outstanding acknowledgement became invalid"
+    grep "$(printf '\tcheck\tinbox:successor\t')" "$state/.wake-queue" >/dev/null \
+      || fail "predecessor acknowledgement consumed the later inbox wake"
+  fi
+  ack_wakes "$state" || fail "resurfaced inbox wake could not be acknowledged"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/stable-arm.out" "$successor"
+  is_live_non_zombie "$ARM_PID" || fail "acknowledged inbox wake caused a recovery loop"
+  pass "watch-arm: a live handling successor resurfaces an inbox wake $phase handling"
+}
+
 # Exercise the handling-window recovery invariant owned by
 # docs/watcher-continuity.md through real watcher processes.
 test_handling_window_close_keeps_the_acknowledgement_valid() {
@@ -1605,6 +1662,8 @@ test_restart_preserves_recovery_across_reused_pid_lock
 test_markerless_legacy_queue_is_recovered_on_arm
 test_idle_lavish_source_stays_quiet_until_result
 test_append_wakes_live_announced_watcher
+test_append_wakes_live_handling_successor after
+test_append_wakes_live_handling_successor during
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
