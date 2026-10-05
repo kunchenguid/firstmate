@@ -179,6 +179,9 @@ async function captureEvidence(name) {
 }
 let pendingTaskDelay = null;
 let failNextTaskRequest = false;
+let removeReconciliationOnNextTaskRequest = false;
+let zeroCompletedOnNextTaskRequest = false;
+let lastFullTaskSnapshot = null;
 function delayNextTaskRequest() {
   let markStarted;
   let release;
@@ -201,29 +204,55 @@ await page.route("**/api/tasks*", async route => {
   }
   const response = await route.fetch();
   const body = await response.json();
+  let replayedFullSnapshot = false;
+  if (removeReconciliationOnNextTaskRequest && body.unchanged === true && Array.isArray(lastFullTaskSnapshot)) {
+    body.tasks = lastFullTaskSnapshot.map(task => ({ ...task }));
+    body.unchanged = false;
+    replayedFullSnapshot = true;
+    body.warning = "changed-fixture";
+  }
   if (Array.isArray(body.tasks)) {
-    body.tasks = body.tasks.flatMap(task => task.category !== "completed" ? [task] : [
-      task,
-      ...Array.from({ length: 40 }, (_, index) => ({
-        ...task,
-        id: `completed-copy-${String(index + 1).padStart(2, "0")}`,
-        title: `Dashboard completed task copy ${String(index + 1).padStart(2, "0")}`,
-      })),
-    ]);
-    body.tasks.push({
-      id: "reconciliation-task",
-      title: "Dashboard reconciliation task",
-      category: "held",
-      status: "Needs reconciliation",
-      kind: "ship",
-      project: "viewer",
-      wait: "Needs reconciliation",
-      warning: null,
-      hasDocument: false,
-      documentType: null,
-      documentTypes: [],
-      documentModifiedAt: "2026-10-03T00:00:01Z",
-    });
+    if (!replayedFullSnapshot) {
+      body.tasks = body.tasks.flatMap(task => task.category !== "completed" ? [task] : [
+        task,
+        ...Array.from({ length: 40 }, (_, index) => ({
+          ...task,
+          id: `completed-copy-${String(index + 1).padStart(2, "0")}`,
+          title: `Dashboard completed task copy ${String(index + 1).padStart(2, "0")}`,
+        })),
+      ]);
+      body.tasks.push({
+        id: "reconciliation-task",
+        title: "Dashboard reconciliation task",
+        category: "held",
+        status: "Needs reconciliation",
+        kind: "ship",
+        project: "viewer",
+        wait: "Needs reconciliation",
+        warning: null,
+        hasDocument: false,
+        documentType: null,
+        documentTypes: [],
+        documentModifiedAt: "2026-10-03T00:00:01Z",
+      });
+      body.tasks.push({ id: "baseline-blocked", title: "Baseline blocked task", category: "held", status: "Blocked", wait: "Blocked" });
+    }
+    if (removeReconciliationOnNextTaskRequest) {
+      removeReconciliationOnNextTaskRequest = false;
+      body.tasks = body.tasks.filter(task => task.status !== "Needs reconciliation");
+    }
+    if (zeroCompletedOnNextTaskRequest) {
+      zeroCompletedOnNextTaskRequest = false;
+      body.warning = "changed-fixture";
+      body.tasks = body.tasks.map(task => ["Completed", "Needs reconciliation"].includes(task.status)
+        ? { ...task, category: "processing", status: "Processing", wait: null }
+        : task);
+      body.tasks.push(
+        { id: "zero-fixture-conflict", title: "Zero fixture completion conflict", category: "held", status: "Completion conflict", wait: "Completion conflict" },
+        { id: "zero-fixture-gap", title: "Zero fixture unresolved goal gap", category: "held", status: "Unresolved goal gap", wait: "Unresolved goal gap" },
+      );
+    }
+    lastFullTaskSnapshot = body.tasks.map(task => ({ ...task }));
   }
   await route.fulfill({ response, json: body });
 });
@@ -304,7 +333,10 @@ try {
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count() !== 1) throw new Error("completed task counter was not rendered");
-  if (await page.locator('#sessions .task-card[data-category="held"]').count() !== 3) throw new Error("held task category was not rendered separately");
+  const completedCounter = page.locator('#task-counts').getByRole("button", { name: /Completed/ });
+  if (await completedCounter.locator("strong").textContent() !== "42") throw new Error("completed counter did not combine completed and reconciliation tasks");
+  if (await page.locator('#task-counts').getByText("Needs reconciliation", { exact: true }).count() !== 0) throw new Error("Needs reconciliation counter was rendered separately");
+  if (await page.locator('#sessions .task-card[data-category="held"]').count() !== 4) throw new Error("held task category was not rendered separately");
   if (await page.locator('#sessions .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
   const completedTaskCount = await page.locator('#sessions .task-card[data-category="completed"]').count();
   if (completedTaskCount !== 41) throw new Error(`dense completed task inventory was not rendered: ${completedTaskCount}`);
@@ -313,10 +345,12 @@ try {
     .filter(card => card.textContent.includes("Needs reconciliation") || card.textContent.includes("Dashboard completed task"))
     .map(card => card.textContent.includes("Needs reconciliation") ? "reconciliation" : "completed"));
   if (sharedCompletedOrder[0] !== "completed" || sharedCompletedOrder.at(-1) !== "reconciliation") throw new Error(`completed and reconciliation tasks did not share title ordering: ${sharedCompletedOrder.join(",")}`);
-  await page.locator("#task-counts").getByRole("button", { name: /Needs reconciliation/ }).click();
-  if (await page.locator('#sessions .task-card').count() !== 1 || !await page.locator('#sessions .task-card').first().textContent().then(text => text.includes("Needs reconciliation"))) throw new Error("Needs reconciliation counter did not filter the task list");
+  await completedCounter.click();
+  if (await page.locator('#sessions .task-card').count() !== 42) throw new Error("combined Completed counter did not filter both task groups");
+  if (await page.locator('#sessions .task-card[data-category="completed"]').count() !== 41) throw new Error("completed filter changed completed task membership");
+  if (await page.locator('#sessions .task-card[data-category="held"]').filter({ hasText: "Needs reconciliation" }).count() !== 1) throw new Error("combined Completed filter omitted reconciliation task");
   await page.getByRole("button", { name: "View all tasks" }).click();
-  if (await page.locator('#sessions .task-card').count() !== 49) throw new Error("View all tasks did not clear the status-card filter");
+  if (await page.locator('#sessions .task-card').count() !== 50) throw new Error("View all tasks did not clear the status-card filter");
   const initialTaskCategories = await page.locator('#sessions .task-card').evaluateAll(cards => cards.slice(0, 4).map(card => card.dataset.category));
   if (initialTaskCategories.some(category => category !== "processing")) throw new Error(`processing tasks were buried behind the dense non-processing inventory: ${initialTaskCategories.join(",")}`);
   const processingTaskIds = await page.locator('#sessions .task-card[data-category="processing"] small:first-of-type').allTextContents();
@@ -345,7 +379,7 @@ try {
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
-  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "4,2,1,41,1") throw new Error("background task refresh did not preserve loaded counts");
+  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "4,2,1,42,1") throw new Error("background task refresh did not preserve loaded counts");
   if (!await dashboardReportCardNode.evaluate(node => node.isConnected)) throw new Error("background task refresh replaced the unchanged task generation before the response");
   if (!await page.locator("#sessions").evaluate(element => element.scrollHeight > element.clientHeight)) throw new Error("dashboard fixture was not tall enough to exercise sidebar scrolling");
   await dashboardReportCard.click();
@@ -619,6 +653,30 @@ try {
   await (await staleReportResponse).finished();
   await page.waitForTimeout(100);
   if (await page.getByText("stale delayed report body", { exact: true }).count()) throw new Error("stale report response replaced the current report");
+
+  await page.locator("#source").selectOption("tasks");
+  await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  const preChangedTaskTotal = await page.locator('#sessions .task-card').count();
+  const preservedStatusCounts = await page.locator('#sessions .task-state').allTextContents();
+  removeReconciliationOnNextTaskRequest = true;
+  zeroCompletedOnNextTaskRequest = true;
+  const changedTaskDelay = delayNextTaskRequest();
+  await changedTaskDelay.started;
+  changedTaskDelay.release();
+  await page.locator("#task-status").filter({ hasText: "changed-fixture" }).waitFor({ state: "visible", timeout: 5000 });
+  if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count() !== 0) throw new Error("zero refresh rendered a Completed card");
+  if (await page.locator('#task-counts').getByText("Needs reconciliation", { exact: true }).count() !== 0) throw new Error("zero refresh rendered an empty reconciliation card");
+  const changedStatusCounts = await page.locator('#sessions .task-state').allTextContents();
+  for (const status of ["Queued", "Blocked", "Archived"]) {
+    const before = preservedStatusCounts.filter(value => value === status).length;
+    const after = changedStatusCounts.filter(value => value === status).length;
+    if (before !== after) throw new Error(`zero refresh changed ${status} count: ${before} -> ${after}`);
+  }
+  for (const status of ["Completion conflict", "Unresolved goal gap"]) {
+    if (changedStatusCounts.filter(value => value === status).length !== 1) throw new Error(`zero refresh omitted ${status} fixture`);
+  }
+  const changedTaskTotal = await page.locator('#sessions .task-card').count();
+  if (changedTaskTotal !== preChangedTaskTotal + 1) throw new Error(`changed refresh did not render the changed task inventory: ${preChangedTaskTotal} -> ${changedTaskTotal}`);
 
   storagePage = await browser.contexts()[0].newPage();
   await storagePage.addInitScript(() => {

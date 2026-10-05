@@ -695,10 +695,22 @@ const taskStatusOrder = ["Processing", "Queued", "Waiting", "Blocked", "Parked",
 let taskStatusFilter = null;
 
 function taskGroups() {
-  const statuses = [...new Set(state.tasks.map(task => task.status))];
-  return statuses.sort((left, right) => (taskStatusOrder.indexOf(left) + 1 || Infinity)
+  const statuses = new Set(state.tasks.map(task => task.status));
+  const hasReconciliation = statuses.delete("Needs reconciliation");
+  if (hasReconciliation) statuses.add("Completed");
+  return [...statuses].sort((left, right) => (taskStatusOrder.indexOf(left) + 1 || Infinity)
     - (taskStatusOrder.indexOf(right) + 1 || Infinity) || left.localeCompare(right))
-    .map(status => ({ key: status, label: status, matches: task => task.status === status }));
+    .map(status => ({
+      key: status,
+      label: status,
+      matches: task => taskStatusMatches(status, task),
+    }));
+}
+
+function taskStatusMatches(status, task) {
+  return status === "Completed"
+    ? task.status === "Completed" || task.status === "Needs reconciliation"
+    : task.status === status;
 }
 
 function taskMatches(task, query) {
@@ -969,7 +981,9 @@ function renderSessions() {
   const source = elements.source.value;
   const query = elements.sessionSearch.value.toLowerCase();
   if (source === "tasks") {
-    const matches = state.tasks.filter(task => (!taskStatusFilter || task.status === taskStatusFilter) && taskMatches(task, query));
+    const group = taskGroups().find(candidate => candidate.key === taskStatusFilter);
+    const matches = state.tasks.filter(task => (!taskStatusFilter
+      || (group ? group.matches(task) : taskStatusMatches(taskStatusFilter, task))) && taskMatches(task, query));
     elements.sessions.replaceChildren();
     for (const task of matches) elements.sessions.append(taskCard(task));
     if (!matches.length) {
