@@ -54,6 +54,16 @@ SH
   chmod +x "$home/fake-bin/node"
 }
 
+# Durable check wakes currently queued in <state-dir>.
+wake_rows() {
+  awk -F '\t' '$3 == "check"' "$1/.wake-queue" 2>/dev/null || true
+}
+
+# One captured captain mention, shaped like the messages this home really
+# captures from Discord's channel-messages endpoint: the bot is addressed by an
+# explicit user mention and the Message object carries no guild_id.
+CAPTAIN_MENTION='[{"id":"1352000000000003001","channel_id":"1000000000000000001","author":{"id":"8000000000000000001","username":"captain"},"mentions":[{"id":"9000000000000000001"}],"content":"<@9000000000000000001> why no reply","attachments":[]}]'
+
 test_ingestion_payload_shape_and_wake() {
   local home inbox_file ctx_file wake_out platform source cursor
   home="$TMP_ROOT/ingestion-test"
@@ -232,6 +242,42 @@ test_dm_reply_is_polled_with_configured_channel() {
   pass "a DM command is polled and captured even when a channel allowlist is configured"
 }
 
+test_out_of_band_mention_enqueues_durable_wake() {
+  local home log rows
+  home="$TMP_ROOT/out-of-band-mention"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  log="$home/ingress.log"
+
+  # An out-of-band runner (LaunchAgent, cron, an operator) only ever sees stdout
+  # as a log file, so the captured mention must reach the durable wake queue by
+  # itself. The one-shot offered marker written during capture suppresses every
+  # later poll of the same message, so a wake that exists only on stdout is a
+  # mention that is consumed and never answered.
+  FM_TEST_REAL_NODE=$(command -v node) \
+  FM_DISCORD_FAKE_MESSAGES="$CAPTAIN_MENTION" \
+  PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+  FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000001" \
+  "$ROOT/bin/fm-discord-poll.sh" > "$log"
+
+  assert_equals "x-mention discord-sh-1352000000000003001" "$(cat "$log")" "out-of-band poll still prints the wake line for its caller"
+  rows=$(wake_rows "$home/state")
+  assert_contains "$rows" "discord-sh-1352000000000003001" "an out-of-band poll queues the mention durably instead of trusting stdout"
+  assert_contains "$rows" "x-mention discord-sh-1352000000000003001" "the queued wake carries the mention payload the supervisor acts on"
+
+  # The offered marker still owns duplicate suppression: re-polling must not
+  # surface the same mention twice.
+  FM_TEST_REAL_NODE=$(command -v node) \
+  FM_DISCORD_FAKE_MESSAGES="$CAPTAIN_MENTION" \
+  PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+  FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000001" \
+  "$ROOT/bin/fm-discord-poll.sh" > "$home/second.log"
+  assert_equals "" "$(cat "$home/second.log")" "a re-poll does not re-offer an already offered mention"
+  assert_equals "1" "$(wake_rows "$home/state" | grep -c 'discord-sh-1352000000000003001')" "the durable wake is queued exactly once"
+
+  pass "an out-of-band Discord poll queues its mention durably, not only on stdout"
+}
+
 test_bootstrap_activation() {
   local home out shim cadence
   home="$TMP_ROOT/bootstrap-test"
@@ -265,4 +311,5 @@ test_reply_to_bot_message_without_mention
 test_reply_to_bot_message_with_mention
 test_reply_to_member_without_mention_is_ignored
 test_dm_reply_is_polled_with_configured_channel
+test_out_of_band_mention_enqueues_durable_wake
 test_bootstrap_activation
