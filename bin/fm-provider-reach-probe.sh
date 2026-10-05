@@ -178,6 +178,9 @@ fi
 PROBE=$TARGET
 BASE=''
 if [ -n "$HOST_ARG" ]; then
+  case "$HOST_ARG" in
+    *@*) die_input "--host must not contain userinfo" ;;
+  esac
   PROBE=host:$HOST_ARG
   BASE=https://$HOST_ARG
 elif [ "$TARGET" = xhy ]; then
@@ -228,15 +231,19 @@ dns_probe() {
     first=$(printf '%s\n' "$out" | head -n 1)
     # A successful answer naming no address is the same finding as NXDOMAIN for
     # routing purposes, so both classes are checked before exit status.
-    if printf '%s\n' "$out" | grep -qiE 'nxdomain|not found|no answer|servfail|formerr|refused|timed out'; then
+    if printf '%s\n' "$out" | grep -qiE 'NXDOMAIN|no answer|not found'; then
       printf 'nxdomain %s\n' "${first:-no-address}"
+      return 0
+    fi
+    if printf '%s\n' "$out" | grep -qiE 'SERVFAIL|FORMERR|REFUSED|timed out'; then
+      printf 'fail rc=%s\n' "$rc"
       return 0
     fi
     if [ "$rc" -ne 0 ]; then
       printf 'fail rc=%s\n' "$rc"
       return 0
     fi
-    if printf '%s\n' "$out" | grep -qE '([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*'; then
+    if printf '%s\n' "$out" | grep -qE '(^|[[:space:]])([0-9]{1,3}\.){3}[0-9]{1,3}([[:space:]]|$)|(^|[[:space:]])[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)'; then
       printf 'ok %s\n' "${first:-address}"
       return 0
     fi
@@ -283,7 +290,7 @@ command -v "$CURL_CMD" >/dev/null 2>&1 || {
 
 http_output=$(mktemp 2>/dev/null) || http_output=/tmp/fm-provider-reach-probe.$$
 trap 'rm -f "$http_output"' EXIT
-HTTP_CODE=$(fm_run_timed "$TIMEOUT" "$CURL_CMD" -sS -o "$http_output" -w '%{http_code}' \
+HTTP_CODE=$(fm_run_timed "$TIMEOUT" "$CURL_CMD" -q -sS -o "$http_output" -w '%{http_code}' \
   --max-time "$TIMEOUT" "$BASE" </dev/null 2>/dev/null) || HTTP_CODE=000
 case "$HTTP_CODE" in
   ''|*[!0-9]*) HTTP_CODE=000 ;;
