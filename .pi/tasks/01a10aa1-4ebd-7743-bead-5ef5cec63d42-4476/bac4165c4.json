@@ -1,0 +1,30 @@
+{
+  "id": "bac4165c4",
+  "name": "PR poll regression",
+  "command": "bash tests/fm-pr-check-security.test.sh",
+  "description": "Run the focused PR-check security and poll regression harness with its disposable fake forge fixtures.",
+  "status": "killed",
+  "outputPath": ".pi/tasks/01a10aa1-4ebd-7743-bead-5ef5cec63d42-4476/bac4165c4.output",
+  "cwd": "/Users/weima/.no-mistakes/worktrees/d19b4aa23d77/01M459GFACRZMM87VCJN5EEHH5",
+  "startTime": 1791179731461,
+  "endTime": 1791179734546,
+  "exitCode": 143,
+  "signal": null,
+  "pid": 12972,
+  "bytesWritten": 88,
+  "isAgent": false,
+  "surviveReload": false,
+  "error": "Killed during Pi session shutdown (quit)",
+  "notified": false,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 600,
+  "shellPolicy": {
+    "policy": "inherit",
+    "executable": "/bin/zsh",
+    "argvPrefix": [
+      "-c"
+    ],
+    "dialect": "posix"
+  }
+}
