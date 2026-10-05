@@ -2786,6 +2786,34 @@ test_no_run_herdr_stale_working_record_is_never_busy() {
   pass "herdr stale working record never reports a shell-only pane busy"
 }
 
+# 2026-10-05 incident: Pi crashed mid-turn, so its extension never posted idle
+# and its own busy record kept saying busy over a pane that held only a shell,
+# while Herdr's registration still said working. The record cannot carry its
+# writer's death, so a busy record must yield to the process-level proof.
+test_no_run_herdr_busy_record_over_shell_reads_agent_gone() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr busy-record-over-shell test skipped without jq"; return; }
+  reset_fakes
+  local d gen out; d=$(new_case herdr-busy-record-shell)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-busy-record
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-busy-record.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=pi"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-herdr-busy-record)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-herdr-busy-record busy --gen "$gen" \
+    --source pi-ext --event agent-start
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  FM_FAKE_HERDR_PROCESS=shell
+  out=$(run_crew_state "$d" feat-herdr-busy-record)
+  assert_not_contains "$out" "state: working" "a busy record over a shell-only pane must never read working"
+  assert_contains "$out" "agent not running under its busy record (dead agent-exited)" "the busy record must yield to the exited harness"
+  FM_FAKE_HERDR_PROCESS=agent
+  out=$(run_crew_state "$d" feat-herdr-busy-record)
+  assert_contains "$out" "state: working" "the same busy record with a live harness must still read working"
+  assert_contains "$out" "pi-ext" "the live verdict must come from the busy record"
+  pass "a busy record over a pane whose harness exited reads agent gone, and a live one stays working"
+}
+
 # Decision follow-up (2026-09-05 review): a husk pane (pane present,
 # agent_not_found) is authoritative death evidence - it keeps the gone-class
 # text so the stale sweep may still reclaim it, never unknown/unreachable.
@@ -5821,6 +5849,7 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
+test_no_run_herdr_busy_record_over_shell_reads_agent_gone
 test_capped_competing_live_runs_report_both_ids
 test_capped_overview_without_branch_rows_reports_both_ids
 test_capped_overview_with_no_branch_runs_reports_absent

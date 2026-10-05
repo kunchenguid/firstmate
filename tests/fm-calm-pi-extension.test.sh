@@ -3840,6 +3840,30 @@ check(liveTimers === 1, "a later run did not use the boat after an idle Calm tog
 await fire("agent_settled");
 check(liveTimers === 0, "the later run did not clean up");
 
+// --- A settle through a disposed session never throws ------------------------------
+// Pi quitting on a signal mid-run disposes the session before agent_settled, and
+// every read of the invalidated ctx then throws.
+reset();
+await fire("agent_start");
+{
+  const staleCtx = {
+    get ui() {
+      throw new Error("This extension ctx is stale after session replacement or reload");
+    },
+  };
+  for (const event of ["agent_settled", "session_shutdown"]) {
+    for (const handler of handlers.get(event) ?? []) {
+      try {
+        await handler({ reason: "quit" }, staleCtx);
+      } catch (error) {
+        check(false, `${event} threw through a stale ctx: ${error.message}`);
+      }
+    }
+  }
+}
+await fire("agent_settled");
+check(liveTimers === 0, "the live settle after a stale one did not clean up");
+
 // --- The visual-only widget never touches session, transcript, or export data ------
 check(
   sessionWrites.length === 0,

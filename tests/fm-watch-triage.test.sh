@@ -4957,6 +4957,48 @@ test_busy_pane_native_progress_resets_age() {
   pass "native progress resets busy age without a completed turn or notification"
 }
 
+# 2026-10-05 fm-pi-composer-shapes2 incident: Pi crashed after a killed tool
+# call and left a bare shell under its last frozen frame. Its extension never
+# posted idle, so the busy record kept saying busy, the crash's own turn_end had
+# just refreshed the completed-turn age, and the pane read as provably working
+# with nothing left to bound it. The record cannot carry its own writer's
+# death, so a busy verdict must not survive a pane whose harness process is
+# gone. Both directions are pinned: the same fixture with the harness still
+# running must stay absorbed, or this would only prove busy detection deleted.
+test_busy_record_with_exited_harness_surfaces() {
+  local dir state fakebin out capture_file window sig pid comm
+  for comm in bash pi; do
+    dir=$(make_case "busy-record-harness-$comm"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-crashed"
+    printf 'Working...\n$ ' > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-crashed.meta"
+    record_pi_busy "$state" busy-crashed
+    printf 'working: setup complete\n' > "$state/busy-crashed.status"
+    sig=$(seen_sig "$state/busy-crashed.status"); printf '%s' "$sig" > "$state/.seen-busy-crashed_status"
+    touch "$state/busy-crashed.turn-ended"
+    prime_turnend_seen "$state/busy-crashed.turn-ended"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$comm" FM_STATE_OVERRIDE="$state" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if [ "$comm" = bash ]; then
+      wait_for_exit "$pid" 100 \
+        || { reap "$pid"; fail "a busy record over an exited harness was absorbed as working"; }
+      grep -F "stale: $window" "$out" >/dev/null \
+        || fail "an exited harness under a busy record did not surface its pane: $(cat "$out")"
+    else
+      for _ in 1 2 3; do
+        wait_poll_cycle "$state" "$pid" || fail "a busy record over a live harness surfaced: $(cat "$out")"
+      done
+      [ ! -s "$out" ] || fail "a busy record over a live harness printed a wake reason: $(cat "$out")"
+      reap "$pid"
+    fi
+  done
+  pass "a busy record whose harness exited to a shell surfaces within a few polls, and a live one stays working"
+}
+
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   local dir state fakebin out capture_file window key pane_hash sig pid n
   dir=$(make_case busy-turn-age-demand-inspect); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6250,8 +6292,8 @@ test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   printf '4\n' > "$dir/config/lane-target"
   printf 'window=test:fm-busyone\nkind=ship\n' > "$state/busyone.meta"
   printf 'window=test:fm-busytwo\nkind=scout\n' > "$state/busytwo.meta"
-  printf "window=test:fm-busythree\n$spare" > "$state/busythree.meta"
-  printf "window=test:fm-busyfour\n$spare" > "$state/busyfour.meta"
+  printf 'window=test:fm-busythree\n%b' "$spare" > "$state/busythree.meta"
+  printf 'window=test:fm-busyfour\n%b' "$spare" > "$state/busyfour.meta"
   expected="check: ready work waiting with free lane slots (2/4 open): alpha-one - start the top ready item now, or record why it waits"
 
   # A home under its floor with working lanes wakes.
@@ -6285,8 +6327,8 @@ test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the absorbing cycle at the floor"
 
   # Still holding after the window elapses, the same condition re-raises.
-  printf "window=test:fm-busythree\n$spare" > "$state/busythree.meta"
-  printf "window=test:fm-busyfour\n$spare" > "$state/busyfour.meta"
+  printf 'window=test:fm-busythree\n%b' "$spare" > "$state/busythree.meta"
+  printf 'window=test:fm-busyfour\n%b' "$spare" > "$state/busyfour.meta"
   rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
   sleep 2
   watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 FM_READY_WORK_RESURFACE_SECS=1 \
@@ -7004,6 +7046,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
+test_busy_record_with_exited_harness_surfaces
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated

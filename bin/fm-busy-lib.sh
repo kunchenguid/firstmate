@@ -5,7 +5,8 @@
 # (2026-07-28): each harness adapter reports turn lifecycle through a
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
-# unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
+# unverified semantic data is UNKNOWN - never idle. Endpoint death, or a busy
+# verdict whose endpoint no longer runs its harness, is the only
 # process-level override and yields dead, never busy. Child processes, CPU,
 # process sleep state, marker mtimes, and the old global UI-regex OR are not
 # state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
@@ -45,13 +46,19 @@
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, agent-exited, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
+#   1b. any busy verdict below whose present endpoint the recovery-grade
+#      fm_backend_agent_state proves agent-free (a shell-only pane)
+#      -> dead agent-exited. A harness that crashes or is killed never
+#      posts its own idle event, so its last busy record would otherwise
+#      read busy until the turn-age bound, however long the pane has sat at
+#      a bare shell. Every verdict short of that proof keeps busy unchanged.
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source,
 #      UNLESS the record is still the untouched seed fm-spawn wrote at arm
@@ -1012,14 +1019,29 @@ fm_busy_launch_prompt_parked() {  # <harness>
 
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
-# busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output: the grok,
+# busy|idle|unknown|dead plus the producing source (see header). Process state
+# is probed only to refute a busy verdict (precedence 1b), through
+# fm_backend_agent_state when the caller has sourced bin/fm-backend.sh; a
+# caller without it keeps the record's verdict. Only a present endpoint proved
+# agent-free refutes; a missing endpoint stays its caller's own check, and an
+# ambiguous, unreadable, or unverified one stays busy.
+fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
+  local verdict
+  verdict=$(fm_busy_classify_semantic "$@")
+  if [ "${verdict%% *}" = busy ] && command -v fm_backend_agent_state >/dev/null 2>&1; then
+    [ "$(fm_backend_agent_state "$1" "$2" 2>/dev/null)" = dead ] && verdict='dead agent-exited'
+  fi
+  printf '%s' "$verdict"
+}
+
+# fm_busy_classify_semantic: the semantic half of fm_busy_classify, which
+# never probes process state. <tail40> is optional pre-captured plain output: the grok,
 # rovo, and agy arms capture it themselves through fm_backend_capture when it
 # is absent (or report unknown capture-failed if that is unavailable too),
 # while the launch-prompt backstop below has no capture fallback of its own -
 # without a supplied tail40 it is skipped entirely and a record still pinned
 # at the fm-spawn seed keeps reading busy fm-spawn, unchanged.
-fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
+fm_busy_classify_semantic() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
   case "$harness" in

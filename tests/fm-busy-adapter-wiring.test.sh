@@ -61,10 +61,13 @@ const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; }, events: { on: (name, fn) => { handlers[name] = fn; } } });
 const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
+// Pi 1.0.0's invalidated runner: every ctx read throws after the session is disposed.
+const staleCtx = { isIdle: () => { throw new Error("This extension ctx is stale after session replacement or reload"); } };
 switch (process.env.MODE) {
   case "agent-start": await handlers["agent_start"]({}, ctx); break;
   case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
   case "settle-continuing": await handlers["agent_settled"]({}, ctx); break;
+  case "settle-stale": await handlers["agent_settled"]({}, staleCtx); break;
   case "settle-then-start":
     await handlers["agent_settled"]({}, ctx);
     await handlers["agent_start"]({}, ctx);
@@ -119,6 +122,24 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
   pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+}
+
+# 2026-10-05: Pi quitting on a signal mid-run settles through a disposed
+# session whose ctx throws. The handler must not throw into Pi's shutdown, and
+# the record must leave busy without claiming idle.
+test_pi_extension_stale_ctx_settles_unknown() {
+  local rec id=busy-pi-stale-ctx out state ext
+  rec=$(make_spawn_case pi-stale-ctx pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+  out=$(drive_pi_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
+  out=$(drive_pi_ext "$ext" settle-stale) || fail "a stale-ctx settle threw: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "unknown pi-ext" ] || fail "a stale-ctx settle must classify 'unknown pi-ext', got '$out'"
+  pass "pi extension settles a disposed session to unknown without throwing"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
@@ -424,6 +445,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
+test_pi_extension_stale_ctx_settles_unknown
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle

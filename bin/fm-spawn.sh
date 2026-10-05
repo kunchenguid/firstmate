@@ -4633,7 +4633,15 @@ const busyEvent = (state: string, event: string) =>
 export default function (pi: any) {
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
-    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    // Pi quitting on a signal mid-run disposes the session before this settle,
+    // and every read of the stale ctx then throws. The run is over but Pi is
+    // exiting rather than waiting at a prompt, so the record leaves busy for
+    // unknown, never idle, and never throws into Pi's shutdown.
+    try {
+      if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    } catch {
+      return busyEvent("unknown", "stale-ctx");
+    }
     return busyEvent("idle", "agent-settled");
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
