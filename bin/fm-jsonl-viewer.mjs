@@ -31,7 +31,7 @@ const TAIL_BYTES = 512 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const FLEET_SNAPSHOT_TIMEOUT_MS = 60000;
-const TASK_DISPOSITION_TIMEOUT_MS = 15000;
+const TASK_RECORD_TIMEOUT_MS = 15000;
 const TASK_OVERVIEW_CACHE_TTL_MS = 2000;
 const TASK_CATEGORY_PRIORITY = new Map([
   ["processing", 0],
@@ -218,10 +218,8 @@ function listSessions(roots) {
   return sessions.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
 }
 
-function listReports(root) {
+function listReports(root, ids) {
   if (!root) return [];
-  let ids = [];
-  try { ids = readdirSync(root).filter(taskIdPathSafe); } catch { return []; }
   const reports = [];
   for (const id of ids) {
     const directory = join(root, id);
@@ -238,10 +236,8 @@ function listReports(root) {
   return reports.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
 }
 
-function listTaskDocuments(root) {
+function listTaskDocuments(root, ids) {
   if (!root) return [];
-  let ids = [];
-  try { ids = readdirSync(root).filter(taskIdPathSafe); } catch { return []; }
   const documents = [];
   for (const id of ids) {
     const available = resolveTaskDocuments(root, id);
@@ -274,28 +270,25 @@ function taskCommandEnvironment(home) {
   return environment;
 }
 
-function taskDispositions(codeRoot, dataRoot, environment) {
-  const library = join(codeRoot, "bin", "fm-task-disposition-lib.sh");
-  const output = execFileSync("bash", ["-c", '. "$1"; fm_task_disposition_snapshot "$2"', "fm-jsonl-viewer", library, dataRoot], {
-    encoding: "utf8",
-    env: environment,
-    timeout: TASK_DISPOSITION_TIMEOUT_MS,
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  const dispositions = new Map();
-  for (const line of output.split("\n")) {
-    if (!line) continue;
-    const [id, disposition] = line.split("\t");
-    if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(id) && /^(active|queued|done|archive_done|parked|ambiguous)$/.test(disposition)) {
-      dispositions.set(id, disposition);
-    }
+function taskRecords(codeRoot, dataRoot, home, id = null) {
+  return JSON.parse(execFileSync("python3", [join(codeRoot, "bin", "fm-task-record.py"), "--data", dataRoot,
+    ...(id === null ? ["inventory"] : ["progress", id])], {
+    encoding: "utf8", env: taskCommandEnvironment(home), timeout: TASK_RECORD_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024,
+  }));
+}
+
+function taskDocumentGate(codeRoot, dataRoot, home, id) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(id)) return { status: 404, body: { error: "task not found" } };
+  try { taskRecords(codeRoot, dataRoot, home, id); return null; }
+  catch (error) {
+    return String(error.stderr || "").trim() === "code: NOT_FOUND"
+      ? { status: 404, body: { error: "task not found" } }
+      : { status: 503, body: { error: "task record is unavailable" } };
   }
-  return dispositions;
 }
 
 function taskOverview(home, roots, codeRoot) {
   const environment = taskCommandEnvironment(home);
-  const dataRoot = roots.reports || join(home, "data");
   const raw = execFileSync(join(codeRoot, "bin", "fm-fleet-snapshot.sh"), ["--json"], {
     encoding: "utf8",
     env: environment,
@@ -303,88 +296,40 @@ function taskOverview(home, roots, codeRoot) {
     maxBuffer: 32 * 1024 * 1024,
   });
   const snapshot = JSON.parse(raw);
-  if (snapshot.schema !== "fm-fleet-snapshot.v1" || !Array.isArray(snapshot.tasks) || !Array.isArray(snapshot.backlog?.records)) {
+  if (!Array.isArray(snapshot.tasks) || !Array.isArray(snapshot.backlog?.records)
+    || snapshot.backlog.records.some(record => !taskIdPathSafe(record?.id)
+      || !["queued", "in_flight", "done", "archived"].includes(record.state)
+      || !["active", "queued", "parked", "done", "archive_done"].includes(record.record_disposition)
+      || typeof record.title !== "string" || typeof record.kind !== "string")) {
     throw new Error("unsupported task snapshot");
   }
-  const dispositions = taskDispositions(codeRoot, dataRoot, environment);
-  const documents = new Map(listTaskDocuments(roots.reports).map(document => [document.id, document]));
-  const items = new Map();
-  const ensure = id => {
-    if (!items.has(id)) items.set(id, { id, title: id });
-    return items.get(id);
-  };
-  for (const record of snapshot.backlog.records) {
-    if (!record?.structured || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(record.id || "")) continue;
-    Object.assign(ensure(record.id), {
-      title: record.title || record.id,
-      backlogState: record.state || null,
-      kind: record.kind || null,
-      project: record.repo || null,
-      holdKind: record.hold_kind || null,
-      blockedBy: Array.isArray(record.unresolved_blocker_ids) ? record.unresolved_blocker_ids : [],
-      compactOpenGap: typeof record.compact_progress?.remaining_gap === "string"
-        && record.compact_progress.remaining_gap.length > 0
-        && typeof record.compact_progress?.next_step === "string"
-        && record.compact_progress.next_step.length > 0,
-    });
-  }
-  for (const task of snapshot.tasks) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(task.id || "")) continue;
-    Object.assign(ensure(task.id), {
-      title: task.backlog?.title || task.id,
-      backlogState: task.backlog?.state || null,
-      kind: task.kind || task.backlog?.kind || null,
-      project: task.backlog?.repo || task.project || null,
-      currentState: task.current_state?.state || "unknown",
-      recordDisposition: task.record_disposition || dispositions.get(task.id) || "unknown",
-      openDecisionCount: Array.isArray(task.hints?.open_decisions) ? task.hints.open_decisions.length : 0,
-      heldByDecision: Boolean(task.hints?.pending_decision || task.hints?.blocked_event),
-      blockedBy: Array.isArray(task.backlog?.unresolved_blocker_ids) ? task.backlog.unresolved_blocker_ids : [],
-      holdKind: task.backlog?.hold_kind || null,
-    });
-  }
-  for (const [id, disposition] of dispositions) ensure(id).recordDisposition ||= disposition;
-  for (const [id, document] of documents) {
-    const item = ensure(id);
-    item.hasDocument = true;
-    item.documentType = document.source;
-    item.documentTypes = document.documentTypes;
-    item.documentModifiedAt = document.modifiedAt;
-  }
+  const records = snapshot.backlog.records;
+  const documents = new Map(listTaskDocuments(roots.reports, records.map(record => record.id)).map(document => [document.id, document]));
+  const observations = new Map(snapshot.tasks.map(task => [task.id, task]));
+  const items = new Map(records.map(record => {
+    const task = observations.get(record.id);
+    const document = documents.get(record.id);
+    return [record.id, {
+      id: record.id, title: record.title, backlogState: record.state, kind: record.kind, project: record.repo,
+      recordDisposition: record.record_disposition, holdKind: record.hold_kind, holdReason: record.hold_reason,
+      blockedBy: record.unresolved_blocker_ids, progress: record.compact_progress,
+      executionHarness: task?.harness || task?.provider || null, executionModel: task?.model || null,
+      executionState: task?.current_state?.state || null,
+      hasDocument: Boolean(document), documentType: document?.source,
+      documentTypes: document?.documentTypes, documentModifiedAt: document?.modifiedAt,
+    }];
+  }));
   const tasks = [...items.values()].map(item => {
-    const disposition = item.recordDisposition || "unknown";
-    const compactOpenGap = Boolean(item.compactOpenGap) && disposition === "done";
-    const terminalConflict = (["working", "blocked", "parked"].includes(item.currentState)
-      && ["done", "archive_done"].includes(disposition)) || compactOpenGap;
-    const remoteStatusUnconfirmed = disposition === "archive_done"
-      && !["done", "failed"].includes(item.currentState);
-    const held = item.heldByDecision || item.openDecisionCount > 0 || item.currentState === "blocked" || item.currentState === "parked"
-      || item.holdKind === "parked" || (item.blockedBy || []).length > 0 || terminalConflict;
-    let category = "held";
-    let status = "Needs reconciliation";
-    if (terminalConflict && disposition !== "archive_done") {
-      category = "held";
-      status = compactOpenGap ? "Unresolved goal gap" : "Completion conflict";
-    } else if (disposition === "archive_done") {
-      category = "history";
-      status = "Archived";
-    } else if (!held && disposition === "done") {
-      category = "completed";
-      status = "Completed";
-    } else if (held) {
-      category = "held";
-      status = item.holdKind === "parked" ? "Parked" : item.currentState === "blocked" ? "Blocked" : "Waiting";
-    } else if (disposition === "active" || item.backlogState === "in_flight" || item.currentState === "working") {
-      category = "processing";
-      status = "Processing";
-    } else if (disposition === "queued" || item.backlogState === "queued") {
-      category = "held";
-      status = "Queued";
-    }
-    let wait = null;
-    if ((item.blockedBy || []).length) wait = `Blocked by ${item.blockedBy.join(", ")}`;
-    else if (item.openDecisionCount > 0) wait = `${item.openDecisionCount} open decision${item.openDecisionCount === 1 ? "" : "s"}`;
-    else if (category === "held") wait = status;
+    const disposition = item.recordDisposition;
+    const terminal = ["done", "archive_done"].includes(disposition);
+    const held = !terminal && (item.holdKind || (item.blockedBy || []).length > 0);
+    const category = disposition === "archive_done" ? "history" : disposition === "done" ? "completed"
+      : held || disposition !== "active" ? "held" : "processing";
+    const status = disposition === "archive_done" ? "Archived" : disposition === "done" ? "Completed"
+      : held ? item.holdKind === "parked" ? "Parked" : (item.blockedBy || []).length ? "Blocked" : "Waiting"
+      : disposition === "active" ? "Processing" : "Queued";
+    const wait = terminal ? null : (item.blockedBy || []).length ? `Blocked by ${item.blockedBy.join(", ")}`
+      : held ? item.holdReason || status : category === "held" ? status : null;
     return {
       id: item.id,
       title: item.title || item.id,
@@ -393,7 +338,12 @@ function taskOverview(home, roots, codeRoot) {
       kind: item.kind || null,
       project: item.project || null,
       wait,
-      warning: remoteStatusUnconfirmed ? "Remote status unconfirmed; archive reflects business disposition only." : null,
+      warning: null,
+      state: item.backlogState,
+      progress: terminal ? null : item.progress,
+      executionHarness: terminal ? null : item.executionHarness,
+      executionModel: terminal ? null : item.executionModel,
+      executionState: terminal ? null : item.executionState,
       hasDocument: Boolean(item.hasDocument),
       documentType: item.documentType || null,
       documentTypes: item.documentTypes || [],
@@ -405,7 +355,7 @@ function taskOverview(home, roots, codeRoot) {
   return {
     generatedAt: snapshot.generated,
     tasks,
-    warning: snapshot.main_inventory?.valid === false ? "Some current task records need reconciliation." : null,
+    warning: null,
   };
 }
 
@@ -768,11 +718,15 @@ function serve() {
       res.setHeader("WWW-Authenticate", 'Bearer realm="Firstmate JSONL viewer"');
       return json(res, 401, { error: "authorization required" });
     }
-    if (url.pathname === "/api/sessions") return json(res, 200, {
-      sessions: listSessions(roots),
-      reports: listReports(roots.reports),
-      roots: { short: Boolean(roots.short), supervisor: Boolean(roots.supervisor), reports: Boolean(roots.reports) },
-    });
+    if (url.pathname === "/api/sessions") {
+      try {
+        const inventory = taskRecords(codeRoot, roots.reports || join(home, "data"), home);
+        return json(res, 200, {
+          sessions: listSessions(roots), reports: listReports(roots.reports, inventory.tasks.map(record => record.id)),
+          roots: { short: Boolean(roots.short), supervisor: Boolean(roots.supervisor), reports: Boolean(roots.reports) },
+        });
+      } catch { return json(res, 503, { error: "task reports are temporarily unavailable" }); }
+    }
     if (url.pathname === "/api/tasks") {
       cachedTaskOverview(home, roots, codeRoot)
         .then(body => {
@@ -790,10 +744,14 @@ function serve() {
       return json(res, result.status, result.body);
     }
     if (url.pathname === "/api/report") {
+      const gate = taskDocumentGate(codeRoot, roots.reports || join(home, "data"), home, url.searchParams.get("id") || "");
+      if (gate) return json(res, gate.status, gate.body);
       const result = readReport(roots.reports, url.searchParams.get("id") || "");
       return json(res, result.status, result.body);
     }
     if (url.pathname === "/api/task-document") {
+      const gate = taskDocumentGate(codeRoot, roots.reports || join(home, "data"), home, url.searchParams.get("id") || "");
+      if (gate) return json(res, gate.status, gate.body);
       const result = readTaskDocument(roots.reports, url.searchParams.get("id") || "", url.searchParams.get("type") || "");
       return json(res, result.status, result.body);
     }

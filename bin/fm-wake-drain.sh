@@ -5,6 +5,9 @@
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
 # then assert liveness.
+# Ordinary status discovery selects canonical nonterminal IDs only. Queued
+# signals retain their explicit byte and generation obligations after archival;
+# unselected historical cursor rows remain untouched without opening their logs.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -307,9 +310,24 @@ EOF
 }
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
-  local snapshot=$1 task endpoint ident presented backstop event event_endpoint line verb key receipt store lock ready
+  local snapshot=$1 task endpoint ident presented backstop event event_endpoint line verb key receipt store lock ready disposition admitted=''
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
   [ "$ACTOR" = main ] || return 0
+  # Automatic recovery uses canonical nonterminal identities. Captured raw
+  # queue and unread spans retain their separate presentation/receipt contract.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    task=${line%%$'\t'*}
+    disposition=$(fm_task_disposition_for "$STATUS_TASK_DISPOSITIONS" "$task") || continue
+    case "$disposition" in
+      active|queued|parked) admitted="$admitted$line
+" ;;
+    esac
+  done <<EOF
+$snapshot
+EOF
+  [ -n "$admitted" ] || return 0
+  snapshot=$admitted
 
   store="$STATE/branch-outcomes.jsonl"
   lock="$STATE/.branch-outcomes.lock"
@@ -471,7 +489,7 @@ print_open_decisions_section() {
     # structured record says this work is Done, archived Done, or deliberately
     # parked. A current/unknown/captain-held task has no such exemption, so its
     # independent decision continues to surface.
-    case "$disposition" in done|archive_done|parked) continue ;; esac
+    case "$disposition" in active|queued) ;; *) continue ;; esac
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
@@ -567,11 +585,9 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot=${1:-} context=${2:-} fully_presented=${3:-} acknowledged prepared
-  if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
+  local snapshot=$1 context=$2 fully_presented=${3:-} acknowledged prepared
   [ -n "$snapshot" ] || return 0
   if [ -z "$context" ]; then context=$(status_presentation_context "$STATE" "$snapshot") || return 1; fi
-  STATUS_TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$context" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
@@ -590,7 +606,7 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
-  if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
+  if ! status_commit_presentation_snapshot "$STATE" "$acknowledged" --preserve-unselected; then
     rm -f -- "$prepared"
     return 1
   fi
@@ -598,7 +614,7 @@ print_status_sections() {
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot context='' annotation_manifest fully_presented='' rc=0
+  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot context='' annotation_manifest selected fully_presented='' rc=0
   local lock_rc holder_pid
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
@@ -613,7 +629,19 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
     return 1
   fi
-  snapshot=$(status_presentation_snapshot "$STATE") || {
+  STATUS_TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA") || {
+    printf 'STATUS PRESENTATION INCOMPLETE: canonical task inventory unavailable; no status discovery fallback.\n'
+    # Keep explicit queued byte obligations independent of business admission.
+    # An unavailable owner supplies no ordinary discovery candidates.
+    STATUS_TASK_DISPOSITIONS=''
+  }
+  annotation_manifest=$(fm_wake_annotation_manifest "$rows") || { fm_lock_release "$lock"; return 1; }
+  selected=$(printf '%s\n' "$STATUS_TASK_DISPOSITIONS" | awk -F '\t' '$2 == "active" || $2 == "queued" || $2 == "parked" { print $1 }')
+  # Raw queued signals own their captured status bytes even after archival or
+  # identity removal. They do not enroll a task or reopen its business state.
+  selected="$selected
+$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '{ sub(/\.status$/, "", $1); print $1 }')"
+  snapshot=$(status_presentation_snapshot "$STATE" "$selected") || {
     printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
     rc=1
   }
@@ -626,7 +654,6 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
     fm_wake_print_annotations "$rows" "$context" || rc=1
     if [ "$rc" -eq 0 ]; then
-      annotation_manifest=$(fm_wake_annotation_manifest "$rows") || rc=1
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi

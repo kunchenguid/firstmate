@@ -21,7 +21,7 @@ TMP_ROOT=$(fm_test_tmproot fm-wake-drain-unread-status-tests)
 prime_cursor() {  # <state> <status-file>
   local state=$1 status=$2
   printf 'note: bootstrap cursor line\n' > "$status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
     || fail "bootstrap drain failed while priming the unread cursor"
 }
 
@@ -31,12 +31,13 @@ test_incident_note_answer_buried_under_routine_note_surfaces_both() {
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task1.status"
+  register_task_fixture "$state" "task1"
   prime_cursor "$state" "$status"
 
   printf 'note: captain said use REST not RPC\n' >> "$status"
   printf 'note: re-read acknowledgement\n' >> "$status"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the incident shape"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the incident shape"
 
   grep -F 'UNREAD STATUS' "$out" >/dev/null \
     || fail "the incident shape produced no UNREAD STATUS section: $(cat "$out")"
@@ -53,15 +54,16 @@ test_already_presented_notes_are_not_replayed() {
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task2.status"
+  register_task_fixture "$state" "task2"
   prime_cursor "$state" "$status"
 
   printf 'note: captain said use REST not RPC\n' >> "$status"
   printf 'note: re-read acknowledgement\n' >> "$status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "first drain of unread notes failed"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "first drain of unread notes failed"
   grep -F 'captain said use REST not RPC' "$out" >/dev/null \
     || fail "setup error: first drain did not surface the answer note"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after presentation failed"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after presentation failed"
   if grep -F 'captain said use REST not RPC' "$out" >/dev/null; then
     fail "an already-presented answer note was replayed as new: $(cat "$out")"
   fi
@@ -80,15 +82,16 @@ test_brand_new_note_after_presentation_is_surfaced() {
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task3.status"
+  register_task_fixture "$state" "task3"
   prime_cursor "$state" "$status"
 
   printf 'note: first answer\n' >> "$status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain of the first note failed"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain of the first note failed"
   grep -F 'task3 note: first answer' "$out" >/dev/null \
     || fail "setup error: first note was not presented"
 
   printf 'note: follow-up after ack\n' >> "$status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain of the brand-new note failed"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain of the brand-new note failed"
   grep -F 'task3 note: follow-up after ack' "$out" >/dev/null \
     || fail "a brand-new note after presentation was not surfaced: $(cat "$out")"
   if grep -F 'task3 note: first answer' "$out" >/dev/null; then
@@ -104,6 +107,7 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest() {
   out="$dir/drain.out"
   err="$dir/drain.err"
   status="$state/task4.status"
+  register_task_fixture "$state" "task4"
   prime_cursor "$state" "$status"
 
   printf 'note: captain said use REST not RPC\n' >> "$status"
@@ -111,7 +115,7 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest() {
   append_wake "$state" signal task4.status "signal: task4.status" \
     || fail "queueing the incident-shape status signal failed"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
     || fail "signal drain failed on the incident shape"
 
   grep -F 'unread wake-EVENT since last drain, not current state: task4.status: note: captain said use REST not RPC' "$out" >/dev/null \
@@ -129,19 +133,20 @@ test_decision_resolution_surfaces_once() {
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task5.status"
+  register_task_fixture "$state" "task5"
   prime_cursor "$state" "$status"
 
   printf 'blocked [key=release-approval]: approval required before shipping\n' >> "$status"
   append_wake "$state" signal task5.status "signal: task5.status" \
     || fail "queueing the decision request signal failed"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "drain failed while acknowledging the decision request"
   {
     printf 'resolved [key=release-approval]: approval recorded via status\n'
     printf 'note: re-read acknowledgement\n'
   } >> "$status"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a decision resolution"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a decision resolution"
 
   grep -F 'approval recorded via status' "$out" >/dev/null \
     || fail "the decision resolution was buried under the later note: $(cat "$out")"
@@ -151,7 +156,7 @@ test_decision_resolution_surfaces_once() {
     fail "the decision resolution did not close its open decision: $(cat "$out")"
   fi
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after decision presentation failed"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after decision presentation failed"
   if grep -F 'approval recorded via status' "$out" >/dev/null; then
     fail "an already-presented decision resolution was replayed: $(cat "$out")"
   fi
@@ -164,6 +169,7 @@ test_unread_output_over_cap_remains_recoverable() {
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task-cap.status"
+  register_task_fixture "$state" "task-cap"
   prime_cursor "$state" "$status"
   payload=$(printf '%0180d' 0)
   i=1
@@ -172,7 +178,7 @@ test_unread_output_over_cap_remains_recoverable() {
     i=$((i + 1))
   done
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed for unread output over the former cap"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed for unread output over the former cap"
   grep -F 'task-cap note: overflow-01' "$out" >/dev/null \
     || fail "the first over-cap note was not surfaced"
   grep -F 'task-cap note: overflow-30' "$out" >/dev/null \
@@ -188,10 +194,11 @@ test_snapshot_does_not_ack_a_later_append() {
   dir=$(make_case snapshot-append)
   state="$dir/state"
   status="$state/task-race.status"
+  register_task_fixture "$state" "task-race"
   prime_cursor "$state" "$status"
   printf 'note: included in presentation snapshot\n' >> "$status"
 
-  FM_STATE_OVERRIDE="$state" bash -c '
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     set -u
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
@@ -217,11 +224,13 @@ test_retired_task_id_starts_new_status_unread() {
   state="$dir/state"
   out="$dir/drain.out"
   printf 'note: old reused-task history\n' > "$state/reused.status"
+  register_task_fixture "$state" "reused"
   printf 'note: stable neighboring history\n' > "$state/neighbor.status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  register_task_fixture "$state" "neighbor"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "drain failed while acknowledging pre-retirement histories"
 
-  FM_STATE_OVERRIDE="$state" bash -c '
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
     _fm_open_decisions_file_ident "$STATE/reused.status" > "$2"
@@ -238,6 +247,7 @@ test_retired_task_id_starts_new_status_unread() {
   ' _ "$ROOT" "$dir/old-ident" || fail "retiring the reused task presentation state failed"
   printf 'blocked: release host unavailable\nworking: routine padding after the reused task started again\nnote: first event from reused task id\n' \
     > "$state/reused.status"
+  register_task_fixture "$state" "reused"
   old_ident=$(cat "$dir/old-ident")
   printf '40@%s' "$old_ident" > "$state/.seen-reused_status"
   offset=$(bash -c '
@@ -253,7 +263,7 @@ test_retired_task_id_starts_new_status_unread() {
   [ "$event" = 'blocked: release host unavailable' ] \
     || fail "retired supervision offsets hid the replacement task blocker: $event"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed after reusing a retired task id"
   grep -F 'reused note: first event from reused task id' "$out" >/dev/null \
     || fail "the retired manifest row skipped the new task prefix: $(cat "$out")"
@@ -270,9 +280,10 @@ test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_hi
   err="$dir/retire.err"
 
   status="$state/unread.status"
+  register_task_fixture "$state" "unread"
   prime_cursor "$state" "$status"
   printf 'note: not yet presented\n' >> "$status"
-  if FM_STATE_OVERRIDE="$state" bash -c '
+  if FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
     status_retire_presentation_task "$2" unread --require-settled
@@ -284,10 +295,11 @@ test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_hi
   [ -f "$status" ] || fail "unread retirement refusal did not preserve the status log"
 
   status="$state/decision.status"
+  register_task_fixture "$state" "decision"
   printf 'needs-decision [key=delivery]: choose destination\n' > "$status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "drain failed while presenting the open-decision fixture"
-  if FM_STATE_OVERRIDE="$state" bash -c '
+  if FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
     status_retire_presentation_task "$2" decision --require-settled
@@ -299,8 +311,9 @@ test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_hi
   [ -f "$status" ] || fail "open-decision retirement refusal did not preserve the status log"
 
   status="$state/settled.status"
+  register_task_fixture "$state" "settled"
   prime_cursor "$state" "$status"
-  FM_STATE_OVERRIDE="$state" bash -c '
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
     status_retire_presentation_task "$2" settled --require-settled
@@ -323,7 +336,7 @@ test_settled_retirement_refuses_orphan_decision_cursor() {
   err="$dir/retire.err"
   printf 'v5\t0\torphan:1:1\ndelivery\tneeds-decision\tchoose destination\n' >"$cursor"
 
-  FM_STATE_OVERRIDE="$state" bash -c '
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
     status_retire_presentation_task "$2" orphan --require-settled
@@ -340,6 +353,7 @@ test_status_append_serializes_with_retirement() {
   dir=$(make_case append-retire-race)
   state="$dir/state"
   status="$state/racing.status"
+  register_task_fixture "$state" "racing"
   trigger="$dir/append-started"
   prime_cursor "$state" "$status"
   reader="$dir/size-reader"
@@ -364,7 +378,7 @@ SH
 
   FM_STATUS_SIZE_READER="$reader" FM_STATUS_RACE_COUNT="$dir/count" \
     FM_STATUS_RACE_STATE="$state" FM_STATUS_RACE_ROOT="$ROOT" FM_STATUS_RACE_TRIGGER="$trigger" \
-    FM_STATE_OVERRIDE="$state" bash -c '
+    FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
       . "$1/bin/fm-wake-lib.sh"
       . "$1/bin/fm-classify-lib.sh"
       status_retire_presentation_task "$2" racing --require-settled
@@ -388,13 +402,14 @@ test_weak_identity_still_presents_and_advances() {
   out="$dir/first.out"; second="$dir/second.out"; reader="$dir/identity-reader"
   printf '#!/usr/bin/env bash\nprintf "weak:7:8"\n' > "$reader"; chmod +x "$reader"
   printf 'needs-decision [key=release]: choose target\nnote: release context attached\n' > "$state/weak.status"
-  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  register_task_fixture "$state" "weak"
+  FM_STATUS_IDENTITY_READER="$reader" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed with the platform-strength fallback identity"
   grep -F 'weak [key=release] needs-decision: choose target' "$out" >/dev/null \
     || fail "weak identity omitted OPEN DECISIONS: $(cat "$out")"
   grep -F 'weak note: release context attached' "$out" >/dev/null \
     || fail "weak identity omitted unread status: $(cat "$out")"
-  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" \
+  FM_STATUS_IDENTITY_READER="$reader" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" \
     || fail "second drain failed with the platform-strength fallback identity"
   grep -F 'release context attached' "$second" >/dev/null \
     && fail "weak identity did not advance the presented-status cursor"
@@ -406,24 +421,26 @@ test_snapshot_failure_is_visible() {
   dir=$(make_case snapshot-failure); state="$dir/state"; out="$dir/drain.out"; reader="$dir/identity-reader"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"; chmod +x "$reader"
   printf 'needs-decision: choose target\n' > "$state/fail.status"
-  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  register_task_fixture "$state" "fail"
+  FM_STATUS_IDENTITY_READER="$reader" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain aborted instead of reporting its incomplete status surface"
   grep -F 'STATUS PRESENTATION INCOMPLETE:' "$out" >/dev/null \
     || fail "snapshot failure produced a silently incomplete drain: $(cat "$out")"
   pass "snapshot failures are reported visibly"
 }
 
-test_warm_manifest_is_parsed_once_per_presentation() {
+test_warm_manifest_context_is_reused_per_presentation() {
   local dir state home out probe i task context_reads cursor_reads
   dir=$(make_case one-manifest-parse); state="$dir/state"; out="$dir/drain.out"; probe="$dir/manifest-reads"
   home="$dir/home"; mkdir -p "$home/data"
   i=1
   while [ "$i" -le 20 ]; do
     task=$(printf 'reuse-%02d' "$i")
+    register_task_fixture "$state" "$task"
     printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
     i=$((i + 1))
   done
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "bootstrap drain failed while creating the warm cursor manifest"
   i=1
   while [ "$i" -le 20 ]; do
@@ -433,17 +450,17 @@ test_warm_manifest_is_parsed_once_per_presentation() {
   done
 
   FM_STATUS_MANIFEST_READ_PROBE="$probe" HOME="$home" FM_HOME="$home" \
-    FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "instrumented warm-manifest drain failed"
   context_reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
   cursor_reads=$(awk -F '\t' '$1 == "cursor" { count++ } END { print count + 0 }' "$probe")
   [ "$context_reads" -eq 1 ] && [ "$cursor_reads" -eq 0 ] \
     || fail "one presentation used $context_reads context reads and $cursor_reads standalone cursor reads: $(cat "$probe")"
   grep -F 'reuse-01 note: new reuse-01' "$out" >/dev/null \
-    || fail "single-parse presentation lost the first unread note: $(cat "$out")"
+    || fail "context reuse lost the first unread note: $(cat "$out")"
   grep -F 'reuse-20 note: new reuse-20' "$out" >/dev/null \
-    || fail "single-parse presentation lost the last unread note: $(cat "$out")"
-  pass "one warm presentation parses the cursor manifest once and preserves fleet output"
+    || fail "context reuse lost the last unread note: $(cat "$out")"
+  pass "one warm presentation reuses one validated cursor context and preserves fleet output"
 }
 
 test_queued_signals_reuse_the_presentation_context() {
@@ -453,10 +470,11 @@ test_queued_signals_reuse_the_presentation_context() {
   i=1
   while [ "$i" -le 12 ]; do
     task=$(printf 'queued-%02d' "$i")
+    register_task_fixture "$state" "$task"
     printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
     i=$((i + 1))
   done
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "bootstrap drain failed while creating the queued-signal manifest"
   i=1
   while [ "$i" -le 12 ]; do
@@ -468,7 +486,7 @@ test_queued_signals_reuse_the_presentation_context() {
   done
 
   FM_STATUS_MANIFEST_READ_PROBE="$probe" HOME="$home" FM_HOME="$home" \
-    FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "instrumented queued-signal drain failed"
   context_reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
   cursor_reads=$(awk -F '\t' '$1 == "cursor" { count++ } END { print count + 0 }' "$probe")
@@ -488,7 +506,7 @@ test_queue_rows_without_a_status_snapshot_stay_valid() {
   append_wake "$state" signal missing.status 'signal: missing.status' \
     || fail "could not queue the missing-status signal"
 
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     "$DRAIN" > "$out" 2> "$err" \
     || fail "queue-only presentation failed without a status snapshot: $(cat "$err")"
   grep -F 'signal' "$out" >/dev/null \
@@ -503,15 +521,17 @@ test_duplicate_manifest_row_refuses_without_advancing() {
   dir=$(make_case duplicate-manifest); state="$dir/state"; out="$dir/drain.out"
   home="$dir/home"; mkdir -p "$home/data"
   printf 'note: bootstrap duplicate fixture\n' > "$state/duplicate.status"
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  register_task_fixture "$state" "duplicate"
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "bootstrap drain failed while creating the duplicate-row fixture"
   manifest="$state/.status-presentation-cursor"
   original=$(cat "$manifest")
   duplicate=${original%%$'\n'*}
   printf '%s\n' "$duplicate" >> "$manifest"
   printf 'note: must remain unread after refusal\n' >> "$state/duplicate.status"
+  register_task_fixture "$state" "duplicate"
 
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "duplicate-row refusal changed the top-level empty-queue compatibility exit"
   grep -F 'STATUS PRESENTATION INCOMPLETE: status cursor manifest could not be read safely.' "$out" >/dev/null \
     || fail "duplicate cursor row did not fail closed visibly: $(cat "$out")"
@@ -525,15 +545,16 @@ test_legacy_three_column_manifest_migrates() {
   dir=$(make_case legacy-three-column); state="$dir/state"; home="$dir/home"
   out="$dir/drain.out"; manifest="$state/.status-presentation-cursor"; mkdir -p "$home/data"
   task=legacy
+  register_task_fixture "$state" "$task"
   printf 'note: already presented\nnote: newly unread\n' > "$state/$task.status"
-  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+  ident=$(FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-classify-lib.sh"
     _fm_open_decisions_file_ident "$2"
   ' _ "$ROOT" "$state/$task.status") || fail "could not identify the legacy status fixture"
   presented=$(printf 'note: already presented\n' | wc -c | tr -d '[:space:]')
   printf '%s\t%s\t%s\n' "$task" "$ident" "$presented" > "$manifest"
 
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     "$DRAIN" > "$out" || fail "drain rejected a legacy three-column cursor manifest"
   grep -F 'legacy note: newly unread' "$out" >/dev/null \
     || fail "legacy cursor migration lost the unread line: $(cat "$out")"
@@ -551,10 +572,13 @@ test_open_decisions_fold_is_unchanged() {
   state="$dir/state"
   out="$dir/drain.out"
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task6.status"
+  register_task_fixture "$state" "task6"
   printf 'working: continuing other work\n' >> "$state/task6.status"
+  register_task_fixture "$state" "task6"
   printf 'note: re-read acknowledgement\n' >> "$state/task6.status"
+  register_task_fixture "$state" "task6"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a buried needs-decision plus a note"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a buried needs-decision plus a note"
 
   grep -F 'task6 [key=api-shape] needs-decision: pick REST or RPC' "$out" >/dev/null \
     || fail "OPEN DECISIONS no longer surfaces a buried needs-decision: $(cat "$out")"
@@ -564,7 +588,8 @@ test_open_decisions_fold_is_unchanged() {
     || fail "OPEN DECISIONS lost its answerer-closes hint"
 
   printf 'resolved [key=api-shape]: went with REST\n' >> "$state/task6.status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after resolving the keyed decision"
+  register_task_fixture "$state" "task6"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after resolving the keyed decision"
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "an explicitly resolved decision still printed as open: $(cat "$out")"
   fi
@@ -580,16 +605,17 @@ test_empty_queue_does_not_swallow_later_signal_annotation() {
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task-delayed.status"
+  register_task_fixture "$state" "task-delayed"
   printf 'done: shipped before watcher published signal\n' > "$status"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "empty-queue drain failed before delayed signal publication"
   grep -F 'task-delayed done: shipped before watcher published signal' "$out" >/dev/null \
     || fail "the main-drain loss backstop did not surface the terminal event before its delayed signal: $(cat "$out")"
 
   append_wake "$state" signal task-delayed.status "signal: task-delayed.status" \
     || fail "publishing the delayed status signal failed"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed after delayed signal publication"
   grep -F 'latest wake-EVENT observed at drain, not current state: task-delayed.status: done: shipped before watcher published signal' "$out" >/dev/null \
     || fail "the empty-queue drain acknowledged an event before its signal annotation: $(cat "$out")"
@@ -602,15 +628,17 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   state="$dir/state"
   out="$dir/drain.out"
   printf 'working: on it\n' > "$state/task7.status"
+  register_task_fixture "$state" "task7"
   printf 'done: shipped clean\n' > "$state/task8.status"
+  register_task_fixture "$state" "task8"
   old=$(( $(date +%s) - 20 ))
   perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$old" "$state/task8.status" \
     || fail "could not age the covered done fixture"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task8 --verdict captain --summary 'shipped clean was handled' >/dev/null \
     || fail "could not record the newer branch outcome fixture"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with routine working and covered done lines"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with routine working and covered done lines"
 
   if grep -F 'UNREAD STATUS' "$out" >/dev/null; then
     fail "routine working/covered done lines printed an UNREAD STATUS section: $(cat "$out")"
@@ -625,6 +653,93 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
+test_terminal_unqueued_status_is_inert_but_explicit_obligations_survive() {
+  local dir state id out manifest before row
+  dir=$(make_case terminal-discovery-boundary); state="$dir/state"
+  for id in ended archived; do
+    register_task_fixture "$state" "$id"
+    prime_cursor "$state" "$state/$id.status"
+  done
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" "done" ended >/dev/null || fail 'done fixture failed'
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" archive archived >/dev/null || fail 'archive fixture failed'
+  manifest="$state/.status-presentation-cursor"
+  cp "$manifest" "$dir/before"
+  for id in ended archived orphan; do printf 'note: %s unqueued historical append\n' "$id" >> "$state/$id.status"; done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" || fail 'terminal-only empty drain failed'
+  [ ! -s "$dir/out" ] || fail "terminal-only ordinary drain read historical notes: $(cat "$dir/out")"
+  cmp -s "$manifest" "$dir/before" || fail 'terminal-only drain mutated its cursor manifest'
+  register_task_fixture "$state" active
+  printf 'note: positive current action\n' > "$state/active.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" || fail 'mixed drain failed'
+  out=$(cat "$dir/out")
+  assert_contains "$out" 'active note: positive current action' 'in-flight informational status disappeared'
+  assert_not_contains "$out" 'unqueued historical append' 'terminal or unknown log entered ordinary discovery'
+  for id in ended archived; do
+    before=$(awk -F '\t' -v id="$id" '$1==id' "$dir/before")
+    row=$(awk -F '\t' -v id="$id" '$1==id' "$manifest")
+    [ "$before" = "$row" ] || fail 'mixed drain changed an unselected terminal receipt'
+  done
+  for id in ended archived orphan; do
+    append_wake "$state" signal "$id.status" "signal: $state/$id.status" || fail 'explicit historical signal failed'
+  done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail 'explicit obligation drain failed'
+  out=$(cat "$dir/out")
+  for id in ended archived orphan; do
+    assert_contains "$out" "$id.status" 'explicit raw wake was dropped'
+    assert_contains "$out" "note: $id unqueued historical append" 'explicit captured answer was dropped'
+  done
+  assert_contains "$(cat "$dir/err")" 'WAKE_ACK_REQUIRED:' 'explicit wake lost acknowledgement'
+  assert_contains "$(cat "$dir/err")" '--recovery-generation' 'explicit wake lost generation acknowledgement'
+  pass 'unqueued terminal/orphan status is inert, active notes remain visible, and explicit wakes retain their byte/ack obligations'
+}
+
+test_captured_status_span_survives_subsequent_archival() {
+  local dir state
+  dir=$(make_case captured-terminal-boundary); state="$dir/state"
+  register_task_fixture "$state" captured
+  printf 'note: captured before archive\n' > "$state/captured.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    snapshot=$(status_presentation_snapshot "$STATE" captured) || exit 1
+    "$1/bin/fm-tasks-axi.sh" archive captured >/dev/null || exit 1
+    printf "note: unqueued after archive\n" >> "$STATE/captured.status"
+    scan_unread_surface_snapshot "$STATE" "$snapshot" > "$2" || exit 1
+    status_commit_presentation_snapshot "$STATE" "$snapshot" || exit 1
+  ' _ "$ROOT" "$dir/captured.out" || fail 'captured span exercise failed'
+  assert_grep 'captured before archive' "$dir/captured.out" 'previously captured presentation was lost'
+  assert_not_contains "$(cat "$dir/captured.out")" 'unqueued after archive' 'captured span read beyond its byte endpoint'
+  cp "$state/.status-presentation-cursor" "$dir/before"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/next" || fail 'post-capture terminal drain failed'
+  [ ! -s "$dir/next" ] || fail 'ordinary drain read post-archive appended status'
+  cmp -s "$dir/before" "$state/.status-presentation-cursor" || fail 'ordinary drain advanced post-archive cursor'
+  pass 'an explicitly captured span survives archival and does not admit later historical appends'
+}
+
+test_canonical_failure_preserves_only_explicit_status_obligations() {
+  local dir state out
+  dir=$(make_case corrupt-owner-obligation); state="$dir/state"
+  register_task_fixture "$state" broken
+  printf '{broken' > "$dir/data/broken/task.json"
+  printf 'note: explicit independent byte obligation\n' > "$state/orphan.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail 'owner-failure empty drain failed'
+  out=$(cat "$dir/out")
+  assert_contains "$out" 'canonical task inventory unavailable' 'owner failure was hidden'
+  assert_not_contains "$out" 'independent byte obligation' 'owner failure fell back to orphan discovery'
+  [ ! -e "$state/.status-presentation-cursor" ] || fail 'owner failure created an ordinary status cursor'
+  append_wake "$state" signal orphan.status 'signal: orphan.status' || fail 'explicit signal failed'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail 'owner-failure explicit drain failed'
+  out=$(cat "$dir/out")
+  assert_contains "$out" 'canonical task inventory unavailable' 'explicit receipt concealed business-owner failure'
+  assert_contains "$out" 'note: explicit independent byte obligation' 'business-owner failure dropped explicit queued bytes'
+  assert_contains "$out" 'orphan.status' 'business-owner failure dropped raw signal'
+  assert_not_contains "$out" 'STATUS OUTCOME BACKSTOP (' 'owner failure inferred automatic task outcome'
+  pass 'canonical failure admits no ordinary status discovery while preserving explicit raw and byte obligations'
+}
+
+test_canonical_failure_preserves_only_explicit_status_obligations
+test_terminal_unqueued_status_is_inert_but_explicit_obligations_survive
+test_captured_status_span_survives_subsequent_archival
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -638,7 +753,7 @@ test_settled_retirement_refuses_orphan_decision_cursor
 test_status_append_serializes_with_retirement
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
-test_warm_manifest_is_parsed_once_per_presentation
+test_warm_manifest_context_is_reused_per_presentation
 test_queued_signals_reuse_the_presentation_context
 test_queue_rows_without_a_status_snapshot_stay_valid
 test_duplicate_manifest_row_refuses_without_advancing

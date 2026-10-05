@@ -39,8 +39,7 @@ During that invocation it never tears down a task, merges a PR, dispatches new w
    A decision is simply a task held for the captain (`captain-hold-lifecycle`), whatever its kind.
    The canonical snapshot assigns every captain hold exactly one bucket from structured fields only: `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
    Never use hold-reason or body prose to classify or place a decision.
-   Treat `retained_record_count` as the default historical-preservation signal and keep `retained_records` out of routine prose; use `--all-retained` only when cleanup or recovery actually needs those identities.
-   Retained records remain preserved execution evidence, never Underway; any unresolved captain action remains independently represented by the snapshot's structured decision surfaces.
+   Terminal records are business history and never ordinary execution observations; use exact operation owners when resource cleanup evidence is needed.
    A `live` hold appears in Captain's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
    Use `--all-decisions` to reveal every captain hold available within the bounded snapshot and remove each revealed gate from Charted Next so the buckets remain exclusive.
    A compact decision row carries its exact `--task <task-id>` retrieval command.
@@ -49,8 +48,8 @@ During that invocation it never tears down a task, merges a PR, dispatches new w
    Do not scrape reports, visual-review artifacts, raw status-event tails, or visible conversation history to supplement current state.
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived.
    Until then it stays queued with the reason.
-   The `(main-inventory)` gate is an action-free integrity warning rather than queued work.
    Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
+   A canonical in-flight record without an execution observation remains visible in Charted Next with `execution observation unavailable`; it does not imply a live worker.
 2. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.

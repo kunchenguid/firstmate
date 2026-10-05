@@ -33,7 +33,7 @@ It is not an update precondition, concurrency protocol, semantic evidence, or pe
 The old backlog and archive remain inert evidence and are not read, rewritten, or deleted by task/progress operations.
 Historical rich lifecycle files may stay on disk unchanged.
 New work does not create them, ordinary historical-task progress does not read or update them, and notification acknowledgement does not require inspect, assess, or reconcile.
-Operation owners may read a historical file only to recover a concrete immutable fact such as an old merge receipt or terminal cleanup authority; they never enroll, migrate, or reactivate it.
+Operation owners may read a historical file only to recover a concrete immutable fact such as an old merge receipt or execution identity; they never enroll, migrate, or reactivate it.
 
 ## From a result to the next action
 
@@ -97,7 +97,7 @@ Empty `remaining_gap` and `next_step` mean MAIN has semantically accepted the re
 
 Explicit archive is a separate terminal business action.
 It does not imply remote cancellation or provider success.
-Viewer classification uses the canonical task disposition as the business authority and continues to warn when remote facts are unconfirmed.
+Viewer classification uses only the canonical task disposition; remote execution observations remain separately labelled and never change business status.
 
 If the exact task is explicitly completed or archived after a continuation admission but before the branch reports, unchanged canonical task evidence and resume-state evidence settles that admission as durably superseded; only the state, close date, completion marker, and update timestamp may differ for the terminal transition. The branch neither reopens the task nor manufactures a missing-outcome failure. A new note, link, report, intent/progress change, changed nonterminal record, pending decision, mismatched executor identity, or uncertain effect still follows the ordinary reconciliation path.
 
@@ -112,10 +112,9 @@ Reports, canonical task records, remote-execution identity, provider captures an
 
 There is no fleet sweeper or inference-based historical deletion command.
 For one already-retired task, MAIN may run `fm-task-retire.sh <task-id> --historical-state dry-run --generation <generation>` and then repeat it with `apply`.
-This state-only path requires absent execution metadata, an absent canonical record, an exact task-and-generation legacy terminal lifecycle record, immutable completed-cleanup evidence, no pending inbox/handoff/lease/short operation/backlog transition/provider runtime, and fully presented status with no open decision.
-A canonical `done` or `archived` row cannot authorize this path because the current schema has no execution generation and therefore cannot distinguish a reopened task ID from the old completed instance.
-It calls the existing status, runtime, poll, inbox, handoff, and receipt owners; it performs no provider, endpoint, copy, backlog, or business-state action.
-Missing metadata, a final `done` line, an absent pane, age, or an old generation receipt alone is not terminal authority, and any failed proof keeps the historical record in place.
+Canonical records carry no execution generation, so legacy-only state sweeping is refused and preserves historical runtime material.
+A missing record cannot inherit business authority from a retained lifecycle disposition, and backfill archival grants no resource disposal authority.
+Exact-generation completed cleanup and merge receipts remain readable and may be archived by their existing owners without changing the task record.
 
 Endpoint cleanup binds the exact task, executor generation, Herdr session, and pane. It refuses conflicting ownership and never closes a whole workspace. Copy disposal is independent: primary, shared, dirty, unintegrated, or unverified copies remain available with an explicit cleanup disposition. Only an exclusive clean copy proved integrated into the default branch can be returned or removed. A pending or uncertain disposal requires exact readback before any further effect.
 

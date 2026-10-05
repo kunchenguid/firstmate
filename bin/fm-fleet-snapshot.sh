@@ -44,7 +44,7 @@
 #     project it as a Charted Next gate stating why, and disclose it in
 #     omitted[]; --all-decisions reveals every captain hold available within the
 #     bounded snapshot.
-#   tasks[]: one row per task metadata record captured at snapshot start, sorted
+#   tasks[]: execution observations for canonical in_flight IDs with metadata, sorted
 #     by id. A record removed before capture is omitted. If a captured task's
 #     generation changes while observations run, its selected metadata remains
 #     but mutable current-state, status, report, and endpoint evidence is discarded
@@ -60,10 +60,8 @@
 #     delegates local agents to bin/fm-crew-state.sh.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
-#     record_disposition separates current backlog state from the configured
-#     tasks-axi Done archive. retained_record is true for a closed current row or
-#     archive record with no current working evidence. It is not proof of endpoint
-#     cleanup or successful acceptance; endpoint evidence stays visible.
+#     record_disposition is derived by the task-record owner; terminal tasks have
+#     no ordinary execution row and closure does not prove resource cleanup.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -72,12 +70,7 @@
 #     null for cloud-worker and remote-agent tasks.
 #     endpoint.agent_alive is not probed by this snapshot; cloud-worker and
 #     remote-agent tasks use "not_applicable" and local tasks use "not_checked".
-#   scout_reports[]: present data/<id>/report.md pointers.
-#   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
-#     main-home current-inventory checks (orphan structured in-flight ids with no
-#     state/<id>.meta, and unstructured current backlog rows). Does not invent live
-#     tasks; meta remains truth for workers. Bearings maps failures into omitted[]
-#     disclosure rather than silently showing an empty Underway section.
+#   scout_reports[]: present report.md pointers for canonical IDs only.
 #
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
@@ -278,7 +271,7 @@ first_pr_url_in_file() {  # <file>
 
 backlog_json() {  # canonical data/<task>/task.json projection
   local canonical_json
-  canonical_json=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory | jq -c \
+  canonical_json=$(printf '%s' "$TASK_INVENTORY" | jq -c \
     --arg path "$DATA" --arg today "$SNAPSHOT_TODAY" \
     --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
     def timestamp_epoch($d):
@@ -288,12 +281,12 @@ backlog_json() {  # canonical data/<task>/task.json projection
     def days_between($from; $to):
       (timestamp_epoch($from)) as $a | (timestamp_epoch($to)) as $b
       | if $a == null or $b == null then null else (($b - $a) / 86400 | floor) end;
-    .tasks as $tasks
+    .dispositions as $dispositions | .tasks as $tasks
     | (reduce $tasks[] as $task ({};
         .[$task.id] = ($task.state == "done" or $task.state == "archived"))) as $resolved
     | {path:$path,present:true,
       records:[$tasks[] | ([.blocked_by[] | select($resolved[.] != true)]) as $unresolved | {
-        order:0,state:(if .state == "archived" then "done" else .state end),structured:true,
+        order:0,state:.state,record_disposition:$dispositions[.id],structured:true,
         id:.id,checked:(.state == "done" or .state == "archived"),title:.title,
         repo:(if .repo == "" then null else .repo end),kind:.kind,
         priority:(if .priority == "" then null else .priority end),
@@ -301,7 +294,7 @@ backlog_json() {  # canonical data/<task>/task.json projection
         hold_until:(.hold.until // .deferred_until // null),
         hold_set:(.hold.set // null),blocked_by:(.blocked_by[0] // null),blocked_by_ids:.blocked_by,
         unresolved_blocker_ids:$unresolved,blocked_reason:null,since:.created,merged:null,reported:null,
-        done:.closed,completion:(.completion // {verb:(if .closed then "done" else null end),date:.closed}),
+        done:.closed,completion:.completion,
         links:(.links|to_entries|map(.value)),pr_url:(.links.pr // null),report_path:(.links.report // null),
         local_note:null,raw:null,body_lines:(.body|split("\n")),body_excerpt:(.body[:240]),
         compact_progress:.progress,
@@ -447,6 +440,10 @@ prefetch_task_current_states() {
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
     [ -z "$TARGET_TASK_ID" ] || [ "$id" = "$TARGET_TASK_ID" ] || continue
+    case $'\n'"$ACTIVE_TASK_IDS"$'\n' in
+      *$'\n'"$id"$'\n'*) ;;
+      *) continue ;;
+    esac
     if [ "$UNFINISHED_ONLY" = 1 ]; then
       case $'\n'"$UNFINISHED_TASK_IDS"$'\n' in
         *$'\n'"$id"$'\n'*) ;;
@@ -494,7 +491,7 @@ prefetch_task_current_states() {
 
 task_json_lines() {
   local cleanup_json
-  local meta original_meta id kind executor provider task_type cloud_state remote_task_state harness mode yolo project worktree spawn_gen backend target status_log report_path
+  local meta original_meta id kind executor provider task_type cloud_state remote_task_state harness model mode yolo project worktree spawn_gen backend target status_log report_path
   local current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json cloud_state_json remote_state_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -514,6 +511,16 @@ task_json_lines() {
     cloud_state=$(meta_value "$meta" cloud_state)
     remote_task_state=$(meta_value "$meta" remote_state)
     harness=$(meta_value "$meta" harness)
+    model=$(meta_value "$meta" model)
+    [ "$model" != default ] || model=
+    if [ "$executor" = remote-agent ]; then
+      # Read an execution fact through its local schema owner, never a provider refresh.
+      # shellcheck source=bin/fm-remote-agent-lib.sh
+      . "$SCRIPT_DIR/fm-remote-agent-lib.sh"
+      if fm_remote_state_load "$id"; then
+        model=$(jq -r '.provider_state.model | select(type == "string")' "$REMOTE_STATE_FILE")
+      fi
+    fi
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -615,6 +622,7 @@ task_json_lines() {
       --arg provider "$provider" \
       --arg task_type "$task_type" \
       --arg harness "$harness" \
+      --arg model "$model" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg project "$project" \
@@ -647,6 +655,7 @@ task_json_lines() {
         provider:($provider | if . == "" then null else . end),
         task_type:($task_type | if . == "" then null else . end),
         harness:($harness // ""),
+        model:($model | if . == "" then null else . end),
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
@@ -706,71 +715,27 @@ task_json_lines() {
   done | jq -s 'sort_by(.id)'
 }
 
-# Main-home current-inventory validity checks orphan / unstructured-current rows
-# without inventing live task rows.
-# Meta inventory remains the sole source of live workers; this object only
-# discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
-main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
-  jq -n \
-    --slurpfile backlog "$1" \
-    --slurpfile tasks "$2" '
-    ($backlog[0]) as $backlog
-    | ($tasks[0]) as $tasks
-    | ([ $backlog.records[]?
-       | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
-    | ([ $backlog.records[]?
-         | select(.state == "in_flight" and .structured and .requires_child_metadata) ]) as $owned_in_flight
-    | ([ $owned_in_flight[]
-         | select(.id as $id | [$tasks[].id] | index($id) | not)
-         | .id ]) as $orphan_in_flight
-    | (($unstructured_current | length) == 0
-       and ($orphan_in_flight | length) == 0) as $valid
-    | (if ($unstructured_current | length) > 0 then "unstructured current backlog row"
-       elif ($orphan_in_flight | length) > 0 then "in-flight backlog item has no child metadata"
-       else null end) as $reason
-    | {
-        valid:$valid,
-        reason:$reason,
-        orphan_in_flight:$orphan_in_flight,
-        unstructured_current_count:($unstructured_current | length)
-      }'
-}
-
 scout_reports_json() {
-  if [ ! -d "$DATA" ]; then
-    jq -n '[]'
-    return 0
-  fi
-  if [ "$UNFINISHED_ONLY" = 1 ]; then
-    {
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        [ -f "$DATA/$id/report.md" ] && [ ! -L "$DATA/$id/report.md" ] || continue
-        printf '%s\n' "$DATA/$id/report.md"
-      done <<EOF
-$UNFINISHED_TASK_IDS
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ -f "$DATA/$id/report.md" ] && [ ! -L "$DATA/$id/report.md" ] && [ ! -L "$DATA/$id" ] || continue
+    printf '%s\n' "$DATA/$id/report.md"
+  done <<EOF
+$DOCUMENT_TASK_IDS
 EOF
-    } | LC_ALL=C sort | jq -Rn '[inputs | {id:(split("/") | .[-2]),path:.}] | sort_by(.id)'
-    return "${PIPESTATUS[1]}"
-  fi
-  # Feed every discovered path to one jq process. Large operational homes may
-  # retain hundreds of reports, so starting one jq per report makes unrelated
-  # task-overview reads scale with historical report count.
-  LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print \
-    | LC_ALL=C sort \
-    | jq -Rn '[inputs | {id:(split("/") | .[-2]),path:.}] | sort_by(.id)'
 }
 
+TASK_INVENTORY=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory) || exit 1
+ACTIVE_TASK_IDS=$(printf '%s' "$TASK_INVENTORY" | jq -r '.tasks[] | select(.state == "in_flight") | .id') || exit 1
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 if [ "$UNFINISHED_ONLY" = 1 ]; then
   UNFINISHED_TASK_IDS=$(printf '%s' "$BACKLOG_JSON" | jq -r \
     '.records[] | select(.structured and (.state == "queued" or .state == "in_flight")) | .id') || exit 1
   BACKLOG_JSON=$(printf '%s' "$BACKLOG_JSON" | jq -c \
     '.records |= map(select(.state == "queued" or .state == "in_flight"))') || exit 1
-  TASK_DISPOSITIONS=$(printf '%s' "$BACKLOG_JSON" | jq -r '.records[] | [.id,.state] | @tsv') || exit 1
-else
-  TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
 fi
+DOCUMENT_TASK_IDS=$(printf '%s' "$BACKLOG_JSON" | jq -r '.records[].id') || exit 1
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
@@ -778,17 +743,14 @@ JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
   || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
 BACKLOG_JSON_FILE="$JSON_TRANSPORT_DIR/backlog.json"
 TASKS_JSON_FILE="$JSON_TRANSPORT_DIR/tasks.json"
-MAIN_INVENTORY_JSON_FILE="$JSON_TRANSPORT_DIR/main-inventory.json"
 SCOUT_REPORTS_JSON_FILE="$JSON_TRANSPORT_DIR/scout-reports.json"
 printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary backlog file write failed" >&2; exit 1; }
 printf '%s\n' "$TASKS_JSON" > "$TASKS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary task file write failed" >&2; exit 1; }
 
-scout_reports_json > "$SCOUT_REPORTS_JSON_FILE" \
+scout_reports_json | jq -Rn '[inputs | {id:(split("/") | .[-2]),path:.}] | sort_by(.id)' > "$SCOUT_REPORTS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: scout report snapshot failed" >&2; exit 1; }
-main_inventory_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" > "$MAIN_INVENTORY_JSON_FILE" \
-  || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \
   --arg fm_home "$FM_HOME" \
@@ -797,22 +759,17 @@ jq -n \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
-  --arg task_dispositions "$TASK_DISPOSITIONS" \
   --arg task_filter "$TARGET_TASK_ID" \
   --argjson unfinished_only "$UNFINISHED_ONLY" \
   --slurpfile backlog "$BACKLOG_JSON_FILE" \
   --slurpfile tasks "$TASKS_JSON_FILE" \
-  --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
   --slurpfile scout_reports "$SCOUT_REPORTS_JSON_FILE" \
   '($backlog[0]) as $backlog
    | ($tasks[0]) as $tasks
-   | ($main_inventory[0]) as $main_inventory
    | ($scout_reports[0]) as $scout_reports
-   | (reduce ($task_dispositions | split("\n")[] | select(length > 0) | split("\t")) as $row
-       ({}; if ($row | length) == 2 then .[$row[0]] = $row[1] else . end)) as $dispositions
-   | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
-   def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
-   def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
+   | (reduce $backlog.records[] as $row ({}; .[$row.id] = $row)) as $records
+   | def backlog_by_id($id): $records[$id];
+   def report_kind($id): $records[$id].kind;
    {
      schema:"fm-fleet-snapshot.v1",
      generated:$generated,
@@ -821,11 +778,7 @@ jq -n \
      query:{unfinished_only:($unfinished_only == 1)},
      backlog:($backlog | if $task_filter == "" then . else .records |= map(select(.id == $task_filter)) end),
      tasks:($tasks | map(.id as $id
-       | . + {backlog:backlog_by_id($id)}
-       | . + {record_disposition:($dispositions[$id] // "unknown")}
-       | . + {retained_record:((.record_disposition == "done" or .record_disposition == "archive_done")
-           and .current_state.state != "working")})),
-     main_inventory:(if $task_filter == "" then $main_inventory
-       else {valid:null,reason:"not evaluated in targeted task projection",orphan_in_flight:[],unstructured_current_count:0} end),
-     scout_reports:($scout_reports | map(select($task_filter == "" or .id == $task_filter) | . + {kind:report_kind(.id)}))
+       | . + {backlog:$records[$id],kind:$records[$id].kind,execution_kind:.kind,project:($records[$id].repo // ""),
+              title:$records[$id].title,record_disposition:$records[$id].record_disposition})),
+     scout_reports:($scout_reports | map(select($records[.id] != null and ($task_filter == "" or .id == $task_filter)) | . + {kind:report_kind(.id)}))
    }'

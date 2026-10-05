@@ -77,49 +77,16 @@ fm_cleanup_completion_guard() { # <task> <generation>
   fm_cleanup_completion_mode "$1" "$2" >/dev/null
 }
 
-# Terminal disposition proof for state-only reconciliation after execution
-# metadata is already gone. The canonical record remains authoritative for
-# business state, but its schema has no execution generation; when it exists it
-# therefore cannot bind historical cleanup to the caller-supplied generation.
-# Only an absent canonical record plus the retained lifecycle's exact
-# task/generation terminal disposition can authorize this legacy path. Neither
-# path creates or updates task state.
-fm_cleanup_historical_completion_mode() ( # <task> <generation>; prints done|archived|accepted
-  local id=$1 generation=$2 current_status lifecycle data
-  data=${FM_DATA_OVERRIDE:-${DATA:-${FM_HOME:?}/data}}
+# A canonical business record has no execution generation. Legacy lifecycle
+# dispositions cannot authorize state sweeping. Exact receipt archival remains
+# available through the receipt owners without deleting unbound runtime state.
+fm_cleanup_historical_completion_mode() ( # <task> <generation>
+  local id=$1
   # shellcheck source=bin/fm-task-progress-lib.sh
   . "$FM_CLEANUP_RECEIPT_DIR/fm-task-progress-lib.sh"
-  if fm_task_progress_current_absent "$id"; then
-    current_status=0
-  else
-    current_status=$?
-  fi
-  [ "$current_status" -ne 2 ] || return 1
-  if [ "$current_status" -eq 1 ]; then
-    fm_task_progress_detail "$id" || return $?
-    case "$FM_TASK_PROGRESS_STATE" in
-      done|archived)
-        echo "REFUSED: canonical terminal task $id has no execution generation; preserving historical state rather than applying generation $generation" >&2
-        return 6
-        ;;
-      *) echo "REFUSED: task $id is not canonically terminal; preserving historical state" >&2; return 6 ;;
-    esac
-  fi
-  lifecycle="$data/$id/lifecycle.json"
-  [ -f "$lifecycle" ] && [ ! -L "$lifecycle" ] \
-    && [ "$(stat -c %h "$lifecycle" 2>/dev/null || stat -f %l "$lifecycle")" = 1 ] || {
-      echo "REFUSED: task $id has no canonical terminal record or safe historical disposition" >&2
-      return 6
-    }
-  jq -er --arg id "$id" --arg generation "$generation" '
-    select((.schema == "fm-task-lifecycle.v1" or .schema == "fm-task-lifecycle.v2") and
-      .task_id == $id and .execution_generation == $generation and
-      (.disposition == "accepted" or .disposition == "archived")) |
-    .disposition
-  ' "$lifecycle" || {
-    echo "REFUSED: task $id historical disposition is not exact and terminal for generation $generation" >&2
-    return 6
-  }
+  fm_task_progress_detail "$id" || return $?
+  echo "REFUSED: canonical task $id has no execution generation; preserving historical state" >&2
+  return 6
 )
 
 fm_cleanup_delivery_guard() { # <task> <generation> <meta>

@@ -149,6 +149,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-cleanup-receipt-lib.sh
 . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
+# shellcheck source=bin/fm-task-disposition-lib.sh
+. "$SCRIPT_DIR/fm-task-disposition-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -315,19 +317,22 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
-# A MAIN-accepted compact task or explicit current/archive disposition is
-# terminal business state even when its endpoint and metadata remain available
-# for safe cleanup. The cleanup owner also supplies the narrow read-only
-# compatibility check for a historical terminal/archive fact, but never lets it
-# override a current original-task row.
-task_business_terminal() {  # <task>
-  local task=$1 meta generation
-  [ -n "$task" ] || return 1
-  meta="$STATE/$task.meta"
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  generation=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
-  [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$STATE" fm_cleanup_completion_guard "$task" "$generation" >/dev/null 2>&1
+# One canonical inventory per watcher cycle; operational receipts never infer task state.
+WATCH_TASK_DISPOSITIONS=
+watch_task_inventory_read() {
+  WATCH_TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "${FM_DATA_OVERRIDE:-$FM_HOME/data}") || return $?
+}
+watch_task_selected() { # <task> <active|nonterminal>
+  local disposition
+  disposition=$(fm_task_disposition_for "$WATCH_TASK_DISPOSITIONS" "$1") || return 1
+  case "$2:$disposition" in active:active|nonterminal:active|nonterminal:queued|nonterminal:parked) return 0 ;; esac
+  return 1
+}
+task_business_terminal() {
+  local disposition
+  disposition=$(fm_task_disposition_for "$WATCH_TASK_DISPOSITIONS" "$1") || return 1
+  case "$disposition" in done|archive_done) return 0 ;; esac
+  return 1
 }
 
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
@@ -637,9 +642,11 @@ signal_turnend_panes_churned() {  # <file> ...
 }
 
 recorded_windows() {
-  local meta w seen=
+  local meta w id seen=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
+    id=${meta##*/}; id=${id%.meta}
+    watch_task_selected "$id" active || continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] || continue
     case "$seen" in
@@ -1108,11 +1115,13 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
-  local f sig sf
+  local f sig sf task
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
     fi
+    task=${f##*/}; task=${task%.status}; task=${task%.turn-ended}
+    watch_task_selected "$task" active || continue
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
@@ -1361,6 +1370,7 @@ heartbeat_scan_finds_actionable() {
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
+    watch_task_selected "$task" active || continue
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
@@ -1597,6 +1607,7 @@ resurface_after_downtime() {
 }
 
 while :; do
+  watch_task_inventory_read || { echo 'REFUSED: watcher canonical task inventory unavailable' >&2; exit 1; }
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
   # down so the rightful singleton continues alone. The EXIT trap's release
@@ -1658,7 +1669,12 @@ while :; do
         continue
       else
         id=$(basename "$c" .check.sh)
+        # Registered custom checks are explicit operation facts, not ordinary
+        # task discovery. A known terminal task never receives such a check;
+        # task-bound PR polls additionally require a nonterminal record.
+        task_business_terminal "$id" && continue
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+          watch_task_selected "$id" nonterminal || continue
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL

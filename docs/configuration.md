@@ -14,7 +14,7 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 
 `bin/fm-spawn.sh` owns local-agent task metadata, `bin/fm-remote-agent-lib.sh` owns the native remote-agent metadata shape and normalized iDA task state, and `bin/fm-aime-cloud-lib.sh` preserves AIME's proven task-state schema plus the legacy cloud-worker metadata path.
 The runtime-backend section below owns local backend-specific fields and selector interpretation.
-The producing PR helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-task-state.sh` owns provider-aware current-state reconciliation while delegating local tasks unchanged to `bin/fm-crew-state.sh`.
+The producing PR helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-task-state.sh` resolves canonical identity and business state before provider-aware execution reconciliation; its local in-flight path delegates to `bin/fm-crew-state.sh`.
 Wake and watcher state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
@@ -270,7 +270,11 @@ Each task has one canonical business record at `data/<task>/task.json`.
 That record owns the task ID, goal/title, body, phase, kind, repository, priority, hold/defer/dependency facts, artifact links, retained notes, completion/archive disposition, and the four goal-progress fields.
 [`fm-task-record.py`](../bin/fm-task-record.py) owns validation, same-directory atomic publication, single-task reads, and one-process list/filter aggregation.
 [`fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) is the thin task CRUD command used by task and lifecycle callers; task commands do not run tasks-axi or write a shared backlog.
-[`fm-fleet-snapshot.sh`](../bin/fm-fleet-snapshot.sh) derives its business-task view from the canonical records and adds runtime observations on demand without persisting an aggregate index.
+[`fm-fleet-snapshot.sh`](../bin/fm-fleet-snapshot.sh) uses one canonical inventory per query and adds runtime observations only for in-flight records with execution metadata.
+
+Done and archived records remain available for exact lookup, dependencies and documents, but never enter ordinary endpoint, provider, watcher or continuation processing.
+Missing or corrupt records return the record owner's result without artifact discovery or lifecycle guesses.
+The explicit one-time `backfill-archived` interface is owned by [`fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) and [`fm-task-record.py`](../bin/fm-task-record.py); ordinary queries never import legacy identities.
 
 Dispatch, completion, archive, hold, dependency and artifact transitions update only the named task record.
 Operation-specific metadata, provider records, merge receipts, cleanup receipts and executor locks keep their existing ownership and actual-effect guards.

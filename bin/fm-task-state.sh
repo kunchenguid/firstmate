@@ -9,8 +9,9 @@
 #   fm-task-state.sh update-progress <task-id> --progress '<json>'
 #   fm-task-state.sh progress-list
 #
-# Legacy metadata and explicit executor=local-agent records delegate unchanged
-# to fm-crew-state.sh.
+# Canonical identity and business state are read first. Missing/corrupt records
+# refuse, and queued/done/archived return without execution reconciliation.
+# In-flight local metadata delegates unchanged to fm-crew-state.sh.
 # executor=cloud-worker/provider=aime is the permanent legacy AIME path.
 # executor=remote-agent delegates to the explicitly recorded AIME or iDA
 # provider. Unknown executor/provider records fail closed and never fall
@@ -69,6 +70,13 @@ esac
 
 id=${1-}
 [ -n "$id" ] || { printf 'usage: fm-task-state.sh <task-id>\n' >&2; exit 2; }
+# Ordinary current-state calls first resolve canonical identity/business state.
+# Exact effect/resource owners retain their direct provider and endpoint APIs.
+record=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "${FM_DATA_OVERRIDE:-$FM_HOME/data}" progress "$id") || exit $?
+business_state=$(printf '%s' "$record" | jq -r '.state') || exit 1
+case "$business_state" in
+  done|archived|queued) printf 'state: %s · source: task-record · canonical business state\n' "$business_state"; exit 0 ;;
+esac
 meta="$STATE/$id.meta"
 
 if [ ! -f "$meta" ] || [ -L "$meta" ]; then

@@ -11,6 +11,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-remote-agent)
 export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
 BASE_PATH=$PATH
+export FM_CANDIDATE_TASKS="$ROOT/bin/fm-tasks-axi.sh"
 IDA="$ROOT/bin/fm-remote-agent-ida.sh"
 DISPATCH="$ROOT/bin/fm-task-dispatch.sh"
 STATE_CMD="$ROOT/bin/fm-task-state.sh"
@@ -59,8 +60,7 @@ new_task() {
   if [ ! -f "$home/data/backlog.md" ]; then
     printf '%s\n' '# Tasks' '' '## In flight' '' '## Queued' '' '## Done' >"$home/data/backlog.md"
   fi
-  TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Remote research $id" --kind scout --start \
-    --file "$home/data/backlog.md" >/dev/null || fail "could not add remote fixture task $id"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start >/dev/null || fail "could not add remote fixture task $id"
   printf '# Brief\n' >"$home/data/$id/brief.md"
   printf '%s\n' "$content" >"$home/data/$id/instructions.txt"
   chmod 0600 "$home/data/$id/instructions.txt"
@@ -69,9 +69,7 @@ new_task() {
 new_canonical_task() { # <home> <id> [instruction]
   local home=$1 id=$2 content=${3:-"PRIVATE_PROMPT_alpha OECID_sensitive"}
   new_task "$home" "$id" "$content"
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
-    "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start \
-    >/dev/null || fail "could not add canonical iDA fixture task $id"
+
 }
 
 mark_status_presented() { # <home> <id>
@@ -241,8 +239,7 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
     case "$mode" in list-unavailable) error HTTP_503 'service unavailable'; exit 1 ;; esac
     if [ -n "${FM_IDA_FAKE_LIST_DONE_TASK:-}" ] \
         && mkdir "${FM_IDA_FAKE_LIST_DONE_CLAIM:?}" 2>/dev/null; then
-      TASKS_AXI_BACKEND=markdown tasks-axi done "$FM_IDA_FAKE_LIST_DONE_TASK" \
-        --file "$FM_HOME/data/backlog.md" >/dev/null \
+      "$FM_CANDIDATE_TASKS" "done" "$FM_IDA_FAKE_LIST_DONE_TASK" >/dev/null \
         || { error FIXTURE_ERROR 'could not close task at list boundary'; exit 1; }
     fi
     rows="[]"
@@ -1371,7 +1368,9 @@ test_abandon_after_authoritative_zero_match() {
   creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
   [ "$creates" -eq 1 ] || fail "abandonment path issued another create"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null 2>&1 && fail "abandoned retirement bypassed the decision gate"
+  FM_HOME="$home" "$ROOT/bin/fm-status-append.sh" "$id" 'resolved [key=ida-submission-ambiguous]: fixture MAIN accepts authorized zero-match abandonment' || fail 'fixture decision resolution failed'
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null || fail "decision-complete abandoned retirement failed"
   assert_absent "$home/state/$id.meta" "retirement retained abandoned iDA metadata"
@@ -1415,6 +1414,7 @@ test_cancellation_and_retirement_authority() {
   rc=0; FM_HOME="$home" "$RETIRE" "$id" >"$home/retire.out" 2>"$home/retire.err" || rc=$?
   [ "$rc" -ne 0 ] || fail "retirement bypassed the decision gate"
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null || fail "decision-complete iDA retirement failed"
   assert_absent "$home/state/$id.meta" "retirement retained iDA metadata"
@@ -1425,73 +1425,53 @@ test_cancellation_and_retirement_authority() {
 # Exercise the real backlog CLI, including a close that landed before its
 # caller saw an error. Retry must preserve evidence and never resurrect work.
 test_retirement_pairs_backlog_and_preserves_failed_close() {
-  local home fakebin id=ida-close out real_tasks mode rc
-  command -v tasks-axi >/dev/null 2>&1 || { printf 'skip: remote backlog pairing needs tasks-axi\n'; return; }
-  real_tasks=$(command -v tasks-axi)
-  for mode in closed held interrupted; do
+  local home fakebin id=ida-close out mode rc
+  for mode in closed held interrupted archived; do
     home=$(new_home "retire-$mode"); fakebin=$(make_fake_bytedcli "$home")
     write_ida_config "$home"; new_task "$home" "$id"
-    printf 'backend = "markdown"\n' > "$home/.tasks.toml"
-    printf '# Tasks\n\n## In flight\n\n- [ ] %s - Remote research (kind: scout) (since 2026-09-24)\n\n## Queued\n\n## Done\n' "$id" > "$home/data/backlog.md"
     : > "$home/sessions.tsv"
     FM_IDA_FAKE_MODE=success dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "retirement fixture dispatch failed"
     wait_phase "$home" "$id" terminal-success || fail "retirement fixture did not complete"
     fm_test_archive_goal "$home" "$id"
+    mark_status_presented "$home" "$id"
     printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$home/state/$id.meta"
     if [ "$mode" = held ]; then
-      TASKS_AXI_BACKEND=markdown tasks-axi hold "$id" --file "$home/data/backlog.md" --kind captain --reason 'Pending independent acceptance' >/dev/null || fail "hold fixture failed"
+      FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" hold "$id" --kind captain --reason 'Pending independent acceptance' >/dev/null || fail "hold fixture failed"
+    elif [ "$mode" = archived ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" archive "$id" >/dev/null || fail "archive fixture failed"
     elif [ "$mode" = interrupted ]; then
-      cat > "$fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-"${FM_REAL_TASKS:?}" "$@" || exit $?
-if [ "$1" = done ] && [ -f "${FM_CLOSE_INTERRUPT:?}" ]; then
-  rm "$FM_CLOSE_INTERRUPT"
-  exit 1
-fi
-SH
-      chmod +x "$fakebin/tasks-axi"
-      : > "$home/interrupt"
-      PATH="$fakebin:$BASE_PATH" TASKS_AXI_BACKEND=markdown FM_REAL_TASKS="$real_tasks" FM_CLOSE_INTERRUPT="$home/interrupt" FM_HOME="$home" \
-        "$RETIRE" "$id" > "$home/retire.out" 2> "$home/retire.err" && fail "lost close acknowledgement reported success"
+      FM_TASK_RECORD_TEST_FAIL_BEFORE_REPLACE=1 PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+        "$RETIRE" "$id" > "$home/retire.out" 2> "$home/retire.err" && fail "failed canonical close reported success"
       assert_present "$home/state/$id.meta" "failed close lost execution metadata"
       assert_present "$(state_file "$home" "$id")" "failed close lost terminal state"
       assert_present "$home/data/$id/report.md" "failed close lost report"
       assert_grep 'execution evidence retained' "$home/retire.err" "failed close lacked actionable diagnostic"
-      out=$(FM_HOME="$home" "$STATE_CMD" progress "$id") \
-        || fail "interrupted close lost readable compact progress"
-      [ "$(printf '%s' "$out" | jq -r .goal)" = 'Remote research' ] \
-        || fail "report-link decoration replaced the original compact goal"
-      [ "$(printf '%s' "$out" | jq -r .context_relation)" = disposition_only ] \
-        || fail "interrupted close changed more than compact task disposition"
     fi
-    PATH="$fakebin:$BASE_PATH" TASKS_AXI_BACKEND=markdown FM_REAL_TASKS="$real_tasks" FM_CLOSE_INTERRUPT="$home/interrupt" FM_HOME="$home" \
-      "$RETIRE" "$id" >/dev/null || fail "remote retirement/retry failed for $mode"
-    out=$(TASKS_AXI_BACKEND=markdown tasks-axi show "$id" --file "$home/data/backlog.md" --full)
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$RETIRE" "$id" >/dev/null || fail "remote retirement/retry failed for $mode"
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show "$id" --full)
     if [ "$mode" = held ]; then
       assert_contains "$out" 'state: queued' "retirement closed an independent captain call"
       assert_contains "$out" 'hold_kind: captain' "retirement lost captain hold"
+    elif [ "$mode" = archived ]; then
+      assert_contains "$out" 'state: archived' "retirement revived historical archive"
     else
       assert_contains "$out" 'state: done' "retirement left a stale in-flight row"
     fi
     assert_present "$home/data/$id/report.md" "retirement lost durable report"
     assert_absent "$home/state/$id.meta" "retirement retained execution metadata"
     assert_contains "$out" "data/$id/report.md" "retirement lost report link"
-    assert_present "$home/data/$id/remote-execution.json" \
-      "retirement lost immutable iDA execution identity"
+    assert_present "$home/data/$id/remote-execution.json" "retirement lost immutable iDA execution identity"
     if [ "$mode" = closed ]; then
-      TASKS_AXI_BACKEND=markdown tasks-axi reopen "$id" --file "$home/data/backlog.md" >/dev/null \
-        || fail "iDA identity-reuse fixture could not reopen the row"
-      TASKS_AXI_BACKEND=markdown tasks-axi start "$id" --file "$home/data/backlog.md" >/dev/null \
-        || fail "iDA identity-reuse fixture could not restart the row"
+      FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" reopen "$id" >/dev/null || fail "iDA reuse fixture could not reopen"
+      FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" start "$id" >/dev/null || fail "iDA reuse fixture could not restart"
       rc=0
-      dispatch_ida "$home" "$fakebin" "$id" >"$home/reuse.out" 2>"$home/reuse.err" || rc=$?
+      dispatch_ida "$home" "$fakebin" "$id" > "$home/reuse.out" 2> "$home/reuse.err" || rc=$?
       [ "$rc" -eq 6 ] || fail "retired iDA id reuse exited $rc instead of 6"
-      assert_grep 'retained remote execution identity' "$home/reuse.err" \
-        "retired iDA id reuse lost its identity blocker"
+      assert_grep 'retained remote execution identity' "$home/reuse.err" "retired iDA id reuse lost its blocker"
       assert_absent "$(state_file "$home" "$id")" "retired iDA id reuse created provider state"
     fi
   done
-  pass "remote retirement pairs closed/held backlog state and retries interrupted close without losing evidence"
+  pass "remote retirement preserves canonical held/archive state and retries failed close without evidence loss"
 }
 
 test_canonical_retirement_retires_active_state_and_preserves_provider_evidence() {
@@ -1515,8 +1495,8 @@ test_canonical_retirement_retires_active_state_and_preserves_provider_evidence()
   generation=$(jq -r '.generation // 1' "$(state_file "$home" "$id")")
 
   fm_test_archive_goal "$home" "$id"
-  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   mark_status_presented "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   for artifact in turn-ended progress pi-ext.ts busy-session control-relaunch \
     control-relaunch.meta-prior control-relaunch.brief-prior control-relaunch.note \
     reconcile-nudged; do
@@ -1573,6 +1553,8 @@ test_canonical_retirement_retires_active_state_and_preserves_provider_evidence()
 test_aime_compatibility_and_local_unchanged() {
   local home fakebin out rc=0
   home=$(new_home compatibility); fakebin=$(make_fake_bytedcli "$home")
+  new_task "$home" legacy-aime
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" start legacy-aime >/dev/null || fail "legacy AIME task start failed"
   mkdir -p "$home/state/cloud-tasks/legacy-aime"
   cat >"$home/state/legacy-aime.meta" <<EOF
 kind=scout
@@ -1652,8 +1634,6 @@ SH
 test_followup_identity_and_unknown_submission() {
   local home fakebin id=ida-followup old_sha creates outcome rc=0
   home=$(new_home followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
-  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start >/dev/null \
-    || fail 'could not add canonical followup fixture task'
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'initial followup fixture dispatch'
   wait_phase "$home" "$id" terminal-success || fail 'initial followup fixture terminal'
@@ -1678,8 +1658,6 @@ test_followup_identity_and_unknown_submission() {
 
   id=ida-followup-baseline
   home=$(new_home followup-baseline); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
-  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start >/dev/null \
-    || fail 'could not add canonical baseline fixture task'
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   REMOTE_TASK_ID=80001
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'baseline fixture dispatch'
@@ -1696,8 +1674,6 @@ test_followup_identity_and_unknown_submission() {
   # and one new turn cannot establish the marker/turn binding.
   id=ida-followup-unknown
   home=$(new_home followup-unknown); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
-  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start >/dev/null \
-    || fail 'could not add canonical unknown-receipt fixture task'
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   REMOTE_TASK_ID=80001
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'unknown fixture dispatch'
@@ -1724,7 +1700,7 @@ test_terminal_disposition_guards_remote_effects() {
   id=ida-terminal-dispatch
   home=$(new_home terminal-dispatch); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
-  tasks-axi "done" "$id" --file "$home/data/backlog.md" >/dev/null \
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "done" "$id" >/dev/null \
     || fail 'terminal-dispatch task could not become Done'
   rc=0
   dispatch_ida "$home" "$fakebin" "$id" >"$home/dispatch.out" 2>"$home/dispatch.err" || rc=$?
@@ -1751,7 +1727,7 @@ test_terminal_disposition_guards_remote_effects() {
   wait_phase "$home" "$id" terminal-success || fail 'terminal-followup initial turn did not finish'
   printf 'This archived task must not continue.\n' >"$home/data/$id/followup.txt"
   chmod 600 "$home/data/$id/followup.txt"
-  tasks-axi "done" "$id" --file "$home/data/backlog.md" >/dev/null \
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "done" "$id" >/dev/null \
     || fail 'terminal-followup task could not become Done'
   rc=0
   run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" \
@@ -1768,25 +1744,27 @@ test_terminal_disposition_guards_remote_effects() {
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'historical-retire dispatch failed'
   wait_phase "$home" "$id" terminal-success || fail 'historical-retire turn did not finish'
   printf '## In flight\n\n## Queued\n\n## Done\n' >"$home/data/backlog.md"
+  rm "$home/data/$id/task.json"
   jq -n --arg id "$id" '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:"remote-1",disposition:"open"}' \
     >"$home/data/$id/lifecycle.json"
   rc=0
   run_ida "$home" "$fakebin" retire "$id" >"$home/retire.out" 2>"$home/retire.err" || rc=$?
   [ "$rc" -ne 0 ] || fail 'iDA retirement accepted open retained history'
-  assert_grep 'neither MAIN-accepted compact progress nor explicit archived completion' "$home/retire.err" \
+  assert_grep 'no canonical task record' "$home/retire.err" \
     'iDA historical retirement lost its terminal-fact blocker'
   assert_present "$(state_file "$home" "$id")" 'iDA historical retirement removed provider state'
 
   id=ida-retained-execution
   home=$(new_home retained-execution); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   printf '## In flight\n\n## Queued\n\n## Done\n' >"$home/data/backlog.md"
+  rm "$home/data/$id/task.json"
   jq -n --arg id "$id" '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:"remote-7",disposition:"archived"}' \
     >"$home/data/$id/lifecycle.json"
   : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
   rc=0
   dispatch_ida "$home" "$fakebin" "$id" >"$home/redispatch.out" 2>"$home/redispatch.err" || rc=$?
   [ "$rc" -eq 6 ] || fail "retained-execution redispatch exited $rc instead of 6"
-  assert_grep 'already has a retained execution identity' "$home/redispatch.err" \
+  assert_grep 'no canonical task record' "$home/redispatch.err" \
     'retained-execution redispatch lost its identity blocker'
   assert_absent "$(state_file "$home" "$id")" 'retained-execution redispatch replaced provider state'
   [ ! -s "$home/bytedcli.log" ] || fail 'retained-execution redispatch reached the provider'
@@ -1805,6 +1783,11 @@ test_terminal_disposition_guards_remote_effects() {
 }
 
 case "${FM_REMOTE_TEST_CASE:-}" in
+  compatibility)
+    test_aime_compatibility_and_local_unchanged
+    test_remote_aime_dispatch_metadata
+    exit 0
+    ;;
   followup)
     test_followup_identity_and_unknown_submission
     exit 0

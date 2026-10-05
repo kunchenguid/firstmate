@@ -18,6 +18,7 @@ make_home() {
 test_quiet_checkpoint_exits_124_cleanly() {
   local home out err status
   home=$(make_home quiet)
+  printf 'done: orphan must not become a task\n' > "$home/state/orphan.status"
   out="$home/out.txt"
   err="$home/err.txt"
   status=0
@@ -31,6 +32,8 @@ test_quiet_checkpoint_exits_124_cleanly() {
 test_signal_passes_through_and_exits_zero() {
   local home out err status drained
   home=$(make_home signal)
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add demo "Checkpoint signal fixture" --start >/dev/null \
+    || fail "checkpoint task registration failed"
   out="$home/out.txt"
   err="$home/err.txt"
   (
@@ -81,7 +84,23 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+test_terminal_task_check_stays_inert() {
+  local home status
+  home=$(make_home terminal-check)
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add ended "Ended check fixture" >/dev/null || fail "terminal task registration failed"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" archive ended >/dev/null || fail "terminal task archival failed"
+  printf '#!/usr/bin/env bash\ntouch "%s"\nprintf "unexpected effect\\n"\n' "$home/effect" > "$home/state/ended.check.sh"
+  chmod 0700 "$home/state/ended.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" ended >/dev/null || fail "terminal check registration failed"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_CHECK_INTERVAL=1 "$CHECKPOINT" --seconds 2 > "$home/out" 2> "$home/err" || status=$?
+  expect_code 124 "$status" "terminal check checkpoint exit"
+  assert_absent "$home/effect" "registered terminal task check executed"
+  pass "known terminal task checks stay inert while independent registered checks retain their owner"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_terminal_task_check_stays_inert

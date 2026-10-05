@@ -217,12 +217,17 @@ SH
 
 write_task_meta() {
   local dir=$1 id=${2:-task-a}
+  if [ ! -f "$dir/home/data/$id/task.json" ]; then
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "$id" --kind ship --start >/dev/null \
+      || fail "PR task registration failed"
+  fi
   fm_test_write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
+    "spawn_gen=fixture-g1" \
     "mode=no-mistakes"
 }
 
@@ -231,6 +236,10 @@ write_task_meta() {
 write_poll_meta() {
   local state=$1 id=$2 url=$3
   shift 3
+  if [ ! -f "${state%/state}/data/$id/task.json" ]; then
+    FM_HOME="${state%/state}" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "$id" --kind ship --start >/dev/null \
+      || fail "PR poll task registration failed"
+  fi
   fm_test_write_herdr_meta "$state/$id.meta" \
     "window=fm-$id" \
     "$@" \
@@ -578,7 +587,7 @@ test_valid_recording_and_merge_derivation() {
 
   : > "$dir/gh.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
-    >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
+    >"$dir/merge.out" 2>"$dir/merge.err" || fail "valid merge wrapper failed: $(cat "$dir/merge.err")"
   grep -qxF "pr merge 37 --repo my-org/repo_name.with-dots --match-head-commit $expected --merge" "$dir/gh.log" \
     || fail "merge wrapper did not preserve repository derivation, live head, and method"
   # A merge this home performed leaves its own durable outcome, so the poll's
@@ -621,9 +630,10 @@ test_valid_recording_and_merge_derivation() {
   rm -rf "$dir/wt"
   fm_test_fake_herdr_gone "$dir/fakebin"
   touch "$dir/home/state/.last-watcher-beat"
+  fm_test_archive_goal "$dir/home" Task_A.1
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
     "$TEARDOWN" Task_A.1 --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "safe lifecycle-compatible task ID could not be torn down"
+    || fail "safe lifecycle-compatible task ID could not be torn down: $(cat "$dir/teardown.err")"
   [ ! -e "$dir/home/state/Task_A.1.meta" ] \
     || fail "safe lifecycle-compatible task teardown retained metadata"
 
@@ -635,6 +645,7 @@ test_valid_recording_and_merge_derivation() {
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
+      'spawn_gen=fixture-legacy-g1' \
       'mode=local-only'
     fm_test_fake_herdr_gone "$dir/fakebin"
     touch "$dir/home/state/.last-watcher-beat"
@@ -650,15 +661,24 @@ test_valid_recording_and_merge_derivation() {
     [ -d "$dir/home/state/$id.check.sh" ] \
       || fail "legacy task teardown changed the unsafe direct artifact"
     rmdir "$dir/home/state/$id.check.sh"
+    rc=0
     run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
-      > "$dir/merge.out" 2> "$dir/merge.err" \
-      || fail "path-safe legacy task ID could not use the PR merge flow"
-    fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
-      || fail "path-safe legacy task ID did not publish an authenticated poll"
+      > "$dir/merge.out" 2> "$dir/merge.err" || rc=$?
+    if [ "$id" = _noncanonical ]; then
+      [ "$rc" -ne 0 ] || fail "invalid canonical identity bypassed the merge gate"
+      assert_no_grep 'pr merge' "$dir/gh.log" "invalid canonical identity reached forge merge"
+    else
+      # Explicit legacy merge authorization remains an operation fact; it
+      # neither registers a business task nor permits unknown-state cleanup.
+      [ "$rc" -eq 0 ] || fail "exact legacy merge operation was lost: $(cat "$dir/merge.err")"
+      fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" || fail "exact legacy poll receipt was lost"
+      [ ! -e "$dir/home/data/$id/task.json" ] || fail "resource receipt synthesized a canonical task"
+    fi
+    rc=0
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-      "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-      || fail "legacy path-safe task ID could not be torn down"
-    [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
+      "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "unknown business identity allowed resource teardown"
+    [ -e "$dir/home/state/$id.meta" ] || fail "unknown legacy identity lost preserved metadata"
   done
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
@@ -1234,12 +1254,16 @@ test_teardown_removes_poll_artifacts() {
   local dir fakebin artifact counterpart rc
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
+  write_task_meta "$dir" task-a
+  fm_test_archive_goal "$dir/home" task-a
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" archive task-a >/dev/null || fail "teardown business acceptance failed"
   fm_test_write_herdr_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
+    'spawn_gen=fixture-g1' \
     'mode=local-only'
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
@@ -1250,7 +1274,8 @@ test_teardown_removes_poll_artifacts() {
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "teardown cleanup fixture failed"
+    || fail "teardown cleanup fixture failed: $(cat "$dir/teardown.err")"
+  [ "$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress task-a | jq -r .task_state)" = archived ] || fail "teardown changed canonical archival"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
@@ -1258,12 +1283,16 @@ test_teardown_removes_poll_artifacts() {
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
+  write_task_meta "$dir" task-a
+  fm_test_archive_goal "$dir/home" task-a
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" archive task-a >/dev/null || fail "teardown business acceptance failed"
   fm_test_write_herdr_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
+    'spawn_gen=fixture-g1' \
     'mode=local-only' \
     'pr=https://github.com/o/r/pull/18'
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/18
@@ -1283,12 +1312,16 @@ test_teardown_removes_poll_artifacts() {
   for artifact in check.sh pr-poll; do
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
+    write_task_meta "$dir" task-a
+    fm_test_archive_goal "$dir/home" task-a
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" archive task-a >/dev/null || fail "teardown business acceptance failed"
     fm_test_write_herdr_meta "$dir/home/state/task-a.meta" \
       'window=firstmate:fm-task-a' \
       'endpoint_task_id=task-a' \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
+      'spawn_gen=fixture-g1' \
       'mode=local-only'
     if [ "$artifact" = check.sh ]; then
       counterpart=pr-poll
@@ -2174,6 +2207,7 @@ test_teardown_cannot_race_authority_consumption() {
   url=https://github.com/o/r/pull/1
   dir=$(make_case merge-authority-teardown-race)
   state="$dir/home/state"
+  write_task_meta "$dir" task-a
   fm_test_write_herdr_meta "$state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
@@ -2279,6 +2313,16 @@ SH
     || fail "replacement: replacement merge lost its attended authority"
   pass "poll retirement preserves a replacement authority record"
 }
+
+if [ "${FM_PR_CHECK_TEST_CASE:-}" = teardown ]; then
+  test_teardown_removes_poll_artifacts
+  exit 0
+fi
+
+if [ "${FM_PR_CHECK_TEST_CASE:-}" = valid-recording ]; then
+  test_valid_recording_and_merge_derivation
+  exit 0
+fi
 
 test_parser_matrix
 test_gitlab_merge_watch

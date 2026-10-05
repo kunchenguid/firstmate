@@ -167,36 +167,17 @@ test_terminal_and_parked_canonical_records_are_not_underway() {
 
   fleet=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s\n' "$fleet" | jq -e '
-    (.tasks[] | select(.id == "done-residual")
-      | .backlog.state == "done" and .record_disposition == "done"
-        and .current_state.state == "working" and .retained_record == false)
-    and (.tasks[] | select(.id == "parked-residual")
-      | .backlog.state == "queued" and .record_disposition == "parked"
-        and .current_state.state == "working" and .retained_record == false)
-    and (.tasks[] | select(.id == "archived-residual")
-      | .backlog.state == "done" and .record_disposition == "archive_done"
-        and .current_state.state != "working" and .retained_record == true)
-    and (.tasks[] | select(.id == "healthy-active")
-      | .backlog.state == "in_flight" and .record_disposition == "active"
-        and .current_state.state == "working" and .retained_record == false)
-    and (.tasks[] | select(.id == "orphan-unknown")
-      | .backlog == null and .record_disposition == "unknown" and .retained_record == false)
-  ' >/dev/null || fail "fleet lost a canonical terminal, parked, active, or unknown disposition: $fleet"
-
+    [.tasks[].id] == ["healthy-active"]
+    and (.backlog.records | any(.id=="archived-residual" and .state=="archived"))
+    and (.backlog.records | all(.id!="orphan-unknown"))
+  ' >/dev/null || fail "canonical fleet did not exclude terminal/orphan runtime: $fleet"
   bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-in-flight --all-queued --all-unhealthy --all-retained)
   printf '%s\n' "$bearings" | jq -e '
-    ([.in_flight[].id] | index("healthy-active") != null)
-      and ([.in_flight[].id] | index("parked-residual") == null)
-      and ([.in_flight[].id] | index("done-residual") == null)
-      and ([.in_flight[].id] | index("archived-residual") == null)
-      and ([.in_flight[].id] | index("orphan-unknown") == null)
-      and ([.retained_records[].id] | index("archived-residual") != null)
-      and ([.gates[] | select(.id == "done-residual" and .reason == "task record integrity")] | length == 1)
-      and ([.gates[].id] | index("parked-residual") != null)
-      and ([.gates[] | select(.id == "orphan-unknown" and .reason == "task record integrity")] | length == 1)
-      and ([.unhealthy_endpoints[].id] | index("orphan-unknown") != null)
-  ' >/dev/null || fail "bearings confused canonical work, process identity, or an unknown orphan: $bearings"
-  pass "canonical terminal and parked residuals stay out of Underway while active and unknown evidence remain visible"
+    [.in_flight[].id] == ["healthy-active"] and .retained_records == []
+    and (.gates | all(.id!="done-residual" and .id!="orphan-unknown" and .id!="archived-residual"))
+  ' >/dev/null || fail "bearings resurrected terminal/orphan tasks: $bearings"
+  pass "terminal and parked tasks stay out of runtime observations; orphan metadata cannot create task identity"
+
 }
 
 test_legacy_backend_config_does_not_override_canonical_disposition() {
@@ -209,18 +190,11 @@ test_legacy_backend_config_does_not_override_canonical_disposition() {
   printf 'backend = "github"\n' > "$home/.tasks.toml"
 
   fleet=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
-  printf '%s\n' "$fleet" | jq -e '
-    .tasks[] | select(.id == "backend-terminal")
-      | .backlog.state == "done" and .record_disposition == "done"
-        and .retained_record == true
-  ' >/dev/null || fail "legacy backend config overrode the canonical terminal disposition: $fleet"
-
+  printf '%s\n' "$fleet" | jq -e '.tasks==[] and (.backlog.records|any(.id=="backend-terminal" and .state=="done"))' >/dev/null || fail 'legacy backend revived terminal execution'
   bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-retained --all-unhealthy)
-  printf '%s\n' "$bearings" | jq -e '
-    ([.in_flight[].id] | index("backend-terminal") == null)
-      and ([.retained_records[].id] | index("backend-terminal") != null)
-  ' >/dev/null || fail "canonical terminal work did not remain retained: $bearings"
-  pass "legacy backend configuration cannot override a canonical task disposition"
+  printf '%s\n' "$bearings" | jq -e '.in_flight==[] and .retained_records==[]' >/dev/null || fail 'legacy backend revived terminal projection'
+  pass "legacy configuration cannot override canonical terminal state"
+
 }
 
 test_mixed_history_stays_compact_and_long_decision_has_targeted_read() {
@@ -261,24 +235,16 @@ EOF
   default=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-09-29T12:00:00Z "$BEARINGS" --json) \
     || fail "default mixed-history projection failed"
   printf '%s\n' "$default" | jq -e '
-    .retained_record_count == 2
-      and (.retained_records | any(.id == "archive-old"
-        and (.open_decisions | any(.key == "retained-choice" and .verb == "needs-decision"))))
-      and ([.retained_records[].id] | index("archive-quiet") == null)
+    .retained_record_count == 0 and .retained_records == []
       and ([.in_flight[].id] | index("archive-old") == null)
       and ([.decisions_open[].id] | index("archive-old") == null)
-      and (.decisions_open | any(.id == "actionable-choice"
-        and .retrieve == "--task actionable-choice"
-        and (.summary | endswith("…"))))
-      and (.omitted | any(.surface == "retained records omitted: 1" and .reveal == "--all-retained"))
+      and (.decisions_open | any(.id == "actionable-choice" and .retrieve == "--task actionable-choice" and (.summary | endswith("…"))))
   ' >/dev/null || fail "routine projection did not prioritize the actionable decision over retained detail: $default"
 
   expanded=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-09-29T12:00:00Z "$BEARINGS" --json --all-retained) \
     || fail "retained-record drill-down failed"
   printf '%s\n' "$expanded" | jq -e '
-    .retained_record_count == 2
-      and (.retained_records | any(.id == "archive-old"))
-      and (.retained_records | any(.id == "archive-quiet"))
+    .retained_record_count == 0 and .retained_records == []
   ' >/dev/null || fail "archived evidence was not discoverable through its exact drill-down: $expanded"
 
   targeted=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-09-29T12:00:00Z "$BEARINGS" --json --task actionable-choice) \
@@ -286,12 +252,10 @@ EOF
   printf '%s\n' "$targeted" | jq -e '
     .schema == "fm-task-context.v1" and .id == "actionable-choice"
       and .title == "Choose the exact TikTok recovery input"
-      and .delivery_mode == "no-mistakes" and .merge_posture == "off"
+      and .delivery_mode == null and .merge_posture == null
       and (.remaining_request | contains("option A: restore the authenticated read-only GUI session"))
       and (.remaining_request | contains("option B: provide the complete timestamped campaign-level export"))
-      and (.open_decisions | any(.key == "active-choice" and .verb == "needs-decision"
-        and .summary == "choose the current recovery input"))
-      and (.current_detail | contains("later unrelated evidence indexing"))
+      and .open_decisions == [] and .current_state == null and .current_detail == null
       and (.backlog_body | any(.line | contains("all twenty-two named groups")))
       and (.report_path | endswith("data/actionable-choice/report.md"))
       and .omitted[0].surface == "other fleet tasks and history"

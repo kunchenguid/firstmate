@@ -7,8 +7,7 @@
 # fm-bootstrap.sh, then separately read data/projects.md, data/captain.md and
 # data/learnings.md, then run
 # fm-lock.sh, fm-wake-drain.sh, then read canonical task records, selected identity
-# fields from every state/*.meta, classified by its authoritative task-record
-# disposition, and the newest event from every state/*.status.
+# fields from canonical in-flight metadata, and the newest event from selected state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
 # belong in a script, not in N agent turns.
 #
@@ -44,8 +43,8 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - one de-duplicated compact task inventory, one
-#                       identity-complete summary for every state/*.meta, the
-#                       newest state/*.status event with a direct full-log
+#                       identity-complete summary for each canonical in-flight task
+#                       with metadata, its newest status event with a direct full-log
 #                       pointer, durable provider state with explicit freshness
 #                       gaps for remote tasks, preserved legacy mode evidence, and a cheap
 #                       endpoint-liveness read for local tasks: read-only,
@@ -436,55 +435,33 @@ print_ready_queued_bounded() {
   '
 }
 
+SESSION_TASK_INVENTORY=
+session_task_inventory_read() {
+  [ -z "$SESSION_TASK_INVENTORY" ] || return 0
+  SESSION_TASK_INVENTORY=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory) || return $?
+}
+
 print_task_records_compact() {
-  local in_flight held blocked ready err=''
-  if ! in_flight=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state in_flight --fields "$BACKLOG_FIELDS" 2>&1); then
-    err=$in_flight
-  elif ! held=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state held --fields "$BACKLOG_FIELDS" 2>&1); then
-    err=$held
-  elif ! blocked=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1); then
-    err=$blocked
-  elif ! ready=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>&1); then
-    err=$ready
-  fi
-  if [ -n "$err" ]; then
-    printf 'canonical task record listing failed:\n%s\n' "$err"
-    return 1
-  fi
-  printf 'compact canonical task inventory (terminal records omitted; in-flight, held, and blocked membership de-duplicated; ready queued bounded to %s; task bodies omitted)\n' \
-    "$QUEUED_LIMIT"
+  session_task_inventory_read || { printf 'canonical task record listing failed\n'; return 1; }
+  printf 'compact canonical task inventory (terminal records omitted; in-flight, held, and blocked membership de-duplicated; ready queued bounded to %s; task bodies omitted)\n' "$QUEUED_LIMIT"
   printf '\nactive, held, and blocked (one row per task):\n'
-  {
-    printf '@@category=in_flight\n%s\n' "$in_flight"
-    printf '@@category=held\n%s\n' "$held"
-    printf '@@category=blocked\n%s\n' "$blocked"
-  } | awk '    /^@@category=/ { category = substr($0, 12); rows = 0; next }
-    /^tasks\[/ { rows = 1; next }
-    rows && /^[[:space:]]/ {
-      row = $0
-      sub(/^[[:space:]]+/, "", row)
-      id = row
-      sub(/,.*/, "", id)
-      if (!(id in seen)) {
-        seen[id] = 1
-        order[++count] = id
-        record[id] = row
-        categories[id] = category
-      } else if (index("+" categories[id] "+", "+" category "+") == 0) {
-        categories[id] = categories[id] "+" category
-      }
-      next
-    }
-    END {
-      printf "tasks[%d]{categories,id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:\n", count
-      for (i = 1; i <= count; i++) {
-        id = order[i]
-        printf "  %s,%s\n", categories[id], record[id]
-      }
-    }
-  '
+  printf '%s' "$SESSION_TASK_INVENTORY" | jq -r '
+    [.tasks[] | select(.state == "queued" or .state == "in_flight")
+      | select(.state == "in_flight" or .hold != null or (.blocked_by|length)>0)] as $rows
+    | "tasks[\($rows|length)]{categories,id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:",
+      ($rows[] | . as $r | [
+        ([if .state=="in_flight" then "in_flight" else empty end,
+          if .hold!=null then "held" else empty end,
+          if (.blocked_by|length)>0 then "blocked" else empty end] | join("+")),
+        .id,.state,.kind,(if .repo=="" then "\"-\"" else .repo end),.title,
+        (if (.blocked_by|length)>0 then .blocked_by|join("|") else "none" end),
+        (.hold.kind // "none"),(.hold.reason // "none")] | "  " + join(","))'
   printf '\nready queued (dispatchable now):\n'
-  print_ready_queued_bounded "$ready"
+  printf '%s' "$SESSION_TASK_INVENTORY" | jq -r --argjson limit "$QUEUED_LIMIT" '
+    .ready_ids as $ready | [.tasks[] | select(.id as $id | $ready|index($id))] as $rows
+    | "count: \($rows|length)", "ready[\($rows|length)]{id,state,kind,repo,title}:",
+      ($rows[:$limit][] | "  " + ([.id,.state,.kind,(if .repo=="" then "\"-\"" else .repo end),.title]|join(","))),
+      "(shown \([$rows|length,$limit]|min) of \($rows|length) ready queued item(s))"'
   print_task_pointer
 }
 
@@ -574,60 +551,30 @@ print_meta_summary() { # <meta-file> <task-id>
 }
 
 print_work_inventory() {
-  local tmp meta id disposition dispositions slot=0 active=0 pid rc=0
-  local active_n=0 inactive_n=0 integrity_n=0 output
-  local -a outputs=() pids=() active_outputs=() inactive_outputs=() integrity_outputs=()
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-session-start-fleet.XXXXXX") || {
-    printf 'inventory unavailable: could not allocate private temporary storage\n'
-    return 0
-  }
-  dispositions=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    outputs[slot]="$tmp/$slot.out"
-    output=${outputs[slot]}
-    disposition=$(fm_task_disposition_for "$dispositions" "$id" 2>/dev/null || printf unknown)
-    case "$disposition" in
-      active)
-        active_outputs[active_n]=$output
-        active_n=$((active_n + 1))
-        ;;
-      queued|parked|done|archive_done)
-        inactive_outputs[inactive_n]=$output
-        inactive_n=$((inactive_n + 1))
-        ;;
-      *)
-        integrity_outputs[integrity_n]=$output
-        integrity_n=$((integrity_n + 1))
-        ;;
-    esac
-    print_meta_summary "$meta" "$id" >"${outputs[slot]}" &
+  local id meta count=0 active=0 pid rc=0 tmp output
+  local -a pids=() outputs=()
+  session_task_inventory_read || { printf 'canonical task inventory unavailable\n'; return 1; }
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-session-start-fleet.XXXXXX") || return 1
+  subsection "Work under way (authoritative active task records)"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    meta="$STATE/$id.meta"
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    output="$tmp/$count.out"
+    outputs[count]=$output
+    print_meta_summary "$meta" "$id" > "$output" &
     pids[active]=$!
-    slot=$((slot + 1)); active=$((active + 1))
+    count=$((count + 1)); active=$((active + 1))
     if [ "$active" -ge "$TASK_READ_CONCURRENCY" ]; then
       for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
       pids=(); active=0
     fi
-  done
-  if [ "$active" -gt 0 ]; then
-    for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+  done < <(printf '%s' "$SESSION_TASK_INVENTORY" | jq -r '.tasks[] | select(.state=="in_flight") | .id')
+  if [ "$active" -gt 0 ]; then for pid in "${pids[@]}"; do wait "$pid" || rc=1; done; fi
+  if [ "$count" -eq 0 ]; then printf '(none)\n'; else
+    for output in "${outputs[@]}"; do cat "$output"; done
   fi
-  subsection "Work under way (authoritative active task records)"
-  if [ "$active_n" -eq 0 ]; then printf '(none)\n'; else
-    for output in "${active_outputs[@]}"; do cat "$output"; done
-  fi
-  subsection "Queued and retained task records (not current work)"
-  printf 'Queued, parked, Done, and archived identities remain available for recovery without being presented as active work.\n'
-  if [ "$inactive_n" -eq 0 ]; then printf '(none)\n'; else
-    for output in "${inactive_outputs[@]}"; do cat "$output"; done
-  fi
-  subsection "Task record integrity (unknown or ambiguous disposition)"
-  printf 'These identities are visible for reconciliation but are not inferred to be current work.\n'
-  if [ "$integrity_n" -eq 0 ]; then printf '(none)\n'; else
-    for output in "${integrity_outputs[@]}"; do cat "$output"; done
-  fi
-  [ "$rc" -eq 0 ] || printf 'inventory warning: one or more task summaries failed; inspect state/*.meta directly.\n'
+  [ "$rc" -eq 0 ] || printf 'inventory warning: one or more execution summaries failed.\n'
   rm -rf -- "$tmp"
 }
 
@@ -904,18 +851,6 @@ section "FLEET STATE"
 print_task_records
 
 print_work_inventory
-
-subsection "Orphan status logs (state/*.status without matching .meta)"
-ORPHAN_STATUS_FOUND=0
-for status in "$STATE"/*.status; do
-  [ -f "$status" ] || continue
-  id=$(basename "$status" .status)
-  [ -f "$STATE/$id.meta" ] && continue
-  ORPHAN_STATUS_FOUND=1
-  printf '\n--- %s ---\n' "$id"
-  print_latest_status "$status"
-done
-[ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "Legacy mode records"
 LEGACY_DAEMON_PID=$(cat "$STATE/.supervise-daemon.pid" 2>/dev/null || true)

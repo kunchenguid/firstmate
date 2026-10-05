@@ -22,10 +22,10 @@
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
 #
-# Direct ordinary crewmates whose newest meta, status, or
+# Only canonical in-flight direct ordinary crewmates whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. It then uses
-# fm-crew-state.sh as the sole current-state source.
+# fm-crew-state.sh for current execution facts; the inventory owns business state.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
 # Working, paused, parked, blocked, unknown, and captain-held work retain their
@@ -380,32 +380,12 @@ scan() {
   valid_id "$cursor" || cursor=''
   write_scan_marker "$cursor" || return 1
   deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
-  # Existing task owners are the only discovery sources: metadata, cleanup
-  # receipts and the current backlog. Never traverse historical task data.
-  local meta id backlog_ids='' listing remaining
-  SCAN_TASK_IDS=$(
-    for meta in "$STATE"/*.meta "$STATE"/*.cleanup.json; do
-      [ -f "$meta" ] || [ -L "$meta" ] || continue
-      id=${meta##*/}; id=${id%.meta}; id=${id%.cleanup.json}
-      valid_id "$id" && printf '%s\n' "$id"
-    done
-  )
-  remaining=$((deadline - $(date +%s)))
-  if [ "$remaining" -gt 1 ] && [ -d "${FM_DATA_OVERRIDE:-$FM_HOME/data}" ]; then
-    if ! listing=$(fm_run_timed 1 "$SCRIPT_DIR/fm-tasks-axi.sh" list --limit 10000 2>/dev/null); then
-      echo 'RECONCILE: current backlog discovery unavailable within one second; metadata/cleanup scan continues, undispatched goals remain unconfirmed' >&2
-      listing=''
-    fi
-    # tasks-axi owns the TOON row shape; IDs are the unquoted first field.
-    backlog_ids=$(printf '%s\n' "$listing" | awk '
-      /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
-      rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ { line=$0; sub(/^  /,"",line); sub(/,.*/,"",line); print line; next }
-      rows { rows=0 }')
-    if [ "$(printf '%s\n' "$backlog_ids" | wc -l)" -ge 10000 ]; then
-      echo 'RECONCILE: current backlog discovery reached 10000-row bound; undiscovered goals require a narrower supported backlog read' >&2
-    fi
-  fi
-  SCAN_TASK_IDS=$(printf '%s\n%s\n' "$SCAN_TASK_IDS" "$backlog_ids" | LC_ALL=C sort -u)
+  local listing
+  listing=$(fm_run_timed 1 "$SCRIPT_DIR/fm-tasks-axi.sh" inventory) || {
+    echo 'RECONCILE: canonical task inventory unavailable; no artifact discovery fallback' >&2
+    return 1
+  }
+  SCAN_TASK_IDS=$(printf '%s' "$listing" | jq -r '.tasks[] | select(.state=="in_flight") | .id') || return 1
   SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then

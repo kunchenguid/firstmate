@@ -331,10 +331,10 @@ crew_dispatch_validate() {
 # Same-home record reconciliation. Every ordinary dispatch and completion now
 # moves the backlog row inside the script that moves the task's record
 # (bin/fm-backlog-transition-lib.sh), so remaining recovery cases include a
-# process killed mid-transition and drift this home was already carrying. Heal
-# this home's OWN books on its own restart. Never reads or writes another home.
+# process killed after publishing its exact pending-close marker.
+# Replay only those receipts; metadata cannot infer a business transition.
 backlog_record_reconcile() {
-  local marker meta control_lock meta_lock id row label has_record=0 has_work=0 gate_status
+  local marker control_lock meta_lock label has_record=0 has_work=0 gate_status
   # A fresh home with no state directory has no physical task records to pair.
   # Keep bootstrap diagnostics working without creating state just for a no-op.
   [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
@@ -342,7 +342,7 @@ backlog_record_reconcile() {
     echo "error: backlog reconciliation refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
     return 2
   fi
-  for marker in "$STATE"/*.backlog-close "$STATE"/*.meta; do
+  for marker in "$STATE"/*.backlog-close; do
     [ -e "$marker" ] || [ -L "$marker" ] || continue
     has_work=1
     break
@@ -406,55 +406,7 @@ backlog_record_reconcile() {
   # A home that owns no records has nothing to pair, so it never pays for a
   # backlog read. A pending close remains authoritative even when replay failed:
   # the record sweep below must not start that item while its marker survives.
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || [ -L "$meta" ] || continue
-    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
-      echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
-      return 2
-    fi
-    has_record=1
-    break
-  done
-  [ "$has_record" = 1 ] || return 0
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || [ -L "$meta" ] || continue
-    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
-      echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
-      return 2
-    fi
-    id=$(basename "$meta" .meta)
-    meta_lock=$(fm_meta_lock_path "$meta") || continue
-    fm_lock_try_acquire "$meta_lock" || continue
-    if [ -e "$STATE/$id.backlog-close" ] || [ -L "$STATE/$id.backlog-close" ]; then
-      fm_lock_release "$meta_lock"
-      continue
-    fi
-    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
-      echo "BACKLOG_RECONCILE: $id: post-lock worker record check refused: $FM_BACKLOG_TRANSITION_ERROR"
-      fm_lock_release "$meta_lock"
-      return 2
-    fi
-    if [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
-       && [ "$(fm_meta_get "$meta" cleanup_recovery)" != orca ]; then
-      row=
-      if fm_backlog_row_probe "$DATA" "$id"; then
-        row=$FM_BACKLOG_ROW_STATE
-      elif [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
-        echo "BACKLOG_RECONCILE: $id: worker record exists but its backlog item could not be read: $FM_BACKLOG_ROW_ERROR"
-      fi
-      # Heal only the unambiguous case: a queued row for a record this home
-      # already owns. A held row is the captain's to move, and a closed row is a
-      # contradiction this sweep must not resolve by resurrecting the item.
-      if [ "$row" = "queued no no" ]; then
-        if fm_backlog_start "$DATA" "$id"; then
-          echo "BOOTSTRAP_INFO: marked $id in flight to match the worker this home already owns"
-        else
-          echo "BACKLOG_RECONCILE: $id: worker record exists but its backlog item could not be moved to In flight: $FM_BACKLOG_TRANSITION_ERROR"
-        fi
-      fi
-    fi
-    fm_lock_release "$meta_lock"
-  done
+
 }
 
 startup_memory_budget_setup() {

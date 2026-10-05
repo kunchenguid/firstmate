@@ -338,3 +338,22 @@ EOF
 
 test_closing_verb_separates_resolution_from_durable_transfer
 test_closing_verb_tracks_the_last_transition_in_both_positions
+
+# Standalone consumers must retain the disposition helper after inventory capture.
+test_standalone_scan_uses_canonical_dispositions() {
+  local home out
+  home="$TMP_ROOT/standalone-scan"
+  mkdir -p "$home/state" "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add active 'Active canonical decision' --start >/dev/null || fail 'active scan fixture failed'
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add terminal 'Terminal canonical decision' >/dev/null || fail 'terminal scan fixture failed'
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" archive terminal >/dev/null || fail 'archive scan fixture failed'
+  printf 'needs-decision [key=route]: choose route\n' > "$home/state/active.status"
+  cp "$home/state/active.status" "$home/state/terminal.status"
+  cp "$home/state/active.status" "$home/state/orphan.status"
+  out=$(FM_HOME="$home" scan_open_decisions "$home/state") || fail 'standalone canonical scan failed'
+  assert_contains "$out" 'active' 'standalone scan omitted active decision'
+  assert_not_contains "$out" 'terminal' 'standalone scan processed terminal decisions'
+  assert_not_contains "$out" 'orphan' 'standalone scan processed orphan decisions'
+  pass 'standalone decision scan keeps disposition helpers and admits only canonical nonterminal identities'
+}
+test_standalone_scan_uses_canonical_dispositions

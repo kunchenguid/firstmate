@@ -1,7 +1,7 @@
 # Task, report, and agent journal viewer
 
 `fm-jsonl-viewer.mjs` provides a read-only browser dashboard for one Firstmate home's tasks, canonical task documents, ShortTask journals, and supervision-branch sessions.
-Task discovery and classification use the structured fleet snapshot, current backlog, and configured Done archive rather than the last status-log line.
+Task discovery and business classification use the [canonical task record owner](configuration.md#task-records) through one structured fleet snapshot.
 The only content artifacts it exposes are `state/short-agents/<short-id>/journal.jsonl`, `state/branch-session/*.jsonl`, and canonical `data/<task>/report.md` or `data/<task>/brief.md` files below the selected canonical home.
 It does not expose arbitrary paths, follow symlinks, modify a journal or task document, or offer chat and lifecycle controls.
 
@@ -42,11 +42,15 @@ Legacy bookmarks to `/` continue to open the login flow and then land on the Das
 The dashboard renders one status card for each status currently present in the task list, with `Needs reconciliation` tasks included in the `Completed` card.
 Each status card count uses the same search scope as the task list, and activating a card filters the list to that display group; `View all tasks` clears the status filter.
 Completed records remain available through the task list and report view without being relabelled as archived.
-An explicitly archived task remains in the archived or cancelled group when its retained remote state is nonterminal or ambiguous, and the dashboard labels that remote status as unconfirmed without implying cancellation or success.
+An explicitly archived task remains Archived regardless of retained execution artifacts; archival does not imply provider success or cancellation.
 Status cards use the backend-provided display status shown on each task card, while the Dashboard's `Completed` card counts and filters both `Completed` and `Needs reconciliation` tasks.
 The list ordering keeps `Completed` and `Needs reconciliation` tasks together, while the task cards retain their individual backend-provided status labels.
 
-The viewer does not use retained rich lifecycle records as an ordinary task source. It may read a valid historical `archived` fact only to keep an already explicit stop labelled `Cancelled`; malformed or non-archived legacy records are ignored and never require reconciliation.
+Report and brief directories, orphan execution metadata, status logs and legacy archives cannot add tasks or override their recorded business state.
+Queued and in-flight tasks show current progress, next step and recorded execution Harness/tool and Model in the sidebar.
+Selecting one shows its goal, acceptance, current progress, remaining gap and next step from the canonical title and progress fields.
+Missing fields display `Not recorded`; finished and archived tasks have no active progress panel.
+Task search includes these progress and execution fields.
 Each task shows explicit Brief and Report selectors, enables every canonical document that is actually available, and labels unavailable document types instead of inventing content.
 The initial selection remains the canonical report when present and otherwise the canonical brief.
 Tasks with a canonical report also provide an explicit Read full report action that navigates to the dedicated report route without changing the canonical task identity.
@@ -68,6 +72,12 @@ A background refresh atomically replaces the complete snapshot only after it suc
 All reader-facing timestamps are rendered in the fixed Asia/Shanghai time zone and labelled UTC+8; stored timestamps remain unchanged.
 Standalone task reports are labelled by task and refresh automatically while follow mode is enabled.
 Rendered reports and task briefs support headings, paragraphs, lists, blockquotes, tables, fenced code, and safe web or email links, with the complete plain source available below them.
+
+The task API adds `state`, `progress`, `executionHarness`, `executionModel` and `executionState` to its existing rows.
+Terminal rows return null progress and execution fields, and no terminal runtime owner is consulted.
+The snapshot schema label is diagnostic; admission requires the actual record and observation capabilities, without a version allowlist.
+Report navigation checks the current canonical record independently of the overview cache: missing records return HTTP 404, corrupt or unsafe records return HTTP 503 with `{error: string}`.
+Report inventory failure also returns HTTP 503 instead of a partial successful list.
 
 ## Reading boundaries
 

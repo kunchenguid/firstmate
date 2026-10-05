@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import subprocess
 import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -107,8 +108,12 @@ def validate(record: Any, expected_id: str | None = None) -> dict[str, Any]:
 
 def read(data: Path, task_id: str) -> tuple[dict[str, Any], bytes]:
     path = task_path(data, task_id)
-    if path.is_symlink() or not path.is_file():
+    if path.parent.is_symlink() or path.is_symlink():
+        raise Refusal(f"unsafe task record: {path}")
+    if not path.exists():
         raise FileNotFoundError(task_id)
+    if not path.is_file():
+        raise Refusal(f"task record is not a regular file: {path}")
     raw = path.read_bytes()
     try:
         return validate(json.loads(raw), task_id), raw
@@ -116,7 +121,7 @@ def read(data: Path, task_id: str) -> tuple[dict[str, Any], bytes]:
         raise Refusal(f"task {task_id} record is invalid JSON") from exc
 
 
-def write(data: Path, record: dict[str, Any], previous_raw: bytes | None = None) -> None:
+def write(data: Path, record: dict[str, Any], previous_raw: bytes | None = None, *, create: bool = False) -> None:
     record = validate(record, record.get("id"))
     path = task_path(data, record["id"])
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -125,7 +130,7 @@ def write(data: Path, record: dict[str, Any], previous_raw: bytes | None = None)
     encoded = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
     if previous_raw is not None and previous_raw == encoded:
         return
-    if previous_raw is None and path.is_file() and not path.is_symlink() and path.read_bytes() == encoded:
+    if not create and previous_raw is None and path.is_file() and not path.is_symlink() and path.read_bytes() == encoded:
         return
     descriptor, temporary = tempfile.mkstemp(prefix=f".{record['id']}.task.", dir=path.parent)
     try:
@@ -136,7 +141,18 @@ def write(data: Path, record: dict[str, Any], previous_raw: bytes | None = None)
             os.fsync(stream.fileno())
         if os.environ.get("FM_TASK_RECORD_TEST_FAIL_BEFORE_REPLACE") == "1":
             raise OSError("injected failure before atomic replacement")
-        os.replace(temporary, path)
+        if create:
+            try:
+                os.link(temporary, path)
+            except FileExistsError as exc:
+                raise Refusal(f"task already exists: {record['id']}") from exc
+        else:
+            os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         try:
             os.unlink(temporary)
@@ -152,13 +168,28 @@ def records(data: Path) -> list[dict[str, Any]]:
         directories = sorted((entry for entry in entries if entry.is_dir(follow_symlinks=False)), key=lambda item: item.name)
     for entry in directories:
         path = Path(entry.path) / "task.json"
-        if not path.is_file() or path.is_symlink():
+        if not path.exists() and not path.is_symlink():
             continue
         try:
-            found.append(validate(json.loads(path.read_bytes()), entry.name))
+            found.append(read(data, entry.name)[0])
         except (json.JSONDecodeError, UnicodeDecodeError, Refusal) as exc:
             raise Refusal(f"cannot list corrupt task record {path}: {exc}") from exc
     return found
+
+
+def disposition(record: dict[str, Any]) -> str:
+    if record["state"] == "in_flight":
+        return "active"
+    if record["state"] == "queued":
+        return "parked" if record["hold"] and record["hold"]["kind"] == "parked" else "queued"
+    return "done" if record["state"] == "done" else "archive_done"
+
+
+def inventory(items: list[dict[str, Any]]) -> dict[str, Any]:
+    by_id = {item["id"]: item for item in items}
+    ready = [item["id"] for item in items if item["state"] == "queued" and not item["hold"] and
+             all(by_id.get(blocker, {}).get("state") in ("done", "archived") for blocker in item["blocked_by"])]
+    return {"tasks": items, "dispositions": {item["id"]: disposition(item) for item in items}, "ready_ids": ready}
 
 
 def shown(value: str | None) -> str:
@@ -255,6 +286,208 @@ def update_common(record: dict[str, Any], args: argparse.Namespace) -> bool:
     return changed
 
 
+# This discovery is used only by explicit one-time migration, never inventory.
+def backfill_preview(data: Path, state: Path) -> dict[str, Any]:
+    excluded: dict[str, str] = {}
+    sources: dict[str, list[dict[str, Any]]] = {}
+    ignored: list[dict[str, str]] = []
+    reserved = {"skills", "short-agents", "branch-session", "procevent", "procevent-inbox"}
+    for path in sorted(state.glob("*.meta")):
+        if path.is_symlink() or not path.is_file():
+            raise Refusal(f"unsafe migration source: {path}")
+        fields = dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
+        if fields.get("kind") == "secondmate":
+            excluded[path.stem] = "persistent secondmate home"
+
+    def candidate(task_id: str, path: Path, kind: str, facts: dict[str, Any] | None = None) -> None:
+        if not ID_RE.fullmatch(task_id) or task_id in reserved or task_id in excluded:
+            excluded.setdefault(task_id, "non-ordinary namespace")
+            return
+        if path.is_symlink() or not path.is_file():
+            raise Refusal(f"unsafe migration source: {path}")
+        sources.setdefault(task_id, []).append({"path": str(path), "type": kind, "facts": facts or {}})
+
+    def load_source(path: Path) -> dict[str, Any]:
+        if path.is_symlink() or not path.is_file():
+            raise Refusal(f"unsafe migration source: {path}")
+        value = json.loads(path.read_bytes())
+        if not isinstance(value, dict):
+            raise Refusal(f"invalid migration source: {path}")
+        return value
+
+    def receipt(path: Path, task_id: str, archived: bool = False) -> None:
+        value = load_source(path)
+        generation = value.get("spawn_gen")
+        if value.get("schema") != "fm-task-cleanup.v1" or value.get("task_id") != task_id or not isinstance(generation, str) or not isinstance(value.get("phases"), dict):
+            raise Refusal(f"invalid cleanup identity: {path}")
+        if archived and path.name != hashlib.sha256(generation.encode()).hexdigest() + ".json":
+            raise Refusal(f"cleanup archive generation mismatch: {path}")
+        candidate(task_id, path, "cleanup-receipt")
+
+    existing = {item["id"]: item for item in records(data)}
+    for directory in sorted(data.iterdir()):
+        if not directory.is_dir() or directory.is_symlink() or not ID_RE.fullmatch(directory.name):
+            continue
+        task_id = directory.name
+        for name in ("task.json", "brief.md", "report.md", "lifecycle.json"):
+            path = directory / name
+            if not path.exists() and not path.is_symlink():
+                continue
+            if name == "task.json":
+                read(data, task_id)
+                candidate(task_id, path, "canonical")
+            elif name == "lifecycle.json":
+                if path.is_symlink() or not path.is_file():
+                    raise Refusal(f"unsafe migration source: {path}")
+                try:
+                    value = json.loads(path.read_bytes())
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    ignored.append({"path": str(path), "reason": "malformed noncanonical lifecycle source"})
+                    continue
+                if not isinstance(value, dict) or value.get("schema") not in ("fm-task-lifecycle.v1", "fm-task-lifecycle.v2"):
+                    ignored.append({"path": str(path), "reason": "invalid noncanonical lifecycle schema"})
+                    continue
+                if value.get("task_id") != task_id:
+                    raise Refusal(f"invalid lifecycle identity: {path}")
+                candidate(task_id, path, "lifecycle", {key: value[key] for key in ("title", "kind", "repo") if key in value})
+            else:
+                candidate(task_id, path, name)
+        receipt_dir = directory / "cleanup-receipts"
+        if receipt_dir.is_symlink():
+            raise Refusal(f"unsafe migration source: {receipt_dir}")
+        if receipt_dir.is_dir():
+            for path in sorted(receipt_dir.glob("*.json")):
+                receipt(path, task_id, True)
+    for path in sorted(state.glob("*.meta")):
+        fields = dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
+        if fields.get("kind") in ("ship", "scout", "program") or fields.get("executor") in ("local-agent", "remote-agent", "cloud-worker"):
+            facts = {key: fields[key] for key in ("title", "kind", "repo") if key in fields}
+            if "project" in fields and "repo" not in fields:
+                facts["repo"] = fields["project"]
+            candidate(path.stem, path, "ordinary-meta", facts)
+        else:
+            excluded.setdefault(path.stem, "non-ordinary metadata")
+    for path in sorted(state.glob("*.status")):
+        if path.is_symlink() or not path.is_file():
+            raise Refusal(f"unsafe migration source: {path}")
+        lines = [line for line in path.read_text().splitlines() if line.strip()]
+        status_check = subprocess.run(
+            ["bash", "-c", '. "$1" || exit 2; while IFS= read -r line; do status_line_is_task_event "$line" || exit 1; done',
+             "backfill-status", str(Path(__file__).with_name("fm-classify-lib.sh"))],
+            input="\n".join(lines) + "\n" if lines else "", text=True, capture_output=True, check=False)
+        if status_check.returncode not in (0, 1):
+            raise Refusal(f"status owner unavailable for migration source: {path}")
+        if lines and status_check.returncode == 0:
+            candidate(path.stem, path, "ordinary-status")
+        else:
+            ignored.append({"path": str(path), "reason": "not a worker status event stream"})
+    for path in sorted(state.glob("*.cleanup.json")):
+        receipt(path, path.name[:-len(".cleanup.json")])
+    for name in ("backlog.md", "done-archive.md"):
+        path = data / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise Refusal(f"unsafe migration source: {path}")
+        for line in path.read_text().splitlines():
+            match = re.fullmatch(r"- \[[ xX]\] ([A-Za-z0-9][A-Za-z0-9._-]{0,159}) - (.+)", line)
+            if not match:
+                continue
+            task_id, body = match.groups()
+            facts = {}
+            for key in ("kind", "repo"):
+                field = re.search(r"\(" + key + r": ([^()]+)\)", body)
+                if field:
+                    facts[key] = field[1]
+            title = re.split(r"\s+(?:\(|https?://|blocked-by:)", body, maxsplit=1)[0].strip()
+            if title:
+                facts["title"] = title
+            candidate(task_id, path, "legacy-row", facts)
+    for namespace, library, validator in (("remote-tasks", "fm-remote-agent-lib.sh", "fm_remote_state_validate_file"),
+                                           ("cloud-tasks", "fm-aime-cloud-lib.sh", "fm_aime_state_validate_file")):
+        for path in sorted((state / namespace).glob("*/state.json")):
+            if path.parent.is_symlink():
+                raise Refusal(f"unsafe migration source: {path}")
+            value = load_source(path)
+            result = subprocess.run(["bash", "-c", '. "$1"; "$2" "$3"', "migration-validator",
+                                     str(Path(__file__).with_name(library)), validator, str(path)], capture_output=True)
+            if result.returncode or value.get("task_id") != path.parent.name:
+                raise Refusal(f"invalid {namespace} identity: {path}")
+            candidate(path.parent.name, path, namespace)
+    entries = []
+    for task_id in sorted(set(sources) | set(existing)):
+        known = sources.get(task_id, [])
+        if task_id in existing:
+            entries.append({"id": task_id, "disposition": "existing", "sources": known,
+                            "sha256": hashlib.sha256(read(data, task_id)[1]).hexdigest()})
+            continue
+        if task_id in excluded:
+            continue
+        facts, defaults = {}, {}
+        for key, default in (("title", task_id), ("kind", "task"), ("repo", "")):
+            values = {source["facts"][key] for source in known if isinstance(source["facts"].get(key), str) and source["facts"][key].strip()}
+            facts[key] = next(iter(values)) if len(values) == 1 else default
+            if len(values) != 1:
+                defaults[key] = "unknown" if not values else "conflicting sources"
+        entry = {"id": task_id, "disposition": "absent", "sources": known, "facts": facts, "defaults": defaults}
+        entry["proposed_record"] = archived_backfill(entry)
+        entries.append(entry)
+    return {"schema": "fm-task-backfill.v1", "data": str(data.resolve()), "state": str(state.resolve()),
+            "policy": "missing-record-archived.v1", "entries": entries,
+            "exclusions": [{"id": task_id, "reason": reason} for task_id, reason in sorted(excluded.items())],
+            "ignored_sources": ignored}
+
+
+def archived_backfill(entry: dict[str, Any]) -> dict[str, Any]:
+    task_id, facts = entry["id"], entry["facts"]
+    record = new_record(task_id, facts["title"], argparse.Namespace(body_file=None, body=None, start=False,
+                         kind=facts["kind"], repo=facts["repo"], priority=None))
+    record["state"] = "archived"
+    record["closed"] = record["created"]
+    record["history"] = ["backfill:missing-record-archived.v1; missing canonical archived by explicit policy; "
+                         "created is registration date; sources=" + ",".join(source["path"] for source in entry["sources"]) +
+                         "; defaults=" + json.dumps(entry["defaults"], ensure_ascii=False, sort_keys=True)]
+    if any(source["type"] == "report.md" for source in entry["sources"]):
+        record["links"]["report"] = f"data/{task_id}/report.md"
+    return validate(record, task_id)
+
+
+def backfill_apply(data: Path, state: Path, manifest: Path) -> int:
+    value = json.loads(manifest.read_bytes())
+    if value.get("schema") != "fm-task-backfill.v1" or value.get("policy") != "missing-record-archived.v1" or value.get("data") != str(data.resolve()) or value.get("state") != str(state.resolve()):
+        raise Refusal("backfill manifest does not address the selected home/policy")
+    entries = value.get("entries")
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) or not isinstance(entry.get("id"), str)
+                                          or entry.get("disposition") not in ("existing", "absent") for entry in entries):
+        raise Refusal("invalid backfill entries")
+    results = []
+    task_id = None
+    try:
+        for entry in entries:
+            task_id = entry["id"]
+            path = task_path(data, task_id)
+            if path.exists() or path.is_symlink():
+                read(data, task_id)
+                results.append({"id": task_id, "result": "skipped-existing"})
+                continue
+            if entry["disposition"] != "absent":
+                raise Refusal(f"existing task disappeared since preview: {task_id}")
+            try:
+                write(data, archived_backfill(entry), create=True)
+            except Refusal:
+                if not path.exists() and not path.is_symlink():
+                    raise
+                read(data, task_id)
+                results.append({"id": task_id, "result": "skipped-existing"})
+            else:
+                results.append({"id": task_id, "result": "created"})
+    except (Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+        print(json.dumps({"results": results, "failed_id": task_id, "error": str(exc)}, ensure_ascii=False))
+        raise
+    print(json.dumps({"results": results}, ensure_ascii=False))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument("--data", required=True, type=Path)
@@ -284,6 +517,11 @@ def parser() -> argparse.ArgumentParser:
     progress_update_view = sub.add_parser("update-progress-view"); progress_update_view.add_argument("id"); progress_update_view.add_argument("--progress", required=True)
     sub.add_parser("progress-list")
     sub.add_parser("inventory")
+    backfill = sub.add_parser("backfill-archived", help="one-time explicit ordinary identity import; ordinary queries never use it")
+    backfill.add_argument("--state-dir", required=True, type=Path)
+    mode = backfill.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--preview", action="store_true")
+    mode.add_argument("--apply-file", type=Path)
     return result
 
 
@@ -291,28 +529,29 @@ def main() -> int:
     args = parser().parse_args()
     data: Path = args.data
     try:
+        if args.command == "backfill-archived":
+            if args.preview:
+                print(json.dumps(backfill_preview(data, args.state_dir), ensure_ascii=False))
+                return 0
+            return backfill_apply(data, args.state_dir, args.apply_file)
         if args.command == "add":
-            path = task_path(data, args.id)
-            if path.exists():
-                raise Refusal(f"task already exists: {args.id}")
-            write(data, new_record(args.id, args.title, args)); return 0
+            write(data, new_record(args.id, args.title, args), create=True); return 0
         if args.command in ("list", "ready", "inventory", "progress-list"):
             items = records(data)
             if args.command == "inventory":
-                print(json.dumps({"tasks": items}, ensure_ascii=False, separators=(",", ":"))); return 0
+                print(json.dumps(inventory(items), ensure_ascii=False, separators=(",", ":"))); return 0
             if args.command == "progress-list":
                 ids = sorted(item["id"] for item in items if item["state"] == "in_flight")
                 print(json.dumps({"tasks": ids}, separators=(",", ":"))); return 0
             state = getattr(args, "state", None)
             if args.command == "ready":
-                dispositions = {item["id"]: item["state"] for item in items}
-                items = [item for item in items if item["state"] == "queued" and not item["hold"] and
-                         all(dispositions.get(blocker) in ("done", "archived") for blocker in item["blocked_by"])]
+                ready_ids = set(inventory(items)["ready_ids"])
+                items = [item for item in items if item["id"] in ready_ids]
                 list_records(items, None, args.limit, label="ready"); return 0
             if args.blocked:
-                items = [item for item in items if item["blocked_by"]]
+                items = [item for item in items if item["blocked_by"] and item["state"] not in ("done", "archived")]
             if state == "held":
-                items = [item for item in items if item["hold"] is not None]
+                items = [item for item in items if item["hold"] is not None and item["state"] not in ("done", "archived")]
                 state = None
             list_records(items, state, args.limit, args.fields); return 0
         record, raw = read(data, args.id)
@@ -333,6 +572,8 @@ def main() -> int:
                 write(data, record, raw)
             result = progress_projection(record) if args.command == "update-progress-view" else record
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":"))); return 0
+        if record["state"] in ("done", "archived") and args.command in ("start", "hold", "unhold", "block", "unblock"):
+            raise Refusal(f"terminal task {args.id} requires explicit reopen before {args.command}")
         old_body = record["body"]
         changed = update_common(record, args) if args.command in ("update", "start", "done", "reopen", "archive") else False
         if args.command == "update" and args.archive_body and record["body"] != old_body and old_body and old_body not in record["history"]:
@@ -342,7 +583,7 @@ def main() -> int:
             if record["state"] != "in_flight" or record["closed"] is not None or record["completion"] is not None:
                 record["state"] = "in_flight"; record["closed"] = None; record["completion"] = None; changed = True
         elif args.command == "done":
-            if record["state"] != "done":
+            if record["state"] not in ("done", "archived"):
                 closed = date.today().isoformat()
                 verb = "merged" if getattr(args, "pr", None) else "reported" if getattr(args, "report", None) else "done"
                 record["state"] = "done"; record["closed"] = closed

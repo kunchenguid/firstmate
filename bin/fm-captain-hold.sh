@@ -505,7 +505,7 @@ verify_hold_durable() {  # <task-id>
   if body_has_resolution_record "$body"; then
     return 0
   fi
-  if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
+  if [ "$state" != "done" ] && [ "$state" != archived ] && [ "$hold_kind" = captain ]; then
     return 0
   fi
   fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
@@ -631,7 +631,7 @@ command_hold() {
   if task_show "$id"; then
     show=$TASK_SHOW_OUTPUT
     state=$(show_field "$show" state)
-    [ "$state" != "done" ] \
+    [ "$state" != "done" ] && [ "$state" != archived ] \
       || fail "task $id is already closed; a new captain call needs its own task"
     existing_hold_kind=$(show_field_value "$show" hold_kind)
     existing_held=$(show_field_value "$show" held)
@@ -806,7 +806,7 @@ command_answer() {
   # one past those already in the body, and a retry names the newest one.
   occurrence=$(( $(resolution_record_count "$body") + 1 ))
 
-  if [ "$state" = "done" ]; then
+  if { [ "$state" = "done" ] || [ "$state" = archived ]; }; then
     if body_has_resolution_record "$body"; then
       # An exact compatible retry is an idempotent no-op; drift is rejected.
       [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
@@ -835,7 +835,7 @@ command_answer() {
     remove_interrupted_answer_stamp "$id"
     task_show "$id" || fail "task $id disappeared while recording the answer"
     show=$TASK_SHOW_OUTPUT
-    [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
+    [ "$(show_field "$show" state)" = "$state" ] || fail "recording the answer changed terminal task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
     publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)"
@@ -1084,9 +1084,9 @@ command_answers() {
       && { [ "$recorded_digest" = "$digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
-      if { [ -z "$release_flag" ] && [ "$state" = "done" ] \
+      if { [ -z "$release_flag" ] && { [ "$state" = "done" ] || [ "$state" = archived ]; } \
           && closed_answer_replay_mode_compatible "$recorded_mode" "$body"; } \
-        || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
+        || { [ "$release_flag" = --release ] && [ "$state" != "done" ] && [ "$state" != archived ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
         occurrence=$(resolution_record_count "$body")
         case "$recorded_mode" in
@@ -1099,7 +1099,7 @@ command_answers() {
         continue
       fi
     fi
-    if [ "$state" = "done" ]; then
+    if { [ "$state" = "done" ] || [ "$state" = archived ]; }; then
       printf 'skipped: %s (already closed)\n' "$id"
       skipped=$((skipped + 1))
       continue
@@ -1225,7 +1225,7 @@ command_reconcile_requests() {
     if [ -z "$show" ]; then
       printf 'refused: %s (absent)\n' "$id"
       skipped=$((skipped + 1))
-    elif [ "$(show_field "$show" state)" = "done" ]; then
+    elif { [ "$(show_field "$show" state)" = "done" ] || [ "$(show_field "$show" state)" = archived ]; }; then
       printf 'refused: %s (already closed)\n' "$id"
       skipped=$((skipped + 1))
     elif [ "$(show_field_value "$show" hold_kind)" != captain ]; then
@@ -1301,7 +1301,7 @@ reconcile_close() {
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
   occurrence=$(( $(resolution_record_count "$body") + 1 ))
-  if [ "$state" = "done" ]; then
+  if { [ "$state" = "done" ] || [ "$state" = archived ]; }; then
     # An exact retry finishes an interrupted close and stays idempotent; a
     # different evidence text on an already closed call is refused.
     body_has_resolution_record "$body" \
@@ -1556,7 +1556,7 @@ open_task_ids() {
     /^  [A-Za-z0-9._-]+,/ {
       id = $1
       sub(/^ +/, "", id)
-      if ($2 != "done") print id
+      if ($2 == "queued" || $2 == "in_flight") print id
     }
   '
 }
@@ -1593,6 +1593,7 @@ command_diverged() {
   for f in "$STATE"/*.status; do
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
     origin=$(basename "$f"); origin=${origin%.status}
+    list_has_line "$ids" "$origin" || continue
     tokens=$(status_log_key_tokens "$f")
     [ -n "$tokens" ] || continue
     while IFS= read -r id; do
@@ -1609,7 +1610,7 @@ command_diverged() {
         [ "$(status_key_closing_verb "$f" "$key")" = "$resolve" ] || continue
         task_show "$id" || continue
         show=$TASK_SHOW_OUTPUT
-        [ "$(show_field "$show" state)" != "done" ] || continue
+        case "$(show_field "$show" state)" in done|archived) continue ;; esac
         [ "$(show_field_value "$show" hold_kind)" = captain ] || continue
         # The title is the only free-text field here, and the report is
         # TAB-separated, so it goes through the same sanitizer every other
