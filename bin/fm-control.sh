@@ -7,6 +7,9 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> switch-model [--model <provider/id>]
+#                                            [--effort <level>]
+#                                            [--confirm-unmeasured-quota]
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -51,6 +54,26 @@
 #              endpoint, so this verb cannot tell a destroyed window from one on
 #              a tmux server it cannot address, and it will not claim a stop it
 #              cannot see.
+#   switch-model  Change a live Pi or Pi-signed ship/scout worker's provider,
+#              model, and/or thinking level in the same session, without
+#              replacing the process, the endpoint, or the conversation.
+#              Postcondition: the extension read back the runtime selection and
+#              the task record names that confirmed profile; the original
+#              dispatch snapshot is preserved beside it. Refuses when the
+#              worker is not a Pi-family ship/scout, the destination is not in
+#              the installed catalog, credentials are not ready, the agent is
+#              not verified idle, the session handshake is missing, or the
+#              change is not confirmed. A busy worker is deferred until idle
+#              rather than interrupted. A harness change is `relaunch`.
+#              The destination harness/model/effort must match a profile in
+#              config/crew-dispatch.json with one unambiguous quota provider.
+#              Omitted model or effort inherits the current task record.
+#              Measured exhausted destination quota refuses. Unmeasured quota
+#              keeps the destination eligible but refuses unless the
+#              supervisor passes --confirm-unmeasured-quota after assessing it.
+#              Catalog and auth preflights use the recorded Pi-family adapter;
+#              the account pin must still match the account recorded at launch.
+#              bin/fm-pi-switch-lib.sh owns the request/ack protocol.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -129,6 +152,10 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_SWITCH_IDLE_WAIT  wait for a verified idle Pi checkpoint (30)
+#   FM_CONTROL_SWITCH_ACK_WAIT   wait for the extension's matching ack (20)
+#   FM_CONTROL_SWITCH_READY_WAIT wait for the Pi session handshake (15)
+#   FM_CONTROL_SWITCH_POLL       live-switch poll interval (0.25)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -159,6 +186,7 @@ fi
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 [ -d "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2
   exit 1
@@ -176,6 +204,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-pi-switch-lib.sh
+. "$SCRIPT_DIR/fm-pi-switch-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -183,6 +213,10 @@ ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+SWITCH_IDLE_WAIT=${FM_CONTROL_SWITCH_IDLE_WAIT:-30}
+SWITCH_ACK_WAIT=${FM_CONTROL_SWITCH_ACK_WAIT:-20}
+SWITCH_READY_WAIT=${FM_CONTROL_SWITCH_READY_WAIT:-15}
+SWITCH_POLL=${FM_CONTROL_SWITCH_POLL:-0.25}
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -236,6 +270,7 @@ NEW_EFFORT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+CONFIRM_UNMEASURED=0
 NOTE=
 NOTE_SET=0
 control_want_value=
@@ -265,6 +300,7 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --confirm-unmeasured-quota) CONFIRM_UNMEASURED=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -281,10 +317,21 @@ if [ -n "$control_want_value" ]; then
   die "--$control_want_value requires a value"
 fi
 
-if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
-fi
+[ "$CONFIRM_UNMEASURED" = 0 ] || [ "$VERB" = switch-model ] \
+  || die "--confirm-unmeasured-quota applies to 'switch-model' only"
+case "$VERB" in
+  relaunch) ;;
+  switch-model)
+    [ "$HARNESS_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+      || die "--harness and --note apply to 'relaunch' only; live Pi switches keep the same session"
+    [ "$MODEL_SET" = 1 ] || [ "$EFFORT_SET" = 1 ] \
+      || die "switch-model requires --model and/or --effort"
+    ;;
+  *)
+    [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+      || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    ;;
+esac
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -960,10 +1007,26 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line absence
   local -a spawn_args
 
   require_state_verified_backend relaunch
+  if ! fm_pi_switch_reconcile "$STATE" "$ID" "$META"; then
+    state=$(agent_state)
+    if [ "$state" = missing ]; then
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+      state=${absence%%$'\t'*}
+    fi
+    case "$state" in
+      dead|gone) ;;
+      *) die "reconcile the pending Pi switch before relaunch; endpoint state $state ${absence:-}" ;;
+    esac
+    [ -n "$NEW_MODEL" ] && [ -n "$NEW_EFFORT" ] || die "dead worker has unknown runtime; relaunch requires explicit model and effort"
+    rm -f "$(fm_pi_switch_req_path "$STATE" "$ID")"
+  fi
+  if [ "$(fm_meta_get "$META" model)" = unknown ] || [ "$(fm_meta_get "$META" effort)" = unknown ]; then
+    [ -n "$NEW_MODEL" ] && [ -n "$NEW_EFFORT" ] || die "runtime profile unknown; relaunch requires explicit model and effort"
+  fi
   resolve_relaunch_profile
 
   case "$KIND" in
@@ -1044,6 +1107,154 @@ do_relaunch() {
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
+wait_switch_idle() {
+  local elapsed=0 verdict
+  while :; do
+    verdict=$(busy_verdict)
+    case "$verdict" in
+      idle*) printf '%s' "$verdict"; return 0 ;;
+      busy*) ;;
+      *)
+        printf '%s' "$verdict"
+        return 1
+        ;;
+    esac
+    awk -v e="$elapsed" -v t="$SWITCH_IDLE_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$SWITCH_POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$SWITCH_POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "$verdict"
+  return 1
+}
+
+wait_switch_ack() {  # <req-id>
+  local req_id=$1 elapsed=0 ack
+  while :; do
+    if ack=$(fm_pi_switch_read_ack "$STATE" "$ID" "$req_id"); then
+      printf '%s' "$ack"
+      return 0
+    fi
+    awk -v e="$elapsed" -v t="$SWITCH_ACK_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$SWITCH_POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$SWITCH_POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  return 1
+}
+
+do_switch_model() {
+  local current_model current_effort dest_model dest_effort parsed provider model_id
+  local pin_selection pin_declared pin_root pin_providers
+  local state_now verdict ready_path req_id ack ack_status ack_model ack_effort
+  local ack_reason ack_session from_model retries max_retries quota_provider recorded_account
+
+  fm_pi_switch_harness_supported "$HARNESS" \
+    || die "task $ID records harness '$RECORDED_HARNESS'; live model switch is a Pi session operation, and a harness change uses relaunch"
+  [ "$KIND" != secondmate ] \
+    || die "task $ID is a secondmate; live model switch is for Pi ship and scout workers. Use relaunch to change a secondmate profile"
+
+  state_now=$(agent_state)
+  [ "$state_now" = alive ] \
+    || die "task $ID's agent is '$state_now'; live model switch needs a running Pi session"
+
+  local FM_PI_BIN
+  FM_PI_BIN=$(resolve_pi_executable "$HARNESS") || die "recorded Pi executable '$HARNESS' is unavailable"
+  fm_pi_switch_reconcile "$STATE" "$ID" "$META" || die "pending live-switch outcome"
+  current_model=$(fm_meta_get "$META" model)
+  current_effort=$(fm_meta_get "$META" effort)
+  dest_model=${NEW_MODEL:-$current_model}
+  dest_effort=${NEW_EFFORT:-$current_effort}
+  [ -n "$dest_model" ] && [ "$dest_model" != default ] \
+    || die "switch-model needs a provider-qualified --model; task $ID records model '${current_model:-none}'"
+
+  parsed=$(fm_pi_switch_parse_model "$dest_model") \
+    || die "--model '$dest_model' is not provider-qualified; live Pi switches need <provider>/<id>"
+  IFS=$'\t' read -r provider model_id <<<"$parsed"
+  fm_pi_switch_effort_ok "$dest_effort" \
+    || die "--effort must be one of default, low, medium, high, xhigh, max"
+
+  pin_selection=$(fm_worker_account_resolve "$HARNESS" "$CONFIG") || exit 1
+  recorded_account=$(fm_meta_get "$META" account)
+  pin_declared=${pin_selection%%$'\t'*}
+  [ "$recorded_account" = "$pin_declared" ] || die "worker account pin changed since launch; relaunch with the approved account before switching"
+  if [ -n "$pin_selection" ]; then
+    pin_root=${pin_selection#*$'\t'}
+    pin_providers=${pin_root#*$'\t'}
+    pin_root=${pin_root%%$'\t'*}
+    case " $pin_providers " in
+      *" $provider "*) ;;
+      *) die "config/pi-account pins Pi workers to providers ($pin_providers); destination $provider is not allowed" ;;
+    esac
+    export PI_CODING_AGENT_DIR="$pin_root"
+    fm_worker_account_check "$HARNESS" "$pin_declared" "$pin_root" "$FM_PI_BIN" "$provider" || exit 1
+  fi
+  fm_pi_switch_catalog_row "$provider" "$model_id" >/dev/null \
+    || die "Pi catalog does not list $provider/$model_id; choose a listed model"
+  if [ -z "$pin_selection" ]; then
+    fm_pi_switch_auth_ready "$provider" || die "Pi provider '$provider' is not authenticated"
+  fi
+  quota_provider=$(jq -er --arg h "$HARNESS" --arg m "$dest_model" --arg e "$dest_effort" '
+    def profiles: if type == "array" then .[] elif type == "object" then . else empty end;
+    [(.rules[]?.use | profiles), (.default | profiles)] |
+    [.[] | select(.harness == $h and .model == $m and .effort == $e) | .provider] | unique |
+    if length == 1 and (.[0] | type) == "string" and (.[0] | length) > 0 then .[0]
+    else error("destination needs a configured profile with a quota provider") end
+  ' "$CONFIG/crew-dispatch.json") || die "destination is not a configured verified profile; reassess with quota-array-dispatch"
+  fm_pi_switch_quota_ready "$HARNESS" "$dest_model" "$quota_provider" "$CONFIRM_UNMEASURED" || die "destination quota preflight failed"
+
+  ready_path=$(fm_pi_switch_ready_path "$STATE" "$ID")
+  fm_pi_switch_wait_file "$ready_path" "$SWITCH_READY_WAIT" "$SWITCH_POLL" \
+    || die "task $ID has no Pi live-switch handshake; relaunch the worker so its session loads the current extension"
+
+  jq -e --arg gen "$(fm_meta_get "$META" busy_gen)" '
+    .schema == "fm-pi-switch-model.v1" and .busy_gen == $gen and
+    (.incarnation | type == "string" and length > 0) and
+    (.session_id | type == "string" and length > 0)
+  ' "$ready_path" >/dev/null || die "stale or invalid Pi session handshake"
+
+  max_retries=8
+  retries=0
+  while [ "$retries" -le "$max_retries" ]; do
+    verdict=$(wait_switch_idle) || {
+      die "task $ID is not at a verified idle checkpoint (busy=$verdict); live model switch will not interrupt an active tool operation"
+    }
+    req_id=$(fm_pi_switch_new_id)
+    fm_pi_switch_write_request "$STATE" "$ID" "$req_id" "$provider" "$model_id" "$dest_effort" \
+      || die "could not publish the live-switch request for task $ID"
+    fm_pi_switch_append_history "$STATE" "$ID" \
+      "ts=$(date +%s) req=$req_id from=$current_model:$current_effort to=$dest_model:$dest_effort status=attempted"
+    if ! ack=$(wait_switch_ack "$req_id"); then
+      fm_pi_switch_cancel "$STATE" "$ID" || die "could not cancel pending switch"
+      fm_pi_switch_confirm_meta "$META" unknown unknown || die "could not record unknown runtime"
+      fm_pi_switch_append_history "$STATE" "$ID" "ts=$(date +%s) req=$req_id status=timeout"
+      die "task $ID switch timed out; cancellation requested, runtime unknown until readback; reconcile before another switch or relaunch"
+    fi
+    ack_status=$(printf '%s' "$ack" | jq -r '.status')
+    ack_reason=$(printf '%s' "$ack" | jq -r '.reason // empty')
+    ack_model=$(printf '%s' "$ack" | jq -r '.model // empty')
+    ack_effort=$(printf '%s' "$ack" | jq -r '.effort // empty')
+    ack_session=$(printf '%s' "$ack" | jq -r '.session_id // empty')
+    fm_pi_switch_reconcile "$STATE" "$ID" "$META" || die "could not reconcile runtime readback"
+    case "$ack_status" in
+      busy)
+        retries=$((retries + 1))
+        sleep "$SWITCH_POLL"
+        continue
+        ;;
+      applied)
+        if [ "$ack_model" != "$dest_model" ] || [ -z "$ack_effort" ] \
+          || { [ "$dest_effort" != default ] && [ "$ack_effort" != "$dest_effort" ]; }; then
+          die "task $ID partial switch: requested selection not confirmed; metadata reconciled to readback"
+        fi
+        from_model=${current_model:-unknown}:${current_effort:-unknown}
+        echo "switched-model $ID harness=$HARNESS from=$from_model model=$ack_model effort=$ack_effort provider=${ack_model%%/*} session=$ack_session backend=$BACKEND endpoint=$T worktree=$WT"
+        return 0
+        ;;
+      *) die "task $ID live switch $ack_status (${ack_reason:-no reason}); runtime model=${ack_model:-unknown} effort=${ack_effort:-unknown}; metadata reconciled" ;;
+    esac
+  done
+  die "task $ID stayed busy across $max_retries live-switch attempts; runtime readback was reconciled"
+}
+
 # --- verbs ------------------------------------------------------------------
 
 case "$VERB" in
@@ -1069,5 +1280,8 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  switch-model)
+    do_switch_model
     ;;
 esac

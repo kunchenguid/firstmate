@@ -45,6 +45,7 @@ relaunch_cleanup() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  chmod -R u+w "$TMP_ROOT" 2>/dev/null || true
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
@@ -1959,6 +1960,7 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
   exit 0
 fi
 if [ "${1:-}" = server ]; then
+  [ ! -f "$D/herdr-unreachable" ] || exit 1
   rm -f "$D/herdr-stopped"
   exit 0
 fi
@@ -2385,6 +2387,49 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
     || fail "a relaunch left its item at $(backlog_state "$dir" rl41)"
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
+
+test_pending_switch_endpoint_recovery() {
+  local dir out rc scenario pane id req
+  for scenario in gone dead alive unproven; do
+    id="switch-recover-$scenario"
+    pane=%7
+    [ "$scenario" != gone ] || pane=%none
+    herdr_case_or_skip "$id" "$id" fmlab "$pane" || fail 'herdr fixture unavailable'
+    dir=$HERDR_CASE_DIR
+    sed -i 's/^harness=claude$/harness=pi/' "$dir/home/state/$id.meta"
+    printf 'dispatch_model=zai/glm-5.3\n' >> "$dir/home/state/$id.meta"
+    req="$dir/home/state/$id.model-switch.req"
+    printf '%s\n' '{"schema":"fm-pi-switch-model.v1","id":"pending","incarnation":"old","session_id":"old-session"}' > "$req"
+    case "$scenario" in
+      alive) : > "$dir/fake/herdr-agent-live" ;;
+      unproven) : > "$dir/fake/herdr-unreachable" ;;
+    esac
+    out=$(run_control "$dir" "$id" relaunch --harness claude --model sonnet --effort low --note 'recover interrupted switch')
+    rc=$?
+    case "$scenario" in
+      gone|dead)
+        expect_code 0 "$rc" "confirmed absent worker must recover ($scenario): $out"
+        assert_absent "$req" 'proven absence must retire the cancelled switch'
+        [ "$(meta_field "$dir" "$id" model)" = sonnet ] || fail 'replacement profile not recorded'
+        [ "$(meta_field "$dir" "$id" dispatch_model)" = zai/glm-5.3 ] || fail 'original dispatch lost'
+        ;;
+      *)
+        expect_code 1 "$rc" "unproven or live endpoint must not recover ($scenario): $out"
+        assert_present "$req" 'unproven absence must retain the pending request'
+        assert_absent "$dir/fake/launched-command" 'unproven absence must not launch a worker'
+        ;;
+    esac
+    assert_contains "$(cat "$dir/fake/herdr-log")" 'server --session fmlab' 'recovery must use recorded-session absence proof'
+  done
+  pass 'pending switch recovery uses endpoint absence proof and preserves refusal boundaries'
+}
+
+if [ "${1:-}" = pi-switch-recovery ]; then
+  test_pending_switch_endpoint_recovery
+  exit 0
+fi
+
+test_pending_switch_endpoint_recovery
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text

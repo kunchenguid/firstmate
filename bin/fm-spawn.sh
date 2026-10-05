@@ -1697,6 +1697,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_META="$STATE/$ID.meta"
+  if [ -f "$STATE/$ID.model-switch.req" ]; then
+    echo "error: pending Pi switch must be reconciled through fm-control before relaunch" >&2
+    exit 1
+  fi
   if [ ! -e "$RELAUNCH_META" ] && [ ! -L "$RELAUNCH_META" ]; then
     echo "error: --relaunch needs an existing task record; no $RELAUNCH_META" >&2
     exit 1
@@ -1863,19 +1867,6 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
-}
-
-resolve_pi_executable() {
-  local candidate dir
-  candidate=$(type -P -- "$1" 2>/dev/null) || return 1
-  [ -x "$candidate" ] || return 1
-  case "$candidate" in
-  /*) printf '%s\n' "$candidate" ;;
-  *)
-    dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
-    printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-    ;;
-  esac
 }
 
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
@@ -4606,8 +4597,9 @@ EOF
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
     cat >"$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate semantic busy-state events + turn-end notification; written by
-// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Firstmate semantic busy-state events + turn-end notification + live
+// model-switch handshake; written by fm-spawn under the contracts owned by
+// bin/fm-busy-lib.sh and bin/fm-pi-switch-lib.sh.
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
 // "agent_settled" -> idle only when ctx.isIdle() confirms Pi will not
 // continue automatically - auto-retries, auto-compaction retries, tool
@@ -4616,18 +4608,33 @@ EOF
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
+// Live switch: session_start arms a request file watcher. setModel and
+// setThinkingLevel run only while ctx.isIdle() is true. Metadata is updated
+// by fm-control after this extension writes a matching ack.
 import { execFile } from "node:child_process";
-const busyEvent = (state: string, event: string) =>
-  new Promise<void>((resolve) => {
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+const busyEvent = (state, event) =>
+  new Promise((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
   });
-export default function (pi: any) {
+import { randomUUID } from "node:crypto";
+const SWITCH_REQ = "$STATE_REAL/$ID.model-switch.req";
+const SWITCH_ACK = "$STATE_REAL/$ID.model-switch.ack";
+const SWITCH_READY = "$STATE_REAL/$ID.model-switch.ready";
+const SWITCH_SCHEMA = "fm-pi-switch-model.v1";
+const writeJson = (path, value) => {
+  const tmp = path + ".tmp";
+  writeFileSync(tmp, JSON.stringify(value) + "\\n");
+  renameSync(tmp, path);
+};
+export default function (pi) {
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
-  pi.on("agent_settled", (_event: any, ctx: any) => {
+  pi.on("agent_settled", (_event, ctx) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    turnAdmitted = false;
     return busyEvent("idle", "agent-settled");
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
@@ -4641,6 +4648,93 @@ export default function (pi: any) {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
       "progress", "$STATE_REAL", "$ID", "--gen", "$BUSY_GEN",
     ]);
+  });
+  let lastReqId = "";
+  let applying = false;
+  let switchInFlight = Promise.resolve();
+  let turnAdmitted = false;
+  pi.on("before_agent_start", async () => {
+    turnAdmitted = true;
+    await switchInFlight;
+  });
+  let switchTimer;
+  const incarnation = randomUUID();
+  const sessionId = (ctx) => ctx?.sessionManager?.getSessionId?.() || "";
+  const readback = (ctx) => ({
+    model: ctx?.model?.provider && ctx?.model?.id ? ctx.model.provider + "/" + ctx.model.id : "",
+    effort: pi.getThinkingLevel?.() || "",
+  });
+  const publishReady = (ctx) => writeJson(SWITCH_READY, {
+    schema: SWITCH_SCHEMA, incarnation, busy_gen: "$BUSY_GEN", session_id: sessionId(ctx), ...readback(ctx),
+  });
+  const cancelled = (req) => {
+    try {
+      const current = JSON.parse(readFileSync(SWITCH_REQ, "utf8"));
+      return current.id !== req.id || current.cancelled || Date.now() >= req.deadline * 1000;
+    } catch { return true; }
+  };
+  const applySwitch = async (req, ctx) => {
+    const base = { schema: SWITCH_SCHEMA, id: req.id, incarnation, session_id: sessionId(ctx) };
+    const finish = (status, reason = "") => {
+      writeJson(SWITCH_ACK, { ...base, status, reason, ...readback(ctx) });
+      publishReady(ctx);
+    };
+    if (req.incarnation !== incarnation || req.session_id !== sessionId(ctx)) return;
+    if (cancelled(req)) { finish("cancelled", "request-expired-or-cancelled"); return; }
+    if (typeof ctx?.isIdle !== "function" || !ctx.isIdle()) {
+      finish("busy", "agent-not-idle"); return;
+    }
+    applying = true;
+    try {
+      const model = ctx?.modelRegistry?.find?.(req.provider, req.model_id);
+      if (!model) { finish("refused", "model-not-found"); return; }
+      const { getSupportedThinkingLevels } = await import("@earendil-works/pi-ai");
+      if (req.effort && req.effort !== "default" && !getSupportedThinkingLevels(model).includes(req.effort)) {
+        finish("refused", "unsupported-effort"); return;
+      }
+      const usage = ctx.getContextUsage?.();
+      if (typeof usage?.tokens !== "number" || typeof model.contextWindow !== "number") {
+        finish("refused", "context-unknown"); return;
+      }
+      if (usage.tokens > model.contextWindow) { finish("refused", "context-exceeds-destination"); return; }
+      if (cancelled(req)) { finish("cancelled", "request-expired-or-cancelled"); return; }
+      if (!ctx.isIdle()) { finish("busy", "agent-not-idle"); return; }
+      if (!await pi.setModel(model)) { finish("failed", "set-model-auth"); return; }
+      if (!cancelled(req) && req.effort && req.effort !== "default") pi.setThinkingLevel(req.effort);
+      const actual = readback(ctx);
+      const confirmed = actual.model === req.model && actual.effort &&
+        (!req.effort || req.effort === "default" || actual.effort === req.effort);
+      finish(confirmed && !cancelled(req) ? "applied" : "partial", confirmed ? "" : "selection-not-confirmed");
+    } catch (err) {
+      finish("failed", String(err));
+    } finally {
+      applying = false;
+    }
+  };
+  const pollSwitch = (ctx) => {
+    try {
+      if (applying || turnAdmitted || !existsSync(SWITCH_REQ)) return;
+      const req = JSON.parse(readFileSync(SWITCH_REQ, "utf8"));
+      if (!req || req.schema !== SWITCH_SCHEMA || !req.id || !Number.isFinite(req.deadline)) return;
+      if (req.id === lastReqId) return;
+      if (req.incarnation !== incarnation || req.session_id !== sessionId(ctx)) return;
+      lastReqId = req.id;
+      switchInFlight = applySwitch(req, ctx);
+    } catch {}
+  };
+  pi.on("session_start", (_event, ctx) => {
+    publishReady(ctx);
+    if (switchTimer) clearInterval(switchTimer);
+    switchTimer = setInterval(() => pollSwitch(ctx), 250);
+    pollSwitch(ctx);
+  });
+  pi.on("session_shutdown", () => {
+    if (switchTimer) clearInterval(switchTimer);
+    switchTimer = undefined;
+    try {
+      const ready = JSON.parse(readFileSync(SWITCH_READY, "utf8"));
+      if (ready.incarnation === incarnation) unlinkSync(SWITCH_READY);
+    } catch {}
   });
 }
 EOF
@@ -4909,6 +5003,19 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Original dispatch snapshot: live Pi switches update model=/effort= after
+  # confirmation and must not overwrite these. Written only on a fresh Pi-family
+  # spawn so a relaunch keeps the first profile via preserve_relaunch_meta.
+  if [ "$RELAUNCH" -eq 0 ]; then
+    case "$HARNESS" in
+      pi|pi-signed)
+        echo "dispatch_harness=$HARNESS"
+        echo "dispatch_model=${MODEL:-default}"
+        echo "dispatch_effort=${EFFORT:-default}"
+        [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "dispatch_provider=$WORKER_ACCOUNT_PROVIDER"
+        ;;
+    esac
+  fi
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"

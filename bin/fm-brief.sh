@@ -599,6 +599,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
+   When work newly becomes complex, stalls without progress, changes phase, or hits a quota constraint, append \`working [at=<epoch>]: checkpoint <complexity|stall|phase|quota>: {one short line}\`.
+   Do not change your own model, effort, or runtime; firstmate selects among verified profiles.
 $CREWMATE_PAUSE_INSTRUCTIONS
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
@@ -678,6 +680,8 @@ $RULE1
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   When work newly becomes complex, stalls without progress, changes phase, or hits a quota constraint, append \`working [at=<epoch>]: checkpoint <complexity|stall|phase|quota>: {one short line}\`.
+   Do not change your own model, effort, or runtime; firstmate selects among verified profiles.
 $CREWMATE_PAUSE_INSTRUCTIONS
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
