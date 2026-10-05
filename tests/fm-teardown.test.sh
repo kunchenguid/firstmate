@@ -1212,6 +1212,76 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+assert_dirty_diagnostic() {
+  local kind=$1 mode=$2 case_dir rc before n
+  case_dir=$(make_case "dirty-$kind-$mode")
+  write_meta "$case_dir" "$mode" ship
+  wt_commit_file "$case_dir" feature.txt hello
+  # Exercise both dirty refusal sites: remote-reachable work and local-only
+  # work merged into local main but absent from every remote.
+  if [ "$mode" = local-only ]; then
+    git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  else
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+  fi
+  if [ "$kind" != untracked ]; then
+    printf '%s\n' 'uncommitted edit' > "$case_dir/wt/feature.txt"
+    # Cover index edits as well as unstaged edits.
+    [ "$mode" != local-only ] || git -C "$case_dir/wt" add feature.txt
+  fi
+  if [ "$kind" != tracked ]; then
+    mkdir "$case_dir/wt/00 proof scratch"
+    printf '%s\n' 'manual server log' > "$case_dir/wt/00 proof scratch/server.log"
+    for n in 01 02 03 04 05 06 07 08 09 10 11; do
+      touch "$case_dir/wt/$n-scratch.txt"
+    done
+    # Preserve the existing exemptions without counting them as leftovers.
+    mkdir "$case_dir/wt/.claude"
+    touch "$case_dir/wt/.claude/settings.local.json" "$case_dir/wt/.fm-grok-turnend"
+  fi
+  before=$(git -C "$case_dir/wt" status --porcelain)
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "$kind/$mode: dirty teardown must still refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "$kind/$mode: no refusal"
+  if [ "$kind" = untracked ]; then
+    grep -Fq 'uncommitted changes present (untracked-only leftovers)' "$case_dir/stderr" \
+      || fail "$kind/$mode: missing untracked-only classification"
+    ! grep -q 'includes tracked edits' "$case_dir/stderr" || fail "$kind/$mode: misclassified as tracked"
+  else
+    grep -Fq 'uncommitted changes present (includes tracked edits)' "$case_dir/stderr" \
+      || fail "$kind/$mode: missing tracked-edit classification"
+    ! grep -q 'untracked-only' "$case_dir/stderr" || fail "$kind/$mode: misclassified as untracked-only"
+  fi
+  if [ "$kind" != tracked ]; then
+    grep -Fq '00 proof scratch/' "$case_dir/stderr" || fail "$kind/$mode: scratch folder not named"
+    grep -Fxq '  09-scratch.txt' "$case_dir/stderr" || fail "$kind/$mode: tenth path missing"
+    ! grep -q '10-scratch.txt\|11-scratch.txt\|\.claude/\|\.fm-grok-turnend' "$case_dir/stderr" \
+      || fail "$kind/$mode: path list exceeded its bound or included exempt files"
+    grep -Fq 'additional untracked paths omitted' "$case_dir/stderr" || fail "$kind/$mode: no truncation notice"
+  else
+    ! grep -q 'untracked paths' "$case_dir/stderr" || fail "$kind/$mode: invented untracked paths"
+  fi
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "$kind/$mode: task metadata removed"
+  [ "$before" = "$(git -C "$case_dir/wt" status --porcelain)" ] || fail "$kind/$mode: worktree changed"
+  pass "$kind/$mode: dirty refusal classifies leftovers and preserves work"
+}
+
+test_untracked_only_refusal_diagnostic() {
+  assert_dirty_diagnostic untracked no-mistakes
+  assert_dirty_diagnostic untracked local-only
+}
+
+test_tracked_edit_refusal_diagnostic() {
+  assert_dirty_diagnostic tracked no-mistakes
+  assert_dirty_diagnostic tracked local-only
+}
+
+test_mixed_refusal_diagnostic() {
+  assert_dirty_diagnostic mixed no-mistakes
+  assert_dirty_diagnostic mixed local-only
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -4337,6 +4407,9 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_untracked_only_refusal_diagnostic
+test_tracked_edit_refusal_diagnostic
+test_mixed_refusal_diagnostic
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_windowless_legacy_record_with_gone_worktree_tears_down
