@@ -234,6 +234,16 @@ test_ask_user_gate_materializes_once() {
   rows=$(FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" list --fields body)
   [ "$(printf '%s\n' "$rows" | grep -c 'Review ask-user finding for task-ask')" -eq 1 ] \
     || fail 'repeat drain duplicated the ask-user hold'
+  printf 'needs-decision [key=review-other]: ask-user findings=f-one file=%s\n' "$snapshot" >> "$state/task-ask.status"
+  printf 'needs-decision: ask-user findings=f-one file=%s\n' "$snapshot" >> "$state/task-ask.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'drain failed on unrelated ask-user shaped decisions'
+  rows=$(FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" list --fields body)
+  [ "$(printf '%s\n' "$rows" | grep -c 'Review ask-user finding for task-ask')" -eq 1 ] \
+    || fail 'unrelated or default decision created an ask-user hold'
+  grep -F 'task-ask [key=review-other] needs-decision:' "$out" >/dev/null \
+    || fail 'unrelated keyed decision disappeared from the open decisions section'
+  grep -F 'task-ask needs-decision:' "$out" >/dev/null \
+    || fail 'default decision disappeared from the open decisions section'
   pass 'new ask-user findings create one durable Firstmate-owned hold'
 }
 

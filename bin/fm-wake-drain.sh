@@ -481,7 +481,7 @@ print_open_decisions_section() {
     # A worker's ask-user event is durable in its status log, but an event log
     # alone cannot own a decision. Materialize one parked Firstmate work item
     # before presenting it. Promotion to captain remains a separate judgment.
-    if [ "$verb" = needs-decision ] && [ "$key" != default ]; then
+    if [ "$verb" = needs-decision ] && [[ "$key" == nm-* ]]; then
       case "$note" in
         'ask-user findings='*' file='*)
           file=${note##* file=}
