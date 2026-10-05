@@ -178,6 +178,7 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 Calm on Claude Code is the mod under `.claude/mods/firstmate-calm`, whose plugin name is `fm`.
 The mod is a Claude Code plugin whose whole behavior lives in one function-hooks module.
 The trusted project auto-loads the mod through the `.claude/skills/firstmate-calm` entry (a symlink into `.claude/mods`), so no `--plugin-dir` or marketplace install is needed.
+The same mod also draws the effort cue above the prompt, which is independent of the Calm toggle and owned by [`effort-cue.md`](effort-cue.md).
 
 ### Enabling function hooks
 

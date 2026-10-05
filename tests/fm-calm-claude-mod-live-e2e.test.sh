@@ -17,8 +17,12 @@
 #      note, each drawn behind the plugin's `fm:` label rather than `firstmate-calm:`,
 #      without moving a store marker or reaching the model, and a resume shows each
 #      anchor once.
+#   5. The effort cue names a level only once a request has carried it, paints each
+#      level in a distinct theme color, and moves the real setting through /effort-cycle
+#      and the band's own focus-and-press keys, putting the starting level back on exit.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
-# authentication and one trusted temporary folder. A few Haiku turns are submitted.
+# authentication and one trusted temporary folder. A few Haiku turns are submitted, and
+# two Sonnet turns for the effort cue, because Haiku has no effort parameter.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
 set -u
 
@@ -37,13 +41,60 @@ FM_HOME_DIR="$LAB/fmhome"
 DEBUG_LOG_OFF="$LAB/debug-off.log"
 DEBUG_LOG_ON="$LAB/debug-on.log"
 DEBUG_LOG_RESUME="$LAB/debug-resume.log"
+DEBUG_LOG_EFFORT="$LAB/debug-effort.log"
 SOCKET="fm-calm-claude-$$"
 SESSION="fm-calm-claude-e2e"
+# Haiku has no effort parameter, so the effort section launches on a model that does.
+MODEL=haiku
+EFFORT_MODEL=sonnet
 HULL='╲▁▁▁╱'
 SAIL='◿│◣'
+# The cue's rule, the run of box-drawing dashes it fills its row with. The composer draws
+# full-width rules of its own, so a row counts as the cue only when it also carries one of
+# the level glyphs the cue leads with.
+EFFORT_RULE='────────'
+
+# The effort level the live session was found at, recorded before anything can move it.
+# `/effort` writes the operator's own `modelSettings.<model>.effortLevel`, which no lab
+# directory isolates, so this level is the captain's and must be put back on every exit.
+EFFORT_STARTED_AT=""
+
+# Put that level back through the live session, which is the only way to move the setting.
+# It runs from the exit trap as well as from the end of the section, so a case that fails
+# between the first step and the end still restores; when no session is left to run it, the
+# captain is told what to set by hand rather than left to find out later.
+restore_effort_level() {
+  local want i=0
+  [ -n "$EFFORT_STARTED_AT" ] || return 0
+  want=$(badge_for "$EFFORT_STARTED_AT")
+  if tmux -L "$SOCKET" has-session -t "$SESSION" 2>/dev/null; then
+    case "$(screen)" in
+      *'CLAUDE_EXIT='*) : ;;
+      *)
+        # A focused band or an open dialog would swallow the command; leave them first.
+        tmux -L "$SOCKET" send-keys -t "$SESSION" Escape 2>/dev/null || true
+        sleep 0.5
+        send "/effort $EFFORT_STARTED_AT"
+        enter
+        while [ "$i" -lt 100 ]; do
+          if [ "$(badge_level "$(screen)")" = "$want" ]; then
+            EFFORT_STARTED_AT=""
+            return 0
+          fi
+          sleep 0.1
+          i=$((i + 1))
+        done
+        ;;
+    esac
+  fi
+  printf 'warning: this run left the effort level moved; restore it with /effort %s\n' \
+    "$EFFORT_STARTED_AT" >&2
+  return 1
+}
 
 cleanup() {
   local i=0
+  restore_effort_level || true
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
   # Claude's debug logger may still be flushing into the lab for a moment.
   while [ "$i" -lt 20 ] && pgrep -f "debug-file '$LAB/" >/dev/null 2>&1; do
@@ -75,7 +126,7 @@ launch() {  # <debug-log> <flag: 1|0> [claude args...]
   [ "$flag" = 1 ] && flag_env="CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1"
   tmux -L "$SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
   tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 160 -y 44 -c "$PROJECT" \
-    "env $(unset_inherited) $flag_env FM_HOME='$FM_HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --model haiku --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --debug-file '$log' $*; printf '\nCLAUDE_EXIT=%s\n' \"\$?\"; sleep 30"
+    "env $(unset_inherited) $flag_env FM_HOME='$FM_HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --model $MODEL --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --debug-file '$log' $*; printf '\nCLAUDE_EXIT=%s\n' \"\$?\"; sleep 30"
 }
 
 screen() {
@@ -168,6 +219,23 @@ command_listed() {  # <command>
   return $((1 - listed))
 }
 
+# The cue row within a capture: a row carrying both a level glyph and the cue's rule.
+cue_row_of() {  # <capture text>
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *"$EFFORT_RULE"*)
+        case "$line" in
+          *○*|*◔*|*◑*|*◕*|*●*|*◉*|*◌*) printf '%s\n' "$line"; return 0 ;;
+        esac
+        ;;
+    esac
+  done <<CAPTURE
+$1
+CAPTURE
+  return 1
+}
+
 hull_column() {  # <screen text>
   printf '%s\n' "$1" | awk -v hull="$HULL" 'index($0, hull) { print index($0, hull); exit }'
 }
@@ -225,6 +293,10 @@ fi
 if command_listed calm; then
   fail "Claude Code $CLAUDE_VERSION lists /calm although the flag is unset"
 fi
+if cue_row_of "$(screen)" >/dev/null; then
+  printf '%s\n' "$(screen)" >&2
+  fail "the effort cue drew above the prompt although the flag is unset"
+fi
 send "$PROMPT"
 enter
 # Sample every frame until the turn settles: the boat must never appear, and the
@@ -266,7 +338,7 @@ esac
 send '/exit'
 enter
 sleep 2
-pass "Claude Code $CLAUDE_VERSION with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored"
+pass "Claude Code $CLAUDE_VERSION with the flag unset: no hooks module, no /calm, no effort cue, stock working row, stock tool rows, preference on ignored"
 
 # --- 2. Flag on: the boat, the hidden rows, the toggle, the persisted choice -------
 launch "$DEBUG_LOG_ON" 1
@@ -506,3 +578,201 @@ send '/exit'
 enter
 sleep 1
 pass "Claude Code $CLAUDE_VERSION with Calm off shows the supervision notes: the session-start anchor for an unprocessed captain outcome, a sailboat for a new routine outcome, an anchor for a new captain outcome, and the latch-trip note, each behind the fm: label, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each anchor once"
+
+# --- 5. The effort cue: what proves a level, its color, its cycle, and the key path --
+# Claude Code persists the level `/effort` selects as the operator's default for new
+# sessions, and an isolated CLAUDE_CONFIG_DIR would demand a fresh login, so this section
+# reads the level it starts at out of the footer badge before anything can move it and
+# puts it back from the exit trap, on the failing path as well as the passing one. The cue
+# names a level only once a request of the main loop has proved one, so this section
+# submits two turns; the command and the band's keyboard path work at an idle prompt.
+# The cue does not depend on Calm; section 4 left it off, so this section runs with it on.
+printf 'on\n' >"$FM_HOME_DIR/config/calm"
+MODEL=$EFFORT_MODEL
+launch "$DEBUG_LOG_EFFORT" 1
+wait_idle
+
+# The badge the captain reads, as the footer spells it.
+badge_level() {  # <screen text>
+  printf '%s\n' "$1" | sed -n 's/.*think:\([a-z]*\).*/\1/p' | head -1
+}
+
+# The footer abbreviates medium; every other level reads there as itself.
+badge_for() {  # <level>
+  case "$1" in
+    medium) printf 'med' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# The level a badge word names, which is what `/effort` accepts: `med` is not a level.
+level_for() {  # <badge word>
+  case "$1" in
+    med) printf 'medium' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# The cue row, with its escapes, so the color the surface actually paints is readable.
+cue_row() {
+  cue_row_of "$(tmux -L "$SOCKET" capture-pane -p -e -t "$SESSION" 2>/dev/null || true)"
+}
+
+# The 256-color code the cue's rule is painted in, or empty when it carries none.
+cue_color() {
+  cue_row | sed -n 's/.*\[38;5;\([0-9]*\)m[^[]*'"$EFFORT_RULE"'.*/\1/p' | head -1
+}
+
+wait_badge() {  # <badge word> <what>
+  local want=$1 what=$2 i=0
+  while [ "$i" -lt 200 ]; do
+    [ "$(badge_level "$(screen)")" = "$want" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf '%s\n' "$(screen)" >&2
+  fail "Claude Code $CLAUDE_VERSION never showed think:$want after $what"
+}
+
+# The label the cue draws for a level: its glyph and its word together, so `high` cannot
+# match the `xhigh` row and hide the very mismatch these checks exist to catch.
+cue_label_for() {  # <level>
+  case "$1" in
+    low) printf '○ low' ;;
+    medium) printf '◔ medium' ;;
+    high) printf '◑ high' ;;
+    xhigh) printf '◕ xhigh' ;;
+    max) printf '● max' ;;
+    ultracode) printf '◉ ultracode' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# The cue names the level the footer names, or claims none; never another level.
+cue_agrees_with_badge() {  # <what>
+  local shown level
+  shown=$(cue_row)
+  level=$(level_for "$(badge_level "$(screen)")")
+  case "$shown" in
+    *"$(cue_label_for "$level")"*|*◌*) return 0 ;;
+  esac
+  printf '%s\n' "$shown" >&2
+  fail "the effort cue names a level the footer does not show ($level) $1"
+}
+
+started_at=$(level_for "$(badge_level "$(screen)")")
+[ -n "$started_at" ] || fail "Claude Code $CLAUDE_VERSION shows no think: badge on $EFFORT_MODEL, so the effort cue cannot be judged"
+# From here on every exit path restores this level, because the next steps move it.
+EFFORT_STARTED_AT=$started_at
+
+# The cue draws above the prompt and is painted, and it never names the wrong level.
+cue_first=$(cue_row)
+[ -n "$cue_first" ] || fail "the effort cue drew no rule above the prompt"
+cue_agrees_with_badge 'at the idle prompt'
+[ -n "$(cue_color)" ] || fail "the effort cue's rule carries no color, so the level is not shown as one"
+
+# One request of the main loop is what proves a level, and the cue then names that level.
+send "$PROMPT"
+enter
+wait_settled 'the turn that proves the starting level'
+proven=$(level_for "$(badge_level "$(screen)")")
+case "$(cue_row)" in
+  *"$(cue_label_for "$proven")"*) : ;;
+  *)
+    printf '%s\n' "$(cue_row)" >&2
+    fail "the effort cue does not name $proven after a request carried it"
+    ;;
+esac
+color_proven=$(cue_color)
+[ -n "$color_proven" ] || fail "the effort cue lost its color at $proven"
+
+# One cycle step moves Claude Code's own setting; running the command is not proof it
+# took, so the cue claims no level until the next request carries the new one.
+send '/effort-cycle'
+enter
+sleep 2
+moved=$(level_for "$(badge_level "$(screen)")")
+[ -n "$moved" ] || fail "the footer lost its think: badge after /effort-cycle"
+[ "$moved" != "$proven" ] || fail "/effort-cycle left the level at $proven"
+case "$(cue_row)" in
+  *◌*) : ;;
+  *)
+    printf '%s\n' "$(cue_row)" >&2
+    fail "the effort cue named a level although no request has carried it yet"
+    ;;
+esac
+
+# The next request proves the stepped level, and it paints in a color of its own.
+send "$PROMPT"
+enter
+wait_settled 'the turn after one cycle step'
+case "$(cue_row)" in
+  *"$(cue_label_for "$moved")"*) : ;;
+  *)
+    printf '%s\n' "$(cue_row)" >&2
+    fail "the effort cue does not name $moved after a request carried it"
+    ;;
+esac
+color_moved=$(cue_color)
+[ -n "$color_moved" ] || fail "the effort cue lost its color at $moved"
+[ "$color_moved" != "$color_proven" ] \
+  || fail "$proven and $moved paint the cue the same 256-color code ($color_moved), so the color says nothing"
+
+# `auto` names no level of its own, so the cue claims none from there.
+send '/effort auto'
+enter
+sleep 2
+case "$(cue_row)" in
+  *◌*) : ;;
+  *)
+    printf '%s\n' "$(cue_row)" >&2
+    fail "the effort cue still names a level after /effort auto left the choice to Claude Code"
+    ;;
+esac
+
+# A level the captain selects himself moves the setting the same way.
+send '/effort low'
+enter
+wait_badge low 'the captain typed /effort low'
+cue_agrees_with_badge 'after the captain typed /effort low'
+
+# The key path that needs no keybindings file: focus the band, then press. The focus chord
+# is answered by the surface rather than by a hook, so it is given a settled prompt and one
+# retry before the case is called a regression; the level it lands on is still exact.
+pressed=0
+attempt=0
+while [ "$attempt" -lt 2 ]; do
+  tmux -L "$SOCKET" send-keys -t "$SESSION" C-x Tab
+  sleep 2
+  enter
+  i=0
+  while [ "$i" -lt 60 ]; do
+    reached=$(badge_level "$(screen)")
+    [ -n "$reached" ] && [ "$reached" != low ] && { pressed=1; break; }
+    sleep 0.25
+    i=$((i + 1))
+  done
+  [ "$pressed" -eq 1 ] && break
+  tmux -L "$SOCKET" send-keys -t "$SESSION" Escape
+  sleep 1
+  attempt=$((attempt + 1))
+done
+[ "$pressed" -eq 1 ] || fail "Claude Code $CLAUDE_VERSION never moved the level from the band's own focus-and-press keys"
+[ "$reached" = "$(badge_for medium)" ] || fail "the band's press moved the level to $reached, not one step up from low"
+tmux -L "$SOCKET" send-keys -t "$SESSION" Escape
+sleep 1
+
+# A press must never leave the engine reporting a skipped hook of this mod, named by its
+# plugin name `fm` or its folder.
+if grep -E 'hook skipped|threw' "$DEBUG_LOG_EFFORT" | grep -E 'plugin fm[:@ ]|\[fm\]|module fm@|fm@|firstmate-calm' >&2; then
+  fail "Claude Code $CLAUDE_VERSION skipped a Calm mod hook while the effort cue was driven"
+fi
+
+# Put the operator's persisted default back exactly where this section found it, through
+# the same restore the exit trap would have run, and prove it landed.
+restore_effort_level || fail "Claude Code $CLAUDE_VERSION did not restore the starting level $started_at"
+send '/exit'
+enter
+sleep 1
+MODEL=haiku
+pass "Claude Code $CLAUDE_VERSION names a level in the effort cue only once a request has carried it, paints each level in a distinct theme color, cycles the setting with /effort-cycle and with the band's own focus-and-press keys, follows the captain's own /effort, and leaves the starting level restored"

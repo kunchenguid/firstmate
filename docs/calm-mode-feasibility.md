@@ -799,6 +799,138 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 ✻ Sautéed for 8s · done 11:07 AM
 ```
 
+## 2026-09-17 Claude Code 2.1.274 effort-cue feasibility and the shipped cue
+
+The captain asked for two things Claude Code does not offer: one keystroke that cycles the reasoning effort level, and the level shown as color in the input area, as Pi shows its reasoning level.
+This record establishes what the mods API of the installed Claude Code actually allows for both, against `claude --version` `2.1.274 (Claude Code)` with `tmux 3.6a`, and what [`effort-cue.md`](effort-cue.md) therefore promises.
+Every capability below was exercised against the real binary through a throwaway probe mod, except the two bullets that say they were read out of the installed binary itself; the declarations quoted are the running build's own, written by `/plugin-types` and headed `// Written by Claude Code 2.1.274.`.
+
+### What the API allows, per requirement
+
+| Requirement | Result on Claude Code 2.1.274 |
+| --- | --- |
+| A mod registers its own keybinding | No. The engine has no `$.keybinding`, `$.keys`, `$.input`, or `$.action` noun and no key event; registering one refuses the whole module at load, and `CommandSpec` is `{ name, description, argumentHint?, immediate? }` with no key field. |
+| A key reaches the mod at all | Yes, two ways. A `command:<name>` binding in the operator's own `keybindings.json` runs a registered slash command, and `AbovePrompt`'s own `abovePrompt:focus` and `abovePrompt:press` actions (`ctrl+x tab` and `enter` by default) press a Button the mod drew, with no configuration. |
+| A mod reads the live effort level | Only from `turn.step`, whose `effort` is the level the request about to be sent asks for. `$.config.list()` has no effort row, `$.env.get("CLAUDE_EFFORT")` is unset inside a hooks module, and `$.session.*` exposes only the model. The engine checks that step's effort against `["low","medium","high","xhigh","max"]` or a number, so `ultracode` cannot be reported there at all. |
+| A mod reads the persisted default | Yes: `$.settings.read()` carries `modelSettings.<model>.effortLevel`, with a top-level `effortLevel` beneath it, and `$.session.model()` returns the key that names the model. |
+| A mod sets the effort level | Yes, by running Claude Code's own command: `$.command.run({ command: "effort", args: "<level>" })` moves the session's level and the footer badge together. A run that resolves is not proof it took, because `/effort` declines a level a session cannot have by printing its own line rather than by failing, so only a later request says what is in force. |
+| A mod observes a change it did not make | Only for a command: `command.run` hooks on `{ command: "effort" }` and `{ command: "model" }` see `/effort <level>` and `/model <name>`. The effort slider and the model picker raise no hookable event at all. |
+| A mod draws in the input area | Not the composer itself, which has no render component. `AbovePrompt` is a render site the engine leaves empty, directly above the prompt, and a mod owns its whole row. |
+| A mod uses Claude Code's own theme colors | Yes. `TextProps` records that "Colors are a theme key or a raw color", so a theme key in `color` is resolved against the live theme; a name that is not a theme key silently draws uncolored, so only real keys may be used. |
+
+### Probe-verified behavior
+
+Each capture came from a real Claude Code 2.1.274 TUI under tmux at 160 by 44 cells, with the inherited session markers stripped and the mod reached through the project's own `.claude/skills` auto-load path.
+
+- `$.config.list()` returned 42 rows, none of them effort-related; `theme` and `thinking` are there, `effortLevel` is not, and `$.config.set` rejects a key no row has.
+- With `CLAUDE_EFFORT` unset in the launching environment, `$.env.get("CLAUDE_EFFORT")` answered undefined at `session.start`, so the variable the hook-command documentation mentions does not reach a hooks module. An earlier reading of `xhigh` came from the probe inheriting the value from its parent session, not from Claude Code.
+- `$.command.run` is refused from inside a `command.run` hook, naming the reason: it "would wait on the turn this hook is holding; answer { text } instead, or run it from a later event". The same call succeeds from `session.start`, from a `$.clock.after` callback, and from a `ui.press` hook.
+- A `command.run` hook on `{ command: "effort" }` saw the captain's own `/effort xhigh` with `args` `xhigh` and `origin` `{ kind: "composer" }`; a bare `/effort` arrived with empty `args` and opened the effort slider, and the slider's own confirmation raised nothing further.
+- A `command.run` result settles to `{ text, context, ref }`, with no denial among them: under the plugin test host, a handler below that answered `{ deny }` left the caller with `{}` and the hook above it with a result carrying no denial. A mod therefore cannot tell a run that was refused below it from one that went through, and the mod does not pretend otherwise: it reads nothing from the result and lets the next request settle what is in force.
+- `turn.step` carried `effort` `"high"` on `claude-sonnet-5` and carried none at all on `claude-haiku-4-5-20251001`, which is the documented "absent for a model without effort" case.
+- The `AbovePrompt` event carries `{ hasSurvey, isWorking, maxRows, bodyColumns, scroll, view }`, and `$.ui.resolve` there offers `Box, Text, Button, Input, Select, Link, Code, Markdown, Client, Raster, Svg`. `hasSurvey` is true while a survey holds the band, which is the engine's own row, so the cue yields it.
+- The engine checks the effort of a `turn.step` against its own list and rejects anything else, naming it: `an effort that is not one of low, medium, high, xhigh, max (a number is internal-only)`. That check and the list behind it were read out of the installed binary at 2.1.275, to which this host updated while the cue was being revised. `ultracode` is absent from the list, and the same binary calls that level `xhigh + dynamic workflow orchestration`, so nothing a mod can see tells a session at `ultracode` apart from one at `xhigh`.
+- The same binary carries `/effort`'s own refusal line, `ultracode is not available for this session (dynamic workflows are off, ...)`, which is printed rather than thrown, so a `$.command.run` of `/effort` resolves whether the level took or not.
+- Every theme key drew a distinct 256-color escape, while a name that is not a theme key drew with no escape at all:
+
+```text
+^[[38;5;153mTHEMEKEY-permission^[[39m
+^[[38;5;174mTHEMEKEY-claude^[[39m
+^[[38;5;220mTHEMEKEY-warning^[[39m
+^[[38;5;208mTHEMEKEY-fastMode^[[39m
+^[[38;5;147mTHEMEKEY-effortUltra^[[39m
+^[[38;5;244mTHEMEKEY-promptBorder^[[39m
+THEMEKEY-notAThemeKeyAtAll
+```
+
+- A `command:<name>` binding is accepted by the keybindings loader even for a command no plugin has registered yet, while an unknown action is dropped with a warning, which is what distinguishes the two:
+
+```text
+$ CLAUDE_CONFIG_DIR=<lab> claude   # bindings: { "ctrl+y": "command:effortcycle" }
+[keybindings] Loaded 1 user bindings from <lab>/keybindings.json
+[keybindings] KeybindingSetup initialized with 227 bindings, 0 warnings
+
+$ CLAUDE_CONFIG_DIR=<lab> claude   # bindings: { "ctrl+y": "bogus:nothing" }
+[keybindings] Loaded 0 user bindings from <lab>/keybindings.json
+[keybindings] [error] Unknown action "bogus:nothing" for "ctrl+y" in Chat - this binding is ignored - Valid action namespaces: app:, strip:, history:, chat:, autocomplete:, confirm:, tabs:, transcript:, historySearch:, task:, theme:, help:, proactivityMenu:, attachments:, footer:, abovePrompt:, pane:, messageSelector:, diff:, modelPicker:, effortSlider:, select:, plugin:, permission:, settings:, voice:, scroll:, selection:, agents:
+[keybindings] KeybindingSetup initialized with 226 bindings, 1 warnings
+```
+
+The `command:` form short-circuits before that namespace check, which is why it is accepted although `command:` is absent from the list the error prints.
+
+### What the API cannot support
+
+1. The captain's exact `ctrl+Tab` cannot be shipped by the mod.
+   No mod can claim a chord, so the single keystroke is one `command:effort-cycle` line in the operator's own `keybindings.json`, and whether a terminal delivers `ctrl+tab` at all is the terminal's choice.
+   The zero-configuration path that does ship is Claude Code's own `ctrl+x tab` then `enter`.
+2. The composer's own frame cannot be recolored: there is no render component for the input, its border, or the composer, so the cue is a row flush above it rather than the input itself.
+3. A `Button` label cannot carry a color; `ButtonProps` has `dimColor` and `hover` and no `color`, which is why the level's word is drawn plainly and the rule beside it carries the color.
+4. The level cannot be read before the first turn.
+   The persisted default is what a new session starts at rather than what this session runs, and a session started with `--effort` or changed for this session only differs from it, so nothing drawn comes from it and the cue claims no level until the first request of a turn carries one.
+   It answers one question that is not a claim, which is where a first cycle step climbs from, and a session with nothing saved at all takes no step and is told so.
+5. A change made through the effort slider or the model picker raises no hookable event, so it reaches the cue at the next turn rather than at the moment it is made.
+6. `ultracode` cannot be displayed at all.
+   The engine's own check on a `turn.step` accepts only `low`, `medium`, `high`, `xhigh`, `max`, or a number, so nothing a mod can see distinguishes a session at `ultracode` from one at `xhigh`, and the cue names no level while the mod knows that level was selected.
+   The same indistinguishability bounds the other side of it: any path that reaches `ultracode` without the mod seeing it leaves the next request looking like an ordinary `xhigh` session, and the cue names that level.
+   No event tells the two apart, so this is recorded as a bound rather than guessed at in code.
+
+Two further observations, recorded so they are not read as failures: `ButtonProps.hotkey` documents that a digit "presses from an empty composer", but on 2.1.274 a digit hotkey fired only while the band already held the focus, so the shipped cue declares no hotkey rather than claiming a key that does not act; and `ButtonProps.action` accepts one of the engine's own keybinding action ids so its chord presses the Button from the prompt, which is a second route to a chord that the shipped cue does not take because it would borrow an action the engine may itself mount.
+
+### The shipped cue
+
+`.claude/mods/firstmate-calm` gained `lib/fm-effort-level.ts`, the pure policy that owns the ramp, the cycle subset, the theme key and glyph per level, the rule's width, and what a request proves; `hooks/register.ts` remains the only file that touches `$`.
+The cue draws one `AbovePrompt` row, yields that row whenever `hasSurvey` says a survey holds the band, follows `/effort` and `/model` through `command.run` hooks, and moves the level only by running Claude Code's own `/effort`.
+The main loop's `turn.step` is the only thing that puts a level on screen, because the request it is about to send is the only evidence of what effort actually goes out.
+Everything weaker leaves the cue at its unestablished row: a command the mod sees that moves the level, `auto`, a request that carries no level, and every request made after `ultracode` was selected, since no request can report that level.
+The cue therefore never names a level the session is not running, while the keystroke keeps cycling: the level a step moves from is kept separately from the level drawn, so the ramp climbs whether or not a turn has confirmed the last step yet.
+That separate level is what `$.settings.read()` and `$.session.model()` feed, and only before a session's first turn: a first keystroke climbs from the level Claude Code has saved for this model, which is where the session started, and a session with nothing saved takes no step and says so rather than moving the setting to a guess.
+The model's own entry decides whenever it has one, so an entry naming something off the ramp, such as `auto`, is unknown rather than a fall-through to the saved default of models that have no entry at all.
+It is also written before the command runs rather than after, so a chord repeating under the captain's finger steps once per press instead of collapsing into one step.
+Beside it the mod keeps the levels declined on the model now in use, read from the one piece of evidence there is: a step that asked for a level and left the session where it already was. The ramp passes over those and says so once while nothing is left to ask for; the memory is forgotten as soon as a request names another model, which is also the only event a picker-driven switch leaves behind, dies with the session, is written to no file, and never reaches the cue.
+It is gated on the same exact `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` opt-in as the rest of the mod, it neither reads nor writes the Calm preference, it writes no settings file, and a `/effort` the host refuses to run at all is reported in a notice with the selection and the cue left as they were.
+
+```text
+$ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate --strict .claude/mods/firstmate-calm
+  ❯ ./register.ts hooks: session.start, command.run{command=calm}, command.run{command=effort-cycle}, command.run{command=effort}, command.run{command=model}, config.set{key=theme}, turn.step, ui.render{component=Spinner}, ui.render{component=ToolUse}, ui.render{component=ToolResult}, ui.render{component=ToolGroup}, ui.render{component=AbovePrompt}, ui.press{element=firstmate-effort-cue}, ui.render{component=UserMessage}, ui.render{component=AssistantMessage}
+  ❯ ./register.ts calls: $.clock.after, $.clock.every (via load), $.command.register, $.command.run (via cycleEffort), $.config.list (via readTheme), $.env.get (via isActivated, load), $.fs.read (via readPreference), $.fs.write, $.session.messages (via load), $.session.model (via readSavedEffort), $.settings.read (via readSavedEffort), $.ui.blit (via repaintShip), $.ui.invalidate, $.ui.resolve, $.ui.toast
+  ❯ ./register.ts env writes: nothing
+  ❯ ./register.ts env reads: CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, FM_CONFIG_OVERRIDE, FM_HOME, FM_ROOT_OVERRIDE
+✔ Validation passed
+
+$ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .claude/mods/firstmate-calm
+ 73 pass
+ 0 fail
+Ran 73 tests across 2 files.
+
+$ bash tests/fm-calm-claude-mod-plugin.test.sh
+ok - Claude Code 2.1.275 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings, /calm, and the effort cue's band, press, and commands
+ok - Claude Code 2.1.275 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, the clock-driven working ship, and the effort cue's proof-only display, colors, cycle from the saved level, survey yield, and auto
+```
+
+Those three runs are from 2.1.275, the version this host updated to while the cue was being revised; the feasibility findings above were established on 2.1.274 and the `turn.step` effort check reads the same on both.
+
+The opt-in live guard, run on this host against the installed Claude Code 2.1.274 with tmux 3.6a, through the shipped `.claude/skills` auto-load path and an isolated project and `FM_HOME`.
+Its effort section launches on a model that has an effort parameter at all, reads the level it starts at out of the footer badge, and puts that level back before it exits, because `/effort` persists the operator's default for new sessions and an isolated `CLAUDE_CONFIG_DIR` would demand a fresh login.
+The run below is that section as it stood before the cue became proof-only; the section was rewritten afterwards to submit turns and to expect no level named until a request carries one, and it has not been re-run since, so its line will read differently next time:
+
+```text
+$ FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
+ok - Claude Code 2.1.274 (Claude Code) with the flag unset: no hooks module, no /calm, no effort cue, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.274 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool and operational rows draw at zero height, /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.274 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
+ok - Claude Code 2.1.274 (Claude Code) draws the effort cue above the prompt in a distinct theme color per level, cycles it with /effort-cycle and with the band's own focus-and-press keys, follows the captain's own /effort, and leaves the starting level restored
+```
+
+The settled cue, captured from that live session at `max`, with the level's glyph and word drawn plainly and the rule carrying the theme color:
+
+```text
+● max ────────────────────────────────────────────────────────────────────────────────────────────────── [-]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Sonnet 5 | think:max | project | 5h:9% 7d:17%
+```
+
 ## 2026-09-25 Claude Code 2.1.280 verification and the record-backed operational doorbell
 
 Claude Code 2.1.280 removes invisible characters, U+2063 included, from every submitted prompt, whether typed, pasted, or passed as the launch prompt.

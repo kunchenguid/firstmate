@@ -10,6 +10,8 @@ import { mock, type MockClock } from "claude-code/testing";
 
 export const HOME = "/fm/home";
 export const PREFERENCE = `${HOME}/config/calm`;
+/** The model a main-loop request names, spelled as Claude Code's own settings key it. */
+export const MODEL = "claude-sonnet-5";
 
 export type Journal = {
   /** Every `$.command.register` name, in order. */
@@ -30,6 +32,10 @@ export type Journal = {
   configLists: number;
   /** Every `$.ui.log` line, in order. */
   logs: string[];
+  /** Every command that reached the bottom of a `command.run` chain, as `{ command, args }`. */
+  runs: { command: string; args: string }[];
+  /** Number of settings reads that reached the mocked settings files. */
+  settingsReads: number;
 };
 
 export type World = {
@@ -59,6 +65,12 @@ export type WorldOptions = {
   messages?: readonly { role: "user" | "assistant"; text: string; toolUses: readonly unknown[] }[];
   /** The `theme` row's value as `$.config.list()` reports it; omitted means `dark`. */
   theme?: unknown;
+  /** What `$.settings.read()` answers; omitted means an empty settings object. */
+  settings?: unknown;
+  /** The model `$.session.model()` answers with until a `/model <name>` switches it. */
+  model?: string;
+  /** Set to make every `$.command.run` deny with this reason, as a refused command does. */
+  commandFailure?: string;
 };
 
 /** The engine's own drawing, as the bottom of every `ui.render` chain. */
@@ -88,6 +100,8 @@ export function world(on: On, options: WorldOptions = {}): World {
     sessionMessageReads: 0,
     configLists: 0,
     logs: [],
+    runs: [],
+    settingsReads: 0,
   };
   let theme: unknown = "theme" in options ? options.theme : "dark";
   let blitDenial: string | undefined;
@@ -136,6 +150,24 @@ export function world(on: On, options: WorldOptions = {}): World {
     journal.sessionMessageReads += 1;
     return { value: [...(options.messages ?? [])] as SessionMessage[] };
   });
+  let model = options.model ?? MODEL;
+  on("session.model", async () => ({ value: model }));
+  on("settings.read", async () => {
+    journal.settingsReads += 1;
+    return { value: (options.settings ?? {}) as never };
+  });
+  // The bottom of every `command.run` chain the mod raises or forwards: what the engine
+  // would have run, recorded so a test can read exactly which level the mod selected.
+  on("command.run", async (_$, e) => {
+    // A command the engine refuses rejects the caller's `$.command.run`, as a host check does.
+    if (options.commandFailure !== undefined) throw new Error(options.commandFailure);
+    // `/model <name>` switches the session's model, which is what `$.session.model()` reports
+    // from then on; a bare `/model` opens the picker and switches nothing here.
+    if (e.command === "model" && e.args !== "") model = e.args;
+    journal.runs.push({ command: e.command, args: e.args });
+    return { value: {} };
+  });
+  on("ui.press", async (_$, e) => ({ value: { element: e.element } }));
   on("session.start", async (_$, e) => ({ cwd: e.cwd }));
   on("session.id", async () => ({ value: sessionId }));
   on("config.list", async () => {
@@ -260,6 +292,76 @@ export function calmCommand() {
     origin: { kind: "composer" as const },
     presentation: { layout: "main" as const, isFullscreen: false, columns: 80 },
   };
+}
+
+/** A run of a slash command as the composer raises it. */
+export function command(name: string, args = "") {
+  return {
+    command: name,
+    args,
+    origin: { kind: "composer" as const },
+    presentation: { layout: "main" as const, isFullscreen: false, columns: 80 },
+  };
+}
+
+/** The band above the composer, the site the effort cue draws in. */
+export function abovePrompt(bodyColumns = 40, requestId = "above-prompt", hasSurvey = false) {
+  return {
+    surface: "terminal" as const,
+    component: "AbovePrompt" as const,
+    requestId,
+    viewport: VIEWPORT,
+    props: {
+      hasSurvey,
+      isWorking: false,
+      maxRows: VIEWPORT.rows,
+      bodyColumns,
+      scroll: { offset: 0, bodyRows: VIEWPORT.rows - 1 },
+      view: {},
+    },
+  };
+}
+
+/** A press of the effort cue's Button, as `$.ui.press` names one. */
+export function effortCuePress(key = "firstmate-effort-cue") {
+  return { plugin: "fm", key };
+}
+
+/** One model request of the main loop, carrying the effort the engine resolved for it. */
+export function turnStep(effort?: unknown, agentId?: string, model = MODEL) {
+  return {
+    turnId: `turn-${model}`,
+    index: 0,
+    model,
+    messageCount: 1,
+    ...(effort === undefined ? {} : { effort: effort as never }),
+    ...(agentId === undefined ? {} : { agentId }),
+  };
+}
+
+/** The effort cue inside an `AbovePrompt` drawing: the Button's label and the rule's color. */
+export function effortCueOf(tree: unknown): { label: string; color: string; rule: string } | undefined {
+  const seen: unknown[] = [tree];
+  let label: string | undefined;
+  let color: string | undefined;
+  let rule: string | undefined;
+  while (seen.length > 0) {
+    const node = seen.pop();
+    if (node === null || typeof node !== "object") continue;
+    const element = node as { type?: unknown; props?: Record<string, unknown>; children?: unknown };
+    if (element.type === "Button" && typeof element.props?.label === "string") label = element.props.label;
+    if (element.type === "Text" && typeof element.props?.color === "string") {
+      color = element.props.color;
+      // The renderer lifts a Text's children out of its props and onto the element.
+      const text = element.children ?? element.props.children;
+      if (typeof text === "string") rule = text;
+      else if (Array.isArray(text) && text.every((part) => typeof part === "string")) rule = text.join("");
+    }
+    if (Array.isArray(element.children)) seen.push(...element.children);
+    else if (element.children !== undefined) seen.push(element.children);
+    if (element.props !== undefined && "children" in element.props) seen.push(element.props.children);
+  }
+  return label === undefined || color === undefined ? undefined : { label, color, rule: rule ?? "" };
 }
 
 /** Whether a drawing is the mod's zero-height box. */
