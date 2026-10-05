@@ -342,8 +342,8 @@ test_runs_under_set_u_on_a_bash_without_bashpid() {
   pass "fm_exec_timed runs under set -u on a bash without BASHPID"
 }
 
-# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
-# BASHPID regression. The rest of this file is not a 3.2 snapshot suite.
+# The whole file runs under stock macOS Bash 3.2 in CI's snapshot lane.
+# FM_TEST_ONLY runs a single case by name.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
