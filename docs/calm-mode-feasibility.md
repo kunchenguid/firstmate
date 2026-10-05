@@ -890,8 +890,7 @@ The cue therefore never names a level the session is not running, while the keys
 That separate level is what `$.settings.read()` and `$.session.model()` feed, and only before a session's first turn: a first keystroke climbs from the level Claude Code has saved for this model, which is where the session started, and a session with nothing saved takes no step and says so rather than moving the setting to a guess.
 The model's own entry decides whenever it has one, so an entry naming something off the ramp, such as `auto`, is unknown rather than a fall-through to the saved default of models that have no entry at all.
 It is also written before the command runs rather than after, so a chord repeating under the captain's finger steps once per press instead of collapsing into one step.
-Beside it the mod keeps the levels declined on the model now in use, read from the one piece of evidence there is: a step that asked for a level and left the session where it already was.
-The ramp passes over those and says so once while nothing is left to ask for; the memory is forgotten as soon as a request names another model, which is also the only event a picker-driven switch leaves behind, dies with the session, is written to no file, and never reaches the cue.
+This build also kept a memory of levels it took as declined and a notice for a ramp with nothing left; both were guesses and were removed, as the [2.1.280 record](#2026-10-05-claude-code-21280-effort-change-confirmation) below records, so neither is present behavior.
 It is gated on the same exact `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` opt-in as the rest of the mod, it neither reads nor writes the Calm preference, it writes no settings file, and a `/effort` the host refuses to run at all is reported in a notice with the selection and the cue left as they were.
 
 ```text

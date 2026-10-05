@@ -4,9 +4,10 @@
 // may load this module through its rollout flag or `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`,
 // but every handler requires that environment variable to equal `1`, so rollout-only
 // loading remains a complete no-op.
-// The plugin carries no command, skill, agent, or classic hook of its own; the `/calm`
-// command below exists only once this module has registered it. docs/calm.md owns the
-// captain-facing contract and docs/calm-mode-feasibility.md the version-scoped evidence.
+// The plugin carries no command, skill, agent, or classic hook of its own; the `/calm` and
+// `/effort-cycle` commands below exist only once this module has registered them.
+// docs/calm.md owns the captain-facing Calm contract, docs/effort-cue.md the effort cue's,
+// and docs/calm-mode-feasibility.md the version-scoped evidence.
 //
 // This file is the only place the engine interface `$` is touched: the geometry lives
 // in ../lib/fm-calm-working-ship-sprite.ts (shared with the Pi extension), the Raster

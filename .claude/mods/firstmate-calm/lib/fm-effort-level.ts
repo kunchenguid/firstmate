@@ -6,7 +6,7 @@
 // levels the cue can show, which subset one keystroke cycles through, which of Claude
 // Code's own theme colors names each level, when a request proves what level is in force,
 // and which saved level a first keystroke steps up from.
-// docs/calm.md owns the captain-facing contract and
+// docs/effort-cue.md owns the captain-facing contract and
 // docs/calm-mode-feasibility.md the version-scoped evidence. Everything here is pure so
 // tests run it under Node.
 
