@@ -86,7 +86,7 @@ Each hook command prints the empty JSON object Gemini's hook contract requires a
 
 Two quirks are wired for deliberately.
 `SessionEnd` was observed firing TWICE for one `/quit`; the repeated idle event is idempotent and is not de-duplicated.
-`AfterAgent` fires on a manual Escape interrupt as well as on normal completion, which is better than Claude, whose interrupt emits no hook and usually leaves `claude-hook` busy.
+`AfterAgent` fires on a manual Escape interrupt as well as on normal completion, while Claude emits no interrupt hook and therefore needs the explicit `fm-interrupt` correction owned by `bin/fm-busy-lib.sh`.
 
 The system settings layer also makes the busy contract independent of the trust decision: its hooks were verified firing under `--skip-trust` in an untrusted folder, and they need no entry in Gemini's per-workspace `~/.gemini/trusted_hooks.json`, which only records PROJECT hooks.
 Workspace trust therefore buys skills, not state.

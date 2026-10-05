@@ -41,7 +41,8 @@
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
-#   fm-interrupt     the legacy Claude fm-send --key Escape idle event, and the
+#   fm-interrupt     the Claude manual-interrupt idle correction shared by
+#                    fm-send --key Escape and fm-control interrupt, and the
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
@@ -252,6 +253,37 @@ fm_busy_source_trusted() {  # <harness> <source>
   return 1
 }
 
+# fm_busy_record_parse: validate one busy-record line against the full record
+# grammar. Prints "<gen> <state> <source> <event> <seq>" or fails.
+fm_busy_record_parse() {  # <line>
+  local ver f
+  local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts=''
+  local -a fields
+  # `read -a` rather than `set --`: it never glob-expands a field and never
+  # touches the caller's positional parameters or shell options.
+  IFS=' ' read -r -a fields <<< "$1"
+  ver=${fields[0]:-}
+  [ "$ver" = "$FM_BUSY_LIB_VERSION" ] || return 1
+  for f in "${fields[@]:1}"; do
+    case "$f" in
+      gen=*) r_gen=${f#gen=} ;;
+      seq=*) r_seq=${f#seq=} ;;
+      state=*) r_state=${f#state=} ;;
+      source=*) r_source=${f#source=} ;;
+      event=*) r_event=${f#event=} ;;
+      ts=*) r_ts=${f#ts=} ;;
+      *) return 1 ;;
+    esac
+  done
+  fm_busy_token_valid "$r_gen" || return 1
+  fm_busy_token_valid "$r_source" || return 1
+  fm_busy_token_valid "$r_event" || return 1
+  case "$r_seq" in ''|*[!0-9]*) return 1 ;; esac
+  case "$r_ts" in ''|*[!0-9]*) return 1 ;; esac
+  case "$r_state" in busy|idle|unknown) : ;; *) return 1 ;; esac
+  printf '%s %s %s %s %s' "$r_gen" "$r_state" "$r_source" "$r_event" "$r_seq"
+}
+
 # fm_busy_record_read: parse and validate state/<id>.busy-state against the
 # armed gen. Prints "<state> <source> <event> <seq>" for a valid record.
 # Non-zero returns name the reason on stdout instead:
@@ -260,8 +292,8 @@ fm_busy_source_trusted() {  # <harness> <source>
 #                existing record
 #   gen-mismatch a record from a stale incarnation
 fm_busy_record_read() {  # <state-dir> <id>
-  local state=$1 id=$2 rec gen line extra ver f
-  local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts=''
+  local state=$1 id=$2 rec gen line extra parsed
+  local r_gen r_seq r_state r_source r_event
   rec=$(fm_busy_record_path "$state" "$id")
   if [ ! -f "$rec" ]; then
     printf 'missing'
@@ -277,29 +309,11 @@ fm_busy_record_read() {  # <state-dir> <id>
     printf 'malformed'
     return 1
   }
-  # `read -a` rather than `set --`: it never glob-expands a field and never
-  # touches the caller's positional parameters or shell options.
-  local -a fields
-  IFS=' ' read -r -a fields <<< "$line"
-  ver=${fields[0]:-}
-  [ "$ver" = "$FM_BUSY_LIB_VERSION" ] || { printf 'malformed'; return 1; }
-  for f in "${fields[@]:1}"; do
-    case "$f" in
-      gen=*) r_gen=${f#gen=} ;;
-      seq=*) r_seq=${f#seq=} ;;
-      state=*) r_state=${f#state=} ;;
-      source=*) r_source=${f#source=} ;;
-      event=*) r_event=${f#event=} ;;
-      ts=*) r_ts=${f#ts=} ;;
-      *) printf 'malformed'; return 1 ;;
-    esac
-  done
-  fm_busy_token_valid "$r_gen" || { printf 'malformed'; return 1; }
-  fm_busy_token_valid "$r_source" || { printf 'malformed'; return 1; }
-  fm_busy_token_valid "$r_event" || { printf 'malformed'; return 1; }
-  case "$r_seq" in ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
-  case "$r_ts" in ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
-  case "$r_state" in busy|idle|unknown) : ;; *) printf 'malformed'; return 1 ;; esac
+  parsed=$(fm_busy_record_parse "$line") || {
+    printf 'malformed'
+    return 1
+  }
+  read -r r_gen r_state r_source r_event r_seq <<< "$parsed"
   if [ "$r_gen" != "$gen" ]; then
     printf 'gen-mismatch'
     return 1
@@ -1212,4 +1226,47 @@ fm_busy_is_busy() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local verdict
   verdict=$(fm_busy_classify "$@")
   [ "${verdict%% *}" = busy ]
+}
+
+# fm_busy_record_manual_interrupt: correct the semantic busy ledger after a
+# manual interrupt key reaches a hook-based busy source. Claude's contract
+# (claude-hook above) is a UserPromptSubmit/Stop bracket; a manual interrupt
+# key emits neither hook, so without this call the ledger is left claiming
+# busy indefinitely - including across a blocking tool prompt (a trust
+# dialog, or a tool like AskUserQuestion) that a manual interrupt correctly
+# dismisses without ever reaching Stop. A caller that gates on busy state
+# (bin/fm-watch.sh's steering-inbox ladder among them) then treats the pane
+# as still provably working forever, so a durable steer already queued for
+# it is never delivered until something else corrects the ledger by hand.
+# Scoped to Claude, whose hook bracket needs this explicit correction; every
+# other harness is a no-op here and retains the verdict from its own source.
+# <snapshot> (from fm_busy_record_snapshot, read before the key was sent)
+# binds the correction to the exact incarnation and seq on record then: it is
+# a no-op once a relaunch replaced the incarnation or a newer event, such as
+# a new UserPromptSubmit, has landed. A missing, unreadable, multiline, or
+# malformed record yields an empty snapshot, so there is nothing safe to correct.
+# This is the one owner of the correction: bin/fm-send.sh's --key Escape path
+# and bin/fm-control.sh's interrupt verb both call it rather than keeping
+# separate copies, so the two interrupt entry points cannot drift apart on
+# what a manual interrupt does to busy state.
+fm_busy_record_manual_interrupt() {  # <fm-root> <state-dir> <id> <harness> [snapshot]
+  local root=$1 state=$2 id=$3 harness=$4 snapshot=${5:-}
+  case "$harness" in claude*) : ;; *) return 0 ;; esac
+  [ -f "$state/$id.busy-gen" ] || return 0
+  [ -n "$snapshot" ] || return 0
+  "$root/bin/fm-busy-event.sh" apply "$state" "$id" idle \
+    --gen "${snapshot%%:*}" --source fm-interrupt --event interrupt --if-seq "${snapshot##*:}"
+}
+
+# fm_busy_record_snapshot: "<gen>:<seq>" read from one complete, valid busy
+# record (the record is replaced atomically), or empty when no such record is
+# readable. A caller captures it before sending an interrupt key and passes it
+# to fm_busy_record_manual_interrupt, so neither a relaunch nor a later record
+# event is overwritten as idle.
+fm_busy_record_snapshot() {  # <state-dir> <id>
+  local line extra parsed gen seq
+  { IFS= read -r line && ! IFS= read -r extra; } < "$(fm_busy_record_path "$1" "$2")" 2>/dev/null || return 0
+  parsed=$(fm_busy_record_parse "$line") || return 0
+  read -r gen _ _ _ seq <<< "$parsed"
+  printf '%s:%s' "$gen" "$seq"
 }
