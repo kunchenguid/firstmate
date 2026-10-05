@@ -393,6 +393,56 @@ Removing the `--force` arm makes the forced generic case refuse; honoring `--for
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
 Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
 
+### Endpoint identity and absence proof
+
+Verified 2026-10-05 against tmux 3.6 on Linux (WSL2, kernel 6.18), on private sockets addressed through `-L`/`-S` and never the host's own sessions.
+The tmux endpoint identity a task record carries (`bin/fm-endpoint-proof-lib.sh`) rests on these observed facts.
+
+The four server and window facts a record stores are format variables of one `display-message`:
+
+```sh
+tmux -L fmv display-message -p -t v:w '#{socket_path} #{pid} #{start_time} #{window_id}'
+```
+
+```text
+<lab>/tmux-1000/fmv 578899 1791174952 @0
+```
+
+tmux rewrites a tab in its own output when the client has no `$TMUX` and a non-UTF-8 locale, so no tmux read here joins fields with one:
+
+```sh
+env -u TMUX LC_ALL=C tmux -L fmv list-windows -a -F "#{window_id}<TAB>x" | od -An -c | head -1
+env -u TMUX tmux -L fmv list-windows -a -F "#{window_id}<TAB>x" | od -An -c | head -1
+```
+
+```text
+   @   0   _   x  \n
+   @   0  \t   x  \n
+```
+
+`-S <socket>` wins over `-L <label>` when both are given, which is how a per-label test shim can still read an explicit recorded socket.
+
+A tmux client hands its stdin and stdout to the server it talks to.
+With the server stopped (`kill -STOP`), a `$(timeout 2 tmux -S <socket> display-message -p '#{pid}' 2>&1)` capture was still waiting after 6s and returned only when the server was resumed (8s), while the same command redirected to a file returned at its bound:
+
+```text
+after 6s the pipe capture has returned: no
+file capture: rc=124 after 2s
+pipe capture returned after 8s
+```
+
+So every read of a server this seat does not own is captured through a file.
+
+`kill-server` removes the server but leaves its socket file behind, and a client that connects to it answers the message the proof classifies as a gone server:
+
+```text
+fmv
+no server running on <lab>/tmux-1000/fmv
+```
+
+A stale socket is therefore not evidence of a live server, and a refused or missing socket plus the absence of any tmux process holding the recorded pid is how a gone server instance is recognized.
+`tests/fm-endpoint-proof.test.sh` exercises each case against real servers and is the command that refreshes this record after a tmux upgrade.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.

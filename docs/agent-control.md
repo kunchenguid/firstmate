@@ -33,7 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
+| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a Herdr pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` that its record cannot prove - a record without endpoint identity, or a recorded server that is unreachable or still holding the window - refuses rather than claim a stop it cannot see. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -80,7 +80,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
-   When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
+   When the recorded endpoint is proven gone rather than merely idle or unreachable - which Herdr establishes from the recorded session and tmux from the endpoint identity its record carries - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 6. **Preserve runtime-bound status authority where supported.**
    The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume, and otherwise launches the ordinary fresh session.
    This reference is a launch input, never authority to send, close, or act on the pane.
@@ -90,10 +90,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 
 ### Reclaiming a task whose endpoint is gone
 
-A Herdr pane or workspace can be destroyed out from under a live task by churn or a session restart.
+A Herdr pane or workspace can be destroyed out from under a live task by churn or a session restart, and a tmux server can be lost with every window on it by a crash or a restart that wipes `/tmp`.
 The task's worktree, branch, commits, and uncommitted changes all survive that; only its terminal does not.
-
-**Reclaim is Herdr-only.** On tmux, both verbs refuse a `missing` endpoint, leaving it exactly as deadlocked as it was before this mechanism existed - deliberately, and with the reason stated rather than guessed past.
 
 Two endpoint verdicts are agent-free, and both license a relaunch:
 
@@ -101,20 +99,23 @@ Two endpoint verdicts are agent-free, and both license a relaunch:
 - gone, **proven** - there is no endpoint and therefore no agent, and it cannot be adopted, so the launch owner **creates one fresh endpoint in the recorded worktree** and the republished record rebinds the task to it.
 
 That proof is its own step, because the classifier's `missing` is not one state: it conflates *the endpoint was destroyed* with *the endpoint is unreachable from here right now*.
-An unreachable endpoint can still hold the live agent a rebind would duplicate, so absence is proven and never inferred from a failed read - and whether it is provable at all is a property of the backend:
+An unreachable endpoint can still hold the live agent a rebind would duplicate, so absence is proven and never inferred from a failed read.
+How it is proven is a property of the backend, and `fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh` is the one owner of the dispatch, so `exit` and `relaunch` cannot reach two different answers about one endpoint:
 
-- **Herdr can prove it.** Every read goes through the adapter's `--session <session>` CLI, so the recheck starts and reads the session the *record* names, through that session's own socket.
+- **Herdr proves it from the recorded session.** Every read goes through the adapter's `--session <session>` CLI, so the recheck starts and reads the session the *record* names, through that session's own socket.
   It starts that server (only the server: no workspace and no tab are created) and **re-reads the recorded pane**.
   `dead` means the pane survived the restart and is adopted after all, with no second tab; `alive` means the agent came back and refuses; only a second `missing` proves the pane itself did not survive ([`docs/herdr-backend.md`](herdr-backend.md) "Restart and liveness behavior").
   That server start is a real side effect, and the parenthetical above does not cover it: when the recorded session's server no longer exists at all, the probe stands a fresh empty one up in order to ask, and nothing afterwards uses it.
   So in that state `exit` - which otherwise reads as a read-only inspection - leaves an idle herdr server behind.
-- **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.
-  A different but running server would answer "not anywhere" about a window it was never able to see, so a server-wide read cannot tell a destroyed window from one on a server this process cannot address.
-  There is no read available that closes that gap, so tmux always refuses - for a renamed session, a moved window, a foreign socket, and a dead server alike.
+- **tmux proves it from the identity its record carries.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), so a server-wide read cannot tell a destroyed window from one on a server this process cannot address, and it is never the proof.
+  Every tmux record written by `bin/fm-spawn.sh` therefore names the server instance that hosted its window: `tmux_socket`, `tmux_server_pid` and `tmux_server_start` (together one server *instance*, which a reused pid or a reused socket path cannot impersonate), `tmux_window_id` (which survives a rename or a move between sessions), `endpoint_host`, and `endpoint_boot`.
+  [`bin/fm-endpoint-proof-lib.sh`](../bin/fm-endpoint-proof-lib.sh) owns the fields and the proof, which rests on exactly one of three facts: the host rebooted since the record was written (same host identity, different boot id, so nothing of that boot is running), the recorded server instance is gone (its socket refuses or no longer exists and no tmux process holds the pid, or the socket is now served by a different instance), or the live recorded server no longer has the recorded window id.
+  After any of them the worktree is still checked for live processes: a same-user non-shell process working in it, or carrying `FM_TASK_ID=<id>`, vetoes the proof, because an agent that outlived its server is exactly the duplicate this guards against.
+  Everything else is `unproven` and refuses as before: a failed or timed-out read (every read is bounded, and captured through a file because a tmux client hands its stdout to the server, so a stopped server would otherwise hold a pipe capture open past the bound), a permission error, a record written on another host, a live recorded server that still has the window - alive, renamed, or moved - and a record whose identity is incomplete or invalid.
+  A tmux record written before the identity existed is [legacy](#legacy-tmux-records-and-the-explicit-consent).
 
 Every transient or self-contradicting read stays `unreadable` or `ambiguous` and still refuses, so a momentary backend failure can never be mistaken for absence.
 
-That proof has one owner for the whole control plane (`fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh`), so `exit` and `relaunch` cannot reach two different answers about one endpoint.
 `exit` reports what the proof established and nothing more - see its row in the verb table above.
 
 What a reclaim is not:
@@ -139,6 +140,41 @@ The rebind registers no abort cleanup, so a refusal in the window between the ne
 The stray pane holds a bare shell - the harness is not delivered until after publication - so the next reclaim cleans up after it: the re-created tab carries the same `fm-<id>` label, `tab create` finds it, classifies it a husk, and closes and replaces it.
 That self-heals only when the retry resolves the *same* workspace, which the placement rule above does not guarantee.
 The worktree and the task's records are unaffected either way.
+
+A tmux rebind opens its fresh window directly in the recorded worktree, on the tmux server the recovering seat addresses: in the seat's own session when it runs inside tmux, otherwise in the detached `firstmate` session.
+The recorded server is proven gone, so there is no other server to keep the task on, and the record is republished with the new window's label and identity.
+The window is closed again, by its exact id, if the spawn aborts before any launch text reached it, so a refused attempt leaves nothing for a retry to trip over; once the record is republished the window is the task's endpoint and is never closed by the abort path.
+A relaunch that adopts a live tmux window refreshes the record's identity from that window, so a record written before the identity existed gains it at its next relaunch.
+
+### Legacy tmux records and the explicit consent
+
+A tmux record spawned before the identity existed carries nothing a proof can start from, and nothing is claimed for it: `exit` and `relaunch` refuse its `missing` endpoint exactly as they always did.
+The one way through is an explicit, specific, recorded consent, and it exists for the situation this plane was blind to - the tmux server that hosted the task is gone, the worktree and its work are intact, and the operator is certain the old agent died with it.
+
+1. `FM_HOME=<home> bin/fm-endpoint-proof.sh <id>` prints the evidence that can still be read and changes nothing: host and boot identity, whether the record predates this boot, the server this seat addresses (where a replacement would open), every reachable tmux server of this user and whether any holds a window for the task, the servers it could not read, and the worktree's live processes.
+   It ends with a `consent-digest` over exactly the decision-relevant evidence.
+   While the evidence names a live window or process there is no digest and the report says `consent: not possible`; no consent ever overrides a live agent.
+   A tmux server of this user that the report could not match to a scanned socket (one started with its own `TMUX_TMPDIR`, say) is listed as a warning and is not part of the digest, so confirm none of them hosts the task before asking.
+2. On the captain's explicit word for that task, `bin/fm-control.sh <id> relaunch --note <text> --legacy-endpoint-consent <digest>` passes the digest back.
+   It verifies only while the evidence is byte-identical, so a restarted server or a process that appeared since the review voids it, and the refusal prints the current digest.
+   It is refused while the away-posture record exists, because nobody who could speak for the captain is watching, and it is never accepted for a record that carries identity - a complete record is decided by its proof alone, so an unreachable or live recorded server is never overridden.
+3. Before anything is stopped, the consent is appended to `state/<id>.endpoint-consent` with the evidence it rested on, and the journal names the digest; `bin/fm-endpoint-proof.sh consents <id>` re-digests each recorded block, so a consent can be audited, and an altered one stops matching.
+   The relaunch then rebinds the task like any proven reclaim, and the record it publishes carries identity, so a repeated recovery of the same task needs no second consent: after the first relaunch the window is adopted, never duplicated.
+
+The consent is the operator's decision about a fact the machine could not establish, with the evidence it was made on kept beside it; it is not a proof and is never reused as one.
+The evidence is shown, not trusted: a record-versus-boot comparison rests on the wall clock, which is why it informs the operator and never carries a verdict.
+
+`bin/fm-endpoint-proof.sh backfill <id|--all>` gives a *live* legacy tmux record the identity it lacks, by reading the window through its exact label on the server this seat addresses and appending the lines under the task's meta lock by atomic replace.
+Run it while tmux is healthy, once after updating firstmate, so the next loss of a server is provable instead of needing a consent.
+It is a no-op for a record that already carries identity, a missing endpoint, or any other backend.
+
+Known limits, stated rather than hidden:
+
+- The proof compares host and boot identity but not pid or mount namespaces, so a record written inside a container that shares the host's machine id and boot id cannot be told apart from one on the host.
+- A process that is not visible to this user (another account's) cannot veto.
+- On a platform without `/proc` the process check reads `lsof` and cannot see the `FM_TASK_ID` marker.
+- The identity is consulted only when the server this seat addresses reads the endpoint `missing`. A same-named, agent-free window already present on this seat's server is still adopted by its name, as before, without checking whether the recorded identity names a different server that is alive: the recovery that creates such a window refuses unless the recorded server is proven gone, but a window put there by other means is trusted.
+- A tmux server of this user outside the scanned socket directories cannot be matched to a socket, so the legacy evidence lists it as a warning outside the digest, and confirming it does not host the task stays with the operator.
 
 ### Failure and rollback
 
@@ -168,7 +204,7 @@ The worktree and the task's records are unaffected either way.
   Only a positively classified state acts.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
 - `fm-spawn --relaunch` independently refuses unless the endpoint is positively agent-free - either a `dead` endpoint that survives, or a Herdr endpoint proven gone by the absence proof above - so a replacement can never join a live agent.
-  An `alive`, `ambiguous`, or `unreadable` verdict all refuse, and so does any endpoint whose absence is not provable, which on tmux is every `missing`; absence is claimed only from positive evidence of it.
+  An `alive`, `ambiguous`, or `unreadable` verdict all refuse, and so does any endpoint whose absence is not provable, which on tmux is a `missing` whose record carries no identity (without a reviewed consent) or whose recorded server is unreachable or still holds the window; absence is claimed only from positive evidence of it.
   It also requires the shell to be in the recorded worktree: every backend but Orca (which owns its own task worktree with no current-path probe) gets one explicit `cd` to the recorded path, then a pre-launch path read that refuses before any harness starts unless it confirms the endpoint is sitting in the recorded copy.
 
 ## Capability matrix
@@ -189,5 +225,6 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, the tmux reclaim from a record's identity, the legacy consent (wrong digest, live process, away posture, accepted digest), repeated recovery, and tmux refusing every endpoint it cannot prove absent.
+- `tests/fm-endpoint-proof.test.sh` - the tmux identity and proof against real tmux servers on private sockets: a server that is gone or replaced, a window gone from a live server, an endpoint alive elsewhere (renamed or moved), a stopped or unreadable server (bounded), a reboot and another host, a live process in the worktree, legacy evidence and its digest, the consent record, dirty work left untouched, and the idempotent backfill.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

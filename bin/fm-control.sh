@@ -7,6 +7,7 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#                                         [--legacy-endpoint-consent <digest>]
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -46,11 +47,16 @@
 #              `already-stopped`, because the endpoint this verb normally
 #              preserves did not survive; a pane that turns out to be there and
 #              idle is the ordinary `already-stopped`; one whose agent is back
-#              takes the ordinary interrupt-then-exit path. A tmux `missing`
-#              always REFUSES: a task record carries no socket identity for its
-#              endpoint, so this verb cannot tell a destroyed window from one on
-#              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#              takes the ordinary interrupt-then-exit path. A tmux `missing` is
+#              proven only from the endpoint identity the task record carries
+#              (bin/fm-endpoint-proof-lib.sh): the host rebooted, the recorded
+#              tmux server instance is gone, or that live server no longer has
+#              the recorded window, and no non-shell process is working in the
+#              worktree. A record without that identity (spawned before it was
+#              recorded) or any unreachable, alive-elsewhere, or malformed
+#              reading REFUSES: this verb cannot tell a destroyed window from
+#              one on a tmux server it cannot address, and it will not claim a
+#              stop it cannot see.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -61,9 +67,19 @@
 #              names, and the task's record rebinds to it; that is how a task
 #              whose terminal was destroyed is reclaimed by the home that owns
 #              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              answer. A tmux `missing` is reclaimed the same way only on the
+#              proof `exit` describes above; the fresh window opens in the
+#              recorded worktree on the CURRENT tmux server and the record
+#              takes that server's identity.
+#              A LEGACY tmux record has no identity to prove from, so it
+#              refuses unless the relaunch carries --legacy-endpoint-consent
+#              <digest>: the digest of the evidence bin/fm-endpoint-proof.sh
+#              printed for that task. It verifies only while the evidence is
+#              byte-identical, never overrides a live window or process, never
+#              applies to a record that carries identity, is refused while the
+#              away-posture record exists, and is appended to
+#              state/<id>.endpoint-consent. Pass it only on the captain's
+#              explicit word for that task.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
@@ -176,6 +192,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-afk-contract.sh
+. "$SCRIPT_DIR/fm-afk-contract.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -238,6 +256,8 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+CONSENT_DIGEST=
+CONSENT_USED=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -254,6 +274,7 @@ for control_arg in "$@"; do
         NOTE=$(cat "$control_arg")
         NOTE_SET=1
         ;;
+      consent) CONSENT_DIGEST=$control_arg ;;
     esac
     control_want_value=
     continue
@@ -268,6 +289,8 @@ for control_arg in "$@"; do
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
+    --legacy-endpoint-consent) control_want_value=consent ;;
+    --legacy-endpoint-consent=*) CONSENT_DIGEST=${control_arg#--legacy-endpoint-consent=} ;;
     --note-file=*)
       [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
       NOTE=$(cat "${control_arg#--note-file=}")
@@ -284,7 +307,13 @@ fi
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
     || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ -z "$CONSENT_DIGEST" ] || die "--legacy-endpoint-consent applies to 'relaunch' only"
 fi
+case "$CONSENT_DIGEST" in
+  '') ;;
+  *[!0-9a-f]*) die "--legacy-endpoint-consent takes the 64-character hex digest bin/fm-endpoint-proof.sh prints" ;;
+  *) [ "${#CONSENT_DIGEST}" -eq 64 ] || die "--legacy-endpoint-consent takes the 64-character hex digest bin/fm-endpoint-proof.sh prints" ;;
+esac
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -571,9 +600,10 @@ do_exit() {
       # "destroyed" with "unreachable from this seat". Route it through the
       # control plane's one absence proof - the same one the relaunch gate uses
       # - and report what that proof actually established, never more.
-      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T" "$META" "$CONSENT_DIGEST")
       case "${absence%%$'\t'*}" in
         gone)
+          [ -z "${absence#*$'\t'}" ] || echo "note: task $ID's endpoint $T is proven gone: ${absence#*$'\t'}" >&2
           # Proven gone, so the agent that lived in it went with it: exit's
           # postcondition already holds and there is nothing to send. Its own
           # outcome rather than `already-stopped`, because the endpoint this
@@ -959,6 +989,32 @@ record_note() {
   esac
 }
 
+# record_endpoint_consent: verify, then durably record, the operator's
+# --legacy-endpoint-consent digest BEFORE anything is stopped. The digest
+# is only meaningful for a legacy tmux record whose endpoint reads `missing`;
+# for any other task it is ignored (a retry after a first attempt already
+# rebound the record legitimately passes the same flag), and every refusal here
+# leaves the task untouched.
+record_endpoint_consent() {
+  local raw reason
+  [ -n "$CONSENT_DIGEST" ] || return 0
+  [ "$BACKEND" = tmux ] \
+    || die "--legacy-endpoint-consent applies to a tmux task, and task $ID runs on $BACKEND"
+  if fm_afk_contract_away_present "$STATE"; then
+    die "--legacy-endpoint-consent is attended-only: the away-posture record exists, so no legacy endpoint can be accepted gone until the captain is back and says so"
+  fi
+  raw=$(agent_state)
+  if [ "$raw" != missing ] || [ "$(fm_endpoint_identity_state "$META")" != legacy ]; then
+    echo "note: --legacy-endpoint-consent was not needed for task $ID (its endpoint reads '$raw' and its record is $(fm_endpoint_identity_state "$META")); ignoring it" >&2
+    return 0
+  fi
+  reason=$(fm_endpoint_legacy_check "$META" "$CONSENT_DIGEST") \
+    || die "task $ID's legacy endpoint consent was refused: $reason"
+  fm_endpoint_consent_record "$STATE" "$ID" "$META" "$CONSENT_DIGEST" \
+    || die "could not record task $ID's endpoint consent at $STATE/$ID.endpoint-consent; refusing to act on a consent that left no durable trace"
+  CONSENT_USED=1
+}
+
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
@@ -990,6 +1046,8 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  record_endpoint_consent
+  [ "$CONSENT_USED" = 0 ] || CHECKPOINT_LINES+=("endpoint_consent=$CONSENT_DIGEST")
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
@@ -1008,6 +1066,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ "$CONSENT_USED" = 0 ] || spawn_args+=(--legacy-endpoint-consent "$CONSENT_DIGEST")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1

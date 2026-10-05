@@ -15,7 +15,7 @@
 # This file owns three capability tables plus their pure artifact-path tables,
 # and ONE named exception to that purity - fm_control_endpoint_absence_verdict,
 # the single owner of the per-backend endpoint-absence proof, which does run
-# backend reads. Everything else has no side effects, runs no backend command,
+# backend reads (tmux's identity-bound proof lives in bin/fm-endpoint-proof-lib.sh). Everything else has no side effects, runs no backend command,
 # and reads no state, so sourcing this file is still free and the tables can be
 # read by a test as a pure contract:
 #
@@ -43,6 +43,12 @@
 # its durable instruction. The relaunch-time exception is
 # fm_control_relaunch_resume_flag below: a reference the endpoint's runtime
 # bound as its status authority is returned to a replacement with that adapter.
+
+_FM_CONTROL_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_CONTROL_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_CONTROL_LIB_DIR=.
+# shellcheck source=bin/fm-endpoint-proof-lib.sh
+. "${_FM_CONTROL_LIB_DIR:-/}/fm-endpoint-proof-lib.sh"
+unset _FM_CONTROL_LIB_DIR
 
 # The complete control-plane verb allowlist, one per line.
 fm_control_verbs() {
@@ -306,9 +312,9 @@ fm_control_backend_state_verified() {  # <backend>
 # unreachable from this seat. Call it only for a `missing` raw state.
 #
 # Prints "<verdict>\t<reason>" - always exactly one TAB, so a caller splits
-# unambiguously with ${raw%%$'\t'*} and ${raw#*$'\t'}. The reason is empty
-# except on `unproven`, where it is the concrete sentence the caller's refusal
-# message embeds. It is returned on stdout rather than set in a variable
+# unambiguously with ${raw%%$'\t'*} and ${raw#*$'\t'}. The reason is the
+# concrete sentence the caller's refusal message embeds on `unproven`, the
+# basis the proof rested on for a tmux `gone`, and empty otherwise. It is returned on stdout rather than set in a variable
 # because every caller reads this through a command substitution, where an
 # assignment made here could never reach them.
 #
@@ -331,23 +337,59 @@ fm_control_backend_state_verified() {  # <backend>
 #     passes `--session <session>`, so the recheck starts and reads the session
 #     the RECORD names, through that session's own socket. The answer is about
 #     the task's endpoint and nothing else.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
+#   tmux proves it from the record's own identity, never from the ambient
+#     server. `list-windows -a` describes only the server the CURRENT process
+#     addresses (its TMUX_TMPDIR/socket), so a window absent from it may be
+#     alive on another server. A record written by a current bin/fm-spawn.sh
+#     therefore carries the endpoint's server identity (socket, server pid and
+#     start time, window id, host, boot - bin/fm-endpoint-proof-lib.sh owns the
+#     fields and the proof): absence is proven only when the host rebooted, the
+#     recorded server instance is provably gone, or the live recorded server no
+#     longer has the recorded window id, AND no non-shell process is working in
+#     the task's worktree. A server that is merely unreachable, a record from
+#     another host, a window still alive elsewhere, and a malformed record stay
+#     `unproven`. A LEGACY record (spawned before the identity existed) carries
+#     nothing to prove from, so it stays `unproven` too, with one narrow way
+#     through: the caller may pass the digest of the legacy evidence the
+#     operator reviewed (bin/fm-endpoint-proof.sh prints it), which verifies
+#     only while the evidence is byte-identical and carries no sign of a live
+#     window or process, and which never applies to a complete record.
+#     Without identity or digest the verdict is the one tmux always had, so
+#     tmux is never made less safe than it was.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
-fm_control_endpoint_absence_verdict() {  # <backend> <target>
-  local backend=${1-} target=${2-}
+fm_control_endpoint_absence_verdict() {  # <backend> <target> [<meta-file> [<legacy-consent-digest>]]
+  local backend=${1-} target=${2-} meta=${3-} consent=${4-} identity reason id
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
     tmux)
-      printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+      if [ -z "$meta" ] || [ ! -f "$meta" ]; then
+        printf 'unproven\ttmux absence cannot be proven without the task record: the window label alone does not say which tmux server it lived on'
+        return 0
+      fi
+      identity=$(fm_endpoint_identity_state "$meta")
+      case "$identity" in
+        complete)
+          fm_endpoint_tmux_proof "$meta"
+          ;;
+        legacy)
+          id=$(fm_endpoint_meta_field "$meta" endpoint_task_id) || id=$(basename "$meta" .meta)
+          if [ -n "$consent" ]; then
+            if reason=$(fm_endpoint_legacy_check "$meta" "$consent"); then
+              printf 'gone\tlegacy record, absence accepted on the operator'"'"'s reviewed evidence (digest %s)' "$consent"
+            else
+              printf 'unproven\t%s' "$reason"
+            fi
+          else
+            printf 'unproven\ttask %s was recorded before tmux endpoint identity existed, so its record cannot say which tmux server it lived on and its absence cannot be proven; review the evidence with bin/fm-endpoint-proof.sh %s, and only on the captain'"'"'s explicit word repeat the relaunch with --legacy-endpoint-consent <digest>' "$id" "$id"
+          fi
+          ;;
+        *)
+          printf 'unproven\tthe tmux endpoint identity in the task record is incomplete or invalid, which a recovery will not guess past; the record needs reconciling by hand'
+          ;;
+      esac
       ;;
     herdr)
       # Start the RECORDED session's server (only the server - nothing is

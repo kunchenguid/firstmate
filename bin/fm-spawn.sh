@@ -42,7 +42,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--legacy-endpoint-consent <digest>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -61,15 +61,25 @@
 #   ADOPTED as-is, while an endpoint PROVEN gone is RE-CREATED in the recorded
 #   worktree and the republished record rebinds the task to it. That proof is
 #   its own step, because a backend's `missing` also covers an endpoint that is
-#   merely unreachable from here - and it is only available on HERDR, which must
-#   still read the recorded pane as gone once that session's server is running
-#   again. A tmux `missing` always refuses: a task record carries no socket
-#   identity for its endpoint, so no read here can tell a destroyed window from
-#   one on a tmux server this process cannot address. An endpoint that turns out
-#   to have survived refuses too. The worktree is reused untouched either way; a
-#   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
-#   secondmate whose endpoint is gone is respawned by its own owner
-#   (`--secondmate`, driven by the session-start liveness sweep).
+#   merely unreachable from here. HERDR proves it by starting the recorded
+#   session's server and re-reading the recorded pane, which must still read as
+#   gone. tmux proves it from the endpoint identity the task record carries
+#   (bin/fm-endpoint-proof-lib.sh): the host rebooted, the recorded tmux server
+#   instance is gone, or that live server no longer has the recorded window,
+#   and no non-shell process is working in the worktree. A tmux record that
+#   predates that identity refuses unless the caller passes
+#   --legacy-endpoint-consent <digest> (the digest bin/fm-endpoint-proof.sh
+#   prints for that task; attended-only, never for a record that carries
+#   identity), and a rebound tmux window opens in the recorded worktree on the
+#   current tmux server. An endpoint that turns out to have survived refuses
+#   too. The worktree is reused untouched either way; a rebind is a recovery,
+#   never a teardown. Only a crewmate or scout rebinds: a secondmate whose
+#   endpoint is gone is respawned by its own owner (`--secondmate`, driven by
+#   the session-start liveness sweep). Every tmux spawn and relaunch records the
+#   endpoint's server identity in the task record (tmux_socket, tmux_server_pid,
+#   tmux_server_start, tmux_window_id, endpoint_host, endpoint_boot), and a
+#   relaunch that adopts a live endpoint refreshes it, so a record written
+#   before that identity existed gains it at its next relaunch.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
@@ -664,6 +674,7 @@ YOLO_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+ENDPOINT_CONSENT_DIGEST=
 POS=()
 want_value=
 for a in "$@"; do
@@ -707,6 +718,7 @@ for a in "$@"; do
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
       ;;
+    consent) ENDPOINT_CONSENT_DIGEST=$a ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
       exit 1
@@ -760,6 +772,8 @@ for a in "$@"; do
     BRANCH_PREFIX=${a#--branch-prefix=}
     BRANCH_PREFIX_SET=1
     ;;
+  --legacy-endpoint-consent) want_value=consent ;;
+  --legacy-endpoint-consent=*) ENDPOINT_CONSENT_DIGEST=${a#--legacy-endpoint-consent=} ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -800,6 +814,22 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+if [ -n "$ENDPOINT_CONSENT_DIGEST" ]; then
+  [ "$RELAUNCH" -eq 1 ] || {
+    echo "error: --legacy-endpoint-consent applies to --relaunch only" >&2
+    exit 1
+  }
+  case "$ENDPOINT_CONSENT_DIGEST" in
+  *[!0-9a-f]*)
+    echo "error: --legacy-endpoint-consent takes the 64-character hex digest bin/fm-endpoint-proof.sh prints" >&2
+    exit 1
+    ;;
+  esac
+  [ "${#ENDPOINT_CONSENT_DIGEST}" -eq 64 ] || {
+    echo "error: --legacy-endpoint-consent takes the 64-character hex digest bin/fm-endpoint-proof.sh prints" >&2
+    exit 1
+  }
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1215,6 +1245,9 @@ CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
+# The id of a tmux window this invocation created to rebind a gone endpoint,
+# while closing it on abort is still safe.
+TMUX_REBIND_WINDOW_ID=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1268,6 +1301,9 @@ spawn_abort_cleanup() {
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
     fi
+  fi
+  if [ -n "$TMUX_REBIND_WINDOW_ID" ] && [ "$status" -ne 0 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]; then
+    tmux kill-window -t "$TMUX_REBIND_WINDOW_ID" 2>/dev/null || true
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] &&
     [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -1736,18 +1772,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR can prove it:
+  # inferred from a failed read - and each backend proves it its own way:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
   #           agent came back and refuses; only a second `missing` proves the
   #           pane itself did not survive.
-  #   tmux  - REFUSES, always. A task record carries no socket identity for its
-  #           endpoint, and a server-wide inventory describes only the server
-  #           this process addresses, so no read available here can tell "gone"
-  #           from "on a server I cannot see". A tmux `missing` therefore stays
-  #           as deadlocked as it was before this change - deliberately, and
-  #           with the reason stated rather than guessed past.
+  #   tmux  - proven from the identity the task record carries, never from the
+  #           server this process addresses (bin/fm-endpoint-proof-lib.sh owns
+  #           the proof): the host rebooted, the recorded server instance is
+  #           gone, or that live server no longer has the recorded window, and
+  #           no non-shell process is working in the worktree. A record from
+  #           before that identity existed refuses unless the caller carries
+  #           --legacy-endpoint-consent with the digest of the evidence the
+  #           operator reviewed. Anything unreachable, alive elsewhere, or
+  #           malformed refuses exactly as a tmux `missing` always did.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
@@ -1755,7 +1794,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # `relaunch` cannot reach two different answers about one endpoint.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if [ "$RELAUNCH_STATE" = missing ]; then
-    RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
+    # A legacy consent is attended-only: while the away-posture record exists
+    # nothing is accepted gone on the strength of a digest, because nobody who
+    # could speak for the captain is watching.
+    if [ -n "$ENDPOINT_CONSENT_DIGEST" ] && [ -f "$STATE/.afk-contract" ] \
+      && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]; then
+      echo "error: --legacy-endpoint-consent is attended-only: the away-posture record exists, so no legacy endpoint can be accepted gone until the captain is back and says so" >&2
+      exit 1
+    fi
+    RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META" "$ENDPOINT_CONSENT_DIGEST")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
       dead) RELAUNCH_STATE=dead ;;
@@ -3533,6 +3580,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+  elif [ "$BACKEND" = tmux ]; then
+    # The recorded tmux endpoint is PROVEN gone (identity proof or the
+    # operator's legacy consent - the gate above), so create ONE fresh window
+    # for the same task, opened directly in the recorded worktree, on the tmux
+    # server this process addresses. The recorded server is gone, so there is
+    # no other server to keep the task on; the record published below takes this
+    # server's identity, which is the whole rebind. The window is closed again
+    # (by its exact id, never its label) if this spawn aborts before any launch
+    # text reaches it, so a refused attempt leaves nothing for a retry to trip
+    # over.
+    SES=$(fm_backend_tmux_container_ensure) || exit 1
+    T="$SES:$W"
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || exit 1
+    TMUX_REBIND_WINDOW_ID=$WID
+    WT_TARGET=$WID
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -3540,11 +3602,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # ids) from these values, which is the whole rebind - the task id, brief,
     # worktree, armed poll and status log are untouched.
     #
-    # Herdr is the ONLY backend that reaches here: the gate above rebinds only
-    # on a PROVEN-gone endpoint, and absence is provable only on herdr, whose
-    # every read is scoped to the session the record names
-    # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
-    # secondmate were already refused, so there is no dispatch left to make.
+    # Herdr is the only other backend that reaches here (tmux rebinds in the
+    # branch above): the gate rebinds only on a PROVEN-gone endpoint, and herdr
+    # proves absence from reads scoped to the session the record names
+    # (fm_control_endpoint_absence_verdict owns that argument). Every secondmate
+    # was already refused, so there is no dispatch left to make.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -4887,9 +4949,26 @@ else
   SPAWN_FRESH_COMMIT_PENDING=1
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
+# The endpoint identity (bin/fm-endpoint-proof-lib.sh) for a tmux task. A
+# relaunch that rebinds ALWAYS replaces the identity the record carried, because
+# the old one names a server that is gone; an adopting relaunch replaces it only
+# when the fresh read succeeded, so a transient read failure never downgrades a
+# complete record to a legacy one.
+SPAWN_ENDPOINT_IDENTITY=
+SPAWN_IDENTITY_OWNED=0
+if [ "$BACKEND" = tmux ]; then
+  SPAWN_ENDPOINT_IDENTITY=$(fm_endpoint_tmux_identity_lines "${WID:-=${T%%:*}:=${T#*:}}" "$T" 2>/dev/null) || SPAWN_ENDPOINT_IDENTITY=
+  if [ -n "$SPAWN_ENDPOINT_IDENTITY" ] || [ "$RELAUNCH_REBIND" -eq 1 ]; then
+    SPAWN_IDENTITY_OWNED=1
+  fi
+fi
 preserve_relaunch_meta() {
-  awk -F= '
+  awk -F= -v drop_identity="$SPAWN_IDENTITY_OWNED" -v identity_keys="$(fm_endpoint_identity_keys | tr '\n' ' ')" '
     BEGIN {
+      if (drop_identity == 1) {
+        n = split(identity_keys, ik, " ")
+        for (j = 1; j <= n; j++) owned[ik[j]] = 1
+      }
       split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
@@ -4939,6 +5018,7 @@ preserve_relaunch_meta() {
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
+  [ -z "$SPAWN_ENDPOINT_IDENTITY" ] || printf '%s\n' "$SPAWN_ENDPOINT_IDENTITY"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -5011,6 +5091,9 @@ spawn_report_preserved_state() {
 
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
+  # The record now names the rebound window, so the abort path no longer owns
+  # it: closing it would turn a recoverable record into one pointing nowhere.
+  TMUX_REBIND_WINDOW_ID=
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1

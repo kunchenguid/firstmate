@@ -473,6 +473,9 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 - A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 
+- A tmux task additionally records the identity of the server instance that hosted its window - `tmux_socket=`, `tmux_server_pid=`, `tmux_server_start=`, `tmux_window_id=`, `endpoint_host=`, and, where the platform exposes a boot id, `endpoint_boot=` - so a lost server can be proven gone instead of refused.
+  A record from before these fields existed is legacy, and a partial one is malformed; [`bin/fm-endpoint-proof-lib.sh`](../bin/fm-endpoint-proof-lib.sh) owns the fields and [agent control](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns what each state permits.
+
 - A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 - An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 

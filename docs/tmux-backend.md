@@ -68,6 +68,15 @@ Cursor is identified from its exact `cursor-agent` identity or versioned install
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
+### Endpoint identity and recovery after a lost server
+
+A task's `window=<session>:fm-<id>` label means nothing once the tmux server it lived on is gone, because `list-windows` describes only the server the calling process addresses.
+Every tmux task record therefore also names the server instance that hosted its window - socket, server pid and start time, window id, host, and boot - written by `bin/fm-spawn.sh` at spawn and refreshed at every relaunch ([`configuration.md`](configuration.md#task-metadata) owns the fields).
+With that identity a lost server is *proven* gone rather than guessed: the host rebooted, the recorded server instance no longer exists, or the live recorded server no longer has the recorded window, and no non-shell process is still working in the worktree.
+An unreachable server, a window still alive elsewhere (even renamed or moved), another host, and an incomplete record all stay refused.
+[`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the recovery contract, the explicit consent a record from before the identity existed needs, and `bin/fm-endpoint-proof.sh backfill`, which gives a live older record its identity while tmux is healthy.
+Every read of a recorded server is bounded and captured through a file, because a tmux client hands its stdout to the server ([verification](verification/runtime-backends.md#endpoint-identity-and-absence-proof)).
+
 ### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.
@@ -106,6 +115,7 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
 tests/fm-tmux-agent-liveness.test.sh
+tests/fm-endpoint-proof.test.sh
 tests/fm-harness-liveness-drift-live-e2e.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh

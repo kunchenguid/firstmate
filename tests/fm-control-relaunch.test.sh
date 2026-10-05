@@ -59,6 +59,27 @@ make_tmux_stub() {  # <dir>
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+# A server reached by an explicit socket (`tmux -S <path> ...`), which is how the
+# endpoint proof reads the server a task record names. $D/srv/<socket basename>
+# holds its state: absent (no such socket), refused, denied, or alive with the
+# `pid-start` line and `windows` ("<window id> <session>:<name>") it answers.
+if [ "${1:-}" = -S ]; then
+  sock=${2:-}
+  shift 2
+  srv="$D/srv/${sock##*/}"
+  case "$(cat "$srv/state" 2>/dev/null || true)" in
+    '') echo "error connecting to $sock (No such file or directory)" >&2; exit 1 ;;
+    refused) echo "error connecting to $sock (Connection refused)" >&2; exit 1 ;;
+    denied) echo "error connecting to $sock (Permission denied)" >&2; exit 1 ;;
+    alive)
+      case "${1:-}" in
+        display-message) cat "$srv/pid-start"; exit 0 ;;
+        list-windows) cat "$srv/windows"; exit 0 ;;
+      esac
+      ;;
+  esac
+  exit 1
+fi
 case "${1:-}" in
   send-keys)
     shift
@@ -104,6 +125,13 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
+        # The endpoint identity reads of the server THIS seat addresses. They
+        # answer only when a case stages $D/ambient-*, so every other case
+        # keeps reading the placeholder and records no identity at all.
+        *window_id*) if [ -f "$D/ambient-facts" ]; then cat "$D/ambient-facts"; exit 0; fi ;;
+        *socket_path*) if [ -f "$D/ambient-socket" ]; then cat "$D/ambient-socket"; exit 0; fi ;;
+        *session_name*) if [ -f "$D/ambient-id" ]; then printf '%s:fm-%s\n' "$(cat "$D/session-name")" "$(cat "$D/ambient-id")"; exit 0; fi ;;
+        '#S') if [ -f "$D/ambient-id" ]; then cat "$D/session-name"; printf '\n'; exit 0; fi ;;
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
@@ -159,15 +187,18 @@ case "${1:-}" in
     # answering `missing`. Echo a stable window id the way the real -P -F does.
     shift
     name=
+    dir=
     while [ $# -gt 0 ]; do
       case "$1" in
         -n) name=${2:-}; shift 2 ;;
-        -c|-t) shift 2 ;;
+        -c) dir=${2:-}; shift 2 ;;
+        -t) shift 2 ;;
         *) shift ;;
       esac
     done
     printf '%s\n' "$name" >> "$D/windows"
     printf '%s\n' "$name" >> "$D/created-windows"
+    printf '%s\n' "$dir" >> "$D/created-cwd"
     printf '@9\n'
     exit 0 ;;
 esac
@@ -1847,12 +1878,13 @@ strand_endpoint() {  # <case-dir> <id>
   : > "$1/fake/windows"
 }
 
-# Every tmux `missing` refuses on BOTH verbs, whatever produced it. tmux is the
-# one verified backend whose absence cannot be proven from a task record: the
-# record carries no socket identity for the endpoint, and any inventory
-# describes only the server this process happens to address. So a window that
-# is merely on a server this seat cannot reach is indistinguishable from one
-# that was destroyed, and neither verb will guess.
+# Every tmux `missing` that its record cannot PROVE gone refuses on BOTH verbs,
+# whatever produced it: a record with no identity (it predates it) says nothing
+# about which tmux server its window lived on, and an identity-bearing record
+# whose server is unreachable, still holds the window, or sits on another host
+# proves nothing either. A window that is merely on a server this seat cannot
+# reach is indistinguishable from one that was destroyed, and neither verb will
+# guess.
 assert_tmux_missing_refuses() {  # <case-dir> <id> <what-was-staged>
   local dir=$1 id=$2 what=$3 out rc brief_before
 
@@ -1927,6 +1959,252 @@ test_reclaim_refuses_an_unreadable_endpoint() {
     "a refused relaunch must not create an endpoint"
   [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch must launch nothing"
   pass "reclaim: an unclassifiable endpoint is still refused, so two agents cannot share one"
+}
+
+# --- 7b. tmux: an endpoint proven gone from the identity its record carries --
+#
+# A record written by a current bin/fm-spawn.sh names the tmux server instance
+# that hosted the window (bin/fm-endpoint-proof-lib.sh), so a window missing
+# from THIS seat's server is no longer indistinguishable from one on a server
+# this seat cannot address. tests/fm-endpoint-proof.test.sh pins the proof
+# against real tmux servers; these cases pin what the control plane does with
+# it, against the lifecycle stub.
+
+# stage_ambient <case-dir> <id>: the tmux server this seat addresses answers the
+# identity reads a rebind records for its fresh window.
+stage_ambient() {
+  printf '4242 1700000500 @9\n' > "$1/fake/ambient-facts"
+  printf '/tmp/fmstub/ambient\n' > "$1/fake/ambient-socket"
+  printf '%s' "$2" > "$1/fake/ambient-id"
+}
+
+# stage_identity <case-dir> <id> <same|other>: give the record the identity of a
+# tmux server that lived on this host, in this boot or an earlier one. Fails when
+# the platform exposes no boot id, so the case can skip instead of guessing.
+stage_identity() {
+  local dir=$1 id=$2 boot=$3 current dead_pid
+  current=$(fm_endpoint_boot_id) || return 1
+  [ "$boot" = same ] || current=00000000-0000-0000-0000-000000000000
+  dead_pid=$(sh -c 'echo $$')
+  {
+    echo "tmux_socket=/tmp/fmstub/recorded"
+    echo "tmux_server_pid=$dead_pid"
+    echo "tmux_server_start=1700000000"
+    echo "tmux_window_id=@3"
+    echo "endpoint_host=$(fm_endpoint_host_id)"
+    echo "endpoint_boot=$current"
+  } >> "$dir/home/state/$id.meta"
+}
+
+stage_recorded_server() {  # <case-dir> <refused|denied|alive> [pid-start] [windows]
+  mkdir -p "$1/fake/srv/recorded"
+  printf '%s\n' "$2" > "$1/fake/srv/recorded/state"
+  [ -z "${3:-}" ] || printf '%s\n' "$3" > "$1/fake/srv/recorded/pid-start"
+  [ -z "${4:-}" ] || printf '%s\n' "$4" > "$1/fake/srv/recorded/windows"
+}
+
+# A tmux task whose window is gone from this seat's server, with committed,
+# staged, modified, and untracked work in its worktree.
+new_stranded_case() {  # <name> <id> -> sets CASE_DIR
+  local name=$1 id=$2
+  CASE_DIR=$(new_case "$name" "$id")
+  add_ship_task "$CASE_DIR" "$id" claude firstmate
+  strand_endpoint "$CASE_DIR" "$id"
+  printf 'zsh' > "$CASE_DIR/fake/command"
+  stage_ambient "$CASE_DIR" "$id"
+  printf 'landed on the branch\n' > "$CASE_DIR/wt/committed.txt"
+  git -C "$CASE_DIR/wt" add committed.txt
+  git -C "$CASE_DIR/wt" -c user.email=t@example.com -c user.name=t commit -qm "work in progress"
+  printf 'staged but not committed\n' > "$CASE_DIR/wt/staged.txt"
+  git -C "$CASE_DIR/wt" add staged.txt
+  printf 'never committed\n' > "$CASE_DIR/wt/dirty.txt"
+  CASE_HEAD=$(git -C "$CASE_DIR/wt" rev-parse HEAD)
+}
+
+assert_work_untouched() {  # <case-dir> <what>
+  [ "$(git -C "$1/wt" rev-parse HEAD)" = "$CASE_HEAD" ] || fail "$2 moved the worktree's HEAD"
+  [ "$(git -C "$1/wt" rev-parse --abbrev-ref HEAD)" != HEAD ] || fail "$2 detached the worktree's branch"
+  assert_contains "$(cat "$1/wt/dirty.txt")" "never committed" "$2 destroyed an uncommitted change"
+  assert_contains "$(git -C "$1/wt" status --porcelain)" "A  staged.txt" "$2 unstaged a staged file"
+  assert_present "$1/wt/committed.txt" "$2 destroyed committed work"
+}
+
+identity_key_count() {  # <case-dir> <id> <key>
+  grep -c "^$3=" "$1/home/state/$2.meta" || true
+}
+
+proof_cli() {  # <case-dir> <args...>
+  local dir=$1
+  shift
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" "$ROOT/bin/fm-endpoint-proof.sh" "$@" 2>&1
+}
+
+test_tmux_proof_reclaims_a_task_whose_recorded_server_is_gone() {
+  local dir out rc=0
+  new_stranded_case tmux-proof-gone rl80 && dir=$CASE_DIR
+  stage_identity "$dir" rl80 same || { echo "skip - tmux identity proof needs a boot id on this platform"; return 0; }
+  stage_recorded_server "$dir" refused
+  printf '%s\n' "pr=https://example.invalid/pr/80" >> "$dir/home/state/rl80.meta"
+  printf 'working: parked on an approval nobody can answer\n' >> "$dir/home/state/rl80.status"
+
+  out=$(run_control "$dir" rl80 relaunch --note "the tmux server is gone; pick the work back up"); rc=$?
+  expect_code 0 "$rc" "a tmux task whose recorded server is gone must be reclaimable"$'\n'"$out"
+  assert_contains "$out" "proven gone" "the operator is told the endpoint was proven gone"
+  assert_contains "$out" "refuses connections" "and on what basis"
+  assert_contains "$(cat "$dir/fake/created-windows")" "fm-rl80" "the rebind creates one fresh window for the same task"
+  [ "$(wc -l < "$dir/fake/created-windows" | tr -d ' ')" = 1 ] || fail "the rebind must create exactly one window"
+  [ "$(cat "$dir/fake/created-cwd")" = "$dir/wt" ] || fail "the fresh window must open in the recorded worktree (got '$(cat "$dir/fake/created-cwd")')"
+  assert_work_untouched "$dir" "a tmux reclaim"
+  [ "$(meta_field "$dir" rl80 worktree)" = "$dir/wt" ] || fail "a reclaim must keep the recorded worktree"
+  [ "$(meta_field "$dir" rl80 pr)" = "https://example.invalid/pr/80" ] || fail "a reclaim dropped a record row it does not own"
+  [ "$(meta_field "$dir" rl80 endpoint_task_id)" = rl80 ] || fail "a reclaim changed the task identity"
+  assert_contains "$(cat "$dir/home/state/rl80.status")" "parked on an approval" "a reclaim truncated the status log"
+  # The record now names the NEW endpoint's identity, and only that one.
+  [ "$(meta_field "$dir" rl80 tmux_server_pid)" = 4242 ] || fail "the record must take the new server's identity"
+  [ "$(meta_field "$dir" rl80 tmux_window_id)" = '@9' ] || fail "the record must name the fresh window id"
+  [ "$(meta_field "$dir" rl80 tmux_socket)" = /tmp/fmstub/ambient ] || fail "the record must name the new server's socket"
+  for key in tmux_socket tmux_server_pid tmux_server_start tmux_window_id endpoint_host; do
+    [ "$(identity_key_count "$dir" rl80 "$key")" = 1 ] || fail "the record must carry exactly one $key"
+  done
+  [ "$(journal_field "$dir" rl80 exit_result)" = endpoint-gone ] || fail "the transaction should record that the endpoint was already gone"
+  pass "tmux reclaim: a recorded server that is gone is proven, and the task keeps its worktree, work, and identity"
+}
+
+test_tmux_identity_that_cannot_prove_absence_still_refuses_both_verbs() {
+  local dir pid out rc dead_pid
+  new_stranded_case tmux-proof-denied rl81 && dir=$CASE_DIR
+  stage_identity "$dir" rl81 same || { echo "skip - tmux identity proof needs a boot id on this platform"; return 0; }
+  stage_recorded_server "$dir" denied
+  assert_tmux_missing_refuses "$dir" rl81 "recorded server's socket cannot be read"
+  assert_not_contains "$(run_control "$dir" rl81 exit)" "proven gone" "an unreadable server is never reported as proven gone"
+
+  new_stranded_case tmux-proof-alive rl82 && dir=$CASE_DIR
+  stage_identity "$dir" rl82 same
+  dead_pid=$(grep '^tmux_server_pid=' "$dir/home/state/rl82.meta" | cut -d= -f2)
+  stage_recorded_server "$dir" alive "$dead_pid 1700000000" "@3 firstmate:fm-rl82"
+  assert_tmux_missing_refuses "$dir" rl82 "recorded server is alive and still holds the window"
+  assert_contains "$(run_control "$dir" rl82 exit)" "still alive on its recorded server" "the refusal names the live endpoint"
+
+  new_stranded_case tmux-proof-process rl83 && dir=$CASE_DIR
+  stage_identity "$dir" rl83 other
+  ( cd "$dir/wt" && exec sleep 600 ) &
+  # shellcheck disable=SC2031  # a different shell function than the earlier background job
+  pid=$!
+  sleep 0.3
+  assert_tmux_missing_refuses "$dir" rl83 "a reboot is recorded but a live process works in the worktree"
+  assert_contains "$(run_control "$dir" rl83 exit)" "still running in the task worktree" "the refusal names the live process"
+  kill "$pid"
+  wait "$pid" 2>/dev/null || true
+  out=$(run_control "$dir" rl83 exit); rc=$?
+  expect_code 0 "$rc" "with nothing left running the reboot proves the endpoint gone"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone" "exit then reports the endpoint gone"
+
+  new_stranded_case tmux-proof-host rl84 && dir=$CASE_DIR
+  stage_identity "$dir" rl84 same
+  sed -i.bak "s/^endpoint_host=.*/endpoint_host=ffffffffffffffffffffffff/" "$dir/home/state/rl84.meta"
+  stage_recorded_server "$dir" refused
+  assert_tmux_missing_refuses "$dir" rl84 "the record was written on another host"
+  pass "tmux reclaim: an unreadable, alive, live-process, or other-host record still refuses both verbs"
+}
+
+test_tmux_legacy_record_needs_the_reviewed_digest_and_keeps_the_work() {
+  local dir out rc digest bad pid id=rl85
+  new_stranded_case tmux-legacy-consent "$id" && dir=$CASE_DIR
+  # No identity on the record: spawned before it was recorded.
+  out=$(run_control "$dir" "$id" exit); rc=$?
+  expect_code 1 "$rc" "a legacy record cannot be exited as gone without consent"$'\n'"$out"
+  assert_contains "$out" "legacy-endpoint-consent" "the refusal names the explicit consent path"
+  assert_contains "$out" "bin/fm-endpoint-proof.sh $id" "and the evidence report to run first"
+  assert_not_contains "$out" "endpoint-gone" "and never reports a stop it cannot see"
+
+  # The consent flag belongs to relaunch only, and is shaped like a digest.
+  out=$(run_control "$dir" "$id" exit --legacy-endpoint-consent "$(printf 'a%.0s' $(seq 1 64))"); rc=$?
+  expect_code 1 "$rc" "exit takes no consent"
+  assert_contains "$out" "applies to 'relaunch' only" "exit refuses the consent flag by name"
+  out=$(run_control "$dir" "$id" relaunch --note n --legacy-endpoint-consent nothex); rc=$?
+  expect_code 1 "$rc" "a non-digest is refused"
+  assert_contains "$out" "64-character hex digest" "the refusal says what a digest is"
+  out=$(run_spawn "$dir" "$id" --legacy-endpoint-consent "$(printf 'a%.0s' $(seq 1 64))"); rc=$?
+  expect_code 1 "$rc" "a plain spawn takes no consent"
+  assert_contains "$out" "applies to --relaunch only" "spawn names the one place the flag applies"
+
+  # A digest that is not the evidence's digest opens nothing.
+  bad=$(printf 'b%.0s' $(seq 1 64))
+  out=$(run_control "$dir" "$id" relaunch --note "must not land" --legacy-endpoint-consent "$bad"); rc=$?
+  expect_code 1 "$rc" "a wrong digest must refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "does not match the evidence" "the refusal says the digest is stale"
+  assert_absent "$dir/fake/created-windows" "a refused consent must not create a window"
+  assert_absent "$dir/home/state/$id.endpoint-consent" "a refused consent must not be recorded"
+  assert_not_contains "$(cat "$dir/home/data/$id/brief.md")" "must not land" "a refused consent must not edit the instructions"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused consent must launch nothing"
+
+  # The reviewed digest: the evidence report prints it and withdraws it when a
+  # live process shows up.
+  out=$(proof_cli "$dir" show "$id")
+  assert_contains "$out" "identity: legacy" "the report names the legacy record"
+  assert_contains "$out" "verdict: unproven" "the report does not claim a proof"
+  digest=$(printf '%s\n' "$out" | sed -n 's/^consent-digest: //p')
+  [ "${#digest}" -eq 64 ] || fail "the report must print the digest (got '$digest')"
+  ( cd "$dir/wt" && exec sleep 600 ) &
+  # shellcheck disable=SC2031  # a different shell function than the earlier background job
+  pid=$!
+  sleep 0.3
+  out=$(proof_cli "$dir" show "$id")
+  assert_contains "$out" "consent: not possible" "a live process withdraws the consent path"
+  out=$(run_control "$dir" "$id" relaunch --note "must not land either" --legacy-endpoint-consent "$digest"); rc=$?
+  kill "$pid"
+  wait "$pid" 2>/dev/null || true
+  expect_code 1 "$rc" "a live process in the worktree voids a digest reviewed before it appeared"$'\n'"$out"
+  assert_contains "$out" "no consent can override" "the refusal says a live agent cannot be consented away"
+  assert_absent "$dir/fake/created-windows" "a voided consent must not create a window"
+
+  # Attended only: while the away-posture record exists, nobody who could speak
+  # for the captain is watching.
+  FM_HOME="$dir/home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'test away posture' >/dev/null || fail "could not enter the away posture"
+  out=$(run_control "$dir" "$id" relaunch --note "must not land in away" --legacy-endpoint-consent "$digest"); rc=$?
+  expect_code 1 "$rc" "an away-posture record must refuse the consent"$'\n'"$out"
+  assert_contains "$out" "attended-only" "the refusal says why"
+  assert_absent "$dir/fake/created-windows" "an away refusal must not create a window"
+  assert_absent "$dir/home/state/$id.endpoint-consent" "an away refusal must not record a consent"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "could not leave the away posture"
+
+  # The captain is back and the evidence is as it was: the digest verifies.
+  out=$(run_control "$dir" "$id" relaunch --note "the tmux server was lost; pick the work back up" --legacy-endpoint-consent "$digest"); rc=$?
+  expect_code 0 "$rc" "the reviewed digest must reclaim the task"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/created-windows")" "fm-$id" "the rebind creates the task's fresh window"
+  [ "$(cat "$dir/fake/created-cwd")" = "$dir/wt" ] || fail "the fresh window must open in the recorded worktree"
+  assert_work_untouched "$dir" "a consented reclaim"
+  assert_contains "$(cat "$dir/home/data/$id/brief.md")" "the tmux server was lost" "the replacement inherits the progress note"
+  assert_contains "$(cat "$dir/home/state/$id.endpoint-consent")" "digest=$digest" "the consent is recorded durably"
+  assert_contains "$(cat "$dir/home/state/$id.endpoint-consent")" "ev.worktree=$dir/wt" "with the evidence it rested on"
+  [ "$(journal_field "$dir" "$id" endpoint_consent)" = "$digest" ] || fail "the transaction journal should name the consent digest"
+  [ "$(journal_field "$dir" "$id" exit_result)" = endpoint-gone ] || fail "the transaction should record that the endpoint was gone"
+  # The record now carries identity, so the next loss of that server is provable.
+  [ "$(meta_field "$dir" "$id" tmux_window_id)" = '@9' ] || fail "the consented relaunch must give the record its identity"
+  [ "$(proof_cli "$dir" show "$id" | sed -n 's/^identity: //p')" = complete ] || fail "the report must now read the record as complete"
+  pass "tmux legacy: only the reviewed digest reclaims a record with no identity, and never over a live process or an away posture"
+}
+
+test_tmux_recovery_repeats_without_a_second_window_or_a_new_consent() {
+  local dir out rc digest id=rl86 count
+  new_stranded_case tmux-legacy-repeat "$id" && dir=$CASE_DIR
+  digest=$(proof_cli "$dir" show "$id" | sed -n 's/^consent-digest: //p')
+  out=$(run_control "$dir" "$id" relaunch --note "first recovery" --legacy-endpoint-consent "$digest"); rc=$?
+  expect_code 0 "$rc" "the first recovery must succeed"$'\n'"$out"
+  # A second recovery of the same task: the agent is stopped, then replaced. The
+  # window the first recovery created is adopted, never duplicated, and the
+  # record that now carries identity needs no consent.
+  out=$(run_control "$dir" "$id" exit); rc=$?
+  expect_code 0 "$rc" "the replacement must be stoppable"$'\n'"$out"
+  out=$(run_control "$dir" "$id" relaunch --note "second recovery"); rc=$?
+  expect_code 0 "$rc" "a second recovery must not need a second consent"$'\n'"$out"
+  count=$(wc -l < "$dir/fake/created-windows" | tr -d ' ')
+  [ "$count" = 1 ] || fail "repeated recovery must reuse the window it already created (created $count)"
+  [ "$(grep -c '^consent=v1$' "$dir/home/state/$id.endpoint-consent")" = 1 ] || fail "only the first recovery should have recorded a consent"
+  assert_work_untouched "$dir" "a repeated recovery"
+  assert_contains "$(cat "$dir/home/data/$id/brief.md")" "second recovery" "the second recovery's note reaches the replacement"
+  [ "$(identity_key_count "$dir" "$id" tmux_window_id)" = 1 ] || fail "the record must carry exactly one window id after repeated recovery"
+  pass "tmux repeated recovery: the second recovery adopts the window, records no new consent, and keeps the work"
 }
 
 # --- herdr: a stopped server is not a destroyed endpoint --------------------
@@ -2448,6 +2726,10 @@ test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint
+test_tmux_proof_reclaims_a_task_whose_recorded_server_is_gone
+test_tmux_identity_that_cannot_prove_absence_still_refuses_both_verbs
+test_tmux_legacy_record_needs_the_reviewed_digest_and_keeps_the_work
+test_tmux_recovery_repeats_without_a_second_window_or_a_new_consent
 test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server

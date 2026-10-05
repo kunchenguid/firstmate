@@ -126,6 +126,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-lease-lib.sh`        | One owner of the supervision lease contract and the main-only role-partition guards  |
 | `fm-control.sh`          | Agent lifecycle control plane: allowlisted `interrupt`, `exit`, and transactional `relaunch` verbs for an exact task id ([agent-control.md](agent-control.md)) |
 | `fm-control-lib.sh`      | One executable owner of the control-plane verb allowlist, per-harness interrupt/exit mechanics, per-backend capability, and the endpoint-absence proof both `exit` and `relaunch` read |
+| `fm-endpoint-proof-lib.sh` | Sourced owner of the tmux endpoint identity a task record carries and of the proof that a recorded tmux endpoint is gone, plus the legacy evidence digest and consent record |
+| `fm-endpoint-proof.sh`   | Read-only report on whether a tmux task's endpoint can be proven gone, the legacy consent evidence and digest, the consent audit, and the idempotent identity backfill ([agent-control.md](agent-control.md)) |
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, and per-harness sources |
 | `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record and native-harness progress marker; arms an incarnation and applies lifecycle events |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
