@@ -278,7 +278,9 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-
 # the worker's own latest event (last_worker_status_line), stands when nothing is open.
 # A standing hold mirror gives way to the worker's own view read past the mirror
 # and resolved lines: its standing pause or latest other event, never a resolved line
-# or a decision one of them answered.
+# or a decision one of them answered. Reaching such an answered decision leaves the
+# mirror as the current line, which fm-crew-state.sh maps to no state, like the
+# resolved line it reads without the hold.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
   local open key verb note current='' worker mirror
