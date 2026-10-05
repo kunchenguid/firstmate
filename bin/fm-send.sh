@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--keep-open <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -148,6 +148,17 @@
 # during the final locked remote-route validation; unset or empty guards do not
 # change ordinary sends.
 #
+# Unclosed relay: a steer that names no --resolve-key for a needs-decision the
+# target still has open may BE the captain's answer, left unrecorded. After the
+# inbox record is durable, fm-send prints an `actionable:` line on stderr and
+# appends the key to the target's relay ledger (bin/fm-relay-ledger-lib.sh); the
+# wake drain then prints UNCLOSED RELAYS until the decision closes. Pass
+# --keep-open <key> (repeatable) when the steer is deliberately not the answer.
+# The steer is still delivered and the exit status is unchanged, because
+# refusing an urgent steer would be worse than the warning. Only the inbox
+# plane to a local task selector takes part; a typed slash command and an
+# explicit backend target carry no decision ledger here.
+#
 # Identity guard: for a ship or scout task, --key and typed text refuse, and
 # the inbox plane records its message but skips the doorbell (ring status 4),
 # when the recorded endpoint provably holds an agent not launched for that task,
@@ -260,6 +271,8 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-relay-ledger-lib.sh
+. "$SCRIPT_DIR/fm-relay-ledger-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
@@ -481,6 +494,7 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+KEEP_OPEN_KEYS=
 FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() { # <key>
   local k=$1
@@ -496,10 +510,44 @@ fm_send_add_resolve_key() { # <key>
     return 1
     ;;
   esac
+  case " $KEEP_OPEN_KEYS " in
+  *" $k "*)
+    echo "error: --resolve-key '$k' is already named by --keep-open" >&2
+    return 1
+    ;;
+  esac
   RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
+}
+fm_send_add_keep_open_key() { # <key>
+  local k=$1
+  case "$k" in
+  '' | *[!A-Za-z0-9._-]*)
+    echo "error: --keep-open '$k' is not a valid decision key (allowed: A-Z a-z 0-9 . _ -)" >&2
+    return 1
+    ;;
+  esac
+  case " $RESOLVE_KEYS $KEEP_OPEN_KEYS " in
+  *" $k "*)
+    echo "error: --keep-open '$k' is already named by --resolve-key or --keep-open" >&2
+    return 1
+    ;;
+  esac
+  KEEP_OPEN_KEYS="${KEEP_OPEN_KEYS}${KEEP_OPEN_KEYS:+ }$k"
 }
 while :; do
   case "${1:-}" in
+  --keep-open)
+    [ $# -ge 2 ] || {
+      echo "error: --keep-open requires a key" >&2
+      exit 1
+    }
+    fm_send_add_keep_open_key "$2" || exit 1
+    shift 2
+    ;;
+  --keep-open=*)
+    fm_send_add_keep_open_key "${1#--keep-open=}" || exit 1
+    shift
+    ;;
   --resolve-key)
     [ $# -ge 2 ] || {
       echo "error: --resolve-key requires a key" >&2
@@ -761,6 +809,26 @@ fm_send_feed_resolved_holds() { # <answer-text>
     echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
+}
+
+# Record every needs-decision the target still has open after this steer, minus
+# the keys the sender named with --keep-open. --resolve-key keys are already
+# closed by the time this runs, so they never appear. The steer is delivered;
+# this only makes the possible unrecorded answer visible (header: Unclosed
+# relay).
+fm_send_note_unclosed_relay() { # <task-id> <inbox-record>
+  local task=$1 record=$2 open key verb unclosed=''
+  open=$(status_open_decisions "$STATE/$task.status" 2>/dev/null) || return 0
+  [ -n "$open" ] || return 0
+  while IFS=$'\t' read -r key verb _; do
+    [ "$verb" = needs-decision ] || continue
+    case " $KEEP_OPEN_KEYS " in *" $key "*) continue ;; esac
+    fm_relay_ledger_append "$STATE" "$task" "$key" "$record" || continue
+    unclosed="${unclosed}${unclosed:+ }$key"
+  done <<OPEN_SET
+$open
+OPEN_SET
+  [ -z "$unclosed" ] || echo "actionable: this steer did not close the open decision(s) '$unclosed' of $task. If it answered the captain, record the answer: fm-send.sh $task --resolve-key <key> '<answer>'. If it was not an answer, pass --keep-open <key> next time. The wake drain lists it as UNCLOSED RELAYS until the decision closes." >&2
 }
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -1097,6 +1165,9 @@ else
     if [ -n "$RESOLVE_KEYS" ]; then
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+    fi
+    if [ -z "$FIRE_AND_FORGET_ID" ] && [ -n "$TARGET_SELECTOR" ]; then
+      fm_send_note_unclosed_relay "$INBOX_TASK_ID" "$INBOX_RECORD"
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its

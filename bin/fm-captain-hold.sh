@@ -32,6 +32,7 @@
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh diverged
+#   fm-captain-hold.sh unclosed
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
 #   fm-captain-hold.sh reconcile note <task-id> --note-file <path>
@@ -193,6 +194,12 @@
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
+# `unclosed` is the read-only guard over the other seam: a steer relayed to a
+# worker while its needs-decision stayed open, so the captain's answer may never
+# have been recorded. It reads the relay ledger bin/fm-send.sh writes
+# (bin/fm-relay-ledger-lib.sh) and prints `<task-id>\t<key>\t<first-relay-epoch>\t<count>`
+# for each decision still open. It closes nothing.
+#
 # Resolution records: the block written into the body names this script, the
 # decision digest, and a `Resolution mode:` of answered, released, repaired, or
 # reconciled. Records written by the retired fm-decision-hold.sh (routed,
@@ -237,6 +244,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-relay-ledger-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-relay-ledger-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
@@ -1966,6 +1976,11 @@ EOF
   done
 }
 
+command_unclosed() {
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  fm_relay_ledger_unclosed "$STATE"
+}
+
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
@@ -2050,6 +2065,7 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
   diverged) shift; command_diverged "$@" ;;
+  unclosed) shift; command_unclosed "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;

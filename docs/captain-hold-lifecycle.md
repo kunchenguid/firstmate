@@ -17,6 +17,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 | Why did a decision card disappear from the board? | [Card hygiene](#card-hygiene-a-landed-subject-is-not-a-live-call) |
 | Where does a hold appear in snapshots and Bearings? | [Structured read surfaces](#structured-read-surfaces) |
 | What does a `RECORD DIVERGENCE` section mean? | [Record divergence](#record-divergence) |
+| What do `UNCLOSED RELAYS` and `UNHANDLED CAPTURES` mean? | [Unrecorded answers](#unrecorded-answers) |
 | How do rows from older installs still work? | [Compatibility with pre-collapse installs](#compatibility-with-pre-collapse-installs) |
 | Which tests prove this, and how is the record refreshed? | [Verification record](#verification-record) |
 
@@ -454,6 +455,31 @@ Cost stays flat: one `tasks-axi list`, one key scan per status log, and the prec
 The comparison is refused unless the status directory is the active home's own.
 Because tasks-axi reads that home's backlog, a mismatch would report one home's logs against another's tasks.
 If tasks-axi is unavailable or its listing cannot be parsed, the guard cannot read the structured record and prints nothing.
+
+## Unrecorded answers
+
+A captain answer is a durable record in the turn it arrives, or the decision reopens and the captain is asked twice.
+Two gaps let an answer reach a worker or a board without becoming a record.
+Both gaps are now visible in the wake drain, and neither closes anything automatically.
+
+### Unclosed relays
+
+`bin/fm-send.sh` closes a `needs-decision` only when the steer names its key with `--resolve-key`.
+A steer that names neither `--resolve-key` nor `--keep-open` for an open `needs-decision` of its target may have been the answer.
+That steer is still delivered and its exit status is unchanged.
+`fm-send` prints an `actionable:` line and appends the key to `state/<id>.unclosed-relay` (`bin/fm-relay-ledger-lib.sh` owns the format).
+`bin/fm-captain-hold.sh unclosed` folds that ledger against the live decision set.
+`bin/fm-wake-drain.sh` prints what remains as `UNCLOSED RELAYS` until the decision closes.
+A decision the worker reopens after the relay is a new question, so the old steer no longer lists it.
+A `blocked` key is ordinary steering and never enters the ledger.
+Pass `--keep-open <key>` when a steer is deliberately not the answer.
+
+### Unhandled captures
+
+A captured process-event result, such as a Lavish board answer, is announced by a wake, and the wake can be drained and acknowledged while nobody applied the round.
+`bin/fm-procevent-lib.sh`'s `fm_procevent_unacknowledged` lists every captured result still lacking a handled acknowledgement once it is older than `FM_UNHANDLED_CAPTURE_MIN_AGE` seconds (default 600).
+`bin/fm-wake-drain.sh` prints them as `UNHANDLED CAPTURES` with the command that reads the round and the `bin/fm-procevent.sh handled` command that acknowledges it.
+The section prints on every drain, including a home with no task status logs, and clears when the result is acknowledged.
 
 ## Compatibility with pre-collapse installs
 

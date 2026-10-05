@@ -2,7 +2,7 @@
 name: captain-hold-lifecycle
 description: >-
   Agent-only policy for completing investigations and visual reviews without losing unresolved captain calls, and for closing what the captain owns with his actual words.
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
+  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE, UNCLOSED RELAYS, or UNHANDLED CAPTURES line the wake drain prints.
 user-invocable: false
 metadata:
   internal: true
@@ -56,6 +56,8 @@ A captain call can be written down twice - as the keyed status decision the fold
 Read such a line as "these two records disagree", never as "the captain ruled and someone forgot to file it": a call can dissolve because its premise was false, or turn out to have been a question of fact rather than the captain's to answer.
 Reconcile it with what actually happened - `answer` when the captain's own words exist to record, and a fresh `needs-decision` line re-opening the status decision when that resolution was not the captain's word.
 The absence of a routed work item is not a divergence and the guard never requires one: when the decision IS the deliverable there is nothing to route.
+
+A drain line under `UNCLOSED RELAYS` or `UNHANDLED CAPTURES` means a captain answer may have reached a worker or a board without becoming a record: record it with `fm-send.sh <task> --resolve-key <key> '<answer>'` or `bin/fm-procevent.sh handled`, and use `--keep-open <key>` on a steer that is not the answer (docs/captain-hold-lifecycle.md "Unrecorded answers").
 
 ## Operating sequence
 

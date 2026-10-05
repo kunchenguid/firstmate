@@ -1234,6 +1234,29 @@ fm_procevent_pending() {
   done | sort -n -k1,1 -k2,2 | cut -f2-
 }
 
+# fm_procevent_unacknowledged <state> <min-age-seconds>
+# Print "<source-id>\t<sequence>\t<adapter>\t<age-seconds>\t<result-path>" for
+# every captured result still without a handled acknowledgement once it is at
+# least <min-age-seconds> old, oldest first. A captured Lavish answer that
+# nothing ever applied and acknowledged is otherwise visible only as a repeating
+# wake a drain can acknowledge away; this is the read-only view the wake drain
+# prints as UNHANDLED CAPTURES, so the captain's answer cannot sit unread.
+fm_procevent_unacknowledged() {
+  local state=$1 min=$2 result mtime now age id seq adapter
+  case "$min" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s)
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    mtime=$(fm_path_mtime "$result") || continue
+    age=$((now - mtime))
+    [ "$age" -ge "$min" ] || continue
+    id=$(fm_procevent_result_source_id "$result")
+    seq=$(fm_procevent_result_sequence "$result") || continue
+    adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null) || adapter=unknown
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$seq" "$adapter" "$age" "$result"
+  done < <(fm_procevent_pending "$state")
+}
+
 # fm_procevent_event_line <adapter> <source-id> <sequence>
 # The complete normalized event. Bounded by construction: a fixed verb, a
 # validated adapter name, and a validated id. No source output, path, or

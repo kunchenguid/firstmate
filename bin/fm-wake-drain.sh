@@ -3,7 +3,9 @@
 # optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
-# newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
+# newer branch outcome, OPEN DECISIONS, captain-call record divergence, unclosed
+# relays (a steer that left a captain decision open), unhandled captures (a
+# captured process-event result nobody acknowledged), and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
@@ -33,6 +35,10 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-procevent-lib.sh
+. "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -524,6 +530,89 @@ EOF
   printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
 }
 
+# Print the UNCLOSED RELAYS section: every open needs-decision that a later
+# fm-send steered without --resolve-key or --keep-open, so the captain's answer
+# may have reached the worker without ever being recorded. bin/fm-captain-hold.sh's
+# `unclosed` owns which pairs count; this prints what it reports. Bounded and
+# silent like RECORD DIVERGENCE above, and a guard failure never changes the
+# drain's exit status.
+print_unclosed_relays_section() {
+  local unclosed task key first count line shown=0 omitted=0 bound
+  local output='' used=0 bytes item_bytes=220 global_bytes=2000
+
+  bound=${FM_UNCLOSED_TIMEOUT:-20}
+  case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
+  unclosed=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-captain-hold.sh" unclosed 2>/dev/null) || return 0
+  [ -n "$unclosed" ] || return 0
+
+  while IFS=$(printf '\t') read -r task key first count; do
+    [ -n "$task" ] || continue
+    line="$task [key=$key] was steered $count time(s) since epoch $first and the decision is still open"
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    output="$output$line
+"
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done <<EOF
+$unclosed
+EOF
+
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf 'UNCLOSED RELAYS (a steer reached the worker, the captain decision stayed open - the answer may be unrecorded):\n' || return 1
+  printf '%s' "$output" || return 1
+  if [ "$omitted" -gt 0 ]; then
+    printf 'UNCLOSED RELAYS: %d more omitted (byte cap)\n' "$omitted" || return 1
+  fi
+  printf "UNCLOSED RELAYS: if the steer was the captain's answer, record it: bin/fm-send.sh <task> --resolve-key <key> '<answer>' (an unrelated steer: pass --keep-open <key> next time; the line clears when the decision closes).\n" || return 1
+}
+
+# Print the UNHANDLED CAPTURES section: every process-event result (a Lavish
+# board answer, for one) captured at least FM_UNHANDLED_CAPTURE_MIN_AGE seconds
+# ago (default 600) and never acknowledged with bin/fm-procevent.sh handled. The
+# wake that announced it can be drained and acknowledged while the round itself
+# was never applied, which is how a sent answer goes unread. Read-only, bounded,
+# silent when every capture is handled.
+print_unhandled_captures_section() {
+  local min rows id seq adapter age result line shown=0 omitted=0
+  local output='' used=0 bytes item_bytes=320 global_bytes=2000
+
+  min=${FM_UNHANDLED_CAPTURE_MIN_AGE:-600}
+  case "$min" in ''|*[!0-9]*) min=600 ;; esac
+  rows=$(fm_procevent_unacknowledged "$STATE" "$min" 2>/dev/null) || return 0
+  [ -n "$rows" ] || return 0
+
+  while IFS=$(printf '\t') read -r id seq adapter age result; do
+    [ -n "$id" ] || continue
+    line="$id sequence $seq ($adapter) captured $((age / 60)) min ago, never acknowledged: read it with bin/fm-procevent-$adapter.sh read $result, apply it, then bin/fm-procevent.sh handled $id $seq"
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    output="$output$line
+"
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done <<EOF
+$rows
+EOF
+
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf 'UNHANDLED CAPTURES (captured results nobody acknowledged - a captain answer in one may be unread):\n' || return 1
+  printf '%s' "$output" || return 1
+  if [ "$omitted" -gt 0 ]; then
+    printf 'UNHANDLED CAPTURES: %d more omitted (byte cap)\n' "$omitted" || return 1
+  fi
+}
+
 # Print BRANCH OUTCOMES: what the supervision host's session recorded since
 # main last drained (docs/supervision-host.md "Captain outcomes"). Off Pi this
 # presentation is what the Pi branch's transcript entries are. It runs only for
@@ -710,7 +799,8 @@ print_status_sections() {
     print_unread_status_section "$snapshot" \
       && print_status_outcome_backstop_section "$snapshot" \
       && print_open_decisions_section "$snapshot" \
-      && print_record_divergence_section
+      && print_record_divergence_section \
+      && print_unclosed_relays_section
   } > "$prepared"; then
     rm -f -- "$prepared"
     return 1
@@ -757,6 +847,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ]; then print_unhandled_captures_section || rc=1; fi
   fm_lock_release "$lock"
   return "$rc"
 }
