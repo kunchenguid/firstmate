@@ -16,12 +16,12 @@
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
 # Reads use gh's active account. Only when the local, default-off presence
-# flag config/contributions-owner-account exists and that account is refused
-# (HTTP 403 or 404), the observation retries every read once as the logged-in
-# gh account whose login equals the repo owner, via gh auth token -u passed as
-# GH_TOKEN to those reads only; the active account never changes and no token
-# is printed. Without the flag, or with no such account, the URL stays
-# unavailable as before. An owner-account observation
+# flag config/contributions-owner-account exists and the repo is not found for
+# that account (HTTP 404), the observation retries every read once as the
+# logged-in gh account whose login equals the repo owner, via gh auth token -u
+# passed as GH_TOKEN to those reads only; the active account never changes and
+# no token is printed. Without the flag, on any other refusal, or with no such
+# account, the URL stays unavailable as before. An owner-account observation
 # records can_merge false, because merges still run as the active account.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
@@ -261,7 +261,7 @@ observe() { # canonical GitHub URL -> normalized JSON
   if ! forge api "$endpoint" > "$TMP/core.json"; then
     # Opted in, an active account that cannot see the repo gets one retry as
     # the logged-in account named like the repo owner; the active account stays.
-    [ -e "$CONFIG/contributions-owner-account" ] && [ "$BUDGET_EXHAUSTED" -eq 0 ] && grep -Eq 'HTTP 40[34]' "$TMP/forge.err" \
+    [ -e "$CONFIG/contributions-owner-account" ] && [ "$BUDGET_EXHAUSTED" -eq 0 ] && grep -Fq 'HTTP 404' "$TMP/forge.err" \
       && owner_token "${part%%/*}" || return 1
     rm -f -- "$TMP/forge-unavailable"
     forge api "$endpoint" > "$TMP/core.json" || return 1
