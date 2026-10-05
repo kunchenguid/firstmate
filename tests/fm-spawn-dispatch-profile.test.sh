@@ -98,7 +98,7 @@ task_inbox_export() {  # <home> <id>
 ai_trailer_hooks_prefix() {  # <home> <id>
   local state
   state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
-  printf "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='%s'; " "$state/$2.git-hooks"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" launch-env "$state/$2.git-hooks" "$WT_DIR"
 }
 
 run_spawn() {
@@ -509,6 +509,48 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   assert_contains "$body" "fix: chained raw launch" "the chained launch did not commit"
   assert_not_contains "$body" "cursoragent@cursor.com" "the AI trailer reached a commit made after the first step of a chained raw launch"
   pass "a chained raw launch commits through the AI-trailer strip in every step"
+}
+
+test_worker_validation_uses_canonical_hooks() {
+  local rec id out status launch
+  id=canonical-worker
+  rec=$(make_spawn_case canonical-worker claude "$id")
+  read_case_record "$rec"
+  if ! git -C "$WT_DIR" -c hook.fm-test.event=commit-msg -c hook.fm-test.command=true \
+    hook list commit-msg >/dev/null 2>&1; then
+    pass "worker canonical hook validation (skipped: Git lacks config hooks)"
+    return
+  fi
+  mkdir -p "$CASE_DIR/project-hooks"
+  git -C "$WT_DIR" config core.hooksPath "$CASE_DIR/project-hooks"
+  cat >"$CASE_DIR/health-check" <<'SH'
+#!/bin/sh
+actual=$(git rev-parse --path-format=absolute --git-path hooks/pre-commit) || exit 1
+expected="$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)/project-hooks/pre-commit"
+[ -x "$actual" ] && [ "$actual" = "$expected" ]
+SH
+  cat >"$CASE_DIR/project-hooks/pre-commit" <<'SH'
+#!/bin/sh
+"$(dirname "$0")/../health-check" || exit 1
+printf 'ran\n' > project-pre-commit.ran
+SH
+  cat >"$CASE_DIR/project-hooks/commit-msg" <<'SH'
+#!/bin/sh
+cp "$1" project-message
+SH
+  chmod +x "$CASE_DIR/health-check" "$CASE_DIR/project-hooks/"{pre-commit,commit-msg}
+  : > "$HOME_DIR/config/launch-env-allowlist"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "cd . && '$CASE_DIR/health-check' && git -c user.name=Tests -c user.email=tests@example.invalid commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: canonical validation'")
+  status=$?
+  expect_code 0 "$status" "canonical worker spawn should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  (cd "$WT_DIR" && HOME="$HOME_DIR/user-home" bash -c "$launch") || fail "ordinary worker validation failed"
+  [ -f "$WT_DIR/project-pre-commit.ran" ] || fail "canonical pre-commit did not run"
+  assert_contains "$(git -C "$WT_DIR" log -1 --format=%B)" "fix: canonical validation" "worker validation did not commit"
+  assert_not_contains "$(cat "$WT_DIR/project-message")" "cursoragent@cursor.com" "project commit-msg saw AI attribution"
+  assert_not_contains "$(git -C "$WT_DIR" log -1 --format=%B)" "cursoragent@cursor.com" "worker commit lost stripping"
+  pass "worker validation runs normally with canonical hooks and stripping under the launch allowlist"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1320,7 +1362,7 @@ test_claude_crewmate_launch_carries_the_attribution_policy() {
   expect_code 0 "$status" "claude crewmate spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy "$launch" "claude crewmate"
-  [ -d "$HOME_DIR/state/$id.git-hooks" ] || fail "default config did not install the AI trailer hooks"
+  assert_contains "$launch" 'GIT_CONFIG_COUNT=' "default launch did not inject the AI trailer hook environment"
   pass "a claude crewmate launch carries the attribution-off policy in its own settings"
 }
 
@@ -1336,8 +1378,8 @@ test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks() {
   expect_code 0 "$status" "claude spawn with keep-ai-trailers should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy_absent "$launch" "opted-in claude"
-  assert_not_contains "$launch" 'GIT_CONFIG_KEY_0=core.hooksPath' \
-    "opted-in launch still overrides the repository hooksPath"
+  assert_not_contains "$launch" 'GIT_CONFIG_COUNT=' \
+    "opted-in launch still injects the AI trailer hook environment"
   [ ! -e "$HOME_DIR/state/$id.git-hooks" ] \
     || fail "opted-in launch installed AI trailer strip hooks"
   pass "keep-ai-trailers omits Claude attribution settings and the pane strip hooks"
@@ -1366,8 +1408,8 @@ test_keep_ai_trailers_reaches_secondmate_crew_launches() {
   expect_code 0 "$status" "secondmate crew spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy_absent "$launch" "secondmate crew claude"
-  assert_not_contains "$launch" 'GIT_CONFIG_KEY_0=core.hooksPath' \
-    "secondmate crew launch still overrides the repository hooksPath"
+  assert_not_contains "$launch" 'GIT_CONFIG_COUNT=' \
+    "secondmate crew launch still injects the AI trailer hook environment"
   [ ! -e "$HOME_DIR/state/$crew_id.git-hooks" ] \
     || fail "secondmate crew launch installed AI trailer strip hooks"
   pass "keep-ai-trailers is inherited so a secondmate's crew launch keeps AI trailers"
@@ -1901,6 +1943,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
+test_worker_validation_uses_canonical_hooks
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort

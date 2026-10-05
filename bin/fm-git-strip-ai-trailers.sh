@@ -6,8 +6,12 @@
 #   fm-git-strip-ai-trailers.sh <msgfile>
 #       Commit-msg hook mode. Git passes the proposed message file as $1.
 #       Rewrites that file in place, then exits 0 so the commit proceeds.
+#   fm-git-strip-ai-trailers.sh launch-env <hooks-dir> <worktree>
+#       Emit a shell export for a pane-scoped config commit-msg hook, leaving
+#       core.hooksPath intact. Git runs it before the file-based commit-msg.
+#       On Git without config hooks, install wrappers and emit their hooksPath.
 #   fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
-#       Recreate <hooks-dir> as a core.hooksPath for this launch: a commit-msg
+#       Recreate <hooks-dir> as a legacy core.hooksPath: a commit-msg
 #       hook that runs this strip, plus one wrapper per client-side hook name
 #       git documents except reference-transaction and post-index-change,
 #       which are deliberately excluded (see FM_GIT_CLIENT_HOOKS below).
@@ -24,8 +28,6 @@
 #       nonzero rather than skipping the repository's hook. Does not touch the
 #       project's git config; the caller prefixes the pane with
 #       GIT_CONFIG_COUNT / GIT_CONFIG_KEY_0 / GIT_CONFIG_VALUE_0.
-#       Canonical-hook health checks see this override too; fm-brief.sh owns
-#       the command-scoped environment recipe for read-only project checks.
 #
 # WHY THIS EXISTS. Claude launches already carry attribution-off in their
 # per-launch --settings JSON. Cursor and other non-Claude runtimes inject a
@@ -49,7 +51,7 @@
 # trailer found on a fleet commit therefore points at one of those two paths,
 # not at an unnoticed hole in the matcher.
 #
-# ACCEPTED RESIDUAL, ruled 2026-09-17. Inside a fleet pane git reports this
+# ACCEPTED RESIDUAL, ruled 2026-09-17. With legacy wrappers git reports this
 # directory as the repository's hooks directory, so a hook manager run there
 # (lefthook's npm postinstall, pre-commit install) targets it and would
 # displace the strip. install leaves the directory and every hook in it
@@ -66,6 +68,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-git-strip-ai-trailers.sh <msgfile>
+  fm-git-strip-ai-trailers.sh launch-env <hooks-dir> <worktree>
   fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
 EOF
   exit 2
@@ -245,8 +248,30 @@ EOF
   chmod 500 "$hooks_dir"
 }
 
+launch_env() {
+  local hooks_dir=$1 wt=$2 command
+  [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
+  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null || return 1
+  command=$(quote_for_hook "$SELF")
+  if git -C "$wt" -c hook.firstmate-strip-ai-trailers.event=commit-msg \
+    -c "hook.firstmate-strip-ai-trailers.command=$command" \
+    -c hook.firstmate-strip-ai-trailers.enabled=true hook list commit-msg >/dev/null 2>&1; then
+    printf 'export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=hook.firstmate-strip-ai-trailers.event GIT_CONFIG_VALUE_0=commit-msg GIT_CONFIG_KEY_1=hook.firstmate-strip-ai-trailers.command GIT_CONFIG_VALUE_1=%s GIT_CONFIG_KEY_2=hook.firstmate-strip-ai-trailers.enabled GIT_CONFIG_VALUE_2=true; ' \
+      "$(quote_for_hook "$command")"
+  else
+    install_hooks "$hooks_dir" "$wt" || return 1
+    hooks_dir=$(CDPATH='' cd -- "$hooks_dir" && pwd -P) || return 1
+    printf 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=%s; ' \
+      "$(quote_for_hook "$hooks_dir")"
+  fi
+}
+
 CMD=${1:-}
 case "$CMD" in
+launch-env)
+  [ "$#" -eq 3 ] || usage
+  launch_env "$2" "$3"
+  ;;
 install)
   [ "$#" -eq 3 ] || usage
   install_hooks "$2" "$3"

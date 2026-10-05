@@ -566,18 +566,6 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
-IFS= read -r -d '' PROJECT_HOOK_CHECK_SECTION <<'EOF' || true
-# Project hook health checks
-Firstmate injects a pane-local Git hooks directory to strip AI commit trailers while chaining the project's hooks.
-For a read-only project health check that verifies the effective hook path or canonical hook identity, run it with this command-scoped environment instead of changing Git config or the pane environment (replace `PROJECT_HEALTH_CHECK [args...]` with the project's check command):
-```sh
-env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 -u GIT_CONFIG_PARAMETERS PROJECT_HEALTH_CHECK [args...]
-```
-This exposes the project's configured hooks only to that check and its children; a nonzero check result still means failure.
-Do not use this environment for commits, pushes, hook installers, or an entire validation pipeline, and do not unset these variables in the parent shell: ordinary Git writes must retain Firstmate's trailer stripping and hook chaining.
-If the check also writes commits or requires command-scoped Git configuration, stop and report the conflict instead of bypassing protection.
-EOF
-
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
@@ -620,8 +608,6 @@ $CREWMATE_PAUSE_INSTRUCTIONS
 $SHARED_INFRA_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
-
-$PROJECT_HOOK_CHECK_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -672,8 +658,6 @@ The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
 1. First action: create your branch: \`git checkout -b $BRANCH_Q --\`$SETUP2
-
-$PROJECT_HOOK_CHECK_SECTION
 
 # Rules
 $RULE1

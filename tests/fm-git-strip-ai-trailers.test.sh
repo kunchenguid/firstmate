@@ -25,6 +25,18 @@ with_hooks_env() {  # <hooks-dir> <command...>
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$hooks "$@"
 }
 
+with_launch_env() {
+  local hooks=$1 repo=$2 launch
+  shift 2
+  launch=$("$STRIP" launch-env "$hooks" "$repo") || fail "could not prepare the pane Git environment"
+  (eval "$launch"; "$@")
+}
+
+supports_config_hooks() {
+  git -C "$1" -c hook.fm-test.event=commit-msg -c hook.fm-test.command=true \
+    hook list commit-msg >/dev/null 2>&1
+}
+
 make_repo() {
   local dir=$1
   fm_git_init_commit "$dir"
@@ -314,7 +326,7 @@ test_repository_pre_push_runs_on_every_override_channel() {
   write_refusing_pre_push "$repo/.git/hooks/pre-push" "$marker"
   hooks="$TMP_ROOT/hooks-guarded"
   "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
-  for label in env param env+param child-env child-param; do
+  for label in env param env+param child-env child-param config-env config-child config-param; do
     rm -f "$marker"
     case "$label" in
     env) with_hooks_env "$hooks" git -C "$repo" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
@@ -322,6 +334,9 @@ test_repository_pre_push_runs_on_every_override_channel() {
     env+param) with_hooks_env "$hooks" git -C "$repo" -c core.hooksPath="$hooks" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
     child-env) with_hooks_env "$hooks" sh -c "$child_push" _ "$repo" "$label" 2>/dev/null ;;
     child-param) git -C "$repo" -c core.hooksPath="$hooks" -c "alias.guarded-push=!git push -q origin HEAD:refs/heads/$label" guarded-push 2>/dev/null ;;
+    config-env) with_launch_env "$hooks" "$repo" git -C "$repo" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
+    config-child) with_launch_env "$hooks" "$repo" sh -c "$child_push" _ "$repo" "$label" 2>/dev/null ;;
+    config-param) with_launch_env "$hooks" "$repo" git -C "$repo" -c "alias.guarded-push=!git push -q origin HEAD:refs/heads/$label" guarded-push 2>/dev/null ;;
     esac && fail "push via $label succeeded past the repository's refusing pre-push hook"
     [ -f "$marker" ] || fail "the repository's pre-push hook did not run via $label"
     git -C "$remote" rev-parse -q --verify "refs/heads/$label" >/dev/null &&
@@ -346,57 +361,167 @@ test_git_c_override_still_strips_and_chains_commit_hooks() {
   pass "a git -c hooksPath override still strips the trailer and chains the project's hooks"
 }
 
-# Execute the recipe from the generated public brief, not a duplicate command
-# in this test: it must expose canonical hooks without changing the pane.
-test_scaffolded_canonical_hook_check() {
-  local repo hooks home kind recipe mode effective rc
-  repo="$TMP_ROOT/canonical-check"
-  home="$TMP_ROOT/brief-home"
-  make_repo "$repo"
-  mkdir -p "$home/data" "$repo/project-hooks"
-  write_marker_hook "$repo/project-hooks/pre-commit" canonical-pre-commit
-  git -C "$repo" config core.hooksPath project-hooks
-  hooks="$TMP_ROOT/hooks-canonical"
-  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
-  cat >"$repo/health-check" <<'EOF'
+test_plain_canonical_hook_check_and_validation() {
+  local repo hooks project_hooks variant legacy launch rc head body
+  for variant in default relative absolute late; do
+    repo="$TMP_ROOT/canonical-$variant"
+    make_repo "$repo"
+    if ! supports_config_hooks "$repo"; then
+      pass "plain canonical hook checks (skipped: Git lacks config hooks)"
+      return
+    fi
+    case "$variant" in
+    default) project_hooks="$repo/.git/hooks" ;;
+    relative | late)
+      project_hooks="$repo/project-hooks"
+      git -C "$repo" config core.hooksPath project-hooks
+      ;;
+    absolute)
+      project_hooks="$TMP_ROOT/absolute-project-hooks"
+      git -C "$repo" config core.hooksPath "$project_hooks"
+      ;;
+    esac
+    hooks="$TMP_ROOT/hooks-canonical-$variant"
+    launch=$("$STRIP" launch-env "$hooks" "$repo") || fail "could not prepare $variant launch"
+    [ ! -e "$hooks" ] || fail "config-hook launch installed legacy wrappers"
+    mkdir -p "$project_hooks"
+    cat >"$repo/health-check" <<'EOF'
 #!/usr/bin/env bash
 set -eu
 actual=$(git rev-parse --path-format=absolute --git-path hooks/pre-commit)
-expected="$PWD/project-hooks/pre-commit"
-[ -x "$actual" ] && [ "$actual" = "$expected" ] || exit 42
+[ -x "$actual" ] && [ "$actual" = "$EXPECTED_PRE_COMMIT" ] || exit 42
 exit "${CHECK_EXIT:-0}"
 EOF
-  chmod +x "$repo/health-check"
-  (cd "$repo" && with_hooks_env "$hooks" ./health-check)
-  rc=$?
-  expect_code 42 "$rc" "pane override must reproduce the canonical-hook health-check failure"
-
-  for kind in no-mistakes direct-PR local-only scout; do
-    mode=(--mode "$kind")
-    [ "$kind" != scout ] || mode=(--scout)
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "canonical-$kind" example "${mode[@]}" >/dev/null ||
-      fail "could not scaffold $kind instructions"
-    recipe=$(awk '/^env .* PROJECT_HEALTH_CHECK / {sub(/PROJECT_HEALTH_CHECK .*/, "./health-check"); print}' \
-      "$home/data/canonical-$kind/brief.md")
-    [ -n "$recipe" ] || fail "$kind brief has no executable health-check recipe"
-    (cd "$repo" && with_hooks_env "$hooks" bash -c "$recipe") ||
-      fail "$kind scaffolded recipe did not pass canonical-hook health check"
-    (cd "$repo" && CHECK_EXIT=23 with_hooks_env "$hooks" bash -c "$recipe")
+    chmod +x "$repo/health-check"
+    cat >"$project_hooks/pre-commit" <<'EOF'
+#!/bin/sh
+./health-check || exit $?
+printf 'pre-commit\n' >> hook-order
+EOF
+    cat >"$project_hooks/prepare-commit-msg" <<'EOF'
+#!/bin/sh
+printf 'prepare-commit-msg\n' >> hook-order
+printf '\nCo-authored-by: Claude <noreply@anthropic.com>\n' >> "$1"
+EOF
+    cat >"$project_hooks/commit-msg" <<'EOF'
+#!/bin/sh
+printf 'commit-msg\n' >> hook-order
+cp "$1" project-message
+exit "${PROJECT_HOOK_EXIT:-0}"
+EOF
+    cat >"$project_hooks/post-commit" <<'EOF'
+#!/bin/sh
+printf 'post-commit\n' >> hook-order
+EOF
+    chmod +x "$project_hooks/"{pre-commit,prepare-commit-msg,commit-msg,post-commit}
+    git -C "$repo" config hook.project.event commit-msg
+    git -C "$repo" config hook.project.command "printf 'config-commit-msg\\n' >> hook-order"
+    git -C "$repo" config hook.firstmate-strip-ai-trailers.enabled false
+    export EXPECTED_PRE_COMMIT="$project_hooks/pre-commit"
+    legacy="$TMP_ROOT/legacy-canonical-$variant"
+    "$STRIP" install "$legacy" "$repo" || fail "legacy install failed"
+    (cd "$repo" && with_hooks_env "$legacy" ./health-check)
     rc=$?
-    expect_code 23 "$rc" "$kind recipe must preserve health-check failures"
-    # git -c also propagates its override to child commands through PARAMETERS.
-    (cd "$repo" && with_hooks_env "$hooks" git -c core.hooksPath="$hooks" \
-      -c "alias.health=!$recipe" health) || fail "$kind recipe retained git -c hooks override"
+    expect_code 42 "$rc" "legacy hooksPath must reproduce the reported failure"
+    (cd "$repo" && eval "$launch"; ./health-check && sh -c './health-check' &&
+      git -c 'alias.health=!./health-check' health) || fail "$variant plain canonical hook check failed"
+    head=$(git -C "$repo" rev-parse HEAD)
+    (cd "$repo" && eval "$launch"; CHECK_EXIT=23 ./health-check && git commit -q --allow-empty -m unexpected)
+    rc=$?
+    expect_code 23 "$rc" "$variant validation must propagate health-check failure"
+    assert_equals "$head" "$(git -C "$repo" rev-parse HEAD)" "failed validation created a commit"
+    (cd "$repo" && eval "$launch"; ./health-check && git commit -q --allow-empty \
+      --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' \
+      --trailer 'Co-authored-by: Jane Doe <jane@example.com>' -m 'fix: ordinary validation') ||
+      fail "$variant ordinary validation failed"
+    body=$(git -C "$repo" log -1 --format=%B)
+    assert_not_contains "$body" "cursoragent@cursor.com" "$variant lost Cursor stripping"
+    assert_not_contains "$body" "noreply@anthropic.com" "$variant lost prepare-commit-msg stripping"
+    assert_contains "$body" 'Jane Doe <jane@example.com>' "$variant lost human attribution"
+    assert_equals "$body" "$(cat "$repo/project-message")" "project commit-msg did not see the stripped message"
+    assert_equals $'pre-commit\nprepare-commit-msg\nconfig-commit-msg\ncommit-msg\npost-commit' \
+      "$(cat "$repo/hook-order")" "$variant project hooks ran out of order or more than once"
+    head=$(git -C "$repo" rev-parse HEAD)
+    (cd "$repo" && eval "$launch"; PROJECT_HOOK_EXIT=7 git commit -q --allow-empty -m refused) &&
+      fail "$variant project commit-msg refusal was ignored"
+    assert_equals "$head" "$(git -C "$repo" rev-parse HEAD)" "project refusal moved HEAD"
   done
-  effective=$(with_hooks_env "$hooks" git -C "$repo" rev-parse --path-format=absolute --git-path hooks)
-  assert_equals "$hooks" "$effective" "health check must not change the pane override"
-  with_hooks_env "$hooks" git -C "$repo" commit -q --allow-empty \
-    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: after canonical check' ||
-    fail "ordinary commit after health check failed"
-  [ -f "$repo/canonical-pre-commit.ran" ] || fail "canonical project hook was not chained"
-  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "cursoragent@cursor.com" \
-    "trailer stripping was lost after canonical-hook health check"
-  pass "all worker briefs provide a command-scoped canonical-hook check without disabling subsequent commit protection"
+  unset EXPECTED_PRE_COMMIT
+  pass "plain canonical checks and validation preserve project hooks, ordering, failures, and stripping"
+}
+
+test_config_hook_respects_repository_and_command_hookspath() {
+  local repo other hooks launch effective body
+  repo="$TMP_ROOT/config-task"
+  other="$TMP_ROOT/config-other"
+  make_repo "$repo"
+  make_repo "$other"
+  if ! supports_config_hooks "$repo"; then
+    pass "config hook repository selection (skipped: Git lacks config hooks)"
+    return
+  fi
+  hooks="$TMP_ROOT/hooks-config-other"
+  launch=$("$STRIP" launch-env "$hooks" "$repo") || fail "could not prepare launch"
+  write_marker_hook "$repo/.git/hooks/pre-commit" task-pre-commit
+  write_marker_hook "$other/.git/hooks/pre-commit" other-pre-commit
+  effective=$(eval "$launch"; git -C "$other" rev-parse --path-format=absolute --git-path hooks/pre-commit)
+  assert_equals "$other/.git/hooks/pre-commit" "$effective" "git -C lost the other repository's canonical hook"
+  (eval "$launch"; git -C "$other" -c "alias.commit-test=!git commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: other repo'" commit-test) ||
+    fail "child commit in another repository failed"
+  [ -f "$other/other-pre-commit.ran" ] || fail "other repository's hook did not run"
+  [ ! -f "$repo/task-pre-commit.ran" ] || fail "task repository's hook ran in another repository"
+  mkdir -p "$other/custom-hooks"
+  write_marker_hook "$other/custom-hooks/pre-commit" command-pre-commit
+  (eval "$launch"; git -C "$other" -c core.hooksPath=custom-hooks commit -q --allow-empty \
+    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: command hooks') || fail "git -c commit failed"
+  [ -f "$other/command-pre-commit.ran" ] || fail "command-scoped project hook did not run"
+  rm -f "$other/other-pre-commit.ran" "$other/command-pre-commit.ran"
+  git -C "$other" config core.hooksPath ''
+  (eval "$launch"; git -C "$other" commit -q --allow-empty \
+    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: disabled project hooks') || fail "empty hooksPath commit failed"
+  [ ! -f "$other/other-pre-commit.ran" ] && [ ! -f "$other/command-pre-commit.ran" ] ||
+    fail "empty hooksPath ran a project hook"
+  body=$(git -C "$other" log -3 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "git -C, child, or command-scoped commit lost stripping"
+  pass "config stripping preserves git -C, child Git configuration, and command-scoped or disabled project hooks"
+}
+
+test_launch_env_quotes_the_strip_command() {
+  local repo copy launch
+  repo="$TMP_ROOT/quoted-command"
+  make_repo "$repo"
+  copy="$TMP_ROOT/strip 'quoted' directory/strip.sh"
+  mkdir -p "$(dirname "$copy")"
+  cp "$STRIP" "$copy"
+  launch=$("$copy" launch-env "$TMP_ROOT/hooks-quoted" "$repo") || fail "quoted strip launch preparation failed"
+  (eval "$launch"; git -C "$repo" commit -q --allow-empty \
+    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: quoted strip path') || fail "quoted strip command failed"
+  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "cursoragent@cursor.com" "quoted strip path lost stripping"
+  pass "pane configuration executes the strip from paths containing spaces and apostrophes"
+}
+
+test_launch_env_falls_back_without_config_hooks() {
+  local repo hooks fakebin real_git launch effective
+  repo="$TMP_ROOT/legacy-launch"
+  hooks="$TMP_ROOT/hooks-legacy-launch"
+  make_repo "$repo"
+  write_marker_hook "$repo/.git/hooks/pre-commit" legacy-project-pre-commit
+  real_git=$(command -v git)
+  fakebin=$(fm_fakebin "$TMP_ROOT/legacy-git")
+  cat >"$fakebin/git" <<EOF
+#!/bin/sh
+case " \$* " in *' hook list commit-msg '*) exit 129 ;; esac
+exec '$real_git' "\$@"
+EOF
+  chmod +x "$fakebin/git"
+  launch=$(PATH="$fakebin:$PATH" "$STRIP" launch-env "$hooks" "$repo") || fail "legacy launch preparation failed"
+  effective=$(eval "$launch"; git -C "$repo" rev-parse --path-format=absolute --git-path hooks)
+  assert_equals "$hooks" "$effective" "unsupported Git did not receive legacy wrappers"
+  (eval "$launch"; git -C "$repo" commit -q --allow-empty \
+    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: legacy fallback') || fail "legacy commit failed"
+  [ -f "$repo/legacy-project-pre-commit.ran" ] || fail "legacy project hook was not chained"
+  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "cursoragent@cursor.com" "legacy fallback lost stripping"
+  pass "Git without config hooks receives working strip-and-chain wrappers"
 }
 
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
@@ -424,7 +549,10 @@ test_unresolvable_project_hookspath_still_refuses
 test_valueless_project_hookspath_still_refuses
 test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
-test_scaffolded_canonical_hook_check
+test_plain_canonical_hook_check_and_validation
+test_config_hook_respects_repository_and_command_hookspath
+test_launch_env_quotes_the_strip_command
+test_launch_env_falls_back_without_config_hooks
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 
 echo "# all fm-git-strip-ai-trailers tests passed"
