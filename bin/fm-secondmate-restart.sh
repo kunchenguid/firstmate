@@ -35,6 +35,12 @@
 #      deliberately leaves that unanswered expectation open: it is a genuine
 #      open loop owned by the ordinary pending-reply recovery ladder, not state
 #      this restart pass may close.
+#      A local mate's answer is often still mid-turn when it lands, and the
+#      relaunch refuses to type its exit command into a composer it cannot
+#      prove empty. So after the answer, the pass also waits, bounded, until
+#      that mate's composer reads exactly empty; a mate still busy at the bound
+#      is nudged and keeps its agent. A remote mate's composer lives on its
+#      host, where the host-local relaunch applies the same refusal itself.
 #
 # A mate whose persist answer did not arrive or whose runtime cannot prove a
 # restart gets the ordinary re-read nudge and is reported as a nudge, never as a
@@ -61,7 +67,8 @@
 #
 # Environment knobs:
 #   FM_SECONDMATE_PERSIST_WAIT  seconds to wait for one mate's persist answer (900)
-#   FM_SECONDMATE_PERSIST_POLL  seconds between checks of that answer (5)
+#   FM_SECONDMATE_IDLE_WAIT     seconds after that answer to wait for its composer to read empty (600)
+#   FM_SECONDMATE_PERSIST_POLL  seconds between checks of the answer and the composer (5)
 #
 # Exit status: 0 every named mate restarted; 3 at least one was nudged or left
 # unreached and every mate was still accounted for; 1 the input itself is
@@ -72,7 +79,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,72{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
@@ -96,8 +103,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 PERSIST_WAIT=${FM_SECONDMATE_PERSIST_WAIT:-900}
+IDLE_WAIT=${FM_SECONDMATE_IDLE_WAIT:-600}
 PERSIST_POLL=${FM_SECONDMATE_PERSIST_POLL:-5}
 case "$PERSIST_WAIT" in ''|*[!0-9]*) echo "error: FM_SECONDMATE_PERSIST_WAIT must be a non-negative integer: $PERSIST_WAIT" >&2; exit 2 ;; esac
+case "$IDLE_WAIT" in ''|*[!0-9]*) echo "error: FM_SECONDMATE_IDLE_WAIT must be a non-negative integer: $IDLE_WAIT" >&2; exit 2 ;; esac
 case "$PERSIST_POLL" in ''|*[!0-9]*|0) echo "error: FM_SECONDMATE_PERSIST_POLL must be a positive integer: $PERSIST_POLL" >&2; exit 2 ;; esac
 
 IDS=()
@@ -117,8 +126,8 @@ done
 [ "${#IDS[@]}" -gt 0 ] || { usage >&2; exit 2; }
 
 # Per-mate pass state, kept as parallel indexed arrays so this stays bash-3.2
-# safe. PLAN is the phase the mate reached: persist-sent, or fallback with the
-# reason already decided.
+# safe. PLAN is the phase the mate reached: persisted-pending, awaiting-empty,
+# restarting, done, or fallback with the reason already decided.
 PLAN=()
 REASON=()
 CORR=()
@@ -189,6 +198,29 @@ restart_mate() {  # <array-index>
   restart_reason=$(first_reported_line "$restart_out")
   [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
   report_unreached "$id" "the restart outcome is unknown: $restart_reason"
+}
+
+# Whether a local mate's composer reads exactly empty right now, through the
+# same classifier fm-control's exit guard reads, so a relaunch started here is
+# not refused for a composer that is still mid-turn.
+composer_reads_empty() {  # <array-index>
+  local id=${IDS[$1]}
+  fm_backend_validate_task_endpoint "$STATE/$id.meta" "$id" 2>/dev/null || return 1
+  [ "$(fm_backend_composer_state "$FM_BACKEND_VALIDATED_BACKEND" \
+    "$FM_BACKEND_VALIDATED_TARGET" "fm-$id" 2>/dev/null)" = empty ]
+}
+
+# The persist answer landed: a remote mate restarts now, a local one first
+# waits for its composer to read empty.
+persist_answered() {  # <array-index>
+  local i=$1
+  if [ "${PLACEMENT[i]}" = remote ]; then
+    pending_count=$((pending_count - 1))
+    launch_restart "$i"
+    return
+  fi
+  DEADLINE[i]=$(($(date +%s) + IDLE_WAIT))
+  PLAN[i]=awaiting-empty
 }
 
 launch_restart() {  # <array-index>
@@ -339,8 +371,7 @@ while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
   while [ "$i" -lt "${#IDS[@]}" ]; do
     if [ "${PLAN[i]}" = persisted-pending ] \
       && fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
-      pending_count=$((pending_count - 1))
-      launch_restart "$i"
+      persist_answered "$i"
     fi
     i=$((i + 1))
   done
@@ -354,8 +385,7 @@ while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
       # A reply can land after the fleet-wide resolution pass. Recheck at the
       # timeout decision so an answer already on disk wins over the fallback.
       if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
-        pending_count=$((pending_count - 1))
-        launch_restart "$i"
+        persist_answered "$i"
       else
         fall_back_to_nudge "${IDS[$i]}" \
           "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
@@ -365,6 +395,26 @@ while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
     else
       remaining=$((DEADLINE[i] - now))
       [ "$remaining" -ge "$next_wait" ] || next_wait=$remaining
+    fi
+    i=$((i + 1))
+  done
+  # A just-answered mate is checked in the same pass, so an idle one restarts
+  # without waiting a poll.
+  i=0
+  while [ "$i" -lt "${#IDS[@]}" ]; do
+    if [ "${PLAN[i]}" = awaiting-empty ]; then
+      if composer_reads_empty "$i"; then
+        pending_count=$((pending_count - 1))
+        launch_restart "$i"
+      elif [ "$(date +%s)" -ge "${DEADLINE[i]}" ]; then
+        fall_back_to_nudge "${IDS[$i]}" \
+          "it wrote down its open work but was still busy ${IDLE_WAIT}s later (its input box never read empty), so it was not stopped mid-turn"
+        PLAN[i]="done"
+        pending_count=$((pending_count - 1))
+      else
+        remaining=$((DEADLINE[i] - $(date +%s)))
+        [ "$remaining" -ge "$next_wait" ] || next_wait=$remaining
+      fi
     fi
     i=$((i + 1))
   done
