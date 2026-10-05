@@ -2811,7 +2811,12 @@ test_no_run_herdr_busy_record_over_shell_reads_agent_gone() {
   out=$(run_crew_state "$d" feat-herdr-busy-record)
   assert_contains "$out" "state: working" "the same busy record with a live harness must still read working"
   assert_contains "$out" "pi-ext" "the live verdict must come from the busy record"
-  pass "a busy record over a pane whose harness exited reads agent gone, and a live one stays working"
+  # Herdr answers agent_not_found for live harnesses it does not detect, so a
+  # missing registration over a running harness is never exit evidence.
+  FM_FAKE_HERDR_HUSK=1
+  out=$(run_crew_state "$d" feat-herdr-busy-record)
+  assert_contains "$out" "state: working" "an unregistered but running harness must still read working"
+  pass "a busy record over a pane whose harness exited reads agent gone, and a running one stays working with or without a registration"
 }
 
 # Decision follow-up (2026-09-05 review): a husk pane (pane present,

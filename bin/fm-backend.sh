@@ -1021,6 +1021,21 @@ fm_backend_agent_state() {  # <backend> <target> [<meta> <task-id>]
   esac
 }
 
+# fm_backend_agent_exited: 0 only when <backend> proves from the process level
+# that the present <target> holds nothing but a shell, i.e. the harness that
+# ran there has exited. Unlike fm_backend_agent_state's `dead`, a missing
+# registration never counts: Herdr answers agent_not_found for live harnesses
+# it does not detect (docs/verification/rovo.md), so only its process view is
+# trusted here. Every unproven read returns 1.
+fm_backend_agent_exited() {  # <backend> <target>
+  fm_backend_source "$1" || return 1
+  case "$1" in
+    tmux) [ "$(fm_backend_tmux_agent_state "$2")" = dead ] ;;
+    herdr) fm_backend_herdr_agent_exited "$2" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_target_absent: whether <backend> authoritatively reports the exact
 # recorded <target> gone. Prints one verdict: `absent` when a read happened and
 # the backend definitively does not have the target, `present` when a read
