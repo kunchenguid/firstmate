@@ -277,7 +277,8 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-
 # fold's most recently opened record supplies it; a standing declared wait, then
 # the worker's own latest event (last_worker_status_line), stands when nothing is open.
 # A standing hold mirror gives way to the worker's own view read past the mirror
-# and resolved lines: its standing pause or latest other event, never a resolved line.
+# and resolved lines: its standing pause or latest other event, never a resolved line
+# or a decision one of them answered.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
   local open key verb note current='' worker mirror
