@@ -3981,6 +3981,59 @@ test_released_merge_passes_the_entrypoint_and_lands() {
   pass "a released merge passes the guarded entrypoint and remains recently landed"
 }
 
+# The usual hand-off of a review-ready PR arms its merge poll, holds the task
+# for the captain's merge word, and completes the captain-call inventory, which
+# writes decision bookkeeping into the same task metadata after pr=. The poll
+# must stay authenticated through that, so a merge made outside firstmate still
+# reaches the watcher as a merged check instead of a rejected one.
+test_completed_captain_hold_keeps_the_merge_poll_watched() {
+  local home id pr repo wt rc
+  home=$(make_home completed-hold-merge-poll)
+  id=sample-held-poll
+  pr=https://github.com/sample/sample/pull/41
+  repo="$home/projects/sample-held-repo"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  git -C "$wt" push -q origin "fm/$id" || fail "could not publish the held task's branch"
+  cat > "$home/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" --json isDraft "*) printf '%s\n' '{"isDraft":false}' ;;
+  *" --json state "*) printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}" ;;
+esac
+SH
+  chmod +x "$home/fakebin/gh"
+  tasks_in "$home" add "$id" "Ship the held pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held merge-poll fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=direct-PR" \
+    "spawn_gen=fixture-$id"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-pr-check.sh" "$id" "$pr" \
+    > "$home/arm.out" 2> "$home/arm.err" \
+    || fail "could not arm the merge poll: $(cat "$home/arm.err")"
+  # Arming also registers the separate contribution observer, whose own check
+  # would end the watcher cycle before the merge poll is reached.
+  rm -f "$home/state/contributions.check.sh" "$home/state/contributions.check-trust"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the armed task for the captain"
+  complete_through_sibling "$home" "$id" >/dev/null \
+    || fail "could not complete the armed task's captain-call inventory"
+  grep -qx 'decisions_reviewed=1' "$home/state/$id.meta" \
+    || fail "the completion gate no longer records its review in the task metadata"
+
+  rc=0
+  fm_run_timed 60 env PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_TEST_GH_STATE=MERGED FM_CHECK_INTERVAL=0 FM_POLL=0.02 FM_HEARTBEAT=999999 \
+    FM_SIGNAL_GRACE=0 "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the watcher cycle did not finish (rc=$rc): $(cat "$home/watch.err")"
+  assert_not_contains "$(cat "$home/watch.out")" "rejected unauthenticated state checks" \
+    "the watcher rejected the merge poll after the captain-call inventory was completed"
+  grep -qxF "check: $home/state/$id.check.sh: merged" "$home/watch.out" \
+    || fail "the watcher did not report the merge of the held task's PR: $(cat "$home/watch.out")"
+  pass "a completed captain hold keeps the merge poll authenticated and watched"
+}
+
 # "Cannot tell" is not permission to close. A ship row has no separate
 # inventory gate ahead of the close, so the predicate itself must refuse before
 # any destructive step when the hold cannot be read.
@@ -4681,6 +4734,7 @@ test_merge_entrypoints_validate_identity_and_state_before_locking
 test_merge_entrypoints_refuse_a_reused_task_incarnation
 test_merge_entrypoints_serialize_forced_teardown_before_task_reads
 test_released_merge_passes_the_entrypoint_and_lands
+test_completed_captain_hold_keeps_the_merge_poll_watched
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
 test_verify_resolves_a_hold_migrated_to_beads_notes
 test_verify_resolves_a_hold_migrated_under_the_configured_prefix

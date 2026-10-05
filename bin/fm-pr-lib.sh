@@ -358,8 +358,12 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# The identity is the record's single pr= line, plus a well-formed pr_head=
+# after it. Other keys may follow pr= in any order: the metadata is shared by
+# every task writer (bin/fm-captain-hold.sh complete, relaunches, teardown
+# stamps), and none of them may silently unauthenticate an armed merge poll.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value pr_count=0 seen_pr=0 pr_head_invalid=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -385,18 +389,13 @@ fm_pr_metadata_identity_parse() {
       pr_head=*)
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
+          fm_pr_head_valid "$value" || pr_head_invalid=1
         fi
-        ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
-      *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
         ;;
     esac
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
+  [ "$pr_head_invalid" -eq 0 ] || return 1
   [ -n "$FM_PR_META_URL" ]
 }
 
