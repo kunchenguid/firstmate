@@ -490,6 +490,67 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+# A merge poll authenticates only while the task record ends with its pr=
+# block (bin/fm-pr-lib.sh), so the lifecycle keys a relaunch writes must land
+# ahead of that block rather than after it.
+test_relaunch_keeps_an_armed_merge_poll_verifiable() {
+  local dir out rc state url head arm valid
+  dir=$(new_case armed-poll rl47)
+  add_ship_task "$dir" rl47 claude
+  state="$dir/home/state"
+  url=https://github.com/example/repo/pull/47
+  head=0123456789abcdef0123456789abcdef01234567
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$state/rl47.meta"
+  # shellcheck disable=SC2016 # $1..$4 expand inside the probe's own shell.
+  arm='. "$1/bin/fm-pr-lib.sh"; fm_pr_url_parse "$3" || exit 1
+    fm_pr_poll_prepare "$2" "$4" "$FM_PR_PROVIDER" "$3" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+      "$1/bin/fm-pr-poll.sh" && fm_pr_poll_publish_prepared'
+  # shellcheck disable=SC2016 # $1..$3 expand inside the probe's own shell.
+  valid='. "$1/bin/fm-pr-lib.sh"; fm_pr_poll_artifacts_valid "$2" "$3" "$1/bin/fm-pr-poll.sh"'
+  bash -c "$arm" _ "$ROOT" "$state" "$url" rl47 || fail "could not arm the merge poll fixture"
+  bash -c "$valid" _ "$ROOT" "$state" rl47 || fail "the armed merge poll fixture did not authenticate"
+
+  out=$(run_control "$dir" rl47 relaunch --note "continuing after a stalled turn"); rc=$?
+  expect_code 0 "$rc" "relaunch of a task with an armed merge poll should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl47 control_relaunch_tx)" ] \
+    || fail "setup error: the relaunch wrote no lifecycle key, so the ordering is untested"
+  [ "$(tail -n 2 "$state/rl47.meta")" = "pr=$url"$'\n'"pr_head=$head" ] \
+    || fail "the relaunched record does not end with its pr= block: $(cat "$state/rl47.meta")"
+  bash -c "$valid" _ "$ROOT" "$state" rl47 \
+    || fail "the relaunch disarmed the task's merge poll: $(cat "$state/rl47.meta")"
+  pass "fm-control relaunch: lifecycle keys land ahead of the pr= block, so an armed merge poll still authenticates"
+}
+
+test_traced_relaunch_keeps_an_armed_merge_poll_verifiable() {
+  local dir out rc state url head arm valid
+  dir=$(new_case armed-poll-traced rl48)
+  add_ship_task "$dir" rl48 claude
+  state="$dir/home/state"
+  printf '%s\n' "$$" > "$state/.lock"
+  printf '%s on\n' "$$" > "$state/.trace-context-effective"
+  url=https://github.com/example/repo/pull/48
+  head=0123456789abcdef0123456789abcdef01234568
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$state/rl48.meta"
+  # shellcheck disable=SC2016 # $1..$4 expand inside the probe's own shell.
+  arm='. "$1/bin/fm-pr-lib.sh"; fm_pr_url_parse "$3" || exit 1
+    fm_pr_poll_prepare "$2" "$4" "$FM_PR_PROVIDER" "$3" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+      "$1/bin/fm-pr-poll.sh" && fm_pr_poll_publish_prepared'
+  # shellcheck disable=SC2016 # $1..$3 expand inside the probe's own shell.
+  valid='. "$1/bin/fm-pr-lib.sh"; fm_pr_poll_artifacts_valid "$2" "$3" "$1/bin/fm-pr-poll.sh"'
+  bash -c "$arm" _ "$ROOT" "$state" "$url" rl48 || fail "could not arm the merge poll fixture"
+  bash -c "$valid" _ "$ROOT" "$state" rl48 || fail "the armed merge poll fixture did not authenticate"
+
+  out=$(run_control "$dir" rl48 relaunch --note "continuing with trace context"); rc=$?
+  expect_code 0 "$rc" "traced relaunch of a task with an armed merge poll should succeed"$'\n'"$out"
+  fm_trace_context_valid "$(meta_field "$dir" rl48 traceparent)" \
+    || fail "setup error: the relaunch recorded no trace carrier, so the ordering is untested"
+  [ "$(tail -n 2 "$state/rl48.meta")" = "pr=$url"$'\n'"pr_head=$head" ] \
+    || fail "the traced relaunch record does not end with its pr= block: $(cat "$state/rl48.meta")"
+  bash -c "$valid" _ "$ROOT" "$state" rl48 \
+    || fail "the traced relaunch disarmed the task's merge poll: $(cat "$state/rl48.meta")"
+  pass "fm-control relaunch: the trace carrier lands ahead of the pr= block, so an armed merge poll still authenticates"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -2391,6 +2452,8 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_merge_poll_verifiable
+test_traced_relaunch_keeps_an_armed_merge_poll_verifiable
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

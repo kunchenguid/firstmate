@@ -2558,7 +2558,7 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
   post_size=$(_fm_status_file_size "$file") || return 1
   post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
   case "$post_size" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
+  [ -n "$pre_ident" ] && _fm_status_ident_same "$post_ident" "$pre_ident" || return 1
   for line in "${stamped[@]}"; do appended=$((appended + ${#line} + 1)); done
   [ "$post_size" -eq $((pre_size + appended)) ] || return 1
   status_home_appends_record "$file" "$pre_size" "$post_size" || return 1

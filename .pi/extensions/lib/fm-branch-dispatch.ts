@@ -324,6 +324,14 @@ function statusFileIdentity(path: string): string {
   return birthEpoch !== "0" && birth ? `strong:${ident}:${birth}` : `weak:${ident}`;
 }
 
+// bin/fm-classify-lib.sh's _fm_status_ident_same: two status identities are
+// compared without their device field, because a volume remount renumbers the
+// device while the file keeps its inode and birth time.
+function statusIdentitySame(left: string, right: string): boolean {
+  const withoutDevice = (ident: string) => ident.replace(/^(strong|weak):[0-9]+:/, "$1:");
+  return withoutDevice(left) === withoutDevice(right);
+}
+
 // The per-task presentation-cursor rows (task, identity, presented offset,
 // backstop), in the format bin/fm-classify-lib.sh writes. Null when the cursor
 // is absent or malformed, so every span read falls back to the whole log.
@@ -505,7 +513,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
               contents = readFileSync(statusPath);
               if (cursor && cursor.offset <= contents.length) {
                 try {
-                  if (cursor.ident === statusFileIdentity(statusPath)) spanOffset = cursor.offset;
+                  if (statusIdentitySame(cursor.ident, statusFileIdentity(statusPath))) spanOffset = cursor.offset;
                 } catch {
                   // No identity to match: the span is the whole log.
                 }
