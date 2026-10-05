@@ -53,6 +53,8 @@
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
 # its base branch instead of the default branch. Local-only delivery retains its
 # existing boundary where publishing the branch to a remote is sufficient.
+# A task whose meta records base_branch= (bin/fm-spawn.sh) runs that content
+# check against origin's copy of its base branch instead of the default branch.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git

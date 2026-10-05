@@ -464,5 +464,4 @@ test_worker_role_names_skill_and_fallback_file() {
 }
 
 test_worker_role_names_skill_and_fallback_file
-
 echo "all fm-dod-lib tests passed"
