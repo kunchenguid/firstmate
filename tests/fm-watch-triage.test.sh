@@ -6224,6 +6224,91 @@ test_heartbeat_wakes_an_idle_lead_with_ready_work() {
   pass "an idle lead with ready work is woken once per ready set, and never while a worker is working"
 }
 
+# The lane floor (config/lane-target): a home below its target with ready work
+# must wake even when its working lanes still have free slots - the 5 Oct
+# Crewhouse stall, where two working lanes and 29 ready items surfaced nothing
+# under the no-worker-working rule. At the target it stays quiet, and a
+# still-holding condition re-raises on FM_READY_WORK_RESURFACE_SECS instead of
+# going silent after one wake. The no-config case is
+# test_heartbeat_wakes_an_idle_lead_with_ready_work above.
+# The same four panes are open in every round; the two spare endpoints are
+# secondmates (kind=secondmate), which are not lanes of this home, so the round
+# varies the lane count without ever orphaning a pane.
+test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
+  local dir state fakebin out pid tasks expected windows spare
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "lane-floor heartbeat # skip: tasks-axi not found"
+    return 0
+  fi
+  dir=$(make_case heartbeat-lane-floor); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  tasks="$ROOT/bin/fm-tasks-axi.sh"
+  windows="$(printf 'fm-busyone\nfm-busytwo\nfm-busythree\nfm-busyfour')"
+  spare='kind=secondmate\nmode=secondmate\n'
+  printf 'sm-lane-floor\n' > "$dir/.fm-secondmate-home"
+  mkdir -p "$dir/data" "$dir/config"
+  FM_HOME="$dir" "$tasks" add alpha-one "first ready item" >/dev/null || fail "fixture: could not queue alpha-one"
+  printf '4\n' > "$dir/config/lane-target"
+  printf 'window=test:fm-busyone\nkind=ship\n' > "$state/busyone.meta"
+  printf 'window=test:fm-busytwo\nkind=scout\n' > "$state/busytwo.meta"
+  printf "window=test:fm-busythree\n$spare" > "$state/busythree.meta"
+  printf "window=test:fm-busyfour\n$spare" > "$state/busyfour.meta"
+  expected="check: ready work waiting with free lane slots (2/4 open): alpha-one - start the top ready item now, or record why it waits"
+
+  # A home under its floor with working lanes wakes.
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 \
+    FM_FAKE_TMUX_WINDOWS="$windows" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a home under its lane floor with working lanes was not woken: $(cat "$out")"; }
+  grep -Fx "$expected" "$out" >/dev/null || fail "the lane-floor wake did not name the open/target counts and the ready ids: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the lane-floor wake"
+
+  # The same still-holding condition is absorbed inside the resurface window.
+  rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 \
+    FM_FAKE_TMUX_WINDOWS="$windows" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  pid=$!
+  wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "the same lane-floor condition woke again inside the resurface window: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "the lane-floor wake repeated inside the resurface window: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the absorbing cycle"
+
+  # Four open lanes is the floor: no wake, however much ready work waits.
+  printf 'window=test:fm-busythree\nkind=ship\n' > "$state/busythree.meta"
+  printf 'window=test:fm-busyfour\nkind=ship\n' > "$state/busyfour.meta"
+  rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 \
+    FM_FAKE_TMUX_WINDOWS="$windows" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  pid=$!
+  wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "a home at its lane floor was woken: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a home at its lane floor printed a wake reason: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the absorbing cycle at the floor"
+
+  # Still holding after the window elapses, the same condition re-raises.
+  printf "window=test:fm-busythree\n$spare" > "$state/busythree.meta"
+  printf "window=test:fm-busyfour\n$spare" > "$state/busyfour.meta"
+  rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
+  sleep 2
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 FM_READY_WORK_RESURFACE_SECS=1 \
+    FM_FAKE_TMUX_WINDOWS="$windows" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a still-holding lane-floor condition never re-raised: $(cat "$out")"; }
+  grep -Fx "$expected" "$out" >/dev/null || fail "the re-raised lane-floor wake changed its reason: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the re-raised lane-floor wake"
+
+  # A malformed target is reported once and falls back to the older rule, which
+  # these working lanes satisfy, so the heartbeat stays absorbed.
+  printf 'four\n' > "$dir/config/lane-target"
+  rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 \
+    FM_FAKE_TMUX_WINDOWS="$windows" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  pid=$!
+  wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "a malformed lane-target read as a number and fired: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a malformed lane-target fired the lane-floor wake: $(cat "$out")"
+  pass "a home under its lane floor wakes with free lane slots, stays quiet at the floor, and re-raises while held"
+}
+
 test_heartbeat_backstop_surfaces_a_masked_status() {
   local dir state fakebin out sig pid
   dir=$(make_case heartbeat-masked); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6968,6 +7053,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_heartbeat_wakes_an_idle_lead_with_ready_work
+test_heartbeat_lane_floor_wakes_with_free_lane_slots
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
