@@ -550,15 +550,41 @@ _fm_status_unstamped() {  # <status-line> <out-var> -> line with its stamp remov
 # all other bytes, including correlation metadata, still identify the event.
 # Both sides normalize through _fm_status_untimed, so a stamped retry of an
 # already-recorded event can never read as a new one.
+# A needs-decision or blocked line is one episode of a keyed decision. A later
+# resolved line for that same key ends the episode when the fold would close
+# on it, and the next identical line is a new episode. A resolve for another
+# key, or one the reserved-key rule rejects, does not end it. Any other line
+# stays recorded for the life of the file.
 status_event_recorded() {  # <status-file> <new-status-line>
-  local wanted line untimed
+  local wanted line untimed open_match=1
+  local wanted_verb='' wanted_key='' opener=1
+  local resolve verb key
   [ -f "$1" ] || return 1
   _fm_status_untimed "$2" wanted
+  status_line_verb "$wanted" wanted_verb
+  case "$wanted_verb" in
+    needs-decision|blocked)
+      if wanted_key=$(_fm_decision_key "$wanted"); then
+        opener=0
+      fi
+      ;;
+  esac
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     _fm_status_untimed "$line" untimed
-    [ "$untimed" != "$wanted" ] || return 0
+    if [ "$untimed" = "$wanted" ]; then
+      open_match=0
+      continue
+    fi
+    [ "$opener" -eq 0 ] && [ "$open_match" -eq 0 ] || continue
+    status_line_verb "$line" verb
+    [ "$verb" = "$resolve" ] || continue
+    key=$(_fm_decision_key "$line") || continue
+    [ "$key" = "$wanted_key" ] || continue
+    _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || continue
+    open_match=1
   done < "$1"
-  return 1
+  return "$open_match"
 }
 
 # --- durable keyed decisions ------------------------------------------------

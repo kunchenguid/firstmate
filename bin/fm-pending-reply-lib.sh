@@ -93,10 +93,12 @@
 # contract; the remote enqueue deduplicates onto the same record). The resend
 # resets the record to awaiting_report and leaves the published escalation
 # decision open: a confirmed delivery does not settle the request, only a
-# correlated report does. A later missed-report escalation reuses that key
-# rather than opening a duplicate, and only the ordinary resolve close closes
-# it. A delivered record, whatever its phase, is never reset. Without this, a
-# wake retried only through its owner
+# correlated report does. A later escalation reuses that key rather than
+# opening a duplicate while the decision stays open, and only the ordinary
+# resolve close closes it. Once that close is in the log, a later escalation
+# of the same kind appends a new blocked line for the same key and the fold
+# opens the decision again. A delivered record, whatever its phase, is never
+# reset. Without this, a wake retried only through its owner
 # (bin/fm-backlog-handoff.sh's receiver wake) stayed refused forever once the
 # watcher escalated between the lost transport and the next resume.
 #

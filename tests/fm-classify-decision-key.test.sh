@@ -11,7 +11,10 @@
 # verb, regardless of order or count. These tests drive the REAL
 # status_line_verb / status_open_decisions / status_open_decisions_incremental
 # functions over crafted status files and assert their folded output, never the
-# fold's own source text. Also covers status_key_closing_verb, which reports how
+# fold's own source text. Also covers status_event_recorded: a retry of an open
+# needs-decision or blocked episode stays recorded, and a later resolved line
+# for that key makes the next identical line a new episode. Also covers
+# status_key_closing_verb, which reports how
 # the status side currently reads one key so a consumer can tell a settled key
 # from one handed to a durable captain-held task (bin/fm-captain-hold.sh
 # diverged). Cross-drain cursor persistence and the incremental
@@ -561,3 +564,48 @@ test_declared_wait_survives_answers_past_the_event_window() {
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
+
+# A stamped retry of an open decision is the same episode. A resolved line for
+# that key ends it, including when the resolve carries its own stamp. A resolve
+# for another key, or one the reserved-key rule rejects, does not. A note and a
+# done line stay recorded across a later resolve, because neither opens a decision.
+test_same_episode_stays_recorded_until_its_resolve() {
+  local dir f line
+  dir=$(case_dir episode)
+  f="$dir/task.status"
+  line='blocked [key=pending-reply-abc]: pending-reply-delivery-unknown: task=mate pending-reply-id=abc request=wake'
+  printf '%s\n' "$line" > "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "the open episode was not recorded"
+  status_event_recorded "$f" \
+    "blocked [key=pending-reply-abc] [at=1700000000]: pending-reply-delivery-unknown: task=mate pending-reply-id=abc request=wake" \
+    || fail "a stamp made the open episode look new"
+  printf '%s\n' 'resolved [key=other]: answered elsewhere' >> "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "another key's resolve ended the episode"
+  printf '%s\n' 'resolved [key=pending-reply-abc]: answered: not this library' >> "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "a reserved-key resolve outside the vocabulary ended the episode"
+  printf '%s\n' 'resolved [key=pending-reply-abc] [at=1700000001]: pending-reply-resolved: task=mate pending-reply-id=abc via=operator-resolve-key dismiss' >> "$f"
+  if status_event_recorded "$f" "$line"; then
+    fail "the episode stayed recorded after its resolve"
+  fi
+  printf '%s\n' "$line" >> "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "the new episode was not recorded"
+  [ "$(status_open_decisions "$f" | cut -f1)" = pending-reply-abc ] \
+    || fail "the new blocked line did not reopen the decision: $(status_open_decisions "$f")"
+  printf '%s\n' 'note: remote document did not transfer for ios: data/reply/missing.md - absent' \
+    > "$dir/note.status"
+  printf '%s\n' 'resolved: closed the default decision' >> "$dir/note.status"
+  status_event_recorded "$dir/note.status" \
+    'note: remote document did not transfer for ios: data/reply/missing.md - absent' \
+    || fail "a resolve made a note look new"
+  printf '%s\n' 'done [corr=abcd]: shipped' > "$dir/done.status"
+  printf '%s\n' 'resolved [key=default]: closed' >> "$dir/done.status"
+  status_event_recorded "$dir/done.status" 'done [corr=abcd]: shipped' \
+    || fail "a resolve made a done line look new"
+  pass "a resolve ends that decision's episode and leaves every other line recorded"
+}
+
+test_same_episode_stays_recorded_until_its_resolve
