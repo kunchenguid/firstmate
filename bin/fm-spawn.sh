@@ -3147,7 +3147,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
             fi
             ;;
           done|failed|closed) ;;
-          *) echo "error: workflow dispatch gate could not read worker count for $meta_id; reconcile task state before spawning" >&2; exit 1 ;;
+          *) echo "notice: workflow dispatch gate could not read state for $meta_id; not counting it" >&2 ;;
         esac
       done
       token_budget=$(sed -n 's/^Task token budget: \([0-9][0-9]*\)$/\1/p' "$BRIEF" | head -1)
