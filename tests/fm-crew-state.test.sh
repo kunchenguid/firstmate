@@ -2400,6 +2400,65 @@ test_merged_pr_reads_done_under_captured_meta() {
   pass "recorded merged PR reads done under the fleet snapshot's captured meta"
 }
 
+test_terminal_status_belongs_to_spawn_incarnation() {
+  reset_fakes
+  local d out verb time expected boundary
+  d=$(new_case terminal-incarnation)
+  make_repo_on_branch "$d/wt" fm/incarnation
+  make_fakebin "$d" >/dev/null
+  arm_idle_record "$d/state" incarnation
+  for verb in done failed; do
+    for time in 99 100 101 legacy malformed; do
+      for boundary in 1 0 legacy malformed ''; do
+        fm_write_meta "$d/state/incarnation.meta" \
+          'window=fm:fm-incarnation' "worktree=$d/wt" \
+          'kind=ship' 'mode=no-mistakes' 'harness=claude' 'spawn_gen=s100.42.7' \
+          "spawn_status_lines=$boundary"
+        case "$time" in
+          legacy) printf '%s: implementation outcome\n' "$verb" ;;
+          malformed) printf '%s [at=<epoch>]: implementation outcome\n' "$verb" ;;
+          *) printf '%s [at=%s]: implementation outcome\n' "$verb" "$time" ;;
+        esac > "$d/state/incarnation.status"
+        expected=$verb
+        if [ "$boundary" = 1 ]; then expected=unknown; fi
+        out=$(run_crew_state "$d" incarnation)
+        assert_contains "$out" "state: $expected" "$verb/$time/$boundary: ledger order decides terminal attribution"
+        if [ "$expected" = unknown ]; then
+          assert_not_contains "$out" 'implementation outcome' 'historical validation must not become current detail'
+        fi
+      done
+    done
+  done
+  for verb in done failed; do
+    fm_write_meta "$d/state/incarnation.meta" \
+      'window=fm:fm-incarnation' "worktree=$d/wt" \
+      'kind=ship' 'mode=no-mistakes' 'harness=claude' \
+      'spawn_gen=s90.42.7' 'spawn_status_lines=0'
+    printf '%s [at=99]: historical outcome\n' "$verb" > "$d/state/incarnation.status"
+    out=$(run_crew_state "$d" incarnation)
+    assert_contains "$out" "state: $verb" 'original incarnation owns its terminal event'
+    # Relaunch retains the ledger, then the fixture clock rolls back below
+    # both the new spawn time and the historical event's timestamp.
+    printf 'spawn_gen=s100.42.8\nspawn_status_lines=1\n' >> "$d/state/incarnation.meta"
+    out=$(run_crew_state "$d" incarnation)
+    assert_contains "$out" 'state: unknown' 'relaunch excludes the retained terminal event'
+    printf '%s [at=80]: rollback outcome\nContinuation prose.\n' "$verb" >> "$d/state/incarnation.status"
+    out=$(run_crew_state "$d" incarnation)
+    assert_contains "$out" "state: $verb" 'clock rollback must not hide a current terminal event'
+    assert_contains "$out" 'rollback outcome' 'current event supplies the detail'
+    assert_not_contains "$out" 'historical outcome' 'superseded completion stays excluded'
+  done
+  # Snapshot consumers must use the metadata they selected, not the live file.
+  mkdir -p "$d/captured"
+  cp "$d/state/incarnation.meta" "$d/captured/incarnation.meta"
+  printf 'spawn_status_lines=1\n' >> "$d/captured/incarnation.meta"
+  printf 'spawn_status_lines=0\n' >> "$d/state/incarnation.meta"
+  printf 'done [at=99]: implementation outcome\n' > "$d/state/incarnation.status"
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/captured/incarnation.meta" run_crew_state "$d" incarnation)
+  assert_contains "$out" 'state: unknown' 'captured ledger boundary governs the snapshot read'
+  pass "terminal status excludes older incarnations and preserves current and legacy outcomes"
+}
+
 test_no_mistakes_prevalidation_done_stays_done() {
   reset_fakes
   local d out
@@ -5576,6 +5635,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
+test_terminal_status_belongs_to_spawn_incarnation
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
