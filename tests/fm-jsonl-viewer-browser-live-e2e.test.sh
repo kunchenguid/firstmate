@@ -757,7 +757,7 @@ try {
   await storagePage.locator("#token").fill(process.env.VIEWER_TOKEN);
   await storagePage.locator("#remember-token").check();
   await storagePage.locator("#connect").click();
-  if (!await storagePage.locator("#token-note").textContent().then(text => text.includes("Browser storage is unavailable"))) throw new Error("storage denial did not produce the fallback notice");
+  await storagePage.locator("#token-note").filter({ hasText: "Browser storage is unavailable" }).waitFor({ state: "attached", timeout: 3000 });
   await storagePage.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
   await storagePage.close();
 } catch (error) {
