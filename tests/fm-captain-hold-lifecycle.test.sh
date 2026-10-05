@@ -14,6 +14,9 @@ set -u
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-captain-hold)
+# Some cleanup fixtures intentionally use directories with no Git metadata.
+# Never let Git discover the developer checkout above an in-repo TMPDIR.
+export GIT_CEILING_DIRECTORIES="$TMP_ROOT${GIT_CEILING_DIRECTORIES:+:$GIT_CEILING_DIRECTORIES}"
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -3881,7 +3884,7 @@ SH
   local_release="$local_home/local-validation-release"
   cat > "$local_home/fakebin/git" <<'SH'
 #!/usr/bin/env bash
-if [ "$*" = "-C ${FM_TEST_RACE_REPO:-} rev-parse --short main" ]; then
+if [ "$*" = "-C ${FM_TEST_RACE_REPO:-} rev-parse --verify refs/heads/main^{commit}" ]; then
   output=$("$FM_TEST_REAL_GIT" "$@") || exit $?
   : > "$FM_TEST_RACE_READY"
   while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.01; done
@@ -3910,7 +3913,7 @@ SH
   if [ ! -e "$local_ready" ]; then
     : > "$local_release"
     wait "$local_pid" 2>/dev/null || true
-    fail "the local merge did not reach the post-validation synchronization point"
+    fail "the local merge did not reach the captured-base synchronization point"
   fi
   set +e
   PATH="$local_home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
