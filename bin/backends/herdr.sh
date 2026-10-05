@@ -384,30 +384,53 @@ fm_backend_herdr_workspace_label() {
 # compatible if a future herdr build honors it. Never used by
 # fm_backend_herdr_version_check, which is intentionally session-independent
 # (reads only .client.* fields).
+# fm_backend_herdr_bounded: run one herdr client command, killed after
+# FM_BACKEND_HERDR_TIMEOUT seconds when that is set (unset = unbounded). A read
+# that must answer in bounded time sets it, so a stalled herdr fails like any
+# other failed call instead of holding its caller open. A host with neither
+# coreutils timeout nor gtimeout (stock macOS) stays unbounded rather than
+# failing every bounded read.
+fm_backend_herdr_bounded() {  # <command...>
+  if [ -n "${FM_BACKEND_HERDR_TIMEOUT:-}" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      timeout -k 1 "$FM_BACKEND_HERDR_TIMEOUT" "$@"
+      return
+    elif command -v gtimeout >/dev/null 2>&1; then
+      gtimeout -k 1 "$FM_BACKEND_HERDR_TIMEOUT" "$@"
+      return
+    fi
+  fi
+  "$@"
+}
+
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   local session=$1 rc=0 err failed_bin selected_bin client_bin=herdr
   shift
   if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
     client_bin=$(fm_backend_herdr_bin)
   fi
+  # The long-lived `server` launch REPLACES this (backgrounded) subshell
+  # rather than running as its child. Verified live (2026-10-05): run as a
+  # child, the subshell stayed alive waiting on the server for its whole
+  # lifetime while still holding the caller's inherited output pipe, so a
+  # `cap=$(...)` read that happened to start a server never saw EOF and hung
+  # for hours. It replaces the CALLING shell, so run it only in a subshell or
+  # background job, as fm_backend_herdr_server_ensure does.
+  if [ "${1:-}" = server ]; then
+    HERDR_SESSION="$session" exec "$client_bin" "$@" --session "$session"
+  fi
   # stderr is buffered (stdout streams untouched) so a protocol_mismatch
   # refusal can be recognized and retried once on a compatible client; see
   # "client selection" below. A failed command's stderr is replayed verbatim.
-  # The long-lived `server` launch is exec'd straight through: buffering its
-  # stderr would hold this call open for the server's whole lifetime.
-  if [ "${1:-}" = server ]; then
-    HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
-    return $?
-  fi
   failed_bin=$client_bin
-  { err=$(HERDR_SESSION="$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
+  { err=$(HERDR_SESSION="$session" fm_backend_herdr_bounded "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
   if [ "$rc" -ne 0 ]; then
     case "$err" in
       *protocol_mismatch*)
         fm_backend_herdr_client_select "$session" force
         selected_bin=$(fm_backend_herdr_bin)
         if [ "$selected_bin" != "$failed_bin" ]; then
-          HERDR_SESSION="$session" "$selected_bin" "$@" --session "$session"
+          HERDR_SESSION="$session" fm_backend_herdr_bounded "$selected_bin" "$@" --session "$session"
           return $?
         fi
         ;;
@@ -468,7 +491,7 @@ fm_backend_herdr_client_candidates() {
 # client did not report. Never fails.
 fm_backend_herdr_client_status() {  # <bin> <session>
   local bin=$1 session=$2 out
-  out=$(HERDR_SESSION="$session" "$bin" status --json --session "$session" 2>/dev/null) || out=
+  out=$(HERDR_SESSION="$session" fm_backend_herdr_bounded "$bin" status --json --session "$session" 2>/dev/null) || out=
   printf '%s' "$out" | jq -r '
     [ (if (.server | type) == "object" and .server.running != null then (.server.running | tostring) else "" end),
       (if (.server | type) == "object" and (.server | has("compatible"))
@@ -3262,14 +3285,24 @@ fm_backend_herdr_capture() {  # <target> <lines>
 # visible` is herdr's viewport-bounded read, so it needs none of the --lines
 # workaround above - the bound is the pane itself, and asking for a line count
 # is what triggers the empty-read bug.
+#
+# Both are passive reads of a pane that must already exist, so they never
+# start a server (fm_backend_herdr_target_ready would mint a stray server for a
+# mistyped session; with none running `pane read` already fails fast), and
+# each is bounded by FM_BACKEND_HERDR_READ_TIMEOUT seconds so a stalled herdr
+# reads as a failed capture - 'unknown' to the composer classifier - not a
+# hang.
+: "${FM_BACKEND_HERDR_READ_TIMEOUT:=10}"
 fm_backend_herdr_visible_capture() {  # <target>
-  fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null
+  fm_backend_herdr_parse_target "$1" || return 1
+  FM_BACKEND_HERDR_TIMEOUT=$FM_BACKEND_HERDR_READ_TIMEOUT \
+    fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null
 }
 
 fm_backend_herdr_visible_capture_ansi() {  # <target>
-  fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible --format ansi 2>/dev/null
+  fm_backend_herdr_parse_target "$1" || return 1
+  FM_BACKEND_HERDR_TIMEOUT=$FM_BACKEND_HERDR_READ_TIMEOUT \
+    fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible --format ansi 2>/dev/null
 }
 
 # --- herdr composer capture and capability primitives -----------------------
@@ -3287,7 +3320,7 @@ fm_backend_herdr_visible_capture_ansi() {  # <target>
 
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
-  out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
+  out=$(FM_BACKEND_HERDR_TIMEOUT=$FM_BACKEND_HERDR_READ_TIMEOUT fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 

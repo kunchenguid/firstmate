@@ -757,6 +757,54 @@ test_matrix_pi_lead_turn_frame_and_extension_rows() {
     || fail "a lower unmatched rule below a turn frame must still refuse, got '$out'"
   pass "matrix: pi's extension status row is furniture and its titled turn frame still needs identity + an idle pi"
 }
+test_matrix_pi_lead_beneath_extension_error_is_empty() {
+  # Real bytes: the TakeOne lead pane (herdr w291:p22, pi, agent status done)
+  # captured verbatim to
+  # data/fm-pi-composer-shapes2/takeone-pane-tail.txt in the supervising home.
+  # The composer is visibly EMPTY - top rule, one blank line, bottom rule,
+  # footer, extension row - but it sits DIRECTLY UNDER a nine-line wrapped
+  # extension error ("Check the active model/provider or set
+  # llmModelOverride."), a much taller unclaimed region above the top rule
+  # than the one-row stderr notice the matrix above covers. fm-secondmate-restart
+  # reported this lead unreached with `composer state is 'unknown', not proven
+  # empty`. The classifier already read this shape empty; the 'unknown' came
+  # from the live herdr read (tests/fm-backend-herdr.test.sh covers that), so
+  # this pins the shape so it keeps reading empty.
+  local tail pi_done pi_working none typed rule
+  pi_done=$(printf 'pi\tdone'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
+  tail=$' shared-tooling findings on the parent channel, and every worker\n'
+tail+=$' steer, which lives in that worker\'s own steering inbox\n'
+tail+=$'\n Operation aborted\n'
+tail+=$'\n Warning: Memory auto-review failed in both transports. Direct:\n'
+tail+=$' parse_error. Subprocess: Warning: Extension package\n'
+tail+=$' "/home/umer/.pi/agent/npm/node_modules/pi-hermes-memory/package.jso\n'
+tail+=$' n": Host-provided extension packages must be declared in\n'
+tail+=$' peerDependencies with a "*" range, not dependencies:\n'
+tail+=$' @earendil-works/pi-tui. Installed copies can bypass the extension\n'
+tail+=$' loader and create duplicate ru. Check the active model/provider or\n'
+tail+=$' set llmModelOverride.\n'
+tail+=$'\n─────────────────────────────────────────────────────────────────────\n'
+tail+=$'\n─────────────────────────────────────────────────────────────────────\n'
+tail+=$'~/.treehouse/firstmate-8bf1b0/1/firstmate (detached)\n'
+tail+=$'↑451k ↓76k R47M 22.5%/1.0M (auto)           space-bunny-free • medium\n'
+tail+=$' ○ 🐴 ponytail: ⚡ FULL'
+
+  assert_screen "done pi lead beneath a wrapped extension error" empty \
+    "$CAPS_STYLED" "$tail" '' "$pi_done"
+  # The same tall region changes no verdict: a draft IN that composer is still
+  # pending (it goes in the blank line between the two rules, where a real
+  # composer holds it), and the identity conjunction is unchanged.
+  rule='─────────────────────────────────────────────────────────────────────'
+  typed=${tail/"$rule"$'\n\n'"$rule"/"$rule"$'\nfix the flaky test\n'"$rule"}
+  [ "$typed" != "$tail" ] || fail "fixture edit: the draft row was not placed between the rules"
+  assert_screen "typed pi lead beneath the same error" pending \
+    "$CAPS_STYLED" "$typed" '' "$pi_done"
+  assert_screen "working pi beneath the same error still defers" unknown \
+    "$CAPS_STYLED" "$tail" '' "$pi_working"
+  assert_screen "non-pi identity cannot prove it either" unknown \
+    "$CAPS_STYLED" "$tail" '' "$none"
+  pass "matrix: a done pi lead composer under a tall wrapped extension error still reads empty"
+}
 test_matrix_pi_stderr_notice_rows() {
   # Real pi 0.87.0 pane bytes (captured live through `tmux capture-pane -e`
   # on an isolated idle pi; the same corruption was caught twice the same day
@@ -1201,6 +1249,7 @@ test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_pi_lead_turn_frame_and_extension_rows
+test_matrix_pi_lead_beneath_extension_error_is_empty
 test_matrix_pi_stderr_notice_rows
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
