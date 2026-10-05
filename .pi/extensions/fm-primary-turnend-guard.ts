@@ -470,8 +470,9 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
-// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
-// extension file rather than separate ones so no extra Pi -e flag is needed at
+// bin/fm-cd-pretool-check.sh, docs/cd-guard.md;
+// bin/fm-supervisor-work-pretool-check.sh, docs/supervisor-work-guard.md). All
+// piggyback on this same extension file rather than separate ones so no extra Pi -e flag is needed at
 // launch - the primary already loads this file for the turn-end guard, and
 // pi.on("tool_call", ...) can block (verified 2026-07-09 against pi 0.80.5:
 // returning {block: true} prevents the bash command from running). Each owner
@@ -506,6 +507,10 @@ function runPretoolCheck(command: string): Promise<{ code: number; stderr: strin
 
 function runCdCheck(command: string): Promise<{ code: number; stderr: string }> {
   return runChecker("fm-cd-pretool-check.sh", command);
+}
+
+function runSupervisorWorkCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-supervisor-work-pretool-check.sh", command);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -594,6 +599,10 @@ export default function (pi: ExtensionAPI) {
     const cdResult = await runCdCheck(command);
     if (cdResult.code === 2) {
       return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
+    }
+    const workResult = await runSupervisorWorkCheck(command);
+    if (workResult.code === 2) {
+      return { block: true, reason: workResult.stderr.trim() || "denied by the supervisor-work PreToolUse seatbelt" };
     }
     const result = await runPretoolCheck(command);
     if (result.code !== 2) return {};
