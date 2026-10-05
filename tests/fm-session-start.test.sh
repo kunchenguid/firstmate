@@ -877,6 +877,56 @@ EOF
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
 }
 
+# The refusal names a Claude-shaped holder from `claude agents --json`, and the
+# read-only banner carries every one of those lines. The lookup is bounded, so
+# a hung claude never holds session start: the banner is then exactly today's.
+test_lock_refusal_banner_names_the_claude_holder() {
+  local rec root home fakebin holder_pid out status started elapsed
+  rec=$(new_world lock-refusal-holder)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_AGENTS_HANG:-0}" = 1 ] && { sleep 30; exit 0; }
+[ "$*" = "agents --json" ] || exit 64
+printf '[{"pid":%s,"id":"ab12cd34","kind":"background","sessionId":"SID-OLD","name":"Leftover run","status":"idle","state":"done"}]\n' "$FM_TEST_HOLDER_PID"
+SH
+  chmod +x "$fakebin/claude"
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  printf 'SID-OLD\n' > "$home/state/.lock-session"
+
+  status=0
+  out=$(FM_TEST_HOLDER_PID=$holder_pid run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 on a lock refusal"
+  assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
+  assert_contains "$out" "●  error: another live firstmate session holds the lock (pid $holder_pid, session SID-OLD); operate read-only until resolved" \
+    "the banner did not carry the refusal line"
+  assert_contains "$out" '●  lock holder: Claude Code background session "Leftover run" (id ab12cd34, status idle, state done)' \
+    "the banner did not name the holder"
+  assert_contains "$out" "●  lock holder: to end that session and free the lock, run: claude stop ab12cd34" \
+    "the banner did not carry the exact stop command"
+
+  started=$(date +%s)
+  status=0
+  out=$(FM_TEST_HOLDER_PID=$holder_pid FM_TEST_AGENTS_HANG=1 FM_LOCK_HOLDER_LOOKUP_TIMEOUT=1 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  elapsed=$(( $(date +%s) - started ))
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  expect_code 0 "$status" "a hung holder lookup must not fail session start"
+  [ "$elapsed" -lt 25 ] || fail "a hung holder lookup held session start for ${elapsed}s"
+  assert_contains "$out" "●  error: another live firstmate session holds the lock (pid $holder_pid, session SID-OLD)" \
+    "a hung lookup lost the refusal line"
+  assert_not_contains "$out" "lock holder:" "a hung lookup must leave exactly today's diagnostic"
+  pass "a lock refusal banner names a Claude holder with its stop command, and a hung lookup never holds session start"
+}
+
 test_lock_write_failure_read_only_path() {
   local rec root home fakebin out status
   rec=$(new_world lock-write-failure)
@@ -3016,6 +3066,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_lock_refusal_banner_names_the_claude_holder
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner

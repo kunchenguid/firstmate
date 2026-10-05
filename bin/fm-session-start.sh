@@ -202,7 +202,8 @@
 #   Prints the full ordered digest to stdout and always exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
-#   an agent skip the rest of the digest.
+#   an agent skip the rest of the digest. The banner carries every line of
+#   fm-lock.sh's refusal, including its "lock holder:" naming of the holder.
 #
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
@@ -690,7 +691,7 @@ if [ "$LOCK_RC" -ne 0 ]; then
   {
     printf '%s\n' "$BAR"
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
-    printf '●  %s\n' "$LOCK_OUT"
+    printf '%s\n' "$LOCK_OUT" | sed 's/^/●  /'
     printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
     printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
     printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
