@@ -74,6 +74,20 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
   esac
 }
 
+# OpenShell hides the sandbox's Codex process from the host process table. Its
+# host-side PTY relay is the Python runner, so recognize only that exact
+# tracked entrypoint while it is in the run subcommand. An ordinary Python
+# process, a recovery command, or another OpenShell CLI remains unclassified.
+fm_agent_openshell_codex_matches() {  # <name> <argv0> <args> -> status
+  local name=${1##*/} argv0=${2##*/} args=${3:-}
+  case "$name" in python|python3|python3.*) ;; *) return 1 ;; esac
+  case "$argv0" in python|python3|python3.*) ;; *) return 1 ;; esac
+  case "$args" in
+    *fm-openshell-codex.py\ run\ [A-Za-z0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_agent_process_classify: one process, from every identity surface a
 # backend can hand over, as agent|shell|other. Any single surface naming a
 # verified harness carries `agent`, because a false negative is the one outcome
@@ -84,8 +98,9 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
 #            on Linux the exec name, on macOS argv[0] truncated to 16 bytes.
 #   <argv0>  argv[0] as the process reports it - a bare name or an install
 #            path, whichever the launcher used (empty when unknown).
-#   <args>   the flattened command line, read only for the node-bundle
-#            harnesses whose identity sits in argv[1] (bin/fm-gemini-lib.sh).
+#   <args>   the flattened command line, read for the node-bundle harnesses
+#            whose identity sits in argv[1] (bin/fm-gemini-lib.sh), and for the
+#            OpenShell Codex PTY runner identified below.
 #   [pid]    when given, lets the Gemini rule read argv boundaries from the
 #            live process instead of the flattened line.
 fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|other
@@ -105,6 +120,10 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     return 0
   fi
   if [ -n "$args" ] && fm_gemini_args_are_gemini "$args"; then
+    printf 'agent'
+    return 0
+  fi
+  if [ -n "$args" ] && fm_agent_openshell_codex_matches "$name" "$argv0" "$args"; then
     printf 'agent'
     return 0
   fi

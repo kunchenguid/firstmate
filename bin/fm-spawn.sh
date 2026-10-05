@@ -2398,6 +2398,141 @@ fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
+
+# NVIDIA OpenShell is a per-home, explicit opt-in for Herdr Codex ship workers.
+# Its boundary is part of the task identity, so relaunch reads the recorded
+# provider set and refuses to fall back to a host Codex process if the setting
+# was removed after the original spawn.
+OPENSH_ENABLED=0
+OPENSH_PROVIDERS=
+OPENSH_GATEWAY=
+OPENSH_IMAGE=
+OPENSH_WORKSPACE=
+OPENSH_WORKSPACE_ID=
+OPENSH_HASH=
+OPENSH_NAME=
+OPENSH_CONFIG="$CONFIG/herdr-codex-openshell"
+opensh_validate_gateway() {
+  case "$1" in ''|*[!A-Za-z0-9._-]*|[-.]*|*[-.]) return 1 ;; esac
+  [ "${#1}" -le 63 ]
+}
+opensh_validate_providers() {
+  local providers=$1 provider count=0 seen=' '
+  case "$providers" in ''|,*|*,|*,,*|*[!A-Za-z0-9._,-]*) return 1 ;; esac
+  case ",$providers," in *,codex,*) ;; *) return 1 ;; esac
+  local IFS=,
+  for provider in $providers; do
+    case "$provider" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    case "$seen" in *" $provider "*) return 1 ;; esac
+    seen="$seen$provider "
+    count=$((count + 1))
+  done
+  [ "$count" -le 4 ]
+}
+opensh_validate_image() {
+  case "$1" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._/:@-]*) return 1 ;; esac
+  [ "${#1}" -le 1024 ]
+}
+opensh_read_config() {
+  local file=$1 line found_gateway=0 found_providers=0 found_image=0
+  [ ! -L "$file" ] && [ -f "$file" ] || {
+    echo "error: OpenShell opt-in must be a regular file at $file" >&2
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in
+      gateway=*)
+        [ "$found_gateway" -eq 0 ] || { echo "error: duplicate gateway= in $file" >&2; return 1; }
+        OPENSH_GATEWAY=${line#gateway=}
+        found_gateway=1
+        ;;
+      providers=*)
+        [ "$found_providers" -eq 0 ] || { echo "error: duplicate providers= in $file" >&2; return 1; }
+        OPENSH_PROVIDERS=${line#providers=}
+        found_providers=1
+        ;;
+      image=*)
+        [ "$found_image" -eq 0 ] || { echo "error: duplicate image= in $file" >&2; return 1; }
+        OPENSH_IMAGE=${line#image=}
+        found_image=1
+        ;;
+      *) echo "error: unknown OpenShell opt-in setting in $file" >&2; return 1 ;;
+    esac
+  done <"$file"
+  if ! { [ "$found_gateway" -eq 1 ] && opensh_validate_gateway "$OPENSH_GATEWAY" &&
+    [ "$found_image" -eq 1 ] && opensh_validate_image "$OPENSH_IMAGE" &&
+    [ "$found_providers" -eq 1 ] && opensh_validate_providers "$OPENSH_PROVIDERS"; }; then
+    echo "error: $file must contain gateway=<registered-gateway-name>, image=<workload-image-reference>, and one providers= list including codex (at most four registered provider names)" >&2
+    return 1
+  fi
+}
+if [ "$RELAUNCH" -eq 1 ]; then
+  RELAUNCH_OPENSH=$(fm_meta_get "$RELAUNCH_META" openshell)
+  if [ "$RELAUNCH_OPENSH" = codex-v1 ]; then
+    [ "$BACKEND" = herdr ] && [ "$HARNESS" = codex ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] || {
+      echo "error: task $ID is bound to its OpenShell Herdr Codex ship path; refusing a harness, backend, or task-kind change" >&2
+      exit 1
+    }
+    OPENSH_PROVIDERS=$(fm_meta_get "$RELAUNCH_META" openshell_providers)
+    OPENSH_GATEWAY=$(fm_meta_get "$RELAUNCH_META" openshell_gateway)
+    OPENSH_IMAGE=$(fm_meta_get "$RELAUNCH_META" openshell_image)
+    OPENSH_WORKSPACE=$(fm_meta_get "$RELAUNCH_META" openshell_workspace)
+    OPENSH_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" openshell_workspace_id)
+    [ -n "$OPENSH_WORKSPACE" ] && [ -n "$OPENSH_WORKSPACE_ID" ] || {
+      echo "error: task $ID is missing its recorded OpenShell workspace identity" >&2
+      exit 1
+    }
+    if ! opensh_validate_providers "$OPENSH_PROVIDERS" || ! opensh_validate_gateway "$OPENSH_GATEWAY" || ! opensh_validate_image "$OPENSH_IMAGE"; then
+      echo "error: task $ID has invalid recorded OpenShell settings; refusing a host Codex fallback" >&2
+      exit 1
+    fi
+    OPENSH_ENABLED=1
+  elif [ -n "$RELAUNCH_OPENSH" ]; then
+    echo "error: task $ID has an unsupported recorded OpenShell mode '$RELAUNCH_OPENSH'; refusing to fall back to host Codex" >&2
+    exit 1
+  fi
+elif { [ -e "$OPENSH_CONFIG" ] || [ -L "$OPENSH_CONFIG" ]; } && [ "$BACKEND" = herdr ] && [ "$HARNESS" = codex ]; then
+  [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] || {
+    echo "error: OpenShell Codex currently supports no-mistakes ship tasks only; other task scopes require additional task-specific capabilities" >&2
+    exit 1
+  }
+  opensh_read_config "$OPENSH_CONFIG" || exit 1
+  OPENSH_ENABLED=1
+fi
+if [ "$OPENSH_ENABLED" = 1 ]; then
+  [ "$(uname -s 2>/dev/null || true)" = Linux ] || {
+    echo "error: configured OpenShell Codex execution requires a Linux Herdr worker host" >&2
+    exit 1
+  }
+  for opensh_bin in python3 git openshell; do
+    command -v "$opensh_bin" >/dev/null 2>&1 || {
+      echo "error: configured OpenShell Codex execution requires $opensh_bin; refusing a host Codex fallback" >&2
+      exit 1
+    }
+  done
+  OPENSH_PYTHON=$(command -v python3)
+  if [ "$RELAUNCH" -eq 0 ]; then
+    OPENSH_WORKSPACE=${OPENSHELL_WORKSPACE-default}
+    OPENSH_WORKSPACE_ID=$("$OPENSH_PYTHON" "$FM_ROOT/bin/fm-openshell-codex.py" workspace-id "$OPENSH_GATEWAY" "$OPENSH_WORKSPACE") || exit 1
+  else
+    OPENSH_CURRENT_WORKSPACE_ID=$("$OPENSH_PYTHON" "$FM_ROOT/bin/fm-openshell-codex.py" workspace-id "$OPENSH_GATEWAY" "$OPENSH_WORKSPACE") || exit 1
+    [ "$OPENSH_CURRENT_WORKSPACE_ID" = "$OPENSH_WORKSPACE_ID" ] || {
+      echo "error: task $ID OpenShell workspace ID has changed; refusing relaunch" >&2
+      exit 1
+    }
+  fi
+  case "${MODEL:-default}" in default) MODEL=gpt-6.1-sol ;; esac
+  case "${EFFORT:-default}" in default) EFFORT=medium ;; esac
+  OPENSH_NAME=$("$OPENSH_PYTHON" "$FM_ROOT/bin/fm-openshell-codex.py" sandbox-name "$FM_HOME" "$ID") || exit 1
+  if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_OPENSH" = codex-v1 ]; then
+    [ "$(fm_meta_get "$RELAUNCH_META" openshell_name)" = "$OPENSH_NAME" ] &&
+      [ "$(fm_meta_get "$RELAUNCH_META" openshell_gateway)" = "$OPENSH_GATEWAY" ] || {
+      echo "error: task $ID OpenShell resource identity is inconsistent; refusing to adopt another sandbox" >&2
+      exit 1
+    }
+  fi
+fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
@@ -4890,7 +5025,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx openshell openshell_gateway openshell_image openshell_workspace openshell_workspace_id openshell_providers openshell_name openshell_keep_ai_trailers", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4925,6 +5060,16 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+  fi
+  if [ "$OPENSH_ENABLED" = 1 ]; then
+    echo "openshell=codex-v1"
+    echo "openshell_gateway=$OPENSH_GATEWAY"
+    echo "openshell_image=$OPENSH_IMAGE"
+    echo "openshell_workspace=$OPENSH_WORKSPACE"
+    echo "openshell_workspace_id=$OPENSH_WORKSPACE_ID"
+    echo "openshell_providers=$OPENSH_PROVIDERS"
+    echo "openshell_name=$OPENSH_NAME"
+    echo "openshell_keep_ai_trailers=$KEEP_AI_TRAILERS"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
@@ -5179,7 +5324,10 @@ fi
 # to keeping trailers, leave core.hooksPath alone so the repository's hooks run
 # directly. An export statement inside the pane command carries the override
 # across every step of a compound raw launch while firstmate's own git is unchanged.
-if [ "$KEEP_AI_TRAILERS" = 0 ]; then
+if [ "$OPENSH_ENABLED" = 1 ]; then
+  LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE_REAL") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") FM_ROOT_OVERRIDE=$(shell_quote "$FM_ROOT") $(shell_quote "$OPENSH_PYTHON") $(shell_quote "$FM_ROOT/bin/fm-openshell-codex.py") run $(shell_quote "$ID") $(shell_quote "$BRIEF") --model $(shell_quote "${MODEL:-default}") --effort $(shell_quote "${EFFORT:-default}")"
+fi
+if [ "$KEEP_AI_TRAILERS" = 0 ] && [ "$OPENSH_ENABLED" != 1 ]; then
   LAUNCH="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$GIT_HOOKS_DIR"); $LAUNCH"
 fi
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
