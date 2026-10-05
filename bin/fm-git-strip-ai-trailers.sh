@@ -11,7 +11,9 @@
 #       the same Git as the worker's commits. Emit a shell export for a
 #       pane-scoped config commit-msg hook, leaving core.hooksPath intact.
 #       Git runs it before the file-based commit-msg. Without config-hook
-#       support, warn, install wrappers, and emit their hooksPath.
+#       support, warn and emit the prepared wrappers' hooksPath. Pass an
+#       absolute hooks directory prepared with install before launch delivery;
+#       launch-env only selects configuration, with no installation or writes.
 #   fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
 #       Recreate <hooks-dir> as a legacy core.hooksPath: a commit-msg
 #       hook that runs this strip, plus one wrapper per client-side hook name
@@ -227,12 +229,12 @@ install_hooks() {
     return 1
   }
   chmod u+w "$hooks_dir" 2>/dev/null
-  rm -rf "$hooks_dir"
+  rm -rf "$hooks_dir" || return 1
   mkdir -p "$hooks_dir" || return 1
   chmod 700 "$hooks_dir" 2>/dev/null || true
   hooks_dir=$(CDPATH='' cd -- "$hooks_dir" && pwd -P) || return 1
 
-  write_executable "$hooks_dir/commit-msg" <<EOF
+  write_executable "$hooks_dir/commit-msg" <<EOF || return 1
 #!/usr/bin/env bash
 set -u
 $(quote_for_hook "$SELF") "\$1" || exit \$?
@@ -240,7 +242,7 @@ $(runtime_chain_body "$hooks_dir")
 EOF
 
   for name in $FM_GIT_CLIENT_HOOKS; do
-    write_executable "$hooks_dir/$name" <<EOF
+    write_executable "$hooks_dir/$name" <<EOF || return 1
 #!/usr/bin/env bash
 set -u
 $(runtime_chain_body "$hooks_dir")
@@ -252,7 +254,6 @@ EOF
 launch_env() {
   local hooks_dir=$1 wt=$2 command
   [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
-  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null || return 1
   command=$(quote_for_hook "$SELF")
   if git -C "$wt" -c hook.firstmate-strip-ai-trailers.event=commit-msg \
     -c "hook.firstmate-strip-ai-trailers.command=$command" \
@@ -260,8 +261,6 @@ launch_env() {
     printf 'export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=hook.firstmate-strip-ai-trailers.event GIT_CONFIG_VALUE_0=commit-msg GIT_CONFIG_KEY_1=hook.firstmate-strip-ai-trailers.command GIT_CONFIG_VALUE_1=%s GIT_CONFIG_KEY_2=hook.firstmate-strip-ai-trailers.enabled GIT_CONFIG_VALUE_2=true; ' \
       "$(quote_for_hook "$command")"
   else
-    install_hooks "$hooks_dir" "$wt" || return 1
-    hooks_dir=$(CDPATH='' cd -- "$hooks_dir" && pwd -P) || return 1
     echo "warning: Git config hooks unavailable; using legacy core.hooksPath wrappers for AI-trailer stripping; canonical project-hook checks may fail" >&2
     printf 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=%s; ' \
       "$(quote_for_hook "$hooks_dir")"

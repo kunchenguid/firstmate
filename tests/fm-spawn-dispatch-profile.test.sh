@@ -574,7 +574,11 @@ SH
         "$id" "$PROJ_DIR" "cd . && ${check}git -c user.name=Tests -c user.email=tests@example.invalid commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: canonical validation' && git rev-parse --path-format=absolute --git-path hooks/pre-commit > '$CASE_DIR/effective-hook'")
       status=$?
       expect_code 0 "$status" "$direction with allowlist=$setting should spawn: $out"
-      [ ! -e "$HOME_DIR/state/$id.git-hooks" ] || fail "spawner prematurely selected legacy wrappers"
+      [ -x "$HOME_DIR/state/$id.git-hooks/commit-msg" ] || fail "spawner did not prepare the legacy fallback"
+      # Destination mode selection must not repeat fallible hook installation.
+      printf '#!/bin/sh\nexit 99\n' > "$destination/mkdir"
+      cp "$destination/mkdir" "$destination/chmod"
+      chmod +x "$destination/mkdir" "$destination/chmod"
       launch=$(cat "$LAUNCH_LOG")
       runtime_output=$(cd "$WT_DIR" && HOME="$HOME_DIR/user-home" PATH="$destination:$FAKEBIN_DIR:$PATH" bash -c "$launch" 2>&1) ||
         fail "$direction with allowlist=$setting ordinary worker validation failed: $runtime_output"
@@ -595,28 +599,6 @@ SH
       pass "$direction with allowlist=$setting selects destination Git and preserves stripping and project hooks"
     done
   done
-}
-
-test_worker_hook_setup_failure_stops_compound_launch() {
-  local rec id out status launch
-  id=hook-setup-failure
-  rec=$(make_spawn_case "$id" claude "$id")
-  read_case_record "$rec"
-  mkdir -p "$CASE_DIR/destination-bin"
-  printf '#!/bin/sh\nexit 1\n' > "$CASE_DIR/destination-bin/git"
-  chmod +x "$CASE_DIR/destination-bin/git"
-  : > "$HOME_DIR/config/launch-env-allowlist"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "touch '$CASE_DIR/first-step'; touch '$CASE_DIR/second-step'")
-  status=$?
-  expect_code 0 "$status" "hook failure fixture should spawn: $out"
-  launch=$(cat "$LAUNCH_LOG")
-  (cd "$WT_DIR" && HOME="$HOME_DIR/user-home" PATH="$CASE_DIR/destination-bin:$PATH" bash -c "$launch")
-  status=$?
-  expect_code 1 "$status" "destination hook setup failure must propagate"
-  assert_absent "$CASE_DIR/first-step" "failed hook setup ran the first raw launch step"
-  assert_absent "$CASE_DIR/second-step" "failed hook setup ran the second raw launch step"
-  pass "destination hook setup failure prevents every step of a compound launch"
 }
 
 test_claude_threads_model_and_effort() {
@@ -2001,7 +1983,6 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_worker_validation_uses_canonical_hooks
-test_worker_hook_setup_failure_stops_compound_launch
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort

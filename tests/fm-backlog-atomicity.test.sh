@@ -1387,6 +1387,53 @@ test_dispatch_reports_an_incomplete_busy_rollback() {
   pass "dispatch verifies both task and busy records during rollback"
 }
 
+test_dispatch_rejects_hook_setup_failure_before_launch() {
+  local case_dir id target tool real out rc failure_path
+  for target in directory commit-msg pre-commit; do
+    id="atomic-hook-setup-$target"
+    case_dir=$(make_home "hook-setup-$target" "$id")
+    add_item "$case_dir" "$id"
+    if [ "$target" = directory ]; then tool='mkdir'; else tool='chmod'; fi
+    real=$(command -v "$tool")
+    cat > "$case_dir/fakebin/$tool" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    */\$FM_HOOK_SETUP_FAILURE_PATH)
+      echo 'error: injected hook setup failure' >&2
+      exit 1
+      ;;
+  esac
+done
+exec "$real" "\$@"
+SH
+    chmod +x "$case_dir/fakebin/$tool"
+    cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
+case "\${1:-}" in
+  display-message) printf 'firstmate\n' ;;
+  send-keys) case " \$* " in *' -l '*) : > "$case_dir/launch-delivered" ;; esac ;;
+esac
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/tmux"
+    case "$target" in
+      directory) failure_path="$id.git-hooks" ;;
+      *) failure_path="$id.git-hooks/$target" ;;
+    esac
+    rc=0
+    out=$(FM_HOOK_SETUP_FAILURE_PATH="$failure_path" run_ship_spawn "$case_dir" "$id") || rc=$?
+    [ "$rc" -ne 0 ] || fail "$target hook setup failure was reported as a successful spawn"
+    assert_contains "$out" "could not install the AI-trailer strip hooks" "spawn did not report the hook setup failure"
+    assert_absent "$case_dir/launch-delivered" "failed hook setup delivered a worker launch"
+    assert_absent "$(home_of "$case_dir")/state/$id.meta" "failed hook setup left a dispatched record"
+    assert_absent "$(home_of "$case_dir")/state/$id.busy-state" "failed hook setup retained busy state"
+    [ "$(row_state "$case_dir" "$id")" = queued ] || fail "failed hook setup moved the task to In flight"
+  done
+  pass "directory and individual hook setup failures reject dispatch before launch and leave the task queued"
+}
+
 test_dispatch_rolls_back_before_a_failed_launch_delivery() {
   local case_dir id out rc=0
   id=atomic-dispatch-delivery-fails-b5
@@ -3063,6 +3110,7 @@ test_dispatch_refuses_to_commit_without_a_published_record
 test_dispatch_leaves_no_record_when_the_transition_fails
 test_dispatch_reports_an_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
+test_dispatch_rejects_hook_setup_failure_before_launch
 test_dispatch_rolls_back_before_a_failed_launch_delivery
 test_dispatch_defers_interruption_across_backlog_commit
 test_deferred_signal_reads_back_preserved_state

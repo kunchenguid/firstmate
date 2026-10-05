@@ -489,6 +489,7 @@ test_launch_env_quotes_the_strip_command() {
   copy="$TMP_ROOT/strip 'quoted' directory/strip.sh"
   mkdir -p "$(dirname "$copy")"
   cp "$STRIP" "$copy"
+  "$copy" install "$TMP_ROOT/hooks-quoted" "$repo" || fail "quoted strip hook setup failed"
   launch=$("$copy" launch-env "$TMP_ROOT/hooks-quoted" "$repo") || fail "quoted strip launch preparation failed"
   (eval "$launch"; git -C "$repo" commit -q --allow-empty \
     --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: quoted strip path') || fail "quoted strip command failed"
@@ -510,6 +511,7 @@ case " \$* " in *' hook list commit-msg '*) exit 129 ;; esac
 exec '$real_git' "\$@"
 EOF
   chmod +x "$fakebin/git"
+  "$STRIP" install "$hooks" "$repo" || fail "legacy hook setup failed"
   launch=$(PATH="$fakebin:$PATH" "$STRIP" launch-env "$hooks" "$repo" 2>"$repo/launch.stderr") || fail "legacy launch preparation failed"
   assert_contains "$(cat "$repo/launch.stderr")" "using legacy core.hooksPath wrappers" "legacy launch did not warn about its hook override"
   assert_contains "$(cat "$repo/launch.stderr")" "canonical project-hook checks may fail" "legacy warning omitted the compatibility limit"

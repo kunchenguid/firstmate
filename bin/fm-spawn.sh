@@ -4414,6 +4414,20 @@ mkdir -p "$TASK_TMP/gotmp"
 # check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
+
+# Prepare the legacy fallback for every kind before arming harness state or
+# delivering the launch, so any installation failure rejects the spawn before
+# its backlog commit. Only mode selection is deferred: a long-lived pane
+# daemon's Git can differ from this process's Git, and a capable worker leaves
+# the prepared wrappers unused.
+GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
+if [ "$KEEP_AI_TRAILERS" = 0 ]; then
+  "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT" || {
+    echo "error: could not install the AI-trailer strip hooks for $ID" >&2
+    exit 1
+  }
+fi
+
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
@@ -4806,19 +4820,6 @@ EOF
     exclude_path '.fm-kimi-turnend'
     ;;
   esac
-fi
-
-# Per-task Git environment for every kind, including secondmate, unless the
-# home opts in to keeping trailers. Defer the strip script's feature detection
-# to the destination launch below: a long-lived pane daemon's Git can differ
-# from this process's Git. Real secondmate homes are firstmate clones;
-# a launch whose worktree is not git fails closed.
-GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
-if [ "$KEEP_AI_TRAILERS" = 0 ]; then
-  git -C "$WT" rev-parse --is-inside-work-tree >/dev/null || {
-    echo "error: not a git worktree for the AI-trailer strip hooks: $WT" >&2
-    exit 1
-  }
 fi
 
 # Delivery posture recorded in meta so fm-teardown's safety check and the
