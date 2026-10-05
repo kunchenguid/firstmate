@@ -2,7 +2,8 @@
 
 Audience: maintainer verification.
 
-This record supports the one bounded reachability probe in `bin/fm-provider-reach-probe.sh` and the fleet-operations finding that motivated it: an upstream provider outage was previously visible only by reading worker panes, so "the endpoint is down" was never a machine-readable condition at an intake.
+This record supports the one bounded reachability probe in `bin/fm-provider-reach-probe.sh`.
+The motivating lesson is that probing the wrong host can produce a false outage reading; this opt-in probe makes the selected endpoint's result machine-readable and reproducible without changing dispatch preferences or gating dispatch.
 It records only facts that must be re-established when the probed endpoint or the probe's own classification changes.
 Incident chronology and quota posture stay in private reports.
 
@@ -11,12 +12,14 @@ The probe collects a fact and renders no verdict. It reads no dispatch configura
 ## What each observed HTTP class does and does not prove
 
 Verified against local stand-ins in `tests/fm-provider-reach-probe.test.sh`, which pins every expected value to a fake resolver and a fake curl rather than to live traffic.
+Read the process exit code as the primary verdict: 0 means reachable only, 10 means routed-auth, 11 means server-error, 20 means unreachable, 2 means invalid input or target configuration, and 64 means curl is unavailable.
+The `dns=` and `http=` fields refine the reason; in particular `dns=fail` means the resolver errored, while `dns=nxdomain` means a successful lookup found no address.
 The classes below are the shapes this home has actually recorded from the registered endpoint.
 
 | Observed | `result=` | Exit | Proven | Not proven |
 | --- | --- | --- | --- | --- |
-| DNS returns no address (NXDOMAIN and friends) | `unreachable` with `dns=nxdomain` | 20 | the name resolves to nothing usable | anything about HTTP, because no request is sent |
-| DNS lookup fails without a recognizable answer shape (resolver errored, e.g. no network or a refused query; carries `dns_detail=rc=<code>`) | `unreachable` with `dns=fail` | 20 | the lookup itself did not complete usefully | anything about HTTP, because no request is sent either - `rc=` names the resolver's own status, not an upstream verdict |
+| DNS successfully reports NXDOMAIN, no answer, or an answer without an address record | `unreachable` with `dns=nxdomain` | 20 | the lookup found no usable address | anything about HTTP, because no request is sent |
+| DNS resolution tool errors or reports SERVFAIL, FORMERR, REFUSED, or timeout (carries `dns_detail=rc=<code>` when available) | `unreachable` with `dns=fail` | 20 | the lookup itself did not complete usefully | anything about HTTP, because no request is sent either - `rc=` names the resolver's own status, not an upstream verdict |
 | connection fails, times out, or yields no code (`000`) | `unreachable` with `reason=no_connection` | 20 | no request could be completed | whether the service itself is healthy |
 | `401` / `403` | `routed-auth` | 10 | a request reached the endpoint and was answered with an authorization refusal | usability - no credential is sent, so this is routing evidence only |
 | `2xx` | `reachable` | 0 | the endpoint is routable and answering on the probed path | model availability, credential validity, or that a large or long-output request succeeds |
