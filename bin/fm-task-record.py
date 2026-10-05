@@ -358,12 +358,17 @@ def backfill_preview(data: Path, state: Path) -> dict[str, Any]:
             candidate(path.stem, path, "ordinary-meta", facts)
         else:
             excluded.setdefault(path.stem, "non-ordinary metadata")
-    status_event = re.compile(r"^(?:(?:\[?\d{4}-\d\d-\d\d[^ ]*\]?|\d\d:\d\d:\d\d)\s+)?(?:working|needs-decision|blocked|paused|done|failed|resolved|note)(?:\s+\[key=[^\]]+\])?:\s*.+$")
     for path in sorted(state.glob("*.status")):
         if path.is_symlink() or not path.is_file():
             raise Refusal(f"unsafe migration source: {path}")
         lines = [line for line in path.read_text().splitlines() if line.strip()]
-        if lines and all(status_event.fullmatch(line) for line in lines):
+        status_check = subprocess.run(
+            ["bash", "-c", '. "$1" || exit 2; while IFS= read -r line; do status_line_is_task_event "$line" || exit 1; done',
+             "backfill-status", str(Path(__file__).with_name("fm-classify-lib.sh"))],
+            input="\n".join(lines) + "\n" if lines else "", text=True, capture_output=True, check=False)
+        if status_check.returncode not in (0, 1):
+            raise Refusal(f"status owner unavailable for migration source: {path}")
+        if lines and status_check.returncode == 0:
             candidate(path.stem, path, "ordinary-status")
         else:
             ignored.append({"path": str(path), "reason": "not a worker status event stream"})

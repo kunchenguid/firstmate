@@ -53,6 +53,9 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   def backlog_row($r):
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
   def under_way($t): $t.record_disposition == "active";
+  (.tasks | map({key:.id,value:true}) | from_entries) as $observed
+  | [.backlog.records[] | select(.state == "in_flight" and $observed[.id] != true)] as $record_only
+  |
 
   "# Fleet View",
   "",
@@ -60,13 +63,14 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "Home: \(.fm_home)",
   "",
   "## Under Way",
-  (if ([.tasks[] | select(under_way(.))] | length) == 0 then
+  (if (([.tasks[] | select(under_way(.))] | length) + ($record_only | length)) == 0 then
     (if (.tasks | length) == 0 then "No live task metadata found."
      else "No tasks currently classified as under way." end)
    else
     "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    (.tasks[] | select(under_way(.)) | task_row(.))
+    (.tasks[] | select(under_way(.)) | task_row(.)),
+    ($record_only[] | "| \(.id) | in_flight / task-record (execution observation unavailable): \(.title) | \(.kind) | \(dash(.repo)) | - | unknown | \(dash(.report_path // .pr_url // .local_note)) | - | - |")
    end),
   "",
   "## Queued",

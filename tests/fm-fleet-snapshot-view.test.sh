@@ -277,6 +277,25 @@ test_scout_report_inventory_is_complete_and_sorted() {
   pass "fleet snapshot preserves the complete sorted scout report inventory"
 }
 
+test_inflight_record_without_execution_metadata_stays_visible() {
+  local home fakebin out view bearings
+  home=$(make_home record-only)
+  fakebin=$(make_fakebin "$home")
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add record-only 'Canonical goal without execution observation' --kind scout --repo alpha --start >/dev/null || fail 'record-only fixture failed'
+  printf '# Known report\n' > "$home/data/record-only/report.md"
+  out=$(HERDR_LOG="$home/runtime.log" PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) || fail 'record-only snapshot failed'
+  printf '%s' "$out" | jq -e '.tasks == [] and (.backlog.records | any(.id=="record-only" and .state=="in_flight"))' >/dev/null || fail 'business identity disappeared without metadata'
+  view=$(HERDR_LOG="$home/runtime.log" PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW") || fail 'record-only view failed'
+  assert_contains "$view" 'record-only' 'view lost the canonical ID'
+  assert_contains "$view" 'Canonical goal without execution observation' 'view lost the canonical title'
+  assert_contains "$view" 'execution observation unavailable' 'view invented execution availability'
+  bearings=$(HERDR_LOG="$home/runtime.log" PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bearings-snapshot.sh" --json) || fail 'record-only bearings failed'
+  printf '%s' "$bearings" | jq -e '.in_flight==[] and (.gates | any(.id=="record-only" and .reason=="execution observation unavailable")) and (.reports | any(.id=="record-only")) and .decisions_open==[]' >/dev/null || fail "bearings lost the canonical task or invented a worker/decision: $bearings"
+  [ ! -s "$home/runtime.log" ] || fail 'metadata-free record triggered endpoint queries'
+  pass 'metadata-free in-flight records remain visible with unavailable execution and no endpoint probing'
+}
+
+test_inflight_record_without_execution_metadata_stays_visible
 test_empty_snapshot_and_view
 test_main_home_inventory_and_historical_refusal
 test_view_uses_authoritative_task_disposition

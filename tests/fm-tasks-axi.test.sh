@@ -157,19 +157,21 @@ for name in ('old', 'home-record', 'orphan-report'):
 (root/'state/home-record.meta').write_text('kind=secondmate\nhome=/fixture/old-home\n')
 (root/'state/orphan-report.status').write_text('old opaque status bytes\n')
 (root/'state/status-only.status').write_text('done: legacy report without acceptance proof\n')
+(root/'state/transferred-only.status').write_text('needs-decision [corr=review] [key=route]: choose route\ncaptain-held [key=route]: transferred to durable hold\n')
+(root/'state/timestamp-only.status').write_text('[2026-01-01T12:00:00Z] working: legacy timestamp\n12:00:01 resolved: legacy answer\n')
 (root/'data/backlog.md').write_text('## Done\n- [x] legacy - Legacy title (kind: ship) (repo: known) (done 2020-01-01)\n')
 existing = {p: p.read_bytes() for p in (root/'data').glob('*/task.json')}
 manifest = root/'preview.json'
 manifest.write_text(run('backfill-archived', '--state-dir', str(root/'state'), '--preview').stdout)
 preview = json.loads(manifest.read_text())
-assert {e['id'] for e in preview['entries'] if e['disposition']=='absent'} == {'old','orphan-report','status-only','legacy'}
+assert {e['id'] for e in preview['entries'] if e['disposition']=='absent'} == {'old','orphan-report','status-only','transferred-only','timestamp-only','legacy'}
 assert any(e['id']=='home-record' for e in preview['exclusions'])
 # Creation after preview wins without the importer overwriting the new active record.
 run('add', 'old', 'Concurrently created', '--start')
 existing[root/'data/old/task.json'] = (root/'data/old/task.json').read_bytes()
 run('backfill-archived', '--state-dir', str(root/'state'), '--apply-file', str(manifest))
 for p, raw in existing.items(): assert p.read_bytes() == raw
-for name in ('orphan-report','status-only','legacy'):
+for name in ('orphan-report','status-only','transferred-only','timestamp-only','legacy'):
     record = json.loads((root/'data'/name/'task.json').read_bytes())
     assert record['state']=='archived' and record['completion'] is None
     assert not any(record['progress'].values())

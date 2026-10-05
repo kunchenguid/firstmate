@@ -411,7 +411,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ($done | map(.id)) as $done_ids
   | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
   | ([.tasks[] | select(.kind != "secondmate" and .current_state.state == "working") | .id]) as $working_ids
-  | ($live_ids + $done_ids) as $rel_ids
+  | ([.backlog.records[] | select(.state == "in_flight") | .id] + $done_ids) as $rel_ids
   | ([ .tasks[]
        | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
        | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]) as $unhealthy_all
@@ -458,10 +458,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | . as $record
          | select(.structured and (.state == "queued" or .state == "in_flight") and
              (.hold_bucket != null or .state == "queued" or
-              (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
+              (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not)) or
+              (.state == "in_flight" and ($live_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
          | select((.hold_bucket == null) or ($all_decisions == 0))
-         | as_gate("(main)") ]) as $gates_all
+         | as_gate("(main)")
+         | if $record.state == "in_flight" and ($live_ids | index($record.id) | not) and $record.hold_bucket == null
+           then .reason = "execution observation unavailable" else . end ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))

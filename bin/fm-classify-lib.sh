@@ -261,6 +261,24 @@ status_line_verb() {  # <status-line> -> leading verb word
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
+
+# Pure identity evidence for explicit legacy import, using this status owner's
+# vocabulary. It does not fold decisions, infer task state, or write cursors.
+status_line_is_task_event() {
+  local line=$1 verb
+  # Retained producer streams may prefix an ISO timestamp or a wall-clock time.
+  if [[ "$line" =~ ^\[?[0-9]{4}-[0-9]{2}-[0-9]{2}[^[:space:]]*\]?[[:space:]]+ ]] \
+    || [[ "$line" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}[[:space:]]+ ]]; then
+    line=${line#* }
+  fi
+  case "$line" in *:*) ;; *) return 1 ;; esac
+  status_is_terminal_verb "$line" && return 0
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    working|note|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|"${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|"${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
+  esac
+  return 1
+}
 # 0 when a complete "[key=...]" token sits in the documented position before
 # the line's first colon (or anywhere on a line that has no colon at all).
 _fm_key_before_colon() {  # <status-line>
@@ -463,12 +481,13 @@ EOF
   printf '%s' "$verb"
 }
 
+# shellcheck source=bin/fm-task-disposition-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-task-disposition-lib.sh"
+
 # Candidate business identities for ordinary decision folds. Raw wake/status-byte
 # presentation has its separate operational contract and is left untouched.
 _fm_decision_dispositions() { # <state>
   local data=${FM_DATA_OVERRIDE:-${FM_HOME:-${1%/state}}/data}
-  # shellcheck source=bin/fm-task-disposition-lib.sh
-  . "${BASH_SOURCE[0]%/*}/fm-task-disposition-lib.sh"
   if [ -n "${STATUS_TASK_DISPOSITIONS:-}" ]; then printf '%s\n' "$STATUS_TASK_DISPOSITIONS"
   else fm_task_disposition_snapshot "$data"; fi
 }

@@ -49,6 +49,7 @@ During that invocation it never tears down a task, merges a PR, dispatches new w
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived.
    Until then it stays queued with the reason.
    Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
+   A canonical in-flight record without an execution observation remains visible in Charted Next with `execution observation unavailable`; it does not imply a live worker.
 2. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.

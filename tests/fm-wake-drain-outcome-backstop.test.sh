@@ -61,6 +61,9 @@ test_newer_task_outcome_and_routine_latest_events_stay_silent() {
   local dir state out old
   dir=$(make_case covered-and-routine)
   state="$dir/state"
+  register_task_fixture "$state" covered
+  register_task_fixture "$state" working
+  register_task_fixture "$state" paused
   out="$dir/drain.out"
   old=$(( $(date +%s) - 20 ))
 
@@ -83,6 +86,8 @@ test_older_or_other_task_outcome_cannot_hide_a_new_captain_event() {
   local dir state out body future
   dir=$(make_case stale-outcomes)
   state="$dir/state"
+  register_task_fixture "$state" same-task
+  register_task_fixture "$state" no-task-outcome
   out="$dir/drain.out"
 
   append_outcome "$state" same-task 'older completion'
@@ -105,6 +110,7 @@ test_branch_annotation_cannot_consume_the_main_resurfacing_backstop() {
   local dir state branch_out branch_err main_out sequence generation old
   dir=$(make_case branch-then-main)
   state="$dir/state"
+  register_task_fixture "$state" lost-task
   branch_out="$dir/branch.out"
   branch_err="$dir/branch.err"
   main_out="$dir/main.out"
@@ -119,7 +125,7 @@ test_branch_annotation_cannot_consume_the_main_resurfacing_backstop() {
   FM_STATE_OVERRIDE="$state" "$GRANT" publish mode5-backstop 1 \
     || fail "branch grant publication failed"
 
-  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$branch_out" 2> "$branch_err" \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$branch_out" 2> "$branch_err" \
     || fail "branch drain failed: $(cat "$branch_err")"
   if grep -F 'STATUS OUTCOME BACKSTOP (' "$branch_out" >/dev/null; then
     fail "the branch actor presented the main-only outcome backstop"
@@ -127,7 +133,7 @@ test_branch_annotation_cannot_consume_the_main_resurfacing_backstop() {
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$branch_err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$branch_err")
   [ -n "$sequence" ] && [ -n "$generation" ] || fail "branch drain omitted its acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
     --ack-through "$sequence" --recovery-generation "$generation" \
     || fail "branch acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "branch acknowledgement did not consume its queue row"
@@ -143,6 +149,7 @@ test_same_second_outcome_uses_status_causal_position() {
   local dir state first_out second_out epoch
   dir=$(make_case same-second-causal-order)
   state="$dir/state"
+  register_task_fixture "$state" same-second
   first_out="$dir/first.out"
   second_out="$dir/second.out"
   epoch=$(date +%s)
@@ -170,6 +177,7 @@ test_drain_does_not_scan_append_only_outcome_history() {
   local dir state out i
   dir=$(make_case bounded-history)
   state="$dir/state"
+  register_task_fixture "$state" bounded-task
   out="$dir/drain.out"
 
   printf 'done: covered before large history\n' > "$state/bounded-task.status"
@@ -191,6 +199,7 @@ test_successful_backstop_is_idempotent_without_consuming_delayed_annotation() {
   local dir state first_out second_out signal_out
   dir=$(make_case idempotent-receipt)
   state="$dir/state"
+  register_task_fixture "$state" receipt-task
   first_out="$dir/first.out"
   second_out="$dir/second.out"
   signal_out="$dir/signal.out"
@@ -219,6 +228,7 @@ test_output_failure_does_not_commit_the_backstop_receipt() {
   local dir state fakebin out retry_out real_cat
   dir=$(make_case output-failure)
   state="$dir/state"
+  register_task_fixture "$state" output-task
   fakebin="$dir/fakebin"
   out="$dir/failed.out"
   retry_out="$dir/retry.out"
@@ -235,7 +245,7 @@ exec "$real_cat" "\$@"
 SH
   chmod +x "$fakebin/cat"
 
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  PATH="$fakebin:$PATH" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "the top-level empty-queue drain changed its compatibility exit on an output failure"
   [ ! -s "$out" ] || fail "the failed output consumer received unexpected bytes: $(cat "$out")"
 
@@ -250,6 +260,7 @@ test_receipt_commit_failure_repeats_the_already_presented_backstop() {
   local dir state fakebin out retry_out final_out real_mv
   dir=$(make_case receipt-commit-failure)
   state="$dir/state"
+  register_task_fixture "$state" atomic-task
   fakebin="$dir/fakebin"
   out="$dir/failed.out"
   retry_out="$dir/retry.out"
@@ -266,7 +277,7 @@ exec "$real_mv" "\$@"
 SH
   chmod +x "$fakebin/mv"
 
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  PATH="$fakebin:$PATH" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "the top-level empty-queue drain changed its compatibility exit on a receipt failure"
   grep -F 'atomic-task done: presentation precedes its durable receipt' "$out" >/dev/null \
     || fail "receipt failure prevented the prepared backstop presentation: $(cat "$out")"
@@ -286,6 +297,7 @@ test_rejected_decision_line_surfaces_once_through_backstop() {
   local dir state first_out second_out
   dir=$(make_case rejected-decision)
   state="$dir/state"
+  register_task_fixture "$state" rejected
   first_out="$dir/first.out"
   second_out="$dir/second.out"
 
@@ -308,6 +320,7 @@ test_missing_index_self_heals_on_first_drain() {
   local dir state out old
   dir=$(make_case index-selfheal-covered)
   state="$dir/state"
+  register_task_fixture "$state" recovered
   out="$dir/drain.out"
 
   printf 'done: handled before cache interruption\n' > "$state/recovered.status"
@@ -333,6 +346,7 @@ test_uncovered_event_surfaces_on_first_drain_without_index() {
   local dir state out body
   dir=$(make_case index-selfheal-uncovered)
   state="$dir/state"
+  register_task_fixture "$state" fresh
   out="$dir/drain.out"
 
   printf 'done: uncovered completion with no index\n' > "$state/fresh.status"
@@ -360,6 +374,7 @@ test_malformed_outcome_store_fails_closed_without_pi_advice() {
   local dir state out
   dir=$(make_case index-selfheal-store-fault)
   state="$dir/state"
+  register_task_fixture "$state" unsafe
   out="$dir/drain.out"
 
   printf 'done: must not surface over a corrupt outcome store\n' > "$state/unsafe.status"
@@ -425,6 +440,7 @@ test_index_self_heal_runs_under_the_outcome_lock() {
   local dir state busy_out healed_out holder i
   dir=$(make_case index-selfheal-lock)
   state="$dir/state"
+  register_task_fixture "$state" locked
   busy_out="$dir/busy.out"
   healed_out="$dir/healed.out"
 
@@ -449,7 +465,7 @@ test_index_self_heal_runs_under_the_outcome_lock() {
   [ -e "$state/.branch-outcomes.lock" ] \
     || { kill "$holder" 2>/dev/null || true; fail "test lock holder did not publish the outcome lock"; }
 
-  FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$busy_out" \
+  FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$busy_out" \
     || fail "drain failed while the outcome lock was held"
   grep -F 'branch outcome history is busy' "$busy_out" >/dev/null \
     || fail "contested lock did not skip the backstop: $(cat "$busy_out")"
@@ -471,6 +487,7 @@ test_overbound_routine_event_stays_silent() {
   local dir state out
   dir=$(make_case overbound-routine-event)
   state="$dir/state"
+  register_task_fixture "$state" oversized
   out="$dir/drain.out"
 
   perl -e 'print "working: ", "x" x 70000, "\n"' > "$state/oversized.status"
@@ -491,6 +508,7 @@ test_backstop_output_is_bounded() {
   i=1
   while [ "$i" -le 30 ]; do
     printf 'done: completion-%02d %s\n' "$i" "$payload" > "$state/task-$i.status"
+    register_task_fixture "$state" "task-$i"
     set_mtime "$old" "$state/task-$i.status"
     i=$((i + 1))
   done
@@ -506,6 +524,30 @@ test_backstop_output_is_bounded() {
   pass "the outcome backstop caps each item and its total task output deterministically"
 }
 
+test_automatic_backstop_uses_only_canonical_nonterminal_ids() {
+  local dir state out body id
+  dir=$(make_case canonical-backstop-boundary)
+  state="$dir/state"
+  for id in active ended archived; do register_task_fixture "$state" "$id"; done
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" "done" ended >/dev/null || fail 'terminal fixture failed'
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" archive archived >/dev/null || fail 'archive fixture failed'
+  for id in active ended archived orphan; do
+    printf 'done: %s retained event\nnote: %s retained answer\ndone: %s final event\n' "$id" "$id" "$id" > "$state/$id.status"
+    append_wake "$state" signal "$id.status" "signal: $state/$id.status" || fail 'raw signal fixture failed'
+  done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail 'canonical boundary drain failed'
+  out=$(cat "$dir/out")
+  body=$(backstop_body "$dir/out")
+  assert_contains "$body" 'active done: active final event' 'active completion lost its backstop'
+  for id in ended archived orphan; do
+    assert_not_contains "$body" "$id " 'terminal or unknown task entered automatic backstop'
+    assert_contains "$out" "$id.status" 'raw wake receipt was lost'
+    assert_contains "$out" "note: $id retained answer" 'unread answer receipt was lost'
+  done
+  pass 'automatic backstop uses canonical nonterminal IDs while raw wake and unread answers remain intact'
+}
+
+test_automatic_backstop_uses_only_canonical_nonterminal_ids
 test_uncovered_keyless_captain_events_surface_on_the_next_main_drain
 test_newer_task_outcome_and_routine_latest_events_stay_silent
 test_older_or_other_task_outcome_cannot_hide_a_new_captain_event
