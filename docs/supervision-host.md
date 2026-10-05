@@ -115,7 +115,7 @@ The host-off Claude Stop hook's detached handling successor is also unchanged; s
 It also passes the close through unchanged, with no added line, when any of these holds (`fm_supervision_host_attended_ready` in `bin/fm-supervision-engine-lib.sh` owns the list):
 
 - The home names no usable engine.
-- A tool its turns need is missing: the engine executable, node, jq, or one of perl, timeout, or gtimeout to bound the turn.
+- A tool its turns need is missing: the engine executable, a node that can load TypeScript (see [Toolchain](configuration.md#toolchain)), jq, or one of perl, timeout, or gtimeout to bound the turn.
 - The primary has no verified dialog mirror.
 - The main session's lock holder cannot be identified.
 - The session is cooling down after engine errors; see [The broken-session latch](#the-broken-session-latch).
@@ -239,7 +239,7 @@ So the owner's next arm starts from the same state as without the host, and the 
 - A refused handoff.
 - An unreadable queue.
 - Rows main already claimed.
-- A missing engine or node.
+- A missing engine, or a node that is missing or cannot load TypeScript.
 - A dialog mirror that cannot be read, on an attended wake.
 - A session latched after repeated engine errors, inside its cooldown; see [The broken-session latch](#the-broken-session-latch).
 - A turn that timed out or failed.

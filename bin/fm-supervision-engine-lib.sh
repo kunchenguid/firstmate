@@ -6,7 +6,8 @@
 # docs/supervision-host.md owns the host design and
 # bin/fm-supervision-host.sh the loop; this file owns two contracts, plus the
 # main-session key (fm_supervision_host_main_key) and the attended readiness
-# check (fm_supervision_host_attended_ready) the host's parts share.
+# check (fm_supervision_host_attended_ready) the host's parts share, with the
+# Node floor it shares with bootstrap (fm_node_loads_typescript).
 #
 # THE HOME GATE (config/supervision-host-off, config/supervision-host).
 # docs/configuration.md "Supervision host" owns both files: the inherited
@@ -48,6 +49,31 @@
 # the marker for isolated suites).
 
 FM_SUPERVISION_ENGINES_VERIFIED='claude'
+
+# THE NODE FLOOR (fm_node_loads_typescript). bin/fm-branch-dispatch.mjs imports
+# a TypeScript module directly, so the node that runs it must strip TypeScript
+# types natively: Node 22.18.0+ or 23.6.0+, the floor docs/configuration.md
+# "Toolchain" declares. The probe asks node for that capability
+# (process.features.typescript) rather than parsing a version, so a build with
+# stripping turned off fails it too. It returns 0 when `node` on PATH can load
+# TypeScript; otherwise 1, with FM_NODE_PROBLEM set to "node is missing" or
+# "node <version> cannot load TypeScript". The host's readiness checks and
+# bin/fm-bootstrap.sh share it; callers add the floor and their consequence.
+# shellcheck disable=SC2034 # Read by the sourcing callers.
+FM_NODE_TYPESCRIPT_FLOOR="22.18.0+ or 23.6.0+"
+
+fm_node_loads_typescript() {
+  local version
+  FM_NODE_PROBLEM=
+  if ! command -v node >/dev/null 2>&1; then
+    FM_NODE_PROBLEM="node is missing"
+    return 1
+  fi
+  node -e 'process.exit(process.features.typescript ? 0 : 1)' >/dev/null 2>&1 && return 0
+  version=$(node --version 2>/dev/null | head -n 1)
+  FM_NODE_PROBLEM="node ${version:-of unknown version} cannot load TypeScript"
+  return 1
+}
 
 # fm_supervision_host_primary: print the primary harness the home gate judges
 # (bin/fm-harness.sh, whose supervision-branch pin names the primary inside an
@@ -142,7 +168,8 @@ EOF
 }
 
 # fm_supervision_host_attended_ready <config-dir> <primary-harness>
-# 0 when the attended host's configured engine, executable, node, jq, turn
+# 0 when the attended host's configured engine, executable, a node that can
+# load TypeScript (THE NODE FLOOR above), jq, turn
 # bound (perl, timeout, or gtimeout), and primary's mirror writer are ready;
 # otherwise 1, with FM_SUPERVISION_HOST_UNREADY naming why. The host's
 # attended acceptor runs it on every attended close; the mirror's contents are
@@ -155,8 +182,8 @@ fm_supervision_host_attended_ready() {
     FM_SUPERVISION_HOST_UNREADY="no supervision engine"
   elif ! fm_supervision_engine_bin "$FM_SUPERVISION_ENGINE" >/dev/null 2>&1; then
     FM_SUPERVISION_HOST_UNREADY="the $FM_SUPERVISION_ENGINE engine executable is missing"
-  elif ! command -v node >/dev/null 2>&1; then
-    FM_SUPERVISION_HOST_UNREADY="node is missing"
+  elif ! fm_node_loads_typescript; then
+    FM_SUPERVISION_HOST_UNREADY="$FM_NODE_PROBLEM; the supervision session needs Node $FM_NODE_TYPESCRIPT_FLOOR"
   elif ! command -v jq >/dev/null 2>&1; then
     FM_SUPERVISION_HOST_UNREADY="jq is missing"
   elif ! command -v perl >/dev/null 2>&1 && ! command -v timeout >/dev/null 2>&1 \

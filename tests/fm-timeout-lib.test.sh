@@ -199,35 +199,52 @@ test_a_named_owner_that_is_gone_ends_the_command() {
   pass "fm_exec_timed ends the command when its named owner is already gone"
 }
 
-# With no named owner the calling script is captured before the watchdog
-# starts, so a script that dies while its subshell is still on the way into
-# fm_exec_timed - the watchdog then starts already reparented - is still
-# detected instead of leaving the command running to its bound.
-test_an_owner_that_dies_during_startup_ends_the_command() {
-  local dir watchdog started
-  dir="$TMP_ROOT/startup-owner"
+# owner_dies_during_startup <case> <bash> <unset-bashpid> runs that case under
+# set -u. With BASHPID unset (as bash 3.2 has none) the subshell must still be
+# told apart from the calling script, or the captured owner is the script's
+# parent and the dead script goes unnoticed until the bound.
+owner_dies_during_startup() {
+  local name=$1 shell=$2 unset_bashpid=$3 dir watchdog started
+  dir="$TMP_ROOT/startup-owner-$name"
   mkdir -p "$dir"
   # shellcheck disable=SC2016
-  PATH=$PERL_ONLY bash -c '
+  PATH=$PERL_ONLY "$shell" -c '
+    set -u
     . "$1/bin/fm-timeout-lib.sh"
+    [ "$3" != yes ] || unset BASHPID
     (
-      echo "$BASHPID" > "$2/watchdog"
+      /bin/sh -c "echo \"\$PPID\"" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
-    ) >/dev/null 2>&1 &
+    ) >/dev/null 2>"$2/stderr" &
     exit 0
-  ' _ "$ROOT" "$dir"
+  ' _ "$ROOT" "$dir" "$unset_bashpid"
   wait_for_file "$dir/watchdog"
   watchdog=$(cat "$dir/watchdog")
   started=$SECONDS
   while kill -0 "$watchdog" 2>/dev/null; do
     if [ "$((SECONDS - started))" -ge 15 ]; then
       kill -KILL "$watchdog" 2>/dev/null || true
-      fail "a watchdog whose owner died during startup ran on toward its bound"
+      fail "$name: a watchdog whose owner died during startup ran on toward its bound"
     fi
     sleep 0.02
   done
-  pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
+  [ ! -s "$dir/stderr" ] || fail "$name: fm_exec_timed failed before bounding the command: $(cat "$dir/stderr")"
+  pass "fm_exec_timed ends the command when its owner dies during watchdog startup ($name)"
+}
+
+# With no named owner the calling script is captured before the watchdog
+# starts, so a script that dies while its subshell is still on the way into
+# fm_exec_timed - the watchdog then starts already reparented - is still
+# detected instead of leaving the command running to its bound.
+test_an_owner_that_dies_during_startup_ends_the_command() {
+  owner_dies_during_startup bash bash no
+  owner_dies_during_startup no-bashpid bash yes
+  if [ -x /bin/bash ] && [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')" = 3 ]; then
+    owner_dies_during_startup bash-3.2 /bin/bash no
+  else
+    pass "fm_exec_timed under bash 3.2 (skipped: /bin/bash is not bash 3.2 here)"
+  fi
 }
 
 # perl is preferred whenever it exists, because only its watchdog can reap a

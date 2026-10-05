@@ -1230,7 +1230,7 @@ Required tools come in two parts: a universal toolchain every home needs regardl
 
 Every home requires:
 
-- node and git.
+- node 22.18.0+ or 23.6.0+, which loads TypeScript natively (`node -p process.features.typescript` prints `strip`), and git.
 - gh, with GitHub authentication through `gh auth login`.
 - no-mistakes v1.46.0 or newer.
 - Compatible gh-axi.
@@ -1238,6 +1238,7 @@ Every home requires:
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
 
+Bootstrap reports a node that cannot load TypeScript, because the supervision host's branch eligibility runs a TypeScript module through it; `fm_node_loads_typescript` in [`bin/fm-supervision-engine-lib.sh`](../bin/fm-supervision-engine-lib.sh) owns that capability probe.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 

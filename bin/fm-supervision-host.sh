@@ -236,6 +236,7 @@ TURN_FILE="$STATE/.supervision-host-turn"
 RECEIPTS="$STATE/.supervision-host-receipts"
 PROMPT_FILE="$STATE/.supervision-host-prompt"
 WAKE_FILE="$STATE/.supervision-host-wake"
+DISPATCH_ERRORS="$STATE/.supervision-host-dispatch-errors"
 HOST_LOG="$STATE/.supervision-host.log"
 ENGINE_PID_FILE="$STATE/.supervision-host.engine-pid"
 HEALTH_FILE="$STATE/.supervision-host-health"
@@ -850,10 +851,11 @@ handle_wake() {  # <reason-lines>
   else
     set --
     case "$first" in heartbeat*) set -- --heartbeat ;; esac
-    if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>/dev/null); then
-      HANDLE_WHY="branch eligibility could not be computed"
+    if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>"$DISPATCH_ERRORS"); then
+      HANDLE_WHY="branch eligibility could not be computed$(dispatch_cause)"
       return 1
     fi
+    rm -f "$DISPATCH_ERRORS"
   fi
   status=$(printf '%s\n' "$scope" | sed -n 's/^status=//p')
   corrupted=$(printf '%s\n' "$scope" | sed -n 's/^corrupted=//p')
@@ -928,17 +930,17 @@ handle_wake() {  # <reason-lines>
   rm -f "$WAKE_FILE"
   rc=0
   printf '%s\n' "$reason" \
-    | (umask 077; exec node "$SCRIPT_DIR/fm-branch-dispatch.mjs" wake-prompt "$@" > "$WAKE_FILE" 2>/dev/null) || rc=$?
+    | (umask 077; exec node "$SCRIPT_DIR/fm-branch-dispatch.mjs" wake-prompt "$@" > "$WAKE_FILE" 2>"$DISPATCH_ERRORS") || rc=$?
   if [ "$rc" -ne 0 ]; then
     [ -z "$readback" ] || rm -f "$readback"
     rm -f "$TURN_FILE" "$mirror"
     "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
-    HANDLE_WHY="the wake prompt could not be rendered"
+    HANDLE_WHY="the wake prompt could not be rendered$(dispatch_cause)"
     [ "$rc" -ne 3 ] || HANDLE_WHY="the dialog mirror could not be read"
     return 1
   fi
   [ -z "$readback" ] || rm -f "$readback"
-  rm -f "$mirror"
+  rm -f "$mirror" "$DISPATCH_ERRORS"
   if turn_crosses_boundary; then
     rm -f "$TURN_FILE"
     "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
@@ -1019,6 +1021,20 @@ turn_captain_seqs() {  # <turn>
   awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
 }
 
+# dispatch_cause: ": <cause>" for a failed bin/fm-branch-dispatch.mjs call,
+# from the stderr it left in DISPATCH_ERRORS (removed here), so the ledger row
+# names why. The cause is node's error line when there is one, since an
+# uncaught error's first lines are only its source location, else the first
+# nonblank line; it is cut to one tab-free line. Prints nothing for no stderr.
+dispatch_cause() {
+  local line
+  line=$(grep -m 1 -E '^[A-Za-z]*Error( \[[A-Z0-9_]+\])?: ' "$DISPATCH_ERRORS" 2>/dev/null) \
+    || line=$(grep -m 1 -v '^[[:space:]]*$' "$DISPATCH_ERRORS" 2>/dev/null) || line=
+  rm -f "$DISPATCH_ERRORS"
+  line=$(printf '%s\n' "$line" | tr '\t\r' '  ' | cut -c 1-300)
+  [ -z "$line" ] || printf ': %s' "$line"
+}
+
 # Why an attended close stays with main exactly as the plain arm delivers it,
 # or nothing when the supervision session may take it. Sets ATTENDED_WHY, and
 # ATTENDED_OFFER to the offer's verdict and the scope it judged.
@@ -1032,11 +1048,12 @@ attended_acceptor() {  # <first-reason-line>
     ATTENDED_WHY="the main session could not be identified"
   elif health_cooling; then
     ATTENDED_WHY="the supervision session is cooling down after engine errors"
-  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer 2>/dev/null); then
-    ATTENDED_WHY="branch eligibility could not be computed"
+  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer 2>"$DISPATCH_ERRORS"); then
+    ATTENDED_WHY="branch eligibility could not be computed$(dispatch_cause)"
   elif [ "$(printf '%s\n' "$offer" | sed -n 's/^eligible=//p')" != 1 ]; then
     ATTENDED_WHY="main-only"
   fi
+  rm -f "$DISPATCH_ERRORS"
   ATTENDED_OFFER=$offer
   [ -z "$ATTENDED_WHY" ]
 }
@@ -1106,8 +1123,8 @@ while :; do
     if [ -z "$FM_SUPERVISION_ENGINE" ]; then
       exit_to_main "no supervision engine runs here: $FM_SUPERVISION_ENGINE_PROBLEM; this wake is yours"
     fi
-    if ! command -v node >/dev/null 2>&1; then
-      exit_to_main "node is required to compute branch eligibility; this wake is yours"
+    if ! fm_node_loads_typescript; then
+      exit_to_main "$FM_NODE_PROBLEM; the supervision session needs Node $FM_NODE_TYPESCRIPT_FLOOR to compute branch eligibility; this wake is yours"
     fi
     if health_cooling; then
       exit_to_main "the away session is paused after repeated engine errors until $(fm_supervision_host_clock "$HEALTH_RETRY"); this wake is yours"

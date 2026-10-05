@@ -348,6 +348,43 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
+# node must load TypeScript natively (fm_node_loads_typescript): the probe asks node
+# itself, so the fake answers the capability and prints its version.
+test_node_typescript_floor() {
+  local label strips version mode case_dir fakebin out missing n
+  n=0
+  while IFS='^' read -r label strips version mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/node-floor-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    cat > "$fakebin/node" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  -e) exit $([ "$strips" = yes ] && echo 0 || echo 1) ;;
+  --version) [ -z "$version" ] || printf '%s\\n' "$version" ;;
+esac
+exit 0
+SH
+    chmod +x "$fakebin/node"
+    out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    missing="MISSING: node ($mode cannot load TypeScript; requires 22.18.0+ or 23.6.0+; install: brew install node  # or the platform's package manager)"
+    if [ "$mode" = empty ]; then
+      [ -z "$out" ] || fail "$label: expected silence, got: $out"
+    else
+      [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out"
+    fi
+  done <<'ROWS'
+a node that loads TypeScript is accepted^yes^v24.16.0^empty
+a node without type stripping reports an upgrade^no^v18.16.0^v18.16.0
+a node without type stripping or a version reports an upgrade^no^^of unknown version
+ROWS
+  pass "bootstrap reports a node that cannot load TypeScript with its upgrade"
+}
+
 test_gh_axi_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
@@ -1246,6 +1283,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_node_typescript_floor
 test_gh_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version

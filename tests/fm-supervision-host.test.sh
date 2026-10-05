@@ -1860,6 +1860,89 @@ SH
 # The attended engine never judges without the captain's words: a mirror that
 # is missing, cannot be read, or holds an entry that does not parse hands the
 # wake to main before any engine turn and leaves the mirror cursor where it was.
+# A node first on PATH that cannot load TypeScript: the real node with type
+# stripping turned off, for every call or, with "dispatch", only for the
+# dispatch entry, so the readiness probe passes and the entry itself fails.
+node_without_type_stripping() {  # <home> [dispatch]
+  local real_node
+  real_node=$(command -v node)
+  if [ "${2:-}" = dispatch ]; then
+    cat > "$1/fakebin/node" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *fm-branch-dispatch.mjs*) exec "$real_node" --no-experimental-strip-types "\$@" ;;
+esac
+exec "$real_node" "\$@"
+SH
+  else
+    printf '#!/usr/bin/env bash\nexec %q --no-experimental-strip-types "$@"\n' "$real_node" > "$1/fakebin/node"
+  fi
+  chmod +x "$1/fakebin/node"
+}
+
+FLOOR_RE='node v[0-9][0-9.]* cannot load TypeScript; the supervision session needs Node 22\.18\.0\+ or 23\.6\.0\+'
+
+test_attended_close_on_a_node_that_cannot_load_typescript_names_the_floor() {
+  local home
+  home=$(make_home attended-old-node attended)
+  node_without_type_stripping "$home"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "old node: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'step one'
+  wait_until 250 host_exited "$home" || fail "old node: the attended close did not reach main: $(cat "$home/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$home/host.rc")" "an attended pass-through must exit 0"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the close must carry the watcher's reason line"
+  assert_no_re '^supervision-host' "$home/host.out" "an attended pass-through must reach main exactly as the arm printed it"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "old node: the engine ran on a node that cannot load TypeScript"
+  assert_re "	pass-through	attended	$FLOOR_RE	signal:" "$home/state/.supervision-host.log" \
+    "the ledger must name the node that cannot load TypeScript and the floor"
+  pass "host: an attended close on a node that cannot load TypeScript passes to main with the Node floor in the ledger"
+}
+
+test_away_wake_on_a_node_that_cannot_load_typescript_names_the_floor() {
+  local home
+  home=$(make_home away-old-node away)
+  node_without_type_stripping "$home"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "old node away: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'step one'
+  wait_until 250 host_exited "$home" || fail "old node away: the wake did not reach main: $(cat "$home/state/.supervision-host.log")"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the handed-back close must carry the watcher's reason line"
+  assert_re "^supervision-host: $FLOOR_RE to compute branch eligibility; this wake is yours\$" "$home/host.out" \
+    "an away wake on a node that cannot load TypeScript must reach main naming the floor"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "old node away: the engine ran on a node that cannot load TypeScript"
+  assert_re "	to-main	$FLOOR_RE" "$home/state/.supervision-host.log" "the ledger must name the floor"
+  pass "host: an away wake on a node that cannot load TypeScript reaches main naming the Node floor"
+}
+
+# A dispatch entry that fails after readiness passed leaves node's error line,
+# not only the generic reason, in the ledger row and the hand-back.
+test_failed_branch_eligibility_names_its_cause() {
+  local home away cause_re='branch eligibility could not be computed: [A-Za-z]*Error'
+  home=$(make_home attended-dispatch-error attended)
+  node_without_type_stripping "$home" dispatch
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "dispatch error: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'step one'
+  wait_until 250 host_exited "$home" || fail "dispatch error: the attended close did not reach main: $(cat "$home/state/.supervision-host.log")"
+  assert_re "	pass-through	attended	$cause_re" "$home/state/.supervision-host.log" \
+    "the attended ledger row must carry the dispatch entry's error"
+  assert_absent "$home/state/.supervision-host-dispatch-errors" "the captured stderr must not be left behind"
+
+  away=$(make_home away-dispatch-error away)
+  node_without_type_stripping "$away" dispatch
+  start_host "$away"
+  wait_until 150 watcher_live "$away" || fail "dispatch error away: the host never started a watcher cycle: $(cat "$away/host.out")"
+  append_status "$away" 'step one'
+  wait_until 250 host_exited "$away" || fail "dispatch error away: the wake did not reach main: $(cat "$away/state/.supervision-host.log")"
+  assert_re "^supervision-host: the away session could not take this wake: $cause_re.*; this wake is yours\$" "$away/host.out" \
+    "the away hand-back must carry the dispatch entry's error"
+  assert_re "	to-main	the away session could not take this wake: $cause_re" "$away/state/.supervision-host.log" \
+    "the away ledger row must carry the dispatch entry's error"
+  assert_absent "$away/state/.supervision-host-dispatch-errors" "the captured stderr must not be left behind"
+  pass "host: a failed branch-eligibility call names node's error in the ledger and the hand-back"
+}
+
 test_attended_wake_with_an_unreadable_mirror_reaches_main() {
   local home mirror cursor
   home=$(make_home attended-bad-mirror attended)
@@ -2934,6 +3017,9 @@ test_attended_wake_carries_the_dialog_mirror
 test_dialog_bearing_files_are_owner_only
 test_undelivered_dialog_is_fed_again_on_the_next_turn
 test_attended_wake_with_an_unreadable_mirror_reaches_main
+test_attended_close_on_a_node_that_cannot_load_typescript_names_the_floor
+test_away_wake_on_a_node_that_cannot_load_typescript_names_the_floor
+test_failed_branch_eligibility_names_its_cause
 test_away_wake_is_handled_on_the_engine_and_never_reaches_main
 test_away_turn_without_a_report_hands_the_wake_to_main
 test_return_during_an_engine_turn_hands_its_outcomes_to_main
