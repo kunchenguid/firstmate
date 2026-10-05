@@ -35,12 +35,12 @@ This skill does not select inside a profile array: `quota-array-dispatch` owns t
 
 ## Shadow and readiness evidence
 
-For a proposed local rule, append one `shadow` row with `bin/fm-dispatch-evidence.sh record <task-id> shadow` before spawn.
+For a proposed local rule, append one `shadow` row with `bin/fm-dispatch-evidence.sh` before spawn.
 Record the proposed model, actual selected model, task class, reason, and confidence when available.
 The log is private `data/<task-id>/dispatch-evidence.jsonl`; the script accepts bounded scalar fields only and stores no prompt or secret.
 An unmeasured local route may shadow while the current specific rule or Codex default still executes.
 
-Before an actual local Pi spawn, run `bin/fm-dispatch-evidence.sh check-local <provider/model> --expected-url <base-url> --canary` using the worker account's Pi catalog.
+Before an actual local Pi spawn, run the script's `check-local` canary against the expected endpoint using the worker account's Pi catalog.
 The check requires a loopback or Tailnet IP, the exact Pi catalog model, `/health`, `/v1/models`, and a complete structured tool call.
 Save its JSON result beside the task's outcome evidence.
 Also record the server's checkpoint and runtime revision from the deployment manifest or image digest; an endpoint that does not advertise those revisions cannot prove them by `/v1/models` alone.

@@ -1172,7 +1172,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
 Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-The agent-only `job-value-dispatch` skill applies task impact and repeated same-job evidence before a local profile becomes a recurring route.
+The agent-only [`job-value-dispatch`](../.agents/skills/job-value-dispatch/SKILL.md) skill owns how task impact and repeated same-job evidence admit a recurring local route.
 
 **Spawn requirements**
 
@@ -1267,13 +1267,13 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 
 **Local Pi readiness and task outcome evidence**
 
-`bin/fm-dispatch-evidence.sh check-local <provider/model> --expected-url <base-url> --canary` checks one explicit Pi catalog tuple against its loopback or Tailnet OpenAI-compatible endpoint.
+The `check-local` subcommand in [`bin/fm-dispatch-evidence.sh`](../bin/fm-dispatch-evidence.sh) checks one explicit Pi catalog tuple against its loopback or Tailnet OpenAI-compatible endpoint; its header owns the exact command syntax.
 It requires `/health`, an exact `/v1/models` alias with at least the Pi catalog's context window, and, with `--canary`, a complete structured tool call.
 It neither starts a server nor chooses another model; a refusal keeps the local route out of service until the operator resolves the mismatch.
 The optional `--catalog <models.json>` selects a specific worker account's catalog instead of the current user's `~/.pi/agent/models.json`.
 The JSON output gives the endpoint and advertised model, plus a served revision only if the server exposes one; retain the checkpoint/runtime digest separately when it does not.
 
-`bin/fm-dispatch-evidence.sh record <task-id> shadow|outcome` reads one JSON object from stdin and appends one fsynced row to the existing private `data/<task-id>/dispatch-evidence.jsonl`.
+The script's `record` subcommand reads one JSON object from stdin and appends one fsynced row to the private `data/<task-id>/dispatch-evidence.jsonl` in an existing task directory.
 A shadow row requires `task_class`, `proposed`, and `selected`.
 An outcome row requires `run_id`, `task_class`, `provider`, `model`, boolean `accepted`, and nonnegative numeric `elapsed_seconds`, `interventions`, and `rework_minutes`.
 Optional bounded scalar fields include `basis`, `confidence`, `status`, `reason`, `endpoint`, `checkpoint_revision`, `runtime_revision`, `spec_sha256`, `verifier_sha256`, `head`, `failure_class`, `cost_usd`, `input_tokens`, `output_tokens`, `cached_tokens`, `context_tokens`, `ttft_seconds`, `decode_tps`, `verifier_score`, `cloud_egress`, and `evidence`.
