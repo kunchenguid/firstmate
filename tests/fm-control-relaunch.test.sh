@@ -490,6 +490,26 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+# A relaunch continues the same task, so its validation runs stay attributable:
+# the task start carries forward, and a record older than task_started= derives
+# it from the spawn generation it was first launched with.
+test_relaunch_carries_the_task_start() {
+  local dir out rc
+  dir=$(new_case task-start rl43)
+  add_ship_task "$dir" rl43 claude
+  printf '%s\n' 'spawn_gen=s1700000000.1.1' >> "$dir/home/state/rl43.meta"
+  out=$(run_control "$dir" rl43 relaunch --note "continuing after a stall"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a legacy record should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl43 task_started)" = 1700000000 ] \
+    || fail "a legacy record must derive its task start from its prior spawn generation"
+  [ "$(meta_field "$dir" rl43 spawn_gen)" != s1700000000.1.1 ] || fail "a relaunch must mint a new spawn generation"
+  out=$(run_control "$dir" rl43 relaunch --note "continuing again"); rc=$?
+  expect_code 0 "$rc" "a second relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl43 task_started)" = 1700000000 ] || fail "the task start must survive every relaunch"
+  [ "$(grep -c '^task_started=' "$dir/home/state/rl43.meta")" = 1 ] || fail "the task start must be recorded once"
+  pass "fm-control relaunch: the task start carries across relaunches"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -2391,6 +2411,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_carries_the_task_start
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
