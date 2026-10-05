@@ -104,6 +104,8 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 - `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
 
+- `bin/fm-backlog-pruner.sh` owns the weekly backlog prune, its report, its change ledger, and its watcher check; [Weekly backlog pruner](#weekly-backlog-pruner) describes the operator switches.
+
 - The producing PR and Relay helpers own the fields they append, [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh) owns status-event vocabulary, optional emission-time syntax, and legacy unknown-time handling, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 
 - The [`bin/fm-fleet-snapshot.sh` header](../bin/fm-fleet-snapshot.sh) owns the snapshot's event-time and age fields, including secondmate parent-event projections.
@@ -409,6 +411,20 @@ Linking the code-root copy into the home therefore forks the queue on the first 
 Run every routine Firstmate backlog command through [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh).
 Like lifecycle transitions, it addresses this home's backlog and archive from any working directory.
 Bootstrap reports a code-root `data/backlog.md` or `data/done-archive.md` that is not this home's own file as a `BACKLOG_RECONCILE: code-root ...` line, even in a read-only session.
+
+### Weekly backlog pruner
+
+`bin/fm-backlog-pruner.sh` keeps the queue short.
+It moves a queued item with no change for 7 days to `data/backlog-fog.md` through `tasks-axi mv`, and it lists a queued or in-flight item whose note names only merged pull requests, with their URLs, for closing.
+It keeps held captain calls, every in-flight item, items changed inside the window, and any blocked-by set that the move would split.
+It never closes an item and never moves in-flight work.
+"No change" is the newer of the item's `since` date and the last time its text changed, which the pruner learns from `state/backlog-pruner.seen`.
+`bin/fm-backlog-pruner.sh run` is a dry run that writes only `data/backlog-prune-report.md`; `run --apply` performs the move.
+`bin/fm-backlog-pruner.sh arm` binds `state/backlog-pruner.check.sh` to the watcher's existing custom-check sweep, and the check works once per 7 days (`state/backlog-pruner.last`).
+A plain `arm` keeps the weekly run a dry run; `arm --apply` lets it move items.
+The run surfaces as one `check:` line in the wake drain only when it moved items, would have moved items, or found items to close.
+To switch it off, run `bin/fm-backlog-pruner.sh disarm`; nothing else starts the pruner.
+The script header owns the options, environment variables, and ledger format, and `tests/fm-backlog-pruner.test.sh` proves the behavior.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 
