@@ -11,7 +11,7 @@
 #      empty lsof result means the file was abandoned, not that no one held it;
 #   3. its mtime age is at least a caller-supplied threshold - a freshly created
 #      lock might belong to a process lsof has not yet reflected.
-# ANY uncertainty - lsof missing, an lsof error, an unreadable mtime - returns
+# ANY uncertainty - lsof missing, an lsof error or timeout, an unreadable mtime - returns
 # non-zero (NOT stale): fail safe, never remove a lock that cannot be proven dead.
 # Diagnostics print to stderr prefixed by ${FM_LOCK_LOG_PREFIX:-fm-lock} so each
 # caller's output stays recognizable.
@@ -30,17 +30,47 @@ fm_lock_path_mtime() {
   fi
 }
 
+# Seconds one `lsof -- <path>` call may run before it is treated as "cannot
+# tell". lsof's mount-table phase stat()s every mount point, and a
+# mounted-but-unresponsive network share blocks that phase for lsof's own guard
+# (15 s plus kill grace) up to four times per call, so an unbounded call can
+# hang a lock-staleness check for minutes. 60 s lets a normal call (0.2 s)
+# finish while bounding a stalled one. Overridable for tests.
+: "${FM_LOCK_LSOF_TIMEOUT:=60}"
+
+# fm_lock_lsof_run <lsof args...>: run lsof under a wall-clock bound when the
+# host has coreutils `timeout` (or Homebrew's `gtimeout` on macOS), bare
+# otherwise. Kept inline rather than sourcing bin/fm-timeout-lib.sh so this
+# leaf lib stays self-contained. The bound reports exit 124.
+fm_lock_lsof_run() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$FM_LOCK_LSOF_TIMEOUT" lsof "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$FM_LOCK_LSOF_TIMEOUT" lsof "$@"
+  else
+    lsof "$@"
+  fi
+}
+
 # fm_lock_lsof_holder <target>: 0 a process holds it, 1 provably none, 2 lsof
-# errored (cannot tell). Diagnostics print on the error path only.
+# errored or hit the wall-clock bound (cannot tell). Diagnostics print on the
+# error path only. Deliberately NOT `lsof -b`: with -b lsof's path-argument
+# matching fails for every path ("status error ... Resource temporarily
+# unavailable", exit 1 with output), which this contract would read as a
+# permanent "cannot tell" and so never recover a stale lock again.
 fm_lock_lsof_holder() {
   local target=$1 output status
-  if output=$(lsof -- "$target" 2>&1); then
+  if output=$(fm_lock_lsof_run -- "$target" 2>&1); then
     return 0
   else
     status=$?
   fi
   if [ "$status" -eq 1 ] && [ -z "$output" ]; then
     return 1
+  fi
+  if [ "$status" -eq 124 ]; then
+    fm_lock_log "lsof check timed out after ${FM_LOCK_LSOF_TIMEOUT}s for $target; cannot tell whether it is held"
+    return 2
   fi
   if [ -n "$output" ]; then
     while IFS= read -r line; do
