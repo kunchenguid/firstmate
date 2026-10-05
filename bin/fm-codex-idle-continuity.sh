@@ -42,7 +42,9 @@
 # supervisor running. The lock directory is written before the detached
 # supervisor exists, with the hook pid in `starting`, and neither a second
 # stop nor a handover treats that directory as stale until `pid` is recorded
-# or the hook pid is dead. An arm cycle that ends because another owner took
+# or the hook pid is dead. Stops that overlap take
+# state/.codex-idle-continuity-claim.lock in turn to check, reclaim and
+# create that directory, so only one of them starts a supervisor. An arm cycle that ends because another owner took
 # or ended the watcher is a handover, not a failure. A later
 # `attached watcher ... stalled` line is a failure even when an earlier line
 # said `watcher: attached`.
@@ -70,6 +72,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 LOCK="$STATE/.codex-idle-continuity.lock"
+CLAIM_MUTEX="$STATE/.codex-idle-continuity-claim.lock"
 FAILURE_NOTICE="$STATE/.codex-idle-continuity-failure-notified"
 ARM="$SCRIPT_DIR/fm-watch-arm.sh"
 
@@ -156,8 +159,19 @@ stop_home_supervisor() {
   ! fm_pid_alive "$pid" && ! fm_pid_alive "$(cat "$STATE/.watch.lock/pid" 2>/dev/null)"
 }
 
+claim_lock() {  # <owner-pid> <session-id>
+  supervisor_live && return 1
+  reclaim_stale_lock || return 1
+  mkdir "$LOCK" 2>/dev/null || return 1
+  # Record the hook pid before the child exists so a second stop cannot
+  # reclaim this directory in the gap before `pid` is written.
+  printf '%s\n' "$$" > "$LOCK/starting"
+  printf '%s\n' "$1" > "$LOCK/owner"
+  printf '%s\n' "$2" > "$LOCK/session"
+}
+
 ensure_supervisor() {  # <session-id>
-  local owner session=$1 lock_pid recover_session_lock=0 i
+  local owner session=$1 lock_pid recover_session_lock=0 i claimed
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
   # shellcheck source=bin/fm-supervision-lib.sh
@@ -184,17 +198,16 @@ ensure_supervisor() {  # <session-id>
     fm_session_lock_owned_by_self "$STATE" || return 0
   fi
   owner=$(codex_ancestor) || return 0
-  if supervisor_live; then
-    return 0
-  fi
-  reclaim_stale_lock || true
-  mkdir -p "$STATE"
-  mkdir "$LOCK" 2>/dev/null || return 0
-  # Record the hook pid before the child exists so a second stop cannot
-  # reclaim this directory in the gap before `pid` is written.
-  printf '%s\n' "$$" > "$LOCK/starting"
-  printf '%s\n' "$owner" > "$LOCK/owner"
-  printf '%s\n' "$session" > "$LOCK/session"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # Judging the lock stale, removing it, and writing `starting` into the new
+  # one are separate steps. Without this mutex an overlapping stop removes a
+  # directory another stop has just created, and both start a supervisor.
+  fm_lock_try_acquire "$CLAIM_MUTEX" || return 0
+  claim_lock "$owner" "$session"
+  claimed=$?
+  fm_lock_release "$CLAIM_MUTEX"
+  [ "$claimed" -eq 0 ] || return 0
   if ! perl -MPOSIX -e 'defined(my $pid = fork) or exit 1; exit 0 if $pid; POSIX::setsid(); exec @ARGV or exit 127' \
     "$0" --supervise </dev/null >/dev/null 2>&1; then
     rm -rf "$LOCK"

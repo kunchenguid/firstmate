@@ -415,6 +415,32 @@ FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh"
   || fail "handover of the reclaimed startup supervisor failed"
 printf 'ok - a startup lock is not reclaimed or handed over until the supervisor pid is recorded\n'
 
+# The window an overlapping stop used to hit: another stop holds the claim and
+# has created the lock directory but has not written `starting` into it yet.
+rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
+: > "$STUB/arms"
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$STATE/.codex-idle-continuity-claim.lock" || exit 1
+  mkdir "$STATE/.codex-idle-continuity.lock" || exit 1
+  : > "$2"
+  exec sleep 600
+' _ "$STUB" "$TMP_ROOT/claim-held" >/dev/null 2>&1 &
+claimer=$!
+wait_until 75 test -e "$TMP_ROOT/claim-held" || fail "the stand-in stop never took the claim"
+stub_stop
+sleep 1
+kill "$claimer" 2>/dev/null || true
+wait "$claimer" 2>/dev/null || true
+[ -d "$SLOCK" ] || fail "an overlapping stop removed a lock directory another stop was still filling"
+[ ! -e "$SLOCK/starting" ] && [ ! -s "$SLOCK/pid" ] && [ "$(arms)" -eq 0 ] \
+  || fail "an overlapping stop started a supervisor while another stop held the claim"
+stub_stop
+wait_until 75 pid_in_live "$SLOCK/pid" || fail "a claim whose holder had died blocked the next stop"
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
+  || fail "handover of the supervisor started after a dead claim failed"
+printf 'ok - a stop that overlaps another stop mid-claim starts no second supervisor\n'
+
 rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
 printf 'stall\n' > "$STUB/mode"
 : > "$STUB/arms"
