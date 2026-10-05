@@ -177,6 +177,7 @@ async function captureEvidence(name) {
 let pendingTaskDelay = null;
 let failNextTaskRequest = false;
 let removeReconciliationOnNextTaskRequest = false;
+let lastFullTaskSnapshot = null;
 function delayNextTaskRequest() {
   let markStarted;
   let release;
@@ -199,33 +200,42 @@ await page.route("**/api/tasks*", async route => {
   }
   const response = await route.fetch();
   const body = await response.json();
+  let replayedFullSnapshot = false;
+  if (removeReconciliationOnNextTaskRequest && body.unchanged === true && Array.isArray(lastFullTaskSnapshot)) {
+    body.tasks = lastFullTaskSnapshot.map(task => ({ ...task }));
+    body.unchanged = false;
+    replayedFullSnapshot = true;
+  }
   if (Array.isArray(body.tasks)) {
-    body.tasks = body.tasks.flatMap(task => task.category !== "completed" ? [task] : [
-      task,
-      ...Array.from({ length: 40 }, (_, index) => ({
-        ...task,
-        id: `completed-copy-${String(index + 1).padStart(2, "0")}`,
-        title: `Dashboard completed task copy ${String(index + 1).padStart(2, "0")}`,
-      })),
-    ]);
-    body.tasks.push({
-      id: "reconciliation-task",
-      title: "Dashboard reconciliation task",
-      category: "held",
-      status: "Needs reconciliation",
-      kind: "ship",
-      project: "viewer",
-      wait: "Needs reconciliation",
-      warning: null,
-      hasDocument: false,
-      documentType: null,
-      documentTypes: [],
-      documentModifiedAt: "2026-10-03T00:00:01Z",
-    });
+    if (!replayedFullSnapshot) {
+      body.tasks = body.tasks.flatMap(task => task.category !== "completed" ? [task] : [
+        task,
+        ...Array.from({ length: 40 }, (_, index) => ({
+          ...task,
+          id: `completed-copy-${String(index + 1).padStart(2, "0")}`,
+          title: `Dashboard completed task copy ${String(index + 1).padStart(2, "0")}`,
+        })),
+      ]);
+      body.tasks.push({
+        id: "reconciliation-task",
+        title: "Dashboard reconciliation task",
+        category: "held",
+        status: "Needs reconciliation",
+        kind: "ship",
+        project: "viewer",
+        wait: "Needs reconciliation",
+        warning: null,
+        hasDocument: false,
+        documentType: null,
+        documentTypes: [],
+        documentModifiedAt: "2026-10-03T00:00:01Z",
+      });
+    }
     if (removeReconciliationOnNextTaskRequest) {
       removeReconciliationOnNextTaskRequest = false;
       body.tasks = body.tasks.filter(task => task.status !== "Needs reconciliation");
     }
+    lastFullTaskSnapshot = body.tasks.map(task => ({ ...task }));
   }
   await route.fulfill({ response, json: body });
 });
