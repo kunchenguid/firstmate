@@ -83,7 +83,10 @@
 #     the harness delivers the collected stderr only on exit 2, so an owned
 #     terminal commit decides the exit. Markerless outcomes commit with the
 #     ledger write; the failure notice additionally requires its marker write.
-#     A refused generation exits 0 silently even after printing. A close that
+#     A refused generation exits 0 silently even after printing. A rewake
+#     refused for any other reason than a newer generation or an already
+#     acknowledged wake is logged with the refusing check and translated
+#     through the failure notice below, never dropped. A close that
 #     reports no actionable reason is benign when a live identity-matched
 #     watcher still has a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
@@ -263,17 +266,35 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # the same hold. Failure means refused or unverifiable: the caller goes silent
 # (cleanup, exit 0) - the harness discards the collected stderr on exit 0, so
 # even an already-printed banner is never delivered by a losing generation.
+# A refused rewake names the check that refused in AUTOARM_REFUSAL.
 autoarm_commit() {  # <outcome> [marker-file]
-  local outcome=$1 marker=${2:-} session_pid recovery
+  local outcome=$1 marker=${2:-} session_pid recovery rc
+  AUTOARM_REFUSAL=
   if [ "$outcome" = rewake ]; then
-    fm_session_lock_owned_by_self "$STATE" || return 2
+    if ! fm_session_lock_owned_by_self "$STATE"; then
+      AUTOARM_REFUSAL="this session no longer owns the session lock"
+      return 2
+    fi
     session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
-    fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 2
+    if ! fm_recovery_marker_snapshot "$STATE/.watcher-down"; then
+      AUTOARM_REFUSAL="the watcher recovery marker could not be read"
+      return 2
+    fi
     case "$FM_RECOVERY_MARKER_TOKEN" in
       pending:downtime:*|announced:downtime:*) recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
-      *) return 2 ;;
+      *)
+        AUTOARM_REFUSAL="the watcher recovery marker is '${FM_RECOVERY_MARKER_TOKEN:-absent}', not a downtime episode"
+        return 2
+        ;;
     esac
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery"
+    rc=$?
+    case "$rc" in
+      0) ;;
+      2) AUTOARM_REFUSAL="a newer generation owns the epoch ledger" ;;
+      *) AUTOARM_REFUSAL="the epoch ledger write failed or stayed contended" ;;
+    esac
+    return "$rc"
   elif [ -n "$marker" ]; then
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker"
   else
@@ -537,18 +558,23 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
-  if [ "$HOST_MODE" -eq 1 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN" \
-    && fm_recovery_marker_snapshot "$STATE/.watcher-down" \
-    && [[ "$FM_RECOVERY_MARKER_TOKEN" == pending:handling:* || "$FM_RECOVERY_MARKER_TOKEN" == announced:handling:* ]] \
-    && ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
-    LOST_HANDBACK_COMMITTED=0
+  # Every refused rewake is logged with the check that refused. Only two
+  # refusals stay silent: a newer generation owns the outcome (it translates
+  # or reports instead), or the wake was already drained and acknowledged.
+  # Any other refusal would leave an actionable wake undelivered, so the hook
+  # records the failure and exits 2 with the notice, once per episode.
+  printf '[%s] autoarm generation %s rewake refused: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$MY_GEN" "$AUTOARM_REFUSAL" \
+    >> "$STATE/.watch-triage.log" 2>/dev/null || true
+  if fm_autoarm_still_owner "$STATE" "$MY_GEN" \
+    && ! { fm_recovery_marker_snapshot "$STATE/.watcher-down" && [[ "$FM_RECOVERY_MARKER_TOKEN" == acked:* ]]; }; then
+    REWAKE_FAILURE_COMMITTED=0
     if [ ! -e "$FAILURE_NOTICE" ]; then
-      printf 'firstmate watcher auto-arm FAILED - the supervision host returned an actionable wake, but its rewake could not be committed.\n' >&2
-      autoarm_commit failed "$FAILURE_NOTICE" && LOST_HANDBACK_COMMITTED=1
+      printf 'firstmate watcher auto-arm FAILED - an actionable wake closed the cycle, but its rewake could not be committed: %s.\n' "$AUTOARM_REFUSAL" >&2
+      autoarm_commit failed "$FAILURE_NOTICE" && REWAKE_FAILURE_COMMITTED=1
     else
-      autoarm_commit failed-suppressed && LOST_HANDBACK_COMMITTED=1
+      autoarm_commit failed-suppressed && REWAKE_FAILURE_COMMITTED=1
     fi
-    if [ "$LOST_HANDBACK_COMMITTED" -eq 1 ]; then
+    if [ "$REWAKE_FAILURE_COMMITTED" -eq 1 ]; then
       [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
       exit 2
     fi

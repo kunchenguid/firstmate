@@ -1422,6 +1422,14 @@ printf 'supervision-host: watcher downtime could not be restored for the main ha
 exit 1
 SH
         ;;
+      live-successor-handback)
+        cat <<'SH'
+printf 'pending:handling:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'signal: fixture.status\n'
+printf 'supervision-host: the wake is main-only; this wake is yours\n'
+SH
+        ;;
       benign-refusal)
         cat <<'SH'
 printf 'acked:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
@@ -1610,7 +1618,7 @@ test_host_benign_rewake_refusal_opens_no_failure_episode() {
 # announced) with no live successor, so no rewake can commit: the hook delivers
 # the failure notice once per episode and keeps exiting 2 without repeating it.
 assert_host_lost_handback_notifies_once_per_episode() {
-  local kind=$1 dir out status
+  local kind=$1 dir out status marker
   dir=$(make_primary_dir "$TMP_ROOT/host-$kind")
   mkdir -p "$dir/config"
   rm -f "$dir/config/supervision-host-off"
@@ -1618,7 +1626,9 @@ assert_host_lost_handback_notifies_once_per_episode() {
   write_host_fixture "$dir" "$kind"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "a lost hand-back must reach main"
-  assert_contains "$out" "auto-arm FAILED - the supervision host returned an actionable wake" "a lost hand-back must deliver the failure notice"
+  marker=pending
+  [ "$kind" = lost-handback ] || marker=announced
+  assert_contains "$out" "rewake could not be committed: the watcher recovery marker is '$marker:handling:fixture-generation'" "a lost hand-back must deliver the failure notice naming the refusing check"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "a lost hand-back did not record its failure episode"
   [ "$(epoch_outcome "$dir")" = failed ] || fail "a lost hand-back must record outcome=failed, got: $(epoch_outcome "$dir")"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
@@ -1636,6 +1646,35 @@ test_host_lost_handback_notifies_once_per_episode() {
 test_host_lost_announced_handback_notifies_once_per_episode() {
   assert_host_lost_handback_notifies_once_per_episode lost-announced-handback
   pass "auto-arm: a lost host hand-back on an announced marker notifies once per failure episode"
+}
+
+# The 4 Oct TakeOne outage: the host handed a main-only wake back and left a
+# live handling successor, so the marker was pending:handling and the watcher
+# healthy. The rewake was refused and the hook used to exit 0 with no ledger
+# write and no notice. A refused rewake must now name the refusing check, log
+# it, record the failure, and still reach main.
+test_host_handback_with_live_successor_never_drops_the_wake() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/host-live-successor")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" live-successor-handback
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the live successor watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a refused rewake beside a live successor must still reach main"
+  assert_contains "$out" "signal: fixture.status" "the undelivered wake must reach main"
+  assert_contains "$out" "auto-arm FAILED - an actionable wake closed the cycle, but its rewake could not be committed: the watcher recovery marker is 'pending:handling:fixture-generation', not a downtime episode." \
+    "the notice must name the check that refused"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "the refused rewake did not record its failure episode"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "the refused rewake must record outcome=failed, got: $(epoch_outcome "$dir")"
+  grep -Fq "rewake refused: the watcher recovery marker is 'pending:handling:fixture-generation', not a downtime episode" "$dir/state/.watch-triage.log" \
+    || fail "the refusing check was not logged: $(cat "$dir/state/.watch-triage.log" 2>/dev/null)"
+  pass "auto-arm: a rewake refused beside a live handling successor is logged, recorded, and still reaches main"
 }
 
 test_host_crash_is_retried_then_reported() {
@@ -1763,6 +1802,7 @@ test_host_stand_down_is_silent
 test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
 test_host_lost_announced_handback_notifies_once_per_episode
+test_host_handback_with_live_successor_never_drops_the_wake
 test_host_crash_is_retried_then_reported
 test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
