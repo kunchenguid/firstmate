@@ -138,7 +138,7 @@ case "$*" in
     printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
   'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
   'api repos/o/r') printf '{"permissions":{"push":false}}\n' ;;
-  'api user --jq .login') printf 'selfuser\n' ;;
+  'api user --jq .login') [ ! -e "$FORGE/self-unknown" ] || exit 1; printf 'selfuser\n' ;;
   *) printf 'unexpected gh fixture call: %s\n' "$*" >&2; exit 1 ;;
 esac
 SH
@@ -206,7 +206,15 @@ test_own_comment_is_not_a_signal() {
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
   printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "maintainer"' >/dev/null \
     || fail "a comment by this home's own login counted as a maintainer signal: $out"
-  pass 'a comment by the authenticated login is never a pending signal while another maintainer still is'
+  : > "$home/forge/self-unknown"
+  jq '. + [{id:23,user:{login:"maintainer"},author_association:"OWNER",body:"One more thing",
+    html_url:"https://github.com/o/r/pull/8#issuecomment-23",updated_at:"2026-09-16T08:04:00Z"}]' \
+    "$home/forge/comments.json" > "$home/forge/comments.next" && mv "$home/forge/comments.next" "$home/forge/comments.json"
+  registered_checks "$home" >/dev/null
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$out" | jq -e 'length == 2 and all(.[]; .author == "maintainer")' >/dev/null \
+    || fail "an already seen own comment woke again once the login was unknown: $out"
+  pass 'an own-login comment never becomes pending, even once the login turns unknown, while another maintainer still wakes'
 }
 
 test_ready_issue_wake() {

@@ -394,8 +394,8 @@ poll() {
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   while IFS=$'\t' read -r -a row; do
-    resolve_self_login
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
+    resolve_self_login
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
