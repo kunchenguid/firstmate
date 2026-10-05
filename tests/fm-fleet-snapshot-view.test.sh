@@ -1140,8 +1140,10 @@ EOF
     "harness=claude" \
     "kind=ship" \
     "mode=no-mistakes"
+  fm_git_init_commit "$home/projects/terminal"
+  git -C "$home/projects/terminal" update-ref refs/remotes/origin/main "$(git -C "$home/projects/terminal" rev-parse HEAD)"
   record_claude_idle "$home/state" terminal-ship
-  printf 'done: complete\n' > "$home/state/terminal-ship.status"
+  printf 'done: PR https://example.test/o/r/pull/1 checks green\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$out" | jq -e '
     .valid == false

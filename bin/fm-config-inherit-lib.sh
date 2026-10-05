@@ -53,6 +53,10 @@
 # After successful config/* changes under an already-running secondmate, callers
 # invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
 # bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
+# A home whose live destination bytes would produce a payload byte-identical to
+# the generation its delivery leaves as the home's newest received payload, or
+# to a generation already queued in the same delivery, is skipped rather than
+# nudged again.
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
@@ -666,6 +670,9 @@ propagate_inheritable_config() {
 # config push so the live secondmate can re-read exact post-write bytes.
 # Kept under state/ (gitignored operational dir) so it never dirties the home.
 FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL="state/.fm-inherited-config-reread"
+# Arrival record of the generation each home received last, written after each
+# successful pointer send. Hyphenated so it never matches the generation glob.
+FM_CONFIG_REREAD_NEWEST_MARKER=".fm-inherited-config-reread-newest"
 FM_CONFIG_REREAD_MAX_SENT=16
 FM_CONFIG_REREAD_RETRY_ROOT_REL="state/.fm-inherited-config-reread-retry"
 FM_CONFIG_REREAD_MAX_PENDING=16
@@ -735,17 +742,6 @@ fm_config_reread_pending_reports() {
     [ -f "$report" ] && [ ! -L "$report" ] || continue
     printf '%s\n' "$report"
   done | LC_ALL=C sort
-}
-
-fm_config_reread_has_staged() {
-  local source_home=$1 id=$2 stage
-  while IFS= read -r stage; do
-    [ -n "$stage" ] && return 0
-  done < <(fm_config_reread_pending_stages "$source_home" "$id")
-  while IFS= read -r stage; do
-    [ -n "$stage" ] && return 0
-  done < <(fm_config_reread_pending_reports "$source_home" "$id")
-  return 1
 }
 
 fm_config_reread_retry_queue_is_full() {
@@ -881,20 +877,184 @@ fm_config_reread_pending_instructions() {
   done | LC_ALL=C sort
 }
 
-fm_config_reread_has_pending() {
-  local dest_home=$1 state pending
+# fm_config_reread_delivered_paths <dest-home>
+# Print every successfully delivered (non-pending) reread instruction path for
+# this home, oldest generation first, or return 1 when none exist. Sorted so the
+# order is by generation name, not filesystem glob order.
+fm_config_reread_delivered_paths() {
+  local dest_home=$1 state path out=
+  [ -n "$dest_home" ] || return 1
   state="$dest_home/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
-  for pending in "$state"/.fm-inherited-config-reread.*.pending; do
-    [ -f "$pending" ] && [ ! -L "$pending" ] || continue
+  [ -d "$state" ] || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      *.pending) continue ;;
+    esac
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    if [ -e "$path.pending" ] || [ -L "$path.pending" ]; then
+      continue
+    fi
+    out+="$path"$'\n'
+  done < <(
+    for path in "$state"/.fm-inherited-config-reread.*; do
+      printf '%s\n' "$path"
+    done | LC_ALL=C sort
+  )
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+# fm_config_reread_record_arrival <instruction-path>
+# Record <instruction-path> as the generation its home received last, so the
+# skip gate compares against arrival order instead of generation-name order.
+# A failed record only degrades the baseline to name order; it never fails a
+# send that already landed.
+fm_config_reread_record_arrival() {
+  local instruction_path=$1 state marker tmp
+  [ -n "$instruction_path" ] || return 0
+  state=${instruction_path%/*}
+  [ -n "$state" ] && [ "$state" != "$instruction_path" ] || return 0
+  marker="$state/$FM_CONFIG_REREAD_NEWEST_MARKER"
+  tmp=$(umask 077; mktemp "$state/.fm-inherited-config-reread-newest.XXXXXX" 2>/dev/null) || return 0
+  if printf '%s\n' "$instruction_path" > "$tmp" \
+    && chmod 0600 "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$marker" 2>/dev/null; then
     return 0
-  done
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 0
+}
+
+# fm_config_reread_latest_delivered <dest-home>
+# Print the delivered (non-pending) reread instruction path this home received
+# last, or return 1 when none exists. Arrival order is recorded on every
+# successful pointer send; the tail of the delivered name order is only the
+# fallback when that record is missing or points at a generation that is gone
+# or pending again.
+fm_config_reread_latest_delivered() {
+  local dest_home=$1 state marker recorded latest
+  [ -n "$dest_home" ] || return 1
+  state="$dest_home/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
+  if [ -d "$state" ]; then
+    state=$(cd "$state" 2>/dev/null && pwd -P) \
+      || state="$dest_home/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
+  fi
+  marker="$state/$FM_CONFIG_REREAD_NEWEST_MARKER"
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    recorded=$(cat "$marker" 2>/dev/null || true)
+    case "$recorded" in
+      "$state"/.fm-inherited-config-reread.*)
+        if [ -f "$recorded" ] && [ ! -L "$recorded" ] \
+          && [ ! -e "$recorded.pending" ] && [ ! -L "$recorded.pending" ]; then
+          printf '%s\n' "$recorded"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  latest=$(fm_config_reread_delivered_paths "$dest_home" | tail -1)
+  [ -n "$latest" ] || return 1
+  printf '%s\n' "$latest"
+}
+
+# fm_config_reread_delivered_gained <dest-home> <known-paths>
+# 0 when the home's delivered set now holds a generation absent from
+# <known-paths>. Every successful pointer send lands a path this way - a fresh
+# publication adds one, a drained pending delivery moves one into the set -
+# while bounded sent-history cleanup only removes paths, so a removal never
+# reads as a send.
+fm_config_reread_delivered_gained() {
+  local dest_home=$1 known=$2 path
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case $'\n'"$known"$'\n' in
+      *$'\n'"$path"$'\n'*) continue ;;
+    esac
+    return 0
+  done < <(fm_config_reread_delivered_paths "$dest_home" || true)
   return 1
 }
 
+# fm_config_reread_discard_redundant_stage <dest-home> <stage-path> [queued-stages]
+# The single skip gate every built generation passes through before it is
+# queued for delivery, whichever producer built it. The stage is discarded and
+# true is returned when its bytes match the generation this delivery leaves as
+# the home's newest received payload - checked only when no generation is
+# awaiting a failed send (its .pending marker lands in or after this run) and
+# no other stage is queued for this delivery - or when its bytes match the
+# generation delivered last (by name) among those still awaiting a failed send
+# and the stages already queued for this home in this delivery, so the same
+# payload is never sent twice and a newer differing generation never ends up
+# delivered after a suppressed current payload.
+# Skips unchanged payloads only; drift-from-payload (destination edited away
+# from the inherited value and then restored) is detected by the convergence
+# check (propagate_inheritable_config), not here.
+fm_config_reread_discard_redundant_stage() {
+  local dest_home=$1 stage_path=$2 queued=${3:-} latest state queued_path last_path
+  local pending_instructions
+  [ -f "$stage_path" ] && [ ! -L "$stage_path" ] || return 1
+  state="$dest_home/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
+  pending_instructions=""
+  if [ -d "$state" ]; then
+    pending_instructions=$(fm_config_reread_pending_instructions "$state")
+  fi
+  if [ -z "$pending_instructions" ] && [ -z "$queued" ]; then
+    if latest=$(fm_config_reread_latest_delivered "$dest_home") \
+      && cmp -s "$stage_path" "$latest"; then
+      rm -f "$stage_path" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  last_path=$(
+    while IFS= read -r queued_path; do
+      [ -n "$queued_path" ] || continue
+      [ "$queued_path" != "$stage_path" ] || continue
+      printf '%s\t%s\n' "${queued_path##*/}" "$queued_path"
+    done <<EOF | LC_ALL=C sort | tail -1 | cut -f2-
+$pending_instructions
+$queued
+EOF
+  )
+  if [ -n "$last_path" ] && [ -f "$last_path" ] && [ ! -L "$last_path" ] \
+    && cmp -s "$stage_path" "$last_path"; then
+    rm -f "$stage_path" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+# fm_config_reread_queue_stage <dest-home> <stage-path> <queued-stages>
+# Print <queued-stages> with <stage-path> appended when the skip gate keeps it,
+# or unchanged when the gate discards it. Every append to the delivery queue
+# goes through this one helper, so no producer, retention lane, or queue entry
+# can queue a generation the gate would refuse.
+fm_config_reread_queue_stage() {
+  local dest_home=$1 stage_path=$2 queued=${3:-}
+  if fm_config_reread_discard_redundant_stage "$dest_home" "$stage_path" "$queued"; then
+    [ -n "$queued" ] && printf '%s\n' "$queued"
+    return 0
+  fi
+  if [ -n "$queued" ]; then
+    printf '%s\n%s\n' "$queued" "$stage_path"
+  else
+    printf '%s\n' "$stage_path"
+  fi
+}
+
+# fm_config_reread_cleanup_sent <dest-home>
+# Bound delivered history to FM_CONFIG_REREAD_MAX_SENT, evicting oldest names
+# first but never the generation the arrival marker records as received last:
+# name order is not arrival order, and the skip gate's baseline must survive.
 fm_config_reread_cleanup_sent() {
-  local dest_home=$1 state path paths sorted total remove
+  local dest_home=$1 state path paths sorted total remove newest=
   state="$dest_home/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
   [ -d "$state" ] || return 0
+  if [ -f "$state/$FM_CONFIG_REREAD_NEWEST_MARKER" ] \
+    && [ ! -L "$state/$FM_CONFIG_REREAD_NEWEST_MARKER" ]; then
+    newest=$(cat "$state/$FM_CONFIG_REREAD_NEWEST_MARKER" 2>/dev/null || true)
+    newest=${newest##*/}
+  fi
   paths=""
   for path in "$state"/.fm-inherited-config-reread.*; do
     case "$path" in
@@ -916,6 +1076,7 @@ fm_config_reread_cleanup_sent() {
     [ "$remove" -gt 0 ] || break
     [ -n "$path" ] || continue
     [ -e "$path.pending" ] || [ -L "$path.pending" ] && continue
+    [ -n "$newest" ] && [ "${path##*/}" = "$newest" ] && continue
     rm -f "$path" 2>/dev/null || continue
     remove=$((remove - 1))
   done <<EOF
@@ -1009,6 +1170,7 @@ fm_config_reread_send_pointer() {
     "$send_bin" "$selector" "$message" 2>&1) && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
     rm -f "$pending_path"
+    fm_config_reread_record_arrival "$instruction_path"
     return 0
   fi
   out=${out%%$'\n'*}
@@ -1165,12 +1327,20 @@ fm_config_reread_quarantine_pending() {
 # (fm-send). The files contain only changed config paths, clear delimiters, and
 # the destination's full exact post-write bytes (or ABSENT) - never summaries,
 # SHA values, selected profiles, or data/captain-shared.md. No-op (return 0) when
-# nothing changed and no pending delivery exists. On publication or send
-# failure, print a concrete CONFIG_REREAD retry diagnostic to stdout and return
-# non-zero - never claim the live agent reread the values.
+# nothing changed and no pending delivery exists, and for any built generation -
+# fresh, rebuilt from a retained retry report, salvaged from an exact temporary,
+# or loaded from the retained queue at entry - whose payload is byte-identical
+# to the generation this delivery leaves as the home's newest received payload
+# (the live destination copy, not a stale propagate-report snapshot; only when
+# no generation is awaiting a failed send and no other stage is queued for this
+# delivery), or to the generation delivered last among those still awaiting a
+# failed send and those already queued in this same delivery. On
+# publication or send failure, print a concrete CONFIG_REREAD retry
+# diagnostic to stdout and return non-zero - never claim the live agent reread
+# the values.
 fm_config_send_reread_nudge() {
   local id=$1 dest_home=$2 report=$3
-  local dest_home_abs state source_home_abs changed_items pending_paths stage_paths delivery_paths
+  local dest_home_abs state source_home_abs changed_items pending_paths pending_stage_paths stage_paths delivery_paths
   local stage_path instruction_path current_stage_path exact_tmp
   local send_failures retry_report_paths retry_report_path retry_stage_path retry_record_path
   [ -n "$id" ] || return 1
@@ -1189,7 +1359,13 @@ fm_config_send_reread_nudge() {
     pending_paths=$(fm_config_reread_pending_instructions "$state")
     source_home_abs=$(cd "${FM_HOME:-}" 2>/dev/null && pwd -P || true)
     if [ -n "$source_home_abs" ]; then
-      stage_paths=$(fm_config_reread_pending_stages "$source_home_abs" "$id")
+      pending_stage_paths=$(fm_config_reread_pending_stages "$source_home_abs" "$id")
+      while IFS= read -r stage_path; do
+        [ -n "$stage_path" ] || continue
+        stage_paths=$(fm_config_reread_queue_stage "$dest_home_abs" "$stage_path" "$stage_paths")
+      done <<EOF
+$pending_stage_paths
+EOF
       retry_report_paths=$(fm_config_reread_pending_reports "$source_home_abs" "$id")
     fi
   fi
@@ -1209,19 +1385,13 @@ fm_config_send_reread_nudge() {
     fi
     if fm_config_write_reread_instruction "$dest_home_abs" "$retry_report_path" "$retry_stage_path"; then
       rm -f "$retry_report_path" 2>/dev/null || send_failures=1
-      if [ -n "$stage_paths" ]; then
-        stage_paths+=$'\n'
-      fi
-      stage_paths+="$retry_stage_path"
+      stage_paths=$(fm_config_reread_queue_stage "$dest_home_abs" "$retry_stage_path" "$stage_paths")
     else
       exact_tmp=${FM_CONFIG_REREAD_FAILED_TEMP:-}
       if [ -n "$exact_tmp" ] \
         && fm_config_reread_adopt_exact_temp "$exact_tmp" "$retry_stage_path"; then
         rm -f "$retry_report_path" 2>/dev/null || send_failures=1
-        if [ -n "$stage_paths" ]; then
-          stage_paths+=$'\n'
-        fi
-        stage_paths+="$retry_stage_path"
+        stage_paths=$(fm_config_reread_queue_stage "$dest_home_abs" "$retry_stage_path" "$stage_paths")
       elif [ -n "$exact_tmp" ] && [ -f "$exact_tmp" ]; then
         printf 'CONFIG_REREAD: secondmate %s: send failed: retained exact retry temporary %s\n' "$id" "$exact_tmp"
         send_failures=1
@@ -1257,7 +1427,10 @@ EOF
       exact_tmp=${FM_CONFIG_REREAD_FAILED_TEMP:-}
       if [ -n "$exact_tmp" ] \
         && fm_config_reread_adopt_exact_temp "$exact_tmp" "$current_stage_path"; then
-        printf 'CONFIG_REREAD: secondmate %s: send failed: could not publish retry instruction; retained exact retry generation %s\n' "$id" "$current_stage_path"
+        stage_paths=$(fm_config_reread_queue_stage "$dest_home_abs" "$current_stage_path" "$stage_paths")
+        if [ -f "$current_stage_path" ]; then
+          printf 'CONFIG_REREAD: secondmate %s: send failed: could not publish retry instruction; retained exact retry generation %s\n' "$id" "$current_stage_path"
+        fi
       elif [ -n "$exact_tmp" ] && [ -f "$exact_tmp" ]; then
         rm -f "$current_stage_path" 2>/dev/null || true
         printf 'CONFIG_REREAD: secondmate %s: send failed: retained exact retry temporary %s\n' "$id" "$exact_tmp"
@@ -1270,10 +1443,7 @@ EOF
       fi
       return 1
     fi
-    if [ -n "$stage_paths" ]; then
-      stage_paths+=$'\n'
-    fi
-    stage_paths+="$current_stage_path"
+    stage_paths=$(fm_config_reread_queue_stage "$dest_home_abs" "$current_stage_path" "$stage_paths")
   fi
   delivery_paths="$pending_paths"
   while IFS= read -r stage_path; do

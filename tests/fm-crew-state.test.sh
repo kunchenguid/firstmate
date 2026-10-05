@@ -2338,7 +2338,7 @@ EOF
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
+  assert_contains "$out" "state: blocked" "the bare status-log claim falls back as blocked, not a validated done"
   pass "another branch's run is ignored, falls back"
 }
 
@@ -2400,7 +2400,7 @@ test_merged_pr_reads_done_under_captured_meta() {
   pass "recorded merged PR reads done under the fleet snapshot's captured meta"
 }
 
-test_no_mistakes_prevalidation_done_stays_done() {
+test_no_mistakes_prevalidation_done_reads_blocked() {
   reset_fakes
   local d out
   d=$(new_case preval-done)
@@ -2416,9 +2416,10 @@ test_no_mistakes_prevalidation_done_stays_done() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" preval
   out=$(run_crew_state "$d" preval)
-  assert_contains "$out" "state: done" "no-mistakes pre-validation done: remains done"
-  assert_not_contains "$out" "state: blocked" "pre-validation done: must not be the named-head gate"
-  pass "no-mistakes pre-validation done: stays current-state done"
+  assert_contains "$out" "state: blocked" "no-mistakes pre-validation done: must not read as a terminal done"
+  assert_not_contains "$out" "state: done" "an unvalidated bare summary must not stay current-state done"
+  assert_contains "$out" "done: implementation complete" "the refused claim must stay visible on the non-terminal state line"
+  pass "no-mistakes pre-validation done: reads blocked with its claim visible"
 }
 
 test_moved_remote_branch_without_named_head_is_blocked() {
@@ -2860,7 +2861,7 @@ test_newest_open_decision_supplies_the_reported_detail() {
 
 test_single_owner_terminal_declaration_supersedes_stale_decision() {
   reset_fakes
-  local d kind opener terminal out key expected
+  local d kind opener terminal note out key expected
   d=$(new_case terminal-stale-decision)
   make_repo_on_branch "$d/wt" fm/task
   make_fakebin "$d" >/dev/null
@@ -2869,8 +2870,10 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
     fm_write_meta "$d/state/task.meta" "window=fm:fm-task" "worktree=$d/wt" "kind=$kind" "harness=claude"
     for opener in needs-decision blocked; do
       for terminal in 'done' failed; do
-        printf '%s [key=choice]: an earlier decision\n%s: final outcome\nContinuation prose.\n\n' \
-          "$opener" "$terminal" > "$d/state/task.status"
+        note='final outcome'
+        [ "$terminal" = failed ] || note='PR https://github.com/o/r/pull/1 checks green - final outcome'
+        printf '%s [key=choice]: an earlier decision\n%s: %s\nContinuation prose.\n\n' \
+          "$opener" "$terminal" "$note" > "$d/state/task.status"
         out=$(run_crew_state "$d" task)
         assert_contains "$out" "state: $terminal" "$kind terminal declaration supersedes stale $opener"
         assert_contains "$out" "final outcome" "the terminal declaration supplies the detail"
@@ -5576,7 +5579,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
-test_no_mistakes_prevalidation_done_stays_done
+test_no_mistakes_prevalidation_done_reads_blocked
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
 test_no_run_launch_prompt_parked_is_not_working

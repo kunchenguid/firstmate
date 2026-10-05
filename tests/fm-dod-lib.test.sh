@@ -83,15 +83,27 @@ test_moved_branch_without_named_head_is_refused() {
   pass "a moved remote branch that lacks the named head is refused"
 }
 
-test_no_mistakes_prevalidation_done_is_not_gated() {
-  local repo wt
+test_no_mistakes_bare_done_is_refused() {
+  local repo wt reason rc
   repo="$TMP_ROOT/preval-repo"
   wt="$TMP_ROOT/preval-wt"
   fm_git_worktree "$repo" "$wt" fm/preval
   git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
-  accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' \
-    || fail "no-mistakes pre-validation done: must not require named-head reachability"
-  pass "no-mistakes pre-validation done: is not gated"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete')
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "no-mistakes bare summary was accepted (exit $rc)"
+  case "$reason" in
+    *'done: implementation complete'*) ;;
+    *) fail "bare-summary refusal did not keep the claim visible: $reason" ;;
+  esac
+  git -C "$wt" update-ref refs/remotes/origin/fm/preval "$(git -C "$wt" rev-parse HEAD)"
+  accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' >/dev/null \
+    && fail "a pushed no-mistakes bare summary was still accepted as ship-done"
+  accept_done ship no-mistakes "$wt" "$repo" 'done: PR https://example.test/o/r/pull/9' >/dev/null \
+    && fail "a no-mistakes done naming a PR without validation evidence was accepted"
+  accept_done ship no-mistakes "$wt" "$repo" 'done: PR https://example.test/o/r/pull/9 checks green' \
+    || fail "the CI-ready report was refused"
+  pass "no-mistakes bare summaries are refused, CI-ready reports pass"
 }
 
 test_local_only_linked_branch_is_accepted() {
@@ -384,7 +396,7 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
 
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
-test_no_mistakes_prevalidation_done_is_not_gated
+test_no_mistakes_bare_done_is_refused
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head

@@ -1230,6 +1230,18 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
     "the gerrit worker was not told to report each pipeline fix the squash hides"
   assert_grep 'pipeline changes: none' "$brief" \
     "the gerrit worker was not told what to report when the pipeline fixed nothing"
+  assert_grep 'The task is complete only after the run'"'"'s outcome passes and the change is published for review' "$brief" \
+    "the gerrit no-mistakes contract does not require the passing run and published change before done"
+  assert_grep 'A commit is only the input to validation; never report done from the bare implementation commit.' "$brief" \
+    "the gerrit no-mistakes contract does not reject a done from the bare implementation commit"
+  assert_grep 'start /no-mistakes to validate the branch' "$brief" \
+    "the gerrit worker was not told to start validation itself"
+  assert_no_grep 'The task is complete only when committed on your branch.' "$brief" \
+    "the gerrit no-mistakes contract still treats the implementation commit as completion"
+  assert_no_grep 'handoff that starts the pipeline' "$brief" \
+    "the gerrit no-mistakes contract still orders a handoff done from the bare commit"
+  assert_no_grep 'Firstmate will then instruct you to run /no-mistakes' "$brief" \
+    "the gerrit contract still makes validation firstmate-triggered rather than worker-started"
   assert_no_grep 'done [at=<epoch>]: PR {url} checks green' "$brief" \
     "the gerrit contract still demands a PR with green checks this forge cannot produce"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
@@ -1538,6 +1550,10 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
     "the direct-PR worker was not told to publish through the forge tool"
   assert_grep 'done [at=<epoch>]: PR {change url} published for review' "$brief" \
     "the direct-PR contract did not end at a published change"
+  assert_grep 'The task is complete only after the branch is pushed and the change is open.' "$brief" \
+    "the gerrit direct-PR contract does not require the pushed, open change before done"
+  assert_no_grep 'The task is complete only when committed on your branch.' "$brief" \
+    "the gerrit direct-PR contract still treats the implementation commit as completion"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_no_grep 'open a PR with `gh-axi`' "$brief" \
     "the gerrit direct-PR worker was still told to open a pull request"
