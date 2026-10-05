@@ -1068,6 +1068,74 @@ EOF
   pass "fm-control-lib: only a runtime's own recorded session has a relaunch resume form"
 }
 
+# --- 7. reproject ------------------------------------------------------------
+
+# add_herdr_task <case-dir> <id> <harness> [kind]: a herdr task record with a
+# consistent session:pane endpoint identity, without any live backend.
+add_herdr_task() {
+  local dir=$1 id=$2 harness=$3 kind=${4:-ship}
+  add_task "$dir" "$id" "$harness" "$kind" herdr "labses:w1:p2"
+  {
+    echo "herdr_session=labses"
+    echo "herdr_workspace_id=w1"
+    echo "herdr_tab_id=w1:t2"
+    echo "herdr_pane_id=w1:p2"
+  } >> "$dir/home/state/$id.meta"
+}
+
+test_reproject_is_allowlisted() {
+  local dir out rc
+  dir=$(new_case reproject-verb)
+  add_task "$dir" t1 claude
+  out=$(run_control "$dir" t1 restart); rc=$?
+  expect_code 2 "$rc" "an unknown verb should still be a usage error"
+  assert_contains "$out" "reproject" "the refusal should list the reproject verb"
+  pass "fm-control: reproject is an allowlisted control verb"
+}
+
+test_reproject_refuses_non_herdr_backend() {
+  local dir out rc
+  dir=$(new_case reproject-tmux)
+  add_task "$dir" t1 pi
+  out=$(run_control "$dir" t1 reproject); rc=$?
+  expect_code 1 "$rc" "reproject on tmux should refuse"
+  assert_contains "$out" "herdr-only" "the refusal should name the herdr-only boundary"
+  pass "fm-control reproject: a non-herdr backend refuses without touching the endpoint"
+}
+
+test_reproject_flags_belong_to_relaunch() {
+  local dir out rc
+  dir=$(new_case reproject-flags)
+  add_task "$dir" t1 pi
+  out=$(run_control "$dir" t1 reproject --note hello); rc=$?
+  expect_code 1 "$rc" "--note should not apply to reproject"
+  assert_contains "$out" "apply to 'relaunch' only" "the refusal should scope the flags"
+  pass "fm-control reproject: profile and note flags belong to relaunch only"
+}
+
+test_reproject_refuses_secondmate_kind() {
+  local dir out rc
+  dir=$(new_case reproject-sm)
+  add_herdr_task "$dir" t1 pi secondmate
+  printf '%s\n' t1 > "$dir/wt-t1/.fm-secondmate-home"
+  out=$(run_control "$dir" t1 reproject); rc=$?
+  expect_code 1 "$rc" "reproject on a secondmate should refuse"
+  assert_contains "$out" "no projected child shape" "the refusal should name the kind boundary"
+  pass "fm-control reproject: a secondmate kind refuses before any endpoint read"
+}
+
+test_reproject_refuses_missing_journal() {
+  local dir out rc
+  dir=$(new_case reproject-nojournal)
+  add_herdr_task "$dir" t1 pi ship
+  out=$(run_control "$dir" t1 reproject); rc=$?
+  expect_code 1 "$rc" "reproject without a journal should refuse"
+  assert_contains "$out" "no presentation journal" "the refusal should name the missing journal"
+  [ ! -e "$dir/home/state/t1.control-reproject" ] \
+    || fail "a journal-less refusal must leave no receipt behind"
+  pass "fm-control reproject: a missing journal refuses without inventing a projection"
+}
+
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
@@ -1094,6 +1162,11 @@ test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
+test_reproject_is_allowlisted
+test_reproject_refuses_non_herdr_backend
+test_reproject_flags_belong_to_relaunch
+test_reproject_refuses_secondmate_kind
+test_reproject_refuses_missing_journal
 test_already_stopped_exit_is_idempotent
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
 test_interrupt_refuses_when_no_agent_runs

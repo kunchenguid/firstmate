@@ -50,12 +50,13 @@ fm_control_verbs() {
 interrupt
 exit
 relaunch
+reproject
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|relaunch|reproject) return 0 ;;
   esac
   return 1
 }

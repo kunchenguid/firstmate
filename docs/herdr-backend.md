@@ -366,7 +366,7 @@ Before any recovery mutation, Firstmate holds both the task spawn lock and the n
 
 A same-identity version 2 binding may replace one exact agent-free restart husk in place.
 A husk is a restored same-labeled tab with a missing pane or no registered agent, as [Restart and liveness behavior](#restart-and-liveness-behavior) describes.
-The replacement is allowed only when all of these agree:
+The in-place replacement is allowed only when all of these agree:
 
 - The physical home.
 - The session.
@@ -381,18 +381,31 @@ Then the journal advances atomically to the replacement endpoint before metadata
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
 A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
 
-These cases fall back flat without mutating the old projection when duplicate-agent risk is positively absent:
+When the recorded pane and its whole one-task workspace are positively gone, a relaunch may instead create one replacement projected workspace under the exact parent and advance the same-token binding to it.
+Recreation first verifies the old endpoint's absence, an unused token, the exact parent and launcher identity, a stable focus snapshot, and available workspace ordering.
+It publishes the new journal binding before the task record; a failed or uncertain creation, cleanup, or journal write refuses flat fallback unless the old binding and absence of the new workspace are proven.
+
+These cases may fall back flat without mutating the old projection when duplicate-agent risk is positively absent:
 
 - Version 1 journals.
-- Dead or missing panes.
-- Duplicate or absent tokens.
+- Dead or missing panes whose one-task workspace still exists.
 - Renamed or detached spaces.
 - Cross-home mismatches.
-- Inconsistent endpoint bindings.
 - Active target tabs.
 - Ambiguous identity or focus.
 
 A live or unknown recorded or token-matched endpoint refuses duplicate launch.
+For missing-workspace recreation, a duplicate token or unresolved mutation refuses flat fallback.
+
+### Live reproject
+
+`bin/fm-control.sh <id> reproject` moves a live flat task tab out of its owning parent into a new projected one-task child under that same parent, then rebinds the task record and the presentation journal to the new endpoint.
+The pane keeps its live process, agent registration, and working directory; only its workspace, tab, and pane ids change.
+The move is allowed only for a Herdr ship or scout task with an existing version 2 journal, a positively classified live endpoint inside its owning parent, a live parent match, no token duplicate, and an unambiguous focus snapshot, all under the task control lock and the named-session presentation lock.
+A crash-recovery receipt at `state/<id>.control-reproject` records the move phase and any response-derived new endpoint; a rerun verifies whether the pane moved and either resumes the rebind or safely retries an unmoved pane.
+If ordering fails after a move, the record and journal still bind the live child, and the receipt remains until a rerun verifies its position.
+The new child is never closed as rollback, because closing it would kill the live worker the verb exists to preserve.
+A dead or unverified endpoint, a missing journal, a secondmate kind, or a non-Herdr backend refuses before any move.
 
 ### Startup cleanup of restored projections
 
@@ -453,26 +466,26 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 ### Operational compromises
 
-- Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
+- Grouping is best-effort; an exact same-identity version 2 binding can survive a Herdr restart in place or recreate its child after the old workspace is proven gone.
 - A failed journal publication or projected workspace create stops that spawn instead of falling back flat.
   So a Herdr create failure surfaces as a spawn failure in every Herdr home, rather than only in homes that opted in.
   Every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
 - Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended, rather than falling back flat.
   Default-on makes that refusal reachable in any Herdr home.
-- Existing layouts are not force-renamed or rearranged.
-- Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
+- Startup does not force-rename or rearrange existing task spaces; [live reproject](#live-reproject) is an explicit repair.
+- Restart bindings that cannot be safely recovered fall back to the ordinary home workspace only after duplicate-agent and mutation uncertainty are ruled out; otherwise relaunch refuses.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces.
   Session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
-- Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
+- A live flat tab regains its dedicated space through `bin/fm-control.sh <id> reproject`, which moves the running tab and rebinds its record; other degradations still require stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
 - The visible token is only a restart-stable correlator and never substitutes for the exact binding.
 
 ### Presentation tests
 
 | Test | What it covers |
 | --- | --- |
-| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
+| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, model-switch relaunch recreation, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
