@@ -1896,7 +1896,13 @@ test_stopfailure_non_retryable_notifies_parent_once() {
   expect_code 0 "$status" "a non-retryable StopFailure in a main home must not rewake"
   [ ! -e "$main/state/arm-ran" ] || fail "a non-retryable StopFailure in a main home must not arm"
   [ "$(stopfailure_field "$main" error)" = authentication_failed ] || fail "a main home must keep the durable episode record"
-  pass "auto-arm: a non-retryable StopFailure records the episode, notifies a parent once, and never loops"
+  out=$(run_autoarm "$main" "$AUTH_FAILURE_PAYLOAD" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a repeated non-retryable StopFailure in a main home must not rewake"
+  lines=$(awk -F '\t' '$3 == "check" && index($0, "authentication_failed")' "$main/state/.wake-queue" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$lines" = 1 ] || fail "a main home must queue exactly one check row for the episode, saw $lines"
+  [ "$(wc -l < "$main/state/.wake-queue" | tr -d ' ')" = 1 ] || fail "the main-home wake queue must hold only the episode notice: $(cat "$main/state/.wake-queue")"
+  [ "$(stopfailure_field "$main" notified)" = 1 ] || fail "a queued main-home notice must stay claimed"
+  pass "auto-arm: a non-retryable StopFailure records the episode, notifies once (parent channel or wake queue), and never loops"
 }
 
 # A non-retryable StopFailure ends every earlier generation's rewake too: the

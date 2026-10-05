@@ -116,9 +116,10 @@
 #     The classes authentication_failed, billing_error, model_not_found, and
 #     invalid_request cannot heal by retrying: such a firing records the
 #     episode with the capped retry time, publishes one line per episode on a
-#     secondmate's parent channel (bin/fm-parent-channel-lib.sh; a main home's
-#     own pane already shows the error; a failed append is retried, then
-#     handed back to the episode), and exits 0 without arming. Any earlier
+#     secondmate's parent channel (bin/fm-parent-channel-lib.sh) or, in a main
+#     home with no parent channel, as one check row in its durable wake queue
+#     (a failed publish is retried, then handed back to the episode), and
+#     exits 0 without arming. Any earlier
 #     generation still parked ends quietly at its next exit 2 rather than
 #     rewaking into the same error. The record and the notice claim are
 #     updated under state/.claude-stopfailure.lock.
@@ -373,7 +374,7 @@ stopfailure_unclaim() {
 }
 
 # A failure that retrying cannot heal gets one line per episode on a
-# secondmate's parent channel; a main home's pane already shows the error. The
+# secondmate's parent channel, or one check row in a main home's wake queue. The
 # claim was taken with the record, so only the firing that holds it publishes;
 # a failed append is retried here (exit 0 follows, so no later firing would),
 # and an undelivered notice is handed back to the episode.
@@ -390,8 +391,14 @@ stopfailure_notify_once() {
     fm_parent_channel_report "$FM_HOME" "$STATE" \
       "blocked: secondmate turn ended on Claude API error $STOPFAILURE_ERROR, which retrying cannot fix; supervision in this home stays paused until the credential or configuration is fixed and the mate is steered (state/.claude-stopfailure)" \
       || rc=$?
+    if [ "$rc" -eq 1 ]; then
+      rc=0
+      fm_wake_append check "claude-stopfailure:$(stopfailure_field first_at)" \
+        "check: Claude API error $STOPFAILURE_ERROR ended the primary turn; retrying cannot fix it, so automatic supervision stays paused until the credential or configuration is fixed (state/.claude-stopfailure)" \
+        || rc=4
+    fi
     case "$rc" in
-      0|1) return 0 ;;
+      0) return 0 ;;
       4) [ "$attempt" -lt 2 ] || break ;;
       *) break ;;
     esac
