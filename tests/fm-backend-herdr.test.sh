@@ -4380,6 +4380,34 @@ test_send_text_submit_detects_swallowed_enter() {
   pass "fm_backend_herdr_send_text_submit: reports 'pending' when agent_status stays idle and the composer still holds unsent text after retried Enters (swallowed)"
 }
 
+# An idle empty agy composer after Enter is exactly what a send whose text
+# never reached the composer leaves behind. It proves only lifecycle emptiness,
+# so with native state still idle the send must not be reported delivered.
+test_send_text_submit_agy_idle_empty_composer_is_not_delivery() {
+  local dir log resp fb out idle screen
+  dir="$TMP_ROOT/submit-agy-idle-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  idle='{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}'
+  screen=$'────────────────────────\n>\n────────────────────────\n? for shortcuts'
+  # 1: identity agy idle; 2: send-text; 3: baseline idle; 4: Enter;
+  # 5: post-Enter agent get stays idle; 6: composer read; 7: composer identity.
+  printf '%s\n' "$idle" > "$resp/1.out"
+  printf '%s\n' "$idle" > "$resp/3.out"
+  printf '%s\n' "$idle" > "$resp/5.out"
+  printf '%s\n' "$screen" > "$resp/6.out"
+  printf '%s\n' "$idle" > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
+  [ "$out" != empty ] || fail "an idle empty agy composer after Enter must not confirm delivery"
+  [ "$out" = unknown ] || fail "an idle empty agy composer after Enter should leave delivery unknown, got '$out'"
+  grep -q $'\x1f''pane'$'\x1f''read' "$log" || fail "the fixture never reached the post-Enter composer read"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_LIFECYCLE=1 \
+    bash -c 'rm -f "$FM_HERDR_RESPONSES/.count"; printf "%s\n" "$1" > "$FM_HERDR_RESPONSES/1.out"; printf "%s\n" "$2" > "$FM_HERDR_RESPONSES/2.out"
+      . "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" "$screen" "$idle" )
+  [ "$out" = empty ] || fail "the same agy composer should still prove empty for a lifecycle read, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: an idle empty agy composer after Enter is not reported delivered, while lifecycle reads still prove it empty"
+}
+
 test_send_text_submit_replays_literal_send_stderr() {
   local dir log resp fb out err
   dir="$TMP_ROOT/submit-send-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5952,6 +5980,7 @@ test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_agy_idle_empty_composer_is_not_delivery
 test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter

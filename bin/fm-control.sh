@@ -624,7 +624,8 @@ do_exit() {
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
   fi
-  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+  # Lifecycle read: an idle agy composer may prove empty here, never for sends.
+  composer_state=$(FM_COMPOSER_LIFECYCLE=1 fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
     || composer_state=unknown
   case "$composer_state" in
     empty) ;;

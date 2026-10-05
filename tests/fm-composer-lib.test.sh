@@ -1011,6 +1011,47 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+test_matrix_agy_separated_independent_idle_signals() {
+  local screen caps status draft
+  screen=$'────────────────────────\n>\n────────────────────────\n? for shortcuts    Gemini 3.8 Flash · low'
+  # An idle empty agy composer is also what a lost send leaves after Enter, so
+  # only a lifecycle read may treat it as proven empty.
+  for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN" "$CAPS_TMUX"; do
+    assert_screen "agy idle footer is not send evidence" unknown "$caps" "$screen" 1 probe-absent
+  done
+  assert_screen "agy native idle is not send evidence" unknown "$CAPS_STYLED" "$screen" '' $'agy\tidle'
+  export FM_COMPOSER_LIFECYCLE=1
+  for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN" "$CAPS_TMUX"; do
+    assert_screen "agy idle footer without native identity" empty "$caps" "$screen" 1 probe-absent
+    for draft in '> a draft' $'>\nwrapped draft' $'> \033[2mdim draft\033[0m'; do
+      assert_screen "agy draft stays pending" pending "$caps" \
+        $'────────────────────────\n'"$draft"$'\n────────────────────────\n? for shortcuts' 1 probe-absent
+    done
+    assert_screen "agy bare shell glyph remains unknown" unknown "$caps" $'>\n? for shortcuts' 0 probe-absent
+    assert_screen "unidentified separator pair remains unknown" unknown "$caps" \
+      $'────────────────────────\n>\n────────────────────────' 1 probe-absent
+  done
+  assert_screen "agy native idle without footer" empty "$CAPS_STYLED" \
+    $'────────────────────────\n>\n────────────────────────' '' $'agy\tidle'
+  assert_screen "agy native done without footer" empty "$CAPS_TMUX" \
+    $'────────────────────────\n>\n────────────────────────' 1 $'agy\tdone'
+  for status in working blocked unknown; do
+    assert_screen "agy contradictory native $status" unknown "$CAPS_STYLED" "$screen" '' "agy"$'\t'"$status"
+  done
+  for status in claude codex; do
+    assert_screen "other native harness never becomes agy" unknown "$CAPS_STYLED" "$screen" '' "$status"$'\tidle'
+  done
+  assert_screen "Pi typed shell glyph stays pending" pending "$CAPS_STYLED" "$screen" '' $'pi\tidle'
+  assert_screen "agy empty blank region has no prompt proof" unknown "$CAPS_STYLED" \
+    $'────────────────────────\n\n────────────────────────\n? for shortcuts' '' $'agy\tidle'
+  assert_screen "agy stale footer above a prefixed shell" unknown "$CAPS_STYLED_NOID" "$screen"$'\nuser@host $' '' probe-absent
+  assert_screen "agy stale footer above activity" unknown "$CAPS_STYLED_NOID" "$screen"$'\nWorking on request...' '' probe-absent
+  assert_screen "agy stale footer above a shell" unknown "$CAPS_STYLED_NOID" "$screen"$'\n$' '' probe-absent
+  unset FM_COMPOSER_LIFECYCLE
+  pass "matrix: agy separated composer proves lifecycle-only empty from either idle signal and refuses drafts or contradictory identity"
+}
+test_matrix_agy_separated_independent_idle_signals
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty

@@ -820,6 +820,13 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
+### Antigravity separated composer
+
+The agy separator and lifecycle guard was refreshed on 2026-10-01 against agy 1.2.14 on Linux x64 with Herdr 0.9.3.
+[agy verification](agy.md#current-composer-and-lifecycle-live-guard) records the exact refresh command and output from `tests/fm-agy-signals-live-e2e.test.sh`.
+The shared classifier's native-idle and adjacent-footer alternatives are pinned independently in `tests/fm-composer-lib.test.sh`; `tests/fm-backend-tmux-smoke.test.sh` verifies their divergence through real tmux captures without a harness.
+The live guard proves idle exit and relaunch through `fm-control.sh` while both verbs refuse and preserve a typed draft.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
