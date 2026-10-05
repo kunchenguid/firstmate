@@ -32,6 +32,9 @@
 #  17. Recovery and escalation grace are measured from the relevant turn's
 #      completion, never from delivery or send time, and each takes one fresh,
 #      uncached status read - accepting any verb - immediately before firing
+#  18. A tick over a large settled history launches no per-record helper, yet
+#      still retries an open escalation close
+#  19. The watcher's beacon keeps advancing through a slow tick
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1478,6 +1481,183 @@ test_tick_leaves_settled_records_alone() {
   pass "the tick leaves settled records alone and still does the selected records' work"
 }
 
+# Portable mtime in epoch seconds.
+file_mtime() {
+  if [ "$(uname)" = Darwin ]; then /usr/bin/stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+}
+
+# PATH shims that log each launch of a common helper, then run the real one.
+launch_counting_path() {  # <dir> <log> -> shim dir
+  local dir=$1 log=$2 tool real
+  mkdir -p "$dir"
+  for tool in grep tail head cut cat basename dirname mkdir rmdir rm mv ln sed awk tr od date ps stat cksum wc; do
+    real=$(command -v "$tool" 2>/dev/null) || continue
+    case "$real" in /*) ;; *) continue ;; esac
+    cat > "$dir/$tool" <<EOF
+#!/bin/sh
+printf '%s\n' '$tool' >> '$log'
+exec '$real' "\$@"
+EOF
+    chmod +x "$dir/$tool"
+  done
+  printf '%s\n' "$dir"
+}
+
+# A home retains every resolved record and the watcher ticks every poll, so a
+# settled history must cost the tick no helper launch. Launches are counted
+# rather than timed because the count does not depend on host load.
+test_tick_does_no_per_record_work_for_settled_history() {
+  local home state corr rec settled template id i dir records progress_log shims launch_log
+  local before after launches
+  home=$(setup_parent settled-history)
+  state="$home/state"
+  dir=$(fm_pending_reply_dir "$state")
+  # Reset hook and clock fixtures after isolated subshell tests.
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=7000
+
+  # A resolve whose escalation close did not land: the tick must still retry it.
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "open escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation fixture failed"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase resolved
+  fm_pending_reply_set "$rec" resolved_epoch 7000
+  fm_pending_reply_set "$rec" resolved_via status
+
+  # Settled history: resolved records never escalated, or escalated and closed.
+  settled=$(fm_pending_reply_create "$home" "$state" hibit "settled request")
+  fm_pending_reply_mark_delivered "$state" "$settled"
+  printf 'done [corr=%s]: settled\n' "$settled" >> "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$settled" || fail "settled fixture should resolve"
+  template=$(fm_pending_reply_path "$state" "$settled")
+  i=1
+  while [ "$i" -le 200 ]; do
+    id=$(printf '%016x' "$i")
+    sed "s/^corr_id=.*/corr_id=$id/" "$template" > "$dir/$id"
+    if [ $((i % 2)) -eq 0 ]; then
+      printf 'escalated_epoch=6000\nescalation_closed_epoch=6500\n' >> "$dir/$id"
+    fi
+    i=$((i + 1))
+  done
+  records=$(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '.*' | wc -l | tr -d ' ')
+
+  progress_log="$home/progress.log"
+  : > "$progress_log"
+  # Invoked indirectly as the tick's progress command.
+  # shellcheck disable=SC2329
+  tick_progress() { printf 'x\n' >> "$progress_log"; }
+  fm_pending_reply_tick "$state" tick_progress || fail "first tick failed"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "an open escalation on a resolved record must still close"
+  [ "$(sed -E 's/ \[at=[0-9]+\]//' "$state/hibit.status" | grep -Fc "resolved [key=pending-reply-$corr]")" -eq 1 ] \
+    || fail "the retried close must append exactly one resolution"
+  # Only the record with an open escalation has work left.
+  [ "$(wc -l < "$progress_log" | tr -d ' ')" = 1 ] \
+    || fail "the progress command must run once per selected record"
+
+  before=$(cat "$dir"/* | cksum)
+  launch_log="$home/launches.log"
+  : > "$launch_log"
+  shims=$(launch_counting_path "$home/shims" "$launch_log")
+  (
+    hash -r
+    PATH="$shims:$PATH" fm_pending_reply_tick "$state"
+  ) || fail "settled tick failed"
+  after=$(cat "$dir"/* | cksum)
+  launches=$(wc -l < "$launch_log" | tr -d ' ')
+  [ "$launches" -lt 10 ] \
+    || fail "a tick over $records settled records launched $launches helpers: $(sort "$launch_log" | uniq -c | tr '\n' ' ')"
+  [ "$before" = "$after" ] || fail "a tick over settled records must not rewrite them"
+  pass "tick over a settled history launches no per-record helper and still closes an open escalation"
+}
+
+# The slow input as the watcher meets it: each open record's endpoint
+# observation is slow, so the tick outlasts the beat interval several times
+# over. The beacon must advance with the records rather than only at the top
+# of the cycle, or a slow tick reads as a dead watcher. The bounds are ratios of
+# the measured tick, so a loaded host that slows every record cannot fail them.
+test_watcher_beacon_stays_fresh_through_a_slow_tick() {
+  local home state fakebin capture_log out pid k corr beat mtime now age max_age=0
+  local captures=0 started finished duration capture_secs=4 mates=4
+  home=$(setup_parent slow-tick)
+  state="$home/state"
+  fm_test_track_watcher_state "$state"
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  capture_log="$home/captures.log"
+  : > "$capture_log"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  capture-pane)
+    printf '%s\n' "$*" >> "$FM_TEST_CAPTURE_LOG"
+    sleep "$FM_TEST_CAPTURE_SECS"
+    printf 'idle pane\n'
+    exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  export FM_PENDING_REPLY_NOW=8000
+  k=1
+  while [ "$k" -le "$mates" ]; do
+    fm_write_secondmate_meta "$state/mate$k.meta" "$home/mate$k"
+    corr=$(fm_pending_reply_create "$home" "$state" "mate$k" "slow request $k")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    k=$((k + 1))
+  done
+  unset FM_PENDING_REPLY_NOW
+
+  out="$home/watch.out"
+  env PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 FM_WATCHER_BEAT_SECS=1 \
+    FM_PENDING_REPLY_SEND_HOOK=true FM_TEST_CAPTURE_LOG="$capture_log" \
+    FM_TEST_CAPTURE_SECS="$capture_secs" "$ROOT/bin/fm-watch.sh" > "$out" 2>&1 &
+  pid=$!
+
+  beat="$state/.last-watcher-beat"
+  started=$(date +%s)
+  while [ ! -s "$capture_log" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "watcher exited before the tick: $(cat "$out")"
+    [ $(($(date +%s) - started)) -lt 60 ] || fail "watcher never reached the tick"
+    sleep 0.1
+  done
+  started=$(date +%s)
+  while [ "$captures" -lt "$mates" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "watcher exited during the slow tick: $(cat "$out")"
+    now=$(date +%s)
+    [ $((now - started)) -lt 240 ] || fail "slow tick did not finish within 240s ($captures of $mates observations)"
+    mtime=$(file_mtime "$beat")
+    [ -n "$mtime" ] || fail "watcher beacon missing during the tick"
+    age=$((now - mtime))
+    [ "$age" -le "$max_age" ] || max_age=$age
+    captures=$(wc -l < "$capture_log" | tr -d ' ')
+    sleep 0.2
+  done
+  finished=$(date +%s)
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  # A beacon touched only at the top of the cycle ages through the whole tick,
+  # while one touched per record ages about one record. The tick must first be
+  # long enough for that difference to show, so the check cannot pass vacuously.
+  duration=$((finished - started))
+  [ "$duration" -ge $(((mates - 1) * capture_secs - 1)) ] \
+    || fail "the tick finished in ${duration}s, too fast to prove anything"
+  [ $((max_age * 3)) -lt $((duration * 2)) ] \
+    || fail "watcher beacon aged ${max_age}s during a ${duration}s tick"
+  pass "watcher beacon stays fresh through a slow pending-reply tick"
+}
+
 test_correlations_reuse_only_for_matching_open_task() {
   local dir fb log home state got corr1 corr2 corr3 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
@@ -2028,6 +2208,8 @@ test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
 test_tick_leaves_settled_records_alone
+test_tick_does_no_per_record_work_for_settled_history
+test_watcher_beacon_stays_fresh_through_a_slow_tick
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
