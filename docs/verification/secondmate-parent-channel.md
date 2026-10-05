@@ -5,6 +5,11 @@ Refresh it by rerunning the fixture below after changing any publisher named in 
 This run predates emission-time stamping, so each published line below is the payload without its stamp: a rerun now writes the same bytes with an `[at=<epoch>]` tag closing the head, as in `done [key=child-outcome-child-done-05b032a1] [at=<epoch>]: child ...`.
 [`bin/fm-classify-lib.sh`](../../bin/fm-classify-lib.sh) owns that tag's syntax; nothing this record proves about delivery depends on it.
 
+This record predates the ship-done gate ([`bin/fm-done-guard-lib.sh`](../../bin/fm-done-guard-lib.sh)) and a refresh of step 1 is due.
+The ledger pass now runs that gate offline, where a PR-requiring ship `done:` is confirmed only by a recorded merge receipt, so the step 1 row reaches the parent channel only while the gate skips the child, which it does when the child's meta records no existing worktree.
+A rerun must therefore record the child's `worktree=` value and name the publisher that delivered that row.
+Steps 2 to 4, the PR registration line and the captain hold with its answer, are unchanged by the gate.
+
 ## What was run
 
 Date: 2026-09-03.
