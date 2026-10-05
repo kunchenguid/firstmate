@@ -54,6 +54,31 @@ SAIL='◿│◣'
 # the level glyphs the cue leads with.
 EFFORT_RULE='────────'
 
+# Claude Code 2.1.280 asks to confirm the first raise of effort after a turn, because the
+# conversation is cached at the level in force; its cursor starts on the option that switches.
+EFFORT_CONFIRM='Change effort level?'
+
+effort_confirmation_open() {  # <screen text>
+  case "$1" in
+    *"$EFFORT_CONFIRM"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Wait a moment for that confirmation after an effort change and accept it when it opens.
+settle_effort_change() {
+  local i=0
+  while [ "$i" -lt 30 ]; do
+    if effort_confirmation_open "$(screen)"; then
+      enter
+      sleep 1
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
 # The effort level the live session was found at, recorded before anything can move it.
 # `/effort` writes the operator's own `modelSettings.<model>.effortLevel`, which no lab
 # directory isolates, so this level is the captain's and must be put back on every exit.
@@ -77,6 +102,7 @@ restore_effort_level() {
         send "/effort $EFFORT_STARTED_AT"
         enter
         while [ "$i" -lt 100 ]; do
+          effort_confirmation_open "$(screen)" && enter
           if [ "$(badge_level "$(screen)")" = "$want" ]; then
             EFFORT_STARTED_AT=""
             return 0
@@ -626,6 +652,7 @@ cue_color() {
 wait_badge() {  # <badge word> <what>
   local want=$1 what=$2 i=0
   while [ "$i" -lt 200 ]; do
+    effort_confirmation_open "$(screen)" && enter
     [ "$(badge_level "$(screen)")" = "$want" ] && return 0
     sleep 0.1
     i=$((i + 1))
@@ -691,6 +718,33 @@ color_proven=$(cue_color)
 send '/effort-cycle'
 enter
 sleep 2
+turned_down='this build asked no confirmation, so no change was turned down'
+# Where Claude Code confirms the change, turning it down keeps the level, and the next step
+# after a request has proved that offers the same level again rather than passing it over as
+# one the model declined.
+if effort_confirmation_open "$(screen)"; then
+  asked=$(screen | sed -n 's/.*Yes, switch to \([a-z]*\).*/\1/p' | head -1)
+  [ -n "$asked" ] || fail "Claude Code $CLAUDE_VERSION confirmed an effort change without naming the level"
+  tmux -L "$SOCKET" send-keys -t "$SESSION" Escape
+  wait_screen 'Kept effort level' 'Claude Code keeping the level after the change was turned down' 80
+  [ "$(level_for "$(badge_level "$(screen)")")" = "$proven" ] \
+    || fail "turning the change to $asked down left the footer off $proven"
+  send "$PROMPT"
+  enter
+  # The earlier answer is still on screen, so the wait starts once this turn is under way;
+  # the prompt's own five-second command keeps it running past this pause.
+  sleep 3
+  wait_settled 'the turn after a change was turned down'
+  send '/effort-cycle'
+  enter
+  wait_screen "$EFFORT_CONFIRM" 'the confirmation for the step after the turned-down one' 80
+  offered=$(screen | sed -n 's/.*Yes, switch to \([a-z]*\).*/\1/p' | head -1)
+  [ "$offered" = "$asked" ] \
+    || fail "after $asked was turned down the cycle offered ${offered:-nothing}, passing $asked over as declined"
+  enter
+  sleep 2
+  turned_down="offers $asked again after its change was turned down at Claude Code's confirmation"
+fi
 moved=$(level_for "$(badge_level "$(screen)")")
 [ -n "$moved" ] || fail "the footer lost its think: badge after /effort-cycle"
 [ "$moved" != "$proven" ] || fail "/effort-cycle left the level at $proven"
@@ -705,6 +759,7 @@ esac
 # The next request proves the stepped level, and it paints in a color of its own.
 send "$PROMPT"
 enter
+sleep 3
 wait_settled 'the turn after one cycle step'
 case "$(cue_row)" in
   *"$(cue_label_for "$moved")"*) : ;;
@@ -721,6 +776,7 @@ color_moved=$(cue_color)
 # `auto` names no level of its own, so the cue claims none from there.
 send '/effort auto'
 enter
+settle_effort_change
 sleep 2
 case "$(cue_row)" in
   *◌*) : ;;
@@ -747,6 +803,7 @@ while [ "$attempt" -lt 2 ]; do
   enter
   i=0
   while [ "$i" -lt 60 ]; do
+    effort_confirmation_open "$(screen)" && enter
     reached=$(badge_level "$(screen)")
     [ -n "$reached" ] && [ "$reached" != low ] && { pressed=1; break; }
     sleep 0.25
@@ -775,4 +832,4 @@ send '/exit'
 enter
 sleep 1
 MODEL=haiku
-pass "Claude Code $CLAUDE_VERSION names a level in the effort cue only once a request has carried it, paints each level in a distinct theme color, cycles the setting with /effort-cycle and with the band's own focus-and-press keys, follows the captain's own /effort, and leaves the starting level restored"
+pass "Claude Code $CLAUDE_VERSION names a level in the effort cue only once a request has carried it, paints each level in a distinct theme color, cycles the setting with /effort-cycle and with the band's own focus-and-press keys, $turned_down, follows the captain's own /effort, and leaves the starting level restored"

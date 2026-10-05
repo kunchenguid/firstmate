@@ -71,6 +71,12 @@ export type WorldOptions = {
   model?: string;
   /** Set to make every `$.command.run` deny with this reason, as a refused command does. */
   commandFailure?: string;
+  /**
+   * Set to make every `/effort <level>` leave the saved level where it was, as turning the
+   * change down at Claude Code's own confirmation does; otherwise the run saves the level as
+   * the model's default, as Claude Code does before the run settles.
+   */
+  effortKept?: boolean;
 };
 
 /** The engine's own drawing, as the bottom of every `ui.render` chain. */
@@ -152,9 +158,10 @@ export function world(on: On, options: WorldOptions = {}): World {
   });
   let model = options.model ?? MODEL;
   on("session.model", async () => ({ value: model }));
+  let settings: unknown = options.settings ?? {};
   on("settings.read", async () => {
     journal.settingsReads += 1;
-    return { value: (options.settings ?? {}) as never };
+    return { value: settings as never };
   });
   // The bottom of every `command.run` chain the mod raises or forwards: what the engine
   // would have run, recorded so a test can read exactly which level the mod selected.
@@ -164,6 +171,14 @@ export function world(on: On, options: WorldOptions = {}): World {
     // `/model <name>` switches the session's model, which is what `$.session.model()` reports
     // from then on; a bare `/model` opens the picker and switches nothing here.
     if (e.command === "model" && e.args !== "") model = e.args;
+    // `/effort <level>` saves the level as this model's default, unless the change is kept.
+    if (e.command === "effort" && /^(low|medium|high|xhigh|max)$/.test(e.args) && !options.effortKept) {
+      const base = (typeof settings === "object" && settings !== null ? settings : {}) as Record<string, unknown>;
+      const models = (typeof base.modelSettings === "object" && base.modelSettings !== null
+        ? base.modelSettings
+        : {}) as Record<string, Record<string, unknown>>;
+      settings = { ...base, modelSettings: { ...models, [model]: { ...models[model], effortLevel: e.args } } };
+    }
     journal.runs.push({ command: e.command, args: e.args });
     return { value: {} };
   });

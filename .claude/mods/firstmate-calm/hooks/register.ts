@@ -82,6 +82,7 @@ import {
   effortCueLabel,
   effortLevelColor,
   effortRuleColumns,
+  effortRunSaved,
   normalizeEffortLevel,
   parseEffortSelection,
   savedEffortLevel,
@@ -315,6 +316,11 @@ function invalidateDrawings($: EngineInterface): void {
  * another model, and while nothing is left to step to the keystroke says so instead of
  * doing nothing, once per such stretch rather than once per press.
  *
+ * A step that never took is not such a decline: a run whose change was turned down at
+ * Claude Code's own confirmation, or refused outright, says nothing about the model, so
+ * nothing is recorded and the next press steps on as usual. What the run saved tells the two
+ * apart, as `effortRunTook` describes.
+ *
  * The selection is recorded before the command is run, so a second keystroke during the run
  * steps from the level this one is selecting rather than repeating it; a run the host
  * refuses to make at all throws, and that puts the selection back and is reported. The
@@ -354,7 +360,22 @@ async function cycleEffort($: EngineInterface): Promise<void> {
     $.ui.toast(`Effort unchanged: ${reason}`);
     return;
   }
-  if (effortSelected === wanted) effortAsked = { wanted, from };
+  if (effortSelected !== wanted) return;
+  if ((await effortRunTook($, wanted)) && effortSelected === wanted) effortAsked = { wanted, from };
+}
+
+/**
+ * Whether the `/effort` run that just settled took `level`, read from the entry it saves for
+ * the session's model. Settings or a model that cannot be read settle nothing, and the run is
+ * then taken at its word, as it was before anything could be read.
+ */
+async function effortRunTook($: EngineInterface, level: EffortLevel): Promise<boolean> {
+  try {
+    const [settings, model] = await Promise.all([$.settings.read(), $.session.model()]);
+    return typeof model !== "string" || effortRunSaved(settings as never, model, level);
+  } catch {
+    return true;
+  }
 }
 
 /** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */

@@ -638,6 +638,22 @@ describe("the effort cue", () => {
     expect(journal.runs.map((run) => run.args)).toEqual(["xhigh", "max", "low", "medium"]);
   });
 
+  test("keeps offering a level whose change was turned down at Claude Code's confirmation", async ($, on) => {
+    const { journal } = world(on, { effortKept: true });
+    stepper(on);
+    await $.session.start(sessionStart);
+    await runStep($, "medium");
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "high" });
+    // The saved level stayed where it was, so the run never took, and the next request proving
+    // the session stayed too says nothing about whether this model offers `high`.
+    await runStep($, "medium");
+    expect(await cueLabel($)).toBe("◔ medium");
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "high" });
+    expect(journal.toasts.filter((toast) => toast.includes("declined"))).toHaveLength(0);
+  });
+
   test("says so once while nothing is left to step to", async ($, on) => {
     const { journal } = world(on);
     stepper(on);

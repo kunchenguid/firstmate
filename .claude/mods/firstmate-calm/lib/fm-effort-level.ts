@@ -163,6 +163,20 @@ export function savedEffortLevel(settings: EffortSettings | undefined, model: st
   return normalizeEffortLevel(settings.effortLevel);
 }
 
+/**
+ * Whether a run of `/effort` took `level` on `model`, judged by what it saved.
+ *
+ * Claude Code saves every level `/effort` takes as the entry for the session's model before
+ * the run settles, and a run that asks to confirm the change settles only once that is
+ * answered. An entry for this model naming anything else, or no entry at all, therefore means
+ * the run did not take: the change was turned down at that confirmation or refused outright.
+ * The saved default is not consulted, because a run of `/effort` never writes it.
+ */
+export function effortRunSaved(settings: EffortSettings | undefined, model: string, level: EffortLevel): boolean {
+  if (settings === null || typeof settings !== "object") return false;
+  return normalizeEffortLevel(settings.modelSettings?.[model]?.effortLevel) === level;
+}
+
 /** Claude Code's own `auto`: a choice to let it pick per turn, not a point on the ramp. */
 const EFFORT_AUTO = "auto";
 

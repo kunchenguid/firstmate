@@ -823,13 +823,17 @@ Every capability below was exercised against the real binary through a throwaway
 Each capture came from a real Claude Code 2.1.274 TUI under tmux at 160 by 44 cells, with the inherited session markers stripped and the mod reached through the project's own `.claude/skills` auto-load path.
 
 - `$.config.list()` returned 42 rows, none of them effort-related; `theme` and `thinking` are there, `effortLevel` is not, and `$.config.set` rejects a key no row has.
-- With `CLAUDE_EFFORT` unset in the launching environment, `$.env.get("CLAUDE_EFFORT")` answered undefined at `session.start`, so the variable the hook-command documentation mentions does not reach a hooks module. An earlier reading of `xhigh` came from the probe inheriting the value from its parent session, not from Claude Code.
+- With `CLAUDE_EFFORT` unset in the launching environment, `$.env.get("CLAUDE_EFFORT")` answered undefined at `session.start`, so the variable the hook-command documentation mentions does not reach a hooks module.
+  An earlier reading of `xhigh` came from the probe inheriting the value from its parent session, not from Claude Code.
 - `$.command.run` is refused from inside a `command.run` hook, naming the reason: it "would wait on the turn this hook is holding; answer { text } instead, or run it from a later event". The same call succeeds from `session.start`, from a `$.clock.after` callback, and from a `ui.press` hook.
 - A `command.run` hook on `{ command: "effort" }` saw the captain's own `/effort xhigh` with `args` `xhigh` and `origin` `{ kind: "composer" }`; a bare `/effort` arrived with empty `args` and opened the effort slider, and the slider's own confirmation raised nothing further.
-- A `command.run` result settles to `{ text, context, ref }`, with no denial among them: under the plugin test host, a handler below that answered `{ deny }` left the caller with `{}` and the hook above it with a result carrying no denial. A mod therefore cannot tell a run that was refused below it from one that went through, and the mod does not pretend otherwise: it reads nothing from the result and lets the next request settle what is in force.
+- A `command.run` result settles to `{ text, context, ref }`, with no denial among them: under the plugin test host, a handler below that answered `{ deny }` left the caller with `{}` and the hook above it with a result carrying no denial.
+  A mod therefore cannot tell a run that was refused below it from one that went through, and the mod does not pretend otherwise: it reads nothing from the result and lets the next request settle what is in force.
 - `turn.step` carried `effort` `"high"` on `claude-sonnet-5` and carried none at all on `claude-haiku-4-5-20251001`, which is the documented "absent for a model without effort" case.
 - The `AbovePrompt` event carries `{ hasSurvey, isWorking, maxRows, bodyColumns, scroll, view }`, and `$.ui.resolve` there offers `Box, Text, Button, Input, Select, Link, Code, Markdown, Client, Raster, Svg`. `hasSurvey` is true while a survey holds the band, which is the engine's own row, so the cue yields it.
-- The engine checks the effort of a `turn.step` against its own list and rejects anything else, naming it: `an effort that is not one of low, medium, high, xhigh, max (a number is internal-only)`. That check and the list behind it were read out of the installed binary at 2.1.275, to which this host updated while the cue was being revised. `ultracode` is absent from the list, and the same binary calls that level `xhigh + dynamic workflow orchestration`, so nothing a mod can see tells a session at `ultracode` apart from one at `xhigh`.
+- The engine checks the effort of a `turn.step` against its own list and rejects anything else, naming it: `an effort that is not one of low, medium, high, xhigh, max (a number is internal-only)`.
+  That check and the list behind it were read out of the installed binary at 2.1.275, to which this host updated while the cue was being revised.
+  `ultracode` is absent from the list, and the same binary calls that level `xhigh + dynamic workflow orchestration`, so nothing a mod can see tells a session at `ultracode` apart from one at `xhigh`.
 - The same binary carries `/effort`'s own refusal line, `ultracode is not available for this session (dynamic workflows are off, ...)`, which is printed rather than thrown, so a `$.command.run` of `/effort` resolves whether the level took or not.
 - Every theme key drew a distinct 256-color escape, while a name that is not a theme key drew with no escape at all:
 
@@ -886,7 +890,8 @@ The cue therefore never names a level the session is not running, while the keys
 That separate level is what `$.settings.read()` and `$.session.model()` feed, and only before a session's first turn: a first keystroke climbs from the level Claude Code has saved for this model, which is where the session started, and a session with nothing saved takes no step and says so rather than moving the setting to a guess.
 The model's own entry decides whenever it has one, so an entry naming something off the ramp, such as `auto`, is unknown rather than a fall-through to the saved default of models that have no entry at all.
 It is also written before the command runs rather than after, so a chord repeating under the captain's finger steps once per press instead of collapsing into one step.
-Beside it the mod keeps the levels declined on the model now in use, read from the one piece of evidence there is: a step that asked for a level and left the session where it already was. The ramp passes over those and says so once while nothing is left to ask for; the memory is forgotten as soon as a request names another model, which is also the only event a picker-driven switch leaves behind, dies with the session, is written to no file, and never reaches the cue.
+Beside it the mod keeps the levels declined on the model now in use, read from the one piece of evidence there is: a step that asked for a level and left the session where it already was.
+The ramp passes over those and says so once while nothing is left to ask for; the memory is forgotten as soon as a request names another model, which is also the only event a picker-driven switch leaves behind, dies with the session, is written to no file, and never reaches the cue.
 It is gated on the same exact `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` opt-in as the rest of the mod, it neither reads nor writes the Calm preference, it writes no settings file, and a `/effort` the host refuses to run at all is reported in a notice with the selection and the cue left as they were.
 
 ```text
@@ -1022,4 +1027,44 @@ ok - Claude Code 2.1.284 (Claude Code) with the flag unset: no hooks module, no 
 ok - Claude Code 2.1.284 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
 ok - Claude Code 2.1.284 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
 ok - Claude Code 2.1.284 (Claude Code) with Calm off shows the supervision notes: the session-start anchor for an unprocessed captain outcome, a sailboat for a new routine outcome, an anchor for a new captain outcome, and the latch-trip note, each behind the fm: label, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each anchor once
+```
+
+## 2026-10-05 Claude Code 2.1.280 effort-change confirmation
+
+The effort cue was built against Claude Code 2.1.274, and on `claude --version` `2.1.280 (Claude Code)` its credentialed live guard failed at the first cycle step after a turn: the footer showed no `think:` badge two seconds after `/effort-cycle`.
+A probe in the guard's own tmux shape that submits one Sonnet turn, and a probe copy of the mod whose step toasted what `$.command.run` settled with, showed why.
+
+- After a turn, the step's `/effort high` from `medium` opens Claude Code's own confirmation over the band and the footer, with its cursor on the option that switches:
+
+```text
+   Change effort level?
+   Your next response will be slower and use more tokens
+   This conversation is cached for the current effort level. Switching to high means the full history gets re-read on your next message.
+   ❯ 1. Yes, switch to high
+     2. No, go back
+```
+
+- `$.command.run` of `/effort` settles only once that confirmation is answered: the probe's run settled 3030 ms after it was raised, which is when `Yes` was pressed, and `$.settings.read()` then carried `modelSettings.claude-sonnet-5.effortLevel` `high`, as the toast showed: `fm: PROBE resolved after 3030ms saved=high text=null`.
+- Escape takes the `No, go back` path: Claude Code prints `Kept effort level as medium`, and the footer stays at `think:med`.
+- Before any turn `/effort high` applied with no confirmation, and so did a second raise before the next turn (`high` to `xhigh`) and a change down from there (`xhigh` to `low`).
+
+Before this build the mod read a step that asked for a level and left the session where it already was as a level the model declined, so turning a change down at that confirmation made the ramp pass the level over until a request named another model.
+The step now reads the entry the run saved for the session's model once the run settles, and a run that did not save the level it asked for is not taken as a decline.
+A request-time downgrade, which is what the decline memory exists for, saves the asked level before the next request proves another, so it is still remembered.
+The live guard accepts the confirmation wherever an effort change can raise it, including the restore on exit, and where the build asks it, the guard turns the first raise down, proves the level kept, and proves the next step after a turn offers the same level again.
+
+```text
+$ bash tests/fm-calm-claude-mod.test.sh
+ok - the effort-level policy cycles the ramp and wraps, passes over the levels a session declined, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, tells a step that took from one turned down by what it saved, and treats only a request that can report the selected level as proof of what is in force
+
+$ bash tests/fm-calm-claude-mod-plugin.test.sh
+ok - Claude Code 2.1.280 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings, /calm, and the effort cue's band, press, and commands while logging supervision notes
+ok - Claude Code 2.1.280 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, the clock-driven working ship, supervision notes, and the effort cue's proof-only display, colors, cycle from the saved level, survey yield, and auto
+
+$ FM_CLAUDE_CALM_LIVE_E2E=1 bash tests/fm-calm-claude-mod-live-e2e.test.sh
+ok - Claude Code 2.1.280 (Claude Code) with the flag unset: no hooks module, no /calm, no effort cue, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.280 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.280 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
+ok - Claude Code 2.1.280 (Claude Code) with Calm off shows the supervision notes: the session-start anchor for an unprocessed captain outcome, a sailboat for a new routine outcome, an anchor for a new captain outcome, and the latch-trip note, each behind the fm: label, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each anchor once
+ok - Claude Code 2.1.280 (Claude Code) names a level in the effort cue only once a request has carried it, paints each level in a distinct theme color, cycles the setting with /effort-cycle and with the band's own focus-and-press keys, offers high again after its change was turned down at Claude Code's confirmation, follows the captain's own /effort, and leaves the starting level restored
 ```
