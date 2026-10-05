@@ -43,6 +43,22 @@
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#   Frozen execution policy and allocation are owned by fm_workforce_policy.py;
+#   policy-bound native launches use fm-workforce-policy.py for generation evidence.
+#   --origin-note <note-id> reserves one captured Workforce job-request for a
+#   fresh, single local ship/scout with a paired backlog. Requires explicit
+#   FM_HOME and canonical roots. The inbox reservation precedes allocation;
+#   provisional admission_origin metadata is not execution evidence. Final
+#   admission_committed_at/admission_committed_generation are published only
+#   after verified launch delivery and backlog In flight read-back, under the
+#   task meta lock. Inbox publication follows; failure reports spawned-but-
+#   binding-pending and must never be retried as a fresh spawn.
+#   --recover-admission <task-id> verifies the committed origin and replays the
+#   inbox attachment under the task lock, without endpoint/worktree lifecycle.
+#   A crash before the final marker remains prepared, even if backlog recovery
+#   moves its row; only committed evidence licenses binding. Relaunch preserves
+#   the original origin/generation/commit fields through preserve_relaunch_meta.
+#
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -493,6 +509,7 @@ case "${1:-}" in
 esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_SPAWN_HOME_EXPLICIT=${FM_HOME:-}
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-tasks-axi-lib.sh
@@ -642,9 +659,32 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+if [ "${1:-}" = --recover-admission ]; then
+  [ "$#" -eq 2 ] && [ -n "$FM_SPAWN_HOME_EXPLICIT" ] || {
+    echo "error: --recover-admission requires explicit FM_HOME and one task" >&2
+    exit 1
+  }
+  recover_id=$2
+  case "$recover_id" in ''|*[!A-Za-z0-9_-]*) exit 1 ;; esac
+  [ "$STATE" = "$FM_HOME/state" ] && [ "$DATA" = "$FM_HOME/data" ] &&
+    [ "$CONFIG" = "$FM_HOME/config" ] || exit 1
+  recover_lock=$(fm_meta_lock_path "$STATE/$recover_id.meta") || exit 1
+  fm_lock_acquire_wait "$recover_lock" || exit 1
+  recover_status=0
+  if ! fm_backlog_row_probe "$DATA" "$recover_id" || [ "$FM_BACKLOG_ROW_STATE" != "in_flight no no" ]; then
+    echo "error: admission recovery requires paired In flight custody" >&2
+    recover_status=1
+  else
+    FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-inbox.sh" publish-admission "$recover_id" || recover_status=$?
+  fi
+  fm_lock_release "$recover_lock"
+  exit "$recover_status"
+fi
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+ORIGIN_NOTE=
+ORIGIN_NOTE_SET=0
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -675,6 +715,7 @@ for a in "$@"; do
       ;;
     esac
     case "$want_value" in
+    origin-note) ORIGIN_NOTE=$a; ORIGIN_NOTE_SET=1 ;;
     harness)
       HARNESS_ARG=$a
       HARNESS_SET=1
@@ -724,6 +765,8 @@ for a in "$@"; do
     KIND=secondmate
     KIND_SET=1
     ;;
+  --origin-note) want_value="origin-note" ;;
+  --origin-note=*) ORIGIN_NOTE=${a#--origin-note=}; ORIGIN_NOTE_SET=1 ;;
   --relaunch) RELAUNCH=1 ;;
   --harness) want_value=harness ;;
   --harness=*)
@@ -820,6 +863,16 @@ case "$EFFORT" in
   exit 1
   ;;
 esac
+
+if [ "$ORIGIN_NOTE_SET" -eq 1 ]; then
+  [ -n "$ORIGIN_NOTE" ] && [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
+    [ "${#POS[@]}" -eq 2 ] && [ -n "$FM_SPAWN_HOME_EXPLICIT" ] &&
+    [ "$STATE" = "$FM_HOME/state" ] && [ "$DATA" = "$FM_HOME/data" ] &&
+    [ "$CONFIG" = "$FM_HOME/config" ] && [ "$PROJECTS" = "$FM_HOME/projects" ] || {
+    echo "error: --origin-note requires one fresh local task and explicit canonical FM_HOME" >&2
+    exit 1
+  }
+fi
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -2398,6 +2451,141 @@ fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
+
+# NVIDIA OpenShell is a per-home, explicit opt-in for Herdr Codex ship workers.
+# Its boundary is part of the task identity, so relaunch reads the recorded
+# provider set and refuses to fall back to a host Codex process if the setting
+# was removed after the original spawn.
+OPENSH_ENABLED=0
+OPENSH_PROVIDERS=
+OPENSH_GATEWAY=
+OPENSH_IMAGE=
+OPENSH_WORKSPACE=
+OPENSH_WORKSPACE_ID=
+OPENSH_HASH=
+OPENSH_NAME=
+OPENSH_CONFIG="$CONFIG/herdr-codex-openshell"
+opensh_validate_gateway() {
+  case "$1" in ''|*[!A-Za-z0-9._-]*|[-.]*|*[-.]) return 1 ;; esac
+  [ "${#1}" -le 63 ]
+}
+opensh_validate_providers() {
+  local providers=$1 provider count=0 seen=' '
+  case "$providers" in ''|,*|*,|*,,*|*[!A-Za-z0-9._,-]*) return 1 ;; esac
+  case ",$providers," in *,codex,*) ;; *) return 1 ;; esac
+  local IFS=,
+  for provider in $providers; do
+    case "$provider" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    case "$seen" in *" $provider "*) return 1 ;; esac
+    seen="$seen$provider "
+    count=$((count + 1))
+  done
+  [ "$count" -le 4 ]
+}
+opensh_validate_image() {
+  case "$1" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._/:@-]*) return 1 ;; esac
+  [ "${#1}" -le 1024 ]
+}
+opensh_read_config() {
+  local file=$1 line found_gateway=0 found_providers=0 found_image=0
+  [ ! -L "$file" ] && [ -f "$file" ] || {
+    echo "error: OpenShell opt-in must be a regular file at $file" >&2
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in
+      gateway=*)
+        [ "$found_gateway" -eq 0 ] || { echo "error: duplicate gateway= in $file" >&2; return 1; }
+        OPENSH_GATEWAY=${line#gateway=}
+        found_gateway=1
+        ;;
+      providers=*)
+        [ "$found_providers" -eq 0 ] || { echo "error: duplicate providers= in $file" >&2; return 1; }
+        OPENSH_PROVIDERS=${line#providers=}
+        found_providers=1
+        ;;
+      image=*)
+        [ "$found_image" -eq 0 ] || { echo "error: duplicate image= in $file" >&2; return 1; }
+        OPENSH_IMAGE=${line#image=}
+        found_image=1
+        ;;
+      *) echo "error: unknown OpenShell opt-in setting in $file" >&2; return 1 ;;
+    esac
+  done <"$file"
+  if ! { [ "$found_gateway" -eq 1 ] && opensh_validate_gateway "$OPENSH_GATEWAY" &&
+    [ "$found_image" -eq 1 ] && opensh_validate_image "$OPENSH_IMAGE" &&
+    [ "$found_providers" -eq 1 ] && opensh_validate_providers "$OPENSH_PROVIDERS"; }; then
+    echo "error: $file must contain gateway=<registered-gateway-name>, image=<workload-image-reference>, and one providers= list including codex (at most four registered provider names)" >&2
+    return 1
+  fi
+}
+if [ "$RELAUNCH" -eq 1 ]; then
+  RELAUNCH_OPENSH=$(fm_meta_get "$RELAUNCH_META" openshell)
+  if [ "$RELAUNCH_OPENSH" = codex-v1 ]; then
+    [ "$BACKEND" = herdr ] && [ "$HARNESS" = codex ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] || {
+      echo "error: task $ID is bound to its OpenShell Herdr Codex ship path; refusing a harness, backend, or task-kind change" >&2
+      exit 1
+    }
+    OPENSH_PROVIDERS=$(fm_meta_get "$RELAUNCH_META" openshell_providers)
+    OPENSH_GATEWAY=$(fm_meta_get "$RELAUNCH_META" openshell_gateway)
+    OPENSH_IMAGE=$(fm_meta_get "$RELAUNCH_META" openshell_image)
+    OPENSH_WORKSPACE=$(fm_meta_get "$RELAUNCH_META" openshell_workspace)
+    OPENSH_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" openshell_workspace_id)
+    [ -n "$OPENSH_WORKSPACE" ] && [ -n "$OPENSH_WORKSPACE_ID" ] || {
+      echo "error: task $ID is missing its recorded OpenShell workspace identity" >&2
+      exit 1
+    }
+    if ! opensh_validate_providers "$OPENSH_PROVIDERS" || ! opensh_validate_gateway "$OPENSH_GATEWAY" || ! opensh_validate_image "$OPENSH_IMAGE"; then
+      echo "error: task $ID has invalid recorded OpenShell settings; refusing a host Codex fallback" >&2
+      exit 1
+    fi
+    OPENSH_ENABLED=1
+  elif [ -n "$RELAUNCH_OPENSH" ]; then
+    echo "error: task $ID has an unsupported recorded OpenShell mode '$RELAUNCH_OPENSH'; refusing to fall back to host Codex" >&2
+    exit 1
+  fi
+elif { [ -e "$OPENSH_CONFIG" ] || [ -L "$OPENSH_CONFIG" ]; } && [ "$BACKEND" = herdr ] && [ "$HARNESS" = codex ]; then
+  [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] || {
+    echo "error: OpenShell Codex currently supports no-mistakes ship tasks only; other task scopes require additional task-specific capabilities" >&2
+    exit 1
+  }
+  opensh_read_config "$OPENSH_CONFIG" || exit 1
+  OPENSH_ENABLED=1
+fi
+if [ "$OPENSH_ENABLED" = 1 ]; then
+  [ "$(uname -s 2>/dev/null || true)" = Linux ] || {
+    echo "error: configured OpenShell Codex execution requires a Linux Herdr worker host" >&2
+    exit 1
+  }
+  for opensh_bin in python3 git openshell; do
+    command -v "$opensh_bin" >/dev/null 2>&1 || {
+      echo "error: configured OpenShell Codex execution requires $opensh_bin; refusing a host Codex fallback" >&2
+      exit 1
+    }
+  done
+  OPENSH_PYTHON=$(command -v python3)
+  if [ "$RELAUNCH" -eq 0 ]; then
+    OPENSH_WORKSPACE=${OPENSHELL_WORKSPACE-default}
+    OPENSH_WORKSPACE_ID=$("$OPENSH_PYTHON" "$FM_ROOT/bin/fm-openshell-codex.py" workspace-id "$OPENSH_GATEWAY" "$OPENSH_WORKSPACE") || exit 1
+  else
+    OPENSH_CURRENT_WORKSPACE_ID=$("$OPENSH_PYTHON" "$FM_ROOT/bin/fm-openshell-codex.py" workspace-id "$OPENSH_GATEWAY" "$OPENSH_WORKSPACE") || exit 1
+    [ "$OPENSH_CURRENT_WORKSPACE_ID" = "$OPENSH_WORKSPACE_ID" ] || {
+      echo "error: task $ID OpenShell workspace ID has changed; refusing relaunch" >&2
+      exit 1
+    }
+  fi
+  case "${MODEL:-default}" in default) MODEL=gpt-6.1-sol ;; esac
+  case "${EFFORT:-default}" in default) EFFORT=medium ;; esac
+  OPENSH_NAME=$("$OPENSH_PYTHON" "$FM_ROOT/bin/fm-openshell-codex.py" sandbox-name "$FM_HOME" "$ID") || exit 1
+  if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_OPENSH" = codex-v1 ]; then
+    [ "$(fm_meta_get "$RELAUNCH_META" openshell_name)" = "$OPENSH_NAME" ] &&
+      [ "$(fm_meta_get "$RELAUNCH_META" openshell_gateway)" = "$OPENSH_GATEWAY" ] || {
+      echo "error: task $ID OpenShell resource identity is inconsistent; refusing to adopt another sandbox" >&2
+      exit 1
+    }
+  fi
+fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
@@ -3512,6 +3700,34 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
+# Frozen Workforce execution policy is checked before allocating an endpoint.
+WORKFORCE_POLICY_BOUND=0
+WORKFORCE_POLICY_NOTE=$ORIGIN_NOTE
+if [ "$RELAUNCH" -eq 1 ] && [ -n "$(fm_meta_get "$RELAUNCH_META" workforce_allocation)" ]; then
+  WORKFORCE_POLICY_NOTE=$(FM_HOME=$FM_HOME python3 "$SCRIPT_DIR/fm-workforce-policy.py" origin-note "$ID") || exit 1
+fi
+if [ -n "$WORKFORCE_POLICY_NOTE" ]; then
+  WORKFORCE_ROUTE=host
+  [ "$OPENSH_ENABLED" != 1 ] || WORKFORCE_ROUTE=openshell
+  WORKFORCE_PREFLIGHT=$(FM_HOME=$FM_HOME python3 "$SCRIPT_DIR/fm-workforce-policy.py" preflight \
+    "$WORKFORCE_POLICY_NOTE" "$ID" "$HARNESS" "$BACKEND" "$WORKFORCE_ROUTE" \
+    "${MODE:-local-only}" "${YOLO:-off}" "${MODEL:-default}" "${EFFORT:-default}") || exit 1
+  if [ "$WORKFORCE_PREFLIGHT" != null ]; then
+    [ "$RAW_LAUNCH" = 0 ] && [ "$KIND" != secondmate ] && [ "$STATE" = "$FM_HOME/state" ] || {
+      echo "error: frozen Workforce policy requires the canonical native disposable-worker launch" >&2
+      exit 1
+    }
+    WORKFORCE_POLICY_BOUND=1
+  fi
+fi
+if [ -n "$ORIGIN_NOTE" ]; then
+  [ "$BACKLOG_TRANSITION" = 1 ] || {
+    echo "error: origin admission requires a paired backlog" >&2
+    exit 1
+  }
+  FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-inbox.sh" prepare-admission "$ORIGIN_NOTE" "$ID" "$PROJ_ABS" "$KIND" >/dev/null || exit 1
+fi
+
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
@@ -4890,7 +5106,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx openshell openshell_gateway openshell_image openshell_workspace openshell_workspace_id openshell_providers openshell_name openshell_keep_ai_trailers", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4915,6 +5131,13 @@ preserve_relaunch_meta() {
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ -n "$ORIGIN_NOTE" ]; then
+    origin_record=$(FM_HOME=$FM_HOME python3 "$SCRIPT_DIR/fm_inbox_admission.py" origin "$ORIGIN_NOTE" "$ID" "$SPAWN_GEN") || exit 1
+    printf 'admission_origin=%s\n' "$origin_record"
+    workforce_allocation=$(FM_HOME=$FM_HOME python3 "$SCRIPT_DIR/fm-workforce-policy.py" allocation "$ORIGIN_NOTE") || exit 1
+    [ "$workforce_allocation" = null ] || printf 'workforce_allocation=%s\n' "$workforce_allocation"
+
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4925,6 +5148,16 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+  fi
+  if [ "$OPENSH_ENABLED" = 1 ]; then
+    echo "openshell=codex-v1"
+    echo "openshell_gateway=$OPENSH_GATEWAY"
+    echo "openshell_image=$OPENSH_IMAGE"
+    echo "openshell_workspace=$OPENSH_WORKSPACE"
+    echo "openshell_workspace_id=$OPENSH_WORKSPACE_ID"
+    echo "openshell_providers=$OPENSH_PROVIDERS"
+    echo "openshell_name=$OPENSH_NAME"
+    echo "openshell_keep_ai_trailers=$KEEP_AI_TRAILERS"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
@@ -5179,7 +5412,18 @@ fi
 # to keeping trailers, leave core.hooksPath alone so the repository's hooks run
 # directly. An export statement inside the pane command carries the override
 # across every step of a compound raw launch while firstmate's own git is unchanged.
-if [ "$KEEP_AI_TRAILERS" = 0 ]; then
+if [ "$WORKFORCE_POLICY_BOUND" = 1 ] && [ "$OPENSH_ENABLED" != 1 ]; then
+  WORKFORCE_LAUNCH_PREFIX="FM_HOME=$(shell_quote "$FM_HOME") python3 $(shell_quote "$SCRIPT_DIR/fm-workforce-policy.py") launch $(shell_quote "$ID") --"
+  if [ "$HARNESS" = opencode ]; then
+    LAUNCH=${LAUNCH/ opencode / $WORKFORCE_LAUNCH_PREFIX opencode }
+  else
+    LAUNCH="$WORKFORCE_LAUNCH_PREFIX $LAUNCH"
+  fi
+fi
+if [ "$OPENSH_ENABLED" = 1 ]; then
+  LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE_REAL") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") FM_ROOT_OVERRIDE=$(shell_quote "$FM_ROOT") $(shell_quote "$OPENSH_PYTHON") $(shell_quote "$FM_ROOT/bin/fm-openshell-codex.py") run $(shell_quote "$ID") $(shell_quote "$BRIEF") --model $(shell_quote "${MODEL:-default}") --effort $(shell_quote "${EFFORT:-default}")"
+fi
+if [ "$KEEP_AI_TRAILERS" = 0 ] && [ "$OPENSH_ENABLED" != 1 ]; then
   LAUNCH="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$GIT_HOOKS_DIR"); $LAUNCH"
 fi
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
@@ -5486,6 +5730,25 @@ fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+if [ -n "$ORIGIN_NOTE" ]; then
+  # A successful dispatch return alone is not custody evidence.
+  if ! fm_backlog_row_probe "$DATA" "$ID" || [ "$FM_BACKLOG_ROW_STATE" != "in_flight no no" ]; then
+    echo "error: spawned-but-binding-pending: $ID backlog commit did not verify; no admission marker published" >&2
+    exit 1
+  fi
+  SPAWN_META_TMP="$STATE/.$ID.meta.admission.${BASHPID:-$$}"
+  if ! cat "$STATE/$ID.meta" >"$SPAWN_META_TMP" ||
+    ! printf 'admission_committed_at=%s\nadmission_committed_generation=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SPAWN_GEN" >>"$SPAWN_META_TMP" ||
+    ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
+    echo "error: spawned-but-binding-pending: $ID final marker unavailable; reconcile without fresh spawn" >&2
+    exit 1
+  fi
+  SPAWN_META_TMP=
+  if ! FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-inbox.sh" publish-admission "$ID"; then
+    echo "error: spawned-but-binding-pending: $ID; recover with FM_HOME='$FM_HOME' bin/fm-spawn.sh --recover-admission '$ID', never fresh spawn" >&2
+    exit 1
+  fi
 fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in

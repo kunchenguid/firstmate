@@ -66,6 +66,19 @@
 # health, away posture, observation time). It never acquires the session lock
 # and never infers liveness from a lock file, a session, or a pane.
 #
+# Admission: supervisor-only prepare-admission <note> <task> <project-path> <kind>
+# reserves one local ship/scout origin in the captured note before allocation.
+# An existing reservation refuses fresh spawn, even for the same task; it never
+# licenses duplicate launch after a crash. publish-admission <task> accepts only
+# a final committed task origin, not a reply or provisional metadata. Identical
+# publication is idempotent; conflicting identity refuses. Queued and handled
+# notes retain immutable admission and a separate admission_cursor, allocated by
+# the existing reply-sequence owner. Receipts add admissions/admission_cursor
+# without changing reply_cursor. A prepared origin without committed evidence
+# stays pending and requires supervisor reconciliation, never automatic respawn.
+# These operations require explicit FM_HOME and canonical home roots. The
+# implementation lives in fm_inbox_admission.py; no UI task identity is accepted.
+#
 # Configuration. A region, a model id and an AWS profile name somebody's account
 # and somebody's choices, so this file carries no default for any of them. Each is
 # read from the home's gitignored config/ directory, or from the matching
@@ -119,6 +132,7 @@ export PATH
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+FM_HOME_EXPLICIT=${FM_HOME:-}
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -370,7 +384,10 @@ finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summ
     0) announced=1 ;;
     2) acknowledged=1 ;;
   esac
-  [ -f "$INBOX/handled/$id.note" ] && path="$INBOX/handled/$id.note"
+  if [ -f "$INBOX/handled/$id.note" ]; then
+    path="$INBOX/handled/$id.note"
+    acknowledged=1
+  fi
   if [ "$json" -eq 1 ]; then
     emit_note_json "$outcome" "$id" "$request_id" 1 "$announced" "$path" "$acknowledged"
   else
@@ -499,7 +516,7 @@ cmd_note() {
 }
 
 cmd_announce() {
-  local json=0 id summary path state rc=0
+  local json=0 id summary path state rc=0 acknowledged=0
   if [ "${1:-}" = "--json" ]; then
     json=1
     shift
@@ -510,13 +527,14 @@ cmd_announce() {
   path=$(note_path "$id") || die "no such note: $id"
   summary=$(note_summary_from_body "$(read_note_body "$path")")
   state=$(note_announce_state "$id" "$path")
+  [ -f "$INBOX/handled/$id.note" ] && acknowledged=1
   if [ "$state" != true ] && [ "$path" = "$INBOX/handled/$id.note" ]; then
     state=acknowledged
   fi
   case "$state" in
     true)
       if [ "$json" -eq 1 ]; then
-        emit_note_json replay "$id" "" 1 1 "$path"
+        emit_note_json replay "$id" "" 1 1 "$path" "$acknowledged"
       else
         printf 'already-announced %s\n' "$id"
       fi
@@ -564,7 +582,7 @@ cmd_announce() {
 # The claim is above both the counter and every recorded reply, and the counter
 # is replaced by rename, so a torn or lost counter can never move it backwards.
 next_reply_seq() {
-  local seq_file="$REPLIES/.seq" seq recorded tmp
+  local seq_file="$REPLIES/.seq" seq recorded admission_recorded tmp
   seq=$(cat "$seq_file" 2>/dev/null || printf '0')
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;
@@ -578,6 +596,13 @@ next_reply_seq() {
     ''|*[!0-9]*) recorded=0 ;;
   esac
   [ "$recorded" -le "$seq" ] || seq=$recorded
+  admission_recorded=$(find "$INBOX" "$INBOX/handled" -maxdepth 1 -type f -name '*.note' -exec awk '
+    FNR == 1 { head = 1 }
+    /^--$/ { head = 0 }
+    head && /^admission_cursor=[0-9]+$/ { v = substr($0, 18) + 0; if (v > max) max = v }
+    END { print max + 0 }' {} + 2>/dev/null | sort -n | tail -n 1) || admission_recorded=0
+  case "$admission_recorded" in ''|*[!0-9]*) admission_recorded=0 ;; esac
+  [ "$admission_recorded" -le "$seq" ] || seq=$admission_recorded
   seq=$((seq + 1))
   tmp=$(mktemp "$REPLIES/.seq-XXXXXX") || return 1
   if ! printf '%s\n' "$seq" >"$tmp" || ! mv "$tmp" "$seq_file"; then
@@ -649,6 +674,35 @@ PY
   else
     printf 'replied %s\n' "$id"
   fi
+}
+
+cmd_admission() {
+  local operation=$1 status=0 seq=""
+  shift
+  [ -n "${FM_HOME_EXPLICIT:-}" ] || die "admission requires explicit FM_HOME"
+  [ "$STATE" = "$FM_HOME/state" ] && [ "$DATA" = "$FM_HOME/data" ] &&
+    [ "$CONFIG" = "$FM_HOME/config" ] || die "admission requires canonical home roots"
+  need_python
+  load_wake_lib || die "admission needs wake lock owner"
+  fm_lock_acquire_wait "$INBOX/.admission.lock" || die "could not lock admission"
+  if [ "$operation" = publish ]; then
+    mkdir -p "$REPLIES"
+    fm_lock_acquire_wait "$REPLY_SEQ_LOCK" || {
+      fm_lock_release "$INBOX/.admission.lock"
+      die "could not lock admission sequence"
+    }
+    seq=$(next_reply_seq) || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    if [ "$operation" = publish ]; then
+      python3 "$SELF_DIR/fm_inbox_admission.py" "$operation" "$@" "$seq" || status=$?
+    else
+      python3 "$SELF_DIR/fm_inbox_admission.py" "$operation" "$@" || status=$?
+    fi
+  fi
+  [ "$operation" != publish ] || fm_lock_release "$REPLY_SEQ_LOCK"
+  fm_lock_release "$INBOX/.admission.lock"
+  return "$status"
 }
 
 cmd_receipts() {
@@ -730,6 +784,10 @@ def list_notes(folder):
             "request_id": meta.get("request_id"),
             "announce_marker": meta.get("announce_marker") == "1",
             "body": body,
+            "allocation": json.loads(meta["workforce_allocation"]) if meta.get("workforce_allocation") else None,
+            "admission": json.loads(meta["admission"]) if meta.get("admission") else None,
+            "admission_state": "admitted" if meta.get("admission") else "prepared" if meta.get("admission_prepared") else "unadmitted",
+            "admission_cursor": meta.get("admission_cursor"),
             "path": str(path),
         })
     return notes
@@ -804,6 +862,11 @@ if after:
 
 replies, replies_omitted = bound_list(replies_all, replies_bound, all_replies)
 reply_cursor = replies[-1]["cursor"] if replies else (after or "")
+admissions = sorted([{"id": n["id"], "admission": n["admission"],
+                      "cursor": n["admission_cursor"]}
+                     for n in pending_all + handled_all if n.get("admission")],
+                    key=lambda n: n["cursor"])
+admission_cursor = admissions[-1]["cursor"] if admissions else ""
 
 omitted = []
 if pending_omitted:
@@ -837,6 +900,8 @@ json.dump({
     "handled": handled,
     "replies": replies,
     "reply_cursor": reply_cursor,
+    "admissions": admissions,
+    "admission_cursor": admission_cursor,
     "omitted": omitted,
 }, sys.stdout, separators=(",", ":"))
 sys.stdout.write("\n")
@@ -1117,7 +1182,9 @@ cmd_drain() {
   if [ "${1:-}" = "--ack" ]; then
     shift
     [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
+    load_wake_lib || die "ack needs wake lock owner"
     mkdir -p "$INBOX/handled"
+    fm_lock_acquire_wait "$INBOX/.admission.lock" || die "could not lock acknowledgement"
     local id
     for id in "$@"; do
       if [ -f "$INBOX/$id.note" ]; then
@@ -1127,6 +1194,7 @@ cmd_drain() {
         printf 'already-acked %s\n' "$id"
       fi
     done
+    fm_lock_release "$INBOX/.admission.lock"
     return 0
   fi
   cmd_list
@@ -1139,6 +1207,8 @@ case "${1:-}" in
   note)     shift; cmd_note "$@" ;;
   announce) shift; cmd_announce "$@" ;;
   reply)    shift; cmd_reply "$@" ;;
+  prepare-admission) shift; cmd_admission prepare "$@" ;;
+  publish-admission) shift; cmd_admission publish "$@" ;;
   receipts) shift; cmd_receipts "$@" ;;
   ready)    shift; cmd_ready "$@" ;;
   say)      shift; cmd_say "$@" ;;
