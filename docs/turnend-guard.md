@@ -303,6 +303,8 @@ The registrations in detail:
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
 In the default Codex mode, a true value lets the second stop finish after one forced continuation.
+Codex's foreground checkpoint must therefore continue in the same model turn while supervision is needed; the guard supplies a bounded recovery prompt, not an idle watcher owner.
+The [Codex protocol](supervision-protocols/codex.md) owns that continuation and its hosting limit.
 
 ### Claude cooperative mode
 

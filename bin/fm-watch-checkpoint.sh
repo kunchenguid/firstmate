@@ -16,6 +16,8 @@
 # "supervision-host:" line other than the park boundary passes through as a
 # wake; the boundary alone is the ordinary quiet checkpoint. On a home that
 # does not run the host nothing below changes.
+# Cancellation forwards to the owned bounded runner; the shared timeout
+# library owns process-group cleanup and signal exit codes.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,8 +62,11 @@ done
 
 case "$SECONDS_ARG" in
   ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
-  0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
+# Preserve decimal bounds with leading zeros when passing to fm_exec_timed,
+# whose positive-integer contract rejects unnormalised values.
+while [ "${SECONDS_ARG#0}" != "$SECONDS_ARG" ]; do SECONDS_ARG=${SECONDS_ARG#0}; done
+[ -n "$SECONDS_ARG" ] || { echo "error: --seconds must be greater than zero" >&2; exit 2; }
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
@@ -70,44 +75,37 @@ ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
 }
 trap 'rm -f "$OUT" "$ERR"' EXIT
 
-run_with_perl_timeout() {  # <seconds> <command...>
-  perl -e '
-    my $seconds = shift;
-    my $pid = fork;
-    die "fork failed\n" unless defined $pid;
-    if (!$pid) {
-      setpgrp(0, 0);
-      exec @ARGV;
-      die "exec failed: $!\n";
-    }
-    local $SIG{ALRM} = sub {
-      kill "TERM", -$pid;
-      my $grace = $ENV{FM_SIGNAL_GRACE} || 5;
-      local $SIG{ALRM} = sub {
-        kill "KILL", -$pid;
-        waitpid $pid, 0;
-        exit 124;
-      };
-      alarm $grace;
-      waitpid $pid, 0;
-      exit 124;
-    };
-    alarm $seconds;
-    waitpid $pid, 0;
-    alarm 0;
-    exit($? >> 8);
-  ' "$@"
-}
-
-run_bounded() {  # <seconds> <command...>
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$@"
-  else
-    run_with_perl_timeout "$@"
-  fi
-}
+# Use the shared bounded-command owner rather than a checkpoint-local timeout.
+# The subshell tracks its runner for signal forwarding; no child survives an
+# ordinary checkpoint cancellation. fm_exec_timed owns group termination,
+# escalation, owner-death handling and signal exit codes.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+run_bounded() (  # <seconds> <command...>
+  bound=$1
+  shift
+  runner_pid=
+  stop_runner() {
+    local status=$1
+    trap '' HUP INT TERM
+    if [ -n "$runner_pid" ]; then
+      kill -TERM "$runner_pid" 2>/dev/null || true
+      wait "$runner_pid" 2>/dev/null || true
+    fi
+    exit "$status"
+  }
+  trap 'stop_runner 129' HUP
+  trap 'stop_runner 130' INT
+  trap 'stop_runner 143' TERM
+  # Keep the runner outside the checkpoint's group: otherwise a tool group
+  # cancellation reaches it directly AND through stop_runner, interrupting
+  # the watcher's EXIT cleanup with a second TERM.
+  set -m
+  ( fm_exec_timed "$bound" "$(positive_or "${FM_SIGNAL_GRACE:-}" 5)" "$@" ) &
+  runner_pid=$!
+  set +m
+  wait "$runner_pid"
+)
 
 positive_or() {  # <value> <default>
   case "$1" in ''|0*|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac

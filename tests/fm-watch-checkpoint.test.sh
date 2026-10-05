@@ -90,6 +90,7 @@ make_host_home() {  # <name>
   mkdir -p "$home/root/bin"
   cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$home/root/bin/fm-timeout-lib.sh"
   cat > "$home/root/bin/fm-supervision-host.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'args=%s\nprimary=%s\npark=%s\nlimit=%s\n' "$*" "${FM_SUPERVISION_HOST_PRIMARY:-}" \
@@ -181,7 +182,7 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
   : > "$home/config/supervision-host"
   fakebin="$TMP_ROOT/host-real-bin"
   mkdir -p "$fakebin"
-  ln -s /bin/bash "$fakebin/codex"
+  ln -s "$(command -v bash)" "$fakebin/codex"
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$fakebin/codex" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
@@ -196,6 +197,143 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
   pass "checkpoint: the real host ends its park at the checkpoint bound as a quiet checkpoint"
 }
 
+# Exercise the supervisor's public path, including the Stop predicate between
+# cycles. These are shell lifecycle tests, not a claim of native idle rewake.
+test_repeated_wake_drain_ack_checkpoint_cycles() (
+  # shellcheck source=tests/wake-helpers.sh
+  . "$ROOT/tests/wake-helpers.sh"
+  local home cycle status drained seq generation
+  home=$(make_case repeated-cycles)
+  mkdir -p "$home/data" "$home/config" "$home/bin"
+  : > "$home/AGENTS.md"
+  printf 'checkpoint-lab\n' > "$home/.fm-secondmate-home"
+  export FM_HOME="$home" FM_ROOT_OVERRIDE="$home" PATH="$home/fakebin:$PATH"
+  export FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh"
+  export FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999
+  cat > "$home/state/cycle.check.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -f "$FM_HOME/fire-check" ]; then
+  rm "$FM_HOME/fire-check"
+  printf 'operator check result\n'
+fi
+SH
+  chmod 0700 "$home/state/cycle.check.sh"
+  "$ROOT/bin/fm-check-register.sh" cycle >/dev/null || fail 'cycle check registration failed'
+  for cycle in signal check stale; do
+    case "$cycle" in
+      signal) printf 'done: first operator wake\n' > "$home/state/demo.status" ;;
+      check) : > "$home/fire-check" ;;
+      stale)
+        export FM_FAKE_TMUX_WINDOW=test:fm-idle
+        printf 'idle prompt\n' > "$home/pane"
+        export FM_FAKE_TMUX_CAPTURE="$home/pane"
+        printf 'window=test:fm-idle\nkind=ship\nharness=codex\n' > "$home/state/idle.meta"
+        ;;
+    esac
+    status=0
+    "$CHECKPOINT" --seconds 20 > "$home/$cycle.out" 2> "$home/$cycle.err" || status=$?
+    expect_code 0 "$status" "$cycle checkpoint return: $(cat "$home/$cycle.out" "$home/$cycle.err")"
+    assert_contains "$(cat "$home/$cycle.out")" "$cycle:" "$cycle reason missing"
+    assert_absent "$home/state/.watch.lock/pid" 'returned checkpoint retained a lock'
+    status=0
+    printf '{"stop_hook_active":false}\n' | "$ROOT/bin/fm-turnend-guard.sh" > "$home/stop.out" 2> "$home/stop.err" || status=$?
+    expect_code 2 "$status" 'Stop must detect the gap after checkpoint return'
+    # The bounded follow-up is deliberately not an autonomous scheduler.
+    printf '{"stop_hook_active":true}\n' | "$ROOT/bin/fm-turnend-guard.sh" >/dev/null 2>&1 \
+      || fail 'Stop follow-up did not respect its bound'
+    "$ROOT/bin/fm-wake-drain.sh" > "$home/drain" 2> "$home/drain.err" || fail 'drain failed'
+    drained=$(cat "$home/drain")
+    assert_contains "$drained" "$(printf '\t%s\t' "$cycle")" 'wake disappeared before acknowledgement'
+    seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\).*$/\1/p' "$home/drain.err")
+    generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-]*\)$/\1/p' "$home/drain.err")
+    [ -n "$seq" ] && [ -n "$generation" ] || fail 'generation-bound acknowledgement absent'
+    append_wake "$home/state" check late-$cycle "check: late-$cycle" || fail 'late wake append failed'
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null 2>&1 \
+      || fail 'cycle acknowledgement failed'
+    assert_contains "$(cat "$home/state/.wake-queue")" "late-$cycle" 'acknowledgement swallowed a newer wake'
+    "$ROOT/bin/fm-wake-drain.sh" > "$home/late-drain" 2> "$home/late.err" || fail 'late drain failed'
+    assert_contains "$(cat "$home/late-drain")" "late-$cycle" 'late notification not delivered'
+    seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\).*$/\1/p' "$home/late.err")
+    generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-]*\)$/\1/p' "$home/late.err")
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null 2>&1 \
+      || fail 'late acknowledgement failed'
+    [ ! -s "$home/state/.wake-queue" ] || fail 'handled notification remained queued'
+  done
+  pass 'signal/check/stale cycles drain and acknowledge without losing later wakes; Stop honestly detects each foreground gap'
+)
+
+test_live_singleton_and_interrupted_checkpoint() (
+  local home pid holder duplicate_status status i identity
+  home=$(make_home interrupted)
+  fm_test_track_watcher_state "$home/state"
+  # This process group belongs only to this test checkpoint and its children.
+  set -m
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 30 > "$home/out" 2> "$home/err" &
+  pid=$!
+  set +m
+  i=0
+  holder=
+  while [ "$i" -lt 200 ]; do
+    holder=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$holder" ] && [ -s "$home/state/.last-watcher-beat" ] && break
+    kill -0 "$pid" 2>/dev/null || fail 'checkpoint died before owning a watcher'
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then
+    fail 'checkpoint never acquired a live singleton'
+  fi
+  identity=$(cat "$home/state/.watch.lock/pid-identity")
+  ps -o pid,ppid,pgid,stat,args -p "$pid,$holder" > "$home/before-interruption"
+  duplicate_status=0
+  FM_HOME="$home" "$CHECKPOINT" --seconds 5 > "$home/duplicate.out" 2> "$home/duplicate.err" || duplicate_status=$?
+  expect_code 1 "$duplicate_status" 'duplicate foreground checkpoint'
+  [ "$(cat "$home/state/.watch.lock/pid")" = "$holder" ] || fail 'duplicate replaced the original singleton'
+  [ "$(cat "$home/state/.watch.lock/pid-identity")" = "$identity" ] || fail 'duplicate changed the lock identity'
+  kill -0 "$holder" 2>/dev/null || fail 'duplicate stopped the rightful owner'
+  # A durable notification already queued when the tool is cancelled survives.
+  FM_HOME="$home" bash -c '. "$1"; fm_wake_append check interrupted "check: interrupted"' _ "$ROOT/bin/fm-wake-lib.sh" \
+    || fail 'could not queue notification before interruption'
+  kill -TERM -- "-$pid" || fail 'could not interrupt the owned checkpoint group'
+  status=0
+  wait "$pid" || status=$?
+  [ "$status" -ne 0 ] || fail 'interrupted checkpoint claimed success'
+  # The foreground shell may return before its owned runner finishes cleanup.
+  # Bound the actual process AND lock retirement rather than asserting timing.
+  for ((i=0; i<200; i++)); do
+    if ! kill -0 "$holder" 2>/dev/null && [ ! -e "$home/state/.watch.lock/pid" ]; then
+      break
+    fi
+    sleep 0.1
+  done
+  ps -o pid,ppid,pgid,stat,args -p "$pid,$holder" > "$home/after-interruption" || true
+  assert_absent "$home/state/.watch.lock/pid" 'interruption retained a watcher lock'
+  kill -0 "$holder" 2>/dev/null && fail 'interruption left the watcher alive'
+  assert_contains "$(cat "$home/state/.wake-queue")" 'check: interrupted' 'interruption consumed a durable notification'
+  # A fresh foreground call owns a real replacement, then expiry releases it.
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 3 > "$home/restart.out" 2> "$home/restart.err" || status=$?
+  case "$status" in 0|124) ;; *) fail 'replacement checkpoint failed' ;; esac
+  assert_absent "$home/state/.watch.lock/pid" 'replacement close retained a lock'
+  assert_contains "$(cat "$home/state/.wake-queue")" 'check: interrupted' 'replacement consumed an unhandled notification'
+  pass 'one foreground checkpoint owns the singleton; interruption and replacement preserve queued notifications'
+)
+
+test_decimal_bounds_keep_leading_zero_compatibility() {
+  local home status
+  home=$(make_home decimal-bounds)
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 01 > "$home/out" 2> "$home/err" || status=$?
+  expect_code 124 "$status" 'leading-zero positive checkpoint bound'
+  assert_contains "$(cat "$home/out")" 'within 1s' 'decimal bound was not normalized'
+  status=0
+  FM_HOME="$home" "$CHECKPOINT" --seconds 00 > "$home/out" 2> "$home/err" || status=$?
+  expect_code 2 "$status" 'all-zero bound must not run unbounded'
+  assert_absent "$home/state/.watch.lock/pid" 'invalid bound started a watcher'
+  pass 'decimal checkpoint bounds accept leading zeros and reject an unbounded all-zero value'
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
@@ -204,3 +342,7 @@ test_host_checkpoint_bounds_the_park_by_posture
 test_host_checkpoint_passes_a_handback_and_reports_a_stand_down
 test_host_checkpoint_needs_the_file_and_honors_off
 test_real_host_checkpoint_ends_quietly_at_its_bound
+
+test_repeated_wake_drain_ack_checkpoint_cycles
+test_live_singleton_and_interrupted_checkpoint
+test_decimal_bounds_keep_leading_zero_compatibility

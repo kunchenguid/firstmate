@@ -592,6 +592,27 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### Codex foreground checkpoint ownership
+
+On 2026-10-04, Linux with Bash 5.3.9 and Perl 5.42.0 exercised the foreground checkpoint and Stop predicate through their executable interfaces:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-watch-checkpoint.test.sh
+```
+
+Observed output included:
+
+```text
+ok - signal/check/stale cycles drain and acknowledge without losing later wakes; Stop honestly detects each foreground gap
+ok - one foreground checkpoint owns the singleton; interruption and replacement preserve queued notifications
+```
+
+Three consecutive wake cycles preserved a notification appended between drain and acknowledgement, and delivered it on the next drain.
+A duplicate checkpoint could not replace the live lock holder or its identity.
+Cancelling the checkpoint's process group retired both the owned watcher process and its lock within a bounded cleanup interval, and an unhandled durable notification survived cancellation and replacement.
+These shell lifecycle results do not prove native Codex idle rewake or a persistent owner after the model ends its turn; the [Codex protocol](../supervision-protocols/codex.md) owns that hosting limit.
+The [bounded-command library](../../bin/fm-timeout-lib.sh) owns the separate limits of owner-death detection and forcible termination.
+
 ## Supervision host
 
 This pre-flip evidence supports [supervision-host.md](../supervision-host.md)'s Claude engine, away-wake path, and failure direction; its no-file baseline describes the earlier opt-in release, not the current Claude default.

@@ -17,6 +17,8 @@ set -u
 . "$ROOT/bin/fm-supervision-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
+export FM_TEST_REAL_CAT
+FM_TEST_REAL_CAT=$(command -v cat)
 fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
@@ -1220,7 +1222,7 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
-  ln -s /bin/bash "$dir/fake-claude"
+  ln -s "$(command -v bash)" "$dir/fake-claude"
   # These cases drive the watcher arm, so the home opts out of the supervision
   # host a Claude home otherwise runs by default.
   mkdir -p "$dir/config"
@@ -1364,12 +1366,12 @@ test_hook_claude_mode_terminal_boundary_excludes_starting_owner() {
   cat > "$fakebin/cat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "$FM_TERMINAL_ROLE_PATH" ] \
-  && [ "$(/bin/cat "$1" 2>/dev/null || true)" = terminal-check ] \
+  && [ "$("$FM_TEST_REAL_CAT" "$1" 2>/dev/null || true)" = terminal-check ] \
   && (set -C; : > "$FM_TERMINAL_ONCE") 2>/dev/null; then
   printf 'ready\n' > "$FM_TERMINAL_READY"
   IFS= read -r _ < "$FM_TERMINAL_RELEASE"
 fi
-exec /bin/cat "$@"
+exec "$FM_TEST_REAL_CAT" "$@"
 SH
   chmod +x "$fakebin/cat"
   (
