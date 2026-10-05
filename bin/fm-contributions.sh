@@ -19,7 +19,8 @@
 # observation retries every read once as the logged-in gh account whose login
 # equals the repo owner, via gh auth token -u passed as GH_TOKEN to those reads
 # only; the active account never changes and no token is printed. With no such
-# account the URL stays unavailable as before.
+# account the URL stays unavailable as before. An owner-account observation
+# records can_merge false, because merges still run as the active account.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
