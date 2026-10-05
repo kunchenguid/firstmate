@@ -15,6 +15,11 @@
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
+# Reads use gh's active account. When it is refused (HTTP 403 or 404), the
+# observation retries every read once as the logged-in gh account whose login
+# equals the repo owner, via gh auth token -u passed as GH_TOKEN to those reads
+# only; the active account never changes and no token is printed. With no such
+# account the URL stays unavailable as before.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
@@ -207,8 +212,11 @@ forge() {
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
   [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
+  # The token rides the environment of this read only, never argv or output.
+  (
+    [ -z "${FORGE_TOKEN:-}" ] || export GH_TOKEN="$FORGE_TOKEN"
+    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
+  ) 2> "$forge_err" || rc=$?
   # A kill at the read bound or the deadline is budget refusal too; only the
   # forge's own nonzero exit is unavailable evidence.
   if [ "$rc" -eq 124 ]; then
@@ -231,6 +239,16 @@ wait_forges() { # background forge pids from one independent read wave
   return "$rc"
 }
 
+owner_token() { # repo-owner -> FORGE_TOKEN of the logged-in gh account with that login
+  local remaining
+  remaining=$((DEADLINE - $(date +%s)))
+  [ "$remaining" -gt 0 ] || return 1
+  [ "$remaining" -le 5 ] || remaining=5
+  FORGE_TOKEN=$(fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    gh auth token -u "$1" 2>/dev/null) || { FORGE_TOKEN=''; return 1; }
+  [ -n "$FORGE_TOKEN" ]
+}
+
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
@@ -238,7 +256,15 @@ observe() { # canonical GitHub URL -> normalized JSON
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   BUDGET_EXHAUSTED=0
-  forge api "$endpoint" > "$TMP/core.json" || return 1
+  FORGE_TOKEN=''
+  if ! forge api "$endpoint" > "$TMP/core.json"; then
+    # An active account that cannot see the repo gets one retry as the
+    # logged-in account named like the repo owner; the active account stays.
+    [ "$BUDGET_EXHAUSTED" -eq 0 ] && grep -Eq 'HTTP 40[34]' "$TMP/forge.err" \
+      && owner_token "${part%%/*}" || return 1
+    rm -f -- "$TMP/forge-unavailable"
+    forge api "$endpoint" > "$TMP/core.json" || return 1
+  fi
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
