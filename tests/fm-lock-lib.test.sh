@@ -145,6 +145,31 @@ EOF
   pass "lsof runs under a 60 s bound by default when timeout exists"
 }
 
+test_zero_override_falls_back_to_the_default_bound() {
+  local bin rc
+  bin=$(make_fakebin zero)
+  # Same recording timeout as above: the bound that lsof actually ran under is
+  # the observable, not the variable's value.
+  cat > "$bin/timeout" <<EOF
+#!/usr/bin/env bash
+while [ "\$1" = -k ]; do shift 2; done
+printf '%s\n' "\$1" >> '$TMP_ROOT/zero.bound'
+shift
+exec "\$@"
+EOF
+  chmod +x "$bin/timeout"
+  write_fake_lsof "$bin" 'exit 1'
+  rc=$(holder_rc "$bin" /some/lock "$TMP_ROOT/zero.err" FM_LOCK_LSOF_TIMEOUT=0)
+  expect_code 1 "$rc" "zero: the bare result must pass through the bound"
+  assert_equals "60" "$(cat "$TMP_ROOT/zero.bound")" \
+    "zero: FM_LOCK_LSOF_TIMEOUT=0 did not fall back to the 60 s bound"
+  assert_grep "fm-lock: ignoring FM_LOCK_LSOF_TIMEOUT='0' (not a positive integer); using the 60s default" \
+    "$TMP_ROOT/zero.err" "zero: the fallback was not logged"
+  assert_equals "1" "$(grep -c 'ignoring FM_LOCK_LSOF_TIMEOUT' "$TMP_ROOT/zero.err")" \
+    "zero: the fallback was not logged exactly once"
+  pass "FM_LOCK_LSOF_TIMEOUT=0 is not unbounded: lsof still runs under the 60 s default, and the fallback is logged once"
+}
+
 test_without_a_timeout_tool_the_bound_still_holds() {
   local bin rc started elapsed
   bin=$(make_fakebin bare)
@@ -170,4 +195,5 @@ test_lsof_error_returns_2_and_logs
 test_timed_out_lsof_returns_2_and_logs
 test_timed_out_lsof_is_a_live_holder_for_callers
 test_bound_is_requested_with_the_default_seconds
+test_zero_override_falls_back_to_the_default_bound
 test_without_a_timeout_tool_the_bound_still_holds

@@ -36,7 +36,16 @@ fm_lock_path_mtime() {
 # (15 s plus kill grace) up to four times per call, so an unbounded call can
 # hang a lock-staleness check for minutes. 60 s lets a normal call (0.2 s)
 # finish while bounding a stalled one. Overridable for tests.
-: "${FM_LOCK_LSOF_TIMEOUT:=60}"
+# Only a positive integer is accepted: fm_run_timed treats zero as no deadline,
+# and this library's contract requires a bound, so zero is not "unbounded" here
+# but an invalid value that falls back to the default like any other.
+case "${FM_LOCK_LSOF_TIMEOUT:-}" in
+  '') FM_LOCK_LSOF_TIMEOUT=60 ;;
+  0* | *[!0-9]*)
+    fm_lock_log "ignoring FM_LOCK_LSOF_TIMEOUT='$FM_LOCK_LSOF_TIMEOUT' (not a positive integer); using the 60s default"
+    FM_LOCK_LSOF_TIMEOUT=60
+    ;;
+esac
 
 # The bound itself is bin/fm-timeout-lib.sh's fm_run_timed, the repo's one
 # owner of bounded command execution; it reports exit 124 when the bound is hit
