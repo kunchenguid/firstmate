@@ -431,14 +431,16 @@ fm_session_lock_inspect_owner() {  # <state>
 # prints nothing at all. Rows match on the lock pid first, then on the recorded
 # session id. Vendor strings lose their control characters before printing, and
 # a stop command is printed only for a background row whose short id is a plain
-# token, because `claude stop` addresses background sessions only. Nothing here
+# token and whose listed pid is the lock pid, because `claude stop` addresses
+# background sessions only and a session-id-only match cannot promise that
+# ending the session frees the lock. Nothing here
 # ever suggests signalling a pid.
 
 # Print zero or more "lock holder:" lines describing live lock pid $1, whose
 # recorded session id is $2 (may be empty). Always returns 0.
 fm_session_lock_holder_lines() {  # <lock-pid> [<recorded-session-id>]
   local pid=$1 session=${2:-} seconds json row detail
-  local kind name status state id sid row_pid cwd
+  local kind name status state id sid row_pid
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
   fm_harness_pid_alive "$pid" || return 0
   [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 0
@@ -459,15 +461,15 @@ fm_session_lock_holder_lines() {  # <lock-pid> [<recorded-session-id>]
        + [ $rows[] | select($sid != "" and .sessionId == $sid) ]) as $hits
     | if ($hits | length) == 0 then "none"
       else $hits[0] | [ (.kind | clean), (.name | clean), (.status | clean),
-        (.state | clean), (.id | clean), (.sessionId | clean), (.pid | clean),
-        (.cwd | clean) ] | join("\u001f")
+        (.state | clean), (.id | clean), (.sessionId | clean), (.pid | clean) ]
+        | join("\u001f")
       end' 2>/dev/null) || return 0
   [ -n "$row" ] || return 0
   if [ "$row" = none ]; then
     printf 'lock holder: pid %s is a live Claude Code process, but claude agents lists no session with that pid or the recorded session id, so no session can be named or stopped from here; it may be a background helper process rather than a session, and the lock still counts as held\n' "$pid"
     return 0
   fi
-  IFS=$'\037' read -r kind name status state id sid row_pid cwd <<<"$row"
+  IFS=$'\037' read -r kind name status state id sid row_pid <<<"$row"
   [ -n "$kind" ] || kind=unknown-kind
   [ -n "$name" ] || name='(unnamed)'
   detail="status ${status:-unknown}"
@@ -476,13 +478,12 @@ fm_session_lock_holder_lines() {  # <lock-pid> [<recorded-session-id>]
     '' | *[!A-Za-z0-9_-]*) id= ;;
     *) detail="id $id, $detail" ;;
   esac
-  [ -z "$cwd" ] || detail="$detail, cwd $cwd"
   printf 'lock holder: Claude Code %s session "%s" (%s)\n' "$kind" "$name" "$detail"
   if [ "$row_pid" != "$pid" ]; then
     printf 'lock holder: matched by the recorded session id %s; that session is listed under pid %s, not the lock pid %s\n' \
       "$sid" "${row_pid:-unknown}" "$pid"
-  fi
-  if [ "$kind" = background ] && [ -n "$id" ]; then
+    printf 'lock holder: stopping or exiting that session may not free the lock, because the lock pid %s is not its listed process; the lock still counts as held\n' "$pid"
+  elif [ "$kind" = background ] && [ -n "$id" ]; then
     printf 'lock holder: to end that session and free the lock, run: claude stop %s (its conversation is kept; claude attach %s resumes it)\n' "$id" "$id"
   elif [ "$kind" = interactive ]; then
     printf 'lock holder: to free the lock, exit that interactive session from its own terminal\n'
