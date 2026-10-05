@@ -238,6 +238,107 @@ make_originless_case() {  # <name> <id>
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
 }
 
+test_graphify_out_links_only_when_worktree_flag_is_present() {
+  local rec id out status source_graph linked_graph
+  id='pool-graphify-off-r1'
+  rec=$(make_originless_case graphify-off "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  printf '%s\n' '{"nodes":[]}' > "$PROJECT_DIR/graphify-out/graph.json"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed with graphify-out present but config/graphify-worktree absent"$'\n'"$out"
+  [ ! -e "$POOL_DIR/graphify-out" ] && [ ! -L "$POOL_DIR/graphify-out" ] \
+    || fail "spawn created a graphify-out entry without the opt-in flag"
+  assert_no_grep '^graphify_link=' "$HOME_DIR/state/$id.meta" \
+    "spawn recorded graph link ownership without creating a link"
+
+  id='pool-graphify-on-r1'
+  rec=$(make_originless_case graphify-on "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  printf '%s\n' '{"nodes":[]}' > "$PROJECT_DIR/graphify-out/graph.json"
+  : > "$HOME_DIR/config/graphify-worktree"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should remain successful when graphify worktree linking is enabled"$'\n'"$out"
+  [ -L "$POOL_DIR/graphify-out" ] || fail "spawn did not create a graphify-out symlink in the task worktree"
+  source_graph=$(cd "$PROJECT_DIR/graphify-out" && pwd -P)
+  linked_graph=$(readlink "$POOL_DIR/graphify-out")
+  [ "$linked_graph" = "$source_graph" ] || fail "graphify-out link was not absolute: $linked_graph"
+  [ -f "$POOL_DIR/graphify-out/graph.json" ] || fail "task worktree graphify-out link does not reach the source graph"
+  [ "$(grep -c '^graphify_link=1$' "$HOME_DIR/state/$id.meta")" = 1 ] \
+    || fail "spawn did not record exactly one graphify_link=1 ownership marker"
+  pass "spawn links graphify-out into task worktrees only when config/graphify-worktree is present"
+}
+
+test_aborted_spawn_removes_its_graphify_link() {
+  local rec id out status
+  id='pool-graphify-abort-r1'
+  rec=$(make_originless_case graphify-abort "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  : > "$HOME_DIR/config/graphify-worktree"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+
+  FM_TEST_CLAUDE_CONFIG_DIR=relative out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a deliberately invalid Claude config path"
+  assert_contains "$out" "could not pre-register Claude workspace trust" \
+    "the graphify abort fixture did not reach the post-link trust failure"
+  [ ! -e "$POOL_DIR/graphify-out" ] && [ ! -L "$POOL_DIR/graphify-out" ] \
+    || fail "an aborted spawn left behind the graphify-out link it created"
+  pass "an aborted spawn removes the graphify-out link it created"
+}
+
+test_committed_interrupted_spawn_preserves_its_graphify_link() {
+  local rec id out status real_tasks
+  id='pool-graphify-committed-signal-r1'
+  rec=$(make_originless_case graphify-committed-signal "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  printf '%s\n' '{"nodes":[]}' > "$PROJECT_DIR/graphify-out/graph.json"
+  : > "$HOME_DIR/config/graphify-worktree"
+  : > "$HOME_DIR/data/backlog.md"
+  real_tasks=$(command -v tasks-axi)
+  "$real_tasks" add "$id" "graphify committed signal fixture" --kind scout \
+    --file "$HOME_DIR/data/backlog.md" >/dev/null
+  cat > "$FAKEBIN_DIR/tasks-axi" <<SH
+#!/usr/bin/env bash
+"$real_tasks" "\$@"
+rc=\$?
+if [ "\${1:-}" = start ] && [ "\$rc" -eq 0 ]; then
+  ancestor=\$PPID
+  attempts=0
+  while [ "\$ancestor" -gt 1 ] 2>/dev/null && [ "\$attempts" -lt 8 ]; do
+    command_line=\$(ps -o command= -p "\$ancestor" 2>/dev/null || true)
+    case "\$command_line" in
+      *fm-spawn.sh*) kill -TERM "\$ancestor"; break ;;
+    esac
+    ancestor=\$(ps -o ppid= -p "\$ancestor" 2>/dev/null | tr -d ' ')
+    attempts=\$((attempts + 1))
+  done
+fi
+exit "\$rc"
+SH
+  chmod +x "$FAKEBIN_DIR/tasks-axi"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 143 "$status" "spawn should report a deferred TERM after committing the task"$'\n'"$out"
+  assert_contains "$out" "verified preserved" \
+    "the interrupted spawn did not verify its committed task state"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "the interrupted committed spawn did not preserve its task record"
+  [ -L "$POOL_DIR/graphify-out" ] \
+    || fail "the interrupted committed spawn removed its live task's graphify-out link"
+  [ -f "$POOL_DIR/graphify-out/graph.json" ] \
+    || fail "the preserved graphify-out link no longer reaches the source graph"
+  pass "an interrupted committed spawn preserves its graphify-out link"
+}
+
 test_originless_pool_launches_without_a_freshness_fetch() {
   local rec id out status before
   id='pool-originless-r6'
@@ -749,6 +850,9 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
+test_graphify_out_links_only_when_worktree_flag_is_present
+test_aborted_spawn_removes_its_graphify_link
+test_committed_interrupted_spawn_preserves_its_graphify_link
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base

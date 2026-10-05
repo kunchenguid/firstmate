@@ -457,6 +457,7 @@
 # active without a markdown file; any active automatic backend without
 # compatible tasks-axi refuses before creating lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+#   When config/graphify-worktree is present and the source clone has graphify-out/, a fresh or relaunch task worktree receives an absolute symlink to it before launch, recorded as graphify_link=1 in state/<id>.meta so teardown removes only that link; an existing entry is preserved and link failures warn without blocking the spawn.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -1205,6 +1206,9 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_GRAPHIFY_LINK_CREATED=0
+SPAWN_GRAPHIFY_LINK_PATH=
+SPAWN_GRAPHIFY_LINK_TARGET=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1245,6 +1249,15 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ "$SPAWN_GRAPHIFY_LINK_CREATED" = 1 ]; then
+    SPAWN_GRAPHIFY_LINK_CREATED=0
+    if [ -L "$SPAWN_GRAPHIFY_LINK_PATH" ] &&
+      [ "$(readlink "$SPAWN_GRAPHIFY_LINK_PATH" 2>/dev/null || true)" = "$SPAWN_GRAPHIFY_LINK_TARGET" ]; then
+      if ! rm -f -- "$SPAWN_GRAPHIFY_LINK_PATH"; then
+        echo "warning: could not remove graphify-out link after aborted spawn of $ID" >&2
+      fi
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -3390,6 +3403,37 @@ freshen_spawn_worktree_base() { # <worktree>
   fi
 }
 
+graphify_worktree_enabled() {
+  [ -e "$CONFIG/graphify-worktree" ] || [ -L "$CONFIG/graphify-worktree" ]
+}
+
+# Give opted-in task workers the source clone's watcher-maintained graph without
+# copying or rebuilding it. The source is optional, and every failure after its
+# presence check is deliberately reduced to a warning so graph availability can
+# never block a spawn.
+link_spawn_graphify_out() { # <source-clone> <worktree>
+  local source_clone worktree source_graph target graph_real
+  source_clone=$1
+  worktree=$2
+  source_graph="$source_clone/graphify-out"
+  target="$worktree/graphify-out"
+  [ -d "$source_graph" ] || return 0
+  [ -e "$target" ] || [ -L "$target" ] || {
+    graph_real=$(CDPATH='' cd -- "$source_graph" 2>/dev/null && pwd -P) || {
+      echo "warning: could not resolve graphify-out in source clone '$source_clone'; continuing without a worktree link" >&2
+      return 0
+    }
+    if ln -s "$graph_real" "$target"; then
+      SPAWN_GRAPHIFY_LINK_CREATED=1
+      SPAWN_GRAPHIFY_LINK_PATH=$target
+      SPAWN_GRAPHIFY_LINK_TARGET=$graph_real
+    else
+      echo "warning: could not link graphify-out from '$graph_real' into worktree '$worktree'; continuing without the graph link" >&2
+    fi
+  }
+  return 0
+}
+
 herdr_projection_meta_field_exact() { # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -4341,6 +4385,12 @@ fi
 spawn_enter_recorded_worktree
 spawn_assert_agent_worktree
 
+# Link only after a ship or scout worktree is known and refreshed, so every
+# backend and pool shape reaches the same pre-launch handoff point.
+if [ "$KIND" != secondmate ] && graphify_worktree_enabled; then
+  link_spawn_graphify_out "$PROJ_ABS" "$WT"
+fi
+
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
 # created below. The dialog gates the pane before the brief is ever read, and it
@@ -4890,7 +4940,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx graphify_link", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4942,6 +4992,10 @@ preserve_relaunch_meta() {
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
+  fi
+  if [ "$SPAWN_GRAPHIFY_LINK_CREATED" = 1 ] ||
+    { [ "$RELAUNCH" -eq 1 ] && [ "$(fm_meta_get "$RELAUNCH_META" graphify_link)" = 1 ]; }; then
+    echo "graphify_link=1"
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
@@ -5487,6 +5541,7 @@ trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
+SPAWN_GRAPHIFY_LINK_CREATED=0
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
   HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;
