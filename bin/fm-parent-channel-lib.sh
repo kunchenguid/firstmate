@@ -16,7 +16,10 @@
 # line is appended to it. The publishers are:
 #   - bin/fm-inactive-reconcile.sh   a direct child's terminal done or failed
 #                                    ledger line, on every watcher poll, plus
-#                                    the silent-ledger inactive-outcome fallback
+#                                    the silent-ledger inactive-outcome fallback,
+#                                    and a child waiting on an open decision
+#   - bin/fm-watch.sh                a child decision still unanswered at its
+#                                    second age re-raise
 #   - bin/fm-pr-check.sh             a registered PR-ready line carrying the
 #                                    canonical URL
 #   - bin/fm-captain-hold.sh         a task held for the captain and its answer

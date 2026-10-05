@@ -4504,7 +4504,25 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_teardown_leaves_no_open_decision_for_its_task() {
+  local case_dir
+  case_dir=$(make_case retired-decisions)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' 'needs-decision [key=publication]: approve publication' > "$case_dir/state/task-x1.status"
+  printf '%s\n' 'needs-decision [key=other]: unrelated task' > "$case_dir/state/task-y2.status"
+  run_teardown "$case_dir" >/dev/null || fail "retired-decisions: teardown failed"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-wake-drain.sh" --list-open-decisions > "$case_dir/open.out" \
+    || fail "retired-decisions: full decision list failed"
+  ! grep -F 'task-x1' "$case_dir/open.out" >/dev/null \
+    || fail "retired-decisions: teardown left its task's decision open: $(cat "$case_dir/open.out")"
+  grep -F 'task-y2 [key=other]' "$case_dir/open.out" >/dev/null \
+    || fail "retired-decisions: teardown disturbed another task's decision"
+  pass "teardown leaves no open decision behind for its own task"
+}
+
 test_teardown_closes_the_backlog_item_itself
+test_teardown_leaves_no_open_decision_for_its_task
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses

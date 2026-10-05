@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# Behavioral coverage for aged keyed decisions in the ordinary and secondmate watcher homes.
+set -u
+
+# shellcheck source=tests/wake-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+
+WATCH="$ROOT/bin/fm-watch.sh"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
+TMP_ROOT=$(fm_test_tmproot fm-decision-age-tests)
+
+watch_bg() { # <state> <fakebin> <out> [home]
+  local state=$1 fakebin=$2 out=$3 home=${4:-}
+  PATH="$fakebin:$PATH" FM_HOME="${home:-$ROOT}" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    FM_DECISION_AGE_SECS=2 "$WATCH" > "$out" &
+}
+
+ack_wake() { # <state>
+  local state=$1 err="$1/ack.err" seq generation
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$seq" ] && [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
+}
+
+test_rewake_dedup_and_resolution() {
+  local dir state fakebin out pid now
+  dir=$(make_case rewake); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  now=$(date +%s)
+  printf 'needs-decision [key=publication] [at=%s]: approve publication\n' "$((now - 20))" > "$state/docs.status"
+  printf 'kind=ship\n' > "$state/docs.meta"
+  prime_status_seen "$state" "$state/docs.status"
+  watch_bg "$state" "$fakebin" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "aged decision did not wake"
+  grep -F 'decision unanswered' "$out" | grep -F 'docs publication' >/dev/null \
+    || fail "aged decision wake omitted task and key"
+  [ "$(grep -c 'decision-age:' "$state/.wake-queue")" = 1 ] || fail "first age wake was duplicated"
+
+  # An unacknowledged row may trigger the existing rearm-resurface wake, but it
+  # must not generate another decision row for the same key and generation.
+  sleep 2
+  watch_bg "$state" "$fakebin" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "queued wake was not resurfaced"
+  [ "$(grep -c 'decision-age:' "$state/.wake-queue")" = 1 ] || fail "queued decision duplicated its row"
+
+  ack_wake "$state" || fail "first age wake could not be acknowledged"
+  watch_bg "$state" "$fakebin" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "unanswered decision did not wake after backoff: out=$(cat "$out"); markers=$(cat "$state"/.decision-age-* 2>/dev/null); queue=$(cat "$state/.wake-queue" 2>/dev/null)"
+  [ "$(grep -c 'decision-age:' "$state/.wake-queue")" = 1 ] || fail "second age wake was duplicated"
+  ack_wake "$state" || fail "second age wake could not be acknowledged"
+  printf 'resolved [key=publication] [at=%s]: approved\n' "$(date +%s)" >> "$state/docs.status"
+  prime_status_seen "$state" "$state/docs.status"
+  watch_bg "$state" "$fakebin" "$out"; pid=$!
+  sleep 3
+  kill -0 "$pid" 2>/dev/null || fail "resolved decision unexpectedly woke"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  printf 'spawn_gen=new-run\n' >> "$state/docs.meta"
+  printf 'needs-decision [key=publication] [at=%s]: new run needs approval\n' "$(( $(date +%s) - 20 ))" >> "$state/docs.status"
+  prime_status_seen "$state" "$state/docs.status"
+  watch_bg "$state" "$fakebin" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "new generation did not cause a wake"
+  if grep -F 'check: rearm-resurface' "$out" >/dev/null; then
+    ack_wake "$state" || fail "rearm resurface could not be acknowledged"
+    watch_bg "$state" "$fakebin" "$out"; pid=$!
+    wait_for_exit "$pid" 100 || fail "a new generation reused the old decision throttle"
+  fi
+  grep -F 'decision unanswered' "$out" | grep -F 'docs publication' >/dev/null \
+    || fail "new generation did not receive its own wake: $(cat "$out")"
+  pass "aged decisions re-wake with backoff, deduplicate, close, and reset for a new generation"
+}
+
+test_secondmate_child_uses_own_queue() {
+  local dir mate state fakebin out pid now
+  dir=$(make_case secondmate-age); mate="$dir/mate"; state="$mate/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  mkdir -p "$mate"/{state,data,config,projects}
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  now=$(date +%s)
+  printf 'needs-decision [key=child-question] [at=%s]: answer child\n' "$((now - 20))" > "$state/child.status"
+  printf 'kind=ship\n' > "$state/child.meta"
+  prime_status_seen "$state" "$state/child.status"
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  wait_for_exit "$pid" 100 || fail "secondmate child decision did not wake its own home"
+  grep -F 'decision unanswered' "$state/.wake-queue" | grep -F 'child child-question' >/dev/null \
+    || fail "secondmate child decision did not reach its own queue"
+  [ ! -e "$dir/state/.wake-queue" ] || fail "secondmate child bypassed its own home"
+  pass "a secondmate child decision wakes the secondmate home"
+}
+
+test_torn_down_status_does_not_wake() {
+  local dir state fakebin out pid now
+  dir=$(make_case torn-down); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  now=$(date +%s)
+  printf 'needs-decision [key=old-question] [at=%s]: stale status\n' "$((now - 20))" > "$state/old.status"
+  prime_status_seen "$state" "$state/old.status"
+  watch_bg "$state" "$fakebin" "$out"; pid=$!
+  sleep 3
+  kill -0 "$pid" 2>/dev/null || fail "torn-down status unexpectedly woke the watcher"
+  ! grep -F 'decision-age:' "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "torn-down status entered the age queue"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "a torn-down task's stale decision does not flood the age queue"
+}
+
+test_secondmate_second_reraise_escalates_to_parent_once() {
+  local dir mate state fakebin out pid now channel escalated_age real_mv
+  dir=$(make_case secondmate-escalation); mate="$dir/mate"; state="$mate/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  channel="$dir/parent/state/mate.status"
+  mkdir -p "$mate"/{state,data,config,projects} "$dir/parent/state"
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/parent" > "$mate/.fm-secondmate-parent"
+  now=$(date +%s)
+  printf 'needs-decision [key=dlp-clean] [at=%s]: clean behind active run?\n' "$((now - 20))" > "$state/docs.status"
+  printf 'kind=ship\n' > "$state/docs.meta"
+  prime_status_seen "$state" "$state/docs.status"
+
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  wait_for_exit "$pid" 100 || fail "first re-raise did not wake the secondmate"
+  ! grep -F 'decision unanswered' "$channel" >/dev/null 2>&1 \
+    || fail "the first re-raise escalated to the parent early"
+  ack_wake "$state" || fail "first re-raise could not be acknowledged"
+
+  # The second re-raise is due threshold plus twice the threshold after the
+  # opener (45 minutes at the 900s default); one threshold later is too early.
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  sleep 1
+  kill -0 "$pid" 2>/dev/null || fail "the second re-raise fired after only one threshold of backoff"
+  ! grep -F 'decision unanswered' "$channel" >/dev/null 2>&1 \
+    || fail "the parent escalation fired before the second re-raise"
+  wait_for_exit "$pid" 100 || fail "second re-raise did not wake the secondmate"
+  [ "$(grep -c 'decision unanswered' "$channel" 2>/dev/null)" = 1 ] \
+    || fail "second re-raise did not escalate exactly once: $(cat "$channel" 2>/dev/null)"
+  grep -E '^needs-decision \[key=decision-unanswered-[0-9a-f]+\].*: decision unanswered [0-9]+s: docs dlp-clean$' "$channel" >/dev/null \
+    || fail "parent escalation line lost its key, age, task, or decision key: $(cat "$channel")"
+  escalated_age=$(sed -n 's/.*: decision unanswered \([0-9][0-9]*\)s: docs dlp-clean$/\1/p' "$channel")
+  [ "${escalated_age:-0}" -ge 24 ] \
+    || fail "the parent escalation reported age ${escalated_age:-none}s, before opener age plus three thresholds"
+  ack_wake "$state" || fail "second re-raise could not be acknowledged"
+
+  # A status log whose open-decision cursor cannot be persisted is missing
+  # from that tick's open set; its escalation must not be closed on that basis.
+  real_mv=$(command -v mv)
+  # shellcheck disable=SC2016 # The fake mv expands its own arguments.
+  printf '#!/usr/bin/env bash\ncase "${*: -1}" in */.docs.open-decisions-cursor) exit 1 ;; esac\nexec %s "$@"\n' "$real_mv" > "$fakebin/mv"
+  chmod +x "$fakebin/mv"
+  printf 'working [at=%s]: still waiting on the answer\n' "$(date +%s)" >> "$state/docs.status"
+  PATH="$fakebin:$PATH" prime_status_seen "$state" "$state/docs.status"
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  sleep 3
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$fakebin/mv"
+  grep -F 'decision-age: keeping .decision-age-' "$state/.watch-triage.log" >/dev/null \
+    || fail "the cursor persistence failure did not reach the decision-age tick: $(cat "$out")"
+  ! grep -F 'resolved [key=decision-unanswered-' "$channel" >/dev/null \
+    || fail "an incomplete fold closed the parent escalation of a still-open decision"
+  ls "$state"/.decision-age-* >/dev/null 2>&1 || fail "an incomplete fold removed a live age marker"
+
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  wait_for_exit "$pid" 150 || fail "third re-raise did not wake the secondmate"
+  [ "$(grep -c 'decision unanswered' "$channel")" = 1 ] || fail "a later re-raise duplicated the parent escalation"
+  ack_wake "$state" || fail "third re-raise could not be acknowledged"
+
+  # An unrelated task whose open-decision cursor cannot be persisted must not
+  # hold the answered child's parent escalation open.
+  # shellcheck disable=SC2016 # The fake mv expands its own arguments.
+  printf '#!/usr/bin/env bash\ncase "${*: -1}" in */.other.open-decisions-cursor) exit 1 ;; esac\nexec %s "$@"\n' "$real_mv" > "$fakebin/mv"
+  chmod +x "$fakebin/mv"
+  printf 'kind=ship\n' > "$state/other.meta"
+  printf 'needs-decision [key=fresh] [at=%s]: not yet aged\n' "$(( $(date +%s) + 3600 ))" > "$state/other.status"
+  PATH="$fakebin:$PATH" prime_status_seen "$state" "$state/other.status"
+  printf 'resolved [key=dlp-clean] [at=%s]: yes, clean it\n' "$(date +%s)" >> "$state/docs.status"
+  PATH="$fakebin:$PATH" prime_status_seen "$state" "$state/docs.status"
+  sleep 8
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  sleep 3
+  kill -0 "$pid" 2>/dev/null || fail "a resolved decision still woke the secondmate"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$(grep -c 'decision unanswered' "$channel")" = 1 ] || fail "a resolved decision escalated again"
+  ! ls "$state"/.decision-age-* >/dev/null 2>&1 || fail "the resolved decision kept its age marker"
+  [ "$(grep -c '^resolved \[key=decision-unanswered-' "$channel")" = 1 ] \
+    || fail "the parent escalation was not closed exactly once beside an unrelated failing fold: $(cat "$channel")"
+  [ -z "$(bash -c '. "$1" && status_open_decisions "$2" secondmate' _ "$ROOT/bin/fm-classify-lib.sh" "$channel")" ] \
+    || fail "the parent still holds an open decision after the child's was answered: $(cat "$channel")"
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  sleep 3
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$fakebin/mv"
+  [ "$(grep -c '^resolved \[key=decision-unanswered-' "$channel")" = 1 ] \
+    || fail "the parent escalation closure was duplicated"
+  pass "the second unanswered re-raise escalates to the parent once and resolution closes it there once"
+}
+
+test_unreadable_marker_does_not_stop_supervision() {
+  local dir state fakebin out pid now marker
+  dir=$(make_case marker-symlink); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  now=$(date +%s)
+  printf 'needs-decision [key=a] [at=%s]: first\n' "$((now - 20))" > "$state/one.status"
+  printf 'needs-decision [key=b] [at=%s]: second\n' "$((now - 20))" > "$state/two.status"
+  printf 'kind=ship\n' > "$state/one.meta"
+  printf 'kind=ship\n' > "$state/two.meta"
+  prime_status_seen "$state" "$state/one.status"
+  prime_status_seen "$state" "$state/two.status"
+  marker="$state/.decision-age-$(printf '%s' 'one|a' | { if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi; })"
+  ln -s "$dir/elsewhere" "$marker"
+  watch_bg "$state" "$fakebin" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "a bad marker on one key stopped the other key's wake"
+  grep -F 'decision unanswered' "$out" | grep -F 'two b' >/dev/null \
+    || fail "the healthy key was not re-raised: $(cat "$out")"
+  ! grep -F 'decision-age scan failed' "$out" >/dev/null || fail "a per-key marker failure killed the cycle"
+  pass "a bad age marker skips only its own key"
+}
+
+test_rewake_dedup_and_resolution
+test_secondmate_child_uses_own_queue
+test_secondmate_second_reraise_escalates_to_parent_once
+test_unreadable_marker_does_not_stop_supervision
+test_torn_down_status_does_not_wake

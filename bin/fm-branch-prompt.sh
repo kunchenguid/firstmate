@@ -70,7 +70,7 @@ Claim the task's lease and run `bin/fm-teardown.sh <task>` with no flags: the sc
 Report the cleanup in that event's outcome with the PR's URL.
 
 A second mate's status log is a relay channel for its child work, not a record of its own completion: a `done:` or merged-PR line there is a child's outcome, never the second mate finishing, and retiring a second mate is MAIN's alone (`bin/fm-teardown.sh` refuses you).
-Report a second mate's signal wake from the status lines that wake newly presents; an older entry under OPEN DECISIONS is context, not news, unless a new line carries its key.
+Report a second mate's signal wake from the status lines that wake newly presents; an older OPEN DECISIONS entry marked actionable because its decision age passed the configured threshold needs a current-state check and an answer or escalation even without a new status line.
 A second mate's stale wake is a liveness event: report it even when it presents no new status lines.
 
 # Verdict: routine or captain

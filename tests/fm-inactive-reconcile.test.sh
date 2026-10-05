@@ -1076,4 +1076,50 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 
+test_open_decision_prevents_inactive_terminal_outcome() {
+  local now err
+  make_world open-decision; write_child "$MAIN" child 'done: unrelated milestone'
+  now=$(date +%s)
+  printf 'needs-decision [key=publication] [at=%s]: approve publication\n' "$((now - 120))" >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  : > "$MAIN/state/.wake-queue"
+  err="$WORLD/decision.err"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup 2> "$err"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "open decision was reported as terminal"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "open decision created a terminal receipt"
+  grep -F 'waiting on decision publication for ' "$err" >/dev/null \
+    || fail "inactive reconciliation did not explain the decision wait"
+  pass "an open keyed decision prevents an inactive terminal report"
+}
+test_open_decision_prevents_inactive_terminal_outcome
+
+test_secondmate_decision_wait_reaches_parent_once() {
+  local now
+  make_world open-decision-mate; bind_secondmate local
+  write_child "$MATE" child 'working: drafting docs'
+  now=$(date +%s)
+  printf 'needs-decision [key=publication] [at=%s]: approve publication\n' "$((now - 120))" >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup 2>/dev/null
+  [ "$(grep -c 'waiting on decision publication for ' "$MAIN/state/mate.status" 2>/dev/null)" = 1 ] \
+    || fail "decision wait did not reach the parent channel: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  grep -F 'blocked [key=decision-waiting-' "$MAIN/state/mate.status" | grep -F 'child=child' >/dev/null \
+    || fail "parent decision-wait line lost its child or blocked verb"
+  grep -F 'inactive terminal' "$MAIN/state/mate.status" >/dev/null \
+    && fail "open decision was reported to the parent as an inactive terminal outcome"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup 2>/dev/null
+  [ "$(grep -c 'waiting on decision publication for ' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "decision wait was published to the parent twice"
+  printf 'resolved [key=publication] [at=%s]: approved\n' "$(date +%s)" >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='working' run_reconcile "$MATE" 2>/dev/null
+  FM_FAKE_CREW_STATE='working' run_reconcile "$MATE" 2>/dev/null
+  [ "$(grep -c '^resolved \[key=decision-waiting-' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the parent decision wait was not closed exactly once: $(cat "$MAIN/state/mate.status")"
+  [ -z "$(bash -c '. "$1" && status_open_decisions "$2" secondmate' _ "$ROOT/bin/fm-classify-lib.sh" "$MAIN/state/mate.status")" ] \
+    || fail "the parent still holds the answered decision wait open"
+  pass "a secondmate child's decision wait reaches the parent once and closes there once when answered"
+}
+test_secondmate_decision_wait_reaches_parent_once
+
 echo "all inactive reconciliation tests passed"
