@@ -200,6 +200,20 @@ test_workflow_dispatch_gate_missing_script_degrades_and_budget_is_optional() {
   pass "fm-spawn degrades without the workflow gate and accepts a brief without a token budget"
 }
 
+test_captain_reminder_failure_does_not_block_spawn() {
+  local rec id out status
+  id=settle-reminder-fail-z6
+  rec=$(make_settle_case settle-reminder-fail "$id" 0)
+  read_settle_record "$rec"
+  mkdir -p "$HOME_DIR/data/earlier-task" "$HOME_DIR/data/captain-reminders.jsonl"
+  cp "$HOME_DIR/data/$id/brief.md" "$HOME_DIR/data/earlier-task/brief.md"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "an unrecordable captain reminder must not refuse the spawn"$'\n'"$out"
+  assert_contains "$out" 'could not record repeated captain instruction' "failure must print a notice"
+  pass "fm-spawn continues when the captain reminder cannot be recorded"
+}
+
 # make_primary_case <name> <id> <stale_reads> builds the linked-home shape: the
 # spawning project is itself a LINKED worktree of the repository, and the path
 # the pane transiently reports is that repository's PRIMARY checkout. `treehouse
@@ -271,6 +285,7 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_workflow_dispatch_gate_refuses_before_allocating_a_worktree
 test_workflow_dispatch_gate_missing_script_degrades_and_budget_is_optional
+test_captain_reminder_failure_does_not_block_spawn
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 

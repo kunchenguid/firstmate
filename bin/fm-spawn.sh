@@ -3117,10 +3117,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     exit 1
   fi
   if [ "$KIND" = ship ]; then
-    "$FM_ROOT/bin/fm-captain-reminder.sh" "$ID" "$BRIEF" "$DATA" "$STATE" || {
-      echo "error: could not record repeated captain instruction for $ID" >&2
-      exit 1
-    }
+    "$FM_ROOT/bin/fm-captain-reminder.sh" "$ID" "$BRIEF" "$DATA" "$STATE" || \
+      echo "notice: could not record repeated captain instruction for $ID; continuing the spawn" >&2
   fi
   if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ] && { [ "${FM_TEST_SEAM:-0}" != 1 ] || [ "${FM_TEST_WORKFLOW_GATE:-0}" = 1 ]; }; then
     workflow_gates="$FM_HOME/projects/workflow/scripts/gates.py"
