@@ -6,6 +6,115 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Treehouse slot identity across local homes
+
+Verified on 2026-09-30 with macOS 26.5.2, Bash 3.2.57, Git 2.50.1, and Treehouse v2.1.0.
+The installed pin was downloaded and checksum-verified with `bin/fm-install-treehouse.sh <disposable-tool-directory>`; the [official release](https://github.com/kunchenguid/treehouse/releases/tag/v2.1.0) is dated 2026-07-20.
+The ownership protocol remains in [`bin/fm-wake-lib.sh`](../../bin/fm-wake-lib.sh), and the guarded recovery procedure is in [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header.
+
+The executable fixtures use independent local homes and clones of one disposable remote, a failed return followed by slot reassignment, live disposable processes, and canonical and symlink paths.
+The optional real-Treehouse case reproduced shared allocation across those clones while the allocated worktree retained the first clone's Git common directory.
+Treehouse v2.1.0 resolves explicit returns from the slot path itself, so the real-tool check does not claim that a foreign Git common directory alone reproduces an unmanaged return.
+The portable failure fixture covers that cleanup failure independently.
+
+A pool root reached through a symlink does reproduce it, verified on 2026-10-01 with Treehouse v2.1.0.
+Treehouse registers the slot under the symlink spelling and matches a return path as a string, so `treehouse return --force <physical path>` answers `is not managed by treehouse` while the same call with the registered spelling returns the slot, including a slot that is already available.
+`fm_treehouse_return_preflight` matches the recorded physical path against the pool's registered paths and returns by the registered spelling.
+The portable case covers a forced scout cleanup and a clean landed ship cleanup whose records hold the physical path.
+
+```sh
+bash tests/fm-spawn-pool-base-freshen.test.sh
+Treehouse v2.1.0 alias root: physical-path return unmanaged; registered spelling returned
+ok - real Treehouse v2.1.0 matches a symlinked pool root by its registered spelling; Firstmate returns by that spelling
+bash tests/fm-teardown-endpoint-safety.test.sh
+ok - fm-teardown: a slot registered through a pool-root alias is returned by that registered spelling when a scout or landed ship record holds the physical path
+```
+
+The real Treehouse v2.1.0 process-exit regression was verified on 2026-09-30 through the executable allocation preflight from a second local home.
+Its unowned control transitions from `in-use` to `available` and reproduces reuse of the same slot with its detached HEAD reset.
+Separate retained-record and retained-claim cases refuse before process exit, preserve the unlanded detached HEAD and exact reflog, and refuse again after exit.
+Allocation fails closed while any pool slot retains a task record or claim, including occupied slots; guarded teardown must release that ownership before another allocation.
+This deliberately limits concurrent allocation in a pool with retained process-backed task slots rather than relying on process liveness to preserve ownership.
+The shared allocation boundary in `fm_treehouse_allocation_begin` acquires the project lock and runs the ownership preflight for both worker spawning and secondmate-home seeding.
+Worker spawning holds that lock through task metadata publication; home seeding holds it until Treehouse has recorded its durable lease.
+This covers the tmux, Herdr, Zellij, and cmux worker allocation paths and `fm-home-seed.sh <id> - --no-projects`; harness launch behavior and Orca's separate allocator are unchanged.
+
+Focused verification command and exact output:
+
+```sh
+FM_TEST_TREEHOUSE_RACE_ONLY=1 bash tests/fm-spawn-pool-base-freshen.test.sh
+Treehouse v2.1.0 control: in-use -> available -> same-slot reset
+Treehouse v2.1.0 record: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
+Treehouse v2.1.0 claim: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
+ok - real Treehouse process-exit allocation preserves retained cross-home task work
+```
+
+The shared home-seeding boundary was verified on 2026-09-30 with Treehouse v2.1.0 using disposable Firstmate repositories and two local operational homes.
+The successful control reproduces home seeding's same-slot reset when no ownership is retained, then publishes the new home with a durable lease.
+Retained records and claims refuse before allocation, and the live-record case additionally proves that refusal leaves the worker running and remains effective after its process exits.
+The contention case holds the same shared allocation boundary from another process and proves that home seeding refuses without changing the pool.
+Each refusal preserves the exact detached HEAD, reflog, serialized `treehouse-state.json` allocation state, and parent registry.
+The focused command exited 0:
+
+```sh
+FM_TEST_TREEHOUSE_SEED_ONLY=1 bash tests/fm-secondmate-safety.test.sh && FM_TEST_TREEHOUSE_RACE_ONLY=1 bash tests/fm-spawn-pool-base-freshen.test.sh
+Treehouse v2.1.0 seed control: same-slot reset; home published; durable lease retained
+Treehouse v2.1.0 seed record: refused; HEAD, reflog, pool state and registry preserved
+Treehouse v2.1.0 seed claim: refused; HEAD, reflog, pool state and registry preserved
+Treehouse v2.1.0 seed live-record: refused; HEAD, reflog, pool state and registry preserved
+Treehouse v2.1.0 seed contention: refused; HEAD, reflog, pool state and registry preserved
+ok - real Treehouse home seeding honors shared locks and retained cross-home task ownership
+leased worktree for dash
+ok - home seeding durably leases treehouse-acquired dash homes under the secondmate id
+ok - home seeding returns rejected acquired homes through treehouse
+ok - home seed rollback warns when treehouse-acquired return fails
+ok - home seeding leaves unsafe acquired active homes untouched
+Treehouse v2.1.0 control: in-use -> available -> same-slot reset
+Treehouse v2.1.0 record: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
+Treehouse v2.1.0 claim: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
+ok - real Treehouse process-exit allocation preserves retained cross-home task work
+ok - a remote-seeded secondmate home allocates and launches from its Treehouse pool
+ok - a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort
+```
+
+Refresh the evidence with:
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-pool-base-freshen.test.sh tests/fm-teardown-endpoint-safety.test.sh
+bin/fm-test-run.sh tests/fm-teardown.test.sh tests/fm-secondmate-safety.test.sh tests/fm-spawn-worktree-settle.test.sh tests/fm-spawn-orca-worktree.test.sh tests/fm-spawn-batch.test.sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+```
+
+Selected regression output:
+
+```text
+ok - spawn refuses foreign same-remote pool slots before allocation and independently before claim or refresh
+ok - real Treehouse v2.1.0 shares same-remote clone pools; Firstmate refuses foreign allocation
+ok - foreign-clone cleanup after a failed return preserves reassigned workers, branches, edits, and records through canonical and symlink paths
+ok - slot claims distinguish identical task ids in different homes and accept symlink home aliases
+ok - a changed Treehouse pool root refuses before any process kill or return even when Git repository identity matches
+```
+
+The records-only recovery regression, refreshed on 2026-10-01, retains the exact old metadata bytes, ancillary task state, an unlanded branch and commit, and a live process even when the old `tasktmp` names the successor's slot.
+It also exercises present and unreadable endpoint refusal, an existing evidence archive, symlinked slot-local state before lease locking, and forced whole-home refusal for a reassigned child.
+Retirement proceeds only for a Herdr record whose running session server answers that the pane does not exist; a stopped Herdr server and a tmux window absent from the addressed server both refuse and keep the record, with no server start.
+An id whose retained record still exists refuses dispatch and dispatches again once that record is removed.
+These cases use canned Herdr and tmux responses; no live session is operated.
+The executable commands and selected output are:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-teardown-endpoint-safety.test.sh tests/fm-spawn-pool-base-freshen.test.sh
+ok - fm-teardown: a stale record on a claimed slot retires, then the claimant tears down
+ok - records-only recovery requires an endpoint proven gone - never a stopped Herdr server or an unaddressable tmux window - and never overwrites retained evidence
+ok - reassigned slots survive repository and pool drift; records-only retirement preserves evidence and whole-home deletion refuses
+ok - an id with a retained reassignment record refuses dispatch until that record is reconciled and removed
+```
+
+The shared spawn path covers every supported worker harness before its launch, with no rendered harness signal involved.
+Source inspection confirms tmux, Herdr, Zellij, and cmux use that Treehouse path; Orca uses its own worktree identity and retains its separate regression.
+The backend and descendant tests use fixtures; no live Herdr, Zellij, Orca, or cmux session is operated by these checks.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

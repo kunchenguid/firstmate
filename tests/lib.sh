@@ -446,6 +446,9 @@ fm_fake_exit0() {
   for tool in "$@"; do
     cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
+if [ "${0##*/}" = treehouse ] && [ "${1:-}" = status ]; then
+  printf '[]\n'
+fi
 exit 0
 SH
     chmod +x "$fakebin/$tool"

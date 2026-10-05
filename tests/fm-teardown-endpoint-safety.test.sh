@@ -26,6 +26,10 @@ exit 0
 SH
   cat > "$TMP_ROOT/$dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  jq '.worktrees' "${FM_RUNTIME_LOG%/*}/pool/treehouse-state.json"
+  exit
+fi
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
@@ -53,6 +57,45 @@ claim_pool_slot() {  # <case> <task-id> [home]
   printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
 }
 
+# Records-only retirement needs an endpoint whose absence can be proven, which
+# only a Herdr record offers: its own running session server answers for the
+# exact pane. This is a canned fake, never a real Herdr session, and it logs
+# every call that is not a read so a lifecycle action cannot pass unnoticed.
+write_stale_herdr_meta() {  # <case> <id> <kind> [project]
+  local dir=$1 id=$2 kind=$3 project=${4:-$1/project}
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fixture-lab:w1:p2" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$project" "kind=$kind" \
+    "backend=herdr" "herdr_session=fixture-lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2"
+}
+
+write_fake_herdr() {  # <case> <gone|stopped>
+  local dir=$1 shape=$2
+  cat > "$dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "session list") printf '%s\n' '{"sessions":[{"name":"fixture-lab","running":true,"socket_path":"$dir/herdr.sock"}]}' ;;
+  "status --json")
+    if [ "$shape" = stopped ]; then printf '%s\n' '{"server":{"running":false}}'
+    else printf '%s\n' '{"server":{"running":true}}'; fi
+    ;;
+  "pane get")
+    if [ "$shape" = stopped ]; then echo 'server is not running' >&2
+    else printf '%s\n' '{"error":{"code":"pane_not_found"}}'; fi
+    exit 1
+    ;;
+  *)
+    printf 'herdr' >> "\${FM_RUNTIME_LOG:?}"
+    printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+    printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/herdr"
+}
+
 run_case() {  # <case> <id>
   local dir=$1 id=$2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -69,7 +112,123 @@ assert_refused_without_mutation() {  # <case> <id> <description>
   [ "$rc" -ne 0 ] || fail "$description: teardown unexpectedly succeeded"
   assert_present "$dir/home/state/$id.meta" "$description: metadata changed before refusal"
   assert_present "$dir/worktree/sentinel" "$description: worktree changed before refusal"
-  [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before refusal: $(cat "$dir/runtime.log")"
+  ! grep -v '^tmux <list-windows>' "$dir/runtime.log" | grep -q . || fail "$description: runtime mutation ran before refusal: $(cat "$dir/runtime.log")"
+}
+
+# Two homes independently clone the same remote. Historical metadata can name
+# the second clone even though Treehouse handed it a slot owned by the first.
+test_foreign_clone_failed_return_then_reassignment() {
+  local dir id=old-task other=new-task spelling second_home second_project slot rc worker before
+  for spelling in canonical symlink; do
+    dir=$(make_case "crossclone-$spelling")
+    mark_case_as_treehouse_pool "$dir"
+    git clone -q --bare "$dir/project" "$dir/origin.git"
+    git -C "$dir/project" remote add origin "$dir/origin.git"
+    second_home="$dir/second-home"
+    second_project="$second_home/projects/project"
+    mkdir -p "$second_home/state" "$second_home/data" "$second_home/config" "$second_home/projects"
+    git clone -q "$dir/origin.git" "$second_project"
+    printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+      > "$dir/home/data/secondmates.md"
+    write_local_parent_record "$second_home" "$dir/home"
+    slot="$dir/pool/1/project"
+    [ "$spelling" != symlink ] || slot="$dir/worktree"
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$slot" "project=$dir/project" "kind=scout"
+    # Retain the old record across a real executable return failure.
+    cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  jq '.worktrees' "${FM_RUNTIME_LOG%/*}/pool/treehouse-state.json"
+  exit
+fi
+printf 'return attempted\n' >> "${FM_RUNTIME_LOG:?}"
+echo 'worktree is not managed by treehouse' >&2
+exit 1
+SH
+    set +e
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "failed Treehouse return unexpectedly succeeded"
+    assert_present "$dir/home/state/$id.meta" "failed return lost old task metadata"
+    assert_contains "$(cat "$dir/runtime.log")" 'return attempted' "fixture did not reach the failed return"
+
+    # Replay the incident's stranded foreign project identity and slot reuse.
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$slot" "project=$second_project" "kind=scout"
+    fm_write_meta "$second_home/state/$other.meta" \
+      "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+      "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+    claim_pool_slot "$dir" "$other" "$second_home"
+    git -C "$slot" checkout -qb "fm/$other"
+    printf 'new unlanded work\n' > "$slot/new-work"
+    before=$(git -C "$slot" rev-parse HEAD)
+    ( cd "$slot" && exec sleep 120 ) &
+    worker=$!
+    cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux <%s>\n' "$1" >> "${FM_RUNTIME_LOG:?}"
+echo 'lost server' >&2
+exit 1
+SH
+    : > "$dir/runtime.log"
+    assert_refused_without_mutation "$dir" "$id" "foreign clone $spelling reassignment"
+    kill -0 "$worker" 2>/dev/null || fail "old cleanup killed the reassigned worker"
+    [ "$(git -C "$slot" symbolic-ref --short HEAD)" = "fm/$other" ] || fail "old cleanup reset the new branch"
+    [ "$(git -C "$slot" rev-parse HEAD)" = "$before" ] || fail "old cleanup moved the new HEAD"
+    assert_present "$slot/new-work" "old cleanup discarded unlanded work"
+    assert_present "$second_home/state/$other.meta" "old cleanup removed the new task"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# foreign-clone cleanup after failed return (%s)\n' "$spelling"
+      printf '$ FM_HOME=%s bin/fm-teardown.sh %s --force\n' "$dir/home" "$id"
+      cat "$dir/stdout" "$dir/stderr"
+      printf 'surviving worker pid=%s; branch=%s; HEAD before=%s after=%s\n' \
+        "$worker" "$(git -C "$slot" symbolic-ref --short HEAD)" "$before" "$(git -C "$slot" rev-parse HEAD)"
+      printf 'preserved unlanded output: '; cat "$slot/new-work"
+      printf 'preserved successor task record:\n'; cat "$second_home/state/$other.meta"
+      printf 'preserved slot claim:\n'; cat "$dir/pool/1/.fm-slot-owner"
+    fi
+    kill "$worker" 2>/dev/null || true
+    wait "$worker" 2>/dev/null || true
+    assert_contains "$(cat "$dir/stderr")" "$other" "collision refusal did not name the new worker"
+
+    # With no second record or claim, the mismatched project alone must refuse
+    # before process termination or Treehouse return, including --force.
+    rm "$second_home/state/$other.meta" "$dir/pool/1/.fm-slot-owner"
+    : > "$dir/runtime.log"
+    assert_refused_without_mutation "$dir" "$id" "foreign clone $spelling without another record"
+    assert_contains "$(cat "$dir/stderr")" 'Git common directory mismatch' "foreign clone identity did not refuse"
+  done
+  pass "foreign-clone cleanup after a failed return preserves reassigned workers, branches, edits, and records through canonical and symlink paths"
+}
+
+test_slot_claim_binds_home_and_task() {
+  local dir id=same-task out
+  dir=$(make_case slot-home-identity)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/other-home"
+  claim_pool_slot "$dir" "$id" "$dir/other-home"
+  out=$(FM_HOME="$dir/home" bash -c '. "$1"; fm_treehouse_slot_owner_state "$2" "$3"; printf "%s\n" "$FM_TREEHOUSE_SLOT_OWNER"; fm_treehouse_slot_owner_release "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/worktree" "$id")
+  [ "$out" = other ] || fail "identical task id in another home was treated as the owner: $out"
+  assert_present "$dir/pool/1/.fm-slot-owner" "another home's identical task id released the claim"
+  if FM_HOME="$dir/home" bash -c '. "$1"; fm_treehouse_slot_owner_claim "$2" "$3" "$FM_HOME"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/worktree" "$id"; then
+    fail "claim replaced an identically named task in another home"
+  fi
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "home=$dir/other-home" "failed claim rewrote its owner"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "same task id claimed by another home"
+  ln -s "$dir/other-home" "$dir/home-alias"
+  out=$(FM_HOME="$dir/home-alias" bash -c '. "$1"; fm_treehouse_slot_owner_state "$2" "$3"; printf "%s\n" "$FM_TREEHOUSE_SLOT_OWNER"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/worktree" "$id")
+  [ "$out" = mine ] || fail "symlink spelling of the owning home lost its claim: $out"
+  pass "slot claims distinguish identical task ids in different homes and accept symlink home aliases"
 }
 
 test_invalid_endpoint_records_refuse_before_mutation() {
@@ -608,9 +767,70 @@ test_sole_slot_record_still_tears_down() {
   kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  grep -Fq "treehouse <return> <--force> <$dir/pool/1/project>" "$dir/runtime.log" \
+    || fail "return did not use Treehouse's registered spelling for the symlinked slot"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
   pass "fm-teardown: a task that solely holds its slot still returns it"
+}
+
+# The mirror of the symlinked record above, and the shape a symlinked pool root
+# produces: Treehouse registers the slot through the alias and matches that
+# string, while the record holds the physical path. Treehouse v2.1.0 answers a
+# physical-path return of such a slot "not managed by treehouse"
+# (docs/verification/runtime-backends.md), so the fake matches by string too.
+test_registry_alias_slot_returns_by_its_registered_spelling() {
+  local dir id=alias-task kind physical registered rc
+
+  # A forced scout cleanup, and a clean landed ship cleanup with every
+  # unlanded-work check still applied.
+  for kind in scout ship; do
+    dir=$(make_case "slot-registry-alias-$kind")
+    mark_case_as_treehouse_pool "$dir"
+    physical="$dir/pool/1/project"
+    ln -s "$dir/pool" "$dir/pool-alias"
+    registered="$dir/pool-alias/1/project"
+    printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$registered" \
+      > "$dir/pool/treehouse-state.json"
+    cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+state="${FM_RUNTIME_LOG%/*}/pool/treehouse-state.json"
+if [ "${1:-}" = status ]; then
+  jq '.worktrees' "$state"
+  exit
+fi
+printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+if jq -e --arg path "${3:-}" '.worktrees | any(.path == $path)' "$state" >/dev/null; then
+  exit 0
+fi
+echo "worktree ${3:-} is not managed by treehouse" >&2
+exit 1
+SH
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$physical" "project=$dir/project" "kind=$kind"
+
+    set +e
+    if [ "$kind" = ship ]; then
+      rm -f "$physical/sentinel"
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    else
+      run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    fi
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$kind teardown could not return a slot registered through an alias: $(cat "$dir/stderr")"
+    [ "$(grep -c '^treehouse <return>' "$dir/runtime.log")" = 1 ] \
+      || fail "$kind alias-registered slot was not returned exactly once: $(cat "$dir/runtime.log")"
+    grep -Fxq "treehouse <return> <--force> <$registered>" "$dir/runtime.log" \
+      || fail "$kind return used a spelling Treehouse does not have registered: $(cat "$dir/runtime.log")"
+    assert_absent "$dir/home/state/$id.meta" "$kind alias-registered teardown left the task record"
+  done
+  pass "fm-teardown: a slot registered through a pool-root alias is returned by that registered spelling when a scout or landed ship record holds the physical path"
 }
 
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
@@ -885,6 +1105,9 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
 assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
   local dir=$1 id=$2 other=$3 description=$4
   assert_absent "$dir/home/state/$id.meta" "$description: the stale task's own record was not removed"
+  assert_present "$dir/home/state/$id.reassigned-record" "$description: the stale record was not preserved"
+  ! grep -v '^tmux <list-windows>' "$dir/runtime.log" | grep -q . \
+    || fail "$description: records-only retirement performed a runtime action: $(cat "$dir/runtime.log")"
   assert_present "$dir/pool/1/.fm-slot-owner" "$description: another task's slot claim was removed"
   assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$other" \
     "$description: another task's slot claim was rewritten"
@@ -900,14 +1123,12 @@ assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   local dir id=stale-task other=reassigned-task worker rc
 
-  # Dirty slot, --force, and a live worker inside it: --force authorizes
-  # discarding this task's unlanded work, which is already gone with the slot,
-  # never the other task's live work.
+  # Dirty slot, --force, and a live worker inside it. The stale endpoint is
+  # absent; its metadata is preserved without any process or slot action.
   dir=$(make_case slot-reassigned)
   mark_case_as_treehouse_pool "$dir"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  write_stale_herdr_meta "$dir" "$id" scout
+  write_fake_herdr "$dir" gone
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   # Staged in this shell, not a command substitution: a background child of a
   # $(...) subshell does not outlive it, and the point of this worker is to be
@@ -939,9 +1160,8 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   rm -f "$dir/worktree/sentinel"
   [ -z "$(git -C "$dir/worktree" status --porcelain)" ] \
     || fail "clean-slot fixture is not clean: $(git -C "$dir/worktree" status --porcelain)"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  write_stale_herdr_meta "$dir" "$id" ship
+  write_fake_herdr "$dir" gone
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   ( cd "$dir/worktree" && exec sleep 30 ) &
   worker=$!
@@ -955,6 +1175,14 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# finished ship cleanup with a successor owning its former slot\n'
+    printf '$ FM_HOME=%s bin/fm-teardown.sh %s\n' "$dir/home" "$id"
+    cat "$dir/stdout" "$dir/stderr"
+    printf 'successor worker pid=%s remains alive; old task record removed\n' "$worker"
+    printf 'successor slot claim:\n'; cat "$dir/pool/1/.fm-slot-owner"
+    printf 'runtime calls (no slot return):\n'; cat "$dir/runtime.log"
+  fi
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
@@ -988,17 +1216,26 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
 # The claim proves the stale record's teardown is records-only, so the record
 # scan must not refuse it; once it is gone, the claimant tears down normally.
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
-  local dir id=stale-task other=live-task rc
+  local dir id=stale-task other=live-task rc worker
 
   dir=$(make_case slot-reassigned-both-records)
   mark_case_as_treehouse_pool "$dir"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  write_stale_herdr_meta "$dir" "$id" scout
+  write_fake_herdr "$dir" gone
   fm_write_meta "$dir/home/state/$other.meta" \
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other"
+  printf 'tasktmp=%s\n' "$dir/worktree" >> "$dir/home/state/$id.meta"
+  cp "$dir/home/state/$id.meta" "$dir/expected-meta"
+  printf 'pending steering\n' > "$dir/home/state/$id.status"
+  git -C "$dir/worktree" checkout -qb fm/preserved-unlanded
+  printf 'unlanded commit\n' > "$dir/worktree/committed-work"
+  git -C "$dir/worktree" add committed-work
+  git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid commit -qm unlanded
+  git -C "$dir/worktree" rev-parse HEAD > "$dir/expected-head"
+  ( cd "$dir/worktree" && exec sleep 120 ) &
+  worker=$!
 
   set +e
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
@@ -1008,6 +1245,12 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "stale record beside the claimant's record"
   assert_present "$dir/worktree/sentinel" "records-only teardown reset the claimant's slot"
   assert_present "$dir/home/state/$other.meta" "records-only teardown removed the claimant's record"
+  cmp "$dir/expected-meta" "$dir/home/state/$id.reassigned-record" || fail "retirement changed archived metadata"
+  assert_present "$dir/home/state/$id.status" "retirement removed ancillary task state"
+  [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$(cat "$dir/expected-head")" ] || fail "retirement changed unlanded HEAD"
+  [ "$(git -C "$dir/worktree" symbolic-ref --short HEAD)" = fm/preserved-unlanded ] || fail "retirement detached the unlanded branch"
+  kill -0 "$worker" || fail "records-only retirement killed a tasktmp process"
+  kill "$worker"; wait "$worker" 2>/dev/null || true
 
   : > "$dir/runtime.log"
   run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
@@ -1018,6 +1261,93 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
     || fail "claimant teardown did not return its pool slot: $(cat "$dir/runtime.log")"
 
   pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
+}
+
+# A reassignment claim is not authority to close even the old task's endpoint.
+# The archive preserves the only active record's exact bytes, and an existing
+# archive refuses rather than overwriting a previous incarnation's evidence.
+test_records_only_requires_missing_endpoint_and_preserves_prior_evidence() {
+  local dir id=stale-task other=live-task probe rc record_state
+  for probe in present unreadable tmux-absent herdr-stopped archive nested-state; do
+    dir=$(make_case "records-only-$probe")
+    record_state="$dir/home/state"
+    mark_case_as_treehouse_pool "$dir"
+    case "$probe" in
+      present|unreadable|tmux-absent)
+        fm_write_meta "$dir/home/state/$id.meta" \
+          "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+          "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+        ;;
+      herdr-stopped)
+        write_stale_herdr_meta "$dir" "$id" ship
+        write_fake_herdr "$dir" stopped
+        ;;
+      *)
+        # Provably gone, so only the probe's own condition can refuse.
+        write_stale_herdr_meta "$dir" "$id" ship
+        write_fake_herdr "$dir" gone
+        ;;
+    esac
+    fm_write_meta "$dir/home/state/$other.meta" \
+      "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+      "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    claim_pool_slot "$dir" "$other"
+    cp "$dir/home/state/$id.meta" "$dir/original-meta"
+    case "$probe" in
+      present)
+        cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux <%s>\n' "$1" >> "${FM_RUNTIME_LOG:?}"
+case "$1" in
+  list-windows) printf 'fm-stale-task\n' ;;
+  display-message|list-panes) exit 0 ;;
+  *) exit 99 ;;
+esac
+SH
+        ;;
+      unreadable)
+        cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux <%s>\n' "$1" >> "${FM_RUNTIME_LOG:?}"
+echo 'lost server' >&2
+exit 1
+SH
+        ;;
+      archive) printf 'previous incarnation\n' > "$dir/home/state/$id.reassigned-record" ;;
+      nested-state)
+        mv "$dir/home/state" "$dir/worktree/state"
+        ln -s "$dir/worktree/state" "$dir/home/state"
+        record_state="$dir/worktree/state"
+        ;;
+    esac
+    set +e
+    FM_STATE_OVERRIDE="$record_state" FM_SUPERVISION_ACTOR=main run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "records-only $probe was accepted"
+    cmp "$dir/original-meta" "$dir/home/state/$id.meta" || fail "$probe changed stale metadata"
+    assert_present "$dir/home/state/$other.meta" "$probe changed successor metadata"
+    assert_present "$dir/worktree/sentinel" "$probe changed the successor worktree"
+    ! grep -vE '^tmux <(list-windows|display-message|list-panes)>' "$dir/runtime.log" | grep -q . \
+      || fail "$probe performed a runtime action: $(cat "$dir/runtime.log")"
+    if [ "$probe" = archive ]; then
+      [ "$(cat "$dir/home/state/$id.reassigned-record")" = 'previous incarnation' ] || fail "overwrote the previous archive"
+    elif [ "$probe" = nested-state ]; then
+      assert_contains "$(cat "$dir/stderr")" 'state resolves inside' "slot-local state did not refuse"
+      assert_absent "$dir/worktree/state/.fm-lease-command.lock" "containment refusal modified a slot through the lease guard"
+      [ "$(find "$dir/worktree/state" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 2 ] || fail "containment refusal left slot-local lock artifacts"
+    else
+      assert_contains "$(cat "$dir/stderr")" 'not proven missing' "$probe did not refuse on endpoint evidence"
+      assert_absent "$dir/home/state/$id.reassigned-record" "$probe archived a still-owned endpoint"
+      case "$probe" in
+        # The window is absent from the only tmux server this process can ask.
+        tmux-absent) assert_contains "$(cat "$dir/stderr")" 'socket identity' "tmux absence did not name why it is unprovable" ;;
+        # A stopped server keeps its panes, and nothing here may start it.
+        herdr-stopped) assert_contains "$(cat "$dir/stderr")" 'stopped server keeps its panes' "stopped Herdr server did not name why absence is unproven" ;;
+      esac
+    fi
+  done
+  pass "records-only recovery requires an endpoint proven gone - never a stopped Herdr server or an unaddressable tmux window - and never overwrites retained evidence"
 }
 
 # The two states that must never become a false refusal: the task's own claim,
@@ -1439,11 +1769,183 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
+test_registry_alias_slot_returns_by_its_registered_spelling
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_records_only_requires_missing_endpoint_and_preserves_prior_evidence
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
+
+test_foreign_clone_failed_return_then_reassignment
+test_slot_claim_binds_home_and_task
+
+
+test_changed_pool_selection_refuses_before_mutation() {
+  local dir id=changed-pool
+  dir=$(make_case changed-pool-selection)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  # The Git repository still matches, but return's config now selects a
+  # different pool, as can happen between acquisition and cleanup.
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then printf '[]\n'; exit 0; fi
+printf 'unexpected mutation\n' >> "${FM_RUNTIME_LOG:?}"
+exit 1
+SH
+  assert_refused_without_mutation "$dir" "$id" "changed Treehouse pool selection"
+  assert_contains "$(cat "$dir/stderr")" 'does not contain' "changed-pool refusal did not identify the selected pool"
+  pass "a changed Treehouse pool root refuses before any process kill or return even when Git repository identity matches"
+}
+
+test_changed_pool_selection_refuses_before_mutation
+
+# A reassignment claim is the durable ownership contract when the successor's
+# task record is outside the homes visible to this cleanup.
+test_reassigned_slot_after_repository_or_pool_change() {
+  local dir id=stale-task other=successor-task drift scope project worker rc before claim mate
+  for scope in task child; do
+    for drift in repository pool; do
+      # Child removal independently validates repository identity before slot
+      # preflight; exercise its pool-selection drift with matching Git identity.
+      [ "$scope/$drift" != child/repository ] || continue
+      dir=$(make_case "reassigned-$scope-$drift")
+      mark_case_as_treehouse_pool "$dir"
+      project="$dir/project"
+      if [ "$drift" = repository ]; then
+        git clone -q "$project" "$dir/old-project"
+        project="$dir/old-project"
+      else
+        cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected Treehouse call\n' >> "${FM_RUNTIME_LOG:?}"
+if [ "${1:-}" = status ]; then printf '[]\n'; exit 0; fi
+exit 1
+SH
+      fi
+      fm_write_meta "$dir/home/state/$id.meta" \
+        "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+        "worktree=$dir/worktree" "project=$project" "kind=ship"
+      if [ "$scope" = task ]; then
+        write_stale_herdr_meta "$dir" "$id" ship "$project"
+        write_fake_herdr "$dir" gone
+      fi
+      if [ "$scope" = child ]; then
+        mate="$dir/mate"
+        mkdir -p "$mate/state" "$mate/data" "$mate/config"
+        printf 'mate-task' > "$mate/.fm-secondmate-home"
+        mv "$dir/home/state/$id.meta" "$mate/state/$id.meta"
+        fm_write_meta "$dir/home/state/mate-task.meta" \
+          "window=firstmate:fm-mate-task" "endpoint_task_id=mate-task" \
+          "worktree=$mate" "project=$mate" "home=$mate" "kind=secondmate"
+      fi
+      claim_pool_slot "$dir" "$other" "$dir/other-home"
+      printf 'successor unlanded output\n' > "$dir/worktree/sentinel"
+      before=$(git -C "$dir/worktree" rev-parse HEAD)
+      claim=$(cat "$dir/pool/1/.fm-slot-owner")
+      ( cd "$dir/worktree" && exec sleep 30 ) &
+      worker=$!
+      set +e
+      if [ "$scope" = child ]; then
+        run_case "$dir" mate-task > "$dir/stdout" 2> "$dir/stderr"
+      else
+        FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+          "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+      fi
+      rc=$?
+      set -e
+      kill -0 "$worker" 2>/dev/null || fail "$scope/$drift cleanup killed the successor"
+      kill "$worker" 2>/dev/null || true
+      wait "$worker" 2>/dev/null || true
+      if [ "$scope" = child ]; then
+        [ "$rc" -ne 0 ] || fail "whole-home cleanup accepted a reassigned child"
+        assert_present "$mate/state/$id.meta" "refused retirement lost child metadata"
+        assert_present "$dir/home/state/mate-task.meta" "refused retirement lost parent metadata"
+        assert_contains "$(cat "$dir/stderr")" 'recover its stale record individually' "missing guarded recovery instruction"
+      else
+        [ "$rc" -eq 0 ] || fail "$scope/$drift reassigned cleanup refused: $(cat "$dir/stderr")"
+        assert_reassigned_slot_left_alone "$dir" "$id" "$other" "$scope/$drift cleanup"
+      fi
+      [ "$(cat "$dir/pool/1/.fm-slot-owner")" = "$claim" ] || fail "cleanup changed the successor claim"
+      [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$before" ] || fail "cleanup moved successor HEAD"
+      [ "$(cat "$dir/worktree/sentinel")" = 'successor unlanded output' ] || fail "cleanup changed successor work"
+      assert_no_grep 'unexpected Treehouse call' "$dir/runtime.log" "cleanup inspected the reassigned pool"
+    done
+  done
+  pass "reassigned slots survive repository and pool drift; records-only retirement preserves evidence and whole-home deletion refuses"
+}
+
+test_reassigned_slot_after_repository_or_pool_change
+
+test_retained_child_records_block_home_removal() {
+  local dir mate retained_home scope mode rc
+  for scope in direct recursive; do
+    dir=$(make_case "retained-home-$scope")
+    mate="$dir/mate"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config"
+    printf 'mate-task' > "$mate/.fm-secondmate-home"
+    fm_write_meta "$dir/home/state/mate-task.meta" \
+      "window=firstmate:fm-mate-task" "endpoint_task_id=mate-task" \
+      "worktree=$mate" "project=$mate" "home=$mate" "kind=secondmate"
+    retained_home=$mate
+    if [ "$scope" = recursive ]; then
+      retained_home="$dir/nested"
+      mkdir -p "$retained_home/state" "$retained_home/data" "$retained_home/config"
+      printf 'nested-task' > "$retained_home/.fm-secondmate-home"
+      fm_write_meta "$mate/state/nested-task.meta" \
+        "window=firstmate:fm-nested-task" "endpoint_task_id=nested-task" \
+        "worktree=$retained_home" "project=$retained_home" \
+        "home=$retained_home" "kind=secondmate"
+    fi
+    fm_write_meta "$retained_home/state/old-task.reassigned-record" \
+      "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    mkdir -p "$retained_home/data/old-task"
+    printf 'unlanded evidence\n' > "$retained_home/data/old-task/report.md"
+    printf 'unresolved backlog\n' > "$retained_home/data/backlog.md"
+    cp "$retained_home/state/old-task.reassigned-record" "$dir/expected-record"
+    for mode in ordinary forced; do
+      [ "$scope/$mode" != recursive/ordinary ] || continue
+      set +e
+      if [ "$mode" = forced ]; then
+        run_case "$dir" mate-task > "$dir/stdout" 2> "$dir/stderr"
+      else
+        FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+          FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+          "$TEARDOWN" mate-task > "$dir/stdout" 2> "$dir/stderr"
+      fi
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] || fail "$scope/$mode deleted a home with retained work"
+      assert_contains "$(cat "$dir/stderr")" 'retained reassignment record' "$scope/$mode missed retained-record preflight"
+      cmp "$dir/expected-record" "$retained_home/state/old-task.reassigned-record" \
+        || fail "$scope/$mode changed retained metadata"
+      [ "$(cat "$retained_home/data/old-task/report.md")" = 'unlanded evidence' ] \
+        || fail "$scope/$mode lost task evidence"
+      [ "$(cat "$retained_home/data/backlog.md")" = 'unresolved backlog' ] \
+        || fail "$scope/$mode changed unresolved backlog"
+      assert_present "$dir/home/state/mate-task.meta" "$scope/$mode lost parent metadata"
+      [ ! -s "$dir/runtime.log" ] || fail "$scope/$mode mutated runtime before refusal"
+    done
+    mv "$retained_home/state/old-task.reassigned-record" "$dir/reconciled-record"
+    if [ "$scope" = recursive ]; then
+      run_case "$dir" mate-task > "$dir/stdout" 2> "$dir/stderr"
+    else
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" mate-task > "$dir/stdout" 2> "$dir/stderr"
+    fi || fail "$scope resolved cleanup refused: $(cat "$dir/stderr")"
+    assert_absent "$mate" "$scope resolved cleanup retained the home"
+    assert_absent "$retained_home" "$scope resolved cleanup retained the nested home"
+    assert_absent "$dir/home/state/mate-task.meta" "$scope resolved cleanup retained parent metadata"
+  done
+  pass "retained child records block direct and recursive home removal until reconciliation"
+}
+
+test_retained_child_records_block_home_removal

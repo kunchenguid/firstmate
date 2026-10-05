@@ -7,7 +7,9 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       "treehouse return". Allocation uses the shared lock and ownership
+#       preflight owned by bin/fm-wake-lib.sh; retained pool ownership refuses
+#       seeding before get can reset a slot. Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -387,8 +389,10 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
-acquire_treehouse_home() {
-  local id=$1 home
+acquire_treehouse_home() (
+  local id=$1 home allocation_lock
+  fm_treehouse_allocation_begin "$FM_ROOT" allocation_lock || return 1
+  trap 'fm_lock_release "$allocation_lock"' EXIT
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
@@ -399,7 +403,7 @@ acquire_treehouse_home() {
   }
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
   printf '%s\n' "$home"
-}
+)
 
 ensure_home() {
   local id=$1 requested=$2 home
