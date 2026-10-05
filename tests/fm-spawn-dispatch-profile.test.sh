@@ -98,7 +98,8 @@ task_inbox_export() {  # <home> <id>
 ai_trailer_hooks_prefix() {  # <home> <id>
   local state
   state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
-  "$ROOT/bin/fm-git-strip-ai-trailers.sh" launch-env "$state/$2.git-hooks" "$WT_DIR"
+  printf 'GIT_HOOKS_ENV=$(%s launch-env %s %s) || exit $?; eval "$GIT_HOOKS_ENV" || exit $?; ' \
+    "'$ROOT/bin/fm-git-strip-ai-trailers.sh'" "'$state/$2.git-hooks'" "'$WT_DIR'"
 }
 
 run_spawn() {
@@ -512,45 +513,100 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step() {
 }
 
 test_worker_validation_uses_canonical_hooks() {
-  local rec id out status launch
-  id=canonical-worker
-  rec=$(make_spawn_case canonical-worker claude "$id")
-  read_case_record "$rec"
-  if ! git -C "$WT_DIR" -c hook.fm-test.event=commit-msg -c hook.fm-test.command=true \
-    hook list commit-msg >/dev/null 2>&1; then
-    pass "worker canonical hook validation (skipped: Git lacks config hooks)"
-    return
-  fi
-  mkdir -p "$CASE_DIR/project-hooks"
-  git -C "$WT_DIR" config core.hooksPath "$CASE_DIR/project-hooks"
-  cat >"$CASE_DIR/health-check" <<'SH'
+  local rec id out status launch real_git direction setting destination check expected
+  real_git=$(command -v git)
+  for direction in native-to-legacy legacy-to-native; do
+    for setting in absent enabled; do
+      id="canonical-$direction-$setting"
+      rec=$(make_spawn_case "$id" claude "$id")
+      read_case_record "$rec"
+      if ! git -C "$WT_DIR" -c hook.fm-test.event=commit-msg -c hook.fm-test.command=true \
+        hook list commit-msg >/dev/null 2>&1; then
+        pass "destination Git selection (skipped: Git lacks config hooks)"
+        return
+      fi
+      destination="$CASE_DIR/destination-bin"
+      mkdir -p "$CASE_DIR/project-hooks" "$destination" "$CASE_DIR/legacy-bin"
+      cat >"$CASE_DIR/legacy-bin/git" <<SH
+#!/bin/sh
+case " \$* " in *' hook list commit-msg '*) exit 129 ;; esac
+case "\${GIT_CONFIG_KEY_0:-}" in hook.*) unset GIT_CONFIG_COUNT ;; esac
+exec '$real_git' "\$@"
+SH
+      chmod +x "$CASE_DIR/legacy-bin/git"
+      git -C "$WT_DIR" config core.hooksPath "$CASE_DIR/project-hooks"
+      cat >"$CASE_DIR/health-check" <<'SH'
 #!/bin/sh
 actual=$(git rev-parse --path-format=absolute --git-path hooks/pre-commit) || exit 1
 expected="$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)/project-hooks/pre-commit"
 [ -x "$actual" ] && [ "$actual" = "$expected" ]
 SH
-  cat >"$CASE_DIR/project-hooks/pre-commit" <<'SH'
+      cat >"$CASE_DIR/project-hooks/pre-commit" <<'SH'
+#!/bin/sh
+printf 'ran\n' > project-pre-commit.ran
+SH
+      cat >"$CASE_DIR/project-hooks/commit-msg" <<'SH'
+#!/bin/sh
+cp "$1" project-message
+SH
+      chmod +x "$CASE_DIR/health-check" "$CASE_DIR/project-hooks/"{pre-commit,commit-msg}
+      case "$direction" in
+      native-to-legacy)
+        ln -s "$CASE_DIR/legacy-bin/git" "$destination/git"
+        check=
+        expected="$HOME_DIR/state/$id.git-hooks/pre-commit"
+        ;;
+      legacy-to-native)
+        ln -s "$CASE_DIR/legacy-bin/git" "$FAKEBIN_DIR/git"
+        ln -s "$real_git" "$destination/git"
+        cat >"$CASE_DIR/project-hooks/pre-commit" <<'SH'
 #!/bin/sh
 "$(dirname "$0")/../health-check" || exit 1
 printf 'ran\n' > project-pre-commit.ran
 SH
-  cat >"$CASE_DIR/project-hooks/commit-msg" <<'SH'
-#!/bin/sh
-cp "$1" project-message
-SH
-  chmod +x "$CASE_DIR/health-check" "$CASE_DIR/project-hooks/"{pre-commit,commit-msg}
+        check="'$CASE_DIR/health-check' && "
+        expected="$CASE_DIR/project-hooks/pre-commit"
+        ;;
+      esac
+      [ "$setting" != enabled ] || : > "$HOME_DIR/config/launch-env-allowlist"
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR" "cd . && ${check}git -c user.name=Tests -c user.email=tests@example.invalid commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: canonical validation' && git rev-parse --path-format=absolute --git-path hooks/pre-commit > '$CASE_DIR/effective-hook'")
+      status=$?
+      expect_code 0 "$status" "$direction with allowlist=$setting should spawn: $out"
+      [ ! -e "$HOME_DIR/state/$id.git-hooks" ] || fail "spawner prematurely selected legacy wrappers"
+      launch=$(cat "$LAUNCH_LOG")
+      (cd "$WT_DIR" && HOME="$HOME_DIR/user-home" PATH="$destination:$FAKEBIN_DIR:$PATH" bash -c "$launch") ||
+        fail "$direction with allowlist=$setting ordinary worker validation failed"
+      assert_equals "$expected" "$(cat "$CASE_DIR/effective-hook")" "destination chose the wrong hook mode"
+      [ -f "$WT_DIR/project-pre-commit.ran" ] || fail "project pre-commit did not run"
+      assert_contains "$(git -C "$WT_DIR" log -1 --format=%B)" "fix: canonical validation" "worker validation did not commit"
+      assert_not_contains "$(cat "$WT_DIR/project-message")" "cursoragent@cursor.com" "project commit-msg saw AI attribution"
+      assert_not_contains "$(git -C "$WT_DIR" log -1 --format=%B)" "cursoragent@cursor.com" "worker commit lost stripping"
+      pass "$direction with allowlist=$setting selects destination Git and preserves stripping and project hooks"
+    done
+  done
+}
+
+test_worker_hook_setup_failure_stops_compound_launch() {
+  local rec id out status launch
+  id=hook-setup-failure
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/destination-bin"
+  printf '#!/bin/sh\nexit 1\n' > "$CASE_DIR/destination-bin/git"
+  chmod +x "$CASE_DIR/destination-bin/git"
   : > "$HOME_DIR/config/launch-env-allowlist"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "cd . && '$CASE_DIR/health-check' && git -c user.name=Tests -c user.email=tests@example.invalid commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: canonical validation'")
+    "$id" "$PROJ_DIR" "touch '$CASE_DIR/first-step'; touch '$CASE_DIR/second-step'")
   status=$?
-  expect_code 0 "$status" "canonical worker spawn should succeed: $out"
+  expect_code 0 "$status" "hook failure fixture should spawn: $out"
   launch=$(cat "$LAUNCH_LOG")
-  (cd "$WT_DIR" && HOME="$HOME_DIR/user-home" bash -c "$launch") || fail "ordinary worker validation failed"
-  [ -f "$WT_DIR/project-pre-commit.ran" ] || fail "canonical pre-commit did not run"
-  assert_contains "$(git -C "$WT_DIR" log -1 --format=%B)" "fix: canonical validation" "worker validation did not commit"
-  assert_not_contains "$(cat "$WT_DIR/project-message")" "cursoragent@cursor.com" "project commit-msg saw AI attribution"
-  assert_not_contains "$(git -C "$WT_DIR" log -1 --format=%B)" "cursoragent@cursor.com" "worker commit lost stripping"
-  pass "worker validation runs normally with canonical hooks and stripping under the launch allowlist"
+  (cd "$WT_DIR" && HOME="$HOME_DIR/user-home" PATH="$CASE_DIR/destination-bin:$PATH" bash -c "$launch")
+  status=$?
+  expect_code 1 "$status" "destination hook setup failure must propagate"
+  assert_absent "$CASE_DIR/first-step" "failed hook setup ran the first raw launch step"
+  assert_absent "$CASE_DIR/second-step" "failed hook setup ran the second raw launch step"
+  pass "destination hook setup failure prevents every step of a compound launch"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1362,7 +1418,7 @@ test_claude_crewmate_launch_carries_the_attribution_policy() {
   expect_code 0 "$status" "claude crewmate spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy "$launch" "claude crewmate"
-  assert_contains "$launch" 'GIT_CONFIG_COUNT=' "default launch did not inject the AI trailer hook environment"
+  assert_contains "$launch" 'GIT_HOOKS_ENV=' "default launch did not select the AI trailer hook environment"
   pass "a claude crewmate launch carries the attribution-off policy in its own settings"
 }
 
@@ -1378,8 +1434,8 @@ test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks() {
   expect_code 0 "$status" "claude spawn with keep-ai-trailers should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy_absent "$launch" "opted-in claude"
-  assert_not_contains "$launch" 'GIT_CONFIG_COUNT=' \
-    "opted-in launch still injects the AI trailer hook environment"
+  assert_not_contains "$launch" 'GIT_HOOKS_ENV=' \
+    "opted-in launch still selects the AI trailer hook environment"
   [ ! -e "$HOME_DIR/state/$id.git-hooks" ] \
     || fail "opted-in launch installed AI trailer strip hooks"
   pass "keep-ai-trailers omits Claude attribution settings and the pane strip hooks"
@@ -1408,8 +1464,8 @@ test_keep_ai_trailers_reaches_secondmate_crew_launches() {
   expect_code 0 "$status" "secondmate crew spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy_absent "$launch" "secondmate crew claude"
-  assert_not_contains "$launch" 'GIT_CONFIG_COUNT=' \
-    "secondmate crew launch still injects the AI trailer hook environment"
+  assert_not_contains "$launch" 'GIT_HOOKS_ENV=' \
+    "secondmate crew launch still selects the AI trailer hook environment"
   [ ! -e "$HOME_DIR/state/$crew_id.git-hooks" ] \
     || fail "secondmate crew launch installed AI trailer strip hooks"
   pass "keep-ai-trailers is inherited so a secondmate's crew launch keeps AI trailers"
@@ -1755,31 +1811,22 @@ SH
 # must both produce today's launch byte-for-byte, `auto` swaps only the
 # permission flag, and any other token refuses before endpoint or metadata.
 claude_settings_json_arg() {  # <launch>
-  local command=$1
-  while [[ "$command" == export\ *\;* ]]; do
-    command=${command#*; }
-  done
-  eval "set -- $command"
-  while [ "$#" -gt 0 ]; do
-    if [ "$1" = --settings ]; then
-      shift
-      printf '%s' "$1"
-      return 0
-    fi
-    shift
-  done
-  return 1
+  python3 - "$1" <<'PY'
+import shlex
+import sys
+
+args = shlex.split(sys.argv[1])
+print(args[args.index("--settings") + 1], end="")
+PY
 }
 
 claude_launch_brief_arg() {  # <launch>
-  local command=$1
-  while [[ "$command" == export\ *\;* ]]; do
-    command=${command#*; }
-  done
-  (
-    eval "set -- ${command#*; }"
-    eval "printf '%s' \"\${$#}\""
-  )
+  python3 - "$1" <<'PY'
+import shlex
+import sys
+
+print(shlex.split(sys.argv[1])[-1], end="")
+PY
 }
 
 # The --add-dir segment every Claude worker launch now carries between the
@@ -1944,6 +1991,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_worker_validation_uses_canonical_hooks
+test_worker_hook_setup_failure_stops_compound_launch
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort

@@ -22,6 +22,7 @@ PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=$(fm_test_base_path_sans "$BASE_PATH" kimi) || fail "could not isolate the Kimi fixture PATH"
 
 task_inbox_export() {  # <home> <id>
   local state
@@ -32,13 +33,14 @@ task_inbox_export() {  # <home> <id>
 ai_trailer_hooks_prefix() {  # <home> <id>
   local state
   state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
-  printf "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='%s'; " "$state/$2.git-hooks"
+  printf 'GIT_HOOKS_ENV=$(%s launch-env %s %s) || exit $?; eval "$GIT_HOOKS_ENV" || exit $?; ' \
+    "'$ROOT/bin/fm-git-strip-ai-trailers.sh'" "'$state/$2.git-hooks'" "'$WT_DIR'"
 }
 
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || fm_test_remove_tree "$KIMI_RUNTIME_TASK_TMP"
   [ -z "$KIMI_RUNTIME_LAUNCH_DIR" ] || fm_test_remove_tree "$KIMI_RUNTIME_LAUNCH_DIR"
-  fm_test_remove_tree "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap cleanup_kimi_harness EXIT
 

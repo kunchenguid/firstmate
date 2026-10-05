@@ -4813,10 +4813,9 @@ fi
 # and the legacy hooks directory. Real secondmate homes are firstmate clones;
 # a launch whose worktree is not git fails closed.
 GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
-GIT_HOOKS_ENV=
 if [ "$KEEP_AI_TRAILERS" = 0 ]; then
-  GIT_HOOKS_ENV=$("$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" launch-env "$GIT_HOOKS_DIR" "$WT") || {
-    echo "error: could not install the AI-trailer strip hooks for $ID" >&2
+  git -C "$WT" rev-parse --is-inside-work-tree >/dev/null || {
+    echo "error: not a git worktree for the AI-trailer strip hooks: $WT" >&2
     exit 1
   }
 fi
@@ -5169,7 +5168,9 @@ if [ "$KIND" = secondmate ]; then
 fi
 # Pane-scoped exports carry stripping across every step of a compound raw
 # launch while firstmate's own git is unchanged.
-LAUNCH="$GIT_HOOKS_ENV$LAUNCH"
+if [ "$KEEP_AI_TRAILERS" = 0 ]; then
+  LAUNCH="GIT_HOOKS_ENV=\$($(shell_quote "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh") launch-env $(shell_quote "$GIT_HOOKS_DIR") $(shell_quote "$WT")) || exit \$?; eval \"\$GIT_HOOKS_ENV\" || exit \$?; $LAUNCH"
+fi
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
 # spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
 # This is an export statement rather than a forwarded ambient name or a
