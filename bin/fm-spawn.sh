@@ -2082,7 +2082,7 @@ launch_template() {
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
-      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ -e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
@@ -4503,7 +4503,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
+# A Pi or pi-signed secondmate is armed with the same extension as a Pi
+# worker: an idle lead's pane is healthy, but the parent's wake-stall ring
+# (secondmate_idle_ring_safe in bin/fm-watch.sh) types into it only on an exact
+# idle verdict, and Herdr's native idle is not one. No other secondmate harness
+# is armed here.
+if [ "$KIND" != secondmate ] || [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
@@ -4669,6 +4674,10 @@ EOF
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+    # A secondmate's turn ends belong to its own home: touching this home's
+    # turn-ended marker would wake the parent on every lead turn.
+    PI_TURNEND_HOOK="pi.on(\"turn_end\", () => execFile(\"touch\", [\"$TURNEND\"]));"
+    [ "$KIND" != secondmate ] || PI_TURNEND_HOOK='// No turn_end notification: this is a secondmate.'
     cat >"$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
@@ -4702,7 +4711,7 @@ export default function (pi: any) {
     }
     return busyEvent("idle", "agent-settled");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  $PI_TURNEND_HOOK
   // A native harness can make progress inside one Pi turn. This separate
   // marker prevents false wedge alarms without fabricating a completed turn.
   let lastProgress = 0;

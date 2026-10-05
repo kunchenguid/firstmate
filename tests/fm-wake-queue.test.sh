@@ -10,6 +10,8 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -1033,6 +1035,71 @@ test_secondmate_genuine_stall_after_idle_ring_still_alarms() {
   cmp -s "$row_before" "$sub/state/.wake-queue" \
     || fail "the parent alarm path rewrote the foreign queue"
   pass "a leftover row that survives a proven-idle ring still surfaces as a genuine stall"
+}
+
+# A real Pi secondmate spawn carries the same pi-ext busy record a Pi worker
+# does, so a lead its extension reports idle is rung for a stalled queue rather
+# than escalated to the parent on the first interval. Its turn ends stay in its
+# own home: the extension never touches this home's turn-ended marker.
+test_spawned_idle_pi_secondmate_is_rung_once() {
+  local dir state sub fakebin spawnbin out ext inbox_count
+  dir=$(make_case secondmate-pi-idle-ring)
+  state="$dir/state"
+  # The spawn refuses a secondmate home inside the launching home.
+  sub="$dir.secondmate"
+  fakebin="$dir/fakebin"
+  fm_test_spawn_home "$dir"
+  printf 'pi\n' > "$dir/config/secondmate-harness"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'charter for mate\n' > "$sub/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' > "$sub/.gitignore"
+  git -C "$sub" init -q -b main
+  spawnbin=$(make_spawn_fakebin "$dir/spawn" pi)
+  out=$(fm_test_run_spawn "$dir" "$sub" "$spawnbin" mate "$sub" --secondmate) \
+    || fail "pi secondmate spawn failed: $out"
+  ext="$state/mate.pi-ext.ts"
+  [ -f "$ext" ] || fail "a pi secondmate spawn wrote no busy-state extension, so its idle lead has no trusted verdict: $out"
+  out=$(EXT_PATH="$ext" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+const host = { on: (name, fn) => { handlers[name] = fn; } };
+mod.default({ ...host, events: host });
+const ctx = { isIdle: () => true };
+await handlers["agent_start"]({}, ctx);
+await handlers["agent_settled"]({}, ctx);
+await handlers["turn_end"]?.({}, ctx);
+await new Promise((resolve) => setTimeout(resolve, 200));
+EOF
+) || fail "could not drive the pi secondmate extension: $out"
+  [ ! -e "$state/mate.turn-ended" ] \
+    || fail "a pi secondmate turn end touched the parent's turn-ended marker, which wakes the parent every lead turn"
+
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "first" progress mate "$(printf '1000\t100-7')"
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "ring" ring mate 100-7
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-first.out" "$dir/watch-ring.out" >/dev/null \
+    || fail "an idle pi secondmate was escalated instead of rung: $(cat "$dir/watch-ring.out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an idle pi secondmate's first stall interval raised a parent wake"
+  [ "$(grep -c -F '[ENTER]' "$dir/sent" 2>/dev/null || true)" = 1 ] \
+    || fail "an idle pi secondmate was not rung exactly once: $(cat "$dir/sent" 2>/dev/null)"
+  inbox_count=$(find "$state/mate.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$inbox_count" = 1 ] || fail "an idle pi secondmate ring wrote $inbox_count drain steers, want 1"
+  pass "an idle pi secondmate with a stalled queue is rung once and raises no parent wake on the first interval"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {
@@ -3434,6 +3501,7 @@ test_secondmate_long_lived_mate_mid_turn_is_not_a_stall
 test_secondmate_proven_idle_ring_lets_the_child_drain
 test_secondmate_busy_and_unknown_panes_are_not_rung
 test_secondmate_genuine_stall_after_idle_ring_still_alarms
+test_spawned_idle_pi_secondmate_is_rung_once
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
