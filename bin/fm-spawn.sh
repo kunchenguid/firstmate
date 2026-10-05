@@ -3154,7 +3154,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       gate_out=$(uv run --no-project "$workflow_gates" --root "${workflow_gates%/scripts/gates.py}" dispatch \
         "${gate_args[@]}" 2>&1) || gate_rc=$?
       gate_rc=${gate_rc:-0}
-      if [ "$gate_rc" -ne 0 ]; then
+      if [ "$gate_rc" -ne 0 ] && { [ "$gate_rc" -ne 1 ] || printf '%s\n' "$gate_out" | grep -Fq 'Traceback (most recent call last)'; }; then
+        printf '%s\n' "$gate_out" >&2
+        echo "notice: workflow dispatch gate failed to run (exit $gate_rc); spawning without it" >&2
+      elif [ "$gate_rc" -ne 0 ]; then
         captain_intent=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
         if [ "$WORKFLOW_GATE_OVERRIDE" -eq 1 ] && printf '%s\n' "$captain_intent" | grep -Fqi 'override the workflow dispatch gate'; then
           printf 'warning: explicit current captain instruction overrides the workflow dispatch gate: %s\n' "$gate_out" >&2

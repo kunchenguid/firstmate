@@ -214,6 +214,27 @@ test_captain_reminder_failure_does_not_block_spawn() {
   pass "fm-spawn continues when the captain reminder cannot be recorded"
 }
 
+test_workflow_dispatch_gate_crash_degrades_but_verdict_refuses() {
+  local rec id out status gates
+  gates="$TMP_ROOT/crashing-gates.py"
+  printf '%s\n' '#!/usr/bin/env python3' 'raise RuntimeError("boom")' > "$gates"
+  id=settle-workflow-crash-z7
+  rec=$(make_settle_case settle-workflow-crash "$id" 0)
+  read_settle_record "$rec"
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$gates" run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a crashing gate must not refuse the spawn"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate failed to run' "crash must print a notice"
+  printf '%s\n' '#!/usr/bin/env python3' 'raise SystemExit(127)' > "$gates"
+  id=settle-workflow-exit127-z8
+  rec=$(make_settle_case settle-workflow-exit127 "$id" 0)
+  read_settle_record "$rec"
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$gates" run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "an unexpected gate exit code must not refuse the spawn"$'\n'"$out"
+  pass "fm-spawn treats gate crashes as infrastructure failure, not a refusal"
+}
+
 # make_primary_case <name> <id> <stale_reads> builds the linked-home shape: the
 # spawning project is itself a LINKED worktree of the repository, and the path
 # the pane transiently reports is that repository's PRIMARY checkout. `treehouse
@@ -286,6 +307,7 @@ test_already_settled_pane_costs_one_confirm_read
 test_workflow_dispatch_gate_refuses_before_allocating_a_worktree
 test_workflow_dispatch_gate_missing_script_degrades_and_budget_is_optional
 test_captain_reminder_failure_does_not_block_spawn
+test_workflow_dispatch_gate_crash_degrades_but_verdict_refuses
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 
