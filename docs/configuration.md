@@ -638,6 +638,24 @@ The file is created lazily on first learning and follows the internal [`stow` sk
 
 There is no shared learnings file by captain decision.
 
+## External memory tiers (Memory layering section)
+
+A home may declare memory stores outside firstmate, such as MCP-served knowledge stores, as authoritative for named classes of knowledge.
+The declaration lives in a `Memory layering` heading inside `data/captain.md`, or inside the primary home's `data/captain-shared.md` when every secondmate home should inherit it; a local `data/captain.md` declaration wins for that home when both exist.
+No declaration means firstmate's local files under `data/` are the only memory owners, which is the default.
+
+Each declared tier states, in plain prose or a table:
+
+- its destination, named precisely enough for an agent to reach it, such as a connector's tool-name prefix;
+- the knowledge classes it is authoritative for, such as decisions and corrections, or people and references;
+- its correction rule, such as append-only supersession instead of edit or delete;
+- any capture etiquette, such as capture first and report what was captured.
+
+For example, one home declares a Palimpsest MCP store authoritative for reasoning continuity (decisions, hypotheses, corrections), an OpenBrain MCP store authoritative for retrievable facts (people, projects, references), and its own `data/` as a disposable per-machine cache; those stores are that home's choice, not a template default.
+
+[`AGENTS.md`](../AGENTS.md) section 6 owns what a declaration changes about knowledge routing, and the internal [`stow` skill](../.agents/skills/stow/SKILL.md) owns how curation reads the declaration and protects tier-owned entries from pruning.
+The section counts toward the startup memory budget like the rest of its file, so keep it to the mapping rather than restating these rules.
+
 ## Startup memory budget (config/startup-memory-budget)
 
 `config/startup-memory-budget` is the primary-authoritative per-home allowance for the startup prompt-memory surface: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` together.
