@@ -90,7 +90,7 @@ unset _fm_classify_nounset
 # declaration cannot disappear behind an earlier recognized line. Continuation
 # prose is not a prefix and stays off that path. Recognized verbs keep the
 # classification below.
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-validation:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The declared-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -176,7 +176,7 @@ _fm_status_verb_recognized() {  # <verb>
     working|needs-decision|blocked|done|failed|note|\
     "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
     "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
-    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}"|needs-validation)
       return 0
       ;;
   esac
@@ -305,6 +305,9 @@ status_is_captain_relevant() {
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
+    needs-validation)
+      return 0
+      ;;
   esac
   # An unrecognized prefix is surfaced as itself. The check sits after the
   # recognized nonterminal verbs, so working, paused, resolved, and captain-held
@@ -317,6 +320,14 @@ status_is_captain_relevant() {
   fi
   _fm_status_unstamped "$line" unstamped
   _fm_classify_matches "$unstamped" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+}
+
+# 0 if a status line is the non-terminal no-mistakes implementation handoff.
+status_is_validation_handoff() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = needs-validation ]
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -2107,7 +2118,7 @@ _fm_status_open_activities_stream() {
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
+      done|needs-validation|failed|needs-decision|blocked|"$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
@@ -2726,7 +2737,8 @@ signal_crew_provably_working() {  # <file> ...
 }
 
 # 0 (terminal/actionable) if a stale window's latest recognized status event is
-# captain-relevant; 1 otherwise, including the no-status case. A 1 only means
+# captain-relevant; 1 otherwise, including the no-status case. The non-terminal
+# needs-validation handoff is included in the actionable result. A 1 only means
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>

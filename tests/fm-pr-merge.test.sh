@@ -92,12 +92,29 @@ write_github_required() {
 # Live GitHub JSON for the pre-merge verify, plus gh-axi for the
 # post-merge fallback view. Merge itself is `gh pr merge --match-head-commit`.
 # Args: case_dir head_sha
+write_github_runs_from_rollup() {
+  local case_dir=$1 head
+  head=$(cat "$case_dir/github-head")
+  jq --arg head "$head" '{check_runs: [.statusCheckRollup[]
+    | select(.__typename == "CheckRun")
+    | {
+        name,
+        app: {id: 42},
+        head_sha: $head,
+        status: (.status | ascii_downcase),
+        conclusion: (if .conclusion == null then null else (.conclusion | ascii_downcase) end),
+        started_at: (.startedAt // null)
+      }
+  ]}' "$case_dir/github-view.json" > "$case_dir/github-runs.json"
+}
+
 write_github_live_json() {
   local case_dir=$1 head=$2
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
 {"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
 JSON
+  write_github_runs_from_rollup "$case_dir"
 }
 
 write_github_red_json() {
@@ -106,6 +123,7 @@ write_github_red_json() {
   cat > "$case_dir/github-view.json" <<JSON
 {"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","status":"COMPLETED","conclusion":"FAILURE"}]}
 JSON
+  write_github_runs_from_rollup "$case_dir"
 }
 
 # One CheckRun rollup entry the way GitHub reports it. A conclusion or timestamp
@@ -141,6 +159,7 @@ write_github_rollup_json() {
   cat > "$case_dir/github-view.json" <<JSON
 {"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[$rollup]}
 JSON
+  write_github_runs_from_rollup "$case_dir"
 }
 
 assert_logged_gh_merge() {
@@ -249,7 +268,13 @@ case "${1:-} ${2:-}" in
           *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
           *) exit 1 ;;
         esac
-        cat "$FM_TEST_GH_RUNS"
+        call_n=$(cat "$FM_TEST_GH_MERGEABLE_CALLS" 2>/dev/null || echo 0)
+        call_state=$(sed -n "${call_n}p" "${FM_TEST_GH_MERGEABLE_SEQUENCE:-/dev/null}" 2>/dev/null || true)
+        if [ "${call_state#* }" = FAILURE ]; then
+          jq '.check_runs[0].conclusion = "failure"' "$FM_TEST_GH_RUNS"
+        else
+          cat "$FM_TEST_GH_RUNS"
+        fi
         exit $?
         ;;
       *" repos/"*"/rules/branches/"*merge_queue*) ;;
@@ -3461,7 +3486,7 @@ test_required_producer_identity() {
   local case_dir head kind variant expected app
   head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
   for kind in classic ruleset; do
-    for variant in wrong correct unreadable malformed stale waived; do
+    for variant in wrong correct mixed unreadable malformed stale waived; do
       case_dir=$(make_case "required-producer-$kind-$variant")
       add_gh_mocks "$case_dir" "$head"
       write_github_required "$case_dir" "$kind:ci"
@@ -3476,12 +3501,16 @@ test_required_producer_identity() {
       fi
       app=42
       [ "$variant" != correct ] || app=15368
-      printf '{"check_runs":[{"name":"ci","app":{"id":%s},"head_sha":"%s"}]}\n' \
+      printf '{"check_runs":[{"name":"ci","app":{"id":%s},"head_sha":"%s","status":"completed","conclusion":"success","started_at":"2026-09-01T00:01:00Z"}]}\n' \
         "$app" "$head" > "$case_dir/github-runs.json"
       case "$variant" in
+        mixed)
+          printf '{"check_runs":[{"name":"ci","app":{"id":15368},"head_sha":"%s","status":"completed","conclusion":"failure","started_at":"2026-09-01T00:00:00Z"},{"name":"ci","app":{"id":42},"head_sha":"%s","status":"completed","conclusion":"success","started_at":"2026-09-01T00:01:00Z"}]}\n' \
+            "$head" "$head" > "$case_dir/github-runs.json"
+          ;;
         unreadable) rm "$case_dir/github-runs.json" ;;
         malformed) printf '{}' > "$case_dir/github-runs.json" ;;
-        stale) printf '{"check_runs":[{"name":"ci","app":{"id":15368},"head_sha":"bbbb"}]}' > "$case_dir/github-runs.json" ;;
+        stale) printf '{"check_runs":[{"name":"ci","app":{"id":15368},"head_sha":"bbbb","status":"completed","conclusion":"success","started_at":"2026-09-01T00:01:00Z"}]}' > "$case_dir/github-runs.json" ;;
       esac
       expected=1
       if [ "$variant" = waived ]; then
@@ -3493,24 +3522,24 @@ test_required_producer_identity() {
       fi
       expect_code "$expected" "$RC" "producer-$kind-$variant: $(cat "$case_dir/stderr")"
       if [ "$expected" = 1 ]; then
-        assert_grep "required check 'ci' has not reported" "$case_dir/stderr" "producer absence not reported"
+        case "$variant" in
+          mixed) assert_grep "check 'ci' is not green" "$case_dir/stderr" "mixed producer failure not reported" ;;
+          unreadable|malformed|stale)
+            assert_grep 'could not read the GitHub pull request checks' "$case_dir/stderr" "producer read error not reported" ;;
+          *) assert_grep "required check 'ci' has not reported" "$case_dir/stderr" "producer absence not reported" ;;
+        esac
         assert_no_grep 'pr merge' "$case_dir/gh.log" "wrong producer reached merge"
       else
         assert_grep 'pr merge' "$case_dir/gh.log" "accepted producer did not merge"
       fi
-      case "$variant" in
-        unreadable|malformed|stale)
-          assert_grep 'required check producers at head' "$case_dir/stderr" "producer read error not reported" ;;
-      esac
     done
   done
   pass "fm-pr-merge enforces required producer identity and named waivers"
 }
 
-# A commit status carries no app id to compare, so an app-bound required context
-# that arrives as a green status matches by name, while the same context left
-# unreported still refuses.
-test_app_bound_required_status_context_matches_by_name() {
+# A commit status carries no app id to compare, so it cannot satisfy an
+# app-bound required context even when the status itself is green.
+test_app_bound_required_status_context_refuses() {
   local case_dir head kind variant
   head=a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7
   for kind in classic ruleset; do
@@ -3532,22 +3561,17 @@ test_app_bound_required_status_context_matches_by_name() {
           "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
         mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
       fi
-      printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
+      printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s","status":"completed","conclusion":"success","started_at":"2026-09-01T00:01:00Z"}]}\n' \
         "$head" > "$case_dir/github-runs.json"
       run_required_case "$case_dir" 111
-      if [ "$variant" = reported ]; then
-        expect_code 0 "$RC" "app-status-$kind-reported: a green app-bound status must merge: $(cat "$case_dir/stderr")"
-        assert_logged_gh_merge "$case_dir" 111 example/repo --squash
-      else
-        expect_code 1 "$RC" "app-status-$kind-absent: an unreported app-bound status must refuse"
-        assert_grep "required check 'license/cla' has not reported" "$case_dir/stderr" \
-          "app-status-$kind-absent: the unreported status was not named"
-        assert_no_grep 'pr merge' "$case_dir/gh.log" \
-          "app-status-$kind-absent: gh pr merge ran with the status unreported"
-      fi
+      expect_code 1 "$RC" "app-status-$kind-$variant: an app-bound status must refuse"
+      assert_grep "required check 'license/cla' has not reported" "$case_dir/stderr" \
+        "app-status-$kind-$variant: the app-bound status was accepted"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" \
+        "app-status-$kind-$variant: gh pr merge ran without the required app"
     done
   done
-  pass "fm-pr-merge matches an app-bound required commit status by name"
+  pass "fm-pr-merge rejects commit statuses for app-bound requirements"
 }
 
 test_required_partial_reads_report_all_failures() {
@@ -3884,5 +3908,5 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
-test_app_bound_required_status_context_matches_by_name
+test_app_bound_required_status_context_refuses
 test_required_partial_reads_report_all_failures

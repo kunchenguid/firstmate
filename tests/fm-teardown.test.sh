@@ -269,10 +269,22 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"statusCheckRollup"*) printf '%s\n' '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}' ; exit 0 ;;
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
+  "api --paginate")
+    case " \$* " in
+      *"/commits/$head/check-runs"*) printf '%s\n' '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"$head","status":"completed","conclusion":"success"}]}' ;;
+      *"/rules/branches/main"*) printf '%s\n' '[]' ;;
+    esac
+    exit 0
+    ;;
+  "api repos/") ;;
+esac
+case " \$* " in
+  *" repos/example/repo/branches/main"*) printf '%s\n' '{"name":"main","protected":false}' ; exit 0 ;;
 esac
 echo "error: pull request not found" >&2
 exit 1
@@ -2124,7 +2136,7 @@ configure_secondmate_home() {  # <case-dir> <local|remote> [<parent-home>]
 # with the canonical URL on the parent channel from fm-pr-check itself, once;
 # a main home publishes nothing.
 test_secondmate_pr_registration_publishes_ready_line() {
-  local case_dir pr_head channel url
+  local case_dir pr_head channel url nm_status
   url=https://github.com/example/repo/pull/7
   case_dir=$(make_case mate-pr-ready)
   configure_secondmate_home "$case_dir" local "$case_dir/parent"
@@ -2134,8 +2146,9 @@ test_secondmate_pr_registration_publishes_ready_line() {
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  nm_status=$(printf 'run:\n  id: "RUNFIXTURE"\n  status: completed\n  head_sha: %s\noutcome: passed\nbranch_sync:\n  state: synchronized\n  pipeline:\n    current_head: %s\n' "$pr_head" "$pr_head")
 
-  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_FAKE_AXI_STATUS="$nm_status" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" \
     || fail "mate-pr-ready: fm-pr-check failed: $(cat "$case_dir/pr-check.err")"
   grep -q '^armed:' "$case_dir/pr-check.out" || fail "mate-pr-ready: poll was not armed"
@@ -2143,7 +2156,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
     "mate-pr-ready: the ready line did not reach the parent channel"
   ! grep -q '^actionable:' "$case_dir/pr-check.err" \
     || fail "mate-pr-ready: registration reported a channel problem: $(cat "$case_dir/pr-check.err")"
-  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_FAKE_AXI_STATUS="$nm_status" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2>&1 \
     || fail "mate-pr-ready: re-registration failed"
   [ "$(grep -c 'child-pr-task-x1' "$channel")" -eq 1 ] \
@@ -2152,8 +2165,10 @@ test_secondmate_pr_registration_publishes_ready_line() {
   case_dir=$(make_case main-pr-ready)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
-  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  nm_status=$(printf 'run:\n  id: "RUNFIXTURE"\n  status: completed\n  head_sha: %s\noutcome: passed\nbranch_sync:\n  state: synchronized\n  pipeline:\n    current_head: %s\n' "$pr_head" "$pr_head")
+  FM_FAKE_AXI_STATUS="$nm_status" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
     || fail "main-pr-ready: fm-pr-check failed"
   ! grep -q '^actionable:' "$case_dir/pr-check.err" \

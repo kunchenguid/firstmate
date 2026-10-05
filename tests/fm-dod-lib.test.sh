@@ -33,65 +33,109 @@ test_scout_done_is_not_gated() {
 }
 
 test_unpushed_ship_done_is_refused() {
-  local repo wt sha reason rc
+  local repo wt reason rc
   repo="$TMP_ROOT/unpushed-repo"
   wt="$TMP_ROOT/unpushed-wt"
   fm_git_worktree "$repo" "$wt" fm/unpushed
   git -C "$wt" commit -q --allow-empty -m 'fix only in the worktree'
-  sha=$(git -C "$wt" rev-parse HEAD)
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/1 checks green")
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/1 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "unpushed ship done: was accepted (exit $rc)"
   case "$reason" in
-    *"named head $sha is unreachable outside the worker copy") ;;
-    *) fail "unpushed refusal did not name the commit: $reason" ;;
+    *"is not the task's recorded forge delivery") ;;
+    *) fail "unpushed refusal did not identify missing task binding: $reason" ;;
   esac
   pass "unpushed ship done: is refused"
 }
 
-test_remote_containing_named_head_is_accepted() {
-  local repo wt sha
+test_remote_containing_named_head_does_not_verify_pr() {
+  local repo wt sha reason rc
   repo="$TMP_ROOT/pushed-repo"
   wt="$TMP_ROOT/pushed-wt"
   fm_git_worktree "$repo" "$wt" fm/pushed
   git -C "$wt" commit -q --allow-empty -m 'fix on the branch'
   sha=$(git -C "$wt" rev-parse HEAD)
   git -C "$wt" update-ref refs/remotes/origin/fm/pushed "$sha"
-  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/2 checks green" \
-    || fail "named head on a remote-tracking ref was refused"
-  pass "named head on a remote-tracking ref is accepted"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/other/repo/pull/2 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "unrecorded PR was accepted from local remote reachability"
+  case "$reason" in
+    *"is not the task's recorded forge delivery") ;;
+    *) fail "unrecorded PR refusal did not identify missing task binding: $reason" ;;
+  esac
+  pass "remote reachability alone does not verify the named PR"
 }
 
 test_moved_branch_without_named_head_is_refused() {
-  local repo wt main_sha fix_sha reason rc
+  local repo wt main_sha reason rc
   repo="$TMP_ROOT/moved-repo"
   wt="$TMP_ROOT/moved-wt"
   fm_git_worktree "$repo" "$wt" fm/moved
   main_sha=$(git -C "$repo" rev-parse main)
   git -C "$wt" commit -q --allow-empty -m 'the actual fix'
-  fix_sha=$(git -C "$wt" rev-parse HEAD)
   # The fork branch exists and moved, but only to a merge of the default
   # branch: reachability of that branch is not reachability of the named head.
   git -C "$wt" update-ref refs/remotes/origin/fm/moved "$main_sha"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/3 checks green")
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/3 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "moved remote branch without the named head was accepted"
   case "$reason" in
-    *"named head $fix_sha is unreachable outside the worker copy") ;;
-    *) fail "moved-branch refusal did not name the fix commit: $reason" ;;
+    *"is not the task's recorded forge delivery") ;;
+    *) fail "moved-branch refusal did not identify missing task binding: $reason" ;;
   esac
   pass "a moved remote branch that lacks the named head is refused"
 }
 
-test_no_mistakes_prevalidation_done_is_not_gated() {
-  local repo wt
+test_no_mistakes_prevalidation_done_is_refused() {
+  local repo wt sha mode reason rc
   repo="$TMP_ROOT/preval-repo"
   wt="$TMP_ROOT/preval-wt"
   fm_git_worktree "$repo" "$wt" fm/preval
   git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
-  accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' \
-    || fail "no-mistakes pre-validation done: must not require named-head reachability"
-  pass "no-mistakes pre-validation done: is not gated"
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/preval "$sha"
+  for mode in no-mistakes ''; do
+    reason=$(accept_done ship "$mode" "$wt" "$repo" 'done: implementation complete')
+    rc=$?
+    [ "$rc" -eq 1 ] || fail "no-mistakes pre-validation done: was accepted for mode '$mode'"
+    case "$reason" in
+      *"use needs-validation for the implementation handoff") ;;
+      *) fail "no-mistakes pre-validation done: returned the wrong refusal for mode '$mode': $reason" ;;
+    esac
+  done
+  pass "no-mistakes pre-validation done: is refused even when its head is reachable"
+}
+
+test_no_mistakes_checks_green_requires_canonical_pr_url() {
+  local repo wt sha mode line reason rc
+  repo="$TMP_ROOT/canonical-pr-repo"
+  wt="$TMP_ROOT/canonical-pr-wt"
+  fm_git_worktree "$repo" "$wt" fm/canonical-pr
+  git -C "$wt" commit -q --allow-empty -m 'reachable implementation'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/canonical-pr "$sha"
+  for mode in no-mistakes ''; do
+    for line in \
+      'done: implementation complete; PR validation runs until checks green' \
+      'done: PR https://example.test/o/r/pull/7 checks green'; do
+      reason=$(accept_done ship "$mode" "$wt" "$repo" "$line")
+      rc=$?
+      [ "$rc" -eq 1 ] || fail "noncanonical checks-green done: was accepted for mode '$mode': $line"
+      case "$reason" in
+        *"requires a checks-green PR or published Gerrit change"*) ;;
+        *) fail "noncanonical checks-green done: returned the wrong refusal: $reason" ;;
+      esac
+    done
+  done
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" \
+    'done: PR https://gitlab.example.test/o/r/-/merge_requests/7 checks green')
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "unrecorded canonical GitLab checks-green done: was accepted"
+  case "$reason" in
+    *"is not the task's recorded forge delivery") ;;
+    *) fail "unrecorded canonical GitLab refusal did not identify missing task binding: $reason" ;;
+  esac
+  pass "no-mistakes checks-green done: requires a canonical task-bound PR URL"
 }
 
 test_local_only_linked_branch_is_accepted() {
@@ -203,7 +247,7 @@ test_merge_marker_binds_to_the_named_pr() {
   pass "the merged-PR short-circuit applies only to the recorded PR the done line names"
 }
 
-test_forge_recorded_head_is_accepted_without_local_object() {
+test_forge_recorded_attributed_head_is_accepted() {
   local repo wt meta state forge_head
   repo="$TMP_ROOT/forge-repo"
   wt="$TMP_ROOT/forge-wt"
@@ -211,19 +255,23 @@ test_forge_recorded_head_is_accepted_without_local_object() {
   mkdir -p "$state"
   fm_git_worktree "$repo" "$wt" fm/forge
   git -C "$wt" commit -q --allow-empty -m 'worker head, not pushed from this copy'
-  # The pipeline's own commit: on the forge and in the gate repo, never
-  # fetched into the worker clone.
-  forge_head=0123456789abcdef0123456789abcdef01234567
+  forge_head=$(git -C "$wt" rev-parse HEAD)
   meta="$state/forge.meta"
   printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
     "$wt" "$repo" "$forge_head" > "$meta"
   accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/5 checks green" \
     "$state" forge "$meta" \
-    || fail "forge-recorded pr_head the worker clone never fetched was refused"
+    || fail "forge-recorded attributed GitHub pr_head was refused"
   accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/6 checks green" \
     "$state" forge "$meta" >/dev/null \
     && fail "pr_head recorded for PR 5 was accepted for a done naming PR 6"
-  pass "a forge-recorded head for the named PR is accepted without a local object"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\npr=https://gitlab.example.test/o/r/-/merge_requests/5\npr_head=%s\n' \
+    "$wt" "$repo" "$forge_head" > "$meta"
+  accept_done ship no-mistakes "$wt" "$repo" \
+    "done: PR https://gitlab.example.test/o/r/-/merge_requests/5 checks green" \
+    "$state" forge "$meta" \
+    || fail "forge-recorded attributed GitLab pr_head was refused"
+  pass "a forge-recorded attributed head for the named PR is accepted"
 }
 
 # A direct-PR worker pushes from its own copy: a commit made after the PR's
@@ -384,13 +432,14 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
 
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
-test_no_mistakes_prevalidation_done_is_not_gated
-test_remote_containing_named_head_is_accepted
+test_no_mistakes_prevalidation_done_is_refused
+test_no_mistakes_checks_green_requires_canonical_pr_url
+test_remote_containing_named_head_does_not_verify_pr
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
-test_forge_recorded_head_is_accepted_without_local_object
+test_forge_recorded_attributed_head_is_accepted
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
 test_ci_ready_variants_are_gated
 test_keyed_and_spaced_done_lines_are_gated

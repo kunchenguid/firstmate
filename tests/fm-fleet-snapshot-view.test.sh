@@ -1133,13 +1133,16 @@ EOF
 
 ## Done
 EOF
+  fm_git_init_commit "$home/projects/terminal"
+  git -C "$home/projects/terminal" update-ref refs/remotes/origin/main \
+    "$(git -C "$home/projects/terminal" rev-parse HEAD)"
   fm_write_meta "$home/state/terminal-ship.meta" \
     "window=firstmate:fm-terminal-ship" \
     "worktree=$home/projects/terminal" \
-    "project=alpha" \
+    "project=$home/projects/terminal" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   record_claude_idle "$home/state" terminal-ship
   printf 'done: complete\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)

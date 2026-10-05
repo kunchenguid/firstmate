@@ -265,6 +265,231 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Every current GitHub check that is not green in <pull-request-json>, one per
+# line. Check runs come from <check-runs-json> so their producer identity is
+# available. Older failed runs are superseded only by a newer green run from
+# the same producer with an unambiguous timestamp.
+fm_pr_github_checks_not_green() {
+  local json=$1 producers=$2
+  printf '%s' "$json" | jq -r --argjson producers "$producers" '
+    def settled_at:
+      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+      then . else null end;
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | .statusCheckRollup as $rollup
+    | if all($rollup[] | select(.__typename == "CheckRun"); .name as $name | any($producers[]; .name == $name))
+      then . else error("check run producer missing") end
+    | [ ($rollup
+        | to_entries[]
+        | .key as $i
+        | .value
+        | select(.__typename != "CheckRun")
+        | if .__typename == "StatusContext" then
+            {kind: "status_context", name: (.context // ""), ok: (.state == "SUCCESS")}
+          else error("unknown check rollup entry")
+          end
+        ),
+        ($producers
+          | to_entries[]
+          | .key as $i
+          | .value
+          | {
+              kind: "check_run",
+              name: .name,
+              completed: (.status == "completed"),
+              ok: (.status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped")),
+              at: (.started_at | settled_at),
+              group: (if .name == "" then ["", .app.id, $i] else [.name, .app.id, -1] end)
+            }
+        )
+      ]
+    | . as $entries
+    | (
+        ($entries[]
+          | select(.kind == "status_context" and (.ok | not))
+          | .name
+        ),
+        ($entries
+          | [.[] | select(.kind == "check_run")]
+          | group_by(.group)[]
+          | {
+              name: .[0].name,
+              reds: [.[] | select(.ok | not)],
+              newest_green: ([.[] | select(.ok) | .at | select(. != null)] | max)
+            }
+          | select(
+              (.reds | length) > 0
+              and (
+                .newest_green == null
+                or any(.reds[]; (.completed | not) or .at == null)
+                or ([.reds[] | .at] | max) >= .newest_green
+              )
+            )
+          | .name
+        )
+      )
+    | if . == "" then "(unnamed check)" else . end
+  ' 2>/dev/null || return 1
+}
+
+fm_pr_github_urlencode_path_segment() {
+  local LC_ALL=C input=$1 encoded='' char octet hex
+  while [ -n "$input" ]; do
+    char=${input%"${input#?}"}
+    input=${input#?}
+    case "$char" in
+      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
+      *)
+        printf -v octet '%d' "'$char"
+        [ "$octet" -ge 0 ] || octet=$((octet + 256))
+        printf -v hex '%02X' "$octet"
+        encoded=$encoded%$hex
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
+
+fm_pr_github_branch_rules_unavailable_on_plan() {
+  case "$1" in
+    *"Upgrade to GitHub Pro or make this repository public"*) return 0 ;;
+  esac
+  return 1
+}
+
+FM_PR_GITHUB_REQUIRED=
+FM_PR_GITHUB_REQUIRED_ERROR=
+fm_pr_github_read_required_contexts() {  # <owner/repo> <base>
+  local repo=$1 base=$2 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
+  FM_PR_GITHUB_REQUIRED='[]'
+  FM_PR_GITHUB_REQUIRED_ERROR=
+  branch_path=$(fm_pr_github_urlencode_path_segment "$base")
+  if ! branch_json=$(gh api "repos/$repo/branches/$branch_path" 2>/dev/null) \
+    || [ -z "$branch_json" ] \
+    || ! classic=$(printf '%s' "$branch_json" | jq -c '
+      if type != "object" or (.protected | type) != "boolean" then error("branch payload is unreadable")
+      elif .protected == false then empty
+      elif (.protection.required_status_checks | type) != "object" then error("branch protection summary is unreadable")
+      else .protection.required_status_checks
+        | ((.checks // []) | if type == "array" then .[] else error("invalid checks") end | {context, app_id}),
+          ((.contexts // []) | if type == "array" then .[] else error("invalid contexts") end | {context: ., app_id: null})
+        | if (.context | type) == "string" and (.context | length) > 0 and (.app_id == null or (.app_id | type) == "number")
+          then . else error("invalid required check") end
+        | if .app_id == -1 then .app_id = null else . end
+      end' 2>/dev/null); then
+    classic=''
+    FM_PR_GITHUB_REQUIRED_ERROR="the branch protection summary for base branch $base could not be read"
+  fi
+  if ! api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-required-rules.XXXXXX"); then
+    FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+  else
+    if ! rules_json=$(gh api --paginate "repos/$repo/rules/branches/$branch_path" 2>"$api_err"); then
+      api_err_text=$(cat "$api_err" 2>/dev/null)
+      if ! fm_pr_github_branch_rules_unavailable_on_plan "$api_err_text"; then
+        FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+      fi
+    elif [ -z "$rules_json" ] || ! ruleset=$(printf '%s' "$rules_json" | jq -c '
+      if type != "array" then error("rules payload is unreadable") else .[] end
+      | select(type != "object" or .type == "required_status_checks")
+      | if type == "object" and (.parameters.required_status_checks | type) == "array"
+        then .parameters.required_status_checks[] else error("invalid required check rule") end
+      | if type == "object" and (.context | type) == "string" and (.context | length) > 0
+           and (.integration_id == null or (.integration_id | type) == "number")
+        then {context, app_id: .integration_id} else error("invalid required check rule") end
+      | if .app_id == -1 then .app_id = null else . end' 2>/dev/null); then
+      ruleset=''
+      FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+    fi
+    rm -f "$api_err"
+  fi
+  # shellcheck disable=SC2034  # Output is consumed by callers that source this library.
+  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | jq -sc '
+    unique_by([.context, .app_id]) | group_by(.context)
+    | map(if any(.[]; .app_id != null) then map(select(.app_id != null)) else . end) | add // []')
+  [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
+}
+
+# GitHub's pull-request check rollup can omit a workflow run while that run is
+# still held for approval or otherwise unfinished. The no-mistakes registration
+# gate uses this API result as the second, exact-head workflow signal; a malformed
+# page is an error, and both Firstmate workflows must be present at the exact
+# head before their latest runs can prove readiness.
+fm_pr_github_workflow_runs_green() {  # <workflow-runs-json> <head>
+  local json=$1 head=$2
+  [ -n "$json" ] || return 1
+  printf '%s' "$json" | jq -s -e --arg head "$head" '
+    [ .[]
+      | if type == "object" and (.workflow_runs | type) == "array"
+        then .workflow_runs[]
+        else error("invalid workflow runs page")
+        end
+      | if (.name | type) == "string"
+           and (.workflow_id | type) == "number"
+           and (.run_number | type) == "number"
+           and (.run_attempt | type) == "number"
+           and (.head_sha | type) == "string"
+           and (.status | type) == "string"
+           and (.conclusion == null or (.conclusion | type) == "string")
+        then .
+        else error("invalid workflow run")
+        end
+      | select(.head_sha == $head)
+      | select(.name == "CI" or .name == "Require no-mistakes")
+    ] as $runs
+    | ($runs
+      | group_by(.workflow_id)
+      | map(
+          (map([.run_number, .run_attempt]) | max) as $latest
+          | map(select([.run_number, .run_attempt] == $latest))
+        )) as $latest_runs
+    | ([ $runs[] | .name ] | unique | sort) == ["CI", "Require no-mistakes"]
+      and all($latest_runs[];
+        all(.[];
+          .status == "completed"
+          and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped")))
+  ' >/dev/null 2>&1
+}
+
+fm_pr_github_required_checks_missing() {  # <pull-request-json> <required-json> <check-runs-json>
+  printf '%s' "$1" | jq -r --argjson required "$2" --argjson producers "$3" '
+    def settled_at:
+      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+      then . else null end;
+    def current_run_is_green($runs):
+      ($runs | map({
+        completed: (.status == "completed"),
+        ok: (.status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped")),
+        at: (.started_at | settled_at)
+      })) as $states
+      | ($states | map(select(.ok) | .at | select(. != null)) | max) as $newest_green
+      | ($states | map(select(.ok | not))) as $reds
+      | ($states | length) > 0
+        and ($reds | length) == 0
+        or (
+          $newest_green != null
+          and all($reds[]; .completed and .at != null and .at < $newest_green)
+        );
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | .statusCheckRollup as $reported
+    | $required
+    | map(. as $requirement
+      | select((
+          if $requirement.app_id == null then
+            any($reported[]; (if .__typename == "CheckRun" then .name else .context end) == $requirement.context)
+          else
+            current_run_is_green([
+              $producers[]
+              | select(.name == $requirement.context and .app.id == $requirement.app_id)
+            ])
+          end
+        ) | not)
+      | .context) | unique[]
+  ' 2>/dev/null || return 1
+}
+
 # The one reading of a GitHub pull request's draft state. Prints "true" or
 # "false" for a boolean isDraft and nothing for anything else, so a caller can
 # tell a positive draft from an unreadable payload. bin/fm-pr-merge.sh refuses

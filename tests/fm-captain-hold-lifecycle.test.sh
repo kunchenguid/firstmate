@@ -115,9 +115,9 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
-        printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
+        printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"%s","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}\n' "$FM_TEST_GH_HEAD"
         ;;
-      *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
+      *headRefOid*) printf '%s\n' "$FM_TEST_GH_HEAD" ;;
     esac
     ;;
   "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
@@ -146,11 +146,13 @@ SH
 }
 
 run_pr_merge() {  # <home> <id> <url>
-  local home=$1
+  local home=$1 id=$2 wt head
+  wt=$(fm_meta_get "$home/state/$id.meta" worktree)
+  head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || head=1111111111111111111111111111111111111111
   shift
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" FM_TEST_GH_LOG="$home/gh.log" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_TEST_GH_LOG="$home/gh.log" FM_TEST_GH_HEAD="$head" \
     FM_TEST_GH_AXI_LOG="$home/gh-axi.log" "$ROOT/bin/fm-pr-merge.sh" "$@"
 }
 
@@ -205,10 +207,15 @@ run_shim() {  # <home> <command args...>
 }
 
 write_origin_meta() {  # <home> <id> [kind]
-  local home=$1 id=$2 kind=${3:-scout}
+  local home=$1 id=$2 kind=${3:-scout} wt
+  wt="$home/projects/missing-$id"
+  if [ "$kind" = ship ]; then
+    fm_git_init_commit "$wt"
+    git -C "$wt" update-ref refs/remotes/origin/main "$(git -C "$wt" rev-parse HEAD)"
+  fi
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" \
-    "worktree=$home/projects/missing-$id" \
+    "worktree=$wt" \
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=$kind" \

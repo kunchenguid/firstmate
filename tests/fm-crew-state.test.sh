@@ -844,6 +844,23 @@ test_stale_blocked_superseded() {
   pass "stale blocked over active run is superseded"
 }
 
+# A validation run is the authoritative evidence that firstmate acted on the
+# non-terminal implementation handoff, so the older status line is superseded.
+test_validation_handoff_superseded_by_active_run() {
+  reset_fakes
+  local d; d=$(new_case validation-handoff-superseded)
+  make_repo_on_branch "$d/wt" fm/feat-bv
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bv.meta" "window=fm:fm-feat-bv" "worktree=$d/wt" "kind=ship"
+  printf 'needs-validation: implementation committed\n' > "$d/state/feat-bv.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bv)"
+  local out; out=$(run_crew_state "$d" feat-bv)
+  assert_contains "$out" "state: working" "triggered validation -> working despite handoff log"
+  assert_contains "$out" "source: run-step" "triggered validation -> run-step source"
+  assert_contains "$out" "superseded by validation run" "implementation handoff not reconciled against active validation"
+  pass "an active validation run supersedes the non-terminal implementation handoff"
+}
+
 # A crew whose drive call timed out or was killed by its harness command limit
 # routinely blocks claiming the pipeline died. The daemon accepts `respond`
 # immediately and runs the fix round in the background, so such a claim over a
@@ -1151,10 +1168,12 @@ test_gate_block_parked_not_superseded() {
 
 test_ci_ready_done_log_beats_monitoring_run() {
   reset_fakes
-  local d; d=$(new_case ci-ready)
+  local d sha; d=$(new_case ci-ready)
   make_repo_on_branch "$d/wt" fm/feat-ci
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
+  sha=$(git -C "$d/wt" rev-parse HEAD)
+  fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/2" "pr_head=$sha"
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
   local out; out=$(run_crew_state "$d" feat-ci)
@@ -2313,10 +2332,11 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
+  assert_contains "$out" "state: blocked" "an unrecorded coarse ready PR must not complete the task"
   assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "not the task's recorded forge delivery" "the coarse ready rejection names the missing delivery registration"
+  assert_not_contains "$out" "state: working" "an unrecorded coarse ready PR must not be suppressed by another branch log"
+  pass "coarse run does not probe another branch's ci log or trust an unrecorded PR"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -2327,7 +2347,7 @@ test_other_branch_run_ignored() {
   make_repo_on_branch "$d/wt" fm/feat-g
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-g.meta" "window=fm:fm-feat-g" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'done: implemented, ready to validate\n' > "$d/state/feat-g.status"
+  printf 'needs-validation: implemented, ready to validate\n' > "$d/state/feat-g.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/some-other)"
   FM_FAKE_RUNS_LIST="$(cat <<'EOF'
   running    fm/some-other aaaaaaa  2026-07-02 22:10
@@ -2338,25 +2358,25 @@ EOF
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
-  pass "another branch's run is ignored, falls back"
+  assert_contains "$out" "state: parked" "implementation handoff remains parked pending this branch's validation"
+  assert_not_contains "$out" "state: done" "implementation handoff must not read as terminal"
+  pass "another branch's run is ignored and the implementation handoff remains parked"
 }
 
-# A ship done: whose named head lives only in the disposable copy is not
-# current-state done (issue 4768). The worker's claim stays a blocked
-# preservation failure rather than finished-and-safe.
+# A no-mistakes ship done: cannot use an unrecorded PR as delivery evidence,
+# including when its named head lives only in the disposable copy. The worker's
+# claim stays blocked rather than finished-and-safe.
 test_unpushed_ship_done_is_blocked() {
   reset_fakes
-  local d sha out
+  local d out
   d=$(new_case unpushed-done)
   make_repo_on_branch "$d/wt" fm/unpushed
   git -C "$d/wt" commit -q --allow-empty -m 'fix only in the worktree'
-  sha=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/unpushed.meta" \
     "window=fm:fm-unpushed" "worktree=$d/wt" "project=$d/wt" \
     "kind=ship" "mode=no-mistakes" "harness=claude"
-  printf 'done: PR https://example.test/o/r/pull/9 checks green\n' \
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' \
     > "$d/state/unpushed.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
@@ -2365,8 +2385,8 @@ test_unpushed_ship_done_is_blocked() {
   out=$(run_crew_state "$d" unpushed)
   assert_contains "$out" "state: blocked" "unpushed ship done: must not read as done"
   assert_contains "$out" "source: status-log" "preservation refusal stays status-log sourced"
-  assert_contains "$out" "named head $sha is unreachable outside the worker copy" \
-    "refusal must name the unpushed head"
+  assert_contains "$out" "not the task's recorded forge delivery" \
+    "refusal must name the missing no-mistakes delivery registration"
   assert_not_contains "$out" "state: done" "unpushed ship done: must not remain done"
   pass "unpushed ship done: is current-state blocked"
 }
@@ -2400,7 +2420,7 @@ test_merged_pr_reads_done_under_captured_meta() {
   pass "recorded merged PR reads done under the fleet snapshot's captured meta"
 }
 
-test_no_mistakes_prevalidation_done_stays_done() {
+test_no_mistakes_prevalidation_done_is_blocked() {
   reset_fakes
   local d out
   d=$(new_case preval-done)
@@ -2416,9 +2436,10 @@ test_no_mistakes_prevalidation_done_stays_done() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" preval
   out=$(run_crew_state "$d" preval)
-  assert_contains "$out" "state: done" "no-mistakes pre-validation done: remains done"
-  assert_not_contains "$out" "state: blocked" "pre-validation done: must not be the named-head gate"
-  pass "no-mistakes pre-validation done: stays current-state done"
+  assert_contains "$out" "state: blocked" "no-mistakes pre-validation done: must not complete"
+  assert_contains "$out" "use needs-validation for the implementation handoff" "no-mistakes pre-validation done: did not identify the canonical handoff"
+  assert_not_contains "$out" "state: done" "no-mistakes pre-validation done: remained terminal"
+  pass "no-mistakes pre-validation done: is blocked"
 }
 
 test_moved_remote_branch_without_named_head_is_blocked() {
@@ -2434,7 +2455,7 @@ test_moved_remote_branch_without_named_head_is_blocked() {
   fm_write_meta "$d/state/moved.meta" \
     "window=fm:fm-moved" "worktree=$d/wt" "project=$d/wt" \
     "kind=ship" "mode=direct-PR" "harness=claude"
-  printf 'done: PR https://example.test/o/r/pull/8\n' > "$d/state/moved.status"
+  printf 'done: PR https://github.com/o/r/pull/8\n' > "$d/state/moved.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
@@ -2866,7 +2887,7 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
   make_fakebin "$d" >/dev/null
   arm_idle_record "$d/state" task
   for kind in scout ship; do
-    fm_write_meta "$d/state/task.meta" "window=fm:fm-task" "worktree=$d/wt" "kind=$kind" "harness=claude"
+    fm_write_meta "$d/state/task.meta" "window=fm:fm-task" "worktree=$d/wt" "project=$d/wt" "kind=$kind" "mode=local-only" "harness=claude"
     for opener in needs-decision blocked; do
       for terminal in 'done' failed; do
         printf '%s [key=choice]: an earlier decision\n%s: final outcome\nContinuation prose.\n\n' \
@@ -5515,6 +5536,7 @@ done
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
+test_validation_handoff_superseded_by_active_run
 test_daemon_claim_over_live_run_reads_run_alive
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
@@ -5576,7 +5598,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
-test_no_mistakes_prevalidation_done_stays_done
+test_no_mistakes_prevalidation_done_is_blocked
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
 test_no_run_launch_prompt_parked_is_not_working

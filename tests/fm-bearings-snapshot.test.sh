@@ -912,9 +912,12 @@ EOF
 
 ## Done
 EOF
+  fm_git_init_commit "$mate/projects/done"
+  git -C "$mate/projects/done" update-ref refs/remotes/origin/main \
+    "$(git -C "$mate/projects/done" rev-parse HEAD)"
   fm_write_meta "$mate/state/done.meta" \
-    "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=sample" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=$mate/projects/done" \
+    "harness=claude" "kind=ship" "mode=direct-PR"
   fm_write_meta "$mate/state/failed.meta" \
     "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
     "harness=claude" "kind=ship" "mode=no-mistakes"

@@ -103,10 +103,12 @@ test_newest_check_has_no_verdict() {
 
 forge_home() {
   local home=$1
-  mkdir -p "$home/forge" "$home/root/bin" "$home/wt"
+  mkdir -p "$home/forge" "$home/root/bin"
+  fm_git_init_commit "$home/wt"
+  git -C "$home/wt" update-ref refs/remotes/origin/main "$(git -C "$home/wt" rev-parse HEAD)"
   printf '#!/bin/sh\nexit 0\n' > "$home/root/bin/fm-guard.sh"
   chmod +x "$home/root/bin/fm-guard.sh"
-  printf 'worktree=%s/wt\nkind=ship\n' "$home" > "$home/state/delivery.meta"
+  printf 'worktree=%s/wt\nkind=ship\nmode=direct-PR\n' "$home" > "$home/state/delivery.meta"
   chmod 600 "$home/state/delivery.meta"
   record "$home" delivery 8 open mergeable
   printf '%s\n' "$HEAD_A" > "$home/forge/head"
@@ -119,6 +121,8 @@ forge_home() {
 #!/usr/bin/env bash
 set -eu
 case "$*" in
+  'pr view '*statusCheckRollup*)
+    jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,baseRefName:"main",statusCheckRollup:[{__typename:"CheckRun",name:"test",status:"COMPLETED",conclusion:"SUCCESS"}]}' ;;
   'pr view '*headRefOid,reviewDecision*)
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
