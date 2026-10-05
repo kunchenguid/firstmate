@@ -1482,21 +1482,43 @@ _fm_composer_locate_footer_zone() {  # <plain>
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
 }
 
+# _fm_composer_bare_continuation_row: 0 when a trimmed row below a bare
+# agent-glyph row continues that composer's wrapped content: non-blank and not
+# an edge, omp status, or braille furniture row.
+_fm_composer_bare_continuation_row() {  # <trimmed-row>
+  [ -n "$1" ] || return 1
+  fm_composer_row_has_edge "$1" && return 1
+  _fm_composer_row_is_omp_status "$1" && return 1
+  _fm_composer_row_is_braille_furniture "$1" && return 1
+  return 0
+}
+
 # _fm_composer_bare_rule_sandwich: 0 when bare agent-glyph <row> sits in its
 # own titled composer: a titled rule directly above it and the screen's only
-# unmatched separator directly below it, which is that composer's closing rule.
+# unmatched separator below it, which is that composer's closing rule, with
+# nothing between them but the content's own wrapped continuation rows.
 #
 # The cursorless staleness rule reads an unmatched separator BELOW a candidate
 # as proof the candidate is scrollback. A titled top rule never opens the
 # separator pair, so the composer's own closing rule becomes that unmatched
 # separator and a genuinely idle composer read `unknown`. Adjacency on BOTH
 # edges keeps the staleness rule intact everywhere else: a glyph stranded in
-# scrollback has transcript rows, not its own rules, around it.
+# scrollback has transcript rows, not its own rules, around it. A draft or
+# doorbell line wider than the composer wraps onto continuation rows, so the
+# closing rule is adjacent to the last of them rather than to the glyph row;
+# a blank or edge row in between still breaks the sandwich.
 _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
-  local plain=$1 row=$2 above below
+  local plain=$1 row=$2 above below next
   [ "$row" -ge 1 ] || return 1
-  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$((row + 1))" ] || return 1
-  below=$(_fm_composer_screen_row "$((row + 1))" "$plain")
+  next=$((row + 1))
+  while [ "$next" -lt "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" ]; do
+    below=$(_fm_composer_screen_row "$next" "$plain")
+    fm_composer_normalize_trim_var below
+    _fm_composer_bare_continuation_row "$below" || return 1
+    next=$((next + 1))
+  done
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$next" ] || return 1
+  below=$(_fm_composer_screen_row "$next" "$plain")
   fm_composer_normalize_trim_var below
   _fm_composer_pi_separator_row "$below" || return 1
   above=$(_fm_composer_screen_row "$((row - 1))" "$plain")
@@ -1582,10 +1604,7 @@ _fm_composer_select_cursorless() {
       raw=$(_fm_composer_screen_row "$next" "$plain")
       trimmed=$raw
       fm_composer_normalize_trim_var trimmed
-      [ -n "$trimmed" ] || break
-      fm_composer_row_has_edge "$trimmed" && break
-      _fm_composer_row_is_omp_status "$trimmed" && break
-      _fm_composer_row_is_braille_furniture "$trimmed" && break
+      _fm_composer_bare_continuation_row "$trimmed" || break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done

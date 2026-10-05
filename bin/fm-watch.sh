@@ -592,7 +592,7 @@ inbox_steer_check() {  # <window> <task>
           wake "$reason"
         fi
       fi
-      triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
+      triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc${FM_TASK_INBOX_RING_REASON:+ reason=$FM_TASK_INBOX_RING_REASON}"
       ;;
     retry)
       ring_rc=0
@@ -602,7 +602,7 @@ inbox_steer_check() {  # <window> <task>
         fm_wake_append stale "$w" "$reason" || exit 1
         wake "$reason"
       fi
-      triage_log "steer-inbox retry ring: $task ${rec##*/} result=$ring_rc"
+      triage_log "steer-inbox retry ring: $task ${rec##*/} result=$ring_rc${FM_TASK_INBOX_RING_REASON:+ reason=$FM_TASK_INBOX_RING_REASON}"
       ;;
     escalate)
       reason=${reason:-"stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"}

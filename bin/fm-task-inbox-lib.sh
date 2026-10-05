@@ -353,12 +353,16 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
+# On return 2, FM_TASK_INBOX_RING_REASON holds the backend's refusal
+# diagnostics on one line, for callers to log; it is empty otherwise.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict errf
+  FM_TASK_INBOX_RING_REASON=
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
+    FM_TASK_INBOX_RING_REASON="inbox name is not printable"
     return 2
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
@@ -378,12 +382,19 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>/dev/null); then
-    return 2
+  errf=$(mktemp "${TMPDIR:-/tmp}/fm-ring-err.XXXXXX" 2>/dev/null) || errf=/dev/null
+  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>"$errf") || verdict=send-failed
+  if [ "$errf" != /dev/null ]; then
+    FM_TASK_INBOX_RING_REASON=$(LC_ALL=C tr -c '[:print:]\n' ' ' < "$errf" | sed '/^ *$/d' | paste -sd ';' - | cut -c1-300)
+    rm -f "$errf"
   fi
   # The verdict is read only to report a failed keystroke; every other value
   # (empty, pending, unknown, ...) is deliberately ignored, never proof.
-  [ "$verdict" != send-failed ] || return 2
+  if [ "$verdict" = send-failed ]; then
+    FM_TASK_INBOX_RING_REASON=${FM_TASK_INBOX_RING_REASON:-the backend reported send-failed without a reason}
+    return 2
+  fi
+  FM_TASK_INBOX_RING_REASON=
   return 0
 }
 
