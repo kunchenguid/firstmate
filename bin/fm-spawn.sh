@@ -4479,13 +4479,22 @@ fi
 # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
 # open-close pair. A secondmate's hooks update this record and do not touch
 # the parent's turn-ended marker; parent turn-end wiring for grok and kimi
-# stays on the ordinary-task path below.
+# stays on the ordinary-task path below. A raw launch command for a claude,
+# pi, pi-signed, or omp secondmate is not armed: those four reach their
+# wiring only through a launch-template flag (--settings, -e) that a raw
+# command does not carry, so the record would never be updated.
 busy_notify_turnend=true
+WIRING_HARNESS=$HARNESS
 if [ "$KIND" = secondmate ]; then
   busy_notify_turnend=false
+  if [ "$RAW_LAUNCH" -ne 0 ]; then
+    case "$HARNESS" in
+    claude* | pi | pi-signed | omp) WIRING_HARNESS= ;;
+    esac
+  fi
 fi
 BUSY_GEN=
-  case "$HARNESS" in
+  case "$WIRING_HARNESS" in
   codex*)
     if fm_busy_codex_semantic_source; then
       echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
@@ -4493,7 +4502,7 @@ BUSY_GEN=
     fi
     ;;
   esac
-  case "$HARNESS" in
+  case "$WIRING_HARNESS" in
   claude* | opencode* | pi | pi-signed | omp)
     BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
       echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4521,7 +4530,7 @@ BUSY_GEN=
     fi
     ;;
   esac
-  case "$HARNESS" in
+  case "$WIRING_HARNESS" in
   claude*)
     # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
     # a turn; Stop (normal completion), StopFailure (API-error turn end),

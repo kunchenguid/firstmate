@@ -759,6 +759,34 @@ test_secondmate_opencode_plugin_closes_without_a_parent_turnend() {
   pass "an opencode secondmate plugin closes the parent busy record without a parent turn-end"
 }
 
+# A raw launch command carries none of the launch-template flags (--settings,
+# -e) that load the secondmate wiring, so a record armed for it would never be
+# updated by the launched command.
+test_raw_secondmate_launch_writes_no_busy_wiring() {
+  local harness raw case_dir id state sm out launch
+  for harness in claude pi pi-signed omp; do
+    case_dir="$TMP_ROOT/sm-raw-$harness"
+    id="sm-raw-$harness"
+    raw="$harness --fm-raw-flag"
+    out=$(spawn_secondmate_harness "$case_dir" "$id" "$raw" "$harness") \
+      || fail "raw $harness secondmate spawn must still succeed: $out"
+    state="$case_dir/primary/state"
+    sm="$case_dir/sm"
+    launch=$(cat "$case_dir/launch.log")
+    assert_contains "$launch" "$raw" "raw $harness secondmate did not launch the raw command"
+    assert_absent "$state/$id.busy-gen" "raw $harness secondmate armed a busy generation"
+    assert_absent "$state/$id.busy-state" "raw $harness secondmate seeded a busy record"
+    assert_absent "$state/$id.claude-settings.json" "raw $harness secondmate wrote Claude hook settings"
+    assert_absent "$sm/.fm-busy-stop" "raw $harness secondmate wrote the Stop pointer"
+    assert_absent "$sm/.claude/settings.local.json" "raw $harness secondmate wrote the home's settings.local.json"
+    assert_absent "$state/$id.pi-ext.ts" "raw $harness secondmate wrote the Pi busy extension"
+    assert_absent "$state/$id.omp-ext.ts" "raw $harness secondmate wrote the omp busy extension"
+    out=$(classify "$harness" "$id" "$state")
+    [ "$out" = "unknown missing" ] || fail "raw $harness secondmate must classify unknown missing, got '$out'"
+  done
+  pass "a raw claude, pi, pi-signed, or omp secondmate launch writes no busy wiring and classifies unknown"
+}
+
 test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
   local case_dir id state launch out sm
   case_dir="$TMP_ROOT/sm-codex"
@@ -788,6 +816,7 @@ test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
 }
 
 test_secondmate_claude_spawn_arms_busy_for_the_stall_gate
+test_raw_secondmate_launch_writes_no_busy_wiring
 test_secondmate_claude_stop_guard_owns_the_stop_verdict
 test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook
 test_secondmate_claude_spawn_leaves_local_settings_untouched
