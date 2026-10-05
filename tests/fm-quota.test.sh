@@ -98,11 +98,74 @@ pass "provider failure returns partial live evidence without stale success"
 cat > "$FAKEBIN/codex" <<'SH'
 #!/usr/bin/env bash
 set -eu
+IFS= read -r _
+printf '%s\n' '{"id":"fm-quota-initialize","result":{"userAgent":"fixture"}}'
+IFS= read -r _
+IFS= read -r _
+printf '%s\n' '{"id":"fm-quota-read","error":{"code":401,"message":"login required\nrun codex login"}}'
+SH
+chmod +x "$FAKEBIN/codex"
+set +e
+PATH="$FAKEBIN:$PATH" "$TOOL" --json --provider codex > "$TMP_ROOT/protocol-error.json"
+protocol_rc=$?
+set -e
+[ "$protocol_rc" -eq 1 ] || fail "Codex protocol rejection did not produce exit 1"
+assert_contains "$(jq -r '.providers.codex.error' "$TMP_ROOT/protocol-error.json")" \
+  "401: login required run codex login" "Codex protocol rejection discarded its actionable detail"
+
+cat > "$FAKEBIN/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'codex state directory is not writable' >&2
+exit 9
+SH
+chmod +x "$FAKEBIN/codex"
+set +e
+PATH="$FAKEBIN:$PATH" "$TOOL" --json --provider codex > "$TMP_ROOT/early-exit.json"
+early_rc=$?
+set -e
+[ "$early_rc" -eq 1 ] || fail "Codex pre-initialization failure did not produce exit 1"
+assert_contains "$(jq -r '.providers.codex.error' "$TMP_ROOT/early-exit.json")" \
+  "codex state directory is not writable" "Codex pre-initialization stderr was discarded"
+pass "Codex unavailable results preserve bounded protocol and startup diagnostics"
+
+cat > "$FAKEBIN/codex" <<'SH'
+#!/usr/bin/env bash
+set -eu
 printf '%s\n' "$$" > "${FM_QUOTA_HANG_PID:?}"
 IFS= read -r _
 while :; do sleep 1; done
 SH
 chmod +x "$FAKEBIN/codex"
+
+: > "$TMP_ROOT/interrupt.pid"
+PATH="$FAKEBIN:$PATH" FM_QUOTA_TIMEOUT_MS=60000 FM_QUOTA_HANG_PID="$TMP_ROOT/interrupt.pid" \
+  "$TOOL" --json --provider codex > "$TMP_ROOT/interrupted.json" &
+quota_pid=$!
+tries=0
+while [ ! -s "$TMP_ROOT/interrupt.pid" ] && [ "$tries" -lt 40 ]; do
+  sleep 0.05
+  tries=$((tries + 1))
+done
+[ -s "$TMP_ROOT/interrupt.pid" ] || fail "interruption fixture child never started"
+interrupted_child=$(cat "$TMP_ROOT/interrupt.pid")
+kill -TERM "$quota_pid"
+set +e
+wait "$quota_pid"
+interrupt_rc=$?
+set -e
+[ "$interrupt_rc" -eq 143 ] || fail "interrupted quota process exited $interrupt_rc instead of 143"
+tries=0
+while kill -0 "$interrupted_child" 2>/dev/null && [ "$tries" -lt 20 ]; do
+  sleep 0.05
+  tries=$((tries + 1))
+done
+if kill -0 "$interrupted_child" 2>/dev/null; then
+  kill -KILL "$interrupted_child" 2>/dev/null || true
+  fail "provider child survived parent interruption"
+fi
+pass "parent interruption terminates and reaps the detached provider child"
+
+: > "$TMP_ROOT/hang.pid"
 set +e
 PATH="$FAKEBIN:$PATH" FM_QUOTA_TIMEOUT_MS=150 FM_QUOTA_HANG_PID="$TMP_ROOT/hang.pid" \
   "$TOOL" --json --provider codex > "$TMP_ROOT/timeout.json"

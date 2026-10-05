@@ -19,6 +19,8 @@ const NORMAL_EXIT_GRACE_MS = 1_000;
 const TERMINATION_GRACE_MS = 400;
 const MAX_CAPTURE_BYTES = 64 * 1024;
 const PROVIDER_ORDER = ["codex", "traex"];
+const activeChildren = new Set();
+let interruptionCleanup;
 
 function usage(stream = process.stdout) {
   stream.write(`Usage: fm-quota.mjs [--json] [--provider codex|traex]... [--model NAME]...
@@ -84,6 +86,8 @@ function taskChild(command, args) {
     env: process.env,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  activeChildren.add(child);
+  child.once("close", () => { activeChildren.delete(child); });
   child.stdin.on("error", () => {});
   return child;
 }
@@ -99,6 +103,9 @@ function signalTaskChild(child, signal) {
 }
 
 function waitForExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
 }
 
@@ -131,6 +138,42 @@ async function stopTaskChild(child) {
   return { forced: true, ...(await exit) };
 }
 
+async function cleanupAfterInterruption(signal, exitCode) {
+  if (interruptionCleanup) return interruptionCleanup;
+  interruptionCleanup = (async () => {
+    const pending = [...activeChildren].map((child) => ({ child, exit: waitForExit(child) }));
+    for (const { child } of pending) signalTaskChild(child, signal);
+    const exited = await waitWithTimeout(Promise.all(pending.map(({ exit }) => exit)), TERMINATION_GRACE_MS);
+    if (!exited) {
+      for (const { child } of pending) signalTaskChild(child, "SIGKILL");
+      await waitWithTimeout(Promise.all(pending.map(({ exit }) => exit)), TERMINATION_GRACE_MS);
+    }
+    process.exit(exitCode);
+  })();
+  return interruptionCleanup;
+}
+
+process.once("SIGINT", () => { void cleanupAfterInterruption("SIGINT", 130); });
+process.once("SIGTERM", () => { void cleanupAfterInterruption("SIGTERM", 143); });
+process.once("SIGHUP", () => { void cleanupAfterInterruption("SIGHUP", 129); });
+
+function diagnosticText(value) {
+  let raw;
+  if (typeof value === "string") raw = value;
+  else if (value && typeof value === "object" && typeof value.message === "string") {
+    raw = `${value.code === undefined ? "" : `${value.code}: `}${value.message}`;
+  } else {
+    try { raw = JSON.stringify(value); } catch { raw = ""; }
+  }
+  const sanitized = String(raw || "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return sanitized ? sanitized.slice(0, 500) : null;
+}
+
+function finalStderrLine(stderr) {
+  const line = stderr.trim().split("\n").filter(Boolean).at(-1);
+  return diagnosticText(line);
+}
+
 function providerUnavailable(provider, message, attemptedAt) {
   return { provider, status: "unavailable", attempted_at: attemptedAt, error: message };
 }
@@ -151,10 +194,12 @@ async function readCodex(timeout) {
 
   let stderr = "";
   let settled = false;
+  let childClosed = false;
   let initialized = false;
   let result;
   let failure;
   child.stderr.on("data", (chunk) => { stderr = appendBounded(stderr, chunk); });
+  child.once("close", () => { childClosed = true; });
   child.once("error", (error) => { failure = error; });
   const lines = readline.createInterface({ input: child.stdout });
   lines.on("line", (line) => {
@@ -169,7 +214,8 @@ async function readCodex(timeout) {
     }
     if (message.id === "fm-quota-initialize") {
       if (message.error) {
-        failure = new Error("codex app-server rejected initialization");
+        const detail = diagnosticText(message.error);
+        failure = new Error(`Codex app-server rejected initialization${detail ? `: ${detail}` : ""}`);
         settled = true;
         return;
       }
@@ -179,7 +225,10 @@ async function readCodex(timeout) {
       return;
     }
     if (message.id === "fm-quota-read") {
-      if (message.error) failure = new Error("Codex account quota read was rejected");
+      if (message.error) {
+        const detail = diagnosticText(message.error);
+        failure = new Error(`Codex account quota read was rejected${detail ? `: ${detail}` : ""}`);
+      }
       else result = message.result;
       settled = true;
       child.stdin.end();
@@ -195,7 +244,7 @@ async function readCodex(timeout) {
   const timedOut = await waitWithTimeout(
     new Promise((resolve) => {
       const poll = () => {
-        if (settled || failure || child.exitCode !== null || child.signalCode !== null) resolve();
+        if (settled || failure || childClosed) resolve();
         else setTimeout(poll, 10);
       };
       poll();
@@ -209,10 +258,10 @@ async function readCodex(timeout) {
   lines.close();
   if (!failure && result && cleanup.forced) failure = new Error("Codex app-server did not exit after its stdin was closed");
   if (!failure && !result) {
-    const detail = stderr.trim().split("\n").filter(Boolean).at(-1);
+    const detail = finalStderrLine(stderr);
     failure = new Error(initialized
       ? `Codex quota response was unavailable${detail ? `: ${detail}` : ""}`
-      : `Codex app-server exited before initialization${exit === null ? "" : ` (exit ${exit})`}`);
+      : `Codex app-server exited before initialization${exit === null ? "" : ` (exit ${exit})`}${detail ? `: ${detail}` : ""}`);
   }
   if (failure) return childFailure("codex", "codex", failure, attemptedAt);
   if (!result || typeof result !== "object" || !result.rateLimits || typeof result.rateLimits !== "object") {
