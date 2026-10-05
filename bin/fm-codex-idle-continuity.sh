@@ -44,10 +44,10 @@
 # stop nor a handover treats that directory as stale until `pid` is recorded
 # or the hook pid is dead. Stops that overlap take
 # state/.codex-idle-continuity-claim.lock in turn to check, reclaim and
-# create that directory, so only one of them starts a supervisor. An arm cycle that ends because another owner took
-# or ended the watcher is a handover, not a failure. A later
-# `attached watcher ... stalled` line is a failure even when an earlier line
-# said `watcher: attached`.
+# create that directory, so only one of them starts a supervisor. An arm
+# cycle that ends because another owner took or ended the watcher is a
+# handover, not a failure. A later `attached watcher ... stalled` line is a
+# failure even when an earlier line said `watcher: attached`.
 #
 # When the recorded Codex owner exits, the supervisor stops a watcher only
 # when this supervisor's own arm printed `watcher: started`. An arm that only

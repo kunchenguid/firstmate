@@ -146,7 +146,10 @@ done
 
 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-procevent.sh" register lavish shot -- "$SRC" >/dev/null \
   || fail "could not register the live source"
-FM_HOME="$HOME_DIR" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
+# reconcile exits non-zero when the runner has not proved its claim inside the
+# confirm window, and the default 3s is too short on a loaded host. The wait
+# ends as soon as the proof exists, so a long window costs nothing otherwise.
+FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=30 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
   || fail "initial live reconcile failed"
 for _ in $(seq 1 30); do
   [ "$(hits)" -ge 1 ] && break

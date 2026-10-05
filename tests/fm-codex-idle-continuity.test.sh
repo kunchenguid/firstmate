@@ -50,7 +50,10 @@ as_lock_owner() {  # <home> <command...>
 
 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-procevent.sh" register lavish shot -- "$SRC" >/dev/null \
   || fail "could not register the single-shot source"
-FM_HOME="$HOME_DIR" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
+# reconcile exits non-zero when the runner has not proved its claim inside the
+# confirm window, and the default 3s is too short on a loaded host. The wait
+# ends as soon as the proof exists, so a long window costs nothing otherwise.
+FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=30 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
   || fail "initial reconcile did not start the source"
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   [ -f "$LOG" ] && [ "$(hits)" -ge 1 ] && break
