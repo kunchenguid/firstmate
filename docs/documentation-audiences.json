@@ -413,6 +413,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/supervisor-work-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/subagent-guard.md",
       "audience": "maintainer-architecture"
     },
