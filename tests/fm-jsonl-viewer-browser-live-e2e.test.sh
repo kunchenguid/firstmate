@@ -104,6 +104,44 @@ Readable paragraph with **strong prose** and `inline code` and [safe link](https
 | Browser | Passed |
 | **A** | **0** |
 
+## 中文：范围 / 安全？
+
+This section verifies that Chinese and punctuation remain readable in navigation labels.
+
+### 重复标题
+
+Long document paragraph 01 keeps the target below the fold for navigation verification.
+
+Long document paragraph 02 keeps the target below the fold for navigation verification.
+
+Long document paragraph 03 keeps the target below the fold for navigation verification.
+
+Long document paragraph 04 keeps the target below the fold for navigation verification.
+
+Long document paragraph 05 keeps the target below the fold for navigation verification.
+
+Long document paragraph 06 keeps the target below the fold for navigation verification.
+
+Long document paragraph 07 keeps the target below the fold for navigation verification.
+
+Long document paragraph 08 keeps the target below the fold for navigation verification.
+
+Long document paragraph 09 keeps the target below the fold for navigation verification.
+
+Long document paragraph 10 keeps the target below the fold for navigation verification.
+
+## 重复标题-2
+
+This distinct title reserves the suffix that naive repeated-title anchors would reuse.
+
+## 重复标题
+
+The second repeated heading is the exact navigation target.
+
+## <img id=toc-unsafe src=x onerror=globalThis.tocExecuted=true>
+
+Heading markup must remain safe text in both the body and directory.
+
 Code keeps `**literal markers**` unchanged.
 
 ```js
@@ -115,7 +153,7 @@ const literal = "<img id=code-unsafe src=x>";
 [unsafe link](javascript:globalThis.linkExecuted=true)
 ![remote image](https://example.invalid/should-not-load.png)
 MARKDOWN
-printf '# Superseded task brief\n\nThis must not replace the report.\n' > "$REPORT_DIR/brief.md"
+printf 'This must not replace the report and intentionally has no heading.\n' > "$REPORT_DIR/brief.md"
 printf '# Brief-only instructions\n\nVisible task instructions.\n' > "$BRIEF_DIR/brief.md"
 printf '# Archived task brief\n\nVisible archived instructions.\n' > "$ARCHIVED_DIR/brief.md"
 cat > "$SHORT_DIR/journal.jsonl" <<'JSONL'
@@ -305,6 +343,8 @@ let storagePage;
 let directPage;
 try {
   await page.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await page.evaluate(() => window.localStorage.clear());
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 3000 });
   await page.locator("#task-follow").evaluate(element => { element.checked = false; });
   failNextTaskRequest = true;
   await page.locator("#token").fill(process.env.VIEWER_TOKEN);
@@ -384,23 +424,51 @@ try {
   if (!await page.locator("#sessions").evaluate(element => element.scrollHeight > element.clientHeight)) throw new Error("dashboard fixture was not tall enough to exercise sidebar scrolling");
   await dashboardReportCard.click();
   await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.waitForTimeout(100);
   const selectedDashboardReportCardNode = await dashboardReportCard.elementHandle();
-  if (!await page.locator("#task-detail").evaluate(element => {
+  const selectedTaskInViewport = await page.locator("#task-detail").evaluate(element => {
     const bounds = element.getBoundingClientRect();
-    return bounds.top >= 0 && bounds.top < window.innerHeight;
-  })) throw new Error("dashboard task click left the rendered report outside the viewport");
+    return { top: bounds.top, viewport: window.innerHeight, visible: bounds.top >= -1 && bounds.top < window.innerHeight };
+  });
+  if (!selectedTaskInViewport.visible) throw new Error(`dashboard task click left the rendered report outside the viewport: ${JSON.stringify(selectedTaskInViewport)}`);
   refreshTaskDelay.release();
   await page.locator("#task-status").filter({ hasText: "UTC+8" }).waitFor({ state: "visible", timeout: 5000 });
   if (!await selectedDashboardReportCardNode.evaluate(node => node.isConnected)) throw new Error("unchanged task generation replaced the Sidebar task cards after the response");
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   if (!await page.getByRole("heading", { name: "Rendered report" }).isVisible()) throw new Error("task refresh replaced the selected report display");
   await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
+  const taskDirectory = page.locator("#task-document .document-toc");
+  if (!await taskDirectory.isVisible()) throw new Error("task document directory was not visible at desktop width");
+  const directoryLabels = await taskDirectory.locator("a").allTextContents();
+  if (directoryLabels.join("|") !== "Rendered report|中文：范围 / 安全？|重复标题|重复标题-2|重复标题|<img id=toc-unsafe src=x onerror=globalThis.tocExecuted=true>") throw new Error(`task document directory did not reflect rendered headings: ${directoryLabels.join("|")}`);
+  const repeatedLinks = taskDirectory.getByRole("link", { name: "重复标题", exact: true });
+  const repeatedIds = await page.locator("#task-document-rendered").getByRole("heading", { name: "重复标题", exact: true }).evaluateAll(nodes => nodes.map(node => node.id));
+  const allHeadingIds = await page.locator("#task-document-rendered :is(h1,h2,h3,h4,h5,h6)").evaluateAll(nodes => nodes.map(node => node.id));
+  if (new Set(allHeadingIds).size !== allHeadingIds.length || new Set(repeatedIds).size !== 2 || !repeatedIds.every(id => id.startsWith("task-document-rendered-重复标题"))) throw new Error(`heading anchors were not unique across repeated and suffixed Chinese titles: ${allHeadingIds.join(",")}`);
+  if (await taskDirectory.locator('li[data-level="3"]').filter({ hasText: "重复标题" }).count() !== 1) throw new Error("directory did not preserve heading hierarchy");
+  const directoryBounds = await taskDirectory.boundingBox();
+  const bodyBounds = await page.locator("#task-document-rendered").boundingBox();
+  if (!directoryBounds || !bodyBounds || directoryBounds.x >= bodyBounds.x) throw new Error("desktop directory was not laid out to the left of the document body");
+  const scrollBeforeDirectoryClick = await page.evaluate(() => window.scrollY);
+  await repeatedLinks.nth(1).click();
+  const repeatedTargetTop = await page.locator(`#${repeatedIds[1]}`).evaluate(element => element.getBoundingClientRect().top);
+  const directoryClickResult = await page.evaluate(() => ({ scrollY: window.scrollY, activeId: document.activeElement?.id }));
+  if (repeatedTargetTop < 60 || repeatedTargetTop >= 1000 || directoryClickResult.scrollY <= scrollBeforeDirectoryClick || directoryClickResult.activeId !== repeatedIds[1]) throw new Error(`directory click did not target the exact repeated heading: ${JSON.stringify({ repeatedTargetTop, scrollBeforeDirectoryClick, ...directoryClickResult })}`);
+  if (await page.locator("#toc-unsafe").count() || await page.evaluate(() => globalThis.tocExecuted === true)) throw new Error("heading label became active HTML through the document body or directory");
+  await page.setViewportSize({ width: 1100, height: 900 });
+  if (await taskDirectory.isVisible()) throw new Error("narrow layout squeezed the document beside a visible directory");
+  if (!await page.locator("#task-document-rendered").isVisible() || await page.locator("#task-document-rendered").evaluate(element => element.getBoundingClientRect().width < 500)) throw new Error("narrow layout did not preserve a readable document body");
+  await page.setViewportSize({ width: 720, height: 900 });
+  if (await taskDirectory.isVisible() || !await page.locator("#task-document-rendered").isVisible()) throw new Error("mobile layout did not preserve the single-column document body");
+  await page.setViewportSize({ width: 1440, height: 1000 });
   if (await page.locator("#task-document-brief").isDisabled() || await page.locator("#task-document-report").isDisabled()) throw new Error("both-document task did not expose both document selectors");
   await page.locator("#task-document-brief").click();
-  await page.getByRole("heading", { name: "Superseded task brief" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#task-document-rendered").getByText("This must not replace the report and intentionally has no heading.", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
   await page.locator("#task-document-type").filter({ hasText: "Task brief" }).waitFor({ state: "visible", timeout: 3000 });
+  if (await taskDirectory.isVisible() || await taskDirectory.locator("a").count()) throw new Error("no-heading document retained a stale directory from the previous report");
   await page.locator("#task-document-report").click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (!await taskDirectory.isVisible() || await taskDirectory.locator("a").count() !== 6) throw new Error("switching back did not rebuild the current document directory");
   await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
   delayUserScrollReport = true;
   await dashboardReportCard.click();
@@ -421,6 +489,8 @@ try {
   await page.locator("#open-task-report").click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   if (new URL(page.url()).pathname !== `/report/${process.env.VIEWER_REPORT_ID}`) throw new Error(`task report did not navigate to its dedicated route: ${page.url()}`);
+  const reportDirectory = page.locator("#report .document-toc");
+  if (!await reportDirectory.isVisible() || await reportDirectory.locator("a").count() !== 6) throw new Error("dedicated report route did not render its current document directory");
   const sourceText = await page.locator("#report .report-source pre").textContent();
   const expectedSource = fs.readFileSync(`${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`, "utf8");
   if (sourceText !== expectedSource) throw new Error("dedicated Report content differed from its selected canonical document");
@@ -490,7 +560,7 @@ try {
 
   await page.setViewportSize({ width: 390, height: 844 });
   await captureEvidence("viewer-dashboard-narrow");
-  if (!await page.locator("nav").isVisible() || !await page.locator("#sidebar-toggle").isVisible()) throw new Error("narrow Dashboard trapped page or Sidebar navigation");
+  if (!await page.locator('nav[aria-label="Viewer pages"]').isVisible() || !await page.locator("#sidebar-toggle").isVisible()) throw new Error("narrow Dashboard trapped page or Sidebar navigation");
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator("#forget").click();
   if (!await page.locator("#login-page").isVisible() || await page.locator("#app-shell").isVisible()) throw new Error("logout did not return to the distinct Login page");
@@ -632,6 +702,7 @@ try {
   const report = `${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`;
   fs.appendFileSync(report, "\n## Refreshed section\n\nreport refresh marker\n");
   await page.getByRole("heading", { name: "Refreshed section" }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.locator("#report .document-toc a").count() !== 7) throw new Error("report refresh did not rebuild the directory from the changed document");
   let releaseArtifactReport = () => {};
   let markArtifactReportStarted;
   const artifactReportStarted = new Promise(resolve => { markArtifactReportStarted = resolve; });
@@ -686,7 +757,7 @@ try {
   await storagePage.locator("#token").fill(process.env.VIEWER_TOKEN);
   await storagePage.locator("#remember-token").check();
   await storagePage.locator("#connect").click();
-  await storagePage.getByText("Browser storage is unavailable", { exact: false }).waitFor({ state: "visible", timeout: 3000 });
+  await storagePage.locator("#token-note").filter({ hasText: "Browser storage is unavailable" }).waitFor({ state: "attached", timeout: 3000 });
   await storagePage.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
   await storagePage.close();
 } catch (error) {
