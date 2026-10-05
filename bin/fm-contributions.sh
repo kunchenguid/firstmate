@@ -7,6 +7,7 @@
 #   fm-contributions.sh pending
 #   fm-contributions.sh verdict <task> <url> <judged-head> <source-url> <captain|fleet|maintainer|nobody> <summary>
 #   fm-contributions.sh ack <task> <url> <event-token>
+#   fm-contributions.sh retire <task> <url> <captain|fleet> <reason>
 #   fm-contributions.sh arm [--if-owned]
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
@@ -18,7 +19,8 @@
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, and notified tokens.
+# observation, verdict, seen event tokens, pending events, notified tokens, and
+# retired provenance once retired.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -30,6 +32,15 @@
 # triage its signal. Formal reviews carry GitHub's own commit_id. Neither kind
 # can grant merge authority. Captain-actor prose requires an existing live hold;
 # an eligible merge remains a captain call, never an automatic forge action.
+#
+# retire ends one task's observation of a contribution whose forge object can
+# never be read again, such as a PR in a deleted repository. It records retired
+# with actor (captain or fleet), a non-empty reason and the UTC time, and
+# refuses a task/url pair with no saved record or with unacknowledged pending
+# signals. A retired pair leaves known, rotation and coverage even while a
+# backlog link remains; snapshot discloses only the retired count. Retiring a
+# retired pair again is a no-op that keeps the first provenance. Nothing
+# un-retires a record; poll never retires one on its own.
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
@@ -164,6 +175,7 @@ project() {
     | .valid_until = (if ($rows | length) > 0 and all($rows[]; .final) then $now else .valid_until end) + $max_age
     | .captain_omitted = ([0, (.captain | length) - 20] | max)
     | .captain |= .[:20]
+    | .retired = retired($saved[0])
     | . + (if $all == "--all" then {rows:$rows} else {} end)'
 }
 
@@ -479,6 +491,25 @@ case "${1:-}" in
       jq --arg head "$1" --arg source "$2" --arg actor "$3" --arg summary "$4" \
         '.verdict={head:$head,source:$source,actor:$actor,summary:$summary}' "$TMP/row.json" > "$TMP/update.json"
     fi
+    write_record "$task" "$TMP/update.json"
+    ;;
+  retire)
+    [ "$#" -eq 5 ] || fail 'retire needs task, URL, actor and reason'
+    task=$2; url=$3
+    fm_pr_task_id_valid "$task" || fail 'invalid contribution task'
+    case "$4" in captain|fleet) ;; *) fail "invalid retire actor '$4'; expected one of: captain, fleet" ;; esac
+    [ -n "$5" ] || fail 'retire needs a non-empty reason'
+    acquire; read_saved
+    jq -e --arg task "$task" --arg url "$url" '.[] | select(.task == $task) | .records[] | select(.url == $url)' "$TMP/saved.json" > "$TMP/row.json" \
+      || fail 'contribution is not recorded for this durable task'
+    if jq -e '.retired != null' "$TMP/row.json" >/dev/null; then
+      printf 'contributions: already retired %s for %s\n' "$url" "$task"
+      exit 0
+    fi
+    jq -e '(.pending | length) == 0' "$TMP/row.json" >/dev/null \
+      || fail 'acknowledge pending signals before retiring this contribution'
+    jq --arg actor "$4" --arg reason "$5" --arg at "$NOW" \
+      '.retired={actor:$actor,reason:$reason,at:$at}' "$TMP/row.json" > "$TMP/update.json"
     write_record "$task" "$TMP/update.json"
     ;;
   *) usage >&2; exit 2 ;;
