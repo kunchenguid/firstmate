@@ -944,6 +944,46 @@ test_append_wakes_live_announced_watcher() {
   pass "watch-arm: appending work reopens an announced empty recovery"
 }
 
+# A Claude Stop auto-arm that already delivered an unacknowledged generation to
+# the same session passes FM_WATCH_DELIVERED_RECOVERY; that re-arm must wait
+# instead of minting and re-announcing a fresh generation on every Stop.
+# The control arm without it keeps the once-per-down-stretch resurface.
+test_delivered_generation_rearm_waits_without_resurface() {
+  local dir home state fakebin row status watcher_pid
+  dir=$(make_case delivered-generation-rearm)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  row=$(printf '1700000000\t7\tcheck\tunacked-news\tcheck: unacked news')
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  printf 'announced:downtime:gen-delivered\n' > "$state/.watcher-down"
+
+  FM_WATCH_DELIVERED_RECOVERY=gen-delivered \
+    start_rearm_arm "$home" "$state" "$fakebin" "$dir/delivered-arm.out"
+  wait_for_exit "$ARM_PID" 6
+  status=$?
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -z "$watcher_pid" ] || kill -TERM "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  [ "$status" -eq 124 ] \
+    || fail "delivered-generation re-arm closed instead of waiting (status $status): $(cat "$dir/delivered-arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/delivered-arm.out" >/dev/null \
+    || fail "delivered-generation re-arm re-announced the same unacked news"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'announced:downtime:gen-delivered' ] \
+    || fail "delivered-generation re-arm minted a new generation: $(cat "$state/.watcher-down" 2>/dev/null)"
+  grep -F "$row" "$state/.wake-queue" >/dev/null \
+    || fail "delivered-generation re-arm lost the unread wake"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/control-arm.out"
+  wait_for_exit "$ARM_PID" 80 || fail "control re-arm without delivery proof did not resurface"
+  grep -F 'check: rearm-resurface' "$dir/control-arm.out" >/dev/null \
+    || fail "control re-arm without delivery proof lost the once-per-down-stretch resurface"
+  grep -F "$row" "$state/.wake-queue" >/dev/null \
+    || fail "control re-arm lost the unread wake"
+  pass "watch-arm: a re-arm after a delivered unacked generation waits quietly"
+}
+
 # Exercise the handling-window recovery invariant owned by
 # docs/watcher-continuity.md through real watcher processes.
 test_handling_window_close_keeps_the_acknowledgement_valid() {
@@ -1605,6 +1645,7 @@ test_restart_preserves_recovery_across_reused_pid_lock
 test_markerless_legacy_queue_is_recovered_on_arm
 test_idle_lavish_source_stays_quiet_until_result
 test_append_wakes_live_announced_watcher
+test_delivered_generation_rearm_waits_without_resurface
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink

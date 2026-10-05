@@ -222,6 +222,8 @@ The first recovery marks that generation announced, and later empty-queue arms l
 A non-successor watcher start checks the durable queue and recovery marker under their locks.
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
+The one exception is a Claude Stop auto-arm running the ordinary arm rather than the supervision host whose ledger proves that same generation was already delivered as a rewake to the same live session.
+That re-arm keeps the generation announced and waits, so an acknowledgement the session cannot run produces one notice rather than a rewake on every Stop.
 
 ### Generation reuse
 
@@ -450,6 +452,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - A persistent live successor after recovery.
 - An idle live Lavish source that stays quiet until its real result wakes promptly.
 - An append that reopens an announced empty recovery.
+- A Claude Stop re-arm after a delivered but unacknowledged generation that must wait without re-announcing it, with a control arm that still resurfaces once.
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
 - The self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.

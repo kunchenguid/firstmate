@@ -244,6 +244,19 @@ fi
 # shim defers to while genuinely deciding and reclaims once when proven
 # abandoned.
 fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
+# Snapshot, before the claim overwrites the ledger, the recovery generation an
+# earlier rewake already delivered to THIS session. The watcher this cycle arms
+# then treats that announced-but-unacked generation as delivered rather than as
+# a new down stretch (docs/watcher-continuity.md "Recovery episode
+# acknowledgement"), so an acknowledgement the session cannot run yields one
+# notice instead of a rewake on every Stop.
+DELIVERED_RECOVERY=
+if fm_autoarm_ledger_read "$STATE" \
+  && [ "$FM_AUTOARM_OUTCOME" = rewake ] \
+  && [ -n "$FM_AUTOARM_RECOVERY" ] \
+  && [ "$FM_AUTOARM_SESSION" = "$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)" ]; then
+  DELIVERED_RECOVERY=$FM_AUTOARM_RECOVERY
+fi
 fm_autoarm_claim_next "$STATE" "$GRACE"
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
@@ -343,9 +356,11 @@ ARM_PID=
 CLOSED_ARM_PID=
 run_arm() {  # <output file, or empty for none>
   if [ -n "$1" ]; then
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
+    FM_WATCH_DELIVERED_RECOVERY="$DELIVERED_RECOVERY" FM_GUARD_GRACE="$GRACE" \
+      "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
+    FM_WATCH_DELIVERED_RECOVERY="$DELIVERED_RECOVERY" FM_GUARD_GRACE="$GRACE" \
+      "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
   fi
   ARM_PID=$!
   wait "$ARM_PID" || true
