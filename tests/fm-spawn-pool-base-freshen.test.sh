@@ -743,8 +743,38 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# The slot belongs to another clone of the same origin. Spawn must still claim
+# it; skipping the claim is how a later cleanup failed to see the slot at all.
+test_spawn_claims_a_slot_bound_to_another_clone() {
+  local rec id out status owner slot_root project_common slot_common
+  id='pool-slot-other-clone-r1'
+  rec=$(make_case other-clone-claim "$id")
+  read_case_record "$rec"
+  owner="$CASE_DIR/owner"
+  slot_root="$CASE_DIR/foreign-slots"
+  git clone --quiet "file://$CASE_DIR/origin.git" "$owner"
+  mkdir -p "$slot_root/1"
+  git -C "$owner" worktree add --quiet --detach "$slot_root/1/project" HEAD
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  POOL_DIR="$slot_root/1/project"
+  SLOT_CLAIM="$slot_root/1/.fm-slot-owner"
+  project_common=$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir)
+  slot_common=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-common-dir)
+  [ "$project_common" != "$slot_common" ] \
+    || fail "the fixture did not separate the slot's git dir from the spawning clone"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn from another clone's pool slot should launch"$'\n'"$out"
+  [ -f "$SLOT_CLAIM" ] || fail "spawn left a slot bound to another clone unclaimed: $out"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "the cross-clone slot claim does not name the spawned task: $(cat "$SLOT_CLAIM")"
+  pass "spawn claims a Treehouse slot bound to another clone of the same project"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_spawn_claims_a_slot_bound_to_another_clone
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
