@@ -548,7 +548,7 @@ fi
 
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 # Task
-Task token budget: 400000
+Scope paths:
 ## Captain's intent
 {TASK}
 

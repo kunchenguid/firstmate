@@ -283,7 +283,6 @@ fm_test_spawn_brief() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-Task token budget: 400000
 ## Captain's intent
 $intent
 

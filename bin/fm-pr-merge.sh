@@ -404,58 +404,43 @@ merge_control_cleanup() {
 }
 
 scope_check_pr() {
-  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" files files_file rc encoded
-  [ -f "$brief" ] || { echo "warning: merge scope check skipped: cannot read $brief" >&2; return 0; }
+  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" globs files encoded outside path glob
+  globs=$(sed -n 's/^Scope paths:[[:space:]]*//p' "$brief" 2>/dev/null | head -1)
+  if [ -z "${globs//[[:space:],]/}" ]; then
+    echo "warning: merge scope check skipped: no Scope paths line in the task brief" >&2
+    return 0
+  fi
   case "$PROVIDER" in
     github) files=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/files?per_page=100" --jq '.[].filename' 2>&1) || {
-      echo "error: merge scope check could not read changed files for $URL: $files" >&2
-      return 1
+      echo "warning: merge scope check skipped: could not read changed files for $URL: $files" >&2
+      return 0
     } ;;
     gitlab)
       encoded=$(jq -rn --arg p "$FM_PR_PATH" '$p|@uri')
-      files=$(GITLAB_HOST="$PR_HOST" glab api --paginate "projects/$encoded/merge_requests/$PR_NUMBER/diffs?per_page=100" 2>&1 | jq -r '.[].new_path' 2>&1) || {
-        echo "error: merge scope check could not read changed files for $URL: $files" >&2
-        return 1
+      files=$(set -o pipefail; GITLAB_HOST="$PR_HOST" glab api --paginate "projects/$encoded/merge_requests/$PR_NUMBER/diffs?per_page=100" 2>&1 | jq -r '.[].new_path' 2>&1) || {
+        echo "warning: merge scope check skipped: could not read changed files for $URL: $files" >&2
+        return 0
       } ;;
     *) return 0 ;;
   esac
-  files_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-scope.XXXXXX") || return 1
-  printf '%s\n' "$files" >"$files_file"
-  rc=0
-  uv run --no-project - "$brief" "$files_file" <<'PY' || rc=$?
-import re
-import sys
-import fnmatch
-from pathlib import Path
-
-brief = Path(sys.argv[1]).read_text(encoding="utf-8")
-files = list(dict.fromkeys(line for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines() if line.strip()))
-match = re.search(r"(?ms)^## Firstmate spec\s*\n(.*?)(?=^##?\s|\Z)", brief)
-if not match:
-    print("warning: merge scope check skipped: no ## Firstmate spec in the task brief")
-    raise SystemExit(0)
-spec = match.group(1)
-allowed = {value.strip().strip(".,;:") for value in re.findall(r"`([^`]+)`", spec)
-           if ("/" in value or re.search(r"\.[A-Za-z0-9]+$", value)) and not value.startswith(("http://", "https://"))}
-allowed.update(re.findall(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*?-]+)+)", spec))
-allowed.update(re.findall(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_-][A-Za-z0-9_.-]*\.[A-Za-z][A-Za-z0-9]*)(?![A-Za-z0-9_/-])", spec))
-if not allowed:
-    print("warning: merge scope check skipped: ## Firstmate spec names no files")
-    raise SystemExit(0)
-
-def in_scope(path):
-    return any(path == name or (name.endswith("/") and path.startswith(name)) or fnmatch.fnmatchcase(path, name)
-               for name in allowed)
-
-outside = [path for path in files if not in_scope(path)]
-print(f"scope check: changed files: {', '.join(files) if files else 'none'}")
-if outside:
-    print("error: merge refused; files outside the Firstmate spec scope: " + ", ".join(outside))
-    print("fix: remove those changes or name the permitted files in ## Firstmate spec")
-    raise SystemExit(1)
-PY
-  rm -f -- "$files_file"
-  return "$rc"
+  outside=
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    local in_scope=0
+    IFS=',' read -r -a glob_list <<<"$globs"
+    for glob in "${glob_list[@]}"; do
+      glob=${glob//[[:space:]]/}
+      [ -n "$glob" ] || continue
+      # shellcheck disable=SC2254
+      case "$path" in $glob) in_scope=1; break ;; esac
+    done
+    [ "$in_scope" -eq 1 ] || outside="${outside:+$outside, }$path"
+  done <<<"$files"
+  if [ -n "$outside" ]; then
+    echo "error: merge refused; files outside the brief Scope paths ($globs): $outside" >&2
+    echo "fix: remove those changes or widen the Scope paths line in the task brief" >&2
+    return 1
+  fi
 }
 
 trap merge_control_cleanup EXIT

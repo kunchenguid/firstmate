@@ -248,7 +248,7 @@ case "${1:-} ${2:-}" in
     # the merge-queue filter the queue reader below applies.
     case " $* " in
       *" repos/"*"/pulls/"*"/files"*)
-        cat "$FM_TEST_PR_FILES"
+        cat "$FM_TEST_PR_FILES" || exit 1
         exit 0
         ;;
       *" repos/"*"/commits/"*"/check-runs"*)
@@ -3847,12 +3847,13 @@ test_allow_missing_follows_the_allow_red_rules() {
   pass "fm-pr-merge --allow-missing is single use, attended-only, and GitHub-only like --allow-red"
 }
 
-run_scope_case() {  # <case-name> <spec-lines> <changed-files>; sets out and rc
+run_scope_case() {  # <case-name> <brief-lines> <changed-files> [api-fails]; sets out and rc
   local case_dir
   case_dir=$(make_case "$1")
   add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   printf '%s\n' "$2" > "$case_dir/home/data/task-x1/brief.md"
   printf '%s\n' "$3" > "$case_dir/pr.files"
+  [ -z "${4:-}" ] || rm -f "$case_dir/pr.files"
   set +e
   out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/17 2>&1)
   rc=$?
@@ -3860,33 +3861,35 @@ run_scope_case() {  # <case-name> <spec-lines> <changed-files>; sets out and rc
   SCOPE_CASE_DIR=$case_dir
 }
 
-test_scope_check_refuses_file_outside_brief_spec() {
+test_scope_check_refuses_file_outside_scope_paths() {
   local out rc
-  run_scope_case scope-outside $'## Firstmate spec\n`bin/allowed.sh`' "docs/outside.md"
-  expect_code 1 "$rc" "scope check must refuse a file outside the Firstmate spec"
-  assert_contains "$out" 'files outside the Firstmate spec scope: docs/outside.md' "scope refusal must name the unexpected file"
+  run_scope_case scope-outside $'# Task\nScope paths: bin/*.sh, README.md' $'bin/a.sh\nREADME.md\ndocs/outside.md'
+  expect_code 1 "$rc" "scope check must refuse a file outside Scope paths"
+  assert_contains "$out" 'outside the brief Scope paths' "scope refusal must say why"
+  assert_contains "$out" 'docs/outside.md' "scope refusal must name the unexpected file"
   assert_no_grep 'pr merge' "$SCOPE_CASE_DIR/gh.log" "scope refusal must happen before the forge merge"
-  pass "fm-pr-merge: refuses a PR that changes a file outside the brief scope"
+  pass "fm-pr-merge: refuses a PR that changes a file outside Scope paths"
 }
 
-test_scope_check_allows_bare_file_names_and_rejects_test_bypass() {
+test_scope_check_allows_files_inside_scope_paths() {
   local out rc
-  run_scope_case scope-bare $'## Firstmate spec\nUpdate README.md and add a test.' $'README.md\ntests/new.test.sh'
-  expect_code 1 "$rc" "a test file the spec does not name must be refused"
-  assert_contains "$out" 'files outside the Firstmate spec scope: tests/new.test.sh' "only the unnamed test file is outside scope"
-  run_scope_case scope-bare-ok $'## Firstmate spec\nUpdate README.md.' "README.md"
-  assert_not_contains "$out" 'outside the Firstmate spec scope' "a bare named file must be in scope"
-  pass "fm-pr-merge: scope parses bare file names and has no test bypass"
+  run_scope_case scope-inside $'# Task\nScope paths: bin/*.sh, README.md, tests/*' $'bin/a.sh\nREADME.md\ntests/new.test.sh'
+  assert_not_contains "$out" 'outside the brief Scope paths' "files matching the globs must be in scope"
+  assert_not_contains "$out" 'scope check skipped' "an enforced scope must not report a skip"
+  pass "fm-pr-merge: files matching Scope paths globs are in scope"
 }
 
-test_scope_check_skips_when_brief_names_no_scope() {
+test_scope_check_skips_without_scope_paths_or_listing() {
   local out rc
-  run_scope_case scope-nospec $'## Captain\'s intent\nDo it.' "anything.txt"
-  assert_contains "$out" 'merge scope check skipped' "missing spec must warn and skip"
-  assert_not_contains "$out" 'outside the Firstmate spec scope' "missing spec must not refuse"
-  run_scope_case scope-nopaths $'## Firstmate spec\nImprove things.' "anything.txt"
-  assert_contains "$out" 'merge scope check skipped' "spec without paths must warn and skip"
-  pass "fm-pr-merge: briefs without a spec or path list stay mergeable"
+  run_scope_case scope-nolines $'## Firstmate spec\nUpdate README.md.' "anything.txt"
+  assert_contains "$out" 'merge scope check skipped: no Scope paths line' "missing line must warn and skip"
+  assert_not_contains "$out" 'outside the brief Scope paths' "missing line must not refuse"
+  run_scope_case scope-emptyline $'# Task\nScope paths:' "anything.txt"
+  assert_contains "$out" 'merge scope check skipped: no Scope paths line' "empty line must warn and skip"
+  run_scope_case scope-listing-error $'# Task\nScope paths: bin/*' "" api-fails
+  assert_contains "$out" 'merge scope check skipped: could not read changed files' "listing error must warn and skip"
+  assert_not_contains "$out" 'outside the brief Scope paths' "listing error must not refuse"
+  pass "fm-pr-merge: scope check warns and continues without a Scope paths line or file listing"
 }
 
 test_gitlab_head_override_args_refuse_before_recording
@@ -3939,9 +3942,9 @@ test_red_and_unreported_checks_are_reported_together
 test_unreadable_required_set_refuses
 test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
-test_scope_check_refuses_file_outside_brief_spec
-test_scope_check_allows_bare_file_names_and_rejects_test_bypass
-test_scope_check_skips_when_brief_names_no_scope
+test_scope_check_refuses_file_outside_scope_paths
+test_scope_check_allows_files_inside_scope_paths
+test_scope_check_skips_without_scope_paths_or_listing
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name

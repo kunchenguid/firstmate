@@ -105,6 +105,13 @@
 #   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
 #   docs/cmux-backend.md),
 #   then tmux.
+#   The ship-spawn dispatch gate is the interface implemented by the workflow
+#   repository's scripts/gates.py: `gates.py --root <project> dispatch --json
+#   [--unlanded N] [--workers N] [--token-budget N]`. Exit 0 passes. Exit 10
+#   refuses and prints JSON {verdict, reasons[], fix} on stdout. Any other exit,
+#   unparsable output, or an absent script is an infrastructure failure: one
+#   notice, and the spawn continues. --token-budget is passed only when the
+#   brief has a "Task token budget: N" line; otherwise the gate's default applies.
 #   --workflow-gate-override bypasses a refusal only when the current Captain's
 #   intent contains the exact words "override the workflow dispatch gate".
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
@@ -3140,9 +3147,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         case "$crew_state" in
           working|parked|blocked|paused)
             workers=$((workers + 1))
-            if [ "$meta_kind" = ship ] && ! grep -Fq ": merged $meta_id " "$STATE/$meta_id.status" 2>/dev/null; then
-              unlanded=$((unlanded + 1))
-            fi
+            [ "$meta_kind" != ship ] || unlanded=$((unlanded + 1))
             ;;
           done|failed|closed) ;;
           *) echo "notice: workflow dispatch gate could not read state for $meta_id; not counting it" >&2 ;;
@@ -3151,21 +3156,20 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       token_budget=$(sed -n 's/^Task token budget: \([0-9][0-9]*\)$/\1/p' "$BRIEF" | head -1)
       gate_args=(--unlanded "$unlanded" --workers "$workers")
       [ -z "$token_budget" ] || gate_args+=(--token-budget "$token_budget")
-      gate_out=$(uv run --no-project "$workflow_gates" --root "${workflow_gates%/scripts/gates.py}" dispatch \
-        "${gate_args[@]}" 2>&1) || gate_rc=$?
-      gate_rc=${gate_rc:-0}
-      if [ "$gate_rc" -ne 0 ] && { [ "$gate_rc" -ne 1 ] || printf '%s\n' "$gate_out" | grep -Fq 'Traceback (most recent call last)'; }; then
-        printf '%s\n' "$gate_out" >&2
-        echo "notice: workflow dispatch gate failed to run (exit $gate_rc); spawning without it" >&2
-      elif [ "$gate_rc" -ne 0 ]; then
+      gate_rc=0
+      gate_out=$(uv run --no-project "$workflow_gates" --root "${workflow_gates%/scripts/gates.py}" dispatch --json \
+        "${gate_args[@]}" 2>/dev/null) || gate_rc=$?
+      if [ "$gate_rc" -eq 10 ] && gate_text=$(printf '%s' "$gate_out" | jq -r '"\(.reasons // [] | join("; "))\n\(.fix // "")"' 2>/dev/null); then
         captain_intent=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
         if [ "$WORKFLOW_GATE_OVERRIDE" -eq 1 ] && printf '%s\n' "$captain_intent" | grep -Fqi 'override the workflow dispatch gate'; then
-          printf 'warning: explicit current captain instruction overrides the workflow dispatch gate: %s\n' "$gate_out" >&2
+          printf 'warning: explicit current captain instruction overrides the workflow dispatch gate: %s\n' "$gate_text" >&2
         else
-          printf '%s\n' "$gate_out" >&2
+          printf 'workflow dispatch gate refused: %s\n' "$gate_text" >&2
           echo "error: ship spawn refused by the workflow dispatch gate; land work, lower machine load, wait for a worker, or restore quota before retrying" >&2
-          exit "$gate_rc"
+          exit 1
         fi
+      elif [ "$gate_rc" -ne 0 ]; then
+        echo "notice: workflow dispatch gate failed to run (exit $gate_rc); spawning without it" >&2
       fi
     fi
   fi

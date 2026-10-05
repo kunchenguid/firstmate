@@ -86,7 +86,6 @@ make_settle_case() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-Task token budget: 400000
 ## Captain's intent
 Exercise settled-worktree detection for $id.
 
@@ -155,49 +154,86 @@ test_already_settled_pane_costs_one_confirm_read() {
   pass "an already-settled pane confirms on the next read, not a whole extra cycle"
 }
 
-test_workflow_dispatch_gate_refuses_before_allocating_a_worktree() {
-  local rec id out status gates
-  id=settle-workflow-refused-z3
-  rec=$(make_settle_case settle-workflow-refused "$id" 0)
-  read_settle_record "$rec"
-  gates="$HOME_DIR/workflow-gates.py"
-  cat > "$gates" <<'EOF'
+write_gate_stub() {  # <path> <exit-code> <stdout>
+  printf '%s' "$3" > "$1.out"
+  cat > "$1" <<EOF
 #!/usr/bin/env python3
 import sys
-print("REFUSE dispatch: 6 workers reach the cap of 6")
-raise SystemExit(1)
+open("$1.args", "w").write(" ".join(sys.argv[1:]))
+sys.stdout.write(open("$1.out").read())
+raise SystemExit($2)
 EOF
-  chmod +x "$gates"
-  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$gates" run_settle_spawn "$id")
-  status=$?
-  expect_code 1 "$status" "workflow dispatch refusal must stop a ship spawn"
-  assert_contains "$out" 'REFUSE dispatch: 6 workers reach the cap of 6' "spawn must relay the named workflow gate"
-  assert_contains "$out" 'land work, lower machine load, wait for a worker, or restore quota' "spawn refusal must name a recovery path"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "workflow refusal published task metadata"
-  pass "fm-spawn refuses a ship before worktree allocation when the workflow gate refuses"
+  chmod +x "$1"
 }
 
-test_workflow_dispatch_gate_missing_script_degrades_and_budget_is_optional() {
-  local rec id out status gates
+run_gate_case() {  # <name> <exit-code> <stdout>; sets out, status, GATE, GATE_ID
+  local rec id=$1-z
+  rec=$(make_settle_case "$1" "$id" 0)
+  read_settle_record "$rec"
+  GATE="$HOME_DIR/gates.py"
+  write_gate_stub "$GATE" "$2" "$3"
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id")
+  status=$?
+  GATE_ID=$id
+}
+
+test_workflow_dispatch_gate_exit_contract() {
+  local out status
+  run_gate_case gate-refuse 10 '{"verdict":"refuse","reasons":["6 workers reach the cap of 6"],"fix":"land work first"}'
+  expect_code 1 "$status" "exit 10 must refuse the ship spawn"
+  assert_contains "$out" '6 workers reach the cap of 6' "refusal must relay the gate reasons"
+  assert_contains "$out" 'land work first' "refusal must relay the gate fix"
+  [ ! -e "$HOME_DIR/state/$GATE_ID.meta" ] || fail "workflow refusal published task metadata"
+  run_gate_case gate-pass 0 '{"verdict":"pass"}'
+  expect_code 0 "$status" "exit 0 must pass"$'\n'"$out"
+  grep -q -- 'dispatch --json' "$GATE.args" || fail "gate must be invoked as dispatch --json"
+  run_gate_case gate-other 1 'whatever'
+  expect_code 0 "$status" "any other exit is an infrastructure failure"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate failed to run (exit 1)' "infrastructure failure must print one notice"
+  run_gate_case gate-unparsable 10 'not json'
+  expect_code 0 "$status" "an unparsable refusal is an infrastructure failure"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate failed to run' "unparsable output must print a notice"
+  pass "fm-spawn honours the gate contract: 0 pass, 10 refuse, anything else continues with a notice"
+}
+
+test_workflow_dispatch_gate_budget_only_when_briefed() {
+  local out status rec id=gate-budget2-z
+  run_gate_case gate-budget 0 '{"verdict":"pass"}'
+  if grep -q -- '--token-budget' "$GATE.args"; then fail "no budget line in the brief must pass no --token-budget"; fi
+  rec=$(make_settle_case gate-budget2 "$id" 0)
+  read_settle_record "$rec"
+  printf 'Task token budget: 123\n' >> "$HOME_DIR/data/$id/brief.md"
+  GATE="$HOME_DIR/gates.py"
+  write_gate_stub "$GATE" 0 '{"verdict":"pass"}'
+  FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id" >/dev/null
+  grep -q -- '--token-budget 123' "$GATE.args" || fail "brief token budget must reach the gate"
+  pass "fm-spawn passes --token-budget only when the brief states one"
+}
+
+test_workflow_dispatch_gate_missing_script_degrades() {
+  local rec id out status
   id=settle-workflow-missing-z4
   rec=$(make_settle_case settle-workflow-missing "$id" 0)
   read_settle_record "$rec"
-  sed -i.bak '/^Task token budget:/d' "$HOME_DIR/data/$id/brief.md"
   out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$HOME_DIR/absent-gates.py" run_settle_spawn "$id")
   status=$?
   expect_code 0 "$status" "a missing workflow gate must not refuse the spawn"$'\n'"$out"
   assert_contains "$out" 'workflow dispatch gate unavailable' "missing gate must print one notice"
-  gates="$HOME_DIR/workflow-gates-nobudget.py"
-  printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'raise SystemExit(1 if "--token-budget" in sys.argv else 0)' > "$gates"
-  chmod +x "$gates"
-  id=settle-workflow-nobudget-z5
-  rec=$(make_settle_case settle-workflow-nobudget "$id" 0)
+  pass "fm-spawn degrades without the workflow gate script"
+}
+
+test_unlanded_counts_only_live_ship_tasks() {
+  local rec id out
+  id=settle-unlanded-z9
+  rec=$(make_settle_case settle-unlanded "$id" 0)
   read_settle_record "$rec"
-  sed -i.bak '/^Task token budget:/d' "$HOME_DIR/data/$id/brief.md"
-  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$gates" run_settle_spawn "$id")
-  status=$?
-  expect_code 0 "$status" "a brief without a token budget must be accepted"$'\n'"$out"
-  pass "fm-spawn degrades without the workflow gate and accepts a brief without a token budget"
+  printf 'kind=ship\n' > "$HOME_DIR/state/old-done.meta"
+  printf 'done: finished\n' > "$HOME_DIR/state/old-done.status"
+  GATE="$HOME_DIR/gates.py"
+  write_gate_stub "$GATE" 0 '{"verdict":"pass"}'
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id")
+  grep -q -- '--unlanded 0' "$GATE.args" || fail "a finished ship task must not count as unlanded: $(cat "$GATE.args")"$'\n'"$out"
+  pass "fm-spawn does not count finished ship tasks as unlanded"
 }
 
 test_captain_reminder_failure_does_not_block_spawn() {
@@ -212,27 +248,6 @@ test_captain_reminder_failure_does_not_block_spawn() {
   expect_code 0 "$status" "an unrecordable captain reminder must not refuse the spawn"$'\n'"$out"
   assert_contains "$out" 'could not record repeated captain instruction' "failure must print a notice"
   pass "fm-spawn continues when the captain reminder cannot be recorded"
-}
-
-test_workflow_dispatch_gate_crash_degrades_but_verdict_refuses() {
-  local rec id out status gates
-  gates="$TMP_ROOT/crashing-gates.py"
-  printf '%s\n' '#!/usr/bin/env python3' 'raise RuntimeError("boom")' > "$gates"
-  id=settle-workflow-crash-z7
-  rec=$(make_settle_case settle-workflow-crash "$id" 0)
-  read_settle_record "$rec"
-  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$gates" run_settle_spawn "$id")
-  status=$?
-  expect_code 0 "$status" "a crashing gate must not refuse the spawn"$'\n'"$out"
-  assert_contains "$out" 'workflow dispatch gate failed to run' "crash must print a notice"
-  printf '%s\n' '#!/usr/bin/env python3' 'raise SystemExit(127)' > "$gates"
-  id=settle-workflow-exit127-z8
-  rec=$(make_settle_case settle-workflow-exit127 "$id" 0)
-  read_settle_record "$rec"
-  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$gates" run_settle_spawn "$id")
-  status=$?
-  expect_code 0 "$status" "an unexpected gate exit code must not refuse the spawn"$'\n'"$out"
-  pass "fm-spawn treats gate crashes as infrastructure failure, not a refusal"
 }
 
 # make_primary_case <name> <id> <stale_reads> builds the linked-home shape: the
@@ -304,10 +319,11 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
-test_workflow_dispatch_gate_refuses_before_allocating_a_worktree
-test_workflow_dispatch_gate_missing_script_degrades_and_budget_is_optional
+test_workflow_dispatch_gate_exit_contract
+test_workflow_dispatch_gate_budget_only_when_briefed
+test_workflow_dispatch_gate_missing_script_degrades
+test_unlanded_counts_only_live_ship_tasks
 test_captain_reminder_failure_does_not_block_spawn
-test_workflow_dispatch_gate_crash_degrades_but_verdict_refuses
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 
