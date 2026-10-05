@@ -3466,6 +3466,167 @@ test_foreign_branch_pr_still_refused_after_recorded_pr_merged() {
   pass "fm-pr-merge still refuses a non-sibling branch even after the recorded PR has merged"
 }
 
+# A direct-PR task case, the delivery mode where bin/fm-pr-check.sh's named-head
+# gate reads the worker copy's HEAD. Echoes the case directory.
+make_direct_pr_case() {
+  local case_dir
+  case_dir=$(make_case "$1")
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=direct-PR"
+  printf '%s\n' "$case_dir"
+}
+
+# assert_line <line> <file> <msg>: <file> holds exactly this whole line.
+assert_line() {
+  grep -qxF -- "$1" "$2" || fail "$3"$'\n'"$(cat "$2")"
+}
+
+# Run one merge, capturing its output in the case and its code in rc.
+run_merge_case() {
+  local case_dir=$1
+  shift
+  set +e
+  run_pr_merge "$case_dir" "$@" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+}
+
+# A task adopts a PR on a branch that is neither its own nor a sibling - here
+# another contributor's - by passing --adopt-external to the merge itself,
+# which hands the flag to bin/fm-pr-check.sh. Without the flag the merge still
+# refuses that branch exactly as before.
+test_adopted_foreign_branch_pr_merges() {
+  local case_dir rc
+  case_dir=$(make_direct_pr_case adopt-foreign-branch)
+  add_sibling_branch_gh_mocks "$case_dir" cececececececececececececececececececece \
+    1 true contributor/crafting
+
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1053
+  expect_code 1 "$rc" "adopt-foreign-branch: a foreign branch without --adopt-external must refuse"
+  assert_grep 'pass --adopt-external' "$case_dir/stderr" \
+    "adopt-foreign-branch: refusal did not name the branch mismatch"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "adopt-foreign-branch: gh pr merge ran for a foreign branch without --adopt-external"
+
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1053 --adopt-external
+  expect_code 0 "$rc" "adopt-foreign-branch: an adopted foreign branch should merge"
+  assert_logged_gh_merge "$case_dir" 1053 example/repo --squash
+  assert_line 'pr=https://github.com/example/repo/pull/1053' "$case_dir/state/task-x1.meta" \
+    "adopt-foreign-branch: pr= was not recorded for the adopted PR"
+  assert_line 'pr_merged=https://github.com/example/repo/pull/1053' "$case_dir/state/task-x1.meta" \
+    "adopt-foreign-branch: the merged PR was not listed as pr_merged="
+  pass "fm-pr-merge --adopt-external merges a PR on another contributor's branch, and refuses it without the flag"
+}
+
+# One task holds two open PRs. Without the flag, merging the second while the
+# recorded first is still open refuses; with it, both merge one after the
+# other, pr= follows each merge, both are listed as pr_merged= ahead of the
+# pr= block, and the metadata still parses as a single bound PR identity.
+test_two_open_prs_of_one_task_merge_in_turn() {
+  local case_dir rc meta
+  case_dir=$(make_direct_pr_case adopt-two-open-prs)
+  meta="$case_dir/state/task-x1.meta"
+  printf 'pr=https://github.com/example/repo/pull/1055\n' >> "$meta"
+  add_sibling_branch_gh_mocks "$case_dir" cececececececececececececececececececece \
+    1055 false fm/task-x1-crafting
+
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1052
+  expect_code 1 "$rc" "adopt-two-open-prs: a second open PR without --adopt-external must refuse"
+  assert_grep 'is bound to https://github.com/example/repo/pull/1055, not https://github.com/example/repo/pull/1052' \
+    "$case_dir/stderr" "adopt-two-open-prs: refusal did not name the still-open recorded PR"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "adopt-two-open-prs: gh pr merge ran without --adopt-external"
+
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1052 --adopt-external
+  expect_code 0 "$rc" "adopt-two-open-prs: the first PR should merge while the recorded PR is still open"
+  assert_logged_gh_merge "$case_dir" 1052 example/repo --squash
+
+  add_sibling_branch_gh_mocks "$case_dir" dededededededededededededededededededede \
+    1052 true contributor/phoenix-idol
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1055 --adopt-external
+  expect_code 0 "$rc" "adopt-two-open-prs: the second PR should merge after the first"
+  assert_logged_gh_merge "$case_dir" 1055 example/repo --squash
+
+  [ "$(grep -c '^pr=' "$meta")" -eq 1 ] \
+    || fail "adopt-two-open-prs: metadata holds more than one pr= line"$'\n'"$(cat "$meta")"
+  assert_line 'pr=https://github.com/example/repo/pull/1055' "$meta" \
+    "adopt-two-open-prs: pr= does not name the last merged PR"
+  assert_line 'pr_head=dededededededededededededededededededede' "$meta" \
+    "adopt-two-open-prs: pr_head= is not the last merged PR's forge head"
+  [ "$(grep '^pr_merged=' "$meta")" = "pr_merged=https://github.com/example/repo/pull/1052"$'\n'"pr_merged=https://github.com/example/repo/pull/1055" ] \
+    || fail "adopt-two-open-prs: both merged PRs are not listed once each"$'\n'"$(cat "$meta")"
+  (
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_metadata_identity_parse "$meta" \
+      && [ "$FM_PR_META_URL" = https://github.com/example/repo/pull/1055 ]
+  ) || fail "adopt-two-open-prs: metadata no longer parses as one PR identity"$'\n'"$(cat "$meta")"
+  pass "fm-pr-merge --adopt-external merges two open PRs of one task in turn and lists both for teardown"
+}
+
+# A direct-PR worker copy has moved on to the task's next piece, so its HEAD is
+# a commit no remote holds. Without the flag, the named-head gate asks about
+# that HEAD and refuses; with it, the named head is the PR's head on the forge,
+# recorded as pr_head= and bound to the merge with --match-head-commit.
+test_adopted_pr_verifies_the_forge_head_not_the_worker_head() {
+  local case_dir rc forge_head
+  forge_head=cececececececececececececececececececece
+  case_dir=$(make_direct_pr_case adopt-worker-head-elsewhere)
+  git -C "$case_dir/wt" commit -q --allow-empty -m "next piece, unpushed"
+  add_sibling_branch_gh_mocks "$case_dir" "$forge_head" 1 true fm/task-x1-technomancer
+
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1054
+  expect_code 1 "$rc" "adopt-worker-head-elsewhere: without --adopt-external the worker HEAD must refuse"
+  assert_grep 'is unreachable outside the worker copy' "$case_dir/stderr" \
+    "adopt-worker-head-elsewhere: refusal did not name the worker copy's head"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "adopt-worker-head-elsewhere: gh pr merge ran without --adopt-external"
+
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1054 --adopt-external
+  expect_code 0 "$rc" "adopt-worker-head-elsewhere: an adopted PR should merge on its forge head"
+  assert_logged_gh_merge "$case_dir" 1054 example/repo --squash
+  assert_line "pr_head=$forge_head" "$case_dir/state/task-x1.meta" \
+    "adopt-worker-head-elsewhere: pr_head= is not the PR's forge head"
+  pass "fm-pr-merge --adopt-external verifies the PR's forge head, not the worker copy's HEAD"
+}
+
+# Adoption lifts only the branch and binding rules. A red or draft adopted PR,
+# and a GitLab merge request, still refuse before any merge.
+test_adopted_red_or_draft_pr_still_refused() {
+  local case_dir rc head
+  head=cececececececececececececececececececece
+
+  case_dir=$(make_direct_pr_case adopt-red)
+  add_sibling_branch_gh_mocks "$case_dir" "$head" 1 true contributor/crafting
+  write_github_red_json "$case_dir" "$head" ci
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1053 --adopt-external
+  expect_code 1 "$rc" "adopt-red: a red adopted PR must refuse"
+  assert_grep 'ci' "$case_dir/stderr" "adopt-red: refusal did not name the red check"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "adopt-red: gh pr merge ran for a red PR"
+  assert_no_grep 'pr_merged=' "$case_dir/state/task-x1.meta" \
+    "adopt-red: a refused PR was listed as merged"
+
+  case_dir=$(make_direct_pr_case adopt-draft)
+  add_sibling_branch_gh_mocks "$case_dir" "$head" 1 true contributor/crafting
+  "$JQ_BIN" -c '.isDraft = true' "$case_dir/github-view.json" > "$case_dir/github-view.draft"
+  mv "$case_dir/github-view.draft" "$case_dir/github-view.json"
+  run_merge_case "$case_dir" task-x1 https://github.com/example/repo/pull/1053 --adopt-external
+  expect_code 1 "$rc" "adopt-draft: a draft adopted PR must refuse"
+  assert_grep 'the pull request is a draft' "$case_dir/stderr" "adopt-draft: refusal did not name the draft"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "adopt-draft: gh pr merge ran for a draft PR"
+
+  case_dir=$(make_gitlab_case adopt-gitlab)
+  run_merge_case "$case_dir" task-x1 "$MR_URL" --adopt-external
+  expect_code 2 "$rc" "adopt-gitlab: --adopt-external must refuse on GitLab"
+  assert_grep 'does not apply to GitLab' "$case_dir/stderr" "adopt-gitlab: refusal did not name GitLab"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] || fail "adopt-gitlab: glab merged"
+  pass "fm-pr-merge --adopt-external still refuses a red or draft PR, and GitLab"
+}
+
 test_away_record_does_not_bypass_red_or_identity() {
   local case_dir rc head
   head=adadadadadadadadadadadadadadadadadadadad
@@ -4122,6 +4283,10 @@ test_away_posture_refuses_asynchronous_merge_paths
 test_away_plan_gated_403_does_not_block_the_merge
 test_sibling_branch_pr_accepted_after_recorded_pr_merged
 test_sibling_branch_pr_refused_while_recorded_pr_still_open
+test_adopted_foreign_branch_pr_merges
+test_two_open_prs_of_one_task_merge_in_turn
+test_adopted_pr_verifies_the_forge_head_not_the_worker_head
+test_adopted_red_or_draft_pr_still_refused
 test_foreign_branch_pr_still_refused_after_recorded_pr_merged
 test_away_record_does_not_bypass_red_or_identity
 test_unreadable_away_record_refuses_merge

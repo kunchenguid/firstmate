@@ -1053,6 +1053,72 @@ test_merged_pr_with_later_local_commit_refuses() {
   pass "merged PR does not allow teardown after a later local commit"
 }
 
+# GitHub reports PRs 1052 and 1055 as merged, each with its own head, so a
+# test can ask teardown about a task that merged several PRs.
+# Args: case_dir head_1052 head_1055
+add_gh_two_prs_merged() {
+  local case_dir=$1 head_a=$2 head_b=$3
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"/pull/1052 "*"state,headRefOid,url"*) printf '%s\t%s\t%s\n' MERGED '$head_a' https://github.com/example/repo/pull/1052 ; exit 0 ;;
+      *"/pull/1055 "*"state,headRefOid,url"*) printf '%s\t%s\t%s\n' MERGED '$head_b' https://github.com/example/repo/pull/1055 ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# A task that merged two PRs (bin/fm-pr-merge.sh --adopt-external) leaves
+# pr= on the last one and lists both as pr_merged=. The worker copy's HEAD may
+# carry either PR's work, unpushed after a squash merge deleted the branch, and
+# teardown must see it as landed through the matching pr_merged= entry. The
+# same copy without those entries is refused, so the entries are what prove it.
+test_teardown_sees_every_merged_pr_of_a_task_as_landed() {
+  local which listed case_dir rc head_a head_b last
+  for which in 1052 1055; do
+    for listed in yes no; do
+      case_dir=$(make_case "two-merged-prs-$which-$listed")
+      write_meta "$case_dir" direct-PR ship
+      wt_commit_file "$case_dir" piece-a.txt a "piece a"
+      head_a=$(git -C "$case_dir/wt" rev-parse HEAD)
+      git -C "$case_dir/wt" checkout -q -B fm/task-x1 main
+      wt_commit_file "$case_dir" piece-b.txt b "piece b"
+      head_b=$(git -C "$case_dir/wt" rev-parse HEAD)
+      if [ "$which" = 1052 ]; then
+        git -C "$case_dir/wt" checkout -q -B fm/task-x1 "$head_a"
+        last=1055
+      else
+        last=1052
+      fi
+      [ "$listed" = no ] || printf '%s\n' \
+        'pr_merged=https://github.com/example/repo/pull/1052' \
+        'pr_merged=https://github.com/example/repo/pull/1055' >> "$case_dir/state/task-x1.meta"
+      printf 'pr=https://github.com/example/repo/pull/%s\n' "$last" >> "$case_dir/state/task-x1.meta"
+      add_gh_two_prs_merged "$case_dir" "$head_a" "$head_b"
+
+      set +e
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+
+      if [ "$listed" = yes ]; then
+        expect_code 0 "$rc" "two-merged-prs-$which: teardown should accept the copy whose work PR $which merged while pr= names PR $last"
+        ! grep -q REFUSED "$case_dir/stderr" || fail "two-merged-prs-$which: teardown printed a REFUSED line"
+      else
+        expect_code 1 "$rc" "two-merged-prs-$which-unlisted: without pr_merged= only pr= PR $last is tried, so teardown must refuse"
+        grep -q REFUSED "$case_dir/stderr" || fail "two-merged-prs-$which-unlisted: no REFUSED line in stderr"
+      fi
+    done
+  done
+  pass "teardown sees the work of each merged PR of a task as landed through pr_merged="
+}
+
 test_squash_merged_rebased_branch_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-rebased)
@@ -4465,6 +4531,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
+test_teardown_sees_every_merged_pr_of_a_task_as_landed
 test_squash_merged_rebased_branch_allows
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses

@@ -62,7 +62,9 @@
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
+# by itself causes a false refusal of landed work. A task that merged several
+# PRs also lists each one as pr_merged= (bin/fm-pr-merge.sh), and each listed
+# PR is tried the same way when the recorded pr= does not carry the local work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
@@ -1550,16 +1552,34 @@ EOF
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# for both the PR state and head. A task that merged several PRs
+# (bin/fm-pr-merge.sh --adopt-external) lists each one as pr_merged=, and
+# each listed PR is tried the same way, because the last recorded pr= need not
+# be the PR that carries the worker copy's HEAD. Returns non-zero when no
+# such PR is merged with the current work contained in its head, no PR is
+# found, or any gh error occurs - the caller then falls back to the content
+# check.
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+  local branch=$1 target merged_url
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    target=$(pr_number_from_branch "$branch") || target=
   fi
+  if [ -n "$target" ] && pr_target_is_merged "$target"; then
+    return 0
+  fi
+  while IFS= read -r merged_url; do
+    [ -n "$merged_url" ] && [ "$merged_url" != "$target" ] || continue
+    pr_target_is_merged "$merged_url" && return 0
+  done <<MERGED
+$(grep '^pr_merged=' "$META" 2>/dev/null | cut -d= -f2- || true)
+MERGED
+  return 1
+}
+
+pr_target_is_merged() {
+  local target=$1 view state remainder head resolved_url current landed=0
   [ -n "$target" ] || return 1
   view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
   state=${view%%$'\t'*}

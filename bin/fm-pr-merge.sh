@@ -128,7 +128,15 @@
 # is on a sibling branch of the same task opened for a further PR
 # (require_recorded_pr_identity below, bin/fm-pr-lib.sh's
 # fm_pr_task_branch_family_member); a task is never rebound to another task's
-# or a stranger's work this way. Auto-merge (--auto), a protection bypass
+# or a stranger's work this way. An explicit --adopt-external, parsed before
+# the optional -- separator and GitHub-only, is the caller's statement that the
+# requested PR is this task's work on a branch of any name, including another
+# contributor's: the task may then hold several open PRs on its own repository
+# and merge them one after another, bin/fm-pr-check.sh is run with the same
+# flag, and the head it verifies is the PR's head on the forge rather than the
+# worker copy's HEAD. Every live merge condition above still applies to an
+# adopted PR, and every accepted merge is listed as pr_merged= for teardown
+# (record_merged_pr below). Auto-merge (--auto), a protection bypass
 # (--admin), and branch
 # deletion (--delete-branch, -d and short-flag clusters, and GitLab's
 # --remove-source-branch) are refused by default; --attended-override, parsed
@@ -136,7 +144,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--adopt-external] [--stack-base <branch>] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -198,8 +206,17 @@ ATTENDED_OVERRIDE=false
 ALLOW_RED=()
 ALLOW_MISSING=()
 STACK_BASE=
+ADOPT_EXTERNAL=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --adopt-external)
+      ADOPT_EXTERNAL=true
+      shift
+      ;;
+    --adopt-external=*)
+      echo "error: --adopt-external takes no value" >&2
+      exit 2
+      ;;
     --attended-override)
       ATTENDED_OVERRIDE=true
       shift
@@ -252,6 +269,10 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
 fi
 if [ -n "$STACK_BASE" ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --stack-base does not apply to GitLab, where the base-branch guard below is GitHub-only" >&2
+  exit 2
+fi
+if [ "$ADOPT_EXTERNAL" = true ] && [ "$PROVIDER" = gitlab ]; then
+  echo "error: --adopt-external does not apply to GitLab, where bin/fm-pr-check.sh reads no branch or head from the forge to adopt" >&2
   exit 2
 fi
 
@@ -1100,13 +1121,15 @@ METHODS
   fi
 }
 
-# A sibling-branch rebind (require_recorded_pr_identity above) already proved
-# this PR's branch belongs to the task, so it is recorded the same way
-# bin/fm-pr-check.sh's own --adopt-external path is meant for: a confirmed
-# branch disagreement from the forge, not a silent bind.
+# A sibling-branch rebind (require_recorded_pr_identity above) needs no flag
+# here, because bin/fm-pr-check.sh accepts a sibling of the task's branch on
+# its own. A caller's --adopt-external is passed through, so that script binds
+# a branch of any name it confirms from the forge, and takes the PR's head on
+# the forge as the named head rather than the worker copy's HEAD, which may
+# already have moved on to the task's next PR.
 record_pr_metadata() {
   local adopt_args=()
-  [ "$FM_PR_REBIND_SIBLING_BRANCH" != true ] || adopt_args=(--adopt-external)
+  [ "$ADOPT_EXTERNAL" != true ] || adopt_args=(--adopt-external)
   if ! FM_PR_CHECK_MERGE=1 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" "${adopt_args[@]+"${adopt_args[@]}"}"; then
     return 1
   fi
@@ -1204,6 +1227,71 @@ persist_accepted_merge_authority() {
   return 1
 }
 
+# Every PR the forge accepted a merge for is listed in the task metadata as
+# pr_merged=<canonical url>, once each, so bin/fm-teardown.sh's landed-work test
+# can try every one of them and not only the last recorded pr=, which moves on
+# when a task merges several PRs (--adopt-external above). The line is written
+# before the pr= block, because fm_pr_metadata_identity_parse
+# (bin/fm-pr-lib.sh) refuses any other key after pr=, and bin/fm-pr-check.sh's
+# own rewrite keeps it in place. Acceptance is not landing: teardown re-reads
+# each listed PR's live state and head, so a queued or reverted merge proves
+# nothing there. A record that cannot be written is reported rather than
+# failing a merge the forge already accepted; teardown then lacks that PR and
+# refuses rather than discarding work it cannot prove landed.
+record_merged_pr() {
+  local lock='' tmp='' line inserted=0 state_device status=0 had_identity=0 identity_url=''
+  grep -qxF "pr_merged=$URL" "$META" 2>/dev/null && return 0
+  if ! lock=$(fm_meta_lock_path "$META") || ! fm_lock_acquire_wait "$lock"; then
+    printf 'actionable: the forge accepted the merge request for %s but pr_merged= could not be recorded on task %s; teardown will not see this PR as landed work\n' \
+      "$URL" "$ID" >&2
+    return 0
+  fi
+  MERGE_META_LOCK=$lock
+  state_device=$(fm_pr_file_device "$STATE") || status=1
+  if [ "$status" -eq 0 ]; then
+    fm_pr_regular_destination_on_device_or_absent "$META" "$state_device" && [ -f "$META" ] || status=1
+  fi
+  if [ "$status" -eq 0 ] && fm_pr_metadata_identity_parse "$META"; then
+    had_identity=1
+    identity_url=$FM_PR_META_URL
+  fi
+  if [ "$status" -eq 0 ] && ! grep -qxF "pr_merged=$URL" "$META"; then
+    tmp=$(mktemp "$STATE/.fm-pr-merged.XXXXXX") || status=1
+    if [ "$status" -eq 0 ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          pr=*)
+            if [ "$inserted" -eq 0 ]; then
+              printf 'pr_merged=%s\n' "$URL" >> "$tmp" || status=1
+              inserted=1
+            fi
+            ;;
+        esac
+        printf '%s\n' "$line" >> "$tmp" || status=1
+      done < "$META"
+      [ "$inserted" -eq 1 ] || printf 'pr_merged=%s\n' "$URL" >> "$tmp" || status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+      chmod 0600 "$tmp" && fm_pr_private_file_valid "$tmp" 600 "$state_device" || status=1
+    fi
+    if [ "$status" -eq 0 ] && [ "$had_identity" -eq 1 ]; then
+      fm_pr_metadata_identity_parse "$tmp" && [ "$FM_PR_META_URL" = "$identity_url" ] || status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+      fm_pr_regular_destination_on_device_or_absent "$META" "$state_device" \
+        && mv -f -- "$tmp" "$META" && tmp= || status=1
+    fi
+    [ -z "$tmp" ] || rm -f -- "$tmp"
+  fi
+  fm_lock_release "$lock" || status=1
+  MERGE_META_LOCK=
+  if [ "$status" -ne 0 ]; then
+    printf 'actionable: the forge accepted the merge request for %s but pr_merged= could not be recorded on task %s; teardown will not see this PR as landed work\n' \
+      "$URL" "$ID" >&2
+  fi
+  return 0
+}
+
 # While away, a merge proceeds only when the base branch's rules prove no
 # merge queue, because a queued merge can land after its away authority
 # lapses with the record's archive. A repository whose
@@ -1243,10 +1331,15 @@ refuse_github_queue_while_away() {
 # compared, not assumed. Any read that cannot prove the recorded PR landed, or
 # cannot prove the requested PR's branch is a sibling, keeps the original
 # refusal: a task is never rebound to another task's or a stranger's work.
-FM_PR_REBIND_SIBLING_BRANCH=false
+# An explicit --adopt-external is the caller's statement that this PR, on a
+# branch of any name, is this task's work. It lifts both the sibling-branch and
+# the already-landed requirements, so one task may hold several open PRs at
+# once and merge them in any order: the recorded pr= moves to each PR as it is
+# merged, and every merged PR stays listed for teardown as pr_merged=
+# (record_merged_pr below). It still never crosses repositories: the requested
+# PR must be on the recorded PR's own owner/repo.
 require_recorded_pr_identity() {
   local existing recorded_branch head_ref
-  FM_PR_REBIND_SIBLING_BRANCH=false
   existing=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$existing" ] || return 0
   [ "$existing" = "$URL" ] && return 0
@@ -1256,6 +1349,7 @@ require_recorded_pr_identity() {
       || { [ "$FM_PR_OWNER" = "$PR_OWNER" ] && [ "$FM_PR_REPO" = "$PR_REPO" ]; }; } \
     && { [ "$PROVIDER" != gitlab ] \
       || { [ "$FM_PR_HOST" = "$PR_HOST" ] && [ "$FM_PR_PATH" = "$PR_PATH" ]; }; }; then
+    [ "$ADOPT_EXTERNAL" != true ] || return 0
     case "$PROVIDER" in
       github)
         if command -v gh >/dev/null 2>&1 \
@@ -1266,7 +1360,6 @@ require_recorded_pr_identity() {
           recorded_branch=$(grep '^branch=' "$META" | tail -1 | cut -d= -f2- || true)
           [ -n "$recorded_branch" ] || recorded_branch="fm/$ID"
           if fm_pr_task_branch_family_member "$recorded_branch" "$head_ref"; then
-            FM_PR_REBIND_SIBLING_BRANCH=true
             return 0
           fi
         fi
@@ -1282,14 +1375,17 @@ require_recorded_pr_identity() {
               2>/dev/null) \
             && [ -n "$head_ref" ] \
             && fm_pr_task_branch_family_member "$recorded_branch" "$head_ref"; then
-            FM_PR_REBIND_SIBLING_BRANCH=true
             return 0
           fi
         fi
         ;;
     esac
   fi
-  echo "error: task $ID is bound to $existing, not $URL" >&2
+  if [ "$ADOPT_EXTERNAL" = true ]; then
+    echo "error: task $ID is bound to $existing, not $URL: --adopt-external adopts a further PR only on the same repository" >&2
+  else
+    echo "error: task $ID is bound to $existing, not $URL" >&2
+  fi
   return 1
 }
 
@@ -1486,6 +1582,7 @@ case "$PROVIDER" in
     if [ "$merge_status" -eq 0 ]; then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
       persist_accepted_merge_authority || exit 1
+      record_merged_pr
       fm_afk_contract_lock_release || true
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
@@ -1547,6 +1644,7 @@ case "$PROVIDER" in
       exit "$merge_status"
     fi
     persist_accepted_merge_authority || exit 1
+    record_merged_pr
     fm_afk_contract_lock_release || true
     fm_lock_release "$MERGE_CONTROL_LOCK" || true
     MERGE_CONTROL_LOCK=

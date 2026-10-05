@@ -18,11 +18,16 @@
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # Usage: fm-pr-check.sh <task-id> <pr-url> [--adopt-external]
-# --adopt-external binds a task to a PR whose live branch differs from the
-# task's own recorded branch, after confirming that branch disagreement from
-# the forge; without it, a branch mismatch refuses rather than silently binding
-# the task to a PR it did not open (retro 30/09: PRs opened directly by gh
-# outside any task, later bound to the wrong task's pr=).
+# --adopt-external binds a task to a GitHub PR on a branch of any name,
+# including another contributor's, after reading that branch from the forge;
+# without it, a branch that is neither the task's own recorded branch nor a
+# sibling of it refuses rather than silently binding the task to a PR it did
+# not open (retro 30/09: PRs opened directly by gh outside any task, later
+# bound to the wrong task's pr=). An adopted PR's named head is its head commit
+# on the forge, read live and recorded as pr_head=, not the worker copy's HEAD:
+# the adopted work is the PR's, and the worker copy may already have moved on
+# to the task's next PR. When that head cannot be read, the worker-copy gate
+# below applies as it does without the flag.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -134,11 +139,18 @@ fi
 # recorded and otherwise diffs the local branch, which is the current content.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
+# An adopted PR needs no worker copy to read its head from, because that head
+# is the named head the gate below is asked about.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
+if [ "$PROVIDER" = github ] && command -v gh >/dev/null 2>&1; then
+  REMOTE_HEAD=
+  if [ -n "$WT" ] && [ -d "$WT" ]; then
+    REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) || REMOTE_HEAD=
+  elif [ "$ADOPT_EXTERNAL" = 1 ]; then
+    REMOTE_HEAD=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) || REMOTE_HEAD=
+  fi
+  if fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
 fi
@@ -151,10 +163,10 @@ fi
 # pr=723 onto the unrelated task lloegrys-release-123 (retro 30/09). Refuse an
 # existing recorded task whose own branch disagrees with the PR's branch,
 # unless the caller explicitly adopts it with --adopt-external - the one
-# path meant for exactly this case, which still requires the live PR's
-# headRefName to equal this task's own recorded branch (default fm/<id> when
-# none was recorded), so --adopt-external cannot bind a task to a stranger's
-# branch either.
+# path meant for exactly this case. It still requires the live PR's
+# headRefName to be read from the forge, so the binding is a branch the forge
+# confirmed, and it is the caller's explicit statement that this branch is the
+# task's work, including another contributor's branch the task adopts.
 # A task that opens several PRs for itself, each on its own branch
 # (<base> for the first, <base>-<suffix> for the next ones, e.g. fm/<id>-b),
 # is never "outside this task": fm_pr_task_branch_family_member accepts any
@@ -187,7 +199,10 @@ case "$PROVIDER:$MODE" in
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
-if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
+# The forge-read head is already the named head in no-mistakes mode
+# (fm_dod_forge_head_is_named_head) and for an adopted PR (--adopt-external
+# above); every other case asks the gate about the worker copy's HEAD.
+if { [ -z "$PR_HEAD" ] || { ! fm_dod_forge_head_is_named_head "$MODE" && [ "$ADOPT_EXTERNAL" != 1 ]; }; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
   exit 1
