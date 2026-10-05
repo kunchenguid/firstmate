@@ -149,7 +149,9 @@
 # report scope and the reports it recorded), .supervision-host-prompt and
 # .supervision-host-wake (the prompt and wake text of the current turn),
 # .supervision-host-mirror (the dialog-mirror feed while an attended wake is
-# rendered), .supervision-host-left (the pid and identity of the successor arm a
+# rendered), .supervision-host-dispatch-errors (a failed
+# bin/fm-branch-dispatch.mjs call's stderr, until its ledger row names the
+# cause), .supervision-host-left (the pid and identity of the successor arm a
 # pass-through left running for main, until that arm is gone),
 # .supervision-host-health (the latch: errors, cooldown, and probe time, keyed
 # to the main session, engine, and model), and .supervision-host.log (a bounded
