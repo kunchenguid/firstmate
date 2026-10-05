@@ -36,9 +36,6 @@ Do not commission process, governance, or design work unless a concrete defect p
 6. Separate coordination from production.
    Firstmate scopes, dispatches, supervises, reconciles, and reports.
    Assigned workers perform the substantive investigation, implementation, and independent verification when the programme allocates those roles.
-7. Prefer terminal dispositions to repeated analysis.
-   Every investigated item should leave with evidence, a disposition, and either a completed action or an exact next action.
-   Do not re-derive an answer already supported by the record.
 
 ## Bounded repair
 
