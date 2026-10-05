@@ -23,6 +23,7 @@ import {
   turnStep,
   userMessage,
   world,
+  type World,
 } from "./support.ts";
 
 const sessionStart = { cwd: "/work", surface: "terminal" as const, isInteractive: true };
@@ -514,6 +515,13 @@ describe("the effort cue", () => {
     while (!step.done) step = await stream.next();
   }
 
+  // One request of the main loop at the level the world's session runs at, then its reply,
+  // after which Claude Code asks to confirm the next effort change.
+  async function turn($: Engine, w: World, model?: string): Promise<void> {
+    await runStep($, w.effort(), undefined, model);
+    w.reply();
+  }
+
   async function cueLabel($: Engine): Promise<string> {
     return effortCueOf(await $.ui.render(abovePrompt()))!.label;
   }
@@ -605,20 +613,20 @@ describe("the effort cue", () => {
     }
   });
 
-  test("passes over a level this session declined instead of offering it again", async ($, on) => {
-    const { journal } = world(on);
+  test("passes over a level declined before the conversation held any reply", async ($, on) => {
+    const w = world(on, { settings: savedFor("xhigh"), effortCap: "xhigh" });
+    const { journal } = w;
     stepper(on);
     await $.session.start(sessionStart);
-    await runStep($, "xhigh");
+    // With no reply yet nothing can turn the step down, so Claude Code setting the capped `max`
+    // to `xhigh` instead is the only way the session's first request can still prove `xhigh`.
     await press($);
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "max" });
-    // `/effort` says a level it will not take in its own output, so the decline is read from
-    // the next request: it left the session exactly where the step started.
-    await runStep($, "xhigh");
+    await turn($, w);
     expect(await cueLabel($)).toBe("◕ xhigh");
     await press($);
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "low" });
-    await runStep($, "low");
+    await turn($, w);
     await press($);
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "medium" });
   });
@@ -639,78 +647,115 @@ describe("the effort cue", () => {
   });
 
   test("keeps offering a level whose change was turned down at Claude Code's confirmation", async ($, on) => {
-    const { journal } = world(on, { effortKept: true });
+    const w = world(on, { effort: "medium", turnDown: true });
+    const { journal } = w;
     stepper(on);
     await $.session.start(sessionStart);
-    await runStep($, "medium");
-    await press($);
-    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "high" });
-    // The saved level stayed where it was, so the run never took, and the next request proving
-    // the session stayed too says nothing about whether this model offers `high`.
-    await runStep($, "medium");
-    expect(await cueLabel($)).toBe("◔ medium");
-    await press($);
-    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "high" });
-    expect(journal.toasts.filter((toast) => toast.includes("declined"))).toHaveLength(0);
-  });
-
-  test("says so once while nothing is left to step to", async ($, on) => {
-    const { journal } = world(on);
-    stepper(on);
-    await $.session.start(sessionStart);
-    await runStep($, "high");
-    // Every step is declined: each request proves the session stayed at `high`.
-    for (const expected of ["xhigh", "max", "low", "medium"]) {
+    await turn($, w);
+    // Each change is turned down, so each request proves the session stayed at `medium`, which
+    // is also what a model without `high` would prove: none of it passes `high` over.
+    for (let lap = 0; lap < 5; lap += 1) {
       await press($);
-      expect(journal.runs.at(-1)).toEqual({ command: "effort", args: expected });
-      await runStep($, "high");
+      await turn($, w);
+      expect(await cueLabel($)).toBe("◔ medium");
     }
-    await press($);
-    await press($);
-    expect(journal.runs).toHaveLength(4);
-    expect(journal.toasts.filter((toast) => toast.includes("was declined here"))).toHaveLength(1);
-    // The cue still names what the last request proved, which the declines never touched.
-    expect(await cueLabel($)).toBe("◑ high");
+    expect(journal.runs.map((run) => run.args)).toEqual(["high", "high", "high", "high", "high"]);
+    expect(journal.toasts.filter((toast) => toast.startsWith("Effort unchanged"))).toHaveLength(0);
   });
 
-  test("forgets the declines when a request names another model, and steps again", async ($, on) => {
-    const { journal } = world(on);
+  test("keeps offering a turned-down level that the shared settings already name", async ($, on) => {
+    // Launched with `--effort high` while the settings every session shares save `xhigh`.
+    const w = world(on, { settings: savedFor("xhigh"), effort: "high", turnDown: true });
+    const { journal } = w;
     stepper(on);
     await $.session.start(sessionStart);
-    await runStep($, "high");
+    await turn($, w);
+    expect(await cueLabel($)).toBe("◑ high");
     await press($);
-    await runStep($, "high");
-    expect(journal.runs.map((run) => run.args)).toEqual(["xhigh"]);
-    // The next request runs another model, which declined nothing of its own.
-    await runStep($, "high", undefined, "claude-opus-5");
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
+    await turn($, w);
     await press($);
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
   });
 
-  test("says so again once another model's levels are declined too", async ($, on) => {
-    const { journal } = world(on);
+  test("keeps offering a turned-down level that another session saves meanwhile", async ($, on) => {
+    const w = world(on, { effort: "medium", turnDown: true });
+    const { journal } = w;
     stepper(on);
     await $.session.start(sessionStart);
-    const declineEveryStep = async (model?: string) => {
-      for (const expected of ["xhigh", "max", "low", "medium"]) {
-        await press($);
-        expect(journal.runs.at(-1)).toEqual({ command: "effort", args: expected });
-        await runStep($, "high", undefined, model);
-      }
-    };
-    const said = () => journal.toasts.filter((toast) => toast.includes("was declined here")).length;
-    await runStep($, "high");
-    await declineEveryStep();
+    await turn($, w);
+    w.writeSettings(savedFor("high"));
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "high" });
+    await turn($, w);
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "high" });
+  });
+
+  test("offers a capped level again once the conversation holds a reply", async ($, on) => {
+    const w = world(on, { settings: savedFor("xhigh"), effortCap: "xhigh" });
+    const { journal } = w;
+    stepper(on);
+    await $.session.start(sessionStart);
+    await turn($, w);
+    // After a reply, staying at `xhigh` looks the same whether `max` was capped or turned down.
+    for (let lap = 0; lap < 2; lap += 1) {
+      await press($);
+      expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "max" });
+      await turn($, w);
+      expect(await cueLabel($)).toBe("◕ xhigh");
+    }
+    // A second press before the next request steps on past it, so the ramp never sticks there.
     await press($);
     await press($);
-    expect(said()).toBe(1);
-    // Another model starts clean, so the ramp offers steps again and the notice is due again.
-    await runStep($, "high", undefined, "claude-opus-5");
-    await declineEveryStep("claude-opus-5");
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "low" });
+    expect(journal.toasts.filter((toast) => toast.startsWith("Effort unchanged"))).toHaveLength(0);
+  });
+
+  test("names max once a request carries it, although Claude Code saves it nowhere", async ($, on) => {
+    const w = world(on, { settings: savedFor("xhigh") });
+    const { journal } = w;
+    stepper(on);
+    await $.session.start(sessionStart);
+    await turn($, w);
     await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "max" });
+    await turn($, w);
+    expect(effortCueOf(await $.ui.render(abovePrompt()))).toMatchObject({ label: "● max", color: "fastMode" });
     await press($);
-    expect(said()).toBe(2);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "low" });
+  });
+
+  test("reads no decline from the first step of a resumed conversation", async ($, on) => {
+    const w = world(on, {
+      settings: savedFor("high"),
+      turnDown: true,
+      messages: [{ role: "assistant", text: "Done.", toolUses: [] }],
+    });
+    const { journal } = w;
+    stepper(on);
+    await $.session.start(sessionStart);
+    // The restored conversation already holds a reply, so even this first step can be turned down.
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
+    await turn($, w);
     expect(await cueLabel($)).toBe("◑ high");
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "xhigh" });
+  });
+
+  test("forgets the declines when a request names another model, and steps again", async ($, on) => {
+    const w = world(on, { settings: savedFor("xhigh"), effortCap: "xhigh" });
+    const { journal } = w;
+    stepper(on);
+    await $.session.start(sessionStart);
+    await press($);
+    await turn($, w);
+    expect(journal.runs.map((run) => run.args)).toEqual(["max"]);
+    // The next request runs another model, picked without any command, which declined nothing.
+    await turn($, w, "claude-opus-5");
+    await press($);
+    expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "max" });
   });
 
   test("/effort-cycle leaves no output row of its own, because /effort draws its own", async ($, on) => {
@@ -820,6 +865,16 @@ describe("the effort cue", () => {
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "low" });
     await runStep($, "low");
     expect(await cueLabel($)).toBe("○ low");
+  });
+
+  test("claims no level from a session's first request once a level no request can report is selected", async ($, on) => {
+    world(on);
+    stepper(on);
+    await $.session.start(sessionStart);
+    await $.command.run(command("effort", "ultracode"));
+    // No request has run before this one, so there is no earlier model for it to differ from.
+    await runStep($, "xhigh");
+    expect(await cueLabel($)).toBe("◌ effort ?");
   });
 
   test("names the level a request resolves to under /effort auto", async ($, on) => {

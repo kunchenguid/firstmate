@@ -652,18 +652,6 @@ for (const settings of [undefined, null, {}, { modelSettings: {} }, { modelSetti
 }
 check(effort.savedEffortLevel({ effortLevel: "high" }, undefined) === "high", "an unnamed model still reads the saved default");
 
-// Whether a run of /effort took its level: only the entry it saves for this model says so.
-check(effort.effortRunSaved({ modelSettings: { [model]: { effortLevel: "high" } } }, model, "high"), "the saved entry names the level asked for");
-check(effort.effortRunSaved({ modelSettings: { [model]: { effortLevel: " HIGH " } } }, model, "high"), "the saved entry spelled loudly");
-check(!effort.effortRunSaved({ modelSettings: { [model]: { effortLevel: "medium" } } }, model, "high"), "a change turned down leaves the old entry");
-check(!effort.effortRunSaved({}, model, "high"), "a change turned down with nothing saved leaves nothing");
-check(!effort.effortRunSaved({ effortLevel: "high" }, model, "high"), "the saved default is never what a run writes");
-check(!effort.effortRunSaved({ modelSettings: { other: { effortLevel: "high" } } }, model, "high"), "another model's entry says nothing about this run");
-check(!effort.effortRunSaved({ modelSettings: { [model]: { effortLevel: "auto" } } }, model, "high"), "an entry off the ramp is not the level asked for");
-for (const settings of [undefined, null, "text", 7]) {
-  check(!effort.effortRunSaved(settings, model, "high"), \`nothing saved in \${JSON.stringify(settings) ?? "undefined"}\`);
-}
-
 // What an /effort run selects: a level, auto which is no level at all, or nothing to act on.
 check(effort.parseEffortSelection("xhigh").level === "xhigh", "/effort xhigh selects a level");
 check(effort.parseEffortSelection(" MAX ").level === "max", "/effort spelled loudly selects a level");
@@ -729,7 +717,7 @@ console.log("effort-ok");
 JS
   out=$(run_node "$TMP_ROOT/effort.mjs" 2>&1) || fail "effort-level policy: $out"
   assert_contains "$out" "effort-ok" "the effort-level policy check did not complete"
-  pass "the effort-level policy cycles the ramp and wraps, passes over the levels a session declined, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, tells a step that took from one turned down by what it saved, and treats only a request that can report the selected level as proof of what is in force"
+  pass "the effort-level policy cycles the ramp and wraps, passes over the levels a session declined, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, and treats only a request that can report the selected level as proof of what is in force"
 }
 
 test_plugin_shape

@@ -50,6 +50,12 @@ export type World = {
   failWrites: (reason: string | undefined) => void;
   /** Set the id `$.session.id()` answers from now on, as a new or resumed session has. */
   setSessionId: (id: string) => void;
+  /** The level the session is running at, which the next main-loop request carries. */
+  effort: () => string;
+  /** A reply has arrived, so Claude Code asks to confirm the next effort change. */
+  reply: () => void;
+  /** Rewrite the settings `$.settings.read()` answers, as another session on the machine does. */
+  writeSettings: (settings: unknown) => void;
 };
 
 export type WorldOptions = {
@@ -72,12 +78,18 @@ export type WorldOptions = {
   /** Set to make every `$.command.run` deny with this reason, as a refused command does. */
   commandFailure?: string;
   /**
-   * Set to make every `/effort <level>` leave the saved level where it was, as turning the
-   * change down at Claude Code's own confirmation does; otherwise the run saves the level as
-   * the model's default, as Claude Code does before the run settles.
+   * The level the session runs at from launch, as `--effort` sets it whatever is saved;
+   * omitted means the level saved for the model, then the saved default, then `high`.
    */
-  effortKept?: boolean;
+  effort?: string;
+  /** The highest level this model and plan allow, which `/effort` sets instead of one above it. */
+  effortCap?: string;
+  /** Set to answer every effort-change confirmation Claude Code asks with `No, go back`. */
+  turnDown?: boolean;
 };
+
+/** The levels `/effort` and a main-loop request share, low to high. */
+const EFFORT_RAMP = ["low", "medium", "high", "xhigh", "max"];
 
 /** The engine's own drawing, as the bottom of every `ui.render` chain. */
 export const STOCK_TEXT = "STOCK-DRAWING";
@@ -163,23 +175,41 @@ export function world(on: On, options: WorldOptions = {}): World {
     journal.settingsReads += 1;
     return { value: settings as never };
   });
+  const saved = (settings ?? {}) as { effortLevel?: string; modelSettings?: Record<string, { effortLevel?: string }> };
+  let effort = options.effort ?? saved.modelSettings?.[model]?.effortLevel ?? saved.effortLevel ?? "high";
+  // Claude Code 2.1.280 asks to confirm an effort change once the conversation holds a reply,
+  // and asks again after each later reply; a change it confirmed lets the rest through.
+  let replied = (options.messages ?? []).length > 0;
+  let confirmed = false;
   // The bottom of every `command.run` chain the mod raises or forwards: what the engine
   // would have run, recorded so a test can read exactly which level the mod selected.
   on("command.run", async (_$, e) => {
     // A command the engine refuses rejects the caller's `$.command.run`, as a host check does.
     if (options.commandFailure !== undefined) throw new Error(options.commandFailure);
+    journal.runs.push({ command: e.command, args: e.args });
     // `/model <name>` switches the session's model, which is what `$.session.model()` reports
     // from then on; a bare `/model` opens the picker and switches nothing here.
     if (e.command === "model" && e.args !== "") model = e.args;
-    // `/effort <level>` saves the level as this model's default, unless the change is kept.
-    if (e.command === "effort" && /^(low|medium|high|xhigh|max)$/.test(e.args) && !options.effortKept) {
-      const base = (typeof settings === "object" && settings !== null ? settings : {}) as Record<string, unknown>;
-      const models = (typeof base.modelSettings === "object" && base.modelSettings !== null
-        ? base.modelSettings
-        : {}) as Record<string, Record<string, unknown>>;
-      settings = { ...base, modelSettings: { ...models, [model]: { ...models[model], effortLevel: e.args } } };
+    if (e.command === "effort" && EFFORT_RAMP.includes(e.args)) {
+      // A level above the cap is set to the cap instead.
+      const cap = options.effortCap;
+      const capped = cap !== undefined && EFFORT_RAMP.indexOf(e.args) > EFFORT_RAMP.indexOf(cap);
+      const level = capped ? cap : e.args;
+      if (replied && !confirmed && level !== effort) {
+        if (options.turnDown) return { value: {} };
+        confirmed = true;
+      }
+      effort = level;
+      // Only low through xhigh are saved as this model's default, and a capped level is not:
+      // `max` is this session only.
+      if (!capped && level !== "max") {
+        const base = (typeof settings === "object" && settings !== null ? settings : {}) as Record<string, unknown>;
+        const models = (typeof base.modelSettings === "object" && base.modelSettings !== null
+          ? base.modelSettings
+          : {}) as Record<string, Record<string, unknown>>;
+        settings = { ...base, modelSettings: { ...models, [model]: { ...models[model], effortLevel: level } } };
+      }
     }
-    journal.runs.push({ command: e.command, args: e.args });
     return { value: {} };
   });
   on("ui.press", async (_$, e) => ({ value: { element: e.element } }));
@@ -224,6 +254,14 @@ export function world(on: On, options: WorldOptions = {}): World {
     },
     setSessionId: (id) => {
       sessionId = id;
+    },
+    effort: () => effort,
+    reply: () => {
+      replied = true;
+      confirmed = false;
+    },
+    writeSettings: (next) => {
+      settings = next;
     },
   };
 }

@@ -51,11 +51,11 @@ Three paths change it, and all three move Claude Code's real setting:
 - `/effort <level>`, the effort slider, and the model picker keep working unchanged.
 
 A command the plugin sees leaves the cue at `◌ effort ?` until the next request of a turn carries whatever level took effect.
-Running `/effort` is not proof that it took: Claude Code can decline a level your plan or your model does not offer, and it says so in its own output rather than by failing.
+Running `/effort` is not proof that it took: Claude Code can decline a level your plan or your model does not offer, or set the highest level allowed instead, and it says so in its own output rather than by failing.
 So the cue never names the level that was asked for, only a level a request carried.
-A step that asked for a level and left the session where it already was asked for a level the model in use cannot have, and the cycle passes over that level from then on.
+Before the conversation holds any reply, nothing can turn a step down, so a step taken then that left the session where it already was asked for a level the model in use cannot have, and the cycle passes over that level from then on.
 Which levels exist is the model's business, so those declines are forgotten as soon as a request runs another model.
-While nothing is left to step to, the keystroke says so instead of doing nothing, once for that stretch rather than once per press.
+After the first reply a step can be turned down at Claude Code's own confirmation, described below, and that looks exactly like a level the model does not offer, so no step after it is read as a decline: a level that stays where it was is still on the ramp, and the next lap asks for it again.
 For every other way the level moves, see [What the cue can know](#what-the-cue-can-know).
 
 The cycle visits `low`, `medium`, `high`, `xhigh`, and `max`, minus any the model in use has declined.
@@ -71,8 +71,9 @@ When nothing is saved, or the model's own saved level is something the ramp cann
 
 If Claude Code refuses to run `/effort` at all, a transient notice says so, and the cue keeps naming the level the last request carried.
 
-Claude Code 2.1.280 asks you to confirm the first raise of effort after a turn, because the conversation is cached at the level in force, so a step up taken after a turn is one press and then `enter` on `Yes`.
-Choosing `No, go back` keeps the level you had, and it is not read as the model declining the level you turned down: once a request has run at the level you kept, the next press offers that level again.
+Claude Code 2.1.280 asks you to confirm the first change of effort after each reply, because the conversation is cached at the level in force, so a step taken after a reply is one press and then `enter` on `Yes`.
+A new session asks nothing until its first reply, while a resumed one can ask from its first change.
+Choosing `No, go back` keeps the level you had, and it is not read as the model declining the level you turned down: the next press offers that level again.
 
 ### Binding it to one key
 
@@ -103,12 +104,14 @@ Each of these is recorded with its evidence in [`calm-mode-feasibility.md`](calm
 
 - The function-hooks surface is early access and default-off, and Claude Code states its API may change between releases without notice; the cue was designed against Claude Code 2.1.274 and its guards last ran against 2.1.280.
 - Models without an effort parameter have no level to show, and no footer badge either; on those the cue stays at `◌ effort ?`.
-- `/effort <level>` saves the level as your default for new sessions on that model, so cycling changes what your next session starts at, exactly as typing `/effort` yourself does.
+- `/effort low`, `medium`, `high`, and `xhigh` save the level as your default for new sessions on that model, so cycling changes what your next session starts at, exactly as typing `/effort` yourself does.
+  `max` applies to this session only, and a level above the cap for the model is set to that cap instead; neither saves anything.
 - The request a turn sends is the only thing that tells a mod what level is in force, so no change can reach the cue before the next turn starts, and a session that has run no turn yet shows no level.
   What follows from that is [What the cue can know](#what-the-cue-can-know).
 - Claude Code checks the effort of its own request against `low`, `medium`, `high`, `xhigh`, and `max`, which is why `ultracode` is a level the cue can never name.
 - The level Claude Code saves in your settings is what a new session starts at, not what this session is running, so the cue never shows it; a session started with `--effort`, or changed for this session only, would make it wrong.
-  The cycle reads it for two things only: where a first keystroke climbs from, and whether a step it just ran took, since Claude Code saves every level `/effort` takes.
+  The cycle reads it for one thing only, which is where a first keystroke climbs from.
+  Every session on the machine shares it, and it never records `max` or a capped level, so it never decides whether a step took.
 
 ## Regression entry points
 

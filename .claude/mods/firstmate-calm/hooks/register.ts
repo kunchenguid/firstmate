@@ -82,7 +82,6 @@ import {
   effortCueLabel,
   effortLevelColor,
   effortRuleColumns,
-  effortRunSaved,
   normalizeEffortLevel,
   parseEffortSelection,
   savedEffortLevel,
@@ -131,18 +130,24 @@ let effortLevel: EffortLevel | undefined;
 // draws with Calm on and off alike, and no effort path reads or writes `calm`.
 let effortSelected: EffortLevel | undefined;
 // The levels declined on the model now in use, so the ramp stops offering them: a step asked
-// for a level and the next request proved the session had stayed where it was. Which levels
-// exist is the model's business, so all of this is forgotten as soon as a request names a
-// different model than the one it was learned under. It lives and dies with the session, is
-// written to no file, and never reaches the cue, which goes on naming only what a request
-// proved. `effortAsked` is the step still waiting for that proof, `effortModel` is the model
-// the rest was learned under, and `effortExhausted` remembers that the captain has already
-// been told nothing is left to step to, so a held keystroke says it once and says it again
-// only once that has changed.
+// for a level that nothing could have turned down, and the next request proved the session
+// had stayed where it was. Which levels exist is the model's business, so all of this is
+// forgotten as soon as a request names a different model than the one it was learned under.
+// It lives and dies with the session, is written to no file, and never reaches the cue, which
+// goes on naming only what a request proved. `effortAsked` is the step still waiting for that
+// proof, `effortModel` is the model the rest was learned under, and `effortExhausted`
+// remembers that the captain has already been told nothing is left to step to, so a held
+// keystroke says it once and says it again only once that has changed.
 const effortDeclined = new Set<EffortLevel>();
 let effortAsked: { wanted: EffortLevel; from: EffortLevel } | undefined;
 let effortModel: string | undefined;
 let effortExhausted = false;
+// Whether the conversation may already hold a reply. From then on Claude Code can ask to
+// confirm an effort change, and a change turned down there leaves the session exactly where a
+// level the model does not offer would, with nothing a mod can see telling the two apart. A
+// step taken while this is still false cannot have been turned down, so it is the only kind
+// whose stay at the old level is read as a decline.
+let effortConfirmable = false;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
@@ -254,11 +259,16 @@ async function load($: EngineInterface): Promise<void> {
   calm = parseCalmPreference(await readText($, preferencePath));
   palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
   try {
-    const restored = classifyRestoredTranscript(await $.session.messages());
+    const messages = await $.session.messages();
+    // A restored conversation already holds replies, so Claude Code can confirm an effort
+    // change from the first one this session makes.
+    if (messages.length > 0) effortConfirmable = true;
+    const restored = classifyRestoredTranscript(messages);
     for (const note of restored.workingNotes) workingNotes.add(note);
     for (const reply of restored.finalReplies) finalReplies.add(reply);
   } catch {
-    // A transcript that cannot be read leaves restored narration visible; nothing else changes.
+    // A transcript that cannot be read leaves restored narration visible, and may hold replies.
+    effortConfirmable = true;
   }
   if (ticker === undefined) {
     ticker = $.clock.every(CALM_WORKING_SHIP_TICK_MS, () => {
@@ -290,6 +300,7 @@ async function resetSession($: EngineInterface): Promise<void> {
   effortAsked = undefined;
   effortModel = undefined;
   effortExhausted = false;
+  effortConfirmable = false;
   await ensureLoaded($);
 }
 
@@ -316,10 +327,10 @@ function invalidateDrawings($: EngineInterface): void {
  * another model, and while nothing is left to step to the keystroke says so instead of
  * doing nothing, once per such stretch rather than once per press.
  *
- * A step that never took is not such a decline: a run whose change was turned down at
- * Claude Code's own confirmation, or refused outright, says nothing about the model, so
- * nothing is recorded and the next press steps on as usual. What the run saved tells the two
- * apart, as `effortRunTook` describes.
+ * That reading holds only for a step nothing could have turned down. Once the conversation
+ * may hold a reply, Claude Code can ask to confirm the change, and `No, go back` leaves the
+ * session exactly where a decline would, so such a step records nothing: the level stays on
+ * the ramp, and the next lap offers it again.
  *
  * The selection is recorded before the command is run, so a second keystroke during the run
  * steps from the level this one is selecting rather than repeating it; a run the host
@@ -360,22 +371,7 @@ async function cycleEffort($: EngineInterface): Promise<void> {
     $.ui.toast(`Effort unchanged: ${reason}`);
     return;
   }
-  if (effortSelected !== wanted) return;
-  if ((await effortRunTook($, wanted)) && effortSelected === wanted) effortAsked = { wanted, from };
-}
-
-/**
- * Whether the `/effort` run that just settled took `level`, read from the entry it saves for
- * the session's model. Settings or a model that cannot be read settle nothing, and the run is
- * then taken at its word, as it was before anything could be read.
- */
-async function effortRunTook($: EngineInterface, level: EffortLevel): Promise<boolean> {
-  try {
-    const [settings, model] = await Promise.all([$.settings.read(), $.session.model()]);
-    return typeof model !== "string" || effortRunSaved(settings as never, model, level);
-  } catch {
-    return true;
-  }
+  if (effortSelected === wanted && !effortConfirmable) effortAsked = { wanted, from };
 }
 
 /** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
@@ -643,22 +639,28 @@ export const register: Register = (on) => {
     // carries its own effort, not the session's, so only the main loop's is read.
     if (e.agentId === undefined) {
       // A request for another model settles nothing about the one before it: which levels
-      // exist, which were declined, and where a step would start are all its own.
-      if (e.model !== effortModel) {
-        effortModel = e.model;
+      // exist, which were declined, and where a step would start are all its own. Before the
+      // first request no model has been learned, and everything held so far was learned in
+      // this session under its own model, so only a model that differs from a learned one
+      // reconsiders it.
+      if (effortModel !== undefined && e.model !== effortModel) {
         effortDeclined.clear();
         effortAsked = undefined;
         effortSelected = undefined;
         effortExhausted = false;
       }
+      effortModel = e.model;
       const confirmed = confirmedEffortLevel(effortSelected, normalizeEffortLevel(e.effort));
+      // This request settles the step waiting on it or nothing does: its reply is what lets
+      // Claude Code ask to confirm every change after it.
+      const asked = effortAsked;
+      effortAsked = undefined;
+      effortConfirmable = true;
       if (confirmed !== undefined) {
-        const asked = effortAsked;
-        effortAsked = undefined;
         if (asked !== undefined && asked.wanted !== asked.from && confirmed === asked.from) {
           effortDeclined.add(asked.wanted);
         }
-        if (confirmed !== effortLevel) effortExhausted = false;
+        if (confirmed !== effortSelected) effortExhausted = false;
         effortSelected = confirmed;
       }
       showEffort($, confirmed);
