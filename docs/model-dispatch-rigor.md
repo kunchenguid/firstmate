@@ -71,9 +71,11 @@ Before dispatching an opencode free-model candidate:
    slack), treat the data as stale — fall back to the most conservative
    narrowing for that domain rather than trusting a classification that may
    no longer hold. A stale scan is a reason to narrow more, never a reason to
-   skip the check. This is manual brief-writing judgment only: `scanned_at`
-   is advisory, not a hard pass/fail signal, and stays out of scope for the
-   mechanical gate in `bin/fm-spawn.sh`.
+   skip the check. `bin/fm-spawn.sh` warns (not a hard failure) when the
+   catalog's own `scanned_at` is past that staleness window, since a status
+   or `early_termination_detected` read off a catalog the weekly cron
+   stopped refreshing may no longer be true; treat that warning as the same
+   narrow-more signal.
 
 This is a reference lookup before dispatch, not a standing daemon — it
 doesn't change what `quota-array-dispatch` already owns (economics,

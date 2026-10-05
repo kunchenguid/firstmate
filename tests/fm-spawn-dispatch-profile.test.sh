@@ -962,6 +962,45 @@ test_opencode_dispatch_proceeds_on_untracked_health_catalog_model() {
   pass "OpenCode proceeds when the health catalog does not track the selected model"
 }
 
+test_opencode_dispatch_warns_on_stale_health_catalog_scan() {
+  local rec id out status stale_scanned_at
+  id=profile-opencode-health-stale-z7m
+  rec=$(make_spawn_case profile-opencode-health-stale opencode "$id")
+  read_case_record "$rec"
+  stale_scanned_at=$(date -u -v-11d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d '11 days ago' +%Y-%m-%dT%H:%M:%SZ)
+  write_opencode_health_catalog "$HOME_DIR" \
+    "{\"scanned_at\":\"$stale_scanned_at\",\"models\":[{\"id\":\"space-bunny-free\",\"status\":\"active\",\"early_termination_detected\":false,\"is_expiring_soon\":false}]}"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model opencode-go/space-bunny-free)
+  status=$?
+  expect_code 0 "$status" "OpenCode dispatch must proceed (warn, not refuse) on a stale but active catalog entry"
+  assert_contains "$out" "health catalog scanned_at is" \
+    "stale scanned_at did not warn"
+  [ -e "$HOME_DIR/state/$id.meta" ] || fail "stale scanned_at warning blocked a valid spawn"
+  pass "OpenCode warns when the health catalog's scanned_at is past the staleness window"
+}
+
+test_opencode_dispatch_silent_on_fresh_health_catalog_scan() {
+  local rec id out status fresh_scanned_at
+  id=profile-opencode-health-fresh-z7n
+  rec=$(make_spawn_case profile-opencode-health-fresh opencode "$id")
+  read_case_record "$rec"
+  fresh_scanned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  write_opencode_health_catalog "$HOME_DIR" \
+    "{\"scanned_at\":\"$fresh_scanned_at\",\"models\":[{\"id\":\"space-bunny-free\",\"status\":\"active\",\"early_termination_detected\":false,\"is_expiring_soon\":false}]}"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model opencode-go/space-bunny-free)
+  status=$?
+  expect_code 0 "$status" "OpenCode dispatch must proceed on a fresh catalog entry"
+  assert_not_contains "$out" "health catalog scanned_at is" \
+    "fresh scanned_at wrongly warned as stale"
+  [ -e "$HOME_DIR/state/$id.meta" ] || fail "fresh scanned_at check blocked a valid spawn"
+  pass "OpenCode does not warn when the health catalog's scanned_at is within the staleness window"
+}
+
 test_opencode_catalog_probe_uses_no_provider_argument() {
   local rec id out status args_file
   id=profile-opencode-catalog-args-z7e
@@ -2136,6 +2175,8 @@ test_opencode_dispatch_proceeds_on_active_health_entry
 test_opencode_refuses_early_terminated_health_entry
 test_opencode_refuses_inactive_health_entry
 test_opencode_dispatch_proceeds_on_untracked_health_catalog_model
+test_opencode_dispatch_warns_on_stale_health_catalog_scan
+test_opencode_dispatch_silent_on_fresh_health_catalog_scan
 test_opencode_catalog_probe_uses_no_provider_argument
 test_opencode_secondmate_config_model_uses_live_catalog
 test_opencode_secondmate_config_refuses_model_absent_from_live_catalog

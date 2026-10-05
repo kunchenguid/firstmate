@@ -2469,6 +2469,18 @@ if [ "$HARNESS" = opencode ]; then
     if [ -z "$OPENCODE_HEALTH_FILE" ] || [ -z "$OPENCODE_HEALTH_ENTRY" ] || [ "$OPENCODE_HEALTH_ENTRY" = null ]; then
       echo "warning: cannot verify '$MODEL' against the opencode free-model health catalog (file missing/unreadable or model not tracked) - proceeding on the models.dev check alone" >&2
     else
+      OPENCODE_HEALTH_SCANNED_AT=$(jq -r '.scanned_at // empty' "$OPENCODE_HEALTH_FILE" 2>/dev/null) || OPENCODE_HEALTH_SCANNED_AT=
+      if [ -n "$OPENCODE_HEALTH_SCANNED_AT" ]; then
+        OPENCODE_HEALTH_SCANNED_NORM=$(printf '%s' "$OPENCODE_HEALTH_SCANNED_AT" | sed -E 's/\.[0-9]+//; s/\+00:00$/Z/')
+        OPENCODE_HEALTH_SCANNED_EPOCH=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$OPENCODE_HEALTH_SCANNED_NORM" +%s 2>/dev/null \
+          || date -u -d "$OPENCODE_HEALTH_SCANNED_NORM" +%s 2>/dev/null) || OPENCODE_HEALTH_SCANNED_EPOCH=
+        if [ -n "$OPENCODE_HEALTH_SCANNED_EPOCH" ]; then
+          OPENCODE_HEALTH_AGE_DAYS=$(( ($(date -u +%s) - OPENCODE_HEALTH_SCANNED_EPOCH) / 86400 ))
+          if [ "$OPENCODE_HEALTH_AGE_DAYS" -gt 10 ]; then
+            echo "warning: opencode free-model health catalog scanned_at is $OPENCODE_HEALTH_AGE_DAYS days old (stale past the ~10-day weekly cadence); status/early_termination_detected for '$MODEL' may no longer hold - narrow the brief or prefer the domain default" >&2
+          fi
+        fi
+      fi
       OPENCODE_HEALTH_STATUS=$(printf '%s' "$OPENCODE_HEALTH_ENTRY" | jq -r '.status // "unknown"')
       OPENCODE_HEALTH_TERMINATED=$(printf '%s' "$OPENCODE_HEALTH_ENTRY" | jq -r '.early_termination_detected // false')
       if [ "$OPENCODE_HEALTH_STATUS" != active ] || [ "$OPENCODE_HEALTH_TERMINATED" = true ]; then
