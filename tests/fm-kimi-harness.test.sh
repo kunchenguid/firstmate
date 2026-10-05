@@ -33,6 +33,7 @@ task_inbox_export() {  # <home> <id>
 ai_trailer_hooks_prefix() {  # <home> <id>
   local state
   state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
+  # shellcheck disable=SC2016 # Expansion is deferred to the worker pane.
   printf 'GIT_HOOKS_ENV=$(%s launch-env %s %s) || exit $?; eval "$GIT_HOOKS_ENV" || exit $?; ' \
     "'$ROOT/bin/fm-git-strip-ai-trailers.sh'" "'$state/$2.git-hooks'" "'$WT_DIR'"
 }
