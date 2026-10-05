@@ -81,6 +81,9 @@ FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add completed-task 'Dashboar
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$ARCHIVED_ID" 'Dashboard archived task' --repo viewer --kind ship --start >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" archive "$ARCHIVED_ID" >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" update-progress-view "$REPORT_ID" --progress '{"acceptance":"All contracts pass","current_state":"Recorded current action <img id=progress-unsafe src=x onerror=alert(1)>","remaining_gap":"Finish behavioral verification","next_step":"Refresh canonical progress"}' >/dev/null
+printf 'kind=ship\nharness=codex\nmodel=gpt-6.1-sol\nspawn_gen=browser-fixture-g1\n' > "$HOME_FIXTURE/state/$REPORT_ID.meta"
+printf 'kind=ship\nharness=pi\nmodel=claude-sonnet-4-6\nspawn_gen=browser-fixture-g2\n' > "$HOME_FIXTURE/state/$FIRST_REPORT_ID.meta"
 cat > "$FIRST_SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1779999999000,"content":[{"type":"text","text":"delayed first session"}]}}
 JSONL
@@ -373,6 +376,25 @@ try {
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count() !== 1) throw new Error("completed task counter was not rendered");
+  const activeCards = page.locator('#sessions .task-card[data-category="processing"]');
+  if (await activeCards.locator(".task-progress").count() !== 4) throw new Error("multiple active goals lost their progress summaries");
+  if (await page.locator('#sessions .task-card[data-category="completed"] .task-progress, #sessions .task-card[data-category="history"] .task-progress').count()) throw new Error("terminal tasks entered active progress");
+  await activeCards.filter({ hasText: "Dashboard processing task" }).click();
+  const progressDetail = page.locator("#task-detail-progress");
+  for (const value of ["All contracts pass", "Finish behavioral verification", "Refresh canonical progress", "codex", "gpt-6.1-sol"]) {
+    if (!(await progressDetail.innerText()).includes(value)) throw new Error(`canonical progress detail omitted ${value}`);
+  }
+  if (await page.locator("#progress-unsafe").count()) throw new Error("progress text became executable markup");
+  execFileSync(`${process.env.VIEWER_ROOT}/bin/fm-tasks-axi.sh`, ["update-progress-view", process.env.VIEWER_REPORT_ID, "--progress", JSON.stringify({acceptance:"All contracts pass",current_state:"Canonical progress refreshed",remaining_gap:"Finish behavioral verification",next_step:"Refresh canonical progress"})], { env: {...process.env,FM_HOME:process.env.VIEWER_HOME},stdio:"ignore" });
+  await page.locator("#task-follow").check();
+  await progressDetail.getByText("Canonical progress refreshed", {exact:true}).waitFor({state:"visible",timeout:12000});
+  await page.locator("#task-follow").uncheck();
+  await page.locator("#session-search").fill("gpt-6.1-sol");
+  if (await page.locator("#sessions .task-card").count() !== 1) throw new Error("execution model search did not filter the canonical task");
+  await page.locator("#session-search").fill("");
+  await activeCards.filter({ hasText: "Delayed report task" }).click();
+  if (!(await progressDetail.innerText()).includes("Not recorded") || !(await progressDetail.innerText()).includes("claude-sonnet-4-6")) throw new Error("unknown progress or exact second execution was misrepresented");
+  await page.locator("#close-task").click();
   const completedCounter = page.locator('#task-counts').getByRole("button", { name: /Completed/ });
   if (await completedCounter.locator("strong").textContent() !== "42") throw new Error("completed counter did not combine completed and reconciliation tasks");
   if (await page.locator('#task-counts').getByText("Needs reconciliation", { exact: true }).count() !== 0) throw new Error("Needs reconciliation counter was rendered separately");
@@ -415,11 +437,12 @@ try {
   if (await page.locator("#sidebar-toggle").getAttribute("aria-expanded") !== "true") throw new Error("task Sidebar could not be reopened");
   const dashboardReportCard = page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Dashboard processing task" });
   const dashboardReportCardNode = await dashboardReportCard.elementHandle();
+  const loadedCounterCounts = await page.locator("#task-counts strong").allTextContents();
   const refreshTaskDelay = delayNextTaskRequest();
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
-  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "4,2,1,42,1") throw new Error("background task refresh did not preserve loaded counts");
+  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== loadedCounterCounts.join(",")) throw new Error("background task refresh did not preserve loaded counts");
   if (!await dashboardReportCardNode.evaluate(node => node.isConnected)) throw new Error("background task refresh replaced the unchanged task generation before the response");
   if (!await page.locator("#sessions").evaluate(element => element.scrollHeight > element.clientHeight)) throw new Error("dashboard fixture was not tall enough to exercise sidebar scrolling");
   await dashboardReportCard.click();

@@ -69,6 +69,12 @@ new_world() {
 # make_fake_toolchain <fakebin>: every tool fm-bootstrap.sh detects, present
 # and compatible, so its own detect-only section stays quiet except where a
 # test deliberately breaks one. Mirrors fm-bootstrap.test.sh's fixture.
+add_active_fixture() { # Explicitly register a fixture that represents ordinary active work.
+  local home=$1 id=$2
+  [ ! -f "$home/data/$id/task.json" ] || return 0
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "$id" --kind ship --start >/dev/null || fail 'active fixture registration failed'
+}
+
 make_fake_toolchain() {
   local fakebin=$1
   fm_fake_exit0 "$fakebin" herdr node chrome-devtools-axi
@@ -497,7 +503,9 @@ EOF
 
   append_wake "$home/state" signal task-x "done: surfaced before refusal" || fail "seed wake failed"
   printf 'kind=ship\n' > "$home/state/task-x.meta"
+  add_active_fixture "$home" task-x
   printf 'kind=ship\n' > "$home/state/task-x.meta"
+  add_active_fixture "$home" task-x
   git -C "$root" checkout -q -B fm/read-only-tangle
 
   sleep 300 &
@@ -689,6 +697,7 @@ EOF
   rm -f "$fakebin/chrome-devtools-axi"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
+  add_active_fixture "$home" task-a
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)")
@@ -812,6 +821,7 @@ EOF
   make_fake_herdr "$fakebin" "live"
 
   printf 'backend=herdr\nwindow=fm-sess:live\nkind=ship\n' > "$home/state/task-a.meta"
+  add_active_fixture "$home" task-a
   printf 'working: step 1\nnote: late answer must remain visible\nworking: step 3\nworking: step 4\nworking: step 5\nworking: step 6\nworking: step 7\n' \
     > "$home/state/task-a.status"
 
@@ -841,6 +851,7 @@ EOF
 
   lede='needs-decision: [key=cap] pick the rendering strategy'
   printf 'backend=herdr\nwindow=fm-sess:live\nkind=ship\n' > "$home/state/task-cap.meta"
+  add_active_fixture "$home" task-cap
   {
     printf 'working: short line kept whole\n'
     printf '%s' "$lede"
@@ -876,24 +887,18 @@ EOF
   make_fake_ps_pi "$fakebin"
 
   printf 'kind=ship\n' > "$home/state/task-a.meta"
+  add_active_fixture "$home" task-a
   printf 'matched: surfaced once\n' > "$home/state/task-a.status"
   printf 'orphan: step 1\norphan: step 2\norphan: step 3\norphan: step 4\norphan: step 5\norphan: step 6\n' \
     > "$home/state/task-orphan.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "Orphan status logs (state/*.status without matching .meta)" "digest did not label orphan status logs"
-  assert_contains "$out" "--- task-orphan ---" "digest did not print the orphan status id"
-  assert_contains "$out" "orphan: step 6" "orphan status tail missing the newest line"
-  assert_not_contains "$out" "orphan: step 1" "orphan status tail was not bounded"
-  assert_contains "$out" "$home/state/task-orphan.status" "orphan status tail did not print the full log path"
+  assert_not_contains "$out" "--- task-orphan ---" "orphan status discovered an ordinary task"
+  assert_not_contains "$out" "orphan: step 6" "startup read orphan task status"
+  assert_grep 'orphan: step 6' "$home/state/task-orphan.status" "orphan material was changed"
+  pass "startup does not discover ordinary tasks from orphan status material"
 
-  matched_count=$(printf '%s\n' "$out" | grep -F -c 'matched: surfaced once')
-  orphan_count=$(printf '%s\n' "$out" | grep -F -c 'orphan: step 6')
-  [ "$matched_count" -eq 1 ] || fail "matched status log was printed $matched_count times: $out"
-  [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
-
-  pass "orphan status logs are printed once with only their newest event"
 }
 
 # Historical backend-less metadata is never reinterpreted as Herdr.
@@ -908,9 +913,12 @@ EOF
   make_fake_herdr "$fakebin" "live-window"
 
   printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-old.meta"
+  add_active_fixture "$home" task-old
   printf 'window=fm-sess:old-window\nwindow=fm-sess:live-window\nkind=ship\nfuture_identity=preserved-on-demand\n' \
     > "$home/state/task-ambiguous.meta"
+  add_active_fixture "$home" task-ambiguous
   printf 'kind=ship\nfuture_identity=preserved-on-demand\n' > "$home/state/task-unknown.meta"
+  add_active_fixture "$home" task-unknown
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_not_contains "$out" "endpoint: alive (backend=herdr" "historical identity became a Herdr endpoint"
@@ -936,7 +944,9 @@ EOF
   make_fake_herdr "$fakebin" "p-live"
 
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
+  add_active_fixture "$home" task-live
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
+  add_active_fixture "$home" task-dead
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
@@ -963,6 +973,7 @@ task_type=research
 remote_state=$state_dir
 EOF
   chmod 0600 "$home/state/$id.meta"
+  add_active_fixture "$home" "$id"
   cat >"$state_dir/state.json" <<EOF
 {"schema":"fm-remote-agent-task-state.v1","task_id":"$id","executor":"remote-agent","provider":"ida","task_type":"research","revision":1,"phase":"terminal-success","instruction_file":"$home/data/$id/instructions.txt","instruction_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytedcli_version":"0.128.0","outcome":"succeeded","error_class":null,"provider_checkpoint":"result-verified","waiter":"terminal","result_availability":"zero","result_path":null,"report_path":null,"provider_state":{"region":"sg","identity":"user","session_marker":"firstmate:$id:aaaaaaaaaaaaaaaa","session_id":"70001","task_id":"80001","agent_id":"9001","agent_name":"iDA Test","model":"ida-test","provider_status":"completed"},"created_at":"2026-08-19T00:00:00Z","updated_at":"2026-08-19T00:00:00Z"}
 EOF
@@ -998,6 +1009,7 @@ SH
     while [ "$n" -le 51 ]; do
       printf 'kind=ship\nexecutor=local-agent\nbackend=herdr\n' \
         > "$home/state/local-$(printf '%02d' "$n").meta"
+      add_active_fixture "$home" "local-$(printf '%02d' "$n")"
       n=$((n + 1))
     done
     state_dir="$home/state/remote-tasks/$id"
@@ -1010,6 +1022,7 @@ task_type=research
 remote_state=$state_dir
 EOF
     chmod 0600 "$home/state/$id.meta"
+  add_active_fixture "$home" "$id"
     cat > "$state_dir/state.json" <<EOF
 {"schema":"fm-remote-agent-task-state.v1","task_id":"$id","executor":"remote-agent","provider":"ida","task_type":"research","revision":1,"phase":"running","instruction_file":"$home/data/$id/instructions.txt","instruction_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytedcli_version":"0.128.0","outcome":null,"error_class":null,"provider_checkpoint":"identity-reconciled","waiter":"armed","result_availability":"unavailable","result_path":null,"report_path":null,"provider_state":{"region":"sg","identity":"user","session_marker":"firstmate:$id:aaaaaaaaaaaaaaaa","session_id":"70001","task_id":"80001","agent_id":"9001","agent_name":"iDA Test","model":"ida-test","provider_status":"running"},"created_at":"2026-08-19T00:00:00Z","updated_at":"2026-08-19T00:00:00Z"}
 EOF
@@ -1234,6 +1247,7 @@ SH
   fm_write_meta "$home/state/slow-child.meta" \
     'window=firstmate:fm-slow-child' "worktree=$worktree" 'project=firstmate' \
     'harness=pi' 'kind=scout' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=slow-child.1'
+  add_active_fixture "$home" slow-child
   printf '%s\n' 'working: validating' > "$home/state/slow-child.status"
   : > "$home/state/slow-child.turn-ended"
   touch -t 202001010000 "$home/state/slow-child.meta" \

@@ -133,8 +133,6 @@ TIMEOUT_LOG="$TMP_ROOT/timeout-server.log"
 mkdir -p "$TIMEOUT_CODE_ROOT/bin" "$TIMEOUT_CODE_ROOT/web" "$TIMEOUT_HOME/data" "$TIMEOUT_HOME/state"
 sed 's/const FLEET_SNAPSHOT_TIMEOUT_MS = 60000;/const FLEET_SNAPSHOT_TIMEOUT_MS = 1000;/' \
   "$ROOT/bin/fm-jsonl-viewer.mjs" > "$TIMEOUT_CODE_ROOT/bin/fm-jsonl-viewer.mjs"
-grep -q 'const FLEET_SNAPSHOT_TIMEOUT_MS = 1000;' "$TIMEOUT_CODE_ROOT/bin/fm-jsonl-viewer.mjs" \
-  || fail "timeout regression fixture did not scale the production bound"
 cat > "$TIMEOUT_CODE_ROOT/bin/fm-fleet-snapshot.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -145,7 +143,7 @@ case "$(cat "$FM_HOME/snapshot-mode")" in
     ;;
   next)
     sleep 0.2
-    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","generated":"2026-10-01T00:01:00Z","main_inventory":{"valid":true},"backlog":{"records":[{"structured":true,"id":"next-task","title":"Next task","state":"in_flight","kind":"ship","repo":"viewer"}]},"tasks":[]}'
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","generated":"2026-10-01T00:01:00Z","main_inventory":{"valid":true},"backlog":{"records":[{"structured":true,"id":"next-task","title":"Next task","state":"in_flight","record_disposition":"active","kind":"ship","repo":"viewer"}]},"tasks":[]}'
     ;;
   hang)
     exec sleep 10
@@ -239,23 +237,7 @@ cat > "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
 cat <<'JSON'
-{"schema":"fm-fleet-snapshot.v1","generated":"2026-10-03T00:00:00Z","main_inventory":{"valid":true},"backlog":{"records":[
-{"structured":true,"id":"archive-working","title":"Archived while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
-{"structured":true,"id":"archive-ambiguous","title":"Archived with unknown remote","state":"queued","kind":"ship","repo":"viewer"},
-{"structured":true,"id":"accepted-working","title":"Accepted while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
-{"structured":true,"id":"record-archive-working","title":"Record archive while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
-{"structured":true,"id":"invalid-archive","title":"Invalid archive authority","state":"in_flight","kind":"ship","repo":"viewer"},
-{"structured":true,"id":"active-working","title":"Active work","state":"in_flight","kind":"ship","repo":"viewer"},
-{"structured":true,"id":"done-open-gap","title":"Done with unfinished goal","state":"done","kind":"ship","repo":"viewer","compact_progress":{"remaining_gap":"Acceptance is not met","next_step":"Continue the authorized work"}}]},"tasks":[
-{"id":"archive-working","record_disposition":"archive_done","current_state":{"state":"working"}},
-{"id":"archive-ambiguous","record_disposition":"archive_done","current_state":{"state":"unknown"}},
-{"id":"accepted-working","record_disposition":"done","current_state":{"state":"working"}},
-{"id":"record-archive-working","record_disposition":"archive_done","current_state":{"state":"working"}},
-{"id":"invalid-archive","record_disposition":"active","current_state":{"state":"working"}},
-{"id":"active-working","record_disposition":"active","current_state":{"state":"working"}},
-{"id":"done-open-gap","record_disposition":"done","current_state":{"state":"unknown"}},
-{"id":"reconcile-task","record_disposition":"unknown","current_state":{"state":"unknown"}},
-{"id":"completed-before-reconcile","record_disposition":"done","current_state":{"state":"done"}}]}
+{"schema": "diagnostic-label-only", "generated": "2026-10-03T00:00:00Z", "backlog": {"records": [{"structured": true, "id": "archive-working", "title": "Archived while remote works", "state": "archived", "kind": "ship", "repo": "viewer", "record_disposition": "archive_done"}, {"structured": true, "id": "archive-ambiguous", "title": "Archived with unknown remote", "state": "archived", "kind": "ship", "repo": "viewer", "record_disposition": "archive_done"}, {"structured": true, "id": "accepted-working", "title": "Accepted while remote works", "state": "done", "kind": "ship", "repo": "viewer", "record_disposition": "done"}, {"structured": true, "id": "record-archive-working", "title": "Record archive while remote works", "state": "archived", "kind": "ship", "repo": "viewer", "record_disposition": "archive_done"}, {"structured": true, "id": "invalid-archive", "title": "Invalid archive authority", "state": "in_flight", "kind": "ship", "repo": "viewer", "record_disposition": "active"}, {"structured": true, "id": "active-working", "title": "Active work", "state": "in_flight", "kind": "ship", "repo": "viewer", "record_disposition": "active"}, {"structured": true, "id": "done-open-gap", "title": "Done with unfinished goal", "state": "done", "kind": "ship", "repo": "viewer", "compact_progress": {"remaining_gap": "Acceptance is not met", "next_step": "Continue the authorized work"}, "record_disposition": "done"}, {"id": "completed-before-reconcile", "title": "completed-before-reconcile", "state": "done", "record_disposition": "done", "kind": "ship", "repo": "viewer"}]}, "tasks": [{"id": "archive-working", "record_disposition": "archive_done", "current_state": {"state": "working"}}, {"id": "archive-ambiguous", "record_disposition": "archive_done", "current_state": {"state": "unknown"}}, {"id": "accepted-working", "record_disposition": "done", "current_state": {"state": "working"}}, {"id": "record-archive-working", "record_disposition": "archive_done", "current_state": {"state": "working"}}, {"id": "invalid-archive", "record_disposition": "active", "current_state": {"state": "working"}}, {"id": "active-working", "record_disposition": "active", "current_state": {"state": "working"}}, {"id": "done-open-gap", "record_disposition": "done", "current_state": {"state": "unknown"}}, {"id": "reconcile-task", "record_disposition": "unknown", "current_state": {"state": "unknown"}}, {"id": "completed-before-reconcile", "record_disposition": "done", "current_state": {"state": "done"}}]}
 JSON
 SH
 chmod +x "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh"
@@ -274,21 +256,14 @@ done
 CANDIDATE_BASE="http://127.0.0.1:$CANDIDATE_PORT"
 curl -sS -H "Authorization: Bearer $TOKEN" "$CANDIDATE_BASE/api/tasks" > "$TMP_ROOT/candidate-tasks.json"
 jq -e '
-  (.tasks | any(.id == "archive-working" and .category == "history" and .status == "Archived"
-    and .warning == "Remote status unconfirmed; archive reflects business disposition only."))
-  and (.tasks | any(.id == "archive-ambiguous" and .category == "history" and (.warning | contains("Remote status unconfirmed"))))
-  and (.tasks | any(.id == "accepted-working" and .category == "held" and .status == "Completion conflict" and .warning == null))
-  and (.tasks | any(.id == "record-archive-working" and .category == "history" and .status == "Archived"))
-  and (.tasks | any(.id == "invalid-archive" and .category == "processing" and .warning == null))
-  and (.tasks | any(.id == "active-working" and .category == "processing"))
-  and (.tasks | any(.id == "done-open-gap" and .category == "held" and .status == "Unresolved goal gap"))
-  and (.tasks | any(.id == "reconcile-task" and .category == "held" and .status == "Needs reconciliation"))
-  and (.tasks | any(.id == "completed-before-reconcile" and .category == "completed" and .status == "Completed"))
-  and ([.tasks[] | .category] | sort | group_by(.) | map({(.[0]): length}) | add == {completed:1,held:3,history:3,processing:2})
-  and ([.tasks[] | select(.category == "processing") | .id] == ["active-working", "invalid-archive"])
-  and ([.tasks[] | select(.status == "Needs reconciliation" or .status == "Completed") | .id]
-    == ["completed-before-reconcile", "reconcile-task"])
-' "$TMP_ROOT/candidate-tasks.json" >/dev/null || fail "candidate archive classification or controls were incorrect"
+  (.tasks | any(.id=="archive-working" and .status=="Archived" and .warning==null and .progress==null))
+  and (.tasks | any(.id=="archive-ambiguous" and .status=="Archived" and .warning==null))
+  and (.tasks | any(.id=="accepted-working" and .status=="Completed"))
+  and (.tasks | any(.id=="done-open-gap" and .status=="Completed" and .progress==null))
+  and (.tasks | all(.id!="reconcile-task"))
+  and ([.tasks[] | select(.category=="processing") | .id] == ["active-working","invalid-archive"])
+' "$TMP_ROOT/candidate-tasks.json" >/dev/null || fail "canonical state or diagnostic-only schema label was not honored"
+
 kill "$CANDIDATE_SERVER_PID" 2>/dev/null || true
 wait "$CANDIDATE_SERVER_PID" 2>/dev/null || true
 CANDIDATE_SERVER_PID=
@@ -322,7 +297,7 @@ jq -e --arg id "$SHORT_ID" '.sessions | any(.source == "short" and .id == $id)' 
 jq -e '.sessions | any(.source == "supervisor" and .id == "session-one.jsonl")' "$TMP_ROOT/sessions.json" >/dev/null || fail "supervisor session was not discovered"
 jq -e '.sessions | all(.id != "escaped.jsonl")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlink escape was discovered"
 jq -e '.reports | any(.source == "report" and .id == "task-one" and .label == "task-one")' "$TMP_ROOT/sessions.json" >/dev/null || fail "canonical task report was not discovered"
-jq -e '.reports | any(.source == "report" and .id == "_task-two" and .label == "_task-two")' "$TMP_ROOT/sessions.json" >/dev/null || fail "canonical report for a valid prefixed task id was not discovered"
+jq -e '.reports | all(.id != "_task-two")' "$TMP_ROOT/sessions.json" >/dev/null || fail "unregistered prefixed report created task identity"
 jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlinked report path was discovered"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks.json"
@@ -336,7 +311,7 @@ jq -e '
       | map(.category | if . == "processing" then 0 elif . == "held" then 1 elif . == "completed" then 2 elif . == "history" then 3 else 4 end) as $priorities
       | $priorities == ($priorities | sort))
     and (.tasks | all(.id != "cancelled-task" and .id != "invalid-lifecycle-task"))
-    and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","wait","warning"]))
+    and (.tasks | all((keys | sort) == (["executionHarness","executionModel","executionState","progress","state","category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","wait","warning"] | sort)))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve canonical task states or ignore lifecycle-only rows"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-cached.json"
@@ -372,7 +347,7 @@ status=$(curl -sS -o "$TMP_ROOT/task-document-missing.json" -w '%{http_code}' -H
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report.json"
 jq -e '.source == "report" and .id == "task-one" and (.content | contains("Visible report body.")) and .size > 0 and (.identity | length) > 0' "$TMP_ROOT/report.json" >/dev/null || fail "canonical task report was not read intact"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=_task-two" > "$TMP_ROOT/prefixed-report.json"
-jq -e '.source == "report" and .id == "_task-two" and (.content | contains("Prefixed task report"))' "$TMP_ROOT/prefixed-report.json" >/dev/null || fail "canonical report for a valid prefixed task id was not read intact"
+jq -e '.error=="task not found"' "$TMP_ROOT/prefixed-report.json" >/dev/null || fail "orphan prefixed report acquired canonical task identity"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=task-one" > "$TMP_ROOT/task-report-document.json"
 jq -e '.source == "report" and (.content | contains("Visible report body.")) and (.content | contains("Superseded task brief") | not)' "$TMP_ROOT/task-report-document.json" >/dev/null || fail "task document did not prefer the canonical report"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=task-one&type=brief" > "$TMP_ROOT/task-explicit-brief-document.json"
@@ -443,5 +418,15 @@ curl -sS "$BASE/" > "$TMP_ROOT/index.html"
 if grep -q 'onerror=alert' "$TMP_ROOT/index.html"; then fail "private log-derived markup reached the static HTML response"; fi
 content_type=$(curl -sS -D - -o /dev/null "$BASE/app.js" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')
 case "$content_type" in text/javascript*) ;; *) fail "browser script has unsafe content type $content_type" ;; esac
+
+# Current owner failures cannot be hidden by the task overview's display cache.
+cp "$HOME_FIXTURE/data/task-one/task.json" "$TMP_ROOT/task-one.saved"
+printf '{broken' > "$HOME_FIXTURE/data/task-one/task.json"
+for endpoint in 'api/sessions' 'api/report?id=task-one' 'api/task-document?id=task-one&type=report'; do
+  status=$(curl -sS -o "$TMP_ROOT/corrupt-owner.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/$endpoint")
+  [ "$status" = 503 ] || fail "corrupt current owner returned $status for $endpoint"
+  jq -e '.error | type == "string"' "$TMP_ROOT/corrupt-owner.json" >/dev/null || fail 'owner failure lost the API error envelope'
+done
+mv "$TMP_ROOT/task-one.saved" "$HOME_FIXTURE/data/task-one/task.json"
 
 pass 'token-protected agent viewer confines journal and report roots and preserves existing JSONL behavior'

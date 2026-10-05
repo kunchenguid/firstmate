@@ -41,9 +41,10 @@ SH
 make_home() {  # <case-dir> <task>...
   local dir=$1 home="$1/home" task
   shift
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/data"
   printf '%s\n' "$$" > "$home/state/.lock"
   for task in "$@"; do
+    FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$task" "Fixture $task" --start >/dev/null || fail "canonical fixture failed"
     {
       printf 'window=fixture:w1:p-%s\n' "$task"
       printf 'endpoint_task_id=%s\n' "$task"

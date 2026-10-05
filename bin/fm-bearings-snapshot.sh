@@ -212,7 +212,7 @@ if [ -n "$TASK_ID" ]; then
         current_detail:($task.current_state.detail // null),
         backlog_path:.backlog.path, backlog_row:($record.raw // null),
         backlog_body:(($record.body_lines // []) | map({line:.})),
-        status_path:($task.paths.status_log.path // null), report_path:($task.paths.report.path // null),
+        status_path:($task.paths.status_log.path // null), report_path:($record.report_path // ([.scout_reports[] | select(.id==$id) | .path][0]) // null),
         progress_source:.backlog.path,
         omitted:[{surface:"other fleet tasks and history",reveal:"run the default snapshot"}]
       }
@@ -417,7 +417,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]) as $unhealthy_all
   | ([ .tasks[]
        | select(.kind != "secondmate")
-       | select(.retained_record != true)
        | select((.record_disposition == "active"
                    and (.backlog.state == "in_flight" or .current_state.state == "working"))
            or (.record_disposition == "unknown" and (.hints.open_decisions | length) > 0))
@@ -433,7 +432,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       } ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
-         | select(.structured and .hold_bucket != null)
+         | select(.structured and (.state == "queued" or .state == "in_flight") and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
             summary:hold_summary(.title; .hold_reason),owner:"(main)",
@@ -455,33 +454,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          owner:"(main)",
          filed:null}]
      else [] end) as $return_catchup_gate
-  | ([ .tasks[]
-       | select(.kind != "secondmate")
-       | select(((.record_disposition == "unknown" or .record_disposition == "ambiguous")
-                   and (.hints.open_decisions | length) == 0)
-           or ((.record_disposition == "done" or .record_disposition == "archive_done")
-               and .current_state.state == "working"))
-       | {id,
-          title:(if .record_disposition == "ambiguous"
-                 then "execution record matches duplicate current task rows"
-                 elif .record_disposition == "unknown" and .backlog == null
-                 then "execution record has no current or archived task row"
-                 elif .record_disposition == "unknown"
-                 then "task row disposition could not be classified"
-                 else "closed task still has current working evidence" end),
-          blocked_by:"-", reason:"task record integrity", owner:"(main)", filed:null} ]) as $task_record_gates
-  | ((if (.main_inventory.valid == false) then
-        [{id:"(main-inventory)",
-          title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
-          blocked_by:"-",
-          reason:"main inventory",
-          owner:"(main)",
-          filed:null}]
-      else [] end)
-     + $task_record_gates
-     + [ .backlog.records[]
+  | ([ .backlog.records[]
          | . as $record
-         | select(.structured and
+         | select(.structured and (.state == "queued" or .state == "in_flight") and
              (.hold_bucket != null or .state == "queued" or
               (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
@@ -492,12 +467,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
-  | ([.tasks[] | select(.retained_record == true)
-       | {id,state:.current_state.state,open_decisions:.hints.open_decisions,
-          reason:(if .record_disposition == "archive_done"
-                  then "backlog completion archived; execution record retained, cleanup unverified"
-                  else "backlog closed; execution record retained, cleanup unverified" end)}]) as $retained_all
-  | ($retained_all | map(select((.open_decisions | length) > 0))) as $retained_open
+  | [] as $retained_all
+  | [] as $retained_open
   | def filed_epoch:
       (.filed // null) as $filed
       | if ($filed | type) != "string" then null
@@ -541,10 +512,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),
         (if $all_reports == 1 then empty else {surface:"full scout-report inventory", reveal:"--all-reports"} end),
         (if $all_landed == 0 and ($landed_sorted | length) > ($done | length) then {surface:("landed showing \($done | length) of \($landed_sorted | length)"), reveal:"--all-landed"} else empty end),
-        ((($snap.main_inventory.orphan_in_flight // []) | length) as $n
-         | if $n > 0 then {surface:("main in-flight task record(s) have no child metadata: \($n)"), reveal:"inspect canonical data/<task>/task.json records vs state/*.meta"} else empty end),
-        ((($snap.main_inventory.unstructured_current_count // 0)) as $n
-         | if $n > 0 then {surface:("main unstructured current task record(s): \($n)"), reveal:"inspect canonical data/<task>/task.json records"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (($retained_all | length) as $n
          | (($retained_all | length) - ($retained_open | length)) as $historical_n

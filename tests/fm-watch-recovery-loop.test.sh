@@ -172,10 +172,11 @@ test_handling_successor_does_not_go_blind() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
   : > "$state/crew.meta"
+  register_task_fixture "$state" crew
   printf 'pending:downtime:gap.1.aaa\n' > "$state/.watcher-down"
   chmod 600 "$state/.watcher-down"
   out="$dir/watch.out"
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
     FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
   child=$!
@@ -189,6 +190,7 @@ test_handling_successor_does_not_go_blind() {
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
   sleep 0.4
   printf 'done: crew finished its task\n' >> "$state/crew.status"
+  register_task_fixture "$state" crew
   event_start=$(date +%s)
   now=0
   while [ "$now" -lt 20 ]; do

@@ -1289,6 +1289,10 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-task-retire-historical.test.sh"
       printf '%s\n' pr-forge
       ;;
+    bin/fm-jsonl-viewer.mjs|web/jsonl-viewer/app.js|web/jsonl-viewer/index.html|web/jsonl-viewer/style.css)
+      printf '%s\n' "__script__:fm-jsonl-viewer.test.sh"
+      printf '%s\n' "__script__:fm-jsonl-viewer-browser-live-e2e.test.sh"
+      ;;
     bin/fm-task-record.py|bin/fm-task-progress-lib.sh)
       printf '%s\n' "__script__:fm-task-progress.test.sh"
       ;;

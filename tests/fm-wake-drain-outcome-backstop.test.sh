@@ -30,7 +30,7 @@ backstop_body() {  # <drain-output>
 }
 
 test_uncovered_keyless_captain_events_surface_on_the_next_main_drain() {
-  local dir state out body old
+  local dir state out body old task
   dir=$(make_case uncovered-keyless)
   state="$dir/state"
   out="$dir/drain.out"
@@ -39,6 +39,7 @@ test_uncovered_keyless_captain_events_surface_on_the_next_main_drain() {
   printf 'done: PR https://example.test/3346 checks green\n' > "$state/done-task.status"
   printf 'blocked: release credential unavailable\n' > "$state/blocked-task.status"
   printf 'needs-decision: choose REST or RPC\n' > "$state/decision-task.status"
+  for task in done-task blocked-task decision-task; do register_task_fixture "$state" "$task"; done
   set_mtime "$old" "$state/done-task.status"
   set_mtime "$old" "$state/blocked-task.status"
   set_mtime "$old" "$state/decision-task.status"

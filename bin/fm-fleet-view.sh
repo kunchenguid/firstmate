@@ -52,25 +52,7 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
   def backlog_row($r):
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
-  def under_way($t):
-    ($t.retained_record != true)
-      and ((($t.record_disposition == "active")
-              and ($t.backlog.state == "in_flight" or $t.current_state.state == "working"))
-           or (($t.record_disposition == "unknown")
-              and (($t.hints.open_decisions // []) | length) > 0));
-  def integrity_record($t):
-    (under_way($t) | not)
-      and ($t.retained_record != true)
-      and (($t.record_disposition == "unknown")
-        or ($t.record_disposition == "ambiguous")
-        or ($t.record_disposition == "active")
-        or ((($t.record_disposition == "done")
-             or ($t.record_disposition == "archive_done")
-             or ($t.record_disposition == "queued")
-             or ($t.record_disposition == "parked"))
-            and $t.current_state.state == "working"));
-  def integrity_row($t):
-    "| \($t.id) | \($t.record_disposition) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) |";
+  def under_way($t): $t.record_disposition == "active";
 
   "# Fleet View",
   "",
@@ -87,26 +69,6 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     (.tasks[] | select(under_way(.)) | task_row(.))
    end),
   "",
-  "## Retained execution records",
-  "Closed backlog items; endpoint and local-copy cleanup are not confirmed by closure.",
-  (if ([.tasks[] | select(.retained_record == true)] | length) == 0 then
-    "No retained closed records."
-   else
-    "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    (.tasks[] | select(.retained_record == true) | task_row(.))
-   end),
-  "",
-  "## Task record integrity",
-  "Unclassified or contradictory execution records; visible for reconciliation, not presented as active work.",
-  (if ([.tasks[] | select(integrity_record(.))] | length) == 0 then
-    "No task-record integrity findings."
-   else
-    "| ID | Disposition | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    (.tasks[] | select(integrity_record(.)) | integrity_row(.))
-   end),
-  "",
   "## Queued",
   (if ([.backlog.records[]? | select(.state == "queued")] | length) == 0 then
     "No queued backlog records found."
@@ -117,11 +79,11 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
    end),
   "",
   "## Done",
-  (if ([.backlog.records[]? | select(.state == "done")] | length) == 0 then
+  (if ([.backlog.records[]? | select((.state == "done" or .state == "archived"))] | length) == 0 then
     "No done backlog records found."
    else
     "| ID | Title | Repo | Kind | Blocked By | Artifact |",
     "| --- | --- | --- | --- | --- | --- |",
-    (.backlog.records[] | select(.state == "done") | backlog_row(.))
+    (.backlog.records[] | select((.state == "done" or .state == "archived")) | backlog_row(.))
    end)
 '

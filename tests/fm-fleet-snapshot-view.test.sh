@@ -49,7 +49,7 @@ test_empty_snapshot_and_view() {
       and .tasks == []
       and .backlog.records == []
       and .scout_reports == []
-      and .main_inventory.valid == true
+      and (has("main_inventory") | not)
   ' >/dev/null || fail "empty fleet snapshot has the wrong public shape: $out"
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty view did not render the empty task state"
@@ -86,21 +86,18 @@ EOF
     "backend=herdr" "worktree=$home/retired" "project=retired" \
     "harness=pi" "kind=secondmate" "mode=secondmate" "home=$home/retired"
 
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(HERDR_LOG="$home/runtime.log" PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s\n' "$out" | jq -e '
     (.tasks | any(.id == "ship-task" and .kind == "ship"))
-      and (.tasks | any(.id == "retired-home" and .current_state.state == "unsupported"
-        and .actions == null))
+      and (.tasks | all(.id != "retired-home"))
       and (.backlog.records | any(.id == "queued-task" and .state == "queued"))
   ' >/dev/null || fail "single-home inventory or historical-record refusal is wrong: $out"
 
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
   assert_contains "$view" "ship-task" "fleet view omitted the ordinary ship task"
-  assert_contains "$view" "retired-home" "fleet view hid the preserved historical record"
-  assert_contains "$view" "unsupported" "fleet view did not label the historical record unsupported"
-  assert_not_contains "$view" "fm-send.sh retired-home" "fleet view advertised an action for a retired owner"
-  assert_not_contains "$view" "## Secondmates" "fleet view still renders a removed feature section"
-  pass "fleet snapshot keeps ordinary work active and preserves historical secondmate records as unsupported"
+  assert_not_contains "$view" "retired-home" "orphan historical metadata acquired business identity"
+  pass "fleet view uses only canonical tasks and leaves persistent-home artifacts inert"
+
 }
 
 test_view_uses_authoritative_task_disposition() {
@@ -167,42 +164,23 @@ EOF
     "herdr_tab_id=w4:t1" "herdr_pane_id=w4:p1" \
     "project=alpha" "worktree=$home/projects/closed-working" "harness=pi" "kind=ship"
 
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(HERDR_LOG="$home/runtime.log" PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  [ ! -s "$home/runtime.log" ] || fail "inactive or terminal endpoints were probed"
   printf '%s\n' "$out" | jq -e '
-    (.tasks | any(.id == "active-task" and .record_disposition == "active"))
-      and (.tasks | any(.id == "queued-task" and .record_disposition == "queued"))
-      and (.tasks | any(.id == "parked-task" and .record_disposition == "parked"))
-      and (.tasks | any(.id == "done-task" and .record_disposition == "done" and .retained_record == true
-        and .backlog.compact_progress.remaining_gap == "Acceptance is still unmet"))
-      and (.tasks | any(.id == "archived-task" and .record_disposition == "archive_done" and .retained_record == true))
-      and (.tasks | any(.id == "ambiguous-task" and .record_disposition == "unknown"))
-      and (.tasks | any(.id == "unknown-task" and .record_disposition == "unknown"))
-      and (.tasks | any(.id == "parked-task" and .record_disposition == "parked" and .current_state.state == "working"))
-      and (.tasks | any(.id == "closed-working" and .record_disposition == "done" and .current_state.state == "working" and .retained_record == false))
-  ' >/dev/null || fail "task disposition snapshot did not preserve active, queued, terminal, and integrity states: $out"
-
+    [.tasks[].id] == ["active-task"]
+    and (.tasks | all(has("retained_record") | not))
+    and (.backlog.records | any(.id=="done-task" and .state=="done" and .compact_progress.remaining_gap!=""))
+    and (.backlog.records | any(.id=="archived-task" and .state=="archived" and .completion==null))
+    and (.backlog.records | all(.id!="unknown-task" and .id!="ambiguous-task"))
+  ' >/dev/null || fail "canonical fleet identity/terminal policy was incorrect: $out"
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  under_way=$(printf '%s\n' "$view" | awk '$0 == "## Under Way" {show=1; next} /^## / && show {exit} show')
-  retained=$(printf '%s\n' "$view" | awk '$0 == "## Retained execution records" {show=1; next} /^## / && show {exit} show')
-  integrity=$(printf '%s\n' "$view" | awk '$0 == "## Task record integrity" {show=1; next} /^## / && show {exit} show')
-  queued=$(printf '%s\n' "$view" | awk '$0 == "## Queued" {show=1; next} /^## / && show {exit} show')
-  assert_contains "$under_way" "active-task" "active in-flight metadata was not rendered Under Way"
-  assert_not_contains "$under_way" "queued-task" "queued metadata was rendered Under Way"
-  assert_not_contains "$under_way" "parked-task" "parked metadata was rendered Under Way"
-  assert_not_contains "$under_way" "done-task" "Done metadata was rendered Under Way"
-  assert_not_contains "$under_way" "archived-task" "archived metadata was rendered Under Way"
-  assert_not_contains "$under_way" "closed-working" "closed metadata with stale working evidence was rendered Under Way"
-  assert_not_contains "$under_way" "ambiguous-task" "ambiguous metadata was rendered Under Way"
-  assert_not_contains "$under_way" "unknown-task" "unknown metadata was rendered Under Way"
-  assert_contains "$retained" "done-task" "Done metadata was not rendered as retained"
-  assert_contains "$retained" "archived-task" "archive-retained metadata was not rendered as retained"
-  assert_contains "$integrity" "ambiguous-task" "ambiguous metadata disappeared instead of surfacing as integrity"
-  assert_contains "$integrity" "unknown-task" "unknown metadata disappeared instead of surfacing as integrity"
-  assert_contains "$integrity" "parked-task" "parked metadata with working evidence disappeared instead of surfacing as integrity"
-  assert_contains "$integrity" "closed-working" "closed metadata with working evidence disappeared instead of surfacing as integrity"
-  assert_contains "$queued" "queued-task" "queued backlog row disappeared from the Queued section"
-  assert_contains "$queued" "parked-task" "parked backlog row disappeared from the Queued section"
-  pass "fleet view uses authoritative disposition for Under Way while retaining terminal and integrity visibility"
+  under_way=$(printf '%s\n' "$view" | awk '$0=="## Under Way" {show=1;next} /^## / && show {exit} show')
+  assert_contains "$under_way" "active-task" "active task missing"
+  for id in queued-task parked-task done-task archived-task closed-working unknown-task ambiguous-task; do
+    assert_not_contains "$under_way" "$id" "nonexecuting identity was observed Under Way"
+  done
+  pass "canonical terminal state wins over retained endpoints and unfinished progress"
+
 }
 
 test_removed_home_summary_mode_is_rejected() {
@@ -248,7 +226,7 @@ EOF
   printf '%s\n' "$out" | jq -e '
     [.tasks[].id] == ["target-task"]
       and [.backlog.records[].id] == ["target-task"]
-      and .main_inventory.valid == null
+      and (has("main_inventory") | not)
   ' >/dev/null || fail "targeted snapshot returned unrelated fleet records: $out"
   assert_grep "p-target" "$log" "targeted snapshot did not observe its selected task"
   assert_no_grep "p-other" "$log" "targeted snapshot performed process reads for another task"
@@ -284,6 +262,10 @@ test_scout_report_inventory_is_complete_and_sorted() {
     printf '# Report %s\n' "$index" > "$home/data/$id/report.md"
   done
 
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) || fail "unregistered report query failed"
+  printf '%s' "$out" | jq -e '.scout_reports==[]' >/dev/null || fail 'report directories created ordinary task identity'
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" backfill-archived --state-dir "$home/state" --preview > "$home/preview.json" || fail 'report identity preview failed'
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" backfill-archived --state-dir "$home/state" --apply-file "$home/preview.json" >/dev/null || fail 'isolated report identity adoption failed'
   out=$(FM_HOME="$home" "$SNAPSHOT" --json) || fail "large scout report inventory failed"
   printf '%s\n' "$out" | jq -e '
     (.scout_reports | length) == 400

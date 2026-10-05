@@ -4,7 +4,10 @@
 # Canonical task data lives only in data/<task>/task.json.  This wrapper keeps
 # established callers on one command surface while bin/fm-task-record.py owns
 # create/read/update/list/filter behavior. Retained legacy task files are inert
-# and never read or mutated here.
+# and never read or mutated by ordinary queries. Explicit one-time migration:
+#   backfill-archived --state-dir <state> --preview > manifest.json
+#   backfill-archived --state-dir <state> --apply-file manifest.json
+# Missing known ordinary identities become archived; existing files stay unchanged.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,7 +17,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CALLER_DIR=$(pwd)
 
 usage() {
-  sed -n '2,9s/^# *//p' "$0"
+  sed -n '2,13s/^# *//p' "$0"
 }
 
 case "${1:-}" in

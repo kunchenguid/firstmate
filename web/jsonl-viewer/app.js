@@ -78,6 +78,7 @@ const elements = {
   taskDetailState: document.getElementById("task-detail-state"),
   taskDetailTitle: document.getElementById("task-detail-title"),
   taskDetailMeta: document.getElementById("task-detail-meta"),
+  taskDetailProgress: document.getElementById("task-detail-progress"),
   taskDetailWait: document.getElementById("task-detail-wait"),
   taskDetailWarning: document.getElementById("task-detail-warning"),
   taskDocumentType: document.getElementById("task-document-type"),
@@ -759,7 +760,7 @@ function taskStatusMatches(status, task) {
 }
 
 function taskMatches(task, query) {
-  return `${task.id} ${task.title} ${task.status} ${task.kind || ""} ${task.project || ""} ${task.wait || ""} ${task.warning || ""}`.toLowerCase().includes(query);
+  return `${task.id} ${task.title} ${task.status} ${task.kind || ""} ${task.project || ""} ${task.wait || ""} ${task.warning || ""} ${Object.values(task.progress || {}).join(" ")} ${task.executionHarness || ""} ${task.executionModel || ""}`.toLowerCase().includes(query);
 }
 
 function taskEmptyMessage(query, loadedMessage) {
@@ -769,6 +770,19 @@ function taskEmptyMessage(query, loadedMessage) {
     return "Connect to load task status.";
   }
   return query ? "No matching tasks." : loadedMessage;
+}
+
+function taskProgress(fields) {
+  const progress = document.createElement("dl");
+  progress.className = "task-progress";
+  for (const [label, value] of fields) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    detail.textContent = value || "Not recorded";
+    progress.append(term, detail);
+  }
+  return progress;
 }
 
 function taskCard(task) {
@@ -792,6 +806,13 @@ function taskCard(task) {
     : "No document";
   metadata.textContent = [task.project, task.kind, documentLabel].filter(Boolean).join(" · ");
   button.append(badge, title, id, metadata);
+  if (["queued", "in_flight"].includes(task.state)) {
+    const progress = taskProgress([
+      ["Current progress", task.progress?.current_state], ["Next step", task.progress?.next_step],
+      ["Execution", [task.executionHarness, task.executionModel].filter(Boolean).join(" · ")],
+    ]);
+    button.append(progress);
+  }
   if (task.warning) {
     const warning = document.createElement("small");
     warning.className = "task-warning";
@@ -851,6 +872,13 @@ function renderTaskDetail() {
       : "Choose a task from the sidebar to inspect its exact identity, state, brief, and report.";
     return;
   }
+  elements.taskDetailProgress.replaceChildren();
+  elements.taskDetailProgress.hidden = !["queued", "in_flight"].includes(task.state);
+  if (!elements.taskDetailProgress.hidden) elements.taskDetailProgress.append(taskProgress([
+    ["Goal", task.title], ["Acceptance", task.progress?.acceptance],
+    ["Current progress", task.progress?.current_state], ["Remaining gap", task.progress?.remaining_gap],
+    ["Next step", task.progress?.next_step], ["Harness", task.executionHarness], ["Model", task.executionModel],
+  ]));
   elements.taskDetailState.textContent = task.status;
   elements.taskDetailTitle.textContent = task.title;
   elements.taskDetailMeta.textContent = [task.id, task.project, task.kind].filter(Boolean).join(" · ");

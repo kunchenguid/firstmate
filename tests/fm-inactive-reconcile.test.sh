@@ -61,6 +61,7 @@ make_world() { # <name>
 
 write_child() { # <home> <id> <status> [spawn-gen]
   local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "$id" --kind ship --start >/dev/null || fail 'child canonical fixture failed'
   fm_test_write_herdr_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
     'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \

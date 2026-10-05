@@ -116,6 +116,14 @@ SH
   chmod +x "$fakebin/herdr"
 }
 
+# Tests that represent ordinary tasks explicitly register their business identity.
+register_task_fixture() { # <state> <id>
+  local home=${1%/state} id=$2
+  mkdir -p "$home/data"
+  [ ! -f "$home/data/$id/task.json" ] || return 0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "$id" --kind ship --start >/dev/null || fail 'task fixture registration failed'
+}
+
 make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"

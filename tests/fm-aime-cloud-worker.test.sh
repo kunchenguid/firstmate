@@ -60,8 +60,7 @@ new_task() { # <home> <id> [instruction]
   if [ ! -f "$home/data/backlog.md" ]; then
     printf '%s\n' '# Tasks' '' '## In flight' '' '## Queued' '' '## Done' >"$home/data/backlog.md"
   fi
-  TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Remote research $id" --kind scout --start \
-    --file "$home/data/backlog.md" >/dev/null || fail "could not add AIME fixture task $id"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start >/dev/null || fail "could not add AIME fixture task $id"
   printf '# Brief for %s\n' "$id" >"$home/data/$id/brief.md"
   printf '%s\n' "$instruction" >"$home/data/$id/instructions.txt"
   chmod 0600 "$home/data/$id/instructions.txt"
@@ -70,9 +69,7 @@ new_task() { # <home> <id> [instruction]
 new_canonical_task() { # <home> <id> [instruction]
   local home=$1 id=$2 instruction=${3:-"Research the requested topic and return a cited report."}
   new_task "$home" "$id" "$instruction"
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
-    "$ROOT/bin/fm-tasks-axi.sh" add "$id" "Remote research $id" --kind scout --start \
-    >/dev/null || fail "could not add canonical AIME fixture task $id"
+
 }
 
 mark_status_presented() { # <home> <id>
@@ -1417,9 +1414,9 @@ test_cloud_retirement_preserves_report() {
   [ ! -e "$home/state/cloud-tasks/$id" ] || fail "AIME retirement retained private cloud state"
   assert_present "$home/data/$id/remote-execution.json" \
     "AIME retirement lost its immutable execution identity"
-  tasks-axi reopen "$id" --file "$home/data/backlog.md" >/dev/null \
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" reopen "$id" >/dev/null \
     || fail "AIME identity-reuse fixture could not reopen the row"
-  tasks-axi start "$id" --file "$home/data/backlog.md" >/dev/null \
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" start "$id" >/dev/null \
     || fail "AIME identity-reuse fixture could not restart the row"
   : >"$home/bytedcli.log"
   rc=0
@@ -1553,7 +1550,7 @@ test_terminal_disposition_guards_aime_effects() {
   write_config "$home" true
   new_task "$home" "$id"
   : >"$home/bytedcli.log"
-  tasks-axi "done" "$id" --file "$home/data/backlog.md" >/dev/null \
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "done" "$id" >/dev/null \
     || fail 'terminal AIME dispatch task could not become Done'
   rc=0
   dispatch_aime "$home" "$fakebin" "$id" >"$home/dispatch.out" 2>"$home/dispatch.err" || rc=$?
@@ -1574,13 +1571,14 @@ test_terminal_disposition_guards_aime_effects() {
   generation=$(jq -r '.execution_generation' "$(state_file "$home" "$id")")
   [ -n "$generation" ] && [ "$generation" != null ] || fail 'AIME fixture lost execution generation'
   printf '## In flight\n\n## Queued\n\n## Done\n' >"$home/data/backlog.md"
+  rm "$home/data/$id/task.json"
   jq -n --arg id "$id" --arg generation "$generation" \
     '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:$generation,disposition:"open"}' \
     >"$home/data/$id/lifecycle.json"
   rc=0
   run_aime "$home" "$fakebin" retire "$id" >"$home/retire.out" 2>"$home/retire.err" || rc=$?
   [ "$rc" -ne 0 ] || fail 'AIME retirement accepted open retained history'
-  assert_grep 'neither MAIN-accepted compact progress nor explicit archived completion' "$home/retire.err" \
+  assert_grep 'no canonical task record' "$home/retire.err" \
     'AIME historical retirement lost its terminal-fact blocker'
   assert_present "$(state_file "$home" "$id")" 'AIME historical retirement removed provider state'
   pass 'AIME terminal admission blocks dispatch and retirement without provider replay'

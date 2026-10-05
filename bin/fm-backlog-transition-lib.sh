@@ -1,9 +1,8 @@
 # shellcheck shell=bash
 # Paired canonical task-record transitions for scripts that own execution metadata.
 #
-# INVARIANT. During ordinary execution, `state/<id>.meta` exists
-# <=> this home's canonical record for <id> is in flight, except a validated terminal
-# cleanup receipt may retain cleanup-only metadata without restarting work.
+# Canonical task records alone select ordinary business work. Execution metadata
+# and cleanup receipts keep exact operation identity without implying task state.
 # The cleanup owner owns generation validation; the teardown crash
 # window is represented by `state/<id>.backlog-close`. The script performing the
 # mechanical record change owns the paired business transition and runs it in the
@@ -34,10 +33,9 @@
 # that record before destructive cleanup, so it never publishes or acts on a close
 # replay would reject. The validator pins the data path to this home's configured
 # root before any recovery mutation, then re-runs exactly that close.
-# Canonical `done` on an already-closed task backfills links
-# without moving the close date, so replay is idempotent. Spawn needs no marker:
-# it publishes the meta first, so a crash
-# leaves the meta itself as the evidence that the row is owed a start.
+# Canonical `done` on a terminal task only attaches explicit artifacts and notes
+# without moving its state or close date. Bootstrap replays only an explicit close
+# marker and never infers a start from execution metadata.
 # A captain-held row uses the same record with a `mode=retain` line: replay then
 # records the deliverable and reopens the row instead of closing it, and never
 # closes a row that reads as an open captain call. An answer that closes the row
@@ -388,6 +386,12 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
+  fm_backlog_row_probe "$data" "$id" || return 1
+  case "${FM_BACKLOG_ROW_STATE%% *}" in done|archived)
+    fm_backlog_done "$data" "$id" "${@:3}"
+    return $?
+    ;;
+  esac
   shift 2
   FM_BACKLOG_TRANSITION_ERROR=
   for arg in "$@"; do
@@ -713,7 +717,7 @@ fm_backlog_remote_retire() {  # <config-dir> <data-dir> <id>
     FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
     return 1
   }
-  if [ "${FM_BACKLOG_ROW_STATE%% *}" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+  if [ "${FM_BACKLOG_ROW_STATE%% *}" != "done" ] && [ "${FM_BACKLOG_ROW_STATE%% *}" != archived ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
     fm_backlog_retain "$data" "$id" --report "data/$id/report.md"
   else
     fm_backlog_done "$data" "$id" --report "data/$id/report.md"
@@ -1092,7 +1096,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       return 1
     fi
     cleanup_kind=close
-    [ "$FM_BACKLOG_ROW_HOLD_KIND" != captain ] || cleanup_kind=retain
+    case "${FM_BACKLOG_ROW_STATE%% *}" in done|archived) ;; *) [ "$FM_BACKLOG_ROW_HOLD_KIND" != captain ] || cleanup_kind=retain ;; esac
     if [ "$cleanup_kind" = retain ]; then
       fm_backlog_retain "$data" "$id" "${args[@]+"${args[@]}"}" || return 1
     else
@@ -1134,27 +1138,15 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   fi
   if fm_backlog_row_probe "$data" "$id"; then
     row_state=$FM_BACKLOG_ROW_STATE
-    if [ "${row_state%% *}" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+    if [ "${row_state%% *}" != "done" ] && [ "${row_state%% *}" != archived ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
       mode=retain
     fi
   else
-    if [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
-      FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
-      return 1
-    fi
-    if [ -n "$cleanup_disposition" ]; then
-      FM_BACKLOG_TRANSITION_ERROR="canonical task $id is missing; preserving its pending-close record"
-      return 1
-    fi
-    if [ "${#args[@]}" -eq 2 ] && [ "${args[0]}" = --pr ] \
-       && fm_backlog_codebase_mr_url "${args[1]}"; then
-      FM_BACKLOG_TRANSITION_ERROR="tasks-axi cannot attach the recorded Codebase MR to missing task $id; preserving its pending-close record"
-      return 1
-    fi
-    row_state=
+    FM_BACKLOG_TRANSITION_ERROR="canonical task $id could not be read; preserving its pending-close record: $FM_BACKLOG_ROW_ERROR"
+    return 1
   fi
   case "$row_state" in
-    done\ *)
+    done\ *|archived\ *)
       if [ "$mode" = retain ]; then
         # The captain's answer closed the row before this replay; the retained
         # transition owes it nothing more than retiring the record.

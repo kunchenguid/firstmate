@@ -14,7 +14,11 @@ set -u
 
 TMP=$(fm_test_tmproot fm-supervision-events)
 STATE_DIR="$TMP/state"
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$TMP/data"
+export FM_HOME="$TMP" FM_DATA_OVERRIDE="$TMP/data"
+for task in tk1 tk2 tk2h tk3 tk4 tk5; do
+  "$ROOT/bin/fm-tasks-axi.sh" add "$task" "$task" --start >/dev/null || fail "canonical event fixture failed"
+done
 
 # Source the watcher with an isolated state/home. The guard returns before the
 # lock/loop, so only the functions load.
@@ -37,6 +41,7 @@ reset_state() {
     "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
+  watch_task_inventory_read || fail "canonical event inventory failed"
   _event_cap_key=""
   _event_cap_ok=0
   _event_cap_fails=0

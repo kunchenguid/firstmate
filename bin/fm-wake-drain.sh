@@ -471,7 +471,7 @@ print_open_decisions_section() {
     # structured record says this work is Done, archived Done, or deliberately
     # parked. A current/unknown/captain-held task has no such exemption, so its
     # independent decision continues to surface.
-    case "$disposition" in done|archive_done|parked) continue ;; esac
+    case "$disposition" in active|queued) ;; *) continue ;; esac
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
@@ -571,7 +571,7 @@ print_status_sections() {
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   if [ -z "$context" ]; then context=$(status_presentation_context "$STATE" "$snapshot") || return 1; fi
-  STATUS_TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
+  STATUS_TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA") || return $?
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$context" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {

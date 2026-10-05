@@ -24,10 +24,13 @@ test_buried_decision_still_surfaces() {
   # exactly the burial scenario the fix targets: last-line-only reads would
   # show "resolved [key=other]" and hide the still-open api-shape decision.
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task1.status"
+  register_task_fixture "$state" task1
   printf 'working: continuing other work\n' >> "$state/task1.status"
+  register_task_fixture "$state" task1
   printf 'resolved [key=other]: unrelated decision closed\n' >> "$state/task1.status"
+  register_task_fixture "$state" task1
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a buried decision"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a buried decision"
 
   grep -F 'OPEN DECISIONS' "$out" >/dev/null || fail "buried decision produced no OPEN DECISIONS section"
   grep -F 'task1' "$out" | grep -F '[key=api-shape]' | grep -F 'pick REST or RPC' >/dev/null \
@@ -43,10 +46,13 @@ test_explicit_resolution_closes_it() {
   state="$dir/state"
   out="$dir/drain.out"
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task2.status"
+  register_task_fixture "$state" task2
   printf 'resolved [key=api-shape]: went with REST\n' >> "$state/task2.status"
+  register_task_fixture "$state" task2
   printf 'done: shipped\n' >> "$state/task2.status"
+  register_task_fixture "$state" task2
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after an explicit resolution"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after an explicit resolution"
 
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "an explicitly resolved decision still printed as open: $(cat "$out")"
@@ -62,9 +68,11 @@ test_later_unrelated_terminal_line_does_not_close_it() {
   # A later done: with no matching [key=...] token opens/closes only the
   # "default" key; it must never clear the still-open api-shape decision.
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task3.status"
+  register_task_fixture "$state" task3
   printf 'done: unrelated later milestone\n' >> "$state/task3.status"
+  register_task_fixture "$state" task3
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after an unrelated terminal line"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after an unrelated terminal line"
 
   grep -F 'task3' "$out" | grep -F '[key=api-shape]' | grep -F 'pick REST or RPC' >/dev/null \
     || fail "a later unrelated terminal line incorrectly cleared the open decision"
@@ -77,9 +85,11 @@ test_no_open_decisions_prints_nothing() {
   state="$dir/state"
   out="$dir/drain.out"
   printf 'working: on it\n' > "$state/task4.status"
+  register_task_fixture "$state" task4
   printf 'resolved: shipped clean\n' > "$state/task5.status"
+  register_task_fixture "$state" task5
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with no open decisions"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with no open decisions"
 
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "the empty case printed an OPEN DECISIONS section: $(cat "$out")"
@@ -97,12 +107,15 @@ test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {
   # this turn; task7 is what actually wakes the drain. The fleet-wide scan
   # must still catch task6's decision alongside task7's own raw row.
   printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$state/task6.status"
+  register_task_fixture "$state" task6
   printf 'working: continuing\n' >> "$state/task6.status"
+  register_task_fixture "$state" task6
   printf 'blocked: waiting on credentials\n' > "$state/task7.status"
+  register_task_fixture "$state" task7
   append_wake "$state" signal task7.status "blocked: waiting on credentials" \
     || fail "queueing the unrelated wake failed"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a mixed fleet"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a mixed fleet"
 
   grep "$(printf '\tsignal\ttask7.status\t')" "$out" >/dev/null || fail "task7's own raw row is missing"
   grep -F 'task6' "$out" | grep -F '[key=migration]' >/dev/null \
@@ -118,9 +131,11 @@ test_buried_decision_surfaces_on_the_empty_queue_fast_path() {
   # No wake is queued at all (the empty-queue exit), but the decision is still
   # open on disk - session-start relies on exactly this path.
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task8.status"
+  register_task_fixture "$state" task8
   printf 'working: continuing\n' >> "$state/task8.status"
+  register_task_fixture "$state" task8
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "empty-queue drain failed"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "empty-queue drain failed"
 
   grep -F 'task8' "$out" | grep -F '[key=api-shape]' >/dev/null \
     || fail "the empty-queue fast path did not surface a still-open decision"
@@ -134,10 +149,11 @@ test_status_symlink_is_not_followed() {
   out="$dir/drain.out"
   mkdir -p "$dir/outside"
   printf 'needs-decision [key=local]: keep this visible\n' > "$state/local.status"
+  register_task_fixture "$state" local
   printf 'needs-decision [key=foreign]: do not expose this\n' > "$dir/outside/foreign.status"
   ln -s ../outside/foreign.status "$state/linked.status"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a symlinked status file"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a symlinked status file"
 
   grep -F 'local [key=local] needs-decision: keep this visible' "$out" >/dev/null \
     || fail "the valid local decision did not surface alongside a rejected status symlink"
@@ -162,8 +178,9 @@ test_over_long_decision_note_is_capped_with_a_marker() {
     awk 'BEGIN { while (i++ < 200) printf " and-then-some" }'
     printf '\n'
   } > "$state/task-long.status"
+  register_task_fixture "$state" task-long
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an over-long decision note"
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an over-long decision note"
 
   line=$(grep -F 'task-long' "$out")
   case "$line" in
@@ -174,7 +191,8 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   [ "$longest" -le 219 ] || fail "a capped decision item ran $longest characters past its per-item budget"
 
   printf 'needs-decision [key=short]: brief enough to keep whole\n' > "$state/task-short.status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a short decision note"
+  register_task_fixture "$state" task-short
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a short decision note"
   grep -F 'task-short [key=short] needs-decision: brief enough to keep whole' "$out" >/dev/null \
     || fail "a decision note already under the cap was altered"
   if grep -F 'brief enough to keep whole [truncated]' "$out" >/dev/null; then
@@ -222,26 +240,32 @@ EOF
   task_in "$dir" add archived-blocker 'Archived blocker' --kind scout --start >/dev/null
   task_in "$dir" 'done' archived-blocker --report data/archived-blocker/report.md >/dev/null
   printf 'needs-decision [key=old]: historical blocker must not reopen execution\n' > "$state/archived-blocker.status"
+  register_task_fixture "$state" archived-blocker
 
   task_in "$dir" add parked-blocker 'Parked blocker' --kind scout >/dev/null
   task_in "$dir" hold parked-blocker --reason 'explicit archive boundary' --kind parked >/dev/null
   printf 'blocked [key=old-wait]: historical wait must not reopen execution\n' > "$state/parked-blocker.status"
+  register_task_fixture "$state" parked-blocker
 
   task_in "$dir" add active-decision 'Active decision' --kind scout --start >/dev/null
   printf 'needs-decision [key=live]: choose the active path\n' > "$state/active-decision.status"
+  register_task_fixture "$state" active-decision
   printf 'needs-decision [key=unknown]: preserve an unclassified integrity problem\n' > "$state/unknown-decision.status"
+  register_task_fixture "$state" unknown-decision
 
   task_in "$dir" add archived-outcome 'Archived outcome' --kind scout --start >/dev/null
   task_in "$dir" 'done' archived-outcome --report data/archived-outcome/report.md >/dev/null
   printf 'done: meaningful result was never handed off\n' > "$state/archived-outcome.status"
+  register_task_fixture "$state" archived-outcome
 
   task_in "$dir" add archived-note 'Archived note' --kind scout --start >/dev/null
   task_in "$dir" 'done' archived-note --report data/archived-note/report.md >/dev/null
   printf 'note: unread answer from archived work stays visible once\n' > "$state/archived-note.status"
+  register_task_fixture "$state" archived-note
 
   append_wake "$state" signal archived-blocker.status 'signal: archived blocker' \
     || fail "could not queue the archived task's raw wake"
-  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" \
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     "$DRAIN" > "$out" 2> "$err" || fail "mixed active/archive drain failed"
 
   grep "$(printf '\tsignal\tarchived-blocker.status\t')" "$out" >/dev/null \
@@ -266,7 +290,7 @@ EOF
   esac
 
   ack_drain_err "$state" "$err" || fail "the mixed raw wake did not acknowledge through its generation guard"
-  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" \
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     "$DRAIN" > "$second" || fail "second mixed active/archive drain failed"
   body=$(open_decisions_body "$second")
   case "$body" in *'active-decision'*'unknown-decision'*|*'unknown-decision'*'active-decision'*) ;; *)

@@ -463,6 +463,22 @@ EOF
   printf '%s' "$verb"
 }
 
+# Candidate business identities for ordinary decision folds. Raw wake/status-byte
+# presentation has its separate operational contract and is left untouched.
+_fm_decision_dispositions() { # <state>
+  local data=${FM_DATA_OVERRIDE:-${FM_HOME:-${1%/state}}/data}
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "${BASH_SOURCE[0]%/*}/fm-task-disposition-lib.sh"
+  if [ -n "${STATUS_TASK_DISPOSITIONS:-}" ]; then printf '%s\n' "$STATUS_TASK_DISPOSITIONS"
+  else fm_task_disposition_snapshot "$data"; fi
+}
+_fm_decision_candidate() { # <dispositions> <id>
+  local disposition
+  disposition=$(fm_task_disposition_for "$1" "$2") || return 1
+  case "$disposition" in active|queued) return 0 ;; esac
+  return 1
+}
+
 # Fleet-wide wrapper around status_open_decisions: scans every task's status
 # log under <state> and prefixes each still-open decision with its owning task
 # id, so a per-wake or per-session surface can print the consolidated open set
@@ -471,10 +487,12 @@ EOF
 # one "<task>\t<key>\t<verb>\t<note>" line per open decision, in glob (task id)
 # order; prints nothing when none are open.
 scan_open_decisions() {  # <state>
-  local state=$1 f task open line
+  local state=$1 f task open line dispositions
+  dispositions=$(_fm_decision_dispositions "$state") || return $?
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
+    _fm_decision_candidate "$dispositions" "$task" || continue
     open=$(status_open_decisions "$f") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
@@ -756,10 +774,12 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
 # bounded by new appends rather than total lifetime log size across every task.
 scan_open_decisions_incremental() {  # <state>
-  local state=$1 f task open line
+  local state=$1 f task open line dispositions
+  dispositions=$(_fm_decision_dispositions "$state") || return $?
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
+    _fm_decision_candidate "$dispositions" "$task" || continue
     open=$(status_open_decisions_incremental "$f") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
@@ -1330,10 +1350,12 @@ EOF
 }
 
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f open line
+  local state=$1 snapshot=$2 dispositions task endpoint ident f open line
+  dispositions=$(_fm_decision_dispositions "$state") || return $?
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
+    _fm_decision_candidate "$dispositions" "$task" || continue
     open=$(status_open_decisions_incremental "$f" "$endpoint") || return 1
     [ -n "$open" ] || continue
     while IFS= read -r line; do

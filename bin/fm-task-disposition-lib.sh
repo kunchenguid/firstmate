@@ -9,15 +9,13 @@
 
 FM_TASK_DISPOSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-fm_task_disposition_snapshot() {  # <data-dir>
+fm_task_disposition_snapshot() {  # <data-dir> [already-read-inventory-json]
   local data=$1
   while [ "$data" != / ] && [ "${data%/}" != "$data" ]; do data=${data%/}; done
-  python3 "$FM_TASK_DISPOSITION_LIB_DIR/fm-task-record.py" --data "$data" inventory | jq -r '    .tasks[] | [.id,
-      (if .state == "in_flight" then "active"
-       elif .state == "queued" and .hold.kind == "parked" then "parked"
-       elif .state == "queued" then "queued"
-       elif .state == "done" then "done"
-       else "archive_done" end)] | @tsv' | LC_ALL=C sort
+  local inventory
+  if [ "$#" -ge 2 ]; then inventory=$2
+  else inventory=$(python3 "$FM_TASK_DISPOSITION_LIB_DIR/fm-task-record.py" --data "$data" inventory) || return $?; fi
+  printf '%s' "$inventory" | jq -r '.dispositions | to_entries[] | [.key,.value] | @tsv'
 }
 fm_task_disposition_for() {  # <snapshot-tsv> <task-id>
   local snapshot=$1 task=$2 id disposition

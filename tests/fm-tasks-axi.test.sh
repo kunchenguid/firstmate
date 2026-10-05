@@ -124,8 +124,91 @@ test_shadow_backlog_files_are_inert() {
   pass 'bootstrap ignores retained code-root backlog and archive files'
 }
 
+test_authority_transitions_and_backfill() {
+  local dir
+  dir=$(make_split authority)
+  if ! python3 - "$WRAPPER" "$dir/home" <<'PY'
+import concurrent.futures, hashlib, json, os, pathlib, subprocess, sys
+cli, root = sys.argv[1], pathlib.Path(sys.argv[2])
+env = dict(os.environ, FM_HOME=str(root))
+def run(*args, ok=True):
+    result = subprocess.run([cli, *args], env=env, capture_output=True, text=True)
+    assert (result.returncode == 0) == ok, (args, result.returncode, result.stderr)
+    return result
+run('add', 'active', 'Current goal', '--start')
+run('hold', 'active', '--kind', 'captain', '--reason', 'decision')
+run('add', 'queued', 'Queued goal')
+run('add', 'ended', 'Ended goal')
+run('hold', 'ended', '--kind', 'captain', '--reason', 'old call')
+run('archive', 'ended')
+ended = root/'data/ended/task.json'
+before = ended.read_bytes()
+run('start', 'ended', ok=False)
+run('hold', 'ended', '--kind', 'captain', '--reason', 'new call', ok=False)
+run('done', 'ended')
+assert ended.read_bytes() == before
+held = run('list', '--state', 'held').stdout
+assert 'active,in_flight' in held and 'ended,' not in held
+run('block', 'queued', '--by', 'ended')
+assert 'queued' in json.loads(run('inventory').stdout)['ready_ids']
+for name in ('old', 'home-record', 'orphan-report'):
+    (root/'data'/name).mkdir()
+    (root/'data'/name/'report.md').write_text('preserved report')
+(root/'state/home-record.meta').write_text('kind=secondmate\nhome=/fixture/old-home\n')
+(root/'state/orphan-report.status').write_text('old opaque status bytes\n')
+(root/'state/status-only.status').write_text('done: legacy report without acceptance proof\n')
+(root/'data/backlog.md').write_text('## Done\n- [x] legacy - Legacy title (kind: ship) (repo: known) (done 2020-01-01)\n')
+existing = {p: p.read_bytes() for p in (root/'data').glob('*/task.json')}
+manifest = root/'preview.json'
+manifest.write_text(run('backfill-archived', '--state-dir', str(root/'state'), '--preview').stdout)
+preview = json.loads(manifest.read_text())
+assert {e['id'] for e in preview['entries'] if e['disposition']=='absent'} == {'old','orphan-report','status-only','legacy'}
+assert any(e['id']=='home-record' for e in preview['exclusions'])
+# Creation after preview wins without the importer overwriting the new active record.
+run('add', 'old', 'Concurrently created', '--start')
+existing[root/'data/old/task.json'] = (root/'data/old/task.json').read_bytes()
+run('backfill-archived', '--state-dir', str(root/'state'), '--apply-file', str(manifest))
+for p, raw in existing.items(): assert p.read_bytes() == raw
+for name in ('orphan-report','status-only','legacy'):
+    record = json.loads((root/'data'/name/'task.json').read_bytes())
+    assert record['state']=='archived' and record['completion'] is None
+    assert not any(record['progress'].values())
+assert json.loads((root/'data/legacy/task.json').read_bytes())['title']=='Legacy title'
+all_before = {p: p.read_bytes() for p in (root/'data').glob('*/task.json')}
+run('backfill-archived', '--state-dir', str(root/'state'), '--apply-file', str(manifest))
+assert all(p.read_bytes()==raw for p,raw in all_before.items())
+run('reopen','ended'); run('start','ended')
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    results = list(pool.map(lambda i: subprocess.run([cli,'add','racing',f'creator {i}'],env=env,capture_output=True),range(8)))
+assert sum(r.returncode==0 for r in results)==1
+assert json.loads((root/'data/racing/task.json').read_bytes())['state']=='queued'
+# Partial application publishes each record atomically and retry keeps already published bytes.
+for name in ('partial-a', 'partial-b'):
+    (root/'data'/name).mkdir()
+    (root/'data'/name/'report.md').write_text('preserved partial evidence')
+manifest.write_text(run('backfill-archived', '--state-dir', str(root/'state'), '--preview').stdout)
+(root/'data/partial-b/task.json').mkdir()
+failure = run('backfill-archived', '--state-dir', str(root/'state'), '--apply-file', str(manifest), ok=False)
+assert json.loads(failure.stdout)['failed_id']=='partial-b'
+published = (root/'data/partial-a/task.json').read_bytes()
+(root/'data/partial-b/task.json').rmdir()
+run('backfill-archived', '--state-dir', str(root/'state'), '--apply-file', str(manifest))
+assert (root/'data/partial-a/task.json').read_bytes()==published
+assert json.loads((root/'data/partial-b/task.json').read_bytes())['state']=='archived'
+# A corrupt canonical record is never interpreted as absent and never overwritten.
+(root/'data/broken').mkdir(); (root/'data/broken/task.json').write_text('{broken')
+run('inventory',ok=False)
+run('backfill-archived','--state-dir',str(root/'state'),'--preview',ok=False)
+assert (root/'data/broken/task.json').read_text()=='{broken'
+PY
+  then fail 'canonical authority/backfill acceptance failed'; fi
+  pass 'terminal policy, known identity backfill, exclusions, no-overwrite/repeat/racing create and corrupt-owner errors'
+}
+
 test_canonical_record_local_writes
 test_ambient_file_cannot_redirect
 test_removed_compatibility_arguments_refuse
 test_task_directory_symlink_refuses
 test_shadow_backlog_files_are_inert
+
+test_authority_transitions_and_backfill

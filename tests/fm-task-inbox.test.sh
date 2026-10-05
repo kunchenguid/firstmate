@@ -43,7 +43,7 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 inbox_lib() {  # <state> <function> [args...]
   local state=$1
   shift
-  FM_STATE_OVERRIDE="$state" bash -c '
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fn=$2
     shift 2
@@ -101,7 +101,7 @@ SH
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
@@ -309,7 +309,7 @@ test_idempotent_write_follows_concurrent_ack() {
   text="acknowledge while dedup scans"
   rec=$(inbox_lib "$state" fm_task_inbox_write_idempotent "$state" t1 "$text") \
     || fail "race fixture write failed"
-  result=$(FM_STATE_OVERRIDE="$state" bash -c '
+  result=$(FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     eval "$(declare -f fm_task_inbox_body | sed "1s/fm_task_inbox_body/_original_fm_task_inbox_body/")"
     fm_task_inbox_body() {
@@ -474,7 +474,8 @@ test_ring_ladder_policy() {
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state" "$dir/data"
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add t1 'Inbox worker' --kind ship --start >/dev/null || fail 'inbox worker fixture failed'
   make_watch_stubs "$dir" >/dev/null
   fm_write_meta "$dir/state/t1.meta" "window=sess:w1:p1" "backend=herdr" "kind=ship" "harness=pi"
   printf '%s\n' "$dir"
