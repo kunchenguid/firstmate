@@ -7,9 +7,9 @@
 # ESCALATES a batched, distilled digest to the supervisor pane on
 # captain-relevant events plus bounded declared-wait rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
-# signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
-# declared-wait recheck reach the LLM, and even then as one pre-read digest per
+# signal/stale/heartbeat wakes cost zero firstmate context; routing is owned by
+# .agents/skills/afk/SKILL.md (Classification policy).
+# Escalated events reach the LLM as one pre-read digest per
 # batch window. That digest is byte-bounded (see escalate_flush); when it cuts
 # or omits anything it names a state/.subsuper-digests/ file holding every
 # buffered event verbatim.
@@ -48,7 +48,7 @@
 #     drain and acknowledges it only after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared wait is escalated
+#   - Bounded wedge latency: ordinary pane staleness without a declared wait escalates
 #     only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
@@ -1563,6 +1563,8 @@ handle_wake() {  # <reason> <state>
                 *) arg="${reason#signal: }" ;;
               esac
               decision=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$arg" "$state") ;;
+    stale:*" (unread firstmate instruction: stuck-busy "*|stale:*" (steering-inbox busy bookkeeping unwritable: "*)
+              decision="escalate|${reason#stale: }" ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
               task=$(window_to_task "$arg" "$state")

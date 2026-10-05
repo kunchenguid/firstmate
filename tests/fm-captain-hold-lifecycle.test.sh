@@ -88,6 +88,15 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+# Completes <id>'s captain-call inventory through a separate held task, because
+# the origin task is never accepted as its own inventory entry.
+complete_through_sibling() {  # <home> <origin-id>
+  local home=$1 id=$2
+  run_captain "$home" hold "$id-call" --title "Sibling captain call for $id" \
+    --reason "captain must decide the sibling call" --repo sample --origin "$id" >/dev/null \
+    && run_captain "$home" complete "$id" "$id-call"
+}
+
 request_reconciles() {  # <home> <source-id> <task-id>...
   local home=$1 source_id=$2 id
   shift 2
@@ -357,7 +366,7 @@ case "${1:-}" in
   show)
     case "${2:-}" in
       @KNOWN@) ;;
-      *) printf 'error: no task %s in this backlog\n' "${2:-}" >&2; exit 1 ;;
+      *) printf 'error: no task %s in this backlog\ncode: NOT_FOUND\n' "${2:-}" >&2; exit 1 ;;
     esac
     printf '%s\n' 'task:'
     printf '  id: %s\n' "$2"
@@ -2575,7 +2584,7 @@ test_teardown_never_closes_a_captain_held_task() {
   run_captain "$home" hold "$id" \
     --reason "captain must choose inline or by-reference attachments" >/dev/null \
     || fail "could not hold the originating work item for the captain"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed with the origin as its own captain call"
 
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
@@ -2666,7 +2675,7 @@ test_retained_row_artifacts_survive_captain_answers() {
     > "$home/data/$retained_id/report.md"
   run_captain "$home" hold "$retained_id" --reason "captain must choose the report follow-up" \
     >/dev/null || fail "could not hold the retained report"
-  run_captain "$home" complete "$retained_id" "$retained_id" >/dev/null \
+  complete_through_sibling "$home" "$retained_id" >/dev/null \
     || fail "completion gate failed for the retained report"
   run_teardown "$home" "$retained_id" > "$home/retained-teardown.out" \
     2> "$home/report-teardown.err" \
@@ -2687,7 +2696,7 @@ test_retained_row_artifacts_survive_captain_answers() {
   run_captain "$home" hold "$precedence_id" \
     --reason "captain must choose the report follow-up" >/dev/null \
     || fail "could not hold the report precedence fixture"
-  run_captain "$home" complete "$precedence_id" "$precedence_id" >/dev/null \
+  complete_through_sibling "$home" "$precedence_id" >/dev/null \
     || fail "completion gate failed for the report precedence fixture"
   run_teardown "$home" "$precedence_id" > "$home/precedence-teardown.out" \
     2> "$home/precedence-teardown.err" \
@@ -2815,7 +2824,7 @@ test_retained_row_artifacts_survive_captain_answers() {
   printf '# Released report\n' > "$home/data/$released_id/report.md"
   run_captain "$home" hold "$released_id" --reason "captain report release pending" \
     >/dev/null || fail "could not hold the released report"
-  run_captain "$home" complete "$released_id" "$released_id" >/dev/null \
+  complete_through_sibling "$home" "$released_id" >/dev/null \
     || fail "completion gate failed for the released report"
   printf 'Release the completed report.\n' > "$home/released-answer.txt"
   run_captain "$home" answer "$released_id" --release \
@@ -2920,7 +2929,7 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
   printf '# Failed cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
   run_captain "$home" hold "$id" --reason "captain must choose after cleanup retry" >/dev/null \
     || fail "could not hold the cleanup-failure fixture"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the cleanup-failure fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -2979,7 +2988,7 @@ test_answer_before_cleanup_replay_preserves_the_retained_report() {
   printf '# Interrupted cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
   run_captain "$home" hold "$id" --reason "captain must choose after interrupted cleanup" \
     >/dev/null || fail "could not hold the answer-before-replay fixture"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the answer-before-replay fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -3090,7 +3099,7 @@ test_unusable_pending_close_record_names_its_reason() {
   printf '# Unusable pending close\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
   run_captain "$home" hold "$id" --reason "captain must choose after interrupted cleanup" \
     >/dev/null || fail "could not hold the unusable pending-close fixture"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the unusable pending-close fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -3154,7 +3163,12 @@ EOF
     || fail "could not hold the relocated answer-before-replay fixture"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id" >/dev/null \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id-call" --title "Sibling captain call" \
+    --reason "captain must decide the sibling call" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the sibling captain call"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id-call" >/dev/null \
     || fail "completion gate failed for the relocated answer-before-replay fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -3231,7 +3245,12 @@ EOF
     || fail "could not hold the relocated work item"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id" >/dev/null \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id-call" --title "Sibling captain call" \
+    --reason "captain must decide the sibling call" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the sibling captain call"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id-call" >/dev/null \
     || fail "completion gate failed for the relocated captain hold"
 
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -4061,7 +4080,7 @@ PM
     > "$home/data/$scout/report.md"
   run_captain "$home" hold "$scout" --reason "captain must choose" >/dev/null \
     || fail "could not hold the investigation for the captain"
-  run_captain "$home" complete "$scout" "$scout" >/dev/null \
+  complete_through_sibling "$home" "$scout" >/dev/null \
     || fail "the completion gate failed with the origin as its own captain call"
   PERL5LIB="$shim" PERL5OPT=-MFmNoNonrefDefault \
     run_teardown "$home" "$scout" > "$home/nonref.out" 2> "$home/nonref.err" \
@@ -4099,7 +4118,7 @@ retain_row_with_body() {  # <home> <id> <body>
     || fail "could not give $id a body carrying non-ASCII characters"
   run_captain "$home" hold "$id" --reason "captain must choose" >/dev/null \
     || fail "could not hold $id for the captain"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "the completion gate failed for $id"
   run_teardown "$home" "$id" > "$home/$id.out" 2> "$home/$id.err" \
     || fail "cleanup of captain-held $id failed: $(cat "$home/$id.err")"
@@ -4137,6 +4156,485 @@ test_retained_body_keeps_its_utf8_bytes() {
   pass "cleanup preserves every byte of a retained body's non-ASCII characters"
 }
 
+# A refused hold must never read as a recorded one. The gate used to accept the
+# origin as its own inventory whenever the origin row looked durable, so a hold
+# that failed just before `complete <origin> <origin>` left a satisfied gate
+# with no captain call recorded.
+test_origin_is_never_its_own_inventory_entry() {
+  local home id
+  home=$(make_home origin-self-inventory)
+  id=sample-self-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample self review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  if run_captain "$home" hold "$id" --reason "" >/dev/null 2> "$home/hold.err"; then
+    fail "hold accepted an empty reason"
+  fi
+  if run_captain "$home" complete "$id" "$id" > "$home/self.out" 2> "$home/self.err"; then
+    fail "complete accepted the origin as its own inventory after a failed hold"
+  fi
+  assert_grep "cannot be its own captain-call inventory entry" "$home/self.err" \
+    "the refusal does not say why the origin was rejected"
+  assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "the refused completion recorded an inventory attestation"
+
+  # Holding the origin row itself must not let it vouch for itself either.
+  run_captain "$home" hold "$id" --reason "captain must choose" >/dev/null \
+    || fail "could not hold the origin row"
+  if run_captain "$home" complete "$id" "$id" > "$home/held.out" 2> "$home/held.err"; then
+    fail "complete accepted a held origin row as its own inventory"
+  fi
+  pass "complete refuses the origin as its own captain-call inventory"
+}
+
+# `hold --origin` records which origin a call was held for, and `complete`
+# refuses a task held for a different origin. A hold recorded before that
+# record existed, or without --origin, still verifies and is flagged.
+test_complete_refuses_an_entry_held_for_another_origin() {
+  local home id other o out
+  home=$(make_home origin-mismatch)
+  id=sample-first-review
+  other=sample-second-review
+  for o in "$id" "$other"; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Investigate $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold sample-other-call --title "Call for the second review" \
+    --reason "captain must decide" --repo sample --origin "$other" >/dev/null \
+    || fail "could not hold the call recorded for the second review"
+  if run_captain "$home" complete "$id" sample-other-call > "$home/mismatch.out" 2> "$home/mismatch.err"; then
+    fail "complete accepted an entry held for a different origin"
+  fi
+  assert_grep "was held for origin $other, not $id" "$home/mismatch.err" \
+    "the refusal does not name both origins"
+  assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "the refused completion recorded an inventory attestation"
+
+  run_captain "$home" hold sample-own-call --title "Call for the first review" \
+    --reason "captain must decide" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the call recorded for the first review"
+  out=$(run_captain "$home" complete "$id" sample-own-call) \
+    || fail "complete refused an entry held for its own origin"
+  assert_not_contains "$out" "no recorded origin" \
+    "an entry with a recorded origin was flagged as unrecorded"
+
+  tasks_in "$home" add sample-old-call "Call held before origins were recorded" --kind captain --repo sample >/dev/null \
+    || fail "could not create the older call"
+  tasks_in "$home" hold sample-old-call --reason "captain must decide" --kind captain >/dev/null \
+    || fail "could not hold the older call"
+  out=$(run_captain "$home" complete "$other" sample-old-call) \
+    || fail "complete refused an older hold with no recorded origin"
+  assert_contains "$out" "no recorded origin on: sample-old-call" \
+    "an older hold with no recorded origin was not flagged"
+  pass "complete refuses an entry held for another origin and flags one with none recorded"
+}
+
+test_hold_origins_precede_backend_holds() {
+  local home phase timing failure id shown origin until_args=()
+  for phase in new active released; do
+    for timing in plain dated; do
+      home=$(make_home "origin-failure-$phase-$timing")
+      id=sample-call
+      for origin in origin-a origin-b; do
+        tasks_in "$home" add "$origin" "Review $origin" --kind scout --repo sample >/dev/null \
+          || fail "could not create $origin"
+        write_origin_meta "$home" "$origin"
+      done
+      if [ "$phase" != new ]; then
+        run_captain "$home" hold "$id" --title "Separate call" --reason "Choose for A" \
+          --origin origin-a >/dev/null || fail "could not establish the original association"
+      fi
+      if [ "$phase" = released ]; then
+        printf 'Release this work.\n' > "$home/answer.txt"
+        run_captain "$home" answer "$id" --release --decision-file "$home/answer.txt" >/dev/null \
+          || fail "could not release the original hold"
+      fi
+      cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = origin-b ] && [ -f "$FM_HOME/fail-lookup" ]; then
+  : > "$FM_HOME/lookup-refused"
+  printf 'error: origin read failed\ncode: READ_FAILED\n' >&2
+  exit 2
+fi
+if [ "${1:-}" = update ] && [ -f "$FM_HOME/fail-write" ]; then
+  previous=''
+  for arg in "$@"; do
+    if [ "$previous" = --body-file ] && grep -qx 'Captain hold origin: origin-b' "$arg"; then
+      : > "$FM_HOME/write-refused"
+      exit 9
+    fi
+    previous=$arg
+  done
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" != --help ]; then
+  "$REAL_TASKS_AXI" show "$2" --full > "$FM_HOME/before-backend-hold" || exit $?
+  if [ -f "$FM_HOME/fail-hold" ]; then
+    : > "$FM_HOME/hold-refused"
+    exit 9
+  fi
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+      chmod +x "$home/fakebin/tasks-axi"
+      until_args=()
+      [ "$timing" != dated ] || until_args=(--until 2099-01-01)
+      for failure in lookup write hold; do
+        : > "$home/fail-$failure"
+        if run_captain "$home" hold "$id" --title "Separate call" --reason "Choose for B" \
+          --origin origin-b ${until_args[@]+"${until_args[@]}"} > "$home/hold.out" 2> "$home/hold.err"; then
+          fail "$phase $timing hold succeeded despite an origin $failure failure"
+        fi
+        assert_present "$home/$failure-refused" "the failure did not reach the origin $failure"
+        if [ "$failure" = hold ]; then
+          assert_present "$home/before-backend-hold" "$phase $timing failure never reached the backend hold"
+          assert_grep 'Captain hold origin: origin-b' "$home/before-backend-hold" \
+            "the failed backend hold did not see the new association"
+          rm "$home/before-backend-hold"
+        else
+          assert_absent "$home/before-backend-hold" "$phase $timing origin $failure failure reached the backend hold"
+        fi
+        shown=$(tasks_in "$home" show "$id" --full)
+        assert_not_contains "$shown" 'Captain hold origin: origin-b' \
+          "$phase $timing origin $failure failure published the new association"
+        if [ "$phase" = active ]; then
+          assert_contains "$shown" 'held: yes' "an origin $failure failure lifted an existing hold"
+        else
+          assert_contains "$shown" 'held: no' "$phase $timing origin $failure failure left the task held"
+        fi
+        if [ "$phase" != new ]; then
+          assert_contains "$shown" 'Captain hold origin: origin-a' \
+            "$phase $timing origin $failure failure lost the original association"
+        fi
+        rm "$home/fail-$failure"
+        if [ "$phase" = new ] && run_captain "$home" complete origin-a "$id" \
+          > "$home/unrelated.out" 2> "$home/unrelated.err"; then
+          fail "$timing origin $failure failure satisfied an unrelated inventory"
+        fi
+        if run_captain "$home" complete origin-b "$id" > "$home/complete.out" 2> "$home/complete.err"; then
+          fail "$phase $timing origin $failure failure satisfied completion for B"
+        fi
+        printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$id" >> "$home/state/origin-b.meta"
+        if run_captain "$home" verify origin-b > "$home/verify.out" 2> "$home/verify.err"; then
+          fail "$phase $timing origin $failure failure verified an inventory for B"
+        fi
+        if [ "$phase" != new ]; then
+          run_captain "$home" complete origin-a "$id" >/dev/null \
+            || fail "$phase $timing origin $failure failure invalidated completion for A"
+          run_captain "$home" verify origin-a >/dev/null \
+            || fail "$phase $timing origin $failure failure invalidated verification for A"
+        fi
+      done
+      run_captain "$home" hold "$id" --reason "Choose for B" --origin origin-b \
+        ${until_args[@]+"${until_args[@]}"} >/dev/null || fail "$phase $timing successful retry failed"
+      assert_present "$home/before-backend-hold" "the successful retry did not reach the backend hold"
+      shown=$(cat "$home/before-backend-hold")
+      assert_contains "$shown" 'Captain hold origin: origin-b' "the backend hold ran before the new origin was recorded"
+      assert_not_contains "$shown" 'Captain hold origin: origin-a' "the backend hold ran with the old association"
+      shown=$(tasks_in "$home" show "$id" --full)
+      assert_contains "$shown" 'held: yes' "the successful retry did not hold the task"
+      assert_contains "$shown" 'Captain hold origin: origin-b' "a successful hold lost its association"
+      assert_not_contains "$shown" 'Captain hold origin: origin-a' "a successful hold retained the old association"
+      run_captain "$home" complete origin-b "$id" >/dev/null \
+        || fail "a successful hold could not complete B"
+      run_captain "$home" verify origin-b >/dev/null || fail "a successful hold could not verify B"
+      if run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/old-origin.err"; then
+        fail "a successful reassociation still certified A"
+      fi
+    done
+  done
+  pass "new, active, and released holds require the origin first with and without deferral"
+}
+
+test_historical_self_inventory_has_workable_repair() {
+  local home origin=sample-review keep=retained-call replacement=repair-call meta before out
+  home=$(make_home historical-self-inventory)
+  run_captain "$home" hold "$origin" --title "Old review call" --reason "Choose" >/dev/null \
+    || fail "could not create the historical origin"
+  write_origin_meta "$home" "$origin"
+  for out in "$keep" "$replacement"; do
+    run_captain "$home" hold "$out" --title "Call $out" --reason "Choose" --origin "$origin" >/dev/null \
+      || fail "could not create $out"
+  done
+  meta="$home/state/$origin.meta"
+  printf 'decisions_reviewed=1\ndecision_keys=%s,%s\n' "$origin" "$keep" >> "$meta"
+  before=$(cat "$meta")
+  for out in "$replacement" --none; do
+    if run_captain "$home" complete "$origin" "$out" > "$home/complete.out" 2> "$home/complete.err"; then
+      fail "complete accepted the historical self-inventory"
+    fi
+    assert_grep "historical decision_keys in $meta still contains $origin" "$home/complete.err" \
+      "the historical refusal did not identify the persisted entry"
+    assert_grep 'replace only' "$home/complete.err" "the refusal omitted the repair instruction"
+  done
+  if run_captain "$home" verify "$origin" > "$home/verify.out" 2> "$home/verify.err"; then
+    fail "verify accepted the historical self-inventory"
+  fi
+  assert_grep "historical decision_keys in $meta still contains $origin" "$home/verify.err" \
+    "verify omitted the historical repair instruction"
+  assert_equals "$before" "$(cat "$meta")" "refusing a historical inventory changed it"
+  sed "s/^decision_keys=$origin,$keep$/decision_keys=$replacement,$keep/" "$meta" > "$meta.repaired"
+  mv "$meta.repaired" "$meta"
+  run_captain "$home" complete "$origin" "$replacement" >/dev/null \
+    || fail "the documented historical repair did not allow completion"
+  run_captain "$home" verify "$origin" >/dev/null || fail "the repaired inventory did not verify"
+  assert_equals "decision_keys=$replacement,$keep" "$(grep '^decision_keys=' "$meta" | tail -1)" \
+    "repair lost a sibling inventory entry"
+  if run_captain "$home" complete "$origin" "$origin" >/dev/null 2> "$home/self.err"; then
+    fail "repair allowed a new self-inventory"
+  fi
+  pass "historical self-inventories name a workable repair that preserves sibling entries"
+}
+
+test_inventory_compares_backend_identities() {
+  local home origin entry shown before
+  home=$(make_home backend-identities)
+  run_captain "$home" hold fm-o --title "Origin" --reason "Choose" >/dev/null \
+    || fail "could not create the canonical origin"
+  tasks_in "$home" add fm-other "Other origin" --kind scout --repo sample >/dev/null \
+    || fail "could not create the other origin"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = o ] && [ -f "$FM_HOME/fail-identity" ]; then
+  printf 'error: origin read failed\ncode: READ_FAILED\n' >&2
+  exit 2
+fi
+if [ "$#" -ge 2 ]; then
+  case "$2" in
+    o|call|other) set -- "$1" "fm-$2" "${@:3}" ;;
+  esac
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  for origin in fm-o o; do
+    for entry in fm-o o; do
+      write_origin_meta "$home" "$origin"
+      if run_captain "$home" complete "$origin" "$entry" > "$home/self.out" 2> "$home/self.err"; then
+        fail "complete accepted aliased self-inventory $origin/$entry"
+      fi
+      assert_grep 'cannot be its own captain-call inventory entry' "$home/self.err" \
+        "the alias refusal did not identify self-inventory"
+      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$entry" >> "$home/state/$origin.meta"
+      if run_captain "$home" verify "$origin" > "$home/verify.out" 2> "$home/verify.err"; then
+        fail "verify accepted aliased self-inventory $origin/$entry"
+      fi
+      assert_grep 'historical decision_keys' "$home/verify.err" "the alias repair diagnostic was missing"
+    done
+    write_origin_meta "$home" "$origin"
+  done
+  run_captain "$home" hold fm-call --title "Separate call" --reason "Choose" --origin o >/dev/null \
+    || fail "could not hold a call using the origin alias"
+  shown=$(tasks_in "$home" show fm-call --full)
+  assert_contains "$shown" 'Captain hold origin: fm-o' "hold did not store the backend origin identity"
+  printf '%s\n' "$shown" | sed -n 's/^  body: //p' | jq -r . \
+    | sed 's/^Captain hold origin: fm-o$/Captain hold origin: o/' > "$home/legacy-origin.txt"
+  tasks_in "$home" update fm-call --body-file "$home/legacy-origin.txt" >/dev/null \
+    || fail "could not create a legacy stored alias"
+  for origin in fm-o o; do
+    for entry in fm-call call; do
+      run_captain "$home" complete "$origin" "$entry" >/dev/null \
+        || fail "complete refused equivalent origin spellings for $origin/$entry"
+      run_captain "$home" verify "$origin" >/dev/null \
+        || fail "verify refused equivalent origin spellings for $origin/$entry"
+    done
+  done
+  for origin in fm-other other; do
+    write_origin_meta "$home" "$origin"
+    if run_captain "$home" complete "$origin" call > "$home/other.out" 2> "$home/other.err"; then
+      fail "complete accepted another origin through $origin"
+    fi
+    assert_grep "was held for origin o, not $origin" "$home/other.err" "the alias mismatch was not identified"
+    printf 'decisions_reviewed=1\ndecision_keys=call\n' >> "$home/state/$origin.meta"
+    if run_captain "$home" verify "$origin" >/dev/null 2> "$home/other-verify.err"; then
+      fail "verify accepted another origin through $origin"
+    fi
+  done
+  : > "$home/fail-identity"
+  before=$(cat "$home/state/o.meta")
+  if run_captain "$home" complete o fm-call >/dev/null 2> "$home/read.err"; then
+    fail "an unreadable backend identity was treated as an absent origin"
+  fi
+  assert_grep 'could not resolve the backend identity of o' "$home/read.err" "the identity read failure was hidden"
+  assert_equals "$before" "$(cat "$home/state/o.meta")" "a failed identity read changed the inventory"
+  rm "$home/fail-identity"
+  write_origin_meta "$home" report-only
+  run_captain "$home" hold report-call --title "Report call" --reason "Choose" --origin report-only >/dev/null \
+    || fail "an origin with metadata but no backlog row could not record a call"
+  run_captain "$home" complete report-only report-call >/dev/null \
+    || fail "an origin with metadata but no backlog row could not complete"
+  run_captain "$home" verify report-only >/dev/null \
+    || fail "an origin with metadata but no backlog row could not verify"
+  pass "completion and verification compare backend identities for entries and current or stored origins"
+}
+
+# tasks-axi refuses parentheses and line breaks in a hold reason and stores the
+# rest on one markdown line. The reason is encoded where it is written and
+# decoded wherever it is shown, so prose with every awkward character survives.
+test_hold_reason_round_trips_awkward_characters() {
+  local home id reason stored json shown start verb fields out raw rc raw_rc mode
+  local title legacy body quoted_reason quoted_title quoted_legacy expected_reason until_args=()
+  local malformed index=0 malformed_reasons=(
+    'fm-hold-v1:/w==' 'fm-hold-v1:bm9ydGg=$' 'fm-hold-v1:bm9ydGg' 'fm-hold-v1:Zh=='
+  )
+  home=$(make_home reason-round-trip)
+  title='Investigate literal %28, "fm-hold-v1:bm9ydGg="'
+  legacy='Visit https://example.test/%28literal%29 and %0A; fm-hold-v1:bm9ydGg='
+  body=$'fm-hold-v1:bm9ydGg=\n  hold_reason: "%28"\n'
+  quoted_title=$(jq -cn --arg value "$title" '$value')
+  quoted_legacy=$(jq -cn --arg value "$legacy" '$value')
+  tasks_in "$home" add sample-legacy-call "$title" --kind captain --repo sample >/dev/null \
+    || fail "could not create the legacy call"
+  tasks_in "$home" hold sample-legacy-call --reason "$legacy" --kind captain >/dev/null \
+    || fail "could not hold the legacy call"
+  printf '%s' "$body" > "$home/legacy-body.txt"
+  tasks_in "$home" update sample-legacy-call --body-file "$home/legacy-body.txt" >/dev/null \
+    || fail "could not write the legacy body"
+
+  # Historical literal reasons are persisted input, not encoder output.
+  for malformed in "${malformed_reasons[@]}"; do
+    id="sample-malformed-$index"
+    index=$((index + 1))
+    tasks_in "$home" add "$id" "Historical reason $index" --kind captain --repo sample >/dev/null \
+      || fail "could not create $id"
+    tasks_in "$home" hold "$id" --reason "$malformed" --kind captain >/dev/null \
+      || fail "could not store the historical literal reason"
+    for verb in show view; do
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "$verb" "$id" --full) \
+        || fail "public $verb failed on historical literal $malformed"
+      raw=$(tasks_in "$home" "$verb" "$id" --full)
+      assert_equals "$raw" "$out" "public $verb changed historical literal $malformed"
+    done
+  done
+
+  for id in sample-reason-call sample-dated-call; do
+    until_args=()
+    reason=$'  Pick route (north); say "yes" or \'no\' - 100% sure %28x%29, café\t\\slash\r\nSecond line\n\n'
+    if [ "$id" = sample-dated-call ]; then
+      until_args=(--until 2099-01-01)
+      reason='fm-hold-v1:bm9ydGg='
+    fi
+    quoted_reason=$(jq -cn --arg value "$reason" '$value')
+    run_captain "$home" hold "$id" --title "$title" --reason "$reason" \
+      --repo sample ${until_args[@]+"${until_args[@]}"} >/dev/null \
+      || fail "hold refused the reason for $id"
+    stored=$(grep "^- \[ \] $id " "$home/data/backlog.md") \
+      || fail "the held row is not on one backlog line"
+    assert_contains "$stored" "(hold: fm-hold-v1:" "the persisted reason has no encoding marker"
+    assert_contains "$stored" "(hold-kind: captain)" "the reason broke the hold-kind tag"
+
+    for verb in show view; do
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "$verb" "$id") \
+        || fail "public $verb failed for $id"
+      shown=$(printf '%s\n' "$out" | sed -n 's/^  hold_reason: //p')
+      printf '%s\n' "$shown" | jq -e --arg reason "$reason" '. == $reason' >/dev/null \
+        || fail "public $verb changed the reason for $id"
+      assert_contains "$out" "  title: $quoted_title" "public $verb changed the title"
+    done
+    for fields in hold_reason,body body,hold_reason,hold_until; do
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" list --fields "$fields") \
+        || fail "public list failed with $fields"
+      assert_contains "$out" "$quoted_reason" "public list changed the reason with $fields"
+      assert_contains "$out" "$quoted_title" "public list changed the title with $fields"
+      raw=$(tasks_in "$home" list --fields "$fields" | grep '^  sample-legacy-call,')
+      shown=$(printf '%s\n' "$out" | grep '^  sample-legacy-call,')
+      assert_equals "$raw" "$shown" "public list changed legacy or unrelated fields"
+      for malformed in "${malformed_reasons[@]}"; do
+        assert_contains "$out" "$malformed" "public list changed historical literal $malformed"
+      done
+    done
+    json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed"
+    printf '%s' "$json" | jq -e --arg id "$id" --arg reason "$reason" --arg title "$title" \
+      '.backlog.records[] | select(.id == $id) | .hold_reason == $reason and .title == $title' >/dev/null \
+      || fail "fleet changed the reason or title for $id"
+    printf '%s' "$json" | jq -e --arg reason "$legacy" --arg title "$title" \
+      '.backlog.records[] | select(.id == "sample-legacy-call") |
+       .hold_reason == $reason and .title == $title and .body_lines[0] == "fm-hold-v1:bm9ydGg="' >/dev/null \
+      || fail "fleet changed legacy or unrelated fields"
+    for malformed in "${malformed_reasons[@]}"; do
+      printf '%s' "$json" | jq -e --arg reason "$malformed" \
+        'any(.backlog.records[]; .hold_reason == $reason)' >/dev/null \
+        || fail "fleet changed historical literal $malformed"
+    done
+  done
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show sample-legacy-call --full)
+  raw=$(tasks_in "$home" show sample-legacy-call --full)
+  assert_equals "$raw" "$out" "public show changed legacy or unrelated fields"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" list)
+  raw=$(tasks_in "$home" list)
+  assert_equals "$raw" "$out" "public list changed output with no reason column"
+  for verb in show list; do
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "$verb" --help)
+    raw=$(tasks_in "$home" "$verb" --help)
+    assert_equals "$raw" "$out" "public $verb changed help output"
+  done
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show nonexistent-call 2>&1)
+  rc=$?
+  raw=$(tasks_in "$home" show nonexistent-call 2>&1)
+  raw_rc=$?
+  [ "$raw_rc" -ne 0 ] || fail "the missing-task fixture unexpectedly exists"
+  expect_code "$raw_rc" "$rc" "public show missing task"
+  assert_equals "$raw" "$out" "public show changed a read error"
+
+  expected_reason=$'  Pick route (north); say "yes" or \'no\' - 100% sure %28x%29, café\t\\slash\r\nSecond line\n\n'
+  quoted_reason=$(jq -cn --arg value "$expected_reason" '$value')
+  for mode in tool manual fallback; do
+    case "$mode" in
+      manual) printf 'manual\n' > "$home/config/backlog-backend" ;;
+      fallback)
+        rm "$home/config/backlog-backend"
+        cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list ]; then
+  printf 'read failed: literal %%28 and fm-hold-v1:bm9ydGg=\n' >&2
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+        chmod +x "$home/fakebin/tasks-axi"
+        ;;
+    esac
+    start=$(PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
+    assert_contains "$start" "$quoted_reason" "startup $mode changed the encoded reason"
+    assert_contains "$start" 'Investigate literal %28' "startup $mode changed the title"
+    assert_contains "$start" "$legacy" "startup $mode changed the legacy reason"
+    assert_contains "$start" '"fm-hold-v1:bm9ydGg="' "startup $mode decoded a reason twice"
+    for malformed in "${malformed_reasons[@]}"; do
+      assert_contains "$start" "$malformed" "startup $mode changed historical literal $malformed"
+    done
+    if [ "$mode" = fallback ]; then
+      assert_contains "$start" 'read failed: literal %28 and fm-hold-v1:bm9ydGg=' \
+        "startup changed unrelated error text"
+    fi
+  done
+  rm "$home/fakebin/tasks-axi"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-afk-return.sh" check 2>&1 || true)
+  assert_contains "$out" "$quoted_reason" "return brief changed the encoded reason"
+  assert_contains "$out" "$quoted_title" "return brief changed the title"
+  assert_contains "$out" "$quoted_legacy" "return brief changed the legacy reason"
+  for malformed in "${malformed_reasons[@]}"; do
+    assert_contains "$out" "$malformed" "return brief changed historical literal $malformed"
+  done
+  pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
+}
+
+test_hold_reason_round_trips_awkward_characters
+test_hold_origins_precede_backend_holds
+test_historical_self_inventory_has_workable_repair
+test_inventory_compares_backend_identities
+test_origin_is_never_its_own_inventory_entry
+test_complete_refuses_an_entry_held_for_another_origin
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
