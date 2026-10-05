@@ -92,13 +92,11 @@
 # its own precedence, so a brief or project instruction that authors a
 # conflicting role is superseded rather than duplicated.
 # The code root argument is the Firstmate checkout that holds
-# .agents/skills/firstmate-coding-guidelines/SKILL.md. A worker in another
-# project's worktree can read that file, because the Claude launch grants the
-# skills directory, but the Skill tool does not resolve the skill name there:
-# Claude registers <added-dir>/.claude/skills, and the granted directory is the
-# skills directory itself, which has no such child. The role therefore names
-# the file. Adding the checkout root would register the skills and would also
-# grant the whole checkout, so that stays off.
+# .agents/skills/firstmate-coding-guidelines/SKILL.md. A worker in a Firstmate
+# worktree loads that skill by name from its own checkout. A worker whose
+# session does not register the skill, such as one in another project's
+# worktree, cannot, so the role also names the file as the fallback to read;
+# the Claude launch grants the skills directory that holds it.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
@@ -114,12 +112,7 @@
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
-  local state=$1 task_id=$2 root=$3 skill
-  if [ -z "$root" ]; then
-    echo "error: fm_brief_worker_role: code root is required so a project worktree is told to read the Firstmate skill file instead of invoking a skill name the Skill tool cannot resolve there" >&2
-    return 1
-  fi
-  skill="$root/.agents/skills/firstmate-coding-guidelines/SKILL.md"
+  local state=$1 task_id=$2 root=$3
   cat <<'EOF'
 # Current worker role contract
 You are a crewmate: an autonomous worker agent managed by firstmate.
@@ -130,9 +123,9 @@ EOF
   cat <<'EOF'
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
+Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
 EOF
-  printf "Project instructions still govern the work wherever they do not conflict with this worker identity, including \`CONTRIBUTING.md\` and \`%s\` for Firstmate changes.\n" "$skill"
-  printf '%s\n' 'Read that file directly. The Skill tool cannot resolve it from a project worktree, because that tool only loads skills registered for the session project.'
+  printf "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`%s/.agents/skills/firstmate-coding-guidelines/SKILL.md\` instead.\n" "$root"
 }
 
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a

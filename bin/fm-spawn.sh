@@ -2788,12 +2788,11 @@ rovo_config_override_flag() {
 # in the PARENT home's state/<id>.inbox, and a ship or scout worker's launch
 # record, steers, and brief live in this home's state/operational-inbox,
 # state/<id>.inbox, and data/<id>, plus the code root's .agents/skills so the
-# worker can read the skill file the launch role names - so every Claude
-# launch, fresh spawn and relaunch, in both permission modes, grants exactly
-# those task-channel directories. The skills grant is that directory, not the
-# checkout root: Claude registers skills from <added-dir>/.claude/skills, so
-# adding the root would register them and would also open the whole checkout.
-# The launch role tells the worker to read the file instead. Paths resolve
+# worker can read the skill file the launch role names as the fallback for a
+# session where the skill name does not resolve - so every Claude launch,
+# fresh spawn and relaunch, in both permission modes, grants exactly those
+# task-channel directories. The skills grant is that directory, not the
+# checkout root, so the grant does not open the whole checkout. Paths resolve
 # the way rovo_config_override_flag resolves them
 # (real paths under the task's home). The state channel dirs are created
 # lazily by their first record, so they are made here: an --add-dir naming a
