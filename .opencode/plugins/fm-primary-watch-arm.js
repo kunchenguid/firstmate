@@ -118,12 +118,14 @@ async function isPrimaryRoot(root, home) {
 }
 
 function shouldArm(paths) {
-  if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
+  if (existsSync(`${paths.state}/.afk`)) return "not-needed";
+  if (existsSync(`${paths.config}/x-mode.env`)) return "armed";
   try {
-    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
+    return readdirSync(paths.state).some((name) => name.endsWith(".meta")) ? "armed" : "not-needed";
   } catch {
-    return false;
+    // A state directory that cannot be listed is a failed fleet check, not a
+    // verified empty fleet: the caller must report it rather than stop cleanly.
+    return "check-failed";
   }
 }
 
@@ -521,7 +523,8 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
-  if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  const armDecision = shouldArm(paths);
+  if (armDecision !== "armed") return { status: armDecision, armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
 

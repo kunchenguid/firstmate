@@ -5184,11 +5184,13 @@ EOF
 # An empty fleet (no state/*.meta) answers shouldArm() as not-needed. A wake
 # whose restoration then finds the fleet empty is a clean stop: the wake still
 # reaches the model, with no FAILED continuity message and no retry cycles. A
-# successor that should have armed but never becomes ready still reports its
-# failure, so this test also proves the real-failure path stays typed.
+# state directory that cannot be listed is a failed fleet check, not a verified
+# empty fleet, so it must stay reported as a failure. A successor that should
+# have armed but never becomes ready still reports its failure, so this test
+# also proves the real-failure path stays typed.
 test_opencode_not_needed_restoration_is_a_clean_stop() {
   local kind plugin repo home log out status
-  for kind in not-needed real-failure; do
+  for kind in not-needed check-failed real-failure; do
     plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
     repo="$TMP_ROOT/opencode-not-needed-$kind-root"
     home="$TMP_ROOT/opencode-not-needed-$kind-home"
@@ -5203,6 +5205,7 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 if [ "$count" -eq 1 ]; then
   [ "${FM_EMPTY_FLEET:-0}" = 1 ] && rm -f "$FM_HOME/state/task.meta"
+  [ -n "${FM_CHMOD_STATE:-}" ] && chmod "$FM_CHMOD_STATE" "$FM_HOME/state"
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
   printf 'signal: synthetic wake\n'
   exit 0
@@ -5213,6 +5216,7 @@ SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_KIND="$kind" \
       FM_EMPTY_FLEET="$([ "$kind" = not-needed ] && printf 1 || printf 0)" \
+      FM_CHMOD_STATE="$([ "$kind" = check-failed ] && printf 0111 || printf '')" \
       FM_OPENCODE_ARM_READY_TIMEOUT_MS=60 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=2000 \
       FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
       node 2>&1 <<'EOF'
@@ -5248,13 +5252,19 @@ if (process.env.FM_KIND === "not-needed") {
   if (prompt.includes("FAILED")) throw new Error(`empty fleet reported a false continuity failure: ${prompt}`);
   await new Promise((resolve) => setTimeout(resolve, 80));
   if (rows().length !== 1) throw new Error(`empty fleet retried after its clean stop: ${rows().join(" | ")}`);
+} else if (process.env.FM_KIND === "check-failed") {
+  if (rows().length !== 1) throw new Error(`failed fleet check still spawned successors: ${rows().join(" | ")}`);
+  if (!prompt.includes("could not verify a ready successor watcher (check-failed)")) throw new Error(`missing typed fleet-check failure: ${prompt}`);
+  if (!prompt.includes("could not restore watcher continuity after 2 retries")) throw new Error(`missing typed restoration failure: ${prompt}`);
 } else {
   if (rows().length !== 4) throw new Error(`expected one successor plus two retries, got ${rows().length}: ${rows().join(" | ")}`);
+  if (!prompt.includes("could not verify a ready successor watcher (timeout)")) throw new Error(`missing typed timeout failure: ${prompt}`);
   if (!prompt.includes("could not restore watcher continuity after 2 retries")) throw new Error(`missing typed restoration failure: ${prompt}`);
 }
 EOF
 )
     status=$?
+    chmod 0755 "$home/state" 2>/dev/null || true
     expect_code 0 "$status" "OpenCode empty fleet must stop cleanly while a real restoration failure stays typed ($kind)"
     [ -z "$out" ] || fail "OpenCode not-needed $kind test printed output: $out"
   done
