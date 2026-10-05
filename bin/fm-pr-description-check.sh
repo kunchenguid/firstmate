@@ -11,27 +11,29 @@
 # its PRs legitimately describe fleet roles. Only GitHub pull requests are read;
 # a GitLab merge request or Gerrit change is skipped with a note.
 #
-# Checks, all against the live PR read with `gh`:
+# Checks, all against the live PR read from the GitHub REST API with `gh`, or
+# with `gh-axi` when `gh` is absent or cannot read it:
 #   1. Template: when the base repository has a PR template at a standard
 #      single-file location (.github/, the root, or docs/, either name case) on
 #      the base branch, every heading of the template's top level (its
 #      shallowest heading level, ignoring headings inside code fences and HTML
 #      comments) appears in the body as a heading with the same text, ignoring
 #      case. No template means no check.
-#   2. Title shape: when the last segment of the PR head branch starts with a
-#      ticket key (such as feat/DF-123-add-x), the title is `<type>(<KEY>): <description>` with that key; when
-#      the project's registered ship-branch prefix (bin/fm-project-mode.sh
-#      --branch-prefix) carries a key prefix such as `feat/DF-` but the branch
-#      has none, any key is accepted; otherwise `<type>: <description>`.
-#      Types: feat fix hotfix refactor docs test chore perf ci build style
-#      revert, optionally followed by `!`.
-#   3. Internal wording, case-insensitive on whole words, in title and body:
-#      captain, firstmate / first mate, crewmate, second mate / secondmate,
-#      brief, yolo, ask-user, "per instruction", and no-mistakes (which covers
-#      the validation tool's PR footer and its HTML attestation comment).
+#   2. Title shape: when the PR head branch is `<type>/<KEY>-<NNN>-<description>`
+#      (KEY two or more uppercase letters, NNN digits, such as
+#      feat/DF-123-add-x), the title is `<type>(<KEY>-<NNN>): <description>` with
+#      that ticket key; otherwise any conventional `<type>: <description>` or
+#      `<type>(<scope>): <description>`. Types: feat fix hotfix refactor docs
+#      test chore perf ci build style revert, optionally followed by `!`.
+#   3. Internal wording, case-insensitive on whole words: captain, firstmate /
+#      first mate, crewmate, second mate / secondmate, "task brief",
+#      "per instruction", and no-mistakes (which covers the validation tool's PR
+#      footer and its HTML attestation comment).
 #   4. Denied product names: each non-blank, non-# line of the optional
 #      gitignored config/pr-description-deny file is a literal term matched the
-#      same way. Inline code spans and fenced code blocks are exempt.
+#      same way.
+# Checks 3 and 4 read the title and body prose: inline code spans and fenced
+# code blocks are exempt.
 # Text the template itself ships (a whole template line found inside a body
 # line, with checkbox state ignored) never counts toward checks 3 or 4.
 #
@@ -90,7 +92,7 @@ if [ "$FM_PR_PROVIDER" != github ]; then
   exit 0
 fi
 
-for tool in gh jq awk; do
+for tool in jq awk; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "error: checking the PR description requires $tool on PATH" >&2
     exit 1
@@ -101,8 +103,51 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-description.XXXXXX") || exit 1
 trap 'rm -rf -- "$WORK"' EXIT
 trap 'exit 1' HUP INT TERM
 
-if ! PR_JSON=$(gh pr view "$URL" --json title,body,headRefName,baseRefName 2>"$WORK/gh.err"); then
-  echo "error: could not read $URL from GitHub: $(head -c 300 "$WORK/gh.err")" >&2
+# github_read <api-path> <jq-filter>: print the filtered record of a GitHub REST
+# GET as compact JSON, read with gh and then gh-axi, like
+# fm_pr_github_read_record. Returns 0 when read, 3 when the forge answered 404,
+# and 1 when neither tool could read it, with each tool's reason in
+# $WORK/gh.err. gh-axi clamps raw output at 4000 characters, so it reads the
+# record in base64 slices of 700 characters until an empty slice.
+github_read() {
+  local path=$1 filter=$2 off=0 out chunk
+  : > "$WORK/gh.err"
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "gh: not on PATH" >> "$WORK/gh.err"
+  elif out=$(gh api --method GET "$path" --jq "$filter | tojson" 2>"$WORK/gh.out"); then
+    printf '%s\n' "$out"
+    return 0
+  else
+    printf 'gh: %s\n' "$(head -c 300 "$WORK/gh.out")" >> "$WORK/gh.err"
+    ! grep -q 'HTTP 404' "$WORK/gh.out" || return 3
+  fi
+  if ! command -v gh-axi >/dev/null 2>&1; then
+    echo "gh-axi: not on PATH" >> "$WORK/gh.err"
+    return 1
+  fi
+  : > "$WORK/axi.json"
+  while :; do
+    if ! out=$(gh-axi api GET "/$path" --jq "\"x\" + ($filter | tojson | .[$off:$((off + 700))] | @base64)" 2>&1); then
+      printf 'gh-axi: %s\n' "$(printf '%s' "$out" | head -c 300)" >> "$WORK/gh.err"
+      case $out in *'HTTP 404'*) return 3 ;; esac
+      return 1
+    fi
+    chunk=$(printf '%s\n' "$out" | awk '$1 == "body:" { b = $2 } $1 == "truncated:" { t = $2 } END { if (t == "false" && b ~ /^x/) print substr(b, 2); else exit 1 }') || {
+      echo "gh-axi: unreadable response" >> "$WORK/gh.err"
+      return 1
+    }
+    [ -n "$chunk" ] || break
+    jq -jn --arg c "$chunk" '$c | @base64d' >> "$WORK/axi.json" || return 1
+    off=$((off + 700))
+  done
+  cat "$WORK/axi.json"
+}
+
+RC=0
+PR_JSON=$(github_read "repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER" \
+  '{title, body, headRefName: .head.ref, baseRefName: .base.ref}') || RC=$?
+if [ "$RC" != 0 ]; then
+  echo "error: could not read $URL from GitHub with gh or gh-axi: $(tr '\n' ' ' < "$WORK/gh.err")" >&2
   exit 1
 fi
 if ! printf '%s' "$PR_JSON" | jq -e 'type == "object" and (.title | type == "string")' >/dev/null 2>&1; then
@@ -118,13 +163,16 @@ if [ -z "$BASE_REF" ]; then
   echo "error: GitHub did not report the base branch of $URL" >&2
   exit 1
 fi
+BASE_REF_Q=$(jq -rn --arg r "$BASE_REF" '$r | @uri')
 
 # The first template found in GitHub's own lookup order wins. Only a 404 means
 # absent; any other read failure stops the check rather than skipping it.
 : > "$WORK/template"
 for dir in .github/ '' docs/; do
   for name in PULL_REQUEST_TEMPLATE.md pull_request_template.md; do
-    if TEMPLATE_JSON=$(gh api --method GET "repos/$FM_PR_PATH/contents/$dir$name" -f ref="$BASE_REF" 2>"$WORK/gh.err"); then
+    RC=0
+    TEMPLATE_JSON=$(github_read "repos/$FM_PR_PATH/contents/$dir$name?ref=$BASE_REF_Q" '{type, content}') || RC=$?
+    if [ "$RC" = 0 ]; then
       if printf '%s' "$TEMPLATE_JSON" | jq -e 'type == "object" and .type == "file"' >/dev/null 2>&1; then
         if ! printf '%s' "$TEMPLATE_JSON" | jq -r '.content | gsub("\\s"; "") | @base64d' | tr -d '\r' > "$WORK/template"; then
           echo "error: could not decode the PR template $dir$name of $FM_PR_PATH" >&2
@@ -132,8 +180,8 @@ for dir in .github/ '' docs/; do
         fi
         break 2
       fi
-    elif ! grep -q 'HTTP 404' "$WORK/gh.err"; then
-      echo "error: could not read the PR template $dir$name of $FM_PR_PATH: $(head -c 300 "$WORK/gh.err")" >&2
+    elif [ "$RC" != 3 ]; then
+      echo "error: could not read the PR template $dir$name of $FM_PR_PATH with gh or gh-axi: $(tr '\n' ' ' < "$WORK/gh.err")" >&2
       exit 1
     fi
   done
@@ -153,18 +201,13 @@ fi
 
 # Check 2: title shape.
 TYPES='(feat|fix|hotfix|refactor|docs|test|chore|perf|ci|build|style|revert)'
-KEY_RE='[A-Z][A-Z0-9]+-[0-9]+'
-BRANCH_KEY=$(printf '%s\n' "${HEAD_REF##*/}" | grep -oE "^$KEY_RE" || true)
-PREFIX=$(FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-project-mode.sh" --branch-prefix "$PROJECT_NAME" 2>/dev/null || true)
+BRANCH_KEY=$(printf '%s\n' "$HEAD_REF" | sed -nE "s#^$TYPES/([A-Z]{2,}-[0-9]+)-.+#\\2#p")
 if [ -n "$BRANCH_KEY" ]; then
   TITLE_RE="^$TYPES\\($BRANCH_KEY\\)!?: [^ ]"
   TITLE_SHAPE="<type>($BRANCH_KEY): <description>"
-elif printf '%s\n' "$PREFIX" | grep -qE '[A-Z][A-Z0-9]+-'; then
-  TITLE_RE="^$TYPES\\($KEY_RE\\)!?: [^ ]"
-  TITLE_SHAPE="<type>(<TICKET-KEY>): <description>"
 else
-  TITLE_RE="^$TYPES!?: [^ ]"
-  TITLE_SHAPE="<type>: <description>"
+  TITLE_RE="^$TYPES(\\([^()]+\\))?!?: [^ ]"
+  TITLE_SHAPE="<type>: <description> or <type>(<scope>): <description>"
 fi
 if ! printf '%s\n' "$TITLE" | grep -qE "$TITLE_RE"; then
   printf 'title: does not match %s (type is one of feat fix hotfix refactor docs test chore perf ci build style revert): %s\n' \
@@ -211,16 +254,16 @@ if ! awk -v title_file="$WORK/title" -v body_file="$WORK/body" \
   }
   function report(where, what, text) { printf "%s: %s: %s\n", where, what, shown(text) }
   function check(where, raw, in_code,   s, t) {
-    s = exempt(norm(raw))
+    if (in_code) return
+    s = raw; gsub(/`+[^`]*`+/, " ", s); s = exempt(norm(s))
     t = hit(s, vocab, nvocab)
     if (t != "") report(where, "internal wording \"" t "\"", raw)
-    if (ndeny == 0 || in_code) return
-    s = raw; gsub(/`+[^`]*`+/, " ", s)
-    t = hit(exempt(norm(s)), deny, ndeny)
+    if (ndeny == 0) return
+    t = hit(s, deny, ndeny)
     if (t != "") report(where, "denied product name \"" t "\"", raw)
   }
   BEGIN {
-    nvocab = split("captain|captains|firstmate|firstmates|first mate|first mates|first-mate|crewmate|crewmates|crew mate|crew-mate|second mate|second mates|second-mate|secondmate|secondmates|brief|briefs|yolo|ask-user|per instruction|per instructions|no-mistakes", vocab, "|")
+    nvocab = split("captain|captains|firstmate|firstmates|first mate|first mates|first-mate|crewmate|crewmates|crew mate|crew-mate|second mate|second mates|second-mate|secondmate|secondmates|task brief|task briefs|per instruction|per instructions|no-mistakes", vocab, "|")
     ndeny = 0
     while ((getline line < deny_file) > 0) {
       line = norm(line)

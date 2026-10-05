@@ -2,7 +2,8 @@
 # Behavior tests for bin/fm-pr-description-check.sh and its refusal inside
 # bin/fm-pr-check.sh: template headings, title shape, internal wording, the
 # per-home product deny list, the template-text and code exemptions, scope
-# skips, and refusing rather than passing when the PR cannot be read.
+# skips, the gh-axi fallback, and refusing rather than passing when the PR
+# cannot be read.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -19,32 +20,61 @@ done
 
 FAKEBIN="$TMP_ROOT/fakebin"
 mkdir -p "$FAKEBIN"
-# gh, answering from fixture files under $FM_TEST_FX: `pr view` builds the PR
-# record from title/body/head, and `api .../contents/<path>` returns the
-# template when <path> equals the fixture's template-path, else a 404.
+# fx_record <api-path>: the raw GitHub REST record built from fixture files
+# under $FM_TEST_FX, or a 404 on stderr. The PR record comes from
+# title/body/head; contents/<path>?ref=main is the template when <path> equals
+# the fixture's template-path. A gh-down file fails every gh read, as when gh
+# is unauthenticated, while gh-axi still reads.
+cat > "$FAKEBIN/fx-record.sh" <<'SH'
+fx_record() {
+  local fx=$FM_TEST_FX path=${1#/} file
+  case $path in
+    repos/acme/widget/pulls/7)
+      [ ! -e "$fx/pr-fail" ] || { echo "gh: network unreachable" >&2; return 1; }
+      jq -n --rawfile t "$fx/title" --rawfile b "$fx/body" --arg h "$(cat "$fx/head")" \
+        '{title: ($t | rtrimstr("\n")), body: $b, head: {ref: $h}, base: {ref: "main"}}'
+      ;;
+    repos/acme/widget/contents/*'?ref=main')
+      [ ! -e "$fx/api-fail" ] || { echo "gh: Internal Server Error (HTTP 500)" >&2; return 1; }
+      file=${path#repos/acme/widget/contents/}
+      file=${file%'?ref=main'}
+      if [ -e "$fx/template" ] && [ "$file" = "$(cat "$fx/template-path")" ]; then
+        jq -n --arg c "$(base64 < "$fx/template")" '{type: "file", encoding: "base64", content: $c}'
+      else
+        echo "gh: Not Found (HTTP 404)" >&2
+        return 1
+      fi
+      ;;
+    *) echo "gh: unexpected path $path" >&2; return 1 ;;
+  esac
+}
+SH
+# gh api --method GET <path> --jq <filter>, printing a string result raw.
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
-fx=$FM_TEST_FX
-case "${1:-} ${2:-}" in
-  "pr view")
-    [ ! -e "$fx/pr-fail" ] || { echo "gh: network unreachable" >&2; exit 1; }
-    jq -n --rawfile t "$fx/title" --rawfile b "$fx/body" --arg h "$(cat "$fx/head")" \
-      '{title: ($t | rtrimstr("\n")), body: $b, headRefName: $h, baseRefName: "main"}'
-    ;;
-  "api --method")
-    [ ! -e "$fx/api-fail" ] || { echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; }
-    path=${4#repos/acme/widget/contents/}
-    if [ -e "$fx/template" ] && [ "$path" = "$(cat "$fx/template-path")" ]; then
-      jq -n --arg c "$(base64 < "$fx/template")" '{type: "file", encoding: "base64", content: $c}'
-    else
-      echo "gh: Not Found (HTTP 404)" >&2
-      exit 1
-    fi
-    ;;
-  *) exit 2 ;;
-esac
+. "$(dirname "$0")/fx-record.sh"
+[ "$1 $2 $3 $5" = "api --method GET --jq" ] || exit 2
+[ ! -e "$FM_TEST_FX/gh-down" ] || { echo "gh: authentication required (HTTP 401)" >&2; exit 1; }
+record=$(fx_record "$4") || exit 1
+printf '%s' "$record" | jq -r "$6"
 SH
-chmod +x "$FAKEBIN/gh"
+# gh-axi api GET <path> --jq <filter>: errors on stdout, and a raw result
+# wrapped in its TOON envelope and clamped at 4000 characters, as gh-axi does.
+cat > "$FAKEBIN/gh-axi" <<'SH'
+#!/usr/bin/env bash
+. "$(dirname "$0")/fx-record.sh"
+[ "$1 $2 $4" = "api GET --jq" ] || exit 2
+: > "$FM_TEST_FX/gh-axi-used"
+if ! record=$(fx_record "$3" 2>&1); then
+  printf 'error: "%s"\ncode: NOT_FOUND\n' "$record"
+  exit 1
+fi
+out=$(printf '%s' "$record" | jq -r "$5")
+truncated=false
+[ "${#out}" -le 4000 ] || { out=${out:0:4000}; truncated=true; }
+printf 'api_response:\n  body: %s\n  truncated: %s\n' "$out" "$truncated"
+SH
+chmod +x "$FAKEBIN/gh" "$FAKEBIN/gh-axi"
 
 TEMPLATE='## Summary
 
@@ -143,8 +173,17 @@ d=$(new_case title-plain)
 printf 'Expire stale widget cache entries\n' > "$d/fx/title"
 run_check "$d"
 expect_code 1 "$RC" "a title without a type fails"
-assert_contains "$OUT" 'title: does not match <type>: <description>' "the expected shape is named"
-pass "a title that is not <type>: <description> fails"
+assert_contains "$OUT" 'title: does not match <type>: <description> or <type>(<scope>): <description>' "the expected shape is named"
+pass "a title that is not a conventional title fails"
+
+d=$(new_case title-scope)
+printf 'feat(api): expire stale widget cache entries\n' > "$d/fx/title"
+run_check "$d"
+expect_code 0 "$RC" "a keyless branch accepts a scoped conventional title: $OUT"
+printf 'fix(DF-9): expire stale widget cache entries\n' > "$d/fx/title"
+run_check "$d"
+expect_code 0 "$RC" "a keyless branch accepts any scope: $OUT"
+pass "a keyless branch accepts <type>: and <type>(<scope>): titles"
 
 d=$(new_case title-key)
 printf 'feat/DF-123-widget-cache\n' > "$d/fx/head"
@@ -152,29 +191,30 @@ printf 'fix: expire stale widget cache entries\n' > "$d/fx/title"
 run_check "$d"
 expect_code 1 "$RC" "a ticket branch requires the key in the title"
 assert_contains "$OUT" 'title: does not match <type>(DF-123): <description>' "the branch key is named"
+printf 'fix(api): expire stale widget cache entries\n' > "$d/fx/title"
+run_check "$d"
+expect_code 1 "$RC" "a non-key scope fails on a ticket branch"
 printf 'fix(DF-124): expire stale widget cache entries\n' > "$d/fx/title"
 run_check "$d"
 expect_code 1 "$RC" "a different key fails"
 printf 'fix(DF-123): expire stale widget cache entries\n' > "$d/fx/title"
 run_check "$d"
 expect_code 0 "$RC" "the branch key in the title passes: $OUT"
-pass "a ticket-keyed branch requires <type>(<KEY>): <description> with that key"
+pass "a <type>/<KEY>-<NNN>-<description> branch requires <type>(<KEY>-<NNN>): <description>"
 
-d=$(new_case title-registered-key)
+d=$(new_case title-registered-prefix)
 printf '# Projects\n\n- widget [no-mistakes branch=feat/DF-] - Widget service (added 2026-01-01)\n' > "$d/home/data/projects.md"
 run_check "$d"
-expect_code 1 "$RC" "a registered key-shaped branch prefix requires a key"
-assert_contains "$OUT" '<type>(<TICKET-KEY>): <description>' "the keyed shape is named"
-printf 'fix(DF-9): expire stale widget cache entries\n' > "$d/fx/title"
-run_check "$d"
-expect_code 0 "$RC" "any key passes when the branch carries none: $OUT"
-pass "a registered key-shaped branch prefix requires a ticket key in the title"
+expect_code 0 "$RC" "a registered key-shaped branch prefix does not demand a key: $OUT"
+pass "only the head branch itself decides whether a ticket key is required"
 
 d=$(new_case title-not-a-key)
-printf 'fix/handle-UTF-8-input\n' > "$d/fx/head"
-run_check "$d"
-expect_code 0 "$RC" "a key-shaped word later in the branch is not a ticket key: $OUT"
-pass "only a key leading the branch's last segment counts as a ticket key"
+for head in fix/handle-UTF-8-input wip/DF-123-widget-cache feat/D-123-widget-cache; do
+  printf '%s\n' "$head" > "$d/fx/head"
+  run_check "$d"
+  expect_code 0 "$RC" "$head does not carry a ticket key: $OUT"
+done
+pass "a branch not shaped <type>/<KEY>-<NNN>-<description> carries no ticket key"
 
 # --- check 3: internal wording ----------------------------------------------
 
@@ -197,6 +237,17 @@ printf '%s\nWe debriefed the captainship team briefly about the briefcase.\n' "$
 run_check "$d"
 expect_code 0 "$RC" "matches are whole words only: $OUT"
 pass "internal wording matches whole words only"
+
+d=$(new_case vocab-ordinary)
+# shellcheck disable=SC2016 # Literal backticks are Markdown code-span test data.
+printf '%s\nIn brief, a brief summary of the YOLO detector change.\nImports `from ultralytics import YOLO` and the `firstmate` fixture.\n```python\n# captain of the crewmate pool\nfrom ultralytics import YOLO\n```\n' "$GOOD_BODY" > "$d/fx/body"
+run_check "$d"
+expect_code 0 "$RC" "ordinary words and code are not internal wording: $OUT"
+printf '%s\nScoped per the task brief.\n' "$GOOD_BODY" > "$d/fx/body"
+run_check "$d"
+expect_code 1 "$RC" "task brief is internal wording"
+assert_contains "$OUT" 'body line 10: internal wording "task brief"' "the task brief line is named"
+pass "ordinary words such as brief and YOLO, and code, are not internal wording"
 
 d=$(new_case footer)
 printf '%s\n## Pipeline\n\nUpdates from [git push no-mistakes](https://example.invalid)\n\n<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc"} -->\n' "$GOOD_BODY" > "$d/fx/body"
@@ -277,8 +328,27 @@ d=$(new_case pr-unreadable)
 : > "$d/fx/pr-fail"
 run_check "$d"
 expect_code 1 "$RC" "an unreadable PR is not a pass"
-assert_contains "$OUT" "error: could not read $URL" "the read failure is reported"
-pass "an unreadable PR fails instead of passing"
+assert_contains "$OUT" "error: could not read $URL from GitHub with gh or gh-axi" "the read failure is reported"
+assert_contains "$OUT" 'gh: gh: network unreachable' "the gh reason is named"
+assert_contains "$OUT" 'gh-axi: error: "gh: network unreachable"' "the gh-axi reason is named"
+pass "a PR neither gh nor gh-axi can read fails instead of passing"
+
+d=$(new_case gh-axi-fallback)
+: > "$d/fx/gh-down"
+long=$(printf 'Line of ordinary prose about the cache change. %.0s' $(seq 1 120))
+printf '%s\n%s\n\nTouches the café widget.\nThe crewmate kept this narrow.\n' "$GOOD_BODY" "$long" > "$d/fx/body"
+run_check "$d"
+expect_code 1 "$RC" "the gh-axi read still runs every check"
+[ -e "$d/fx/gh-axi-used" ] || fail "gh-axi was not used when gh could not read the PR"
+assert_contains "$OUT" 'body line 13: internal wording "crewmate"' "a violation past gh-axi's output clamp is found on its line"
+printf '## Summary\n\n' > "$d/fx/body"
+run_check "$d"
+expect_code 1 "$RC" "the template read through gh-axi is enforced"
+assert_contains "$OUT" 'body: missing template heading: ## Test plan' "the gh-axi template is read"
+printf '%s' "$GOOD_BODY" > "$d/fx/body"
+run_check "$d"
+expect_code 0 "$RC" "a conforming PR read through gh-axi passes: $OUT"
+pass "gh-axi reads the PR and template when gh cannot, beyond its output clamp"
 
 d=$(new_case template-unreadable)
 : > "$d/fx/api-fail"
@@ -305,3 +375,20 @@ assert_contains "$OUT" "error: $URL was not recorded as ready" "the refusal is e
 assert_no_grep 'pr=' "$d/home/state/task-a.meta" "nothing is recorded on refusal"
 [ ! -e "$d/home/state/task-a.check.sh" ] || fail "no merge poll is armed on refusal"
 pass "fm-pr-check records and arms nothing while the description fails"
+
+d=$(new_case pr-merge-unrecorded)
+printf 'Fix the cache\n' > "$d/fx/title"
+RC=0
+OUT=$(FM_HOME="$d/home" FM_TEST_FX="$d/fx" FM_PR_CHECK_MERGE=1 PATH="$FAKEBIN:$PATH" \
+  bash "$PR_CHECK" task-a "$URL" 2>&1) || RC=$?
+expect_code 1 "$RC" "the merge-time record still guards a PR never recorded ready"
+assert_contains "$OUT" "error: $URL was not recorded as ready" "the merge-time refusal is explicit"
+assert_no_grep 'pr=' "$d/home/state/task-a.meta" "nothing is recorded on the merge-time refusal"
+fm_write_meta "$d/home/state/task-a.meta" \
+  "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$d/wt" \
+  "project=$d/home/projects/widget" "kind=ship" "mode=no-mistakes" "pr=$URL"
+RC=0
+OUT=$(FM_HOME="$d/home" FM_TEST_FX="$d/fx" FM_PR_CHECK_MERGE=1 PATH="$FAKEBIN:$PATH" \
+  bash "$PR_CHECK" task-a "$URL" 2>&1) || RC=$?
+assert_not_contains "$OUT" 'description guard' "the merge-time re-record of the recorded PR skips the guard"
+pass "the merge-time record skips the guard only for the PR already recorded ready"

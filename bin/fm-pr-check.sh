@@ -18,7 +18,8 @@
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # A PR whose live title or body fails bin/fm-pr-description-check.sh is refused
-# the same way, recording and arming nothing; the merge-time re-record skips it.
+# the same way, recording and arming nothing; the merge-time re-record skips it
+# only when the task already records this exact PR as ready.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -113,8 +114,10 @@ fi
 # The live PR title and body must pass the description guard before anything is
 # recorded, so a leaked or off-template description is never reported ready
 # (bin/fm-pr-description-check.sh owns the checks and their scope). The
-# merge-time re-record skips it: the PR was already accepted as ready.
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && ! "$SCRIPT_DIR/fm-pr-description-check.sh" "$ID" "$URL" >&2; then
+# merge-time re-record skips it only for a PR already recorded here as ready.
+RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+if { [ "${FM_PR_CHECK_MERGE:-}" != 1 ] || [ "$RECORDED_PR" != "$URL" ]; } \
+  && ! "$SCRIPT_DIR/fm-pr-description-check.sh" "$ID" "$URL" >&2; then
   echo "error: $URL was not recorded as ready because its description failed the PR description guard" >&2
   exit 1
 fi
