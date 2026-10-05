@@ -118,10 +118,15 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   check: ready work waiting with free lane slots: (<open>/<target> open): <ids> - start the top ready item now, or record why it waits
 #   check: ready work waiting with no worker working: <ids> - start each or record why it waits
 #                          a secondmate home's heartbeat found dispatchable
-#                          queued work (fm-tasks-axi.sh ready) while none of its
-#                          workers is provably working; once per new ready set
+#                          queued work (fm-tasks-axi.sh ready) while the home sits
+#                          below its lane floor: with config/lane-target naming a
+#                          positive integer, fewer open lanes than that target;
+#                          with no usable target, none of its workers is provably
+#                          working. Re-raised while the condition holds, once per
+#                          new ready set and then every READY_WORK_RESURFACE_SECS
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -391,6 +396,12 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # invisibly - except an item held for the captain while the away-posture record
 # exists, which is never rechecked (away_record_present below).
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# A secondmate home below its lane floor with ready work re-raises the same
+# condition on this cadence instead of going silent after one wake: the lead
+# either starts the work or records why it waits, and that answer must not need a
+# fresh incident to be repeated.
+READY_WORK_RESURFACE_SECS=${FM_READY_WORK_RESURFACE_SECS:-1800}
+case "$READY_WORK_RESURFACE_SECS" in ''|*[!0-9]*|0) READY_WORK_RESURFACE_SECS=1800 ;; esac
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
@@ -2349,15 +2360,59 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# config/lane-target: one positive integer, the per-home lane floor. Prints it
+# and returns 0 only for a regular file holding exactly that; an absent,
+# unreadable, or malformed file returns 1 and is never treated as a number, so
+# the caller falls back to the no-worker-working rule.
+lane_target_value() {
+  local path=$FM_HOME/config/lane-target raw
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  raw=$(awk 'NF { print }' "$path" 2>/dev/null) || return 1
+  case "$raw" in ''|*"$'\n'"*) return 1 ;; esac
+  case "$raw" in *[!0-9]*) return 1 ;; esac
+  [ "$raw" -gt 0 ] || return 1
+  printf '%s\n' "$raw"
+}
+
+# Open lanes: every state/<task>.meta whose kind is ship (the default when a
+# meta omits it) or scout. A secondmate endpoint's own meta (kind=secondmate) is
+# not a lane of this home, so it never counts toward the floor.
+open_lane_count() {
+  local meta kind count=0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    kind=$(grep '^kind=' "$meta" 2>/dev/null | head -1 | cut -d= -f2- || true)
+    case "${kind:-ship}" in
+      ship|scout) count=$((count + 1)) ;;
+    esac
+  done
+  printf '%s\n' "$count"
+}
+
+# A malformed config/lane-target is reported once per distinct content, never
+# every heartbeat and never as a number.
+warn_invalid_lane_target_once() {
+  local marker=$STATE/.ready-work-lane-target-invalid current
+  current=$(cat "$FM_HOME/config/lane-target" 2>/dev/null) || current=unreadable
+  [ "$(cat "$marker" 2>/dev/null)" = "$current" ] && return 0
+  printf '%s' "$current" > "$marker" 2>/dev/null || true
+  triage_log "lane-target is not a positive integer; using the no-worker-working rule instead"
+}
+
 # Heartbeat idle-lead check: 0 when this is a secondmate home, its backlog has
-# dispatchable queued work, none of its workers is provably working, and that
-# ready set differs from the one last surfaced. Sets READY_WORK_IDS. An empty
-# ready set forgets the last one so the same work surfaces again if it returns.
-# A lead that went idle with ready work otherwise has no trigger: an absorbed
-# heartbeat never reads the backlog.
+# dispatchable queued work, and the home sits below its lane floor. With
+# config/lane-target naming a positive integer N, the floor is fewer than N open
+# lanes, and a home with working workers but free slots is exactly the 5 Oct
+# stall that the no-worker-working rule missed. With no usable target the rule is
+# the older one: no worker is provably working. A condition that still holds
+# re-raises on READY_WORK_RESURFACE_SECS; a new ready set fires at once. Sets
+# READY_WORK_IDS and READY_WORK_REASON. An empty ready set forgets the last one so
+# the same work surfaces again if it returns. A lead below its floor with ready
+# work otherwise has no trigger: an absorbed heartbeat never reads the backlog.
 ready_work_waits_idle() {
-  local meta task
+  local meta task target open now surfaced surfaced_at surfaced_ids
   READY_WORK_IDS=
+  READY_WORK_REASON=
   [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] || return 1
   READY_WORK_IDS=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null \
     | awk '/^ready\[[0-9]+\]/ { on = 1; next } on && /^  / { sub(/^  /, ""); split($0, f, ","); print f[1]; next } { on = 0 }' \
@@ -2366,13 +2421,42 @@ ready_work_waits_idle() {
     rm -f "$STATE/.ready-work-surfaced"
     return 1
   fi
-  [ "$(cat "$STATE/.ready-work-surfaced" 2>/dev/null)" != "$READY_WORK_IDS" ] || return 1
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    task=${meta##*/}
-    crew_is_provably_working "${task%.meta}" && return 1
-  done
-  return 0
+  target=$(lane_target_value) || target=
+  if [ -z "$target" ] && [ -f "$FM_HOME/config/lane-target" ]; then
+    warn_invalid_lane_target_once
+  fi
+  if [ -n "$target" ]; then
+    open=$(open_lane_count)
+    [ "$open" -lt "$target" ] || return 1
+    READY_WORK_REASON="check: ready work waiting with free lane slots ($open/$target open): $READY_WORK_IDS - start the top ready item now, or record why it waits"
+  else
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      task=${meta##*/}
+      crew_is_provably_working "${task%.meta}" && return 1
+    done
+    READY_WORK_REASON="check: ready work waiting with no worker working: $READY_WORK_IDS - start each or record why it waits"
+  fi
+  # Re-raise gate: a new ready set fires at once; the same still-holding set only
+  # again after READY_WORK_RESURFACE_SECS. A record without a usable timestamp
+  # (the pre-timestamp format, or a rewound clock) counts as never surfaced.
+  fm_epoch_seconds_to now
+  surfaced=$(cat "$STATE/.ready-work-surfaced" 2>/dev/null) || surfaced=
+  case "$surfaced" in
+    *$'\t'*) surfaced_at=${surfaced%%$'\t'*}; surfaced_ids=${surfaced#*$'\t'} ;;
+    *) surfaced_at=0; surfaced_ids=$surfaced ;;
+  esac
+  [ "$surfaced_ids" != "$READY_WORK_IDS" ] && return 0
+  case "$surfaced_at" in ''|*[!0-9]*) surfaced_at=0 ;; esac
+  [ "$(( now - surfaced_at ))" -ge "$READY_WORK_RESURFACE_SECS" ]
+}
+
+# Records the ready set just surfaced with its epoch, after the wake was
+# enqueued, so the re-raise gate above is answerable on the next heartbeat.
+record_ready_work_surfaced() {
+  local now
+  fm_epoch_seconds_to now
+  printf '%s\t%s\n' "$now" "$READY_WORK_IDS" > "$STATE/.ready-work-surfaced"
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -3341,10 +3425,10 @@ EOF
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
     elif ready_work_waits_idle; then
-      reason="check: ready work waiting with no worker working: $READY_WORK_IDS - start each or record why it waits"
+      reason=$READY_WORK_REASON
       fm_wake_append check ready-work "$reason" || exit 1
       touch "$STATE/.last-heartbeat"
-      printf '%s\n' "$READY_WORK_IDS" > "$STATE/.ready-work-surfaced"
+      record_ready_work_surfaced
       wake "$reason"
     else
       if ! mark_all_captain_relevant_surfaced; then

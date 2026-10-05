@@ -909,6 +909,19 @@ When the file is absent, worker launches do not add a board address and retain t
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
 
+## Lane floor (config/lane-target)
+
+The optional local, gitignored `config/lane-target` holds one positive integer: the number of open lanes this home keeps working while ready backlog work exists.
+It is primary-authoritative inherited configuration, so one value in the main home reaches every secondmate home through [`fm_config_inherit_items`](../bin/fm-config-inherit-lib.sh).
+
+An open lane is a `state/<task>.meta` whose `kind` is `ship` or `scout`; a secondmate endpoint's own meta is not a lane of that home.
+
+In a secondmate home, a heartbeat whose home sits below the floor with `fm-tasks-axi.sh ready` work raises one check wake naming the open and target counts and the first ready ids, re-raised while the condition holds every `FM_READY_WORK_RESURFACE_SECS` (1800 by default).
+Without the file, a home keeps the older rule and wakes only when no worker is provably working.
+A malformed value is reported once in the watcher's triage log and then treated as absent, never as a number; `bin/fm-watch.sh`'s header owns the exact reason lines.
+
+The floor is a floor, not a cap: it never asks a home to stop working above its target.
+
 ## Home brief include (config/brief-include.md)
 
 The optional gitignored `config/brief-include-shared.md` and home-local `config/brief-include.md` add standing worker instructions to every ship and scout brief.
