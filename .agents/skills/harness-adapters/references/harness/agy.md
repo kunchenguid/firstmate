@@ -48,7 +48,17 @@ No environment marker is promoted: `AGENT=1` observed on a live TUI is an inheri
 `fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
 Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
+## Delegation tools and PreToolUse guard
+
+Antigravity CLI exposes built-in in-process subagent tools (`invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents`).
+Firstmate must never use these for project delegation because in-process subagents bypass Treehouse worktrees, Herdr/tmux panes, and fleet supervision records.
+Tracked `.agents/hooks.json` registers a `PreToolUse` hook running `bin/fm-subagent-pretool-check.sh`, which parses Antigravity's `.toolCall.name` payload and returns `{"decision":"deny","reason":"..."}` on stdout with exit 0 to block native subagent creation in primary homes.
+In linked task worktrees, the shared primary-scope check keeps the guard inert so legitimate worker tools remain allowed.
+
 ## Primary integration
 
-Antigravity CLI is recognized as an active primary supervisor for session locking via `../../../../../bin/fm-session-lock-lib.sh` and ancestry detection (`agy`).
-`../../../../../docs/supervision-protocols/` falls back to `unknown.md` for watcher wake instructions.
+Supported via the synchronous `Stop` hook park model, registered in `.agents/hooks.json` running `bin/fm-turnend-guard-agy.sh`.
+When fleet supervision is active, the hook foregrounds `bin/fm-watch-arm.sh` and parks until an actionable wake arrives, returning `{"decision": "continue", "reason": "..."}` on stdout with exit 0 to immediately re-enter the loop with the wake injected as a system message.
+When supervision is inactive or the session is in away mode (`state/.afk`), it returns `{"decision": "allow"}` to stop cleanly.
+Consecutive hook continuations are bounded by `FM_AGY_TURNEND_LOOP_CEILING` (default 180), and failed parks by `FM_AGY_TURNEND_BLOCK_BUDGET` (default 3) before failing open.
+Shared turn-end guard logic is reached via `bin/fm-turnend-guard.sh --agy`.
