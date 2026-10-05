@@ -126,6 +126,14 @@ herdr_submit_claude_prefix() {  # <resp-dir> <typed-text>
   printf '  \xe2\x9d\xaf %s\n' "$text" > "$resp/4.out"
 }
 
+# herdr_submit_preflight_prefix: fm_backend_send_text_submit reads the composer
+# once before the adapter types. That read is call 1 and shows an empty
+# composer, so every adapter call moves one slot later.
+herdr_submit_preflight_prefix() {  # <resp-dir>
+  herdr_submit_shift "$1" 1
+  printf '  \xe2\x9d\xaf\n' > "$1/1.out"
+}
+
 # make_herdr_server_env_fakebin: a stateful server stub that records only the
 # long-lived server launch environment, then reports the server as running.
 make_herdr_server_env_fakebin() {  # <dir> -> echoes fakebin dir
@@ -4445,6 +4453,7 @@ test_send_text_submit_refuses_confirming_enter_on_exit_picker() {
     '  2. Move to background and exit' \
     '  3. Stay' \
     'Enter to confirm · Esc to cancel' > "$resp/8.out"
+  herdr_submit_preflight_prefix "$resp"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     TMPDIR="$dir/tmp" \
@@ -4474,6 +4483,7 @@ test_blocked_submit_leaves_the_exit_picker_to_the_next_composer_read() {
     '  2. Move to background and exit' \
     '  3. Stay' \
     'Enter to confirm · Esc to cancel' > "$resp/8.out"
+  herdr_submit_preflight_prefix "$resp"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     FM_COMPOSER_DIALOG_SINK="$dir/sink" \
