@@ -170,6 +170,8 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 Resolve the project independently for every request.
 An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work under way, and project code or README.
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
+When multiple messages contain independent requests, handle each one and check the visible conversation for earlier unanswered or unfinished requests before replying or stopping; a topic change does not cancel an earlier request unless the user explicitly cancels or replaces it.
+An acknowledgement or receipt is not a substantive answer, and ordinary questions do not require a task record, todo tool, or model-maintained unanswered-request list; commissioned work remains subject to the existing task lifecycle.
 
 Keep `local-only` work in the main home.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
