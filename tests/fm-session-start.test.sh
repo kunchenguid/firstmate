@@ -458,9 +458,9 @@ case "${1:-} ${2:-}" in
   "pane get")
     pane=${3:-}
     if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","tab_id":"t-new","workspace_id":"ws1"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","terminal_id":"term-new","tab_id":"t-new","workspace_id":"ws1"}}}'
     elif [ "$pane" = p-old ] && [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old","tab_id":"t-old","workspace_id":"ws1"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old","terminal_id":"term-old","tab_id":"t-old","workspace_id":"ws1"}}}'
     else
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
@@ -488,21 +488,25 @@ SH
   chmod +x "$fakebin/herdr"
 }
 
-# make_fake_herdr <fakebin> <live-pane> [odd-status-pane]: `herdr pane get
-# <pane>` succeeds only for the given pane id - the exact primitive
-# fm_backend_target_exists uses for a herdr endpoint liveness read. An
-# optional second pane id answers with exit 4, the shape backend probes
-# produce for a gone surface without normalising to 1 (jq -e on empty input,
-# orca's ok:false, a missing tmux binary). No version/server-start calls: a
-# liveness check must never auto-start a server (fm-backend.sh's contract).
+# make_fake_herdr <fakebin> <odd-status-pane> <live-pane>...: `herdr pane get
+# <pane>` succeeds only for the given live pane ids, each held by terminal
+# term-<pane> - the exact primitive fm_backend_target_exists uses for a herdr
+# endpoint liveness and identity read. A non-empty odd-status pane id answers
+# with exit 4, the shape backend probes produce for a gone surface without
+# normalising to 1 (jq -e on empty input, orca's ok:false, a missing tmux
+# binary). No version/server-start calls: a liveness check must never
+# auto-start a server (fm-backend.sh's contract).
 make_fake_herdr() {
-  local fakebin=$1 live=$2 odd=${3:-}
+  local fakebin=$1 odd=$2; shift 2
   cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
   [ -n "$odd" ] && [ "\${3:-}" = "$odd" ] && exit 4
-  [ "\${3:-}" = "$live" ] && exit 0
+  case " $* " in
+    *" \${3:-} "*) printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-%s"}}}\\n' "\$3" "\$3"; exit 0 ;;
+  esac
+  printf '%s\\n' '{"error":{"code":"pane_not_found"}}'
   exit 1
 fi
 exit 1
@@ -528,7 +532,11 @@ if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
     kill -KILL "\$read_shell" 2>/dev/null
     exit 0
   fi
-  [ "\${3:-}" = "$live" ] && exit 0
+  if [ "\${3:-}" = "$live" ]; then
+    printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-%s"}}}\\n' "\$3" "\$3"
+    exit 0
+  fi
+  printf '%s\\n' '{"error":{"code":"pane_not_found"}}'
   exit 1
 fi
 exit 1
@@ -546,7 +554,11 @@ make_fake_herdr_hanging_read() {
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
   [ "\${3:-}" = "$hangpane" ] && sleep 300
-  [ "\${3:-}" = "$live" ] && exit 0
+  if [ "\${3:-}" = "$live" ]; then
+    printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-%s"}}}\\n' "\$3" "\$3"
+    exit 0
+  fi
+  printf '%s\\n' '{"error":{"code":"pane_not_found"}}'
   exit 1
 fi
 exit 1
@@ -669,6 +681,7 @@ EOF
     printf 'herdr_workspace_id=ws1\n'
     printf 'herdr_tab_id=t-old\n'
     printf 'herdr_pane_id=p-old\n'
+    printf 'herdr_terminal_id=term-old\n'
   } > "$home/state/$id.meta"
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
@@ -1374,6 +1387,8 @@ EOF
   assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
   assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
     "the real respawn path did not record the replacement Herdr pane"
+  assert_grep 'herdr_terminal_id=term-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
+    "the real respawn path did not record the replacement pane's terminal identity"
   pass "session start: a confirmed Herdr husk is closed and relaunched"
 }
 
@@ -1407,21 +1422,24 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  make_fake_herdr "$fakebin" "p-live" "p-odd"
+  make_fake_herdr "$fakebin" p-odd p-live p-reissued
 
-  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\nherdr_terminal_id=term-p-live\n' > "$home/state/task-live.meta"
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
+  # Herdr reissued this finished task's pane id to another terminal.
+  printf 'window=sess:p-reissued\nkind=ship\nbackend=herdr\nherdr_terminal_id=term-gone\n' > "$home/state/task-reissued.meta"
   printf 'window=sess:p-odd\nkind=ship\nbackend=herdr\n' > "$home/state/task-odd.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
   assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-reissued)" "a pane id reissued to another terminal was reported as the task's live endpoint"
   assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-odd)" \
     "a probe exiting 4 for a gone surface was not reported dead"
   assert_not_contains "$out" "endpoint: error (backend=herdr window=sess:p-odd" \
     "a probe exiting 4 was mislabelled as a failed read"
 
-  pass "herdr endpoint liveness is reported per task: alive, dead for exit 1, dead for any other probe status"
+  pass "herdr endpoint liveness is reported per task: alive, dead for exit 1, a reissued pane, or any other probe status"
 }
 
 test_endpoint_read_death_is_isolated_and_reported() {
@@ -1437,7 +1455,7 @@ EOF
 
   printf 'window=sess:p-doom\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-doom.meta"
   printf 'working: doomed task marker\n' > "$home/state/task-a-doom.status"
-  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\nherdr_terminal_id=term-p-live\n' > "$home/state/task-z-live.meta"
 
   out=$(FM_SESSION_START_ENDPOINT_TIMEOUT=bogus run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
@@ -1472,7 +1490,7 @@ EOF
   make_fake_herdr_hanging_read "$fakebin" "p-live" "p-slow"
 
   printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
-  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\nherdr_terminal_id=term-p-live\n' > "$home/state/task-z-live.meta"
 
   # The same fake hangs the side-band home summary before the endpoint section.
   # Bound that unrelated refresh at 5s instead of paying its production 60s;
@@ -1508,7 +1526,7 @@ EOF
   make_fake_herdr_hanging_read "$fakebin" "p-live" "p-slow"
 
   printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
-  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\nherdr_terminal_id=term-p-live\n' > "$home/state/task-z-live.meta"
 
   # Only the unrelated summary gets a shorter fixture budget. The invalid
   # endpoint value must still fall back to the real 10s production bound.

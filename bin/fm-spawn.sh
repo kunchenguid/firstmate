@@ -1190,6 +1190,7 @@ HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+HERDR_TERMINAL_ID=
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 SPAWN_CONTROL_LOCK=
@@ -1823,6 +1824,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+    HERDR_TERMINAL_ID=$(fm_meta_get "$RELAUNCH_META" herdr_terminal_id)
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -3594,7 +3596,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
     HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    read -r HERDR_TAB_ID HERDR_PANE_ID HERDR_TERMINAL_ID <<EOF
 $HERDR_TASK_IDS
 EOF
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
@@ -3602,6 +3604,7 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    FM_BACKEND_HERDR_IDENTITY_PIN=$T
     SES=$HERDR_SES
     WT_TARGET=$T
   fi
@@ -3678,6 +3681,7 @@ else
             HERDR_SEEDED_DEFAULT_TAB_ID=""
             HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
             HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_TERMINAL_ID=$FM_BACKEND_HERDR_PROJECTION_TERMINAL_ID
             HERDR_PROJECTION_ABORT_CLEANUP=1
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
@@ -3740,6 +3744,7 @@ else
             HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
             HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
             HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_TERMINAL_ID=$FM_BACKEND_HERDR_PROJECTION_TERMINAL_ID
             HERDR_PROJECTION_ABORT_CLEANUP=1
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
@@ -3779,7 +3784,7 @@ else
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+      read -r HERDR_TAB_ID HERDR_PANE_ID HERDR_TERMINAL_ID <<EOF
 $HERDR_TASK_IDS
 EOF
     fi
@@ -3788,6 +3793,11 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    # This spawn created the pane, so it is this task's own endpoint even when
+    # an older record names the same reissued pane id. The pin holds only
+    # until this task's record is published below.
+    # shellcheck disable=SC2034 # Read by the sourced Herdr adapter.
+    FM_BACKEND_HERDR_IDENTITY_PIN=$T
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -4873,6 +4883,35 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# Herdr reissues pane ids, so the record also binds the pane's terminal id, the
+# identity every later endpoint read and action checks before trusting the
+# pane id (bin/backends/herdr.sh's fm_backend_herdr_endpoint_identity). The id
+# comes from the pane-create response, or from the record of an adopted
+# endpoint, and the pane read here must still answer with it, so a pane id
+# reissued since then cannot lend its terminal to this record. A record whose
+# identity cannot be established is never published.
+if [ "$BACKEND" = herdr ]; then
+  HERDR_READ_TERMINAL_ID=$(fm_backend_herdr_pane_terminal_id "$HERDR_SES" "$HERDR_PANE_ID") || HERDR_READ_TERMINAL_ID=
+  if [ -z "$HERDR_READ_TERMINAL_ID" ] || { [ -n "$HERDR_TERMINAL_ID" ] && [ "$HERDR_READ_TERMINAL_ID" != "$HERDR_TERMINAL_ID" ]; }; then
+    echo "error: could not establish the terminal identity of herdr pane $HERDR_SES:$HERDR_PANE_ID for $ID; refusing to publish its record" >&2
+    # The abort cleanup closes a pane this spawn created (pinned above), flat
+    # or projected, only when its terminal identity was read. An unreadable
+    # identity grants no close by pane id alone, so that pane is left open for
+    # the operator.
+    if [ "${FM_BACKEND_HERDR_IDENTITY_PIN:-}" = "$T" ]; then
+      if [ -n "$HERDR_READ_TERMINAL_ID" ]; then
+        HERDR_PROJECTION_ABORT_CLEANUP=1
+        HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+        HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+      else
+        HERDR_PROJECTION_ABORT_TASK_PANE=
+        echo "error: herdr pane $HERDR_SES:$HERDR_PANE_ID was left open; close it by hand" >&2
+      fi
+    fi
+    exit 1
+  fi
+  HERDR_TERMINAL_ID=$HERDR_READ_TERMINAL_ID
+fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -4890,7 +4929,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id herdr_terminal_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4925,6 +4964,7 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    [ -z "$HERDR_TERMINAL_ID" ] || echo "herdr_terminal_id=$HERDR_TERMINAL_ID"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
@@ -5018,6 +5058,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+fi
+# From here every read and action on the endpoint checks it against this
+# task's own published record and the terminal id it recorded.
+if [ "$BACKEND" = herdr ]; then
+  unset FM_BACKEND_HERDR_IDENTITY_PIN
+  fm_backend_bind_task_record "$STATE/$ID.meta" "$META_WINDOW"
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so
