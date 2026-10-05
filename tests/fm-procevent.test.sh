@@ -3304,7 +3304,34 @@ assert_not_contains "$out" "Context data:" \
   "a choice row surfaced machine-generated context as a comment"
 assert_not_contains "$out" $'\nprompt:\n' \
   "a choice row gained a freeform comment field"
+assert_not_contains "$out" $'\nnote:\n' \
+  "a choice row without a note invented a note field"
 pass "read does not present choice context as a comment"
+
+# A real Lavish choice row with a note: the element text carries only the
+# selected option, and the note lives in the row's Context data.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]{uid,prompt,selector,tag,text}:
+  "5","Q5 answer: B: no locks and no report | Notes: first to merge wins\n\nContext data:\n{\n  \"question\": \"Q5\",\n  \"answer\": \"B: no locks and no report\",\n  \"notes\": \"first to merge wins\\nsecond line\"\n}","html > body > main > form:nth-of-type(5)",choice,"Q5: B: no locks and no report"
+  "2","Order proof: yes\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"order-proof\",\n  \"selection\": \"yes\",\n  \"note\": \"only after the rerun\"\n}","form",choice,"Order proof: yes"
+EOF
+out=$(read_out) || fail "read failed on a choice-with-note capture"
+assert_contains "$out" $'text:\n| Q5: B: no locks and no report\nnote:\n| first to merge wins\n| second line' \
+  "read dropped the notes attached to a choice answer"
+assert_contains "$out" $'text:\n| Order proof: yes\nnote:\n| only after the rerun' \
+  "read dropped the note attached to a bearings choice answer"
+assert_not_contains "$out" "Context data:" \
+  "a choice row with a note surfaced machine-generated context"
+assert_not_contains "$out" $'\nprompt:\n' \
+  "a choice row with a note gained a freeform comment field"
+"$ROOT/bin/fm-procevent-lavish.sh" answers "$READ" >/dev/null \
+  || fail "answers failed on a choice-with-note capture"
+pass "read prints the note attached to a choice answer"
 
 cat > "$READ" <<'EOF'
 session:
