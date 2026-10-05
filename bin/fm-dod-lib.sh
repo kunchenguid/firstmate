@@ -232,8 +232,22 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+fm_dod_acceptance_block() {
+  cat <<'EOF'
+# User-visible acceptance evidence
+Before reporting done, if the change affects user-visible behavior, run the affected feature through the project's own verification entry point from a real entry point.
+Use the verification skill named by the project `AGENTS.md` or project instructions when one exists.
+Record the commands, passed and failed checks, and screenshot or log paths in the PR description; for local-only work, record them in the status file or report.
+Include the evidence path or PR description location in the done line.
+If required verification was not run, cannot run, or leaves a required case uncovered, report blocked with the reason instead of done.
+If the project has no verification skill or the change is not user-visible, record that reason instead of inventing a process.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id> [pr-base]
   local mode=$1 id=$2 base=${3:-main}
+  local acceptance
+  acceptance=$(fm_dod_acceptance_block)
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -241,6 +255,9 @@ fm_dod_block() {  # <mode> <task-id> [pr-base]
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
+
+$acceptance
+
 When it is implemented and committed, push your branch and open a PR against \`$base\` with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -253,6 +270,9 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 The selected local landing base must be the project default branch supported by \`fm-merge-local.sh\`; a different base needs corrected instructions before work.
 Keep your branch a clean fast-forward onto the selected landing base \`$base\` - if it has advanced, rebase onto it so the eventual merge stays a fast-forward.
+
+$acceptance
+
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into the selected local base through the guarded fast-forward path.
 EOF
@@ -264,6 +284,8 @@ Delivery contract: mode=no-mistakes
 After implementation, agreed checks, and your commit, you are explicitly authorized to run /no-mistakes immediately to validate and ship a PR; do not wait for firstmate to initiate it.
 Load the no-mistakes skill using your harness-native invocation (or read its SKILL.md directly); this authorization does not depend on typing a slash command into a terminal.
 Implementation alone is not done; real ask-user findings still stop under rule 6.
+
+$acceptance
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.

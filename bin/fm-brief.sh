@@ -51,6 +51,8 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
+# Every ship mode requires real-entry-point acceptance evidence before done for user-visible changes;
+# bin/fm-dod-lib.sh owns the complete requirement and exceptions.
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable

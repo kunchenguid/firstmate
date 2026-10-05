@@ -217,6 +217,16 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "# User-visible acceptance evidence" "$brief" \
+      "$id: brief missing the shared user-visible acceptance requirement"
+    assert_grep "project's own verification entry point from a real entry point" "$brief" \
+      "$id: brief does not require real-entry-point acceptance"
+    assert_grep "commands, passed and failed checks, and screenshot or log paths" "$brief" \
+      "$id: brief does not require acceptance evidence"
+    assert_grep "report blocked with the reason instead of done" "$brief" \
+      "$id: brief permits incomplete required verification to report done"
+    assert_grep "no verification skill or the change is not user-visible" "$brief" \
+      "$id: brief does not preserve the no-process exception"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
