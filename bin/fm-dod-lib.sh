@@ -279,8 +279,9 @@ EOF
 # the pipeline, what `--intent` may carry, and the two firstmate-specific rules.
 # Written once; only the two sentences about a green PR depend on the forge,
 # because on gerrit the ci step is skipped and there is no PR to report.
-fm_nm_driving_block() {  # <forge>
-  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg
+fm_nm_driving_block() {  # <forge> <task-id>
+  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg id=$2
+  local root="${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
   if [ "$1" != gerrit ]; then
     pr_return_line="Only a drive call's return reports the green PR: \`no-mistakes axi status\` shows progress but never reports \`checks-passed\` while the ci step is still monitoring the PR for merge, so never wait on a status poll for the next gate or outcome.
 "
@@ -314,6 +315,10 @@ The \`--intent\` string you pass must be self-sufficient: that string plus the c
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+While a pipeline round runs, do NOT poll and do NOT sleep. Append \`paused: no-mistakes run in progress, clears on its own\` to the status file and END YOUR TURN. A deterministic watch registered for this task (\`when-nm-state-$id\`, armed at spawn) polls the pipeline state outside any model turn and rings your steering inbox the moment that state changes; resume from that ring, append \`resolved [at=<epoch>]: run returned\`, and answer the parked gate with a short foreground call.
+If the pipeline must run somewhere other than this worktree (for example a throwaway clone an upstream workflow requires), run \`$root/bin/fm-nm-watch.sh register-clone $id <absolute clone path>\` before that run starts, so that watch and firstmate's state read follow the run there; an unregistered out-of-worktree run is invisible to both, and your paused line then reads as a stall.
+A \`sleep\` between status checks is a defect here, not patience: every wake-up is a full model turn that re-reads your whole context to learn nothing, and those turns were 31% of the fleet's turns and 9.95B tokens in the week of 2026-08-29.
+If the ring never comes and you are resumed for another reason, one \`no-mistakes axi status\` call is fine; a loop of them is not.
 
 $drive_block
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
@@ -384,7 +389,7 @@ Firstmate will then instruct you to run /no-mistakes to validate.
 That first \`done:\` is the handoff that starts the pipeline; it is not a request to publish.
 
 EOF
-      fm_nm_driving_block "$forge"
+      fm_nm_driving_block "$forge" "$id"
       cat <<EOF
 
 Because \`push\` is skipped, the pipeline's fixes DO NOT arrive in your checkout: each fix round commits onto a branch inside no-mistakes' own local gate repository, and with no push nothing carries those commits back to you.
@@ -442,7 +447,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
 
 EOF
-      fm_nm_driving_block "$forge"
+      fm_nm_driving_block "$forge" "$id"
       cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.

@@ -1916,15 +1916,16 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 
 **Register deterministic condition and action watches**
 
-The `when` adapter (`bin/fm-procevent-when.sh`) registers a deterministic condition and action once.
-Its blocking child polls the condition without waking firstmate.
-A stable true fires the action at most once.
-One terminal outcome is then durably captured and published as a wake, which remains eligible for re-announcement until handled.
-
+The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs, and that binding is reloaded from disk immediately before each fire rather than trusted from when polling started.
 A repo update that fast-forwards an in-repo action's bytes in place would otherwise desync every already-armed watch's trust binding with no tampering involved; `bin/fm-procevent-when.sh rebind-all` re-hashes and republishes the binding for every registered watch whose action lives under `FM_ROOT`, including one already polling, so it keeps firing across such an update instead of being refused on its next fire.
-
-Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, and a durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice.
+An action that needs environment to work at all is armed with hash-bound `NAME=VALUE` assignments recorded in that same spec, and the action executable stays argv[0], so binding its bytes is unaffected.
+A watch armed one-shot fires at most once and every one of its outcomes is terminal.
+A watch armed to repeat answers "ring X every time Y changes" instead: its successful fire is the single non-terminal outcome, and it is also the single silent one, so the runner records it handled without a wake and restarts the poll rather than retiring the source.
+That fire is journalled under `state/when/`, and a repeat watch's deadline is measured from its last fire rather than from arming, so the deadline means the condition stopped changing instead of the watch getting old.
+A repeat action must therefore be safe to run again, which is the standard the one-shot action already had to meet.
+Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or, for a one-shot watch, an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, in both modes.
+A durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice; a repeat watch releases that marker only once its fire has been emitted, so a lost capture costs one extra ring instead of ending the watch.
 The adapter automates only the exact deterministic subset: anything needing judgment, and anything destructive, irreversible, or security-sensitive, keeps the ordinary check-fires-then-firstmate-decides flow, and the adapter's header and `--help` own its commands, flags, and outcome document.
 
 **Capture and publish results**
@@ -1932,6 +1933,9 @@ The adapter automates only the exact deterministic subset: anything needing judg
 This section is the single owner of the runner's operating contract.
 
 - Process-event commands resolve the state root to its physical directory before validating it and deriving paths, so a home reached through a symlinked ancestor behaves like its physical spelling while an unsafe target directory remains refused.
+- A state root that is not a private directory (group- or world-writable, or owned by another user) is refused with its reason (`bad-mode` or `not-owned`), and a registered source cannot be polled until it is fixed.
+  `bin/fm-procevent-when.sh arm` refuses before registering anything, `bin/fm-bootstrap.sh` prints a `PROCEVENT:` diagnostic at session start, and `bin/fm-watch.sh` wakes once per failure episode with `check: process-event reconcile failed: <error>` when `reconcile` fails with an error message, clearing the episode when `reconcile` succeeds again.
+  Only `bad-mode` is fixed by `chmod 750 <state>`; an unconfirmed runner launch is announced separately below and raises no such wake.
 - Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before any announcement or event can reference it.
 - By default, results are published as ordinary `check` wakes carrying the source id and committed result sequence through the existing durable wake queue, so the runner adds no second notification control plane.
 - The self-announcing adapter exception and its fail-safe ordering are defined below.
@@ -1969,6 +1973,9 @@ Whether a captured result is a routine no-op is adapter knowledge too, and the r
 - Any recognized top-level `prompts` or `feedback` block counts as content regardless of its declared count, and a malformed header makes the result indeterminate rather than empty.
 - A `Send & End` close carrying the captain's answer arrives as `status: feedback` with `session_ended`, so it classifies `feedback` and is announced unchanged, as is any `ended` result that still carries content, and every `waiting`, `missing`, `unknown`, or unreadable result.
 
+- For `when` that verdict covers exactly one shape too - a repeat watch's successful fire, whose action has already rung its target, so announcing it would only spend a turn on news the target already has.
+- Every other `when` outcome, in both modes, is announced unchanged.
+
 **Retire terminal sources**
 
 Whether a captured result ends its source is adapter knowledge, never the runner's.
@@ -1988,6 +1995,8 @@ Under the default ordering, this happens after the initial `check` publication.
 - A source that has ended therefore captures at most one terminal result, is never restarted, and leaves no recurring poll work.
 - For ordinary sources, explicit `retire` stays the supported and idempotent path afterwards; a task-owned board instead refuses `retire` until its owner concludes the open terminal round with `handled`.
 - For Lavish that verdict covers an ended session, a missing session, and the final feedback of a `Send & End` review, which the published poll marks with `session_ended` before it returns only empty ended sessions.
+
+- For `when` it covers every outcome of a one-shot watch, and every outcome of a repeat watch except its successful fire, which is what keeps a repeat watch registered and restarted until it fails or is retired.
 
 **Apply built-in results automatically**
 
@@ -2215,6 +2224,22 @@ The runner proves exactly one durability boundary: output that reached the runne
 
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+### Pipeline-state watch (`when-nm-state-<task-id>`)
+
+Every `--mode no-mistakes` ship spawn arms one `when` source per task whose condition is `bin/fm-nm-state-condition.sh <worktree> state/<id>.nm-state` and whose action rings that task's steering inbox through `bin/fm-send.sh`.
+It exists so a worker never spends model turns waiting: `bin/fm-dod-lib.sh`'s Definition of done tells the worker to append `paused: no-mistakes run in progress, clears on its own` and end its turn, and this source is what brings it back.
+
+The condition compares a PROJECTION of `no-mistakes axi status` (`status`, `outcome`, `step`, `round`) against a snapshot, not the whole output, because the raw output carries elapsed times that churn on every poll.
+A missing key contributes an empty field, so a no-mistakes release that renames a key degrades the watch to a coarser one rather than to a wrong one.
+The first poll after arming writes the snapshot and returns false, so arming never fires on its own baseline.
+A probe that errors exits 2 and is counted against the source's error budget; it is never read as a true.
+A worktree with no no-mistakes run yet (no `init`, or no run submitted there) is not an error: the probe reads it as a clean false on every poll instead of spending the error budget, and still fires the moment a real run appears.
+
+`bin/fm-nm-watch.sh` owns arming: `bin/fm-spawn.sh` calls it on every spawn and relaunch, it retires any existing watch first so a relaunch converges, and `bin/fm-teardown.sh` retires it.
+A failed arm never fails the spawn, but it queues a durable `check` wake naming the task, because a worker without its watch is never rung.
+A worker whose pipeline runs outside its worktree registers that clone with `fm-nm-watch.sh register-clone`, which records `nm_clone=` in the task record; the watch and `bin/fm-crew-state.sh` then look for the run there.
+A `paused:` line claiming a no-mistakes run is honored only while crew state confirms a working run; otherwise the watcher and the away-mode daemon treat it as a stalled worker on the stale cadence (`status_pause_claims_nm_run` in `bin/fm-classify-lib.sh`).
+
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
@@ -2312,6 +2337,8 @@ FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # a runner guard's detection interval, r
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=3   # how long reconcile waits for the runners it started to prove they are running; 1..600, keep well below FM_POLL
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
+FM_WHEN_FIRES_JOURNAL_LINES=200          # most recent fires a repeat watch keeps in its state/when/ journal; a positive integer, anything else is refused before the action runs
+FM_NM_STATE_PROBE_TIMEOUT=45             # seconds allowed for the no-mistakes status probe inside the pipeline-state watch condition ("Pipeline-state watch")
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CODEX_WATCH_CHECKPOINT_AWAY=3600  # requested away checkpoint bound on a home that runs the supervision host; longer of this and attended bound, capped at 27000
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh, and per state-database run-inventory read behind a capped AXI overview
@@ -2360,9 +2387,9 @@ FM_WATCHER_CLEANUP_LOCK_BOUND=   # optional watcher EXIT marker-lock wait; defau
 FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading declared-wait status verb; bin/fm-classify-lib.sh owns its meaning and legacy external-wait label; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates, unless that pane's own worker declared a wait that has not elapsed, or, where config/wedge-defer-parked-gate arms it, that pane's crew is parked at a validation gate awaiting the supervisor's decision on it that the crew raised under that run's key and nobody has answered yet, either of which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way
+FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates, unless that pane's own worker declared a wait that has not elapsed, or, where config/wedge-defer-parked-gate arms it, that pane's crew is parked at a validation gate awaiting the supervisor's decision on it that the crew raised under that run's key and nobody has answered yet, either of which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way; the away-mode daemon also uses it, not FM_PAUSE_RESURFACE_SECS, as the recheck interval for a paused: line claiming a no-mistakes run ("Pipeline-state watch" above), since that claim needs reconfirming against crew state on a shorter cadence than an ordinary declared wait
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn or explicit native-harness progress (bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified captain-held transfer, or - where config/wedge-defer-parked-gate arms it - a validation gate of the crew's own awaiting the supervisor's still-unanswered decision takes the FM_PAUSE_RESURFACE_SECS recheck below instead
-FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait or, where config/wedge-defer-parked-gate arms it, unanswered supervisor-owed validation gate defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; a captain-held transfer is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
+FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait or, where config/wedge-defer-parked-gate arms it, unanswered supervisor-owed validation gate defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state, except a paused: line claiming a no-mistakes run, which the daemon rechecks on FM_STALE_ESCALATE_SECS instead; a captain-held transfer is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
 FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
 FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint through bin/fm-secondmate-liveness-lib.sh, which relaunches only a positively `dead` or `missing` endpoint through the ordinary guarded fm-spawn.sh --secondmate path and emits exactly one check wake per relaunch; zero or invalid values use 60
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds bounding one watcher-driven relaunch, so a wedged spawn cannot stall the poll; zero or invalid values use 120

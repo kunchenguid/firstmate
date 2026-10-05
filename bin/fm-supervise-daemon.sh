@@ -424,7 +424,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state> [<span-record> <span-status>]
-  local win=$1 state=$2 record=${3-} rc=${4-} task last declared event rest
+  local win=$1 state=$2 record=${3-} rc=${4-} task last declared event rest contradiction
   task=$(window_to_task "$win" "$state")
   if [ -z "$rc" ]; then
     record=$(status_span_first_actionable_record "$state/$task.status" \
@@ -444,6 +444,11 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
   fi
   declared=$(status_declared_wait_line "$state/$task.status")
   if [ -n "$declared" ] && status_is_paused_or_captain_held "$declared"; then
+    # A pause claiming a no-mistakes run is a wait only while crew state confirms it.
+    if contradiction=$(crew_pause_claim_contradiction "$task" "$declared"); then
+      printf 'escalate|paused line claims a no-mistakes run that crew state does not confirm (%s): %s' "$contradiction" "$declared"
+      return
+    fi
     # A DECLARED external-wait pause or a verified captain-held transfer
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
     # EXPECTED, so this is not a wedge. The caller records a pause marker (long
@@ -1188,7 +1193,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason threshold contradiction
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1286,19 +1291,22 @@ housekeeping() {  # <state>
     due="$state/.subsuper-pause-until-due-$key"
     until=
     bounded_until=0
+    # A pause claiming a no-mistakes run is rechecked on the stale cadence.
+    threshold=$pause_secs
+    status_pause_claims_nm_run "$last" && threshold=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}
     if status_is_captain_held "$last" && fm_afk_contract_away_present "$state"; then
       continue
     fi
     if until=$(status_paused_until "$last"); then
-      if [ "$now" -lt "$until" ] && [ "$age" -lt "$pause_secs" ]; then
+      if [ "$now" -lt "$until" ] && [ "$age" -lt "$threshold" ]; then
         continue
       elif [ "$now" -lt "$until" ]; then
         bounded_until=1
       elif [ "$(cat "$due" 2>/dev/null || true)" = "$until" ]; then
-        [ "$age" -ge "$pause_secs" ] || continue
+        [ "$age" -ge "$threshold" ] || continue
       fi
     else
-      [ "$age" -ge "$pause_secs" ] || continue
+      [ "$age" -ge "$threshold" ] || continue
     fi
     # Endpoint-readability probe only: exit code 2 means the capture failed, so the
     # endpoint is gone and there is nothing left to re-surface. The busy/idle verdict
@@ -1311,7 +1319,15 @@ housekeeping() {  # <state>
       2) rm -f "$marker" ;;
       *)
         last=$(status_declared_wait_line "$state/$task.status")
-        if [ -n "$last" ] && status_is_captain_held "$last"; then
+        if [ -n "$last" ] && status_pause_claims_nm_run "$last"; then
+          if contradiction=$(crew_pause_claim_contradiction "$task" "$last"); then
+            if escalate_add "$state" "paused ${age}s claiming a no-mistakes run that crew state does not confirm ($contradiction): $win"; then
+              _now > "$marker"
+            fi
+          else
+            _now > "$marker"
+          fi
+        elif [ -n "$last" ] && status_is_captain_held "$last"; then
           if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
             _now > "$marker"
           fi
