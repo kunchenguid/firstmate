@@ -15,6 +15,9 @@ if [ "$#" -ne 4 ]; then
   exit 2
 fi
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+export FM_CLASSIFY_LIB="$SCRIPT_DIR/fm-classify-lib.sh"
+
 exec uv run --no-project - "$@" <<'PY'
 import datetime
 import fcntl
@@ -22,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,13 +54,25 @@ def normalized(value):
     return " ".join(value.casefold().split())
 
 
-def failed(name):
-    try:
-        lines = (Path(state_dir) / (name + ".status")).read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    lines = [line for line in lines if line.strip()]
-    return bool(lines) and lines[-1].split(":", 1)[0].strip() == "failed"
+def failed_tasks():
+    parser = """
+source "$1" || exit 1
+for status in "$2"/*.status; do
+    [ -f "$status" ] || continue
+    line=$(last_status_line "$status") || exit 1
+    verb=$(status_line_verb "$line") || exit 1
+    if [ "$verb" = failed ]; then
+        basename "$status" .status
+    fi
+done
+"""
+    result = subprocess.run(
+        ["bash", "-c", parser, "fm-captain-reminder", os.environ["FM_CLASSIFY_LIB"], state_dir],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return set(result.stdout.splitlines())
 
 
 current = intent(Path(current_path))
@@ -64,9 +80,10 @@ needle = normalized(current)
 if not needle:
     raise SystemExit(0)
 
+failed_ids = failed_tasks()
 matches = []
 for path in sorted(data.glob("*/brief.md")):
-    if path.parent.name == task_id or failed(path.parent.name):
+    if path.parent.name == task_id or path.parent.name in failed_ids:
         continue
     previous = intent(path)
     if normalized(previous) == needle:

@@ -193,6 +193,9 @@ test_workflow_dispatch_gate_exit_contract() {
   run_gate_case gate-unparsable 10 'not json'
   expect_code 0 "$status" "an unparsable refusal is an infrastructure failure"$'\n'"$out"
   assert_contains "$out" 'workflow dispatch gate failed to run' "unparsable output must print a notice"
+  run_gate_case gate-invalid-contract 10 '{}'
+  expect_code 0 "$status" "an incomplete refusal is an infrastructure failure"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate failed to run' "an incomplete refusal must print a notice"
   pass "fm-spawn honours the gate contract: 0 pass, 10 refuse, anything else continues with a notice"
 }
 

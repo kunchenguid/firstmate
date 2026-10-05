@@ -3159,7 +3159,15 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       gate_rc=0
       gate_out=$(uv run --no-project "$workflow_gates" --root "${workflow_gates%/scripts/gates.py}" dispatch --json \
         "${gate_args[@]}" 2>/dev/null) || gate_rc=$?
-      if [ "$gate_rc" -eq 10 ] && gate_text=$(printf '%s' "$gate_out" | jq -r '"\(.reasons // [] | join("; "))\n\(.fix // "")"' 2>/dev/null); then
+      if [ "$gate_rc" -eq 10 ] && gate_text=$(printf '%s' "$gate_out" | jq -er -s '
+        if length == 1 and (.[0] | type == "object"
+          and .verdict == "refuse"
+          and (.reasons | type == "array" and length > 0 and all(.[]; type == "string" and test("\\S")))
+          and (.fix | type == "string" and test("\\S")))
+        then .[0] | "\(.reasons | join("; "))\n\(.fix)"
+        else error("invalid refusal contract")
+        end
+      ' 2>/dev/null); then
         captain_intent=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
         if [ "$WORKFLOW_GATE_OVERRIDE" -eq 1 ] && printf '%s\n' "$captain_intent" | grep -Fqi 'override the workflow dispatch gate'; then
           printf 'warning: explicit current captain instruction overrides the workflow dispatch gate: %s\n' "$gate_text" >&2

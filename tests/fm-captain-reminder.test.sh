@@ -58,17 +58,22 @@ test_unrelated_instruction_appends_nothing() {
 test_failed_retry_and_bad_lines_do_not_block() {
   local data
   data="$TMP_ROOT/retry-data"
-  mkdir -p "$data/failed-task" "$data/current-task" "$data/state"
+  mkdir -p "$data/failed-task" "$data/stamped-failed-task" "$data/current-task" "$data/state"
   printf '%s\n' "## Captain's intent" 'Fix the flaky sync.' > "$data/failed-task/brief.md"
+  printf '%s\n' "## Captain's intent" 'Fix the flaky sync.' > "$data/stamped-failed-task/brief.md"
   printf '%s\n' "## Captain's intent" 'Fix the flaky sync.' > "$data/current-task/brief.md"
   printf '%s\n' 'working: started' 'failed: gave up' > "$data/state/failed-task.status"
+  printf '%s\n' 'working: started' 'failed [at=1790000000]: gave up' 'diagnostic continuation' \
+    > "$data/state/stamped-failed-task.status"
   "$SIGNAL" current-task "$data/current-task/brief.md" "$data" "$data/state"
   [ ! -e "$data/captain-reminders.jsonl" ] || fail "a retry of a failed task counted as a captain repeat"
   printf '%s\n' 'working: started' > "$data/state/failed-task.status"
+  printf '%s\n' 'working: started' > "$data/state/stamped-failed-task.status"
   printf '%s\n' '' 'not json' > "$data/captain-reminders.jsonl"
   "$SIGNAL" current-task "$data/current-task/brief.md" "$data" "$data/state" \
     || fail "malformed or blank signal lines failed the spawn"
-  [ "$(grep -c '"count"' "$data/captain-reminders.jsonl")" = 1 ] || fail "repeat was not recorded past bad lines"
+  [ "$(tail -1 "$data/captain-reminders.jsonl" | jq -r '.count')" = 3 ] \
+    || fail "repeat was not recorded after failed tasks became active"
   pass "captain reminder ignores failed-task retries and skips bad signal lines"
 }
 
