@@ -727,7 +727,7 @@ EOF
 # leave that poll readable: the attestation lands after the pr=/pr_head= lines
 # the PR check wrote, and the watcher's poll reads the same record.
 test_completion_keeps_an_armed_pr_poll_readable() {
-  local home id url head
+  local home id url head poll_valid
   home=$(make_home armed-pr-poll)
   id=sample-armed-ship
   url=https://github.com/o/r/pull/7
@@ -736,6 +736,16 @@ test_completion_keeps_an_armed_pr_poll_readable() {
   tasks_in "$home" add "$id" "Ship the sample fix" --kind ship --repo sample --start >/dev/null
   write_origin_meta "$home" "$id" ship
   printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$home/state/$id.meta"
+  # The poll artifacts are published through the same prepare/publish pair
+  # fm-pr-check.sh uses, then validated the way the watcher validates them.
+  # shellcheck disable=SC2016
+  poll_valid='. "$1"; fm_pr_poll_artifacts_valid "$2" "$3" "$4"'
+  bash -c '. "$1"; fm_pr_poll_prepare "$2" "$3" github "$4" github.com o/r 7 "$5" \
+      && fm_pr_poll_publish_prepared' _ \
+    "$ROOT/bin/fm-pr-lib.sh" "$home/state" "$id" "$url" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not arm the PR poll fixture"
+  bash -c "$poll_valid" _ "$ROOT/bin/fm-pr-lib.sh" "$home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the armed PR poll fixture did not validate before completion"
   printf 'done: PR %s checks green\n' "$url" > "$home/state/$id.status"
   run_captain "$home" hold sample-ship-call --title "Choose the sample rollout" \
     --reason "captain rollout choice pending" --repo sample --origin "$id" >/dev/null \
@@ -743,8 +753,7 @@ test_completion_keeps_an_armed_pr_poll_readable() {
   run_captain "$home" complete "$id" sample-ship-call >/dev/null \
     || fail "completion on the armed ship failed"
   assert_grep "decision_keys=sample-ship-call" "$home/state/$id.meta" "inventory was not recorded"
-  bash -c '. "$1"; fm_pr_metadata_identity_parse "$2" && [ "$FM_PR_META_URL" = "$3" ]' _ \
-    "$ROOT/bin/fm-pr-lib.sh" "$home/state/$id.meta" "$url" \
+  bash -c "$poll_valid" _ "$ROOT/bin/fm-pr-lib.sh" "$home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
     || fail "recording the inventory made the armed PR poll unreadable: $(cat "$home/state/$id.meta")"
   pass "recording the inventory keeps an armed PR poll readable"
 }
