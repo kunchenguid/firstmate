@@ -297,6 +297,10 @@ The registrations in detail:
   The discriminator is the payload's own `transcript_path`, not the environment and not the shared foreign-host predicate above.
   pi-code stamps it with Pi's session file under `/.pi/`, a path component a Claude transcript never carries.
   The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
+- Antigravity CLI (agy) registers a `Stop` hook in `.agents/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-agy.sh`, following the synchronous park model.
+  While supervision is needed it parks on `bin/fm-watch-arm.sh` and returns an actionable close as `{"decision": "continue", "reason": "..."}`, immediately re-entering the loop with the wake injected as a system message.
+  When the park cannot establish a cycle it queries this shared guard with `--agy` and returns a bounded continue decision with the repair instructions, capped by `FM_AGY_TURNEND_BLOCK_BUDGET` (default 3) consecutive unproductive blocks before allowing the stop.
+  `FM_AGY_TURNEND_LOOP_CEILING` (default 180) bounds consecutive hook-driven turns.
 
 ### Claude and Codex blocking
 
