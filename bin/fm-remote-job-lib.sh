@@ -109,9 +109,11 @@ FM_REMOTE_JOB_STAGE_REAP_SECONDS=${FM_REMOTE_JOB_STAGE_REAP_SECONDS:-600}
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_SECONDS=86400
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_INTERVAL=3600
 # procps recomputes lstart from the kernel boot time, so a clock step moves
-# the string for a process that is still alive. Legacy records stay valid
-# across a small step. A reused pid is much farther from the stored start.
-FM_REMOTE_JOB_START_SKEW_SECONDS=${FM_REMOTE_JOB_START_SKEW_SECONDS:-300}
+# the string for a process that is still alive. A legacy lstart within this
+# many seconds of the live one still matches. A reused pid matches only when
+# the new process started inside this window of the recorded start; the
+# observed clock step was under ten seconds. Exact stat: tokens ignore it.
+FM_REMOTE_JOB_START_SKEW_SECONDS=${FM_REMOTE_JOB_START_SKEW_SECONDS:-30}
 # shellcheck disable=SC2034 # Shared protocol constant consumed by the worker and sourcing callers.
 FM_REMOTE_JOB_PREEMPTED_EXIT=76
 FM_REMOTE_JOB_OPERATOR_PATH=
@@ -1030,25 +1032,40 @@ fm_remote_job_lstart_epoch() { # <lstart text>
   printf '%s\n' "$epoch"
 }
 
-# One comparison for every recorded start: the lock, a staged owner, a claim,
-# a lane, and a recorded supervisor or process group. Exact token or exact
-# lstart matches. A legacy lstart within the skew bound still matches, so a
-# clock step does not look like pid reuse.
-fm_remote_job_start_matches() { # <recorded> <pid>
+# 0 exact token or exact lstart, 3 legacy lstart inside the skew bound,
+# 1 definite mismatch, 2 the live start could not be read. Callers that
+# signal a process must not treat 2 as dead, and must not treat 3 as the
+# same process unless the live command is the one that was recorded.
+fm_remote_job_start_match_status() { # <recorded> <pid>
   local recorded=$1 pid=$2 actual lstart legacy_epoch live_epoch delta skew
   [ -n "$recorded" ] || return 1
-  actual=$(fm_remote_job_process_start_token "$pid" 2>/dev/null) || return 1
+  if ! actual=$(fm_remote_job_process_start_token "$pid" 2>/dev/null); then
+    return 2
+  fi
   [ "$recorded" = "$actual" ] && return 0
   case "$recorded" in stat:*) return 1 ;; esac
-  lstart=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
+  if ! lstart=$(fm_remote_job_process_start "$pid" 2>/dev/null); then
+    return 2
+  fi
   [ "$recorded" = "$lstart" ] && return 0
-  skew=${FM_REMOTE_JOB_START_SKEW_SECONDS:-300}
+  skew=${FM_REMOTE_JOB_START_SKEW_SECONDS:-30}
   case "$skew" in ''|*[!0-9]*) return 1 ;; esac
   legacy_epoch=$(fm_remote_job_lstart_epoch "$recorded") || return 1
-  live_epoch=$(fm_remote_job_lstart_epoch "$lstart") || return 1
+  if ! live_epoch=$(fm_remote_job_lstart_epoch "$lstart"); then
+    return 2
+  fi
   delta=$((legacy_epoch - live_epoch))
   if [ "$delta" -lt 0 ]; then delta=$((-delta)); fi
-  [ "$delta" -le "$skew" ]
+  [ "$delta" -le "$skew" ] && return 3
+  return 1
+}
+
+# True for an exact start or a legacy lstart inside the skew bound.
+# Unreadable identity is not a match. The lock path still compares command.
+fm_remote_job_start_matches() { # <recorded> <pid>
+  local status=0
+  fm_remote_job_start_match_status "$@" || status=$?
+  case "$status" in 0|3) return 0 ;; *) return 1 ;; esac
 }
 
 fm_remote_job_process_command() {

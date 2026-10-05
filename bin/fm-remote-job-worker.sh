@@ -373,16 +373,23 @@ worker_signal_process_or_group() { # process|group <signal> <pid>
 }
 
 worker_supervisor_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start
+  local job=$1 pid=$2 recorded_start status=0 command
   recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
-  if fm_remote_job_start_matches "$recorded_start" "$pid"; then
-    return 0
-  fi
-  if ! fm_remote_job_process_start_token "$pid" >/dev/null 2>&1; then
-    worker_process_or_group_alive process "$pid" && return 2
-    return 1
-  fi
-  return 1
+  fm_remote_job_start_match_status "$recorded_start" "$pid" || status=$?
+  case "$status" in
+    0) return 0 ;;
+    3)
+      # A clock step keeps the lane's command. A reused pid inside the skew
+      # window is a different command and must not be signalled.
+      command=$(fm_remote_job_process_command "$pid" 2>/dev/null) || return 2
+      case "$command" in *fm-remote-job-worker.sh*) return 0 ;; *) return 1 ;; esac
+      ;;
+    2)
+      worker_process_or_group_alive process "$pid" && return 2
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # A leaderless live group still belongs to the recorded execution: its PGID
@@ -391,18 +398,26 @@ worker_supervisor_identity_status() { # <job-dir> <pid>
 # recorded group stale; an unreadable live leader stays indeterminate so the
 # stop loop retries rather than signaling or declaring the group dead.
 worker_group_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start file="$1/.claim/group_start"
+  local job=$1 pid=$2 recorded_start status=0 command job_cmd file="$1/.claim/group_start"
   [ -e "$file" ] || [ -L "$file" ] || return 3
   recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
-  if fm_remote_job_start_matches "$recorded_start" "$pid"; then
-    return 0
-  fi
-  if ! fm_remote_job_process_start_token "$pid" >/dev/null 2>&1; then
-    kill -0 "$pid" 2>/dev/null && return 2
-    worker_process_or_group_alive group "$pid" && return 0
-    return 1
-  fi
-  return 1
+  fm_remote_job_start_match_status "$recorded_start" "$pid" || status=$?
+  case "$status" in
+    0) return 0 ;;
+    3)
+      command=$(fm_remote_job_process_command "$pid" 2>/dev/null) || return 2
+      job_cmd=$(tr '\0' '\n' < "$job/argv" 2>/dev/null | head -n 1) || return 2
+      [ -n "$job_cmd" ] || return 2
+      case "$job_cmd" in *'*'*|*'?'*|*'['*) return 2 ;; esac
+      case "$command" in *"$job_cmd"*) return 0 ;; *) return 1 ;; esac
+      ;;
+    2)
+      kill -0 "$pid" 2>/dev/null && return 2
+      worker_process_or_group_alive group "$pid" && return 0
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 worker_recorded_execution_alive() { # <job-dir> process|group <pid>
@@ -609,7 +624,7 @@ worker_claim() { # <job-dir>
 }
 
 worker_claim_owner_alive() { # <job-dir>
-  local job=$1 claim="$1/.claim" owner pid recorded_start
+  local job=$1 claim="$1/.claim" owner pid recorded_start status=0 command
   [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
   owner="$claim/owner"
   fm_remote_job_regular_bounded "$owner" 64 || return 1
@@ -617,8 +632,17 @@ worker_claim_owner_alive() { # <job-dir>
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -e "$claim/owner_start" ] || [ -L "$claim/owner_start" ]; then
     recorded_start=$(fm_remote_job_read_single_line "$claim/owner_start" 256 2>/dev/null) || return 1
-    fm_remote_job_start_matches "$recorded_start" "$pid"
-    return
+    fm_remote_job_start_match_status "$recorded_start" "$pid" || status=$?
+    case "$status" in
+      0) return 0 ;;
+      3)
+        # The claim owner is the lane. A clock-stepped lane still runs the
+        # worker. A different command inside the skew window is pid reuse.
+        command=$(fm_remote_job_process_command "$pid" 2>/dev/null) || return 0
+        case "$command" in *fm-remote-job-worker.sh*) return 0 ;; *) return 1 ;; esac
+        ;;
+      *) return 1 ;;
+    esac
   fi
   kill -0 "$pid" 2>/dev/null
 }

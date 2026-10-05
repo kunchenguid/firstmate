@@ -1539,7 +1539,7 @@ DRIFT_HOME="$TMP_ROOT/drift-account"
 DRIFT_STATE="$TMP_ROOT/drift-state"
 DRIFT_CLAIM="$DRIFT_STATE/jobs/job-driftclaim"
 mkdir -p "$DRIFT_HOME" "$DRIFT_CLAIM/.claim"
-sleep 120 &
+bash -c 'exec -a fm-remote-job-worker.sh sleep 120' &
 DRIFT_SLEEP_PID=$!
 sleep 0.2
 DRIFT_LSTART=$(/bin/ps -p "$DRIFT_SLEEP_PID" -o lstart=) \
