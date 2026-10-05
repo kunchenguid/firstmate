@@ -120,7 +120,6 @@ init_changed_fixture_repo() {
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
-    fm-watch-triage.test.sh \
     fm-backend-orca.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
@@ -129,7 +128,6 @@ init_changed_fixture_repo() {
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
-  : >"$repo/bin/fm-composer-lib.sh"
   : >"$repo/bin/fm-timeout-lib.sh"
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
@@ -406,15 +404,6 @@ test_changed_dependency_selection_and_unmapped_failure() {
     "control library selects chooser coverage"
   git -C "$repo" add bin/fm-control-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm control-lib-change
-
-  printf '\n' >>"$repo/bin/fm-composer-lib.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-backend.test.sh" \
-    "composer library keeps backend coverage"
-  assert_contains "$listed" "tests/fm-watch-triage.test.sh" \
-    "composer library selects the watcher's dialog wake coverage"
-  git -C "$repo" add bin/fm-composer-lib.sh
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm composer-lib-change
 
   printf '\n' >>"$repo/bin/fm-timeout-lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

@@ -1621,11 +1621,9 @@ families_for_changed_path() {
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it
       # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the
-      # portable families. The watcher reads the dialog matcher for its
-      # stale wake (watcher-wake-lock).
+      # portable families.
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
-      printf '%s\n' watcher-wake-lock
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\

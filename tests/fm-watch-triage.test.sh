@@ -4286,118 +4286,6 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   pass "a non-paused secondmate retains normal stale suppression"
 }
 
-exit_picker_capture() {
-  printf '%s\n' \
-    'Background work is running' \
-    '❯ 1. Exit and stop tasks' \
-    'The following will stop when you exit:' \
-    'shell · sleep 300' \
-    '  2. Move to background and exit' \
-    '  3. Stay' \
-    'Enter to confirm · Esc to cancel'
-}
-
-test_exit_picker_stale_names_the_dialog() {
-  local dir state fakebin out capture_file statusf window key sig pid
-  dir=$(make_case exit-picker-stale); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/exit-picker.status"
-  window="test:fm-exit-picker"
-  exit_picker_capture > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/exit-picker.meta"
-  printf 'working: implementing\n' > "$statusf"
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-exit-picker_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
-    watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || { reap "$pid"; fail "exit picker did not wake: $(cat "$out")"; }
-  grep -Fx "stale: $window (blocked on a prompt: Claude background-task exit picker)" "$out" >/dev/null \
-    || { reap "$pid"; fail "exit picker wake did not name the dialog: $(cat "$out")"; }
-  grep -F "stale: $window (blocked on a prompt: Claude background-task exit picker)" "$state/.wake-queue" >/dev/null \
-    || fail "exit picker wake was not queued"
-  pass "an ordinary worker parked on the background-task exit picker raises a stale wake that names it"
-}
-
-test_secondmate_exit_picker_names_the_dialog() {
-  local dir state fakebin out capture_file statusf window key sig pid
-  dir=$(make_case secondmate-exit-picker); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-picker.status"
-  window="test:fm-secondmate-picker"
-  exit_picker_capture > "$capture_file"
-  printf 'window=%s\nkind=secondmate\nharness=claude\nbackend=tmux\n' "$window" > "$state/secondmate-picker.meta"
-  printf 'working: the parent supervises this secondmate\n' > "$statusf"
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-picker_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
-    watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a secondmate on the exit picker did not wake: $(cat "$out")"; }
-  grep -Fx "stale: $window (blocked on a prompt: Claude background-task exit picker)" "$out" >/dev/null \
-    || fail "the secondmate exit picker wake did not name the dialog: $(cat "$out")"
-  grep -F "stale: $window (blocked on a prompt: Claude background-task exit picker)" "$state/.wake-queue" >/dev/null \
-    || fail "the secondmate exit picker wake was not queued"
-  pass "a non-paused secondmate parked on the background-task exit picker raises a stale wake that names it"
-}
-
-# The idle exemption still covers a mate whose pane only quotes the picker:
-# the text sits above a normal composer, so no prompt is waiting.
-test_secondmate_quoted_exit_picker_stays_quiet() {
-  local dir state fakebin out capture_file statusf window key sig pid
-  dir=$(make_case secondmate-quoted-picker); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-quoted.status"
-  window="test:fm-secondmate-quoted"
-  { exit_picker_capture; printf '%s\n' '' '╭──────╮' '│ >    │' '╰──────╯'; } > "$capture_file"
-  printf 'window=%s\nkind=secondmate\nharness=claude\nbackend=tmux\n' "$window" > "$state/secondmate-quoted.meta"
-  printf 'working: the parent supervises this secondmate\n' > "$statusf"
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-quoted_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
-    watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "watcher surfaced a secondmate whose pane only quotes the exit picker: $(cat "$out")"
-  fi
-  [ ! -s "$out" ] || { reap "$pid"; fail "quoted exit picker text printed a wake reason: $(cat "$out")"; }
-  reap "$pid"
-  pass "a non-paused secondmate whose pane only quotes the exit picker stays quiet"
-}
-
-# A stopped agent can leave the picker text on its pane. Nothing is waiting
-# for an answer there, so the wake keeps its ordinary stale reason.
-test_stopped_worker_exit_picker_text_is_not_a_prompt() {
-  local dir state fakebin out capture_file statusf window key sig pid
-  dir=$(make_case exit-picker-stopped); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/exit-picker-stopped.status"
-  window="test:fm-exit-picker-stopped"
-  exit_picker_capture > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/exit-picker-stopped.meta"
-  printf 'working: implementing\n' > "$statusf"
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-exit-picker-stopped_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
-    watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a stopped worker's stale pane did not wake: $(cat "$out")"; }
-  grep -F "stale: $window" "$out" >/dev/null \
-    || fail "a stopped worker's stale pane lost its ordinary wake: $(cat "$out")"
-  if grep -F 'blocked on a prompt' "$out" >/dev/null; then
-    fail "a stopped worker was reported as blocked on a prompt: $(cat "$out")"
-  fi
-  pass "a stopped worker whose pane still shows the exit picker text is not reported as blocked on a prompt"
-}
-
 test_secondmate_unpause_clears_pause_tracking() {
   local dir state fakebin out statusf window key pid
   dir=$(make_case secondmate-unpause-clears); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6829,10 +6717,6 @@ test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
-test_exit_picker_stale_names_the_dialog
-test_secondmate_exit_picker_names_the_dialog
-test_secondmate_quoted_exit_picker_stays_quiet
-test_stopped_worker_exit_picker_text_is_not_a_prompt
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state

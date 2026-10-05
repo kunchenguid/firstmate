@@ -1277,10 +1277,8 @@ Submit retries now stop after the Enter that opened the picker and report unknow
 A typed submit to a pane that already shows the picker types nothing and sends no Enter.
 Exit reports that the worker is blocked on the Claude background-task exit picker and does not type another Enter.
 A submit can return before any read sees the picker, so exit reads the screen once more when its wait for the agent to stop times out, and names the picker there too.
-The watcher raises the existing stale wake once per unchanged screen, with that dialog name in the reason.
-A secondmate parked on this picker raises the same wake.
-Every other non-paused secondmate still skips pane staleness.
-A stopped agent whose pane still shows the picker text is not reported as blocked on a prompt.
+Exit does not report a stopped agent whose pane still shows the picker text as blocked on a prompt.
+The watcher does not read the picker: a pane parked on it keeps the ordinary stale triage.
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
 Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 

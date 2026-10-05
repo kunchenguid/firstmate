@@ -215,10 +215,6 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
-# Dialog recognition lives in the composer owner. shellcheck does not follow
-# this source: the watcher graph must not absorb the classifier AST.
-# shellcheck source=/dev/null
-. "$SCRIPT_DIR/fm-composer-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -3010,19 +3006,17 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a status-declared wait's bounded
-    # re-surface, or the wake for a recognised dialog on a pane that is not
-    # busy. This gate reads the shared predicate rather than the pause verb
+    # re-surface. This gate reads the shared predicate rather than the pause verb
     # alone so it includes a declared `captain-held` status. A hold recorded only
     # in the backlog while the mate still says `working:` or `done:` is outside
     # this guard: reaching it would require backlog reads for windows this gate
     # deliberately skips, putting that read on the ordinary poll hot path.
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
-      { [ -n "$dialog" ] && ! window_is_busy "$w" "$tail40"; } || continue
+      continue
     fi
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -3043,15 +3037,7 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ -n "$dialog" ] && [ "$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null || true)" != dead ]; then
-          # A stopped agent can leave the picker text on its pane. That is
-          # not a prompt still waiting, so it keeps the ordinary triage below.
-          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w (blocked on a prompt: $dialog)" || exit 1
-            printf '%s' "$h" > "$sf"
-            wake "stale: $w (blocked on a prompt: $dialog)"
-          fi
-        elif [ "$kind" = secondmate ]; then
+        if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
