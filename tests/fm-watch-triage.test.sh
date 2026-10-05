@@ -6163,6 +6163,67 @@ test_heartbeat_no_change_absorbed() {
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
 }
 
+# A secondmate lead that went idle with dispatchable work had no trigger: an
+# absorbed heartbeat never read the backlog (the 4 Oct overnight stall). The
+# heartbeat now wakes the lead once per new ready set, and stays absorbed for
+# the same set or while a worker is provably working.
+wait_absorbed_heartbeat() {  # <state> <pid>
+  local i=0
+  while [ "$i" -lt 200 ]; do
+    [ "$(cat "$1/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && return 0
+    kill -0 "$2" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_heartbeat_wakes_an_idle_lead_with_ready_work() {
+  local dir state fakebin out pid drain_out tasks expected
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "idle-lead ready-work heartbeat # skip: tasks-axi not found"
+    return 0
+  fi
+  dir=$(make_case heartbeat-ready-work); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  tasks="$ROOT/bin/fm-tasks-axi.sh"
+  printf 'sm-ready-1\n' > "$dir/.fm-secondmate-home"
+  mkdir -p "$dir/data"
+  FM_HOME="$dir" "$tasks" add beta-two "second ready item" >/dev/null || fail "fixture: could not queue beta-two"
+  FM_HOME="$dir" "$tasks" add alpha-one "first ready item" >/dev/null || fail "fixture: could not queue alpha-one"
+  FM_HOME="$dir" "$tasks" add gamma "blocked item" --blocked-by alpha-one >/dev/null || fail "fixture: could not queue gamma"
+  expected="check: ready work waiting with no worker working: alpha-one beta-two - start each or record why it waits"
+
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an idle lead with ready work was not woken"; }
+  grep -Fx "$expected" "$out" >/dev/null || fail "the ready-work wake did not name the ready ids: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the ready-work wake failed"
+  grep -F "$(printf '\tcheck\t')" "$drain_out" >/dev/null || fail "the ready-work wake was not queued as a check row: $(cat "$drain_out")"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the ready-work wake"
+
+  # The same ready set wakes once only.
+  rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1
+  pid=$!
+  wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "the same ready set woke the lead again: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "the same ready set printed a wake reason: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the stopped absorbing cycle"
+
+  # A new ready set while a worker is provably working stays absorbed.
+  FM_HOME="$dir" "$tasks" add delta "third ready item" >/dev/null || fail "fixture: could not queue delta"
+  printf 'window=test:fm-busy\nkind=ship\n' > "$state/busy.meta"
+  rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 FM_FAKE_TMUX_WINDOW=test:fm-busy \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  pid=$!
+  wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "ready work woke a lead whose worker is working: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a lead with a working worker printed a wake reason: $(cat "$out")"
+  pass "an idle lead with ready work is woken once per ready set, and never while a worker is working"
+}
+
 test_heartbeat_backstop_surfaces_a_masked_status() {
   local dir state fakebin out sig pid
   dir=$(make_case heartbeat-masked); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6906,6 +6967,7 @@ test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
+test_heartbeat_wakes_an_idle_lead_with_ready_work
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
