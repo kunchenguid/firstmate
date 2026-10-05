@@ -1500,7 +1500,7 @@ status_presentation_cursor_offset() {  # <status-file>
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
     offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
+    while IFS=$'\t' read -r row_task ident legacy backstop extra; do
       [ -n "$row_task" ] || continue
       [ -z "$extra" ] || return 1
       case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
@@ -1545,7 +1545,7 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
   [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
   data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
   backstop=0
-  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
+  while IFS=$'\t' read -r row_task ident presented row_backstop extra; do
     [ -n "$row_task" ] || continue
     [ -z "$extra" ] || return 1
     case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
