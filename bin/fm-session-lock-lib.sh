@@ -428,12 +428,14 @@ fm_session_lock_inspect_owner() {  # <state>
 # diagnostic only: it never changes a liveness or ownership verdict, it is
 # bounded by FM_LOCK_HOLDER_LOOKUP_TIMEOUT seconds (default 2), and a missing
 # claude or jq, a failed or timed-out call, or output that is not a JSON array
-# prints nothing at all. Rows match on the lock pid first, then on the recorded
-# session id. Vendor strings lose their control characters before printing, and
-# a stop command is printed only for a background row whose short id is a plain
-# token and whose listed pid is the lock pid, because `claude stop` addresses
-# background sessions only and a session-id-only match cannot promise that
-# ending the session frees the lock. Nothing here
+# prints nothing at all. Rows match on the recorded session id first, then on
+# the lock pid. Vendor strings lose their control characters before printing,
+# and a stop command is printed only for a background row whose short id is a
+# plain token and whose listed pid is the lock pid, because `claude stop`
+# addresses background sessions only and a session-id-only match cannot promise
+# that ending the session frees the lock. A pid-matched row whose session id
+# conflicts with the recorded one is a different session that now owns the
+# lock pid, so it is named but never offered a stop or exit. Nothing here
 # ever suggests signalling a pid.
 
 # Print zero or more "lock holder:" lines describing live lock pid $1, whose
@@ -457,8 +459,8 @@ fm_session_lock_holder_lines() {  # <lock-pid> [<recorded-session-id>]
     def clean: (. // "") | tostring | gsub("[\u0000-\u001f\u007f]"; " ");
     if type != "array" then error("not an array") else . end
     | [ .[] | select(type == "object") ] as $rows
-    | ([ $rows[] | select((.pid | tostring) == $pid) ]
-       + [ $rows[] | select($sid != "" and .sessionId == $sid) ]) as $hits
+    | ([ $rows[] | select($sid != "" and .sessionId == $sid) ]
+       + [ $rows[] | select((.pid | tostring) == $pid) ]) as $hits
     | if ($hits | length) == 0 then "none"
       else $hits[0] | [ (.kind | clean), (.name | clean), (.status | clean),
         (.state | clean), (.id | clean), (.sessionId | clean), (.pid | clean) ]
@@ -478,6 +480,11 @@ fm_session_lock_holder_lines() {  # <lock-pid> [<recorded-session-id>]
     '' | *[!A-Za-z0-9_-]*) id= ;;
     *) detail="id $id, $detail" ;;
   esac
+  if [ -n "$session" ] && [ "$sid" != "$session" ]; then
+    printf 'lock holder: the lock pid %s now belongs to a different session, Claude Code %s session "%s" (%s), not the session %s recorded beside the lock; no session can be stopped from here to free it, and the lock still counts as held\n' \
+      "$pid" "$kind" "$name" "$detail" "$session"
+    return 0
+  fi
   printf 'lock holder: Claude Code %s session "%s" (%s)\n' "$kind" "$name" "$detail"
   if [ "$row_pid" != "$pid" ]; then
     printf 'lock holder: matched by the recorded session id %s; that session is listed under pid %s, not the lock pid %s\n' \

@@ -202,11 +202,18 @@ confirm_own_lock() {  # <recorded-pid>
 }
 
 refuse_live_owner() {  # <recorded-pid>
-  local recorded
+  local recorded=
+  # Snapshot the holder's session id beside pid $1 first: under the claim lock
+  # no acquirer can replace either, and without it the id is kept only while
+  # line 1 still names $1, so the refusal never pairs two holders.
+  if recorded=$(fm_session_lock_recorded_session_id "$STATE") \
+    && [ "$(sed -n '1p' "$LOCK" 2>/dev/null)" != "$1" ]; then
+    recorded=
+  fi
   # The holder lookup below may take seconds; nothing is published yet, so
   # stop serializing other acquirers before it runs.
   [ "$LOCK_SESSION_PHASE" -ne 0 ] || release_claim_lock
-  if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
+  if [ -n "$recorded" ]; then
     echo "error: another live firstmate session holds the lock (pid $1, session $recorded); operate read-only until resolved" >&2
   else
     recorded=
