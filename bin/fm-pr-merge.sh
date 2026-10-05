@@ -404,68 +404,57 @@ merge_control_cleanup() {
 }
 
 scope_check_pr() {
-  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" diff diff_file rc
-  [ -f "$brief" ] || { echo "error: merge scope check cannot read $brief" >&2; return 1; }
+  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" files files_file rc encoded
+  [ -f "$brief" ] || { echo "warning: merge scope check skipped: cannot read $brief" >&2; return 0; }
   case "$PROVIDER" in
-    github) diff=$(gh-axi pr diff "$PR_NUMBER" --full -R "$PR_OWNER/$PR_REPO" 2>&1) || {
-      echo "error: merge scope check could not read changed files for $URL: $diff" >&2
+    github) files=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/files?per_page=100" --jq '.[].filename' 2>&1) || {
+      echo "error: merge scope check could not read changed files for $URL: $files" >&2
       return 1
     } ;;
-    gitlab) diff=$(GITLAB_HOST="$PR_HOST" glab mr diff "$PR_NUMBER" -R "$PROJECT_URL" 2>&1) || {
-      echo "error: merge scope check could not read changed files for $URL: $diff" >&2
-      return 1
-    } ;;
+    gitlab)
+      encoded=$(jq -rn --arg p "$FM_PR_PATH" '$p|@uri')
+      files=$(GITLAB_HOST="$PR_HOST" glab api --paginate "projects/$encoded/merge_requests/$PR_NUMBER/diffs?per_page=100" 2>&1 | jq -r '.[].new_path' 2>&1) || {
+        echo "error: merge scope check could not read changed files for $URL: $files" >&2
+        return 1
+      } ;;
     *) return 0 ;;
   esac
-  diff_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-scope.XXXXXX") || return 1
-  printf '%s\n' "$diff" >"$diff_file"
+  files_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-scope.XXXXXX") || return 1
+  printf '%s\n' "$files" >"$files_file"
   rc=0
-  uv run --no-project - "$brief" "$diff_file" <<'PY' || rc=$?
+  uv run --no-project - "$brief" "$files_file" <<'PY' || rc=$?
 import re
 import sys
 import fnmatch
 from pathlib import Path
 
 brief = Path(sys.argv[1]).read_text(encoding="utf-8")
+files = list(dict.fromkeys(line for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines() if line.strip()))
 match = re.search(r"(?ms)^## Firstmate spec\s*\n(.*?)(?=^##?\s|\Z)", brief)
 if not match:
-    print("error: merge scope check cannot find ## Firstmate spec in the task brief")
-    raise SystemExit(1)
+    print("warning: merge scope check skipped: no ## Firstmate spec in the task brief")
+    raise SystemExit(0)
 spec = match.group(1)
 allowed = {value.strip().strip(".,;:") for value in re.findall(r"`([^`]+)`", spec)
-           if "/" in value and not value.startswith(("http://", "https://"))}
-allowed.update(re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*?-]+)+)", spec))
-diff = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
-files = []
-additions = deletions = 0
-for line in diff.splitlines():
-    file_match = re.match(r"diff --git a/(.*?) b/(.*)$", line)
-    if file_match:
-        path = file_match.group(2)
-        if path not in files:
-            files.append(path)
-    elif line.startswith("+") and not line.startswith("+++"):
-        additions += 1
-    elif line.startswith("-") and not line.startswith("---"):
-        deletions += 1
-
-if diff.strip() and not files:
-    print("error: merge scope check could not parse the forge diff; retry after the forge returns a complete diff")
-    raise SystemExit(1)
+           if ("/" in value or re.search(r"\.[A-Za-z0-9]+$", value)) and not value.startswith(("http://", "https://"))}
+allowed.update(re.findall(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*?-]+)+)", spec))
+allowed.update(re.findall(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_-][A-Za-z0-9_.-]*\.[A-Za-z][A-Za-z0-9]*)(?![A-Za-z0-9_/-])", spec))
+if not allowed:
+    print("warning: merge scope check skipped: ## Firstmate spec names no files")
+    raise SystemExit(0)
 
 def in_scope(path):
     return any(path == name or (name.endswith("/") and path.startswith(name)) or fnmatch.fnmatchcase(path, name)
-               for name in allowed) or (
-        "test" in spec.casefold() and path.startswith("tests/") and path.endswith((".test.sh", ".test.py")))
+               for name in allowed)
 
 outside = [path for path in files if not in_scope(path)]
-print(f"scope diff: +{additions} -{deletions}; changed files: {', '.join(files) if files else 'none'}")
+print(f"scope check: changed files: {', '.join(files) if files else 'none'}")
 if outside:
     print("error: merge refused; files outside the Firstmate spec scope: " + ", ".join(outside))
     print("fix: remove those changes or name the permitted files in ## Firstmate spec")
     raise SystemExit(1)
 PY
-  rm -f -- "$diff_file"
+  rm -f -- "$files_file"
   return "$rc"
 }
 

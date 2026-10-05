@@ -177,6 +177,29 @@ EOF
   pass "fm-spawn refuses a ship before worktree allocation when the workflow gate refuses"
 }
 
+test_workflow_dispatch_gate_missing_script_degrades_and_budget_is_optional() {
+  local rec id out status gates
+  id=settle-workflow-missing-z4
+  rec=$(make_settle_case settle-workflow-missing "$id" 0)
+  read_settle_record "$rec"
+  sed -i.bak '/^Task token budget:/d' "$HOME_DIR/data/$id/brief.md"
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$HOME_DIR/absent-gates.py" run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a missing workflow gate must not refuse the spawn"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate unavailable' "missing gate must print one notice"
+  gates="$HOME_DIR/workflow-gates-nobudget.py"
+  printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'raise SystemExit(1 if "--token-budget" in sys.argv else 0)' > "$gates"
+  chmod +x "$gates"
+  id=settle-workflow-nobudget-z5
+  rec=$(make_settle_case settle-workflow-nobudget "$id" 0)
+  read_settle_record "$rec"
+  sed -i.bak '/^Task token budget:/d' "$HOME_DIR/data/$id/brief.md"
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$gates" run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a brief without a token budget must be accepted"$'\n'"$out"
+  pass "fm-spawn degrades without the workflow gate and accepts a brief without a token budget"
+}
+
 # make_primary_case <name> <id> <stale_reads> builds the linked-home shape: the
 # spawning project is itself a LINKED worktree of the repository, and the path
 # the pane transiently reports is that repository's PRIMARY checkout. `treehouse
@@ -247,6 +270,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_workflow_dispatch_gate_refuses_before_allocating_a_worktree
+test_workflow_dispatch_gate_missing_script_degrades_and_budget_is_optional
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 

@@ -32,13 +32,13 @@ Make the dashboard easier to scan.
 ## Firstmate spec
 Unrelated task.
 EOF
-  "$SIGNAL" current-task "$data/current-task/brief.md" "$data"
+  "$SIGNAL" current-task "$data/current-task/brief.md" "$data" "$data/state"
   out=$(cat "$data/captain-reminders.jsonl")
   printf '%s\n' "$out" | jq -e '.key | startswith("captain-reminder:current-task:")' >/dev/null \
     || fail "repeated instruction did not get a task-scoped key"
   printf '%s\n' "$out" | jq -e '.class == "mistakes" and .count == 2 and .ladder_level_hint == "automation"' >/dev/null \
     || fail "signal did not record its recurrence and ladder hint"
-  "$SIGNAL" current-task "$data/current-task/brief.md" "$data"
+  "$SIGNAL" current-task "$data/current-task/brief.md" "$data" "$data/state"
   [ "$(wc -l < "$data/captain-reminders.jsonl" | tr -d ' ')" = 1 ] \
     || fail "reprocessing the task appended a duplicate signal"
   pass "captain reminder appends one idempotent keyed signal for a repeated instruction"
@@ -50,10 +50,28 @@ test_unrelated_instruction_appends_nothing() {
   mkdir -p "$data/old-task" "$data/current-task"
   printf '%s\n' '## Captain intent authorized for --intent' 'Keep the CLI output concise.' > "$data/old-task/brief.md"
   printf '%s\n' '## Captain intent authorized for --intent' 'Add a compact visual summary.' > "$data/current-task/brief.md"
-  "$SIGNAL" current-task "$data/current-task/brief.md" "$data"
+  "$SIGNAL" current-task "$data/current-task/brief.md" "$data" "$data/state"
   [ ! -e "$data/captain-reminders.jsonl" ] || fail "unrelated instructions produced a reminder signal"
   pass "captain reminder ignores unrelated instructions"
 }
 
+test_failed_retry_and_bad_lines_do_not_block() {
+  local data
+  data="$TMP_ROOT/retry-data"
+  mkdir -p "$data/failed-task" "$data/current-task" "$data/state"
+  printf '%s\n' "## Captain's intent" 'Fix the flaky sync.' > "$data/failed-task/brief.md"
+  printf '%s\n' "## Captain's intent" 'Fix the flaky sync.' > "$data/current-task/brief.md"
+  printf '%s\n' 'working: started' 'failed: gave up' > "$data/state/failed-task.status"
+  "$SIGNAL" current-task "$data/current-task/brief.md" "$data" "$data/state"
+  [ ! -e "$data/captain-reminders.jsonl" ] || fail "a retry of a failed task counted as a captain repeat"
+  printf '%s\n' 'working: started' > "$data/state/failed-task.status"
+  printf '%s\n' '' 'not json' > "$data/captain-reminders.jsonl"
+  "$SIGNAL" current-task "$data/current-task/brief.md" "$data" "$data/state" \
+    || fail "malformed or blank signal lines failed the spawn"
+  [ "$(grep -c '"count"' "$data/captain-reminders.jsonl")" = 1 ] || fail "repeat was not recorded past bad lines"
+  pass "captain reminder ignores failed-task retries and skips bad signal lines"
+}
+
 test_repeated_instruction_appends_one_keyed_signal
+test_failed_retry_and_bad_lines_do_not_block
 test_unrelated_instruction_appends_nothing

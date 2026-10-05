@@ -165,10 +165,14 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 LAST_ASSISTANT_MESSAGE=$(printf '%s' "$PAYLOAD" | jq -r 'if type == "object" then (.last_assistant_message // "") else "" end' 2>/dev/null || true)
-if [ -n "$LAST_ASSISTANT_MESSAGE" ] && printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq '(^|[^[:alpha:]])(completed|finished|implemented|fixed|shipped|merged|verified|passed)([^[:alpha:]]|$)'; then
-  if ! printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq '(^|[^[:alpha:]])(not|never|haven.t|hasn.t|didn.t|won.t)[[:space:][:alnum:]]{0,16}(completed|finished|implemented|fixed|shipped|merged|verified|passed)([^[:alpha:]]|$)' \
-    && ! printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq 'https://[^[:space:]]+/(pull|merge_requests)/[0-9]+|(^|[^[:alpha:]])(checks?|tests?|ci|validation).*?(passed|green|success)([^[:alpha:]]|$)'; then
-    printf 'warning: completion claim has no linked evidence; include a PR URL or a check result before ending the turn\n' >&2
+CLAIM_WORDS='(completed|finished|implemented|fixed|shipped|merged|verified|passed)'
+if [ "$STOP_HOOK_ACTIVE" != "true" ] && [ -n "$LAST_ASSISTANT_MESSAGE" ]; then
+  CLAIM_TEXT=$(printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | sed -E 's/(^|[^[:alpha:]])not only([^[:alpha:]]|$)/\1\2/Ig')
+  if printf '%s\n' "$CLAIM_TEXT" | grep -Eiq "(^|[^[:alpha:]])$CLAIM_WORDS([^[:alpha:]]|$)" \
+    && ! printf '%s\n' "$CLAIM_TEXT" | grep -Eiq "(^|[^[:alpha:]])(not|never|haven.t|hasn.t|didn.t|won.t)[[:space:][:alnum:]]{0,16}$CLAIM_WORDS([^[:alpha:]]|$)" \
+    && ! printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq 'https://[^[:space:]]+/(pull|merge_requests)/[0-9]+|(^|[^[:alpha:]])(checks?|tests?|ci|validation).*(passed|green|success)([^[:alpha:]]|$)'; then
+    printf 'completion claim has no linked evidence; include a PR URL or a check result before ending the turn\n' >&2
+    exit 2
   fi
 fi
 if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then

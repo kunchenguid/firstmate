@@ -158,14 +158,11 @@ assert_logged_gh_merge() {
 add_gh_mocks() {
   local case_dir=$1 head=$2
   write_github_live_json "$case_dir" "$head"
-  : > "$case_dir/pr.diff"
+  : > "$case_dir/pr.files"
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
-  "pr diff")
-    [ -f "$FM_TEST_PR_DIFF" ] && cat "$FM_TEST_PR_DIFF"
-    ;;
   "pr view")
     [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
     printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
@@ -250,6 +247,10 @@ case "${1:-} ${2:-}" in
     # The required-check reads: the branch itself, and its rules read without
     # the merge-queue filter the queue reader below applies.
     case " $* " in
+      *" repos/"*"/pulls/"*"/files"*)
+        cat "$FM_TEST_PR_FILES"
+        exit 0
+        ;;
       *" repos/"*"/commits/"*"/check-runs"*)
         case "$*" in
           *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
@@ -468,7 +469,7 @@ run_pr_merge() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_SEAM="${FM_TEST_SEAM:-0}" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
-  FM_TEST_PR_DIFF="$case_dir/pr.diff" \
+  FM_TEST_PR_FILES="$case_dir/pr.files" \
   FM_TEST_SCOPE_CHECK="${FM_TEST_SCOPE_CHECK:-0}" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
@@ -3846,28 +3847,46 @@ test_allow_missing_follows_the_allow_red_rules() {
   pass "fm-pr-merge --allow-missing is single use, attended-only, and GitHub-only like --allow-red"
 }
 
-test_scope_check_refuses_file_outside_brief_spec() {
-  local case_dir out rc
-  case_dir=$(make_case scope-outside)
+run_scope_case() {  # <case-name> <spec-lines> <changed-files>; sets out and rc
+  local case_dir
+  case_dir=$(make_case "$1")
   add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  cat > "$case_dir/pr.diff" <<'EOF'
-diff --git a/docs/outside.md b/docs/outside.md
-index 1111111..2222222 100644
---- a/docs/outside.md
-+++ b/docs/outside.md
-@@ -1 +1,2 @@
--old
-+new
-EOF
+  printf '%s\n' "$2" > "$case_dir/home/data/task-x1/brief.md"
+  printf '%s\n' "$3" > "$case_dir/pr.files"
   set +e
   out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/17 2>&1)
   rc=$?
   set -e
+  SCOPE_CASE_DIR=$case_dir
+}
+
+test_scope_check_refuses_file_outside_brief_spec() {
+  local out rc
+  run_scope_case scope-outside $'## Firstmate spec\n`bin/allowed.sh`' "docs/outside.md"
   expect_code 1 "$rc" "scope check must refuse a file outside the Firstmate spec"
-  assert_contains "$out" 'scope diff: +1 -1; changed files: docs/outside.md' "scope refusal must print its diff stat"
   assert_contains "$out" 'files outside the Firstmate spec scope: docs/outside.md' "scope refusal must name the unexpected file"
-  assert_no_grep 'pr merge' "$case_dir/gh.log" "scope refusal must happen before the forge merge"
+  assert_no_grep 'pr merge' "$SCOPE_CASE_DIR/gh.log" "scope refusal must happen before the forge merge"
   pass "fm-pr-merge: refuses a PR that changes a file outside the brief scope"
+}
+
+test_scope_check_allows_bare_file_names_and_rejects_test_bypass() {
+  local out rc
+  run_scope_case scope-bare $'## Firstmate spec\nUpdate README.md and add a test.' $'README.md\ntests/new.test.sh'
+  expect_code 1 "$rc" "a test file the spec does not name must be refused"
+  assert_contains "$out" 'files outside the Firstmate spec scope: tests/new.test.sh' "only the unnamed test file is outside scope"
+  run_scope_case scope-bare-ok $'## Firstmate spec\nUpdate README.md.' "README.md"
+  assert_not_contains "$out" 'outside the Firstmate spec scope' "a bare named file must be in scope"
+  pass "fm-pr-merge: scope parses bare file names and has no test bypass"
+}
+
+test_scope_check_skips_when_brief_names_no_scope() {
+  local out rc
+  run_scope_case scope-nospec $'## Captain\'s intent\nDo it.' "anything.txt"
+  assert_contains "$out" 'merge scope check skipped' "missing spec must warn and skip"
+  assert_not_contains "$out" 'outside the Firstmate spec scope' "missing spec must not refuse"
+  run_scope_case scope-nopaths $'## Firstmate spec\nImprove things.' "anything.txt"
+  assert_contains "$out" 'merge scope check skipped' "spec without paths must warn and skip"
+  pass "fm-pr-merge: briefs without a spec or path list stay mergeable"
 }
 
 test_gitlab_head_override_args_refuse_before_recording
@@ -3921,6 +3940,8 @@ test_unreadable_required_set_refuses
 test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 test_scope_check_refuses_file_outside_brief_spec
+test_scope_check_allows_bare_file_names_and_rejects_test_bypass
+test_scope_check_skips_when_brief_names_no_scope
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name

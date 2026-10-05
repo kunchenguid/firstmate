@@ -308,32 +308,29 @@ test_hook_silent_when_no_work_in_flight() {
   pass "fm-turnend-guard: silent no-op with nothing in flight"
 }
 
-test_hook_warns_on_completion_claim_without_evidence() {
-  local dir home payload out
+test_hook_blocks_on_completion_claim_without_evidence() {
+  local dir home payload out rc
   dir=$(make_primary_dir "$TMP_ROOT/hook-unsupported-completion")
   home=$(cd "$dir" && pwd)
-  payload=$(jq -cn --arg message 'I completed the implementation.' '{last_assistant_message:$message,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1 || true)
-  assert_contains "$out" 'warning: completion claim has no linked evidence' "turn-end must warn on an unsupported completion claim"
-  payload=$(jq -cn --arg message 'I completed the implementation. https://github.com/acme/project/pull/42' '{last_assistant_message:$message,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1 || true)
-  if printf '%s\n' "$out" | grep -F 'warning: completion claim has no linked evidence' >/dev/null; then
-    fail "turn-end warned despite a linked PR URL"
-  fi
-  payload=$(jq -cn --arg message 'Validation passed and I completed the implementation.' '{last_assistant_message:$message,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1 || true)
-  if printf '%s\n' "$out" | grep -F 'warning: completion claim has no linked evidence' >/dev/null; then
-    fail "turn-end warned despite a check result"
-  fi
-  payload=$(jq -cn --arg message 'I completed the implementation.' '{last_assistant_message:$message,stop_hook_active:true}')
-  out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1 || true)
-  assert_contains "$out" 'warning: completion claim has no linked evidence' "bounded continuation must still check the final assistant message"
-  payload=$(jq -cn --arg message 'I have not completed this change.' '{last_assistant_message:$message,stop_hook_active:true}')
-  out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1 || true)
-  if printf '%s\n' "$out" | grep -F 'warning: completion claim has no linked evidence' >/dev/null; then
-    fail "turn-end treated a negated completion statement as a completion claim"
-  fi
-  pass "fm-turnend-guard: warns when a completion claim lacks a PR URL or check result"
+  claim_check() {  # <message> <stop_hook_active>; sets out and rc
+    payload=$(jq -cn --arg message "$1" --argjson active "$2" '{last_assistant_message:$message,stop_hook_active:$active}')
+    rc=0
+    out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1) || rc=$?
+  }
+  claim_check 'I completed the implementation.' false
+  expect_code 2 "$rc" "an unsupported completion claim must block the turn end"
+  assert_contains "$out" 'completion claim has no linked evidence' "block must carry the reason to the agent"
+  claim_check 'I completed the implementation.' true
+  expect_code 0 "$rc" "the claim block must not repeat once the turn was already continued"
+  claim_check 'I completed the implementation. https://github.com/acme/project/pull/42' false
+  expect_code 0 "$rc" "a linked PR URL is evidence"
+  claim_check 'Validation passed and I completed the implementation.' false
+  expect_code 0 "$rc" "a check result is evidence"
+  claim_check 'I have not completed this change.' false
+  expect_code 0 "$rc" "a negated statement is not a completion claim"
+  claim_check 'This is not only fixed but shipped.' false
+  expect_code 2 "$rc" "not only fixed is not a negated claim"
+  pass "fm-turnend-guard: blocks once when a completion claim lacks a PR URL or check result"
 }
 
 test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
@@ -2235,7 +2232,7 @@ test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight
-test_hook_warns_on_completion_claim_without_evidence
+test_hook_blocks_on_completion_claim_without_evidence
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon

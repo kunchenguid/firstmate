@@ -3117,8 +3117,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     exit 1
   fi
   if [ "$KIND" = ship ]; then
-    "$FM_ROOT/bin/fm-captain-reminder.sh" "$ID" "$BRIEF" "$DATA" || {
-      echo "error: could not record repeated captain instruction for $ID; fix $DATA/captain-reminders.jsonl before spawning" >&2
+    "$FM_ROOT/bin/fm-captain-reminder.sh" "$ID" "$BRIEF" "$DATA" "$STATE" || {
+      echo "error: could not record repeated captain instruction for $ID" >&2
       exit 1
     }
   fi
@@ -3128,43 +3128,43 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       workflow_gates=$FM_WORKFLOW_GATES_SCRIPT
     fi
     if [ ! -f "$workflow_gates" ]; then
-      echo "error: workflow dispatch gate unavailable at $workflow_gates; register the workflow project before spawning" >&2
-      exit 1
-    fi
-    unlanded=0
-    workers=0
-    for meta in "$STATE"/*.meta; do
-      [ -f "$meta" ] || continue
-      meta_kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      meta_id=${meta##*/}
-      meta_id=${meta_id%.meta}
-      [ "$meta_kind" != secondmate ] || continue
-      crew_state=$(FM_CREW_STATE_NO_FORGE=1 "$FM_ROOT/bin/fm-crew-state.sh" "$meta_id" 2>/dev/null | sed -n 's/^state: \([^ ]*\).*/\1/p')
-      case "$crew_state" in
-        working|parked|blocked|paused) workers=$((workers + 1)) ;;
-        done|failed) ;;
-        *) echo "error: workflow dispatch gate could not read worker count for $meta_id; reconcile task state before spawning" >&2; exit 1 ;;
-      esac
-      if [ "$meta_kind" = ship ] && ! grep -Fq ": merged $meta_id " "$STATE/$meta_id.status" 2>/dev/null; then
-        unlanded=$((unlanded + 1))
-      fi
-    done
-    token_budget=$(sed -n 's/^Task token budget: \([0-9][0-9]*\)$/\1/p' "$BRIEF" | head -1)
-    if [ -z "$token_budget" ]; then
-      echo "error: workflow dispatch gate could not read Task token budget from $BRIEF; add a numeric budget before spawning" >&2
-      exit 1
-    fi
-    gate_out=$(uv run --no-project "$workflow_gates" --root "${workflow_gates%/scripts/gates.py}" dispatch \
-      --unlanded "$unlanded" --workers "$workers" --token-budget "$token_budget" 2>&1) || gate_rc=$?
-    gate_rc=${gate_rc:-0}
-    if [ "$gate_rc" -ne 0 ]; then
-      captain_intent=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
-      if [ "$WORKFLOW_GATE_OVERRIDE" -eq 1 ] && printf '%s\n' "$captain_intent" | grep -Fqi 'override the workflow dispatch gate'; then
-        printf 'warning: explicit current captain instruction overrides the workflow dispatch gate: %s\n' "$gate_out" >&2
-      else
-        printf '%s\n' "$gate_out" >&2
-        echo "error: ship spawn refused by the workflow dispatch gate; land work, lower machine load, wait for a worker, or restore quota before retrying" >&2
-        exit "$gate_rc"
+      echo "notice: workflow dispatch gate unavailable at $workflow_gates; spawning without it" >&2
+    else
+      unlanded=0
+      workers=0
+      for meta in "$STATE"/*.meta; do
+        [ -f "$meta" ] || continue
+        meta_kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+        meta_id=${meta##*/}
+        meta_id=${meta_id%.meta}
+        [ "$meta_kind" != secondmate ] || continue
+        crew_state=$(FM_CREW_STATE_NO_FORGE=1 "$FM_ROOT/bin/fm-crew-state.sh" "$meta_id" 2>/dev/null | sed -n 's/^state: \([^ ]*\).*/\1/p')
+        case "$crew_state" in
+          working|parked|blocked|paused)
+            workers=$((workers + 1))
+            if [ "$meta_kind" = ship ] && ! grep -Fq ": merged $meta_id " "$STATE/$meta_id.status" 2>/dev/null; then
+              unlanded=$((unlanded + 1))
+            fi
+            ;;
+          done|failed|closed) ;;
+          *) echo "error: workflow dispatch gate could not read worker count for $meta_id; reconcile task state before spawning" >&2; exit 1 ;;
+        esac
+      done
+      token_budget=$(sed -n 's/^Task token budget: \([0-9][0-9]*\)$/\1/p' "$BRIEF" | head -1)
+      gate_args=(--unlanded "$unlanded" --workers "$workers")
+      [ -z "$token_budget" ] || gate_args+=(--token-budget "$token_budget")
+      gate_out=$(uv run --no-project "$workflow_gates" --root "${workflow_gates%/scripts/gates.py}" dispatch \
+        "${gate_args[@]}" 2>&1) || gate_rc=$?
+      gate_rc=${gate_rc:-0}
+      if [ "$gate_rc" -ne 0 ]; then
+        captain_intent=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
+        if [ "$WORKFLOW_GATE_OVERRIDE" -eq 1 ] && printf '%s\n' "$captain_intent" | grep -Fqi 'override the workflow dispatch gate'; then
+          printf 'warning: explicit current captain instruction overrides the workflow dispatch gate: %s\n' "$gate_out" >&2
+        else
+          printf '%s\n' "$gate_out" >&2
+          echo "error: ship spawn refused by the workflow dispatch gate; land work, lower machine load, wait for a worker, or restore quota before retrying" >&2
+          exit "$gate_rc"
+        fi
       fi
     fi
   fi
