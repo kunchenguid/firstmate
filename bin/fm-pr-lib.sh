@@ -911,6 +911,39 @@ fm_pr_poll_retirement_receipt_valid() {
   FM_PR_RETIRE_RECEIPT_IDENTITY=$(fm_pr_file_identity "$receipt") || return 1
 }
 
+# Live publication proof for a direct-PR copy whose refs are not shared with
+# the primary clone. Resolve repository identity through gh in that copy, then
+# bind the PR and its current fork ref to the authenticated owner and task head.
+# No fetch or primary-repository mutation is needed; unreadable data refuses.
+fm_pr_github_direct_head_published() {  # <worktree> <url> <branch> <sha>
+  local wt=$1 url=$2 branch=$3 sha=$4 base login record fork ref encoded origin current
+  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
+  command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || return 1
+  current=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ "$current" = "$branch" ] || return 1
+  origin=$(git -C "$wt" remote get-url origin 2>/dev/null) || return 1
+  base=$(cd "$wt" && GH_HOST=github.com gh repo view "$origin" --json nameWithOwner -q .nameWithOwner 2>/dev/null) || return 1
+  [ "$base" = "$FM_PR_PATH" ] || return 1
+  login=$(GH_HOST=github.com gh api user --jq .login 2>/dev/null) || return 1
+  [ -n "$login" ] || return 1
+  record=$(GH_HOST=github.com gh api "repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER" 2>/dev/null) || return 1
+  fork=$(printf '%s\n' "$record" | jq -er --arg url "$url" --arg base "$base" \
+    --arg login "$login" --arg branch "$branch" --arg sha "$sha" '
+      select(.html_url == $url and .base.repo.full_name == $base
+        and .draft == false and .user.login == $login
+        and .head.repo.owner.login == $login and .head.ref == $branch
+        and .head.sha == $sha)
+      | .head.repo.full_name
+      | select(type == "string" and test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
+    ' 2>/dev/null) || return 1
+  encoded=$(jq -rn --arg branch "$branch" '$branch | @uri') || return 1
+  ref=$(GH_HOST=github.com gh api "repos/$fork/git/ref/heads/$encoded" 2>/dev/null) || return 1
+  printf '%s\n' "$ref" | jq -e --arg branch "$branch" --arg sha "$sha" '
+    .ref == ("refs/heads/" + $branch) and .object.type == "commit" and .object.sha == $sha
+  ' >/dev/null 2>&1
+}
+
 fm_pr_github_read_record_with_gh() {  # <owner> <repo> <number>
   local owner=$1 repo=$2 number=$3 fields line total=0 named=0
   local state='' merged=''

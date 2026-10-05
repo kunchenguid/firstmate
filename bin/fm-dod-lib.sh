@@ -21,7 +21,9 @@
 # mode the pre-validation `done: {summary}` is the pipeline handoff and is
 # not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
 # Gerrit project the later `done: PR <change url> published for review`. The
-# named head is the worker copy's HEAD, except that a done naming the task's
+# named head is the worker copy's HEAD; direct-PR can prove exact publication
+# through fm_pr_github_direct_head_published without a primary clone object.
+# Otherwise a done naming the task's
 # recorded pr= passes when the forge holds that head: a forge-reported
 # pr_head= in no-mistakes mode, or a recorded merge
 # (state/<id>.pr-poll-merge-notified). A push to Gerrit's refs/for/ leaves no
@@ -631,7 +633,9 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
 # patch set carries the worker copy's HEAD tree, or otherwise when its named
-# head - the worker copy's HEAD - is reachable outside that disposable copy. A
+# head - the worker copy's HEAD - is reachable outside that disposable copy.
+# Direct PR also accepts live authenticated publication through
+# fm_pr_github_direct_head_published, bound to this task branch and owned fork. A
 # published-for-review report that names no Gerrit change is refused.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is
 # not the named head. 1 when
@@ -640,7 +644,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit branch lib
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
@@ -677,6 +681,19 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   fi
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
     return 0
+  fi
+  if [ "$mode" = direct-PR ] && [ "${FM_CREW_STATE_NO_FORGE:-0}" != 1 ] \
+    && [ -n "$url" ] && [ -n "$id" ] && [ -f "$meta" ]; then
+    branch=$(fm_dod_meta_value "$meta" branch)
+    [ -n "$branch" ] || branch="fm/$id"
+    lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+    # shellcheck disable=SC2016 # The bounded child expands positional args.
+    if fm_run_timed 15 bash -c '
+      . "$1"
+      fm_pr_github_direct_head_published "$2" "$3" "$4" "$5"
+    ' _ "$lib" "$wt" "$url" "$branch" "$sha" >/dev/null 2>&1; then
+      return 0
+    fi
   fi
   printf '%s\n' "named head $sha is unreachable outside the worker copy"
   return 1

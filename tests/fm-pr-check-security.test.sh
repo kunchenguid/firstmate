@@ -148,6 +148,17 @@ case "${1:-} ${2:-}" in
       'base=main'
     exit 0
     ;;
+  "repo view")
+    [ -n "${FM_TEST_PUBLICATION:-}" ] || exit 1
+    printf '%s\n' "${FM_TEST_PUBLICATION_BASE:-o/r}"
+    exit 0
+    ;;
+  "api user")
+    [ -n "${FM_TEST_PUBLICATION:-}" ] || exit 1
+    [ "$FM_TEST_PUBLICATION" != auth-offline ] || exit 1
+    printf '%s\n' owner
+    exit 0
+    ;;
   "pr view")
     case " $* " in
       *statusCheckRollup*)
@@ -166,6 +177,22 @@ case "${1:-} ${2:-}" in
     ;;
   "pr merge")
     [ -z "${FM_TEST_GH_MERGE_HOOK:-}" ] || "$FM_TEST_GH_MERGE_HOOK"
+    exit 0
+    ;;
+esac
+case "${2:-}" in
+  repos/o/r/pulls/4)
+    if [ -n "${FM_TEST_PUBLICATION:-}" ]; then
+      [ "$FM_TEST_PUBLICATION" != offline ] || exit 1
+      cat "$FM_TEST_PUBLICATION_RECORD"
+      exit 0
+    fi
+    ;;
+  repos/owner/r/git/ref/heads/*)
+    [ -n "${FM_TEST_PUBLICATION:-}" ] || exit 1
+    [ "$FM_TEST_PUBLICATION" != ref-offline ] || exit 1
+    printf '{"ref":"refs/heads/fm/task-a","object":{"type":"commit","sha":"%s"}}\n' \
+      "${FM_TEST_PUBLICATION_REF:-$FM_TEST_GH_HEAD}"
     exit 0
     ;;
 esac
@@ -733,6 +760,65 @@ test_direct_pr_unpushed_commit_refuses_registration() {
     || fail "direct-PR refusal did not name the unpushed commit: $(cat "$dir/stderr")"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "direct-PR unpushed commit still armed a poll"
   pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
+}
+
+# Use separate Git repositories: no primary object or worker remote-tracking
+# ref contains the published commit. The authenticated API proves publication.
+test_direct_pr_owned_fork_publication() {
+  local variant dir sha rc record
+  for variant in accepted later-head branch wrong-task wrong-base wrong-url wrong-fork wrong-author draft malformed offline auth-offline ref-drift ref-offline; do
+    dir=$(make_case "direct-fork-$variant")
+    git -C "$dir/wt" checkout -qb fm/task-a
+    git -C "$dir/wt" remote add origin https://github.com/o/r.git
+    mkdir "$dir/project"
+    git -C "$dir/project" init -q
+    git -C "$dir/project" commit -q --allow-empty -m primary
+    git -C "$dir/wt" commit -q --allow-empty -m 'published only from isolated copy'
+    sha=$(git -C "$dir/wt" rev-parse HEAD)
+    git -C "$dir/project" cat-file -e "$sha" 2>/dev/null && fail "primary unexpectedly holds worker head"
+    [ -z "$(git -C "$dir/wt" for-each-ref --contains="$sha" refs/remotes)" ] \
+      || fail "fixture unexpectedly has a tracking ref containing worker head"
+    fm_write_meta "$dir/home/state/task-a.meta" \
+      "worktree=$dir/wt" "project=$dir/project" 'kind=ship' 'mode=direct-PR' 'branch=fm/task-a'
+    record="$dir/publication.json"
+    jq -n --arg sha "$sha" '{html_url:"https://github.com/o/r/pull/4",draft:false,
+      user:{login:"owner"},base:{repo:{full_name:"o/r"}},
+      head:{sha:$sha,ref:"fm/task-a",repo:{full_name:"owner/r",owner:{login:"owner"}}}}' > "$record"
+    case "$variant" in
+      later-head) git -C "$dir/wt" commit -q --allow-empty -m unpublished ;;
+      branch) git -C "$dir/wt" checkout -qb fm/other ;;
+      wrong-task) sed 's/branch=fm\/task-a/branch=fm\/other/' "$dir/home/state/task-a.meta" > "$dir/meta"; mv "$dir/meta" "$dir/home/state/task-a.meta" ;;
+      wrong-base) jq '.base.repo.full_name="other/r"' "$record" > "$dir/new"; mv "$dir/new" "$record" ;;
+      wrong-url) jq '.html_url="https://github.com/o/r/pull/5"' "$record" > "$dir/new"; mv "$dir/new" "$record" ;;
+      wrong-fork) jq '.head.repo.owner.login="other"' "$record" > "$dir/new"; mv "$dir/new" "$record" ;;
+      wrong-author) jq '.user.login="other"' "$record" > "$dir/new"; mv "$dir/new" "$record" ;;
+      draft) jq '.draft=true' "$record" > "$dir/new"; mv "$dir/new" "$record" ;;
+      malformed) printf 'unreadable\n' > "$record" ;;
+    esac
+    cp "$dir/home/state/task-a.meta" "$dir/meta.before"
+    rc=0
+    FM_TEST_PUBLICATION=$variant FM_TEST_PUBLICATION_RECORD=$record FM_TEST_GH_HEAD=$sha \
+      FM_TEST_PUBLICATION_REF=$([ "$variant" != ref-drift ] && printf '%s' "$sha" || printf '%040d' 1) \
+      run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+      > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    if [ "$variant" = accepted ]; then
+      [ "$rc" -eq 0 ] || fail "owned fork publication refused: $(cat "$dir/stderr")"
+      [ -f "$dir/home/state/task-a.check.sh" ] || fail "accepted publication armed no poll"
+      grep -qx "pr_head=$sha" "$dir/home/state/task-a.meta" || fail "published exact head not recorded"
+      FM_TEST_PUBLICATION=$variant FM_TEST_PUBLICATION_RECORD=$record FM_TEST_GH_HEAD=$sha \
+        FM_TEST_GH_LOG="$dir/gh.log" PATH="$dir/fakebin:$BASE_PATH" bash -c '
+          . "$1/bin/fm-dod-lib.sh"
+          fm_dod_accept_ship_done ship direct-PR "$2/wt" "$2/project" \
+            "done: PR https://github.com/o/r/pull/4" "$2/home/state" task-a "$2/home/state/task-a.meta"
+        ' _ "$ROOT" "$dir" || fail "registered owned fork done was refused"
+    else
+      [ "$rc" -ne 0 ] || fail "$variant publication accepted"
+      cmp -s "$dir/meta.before" "$dir/home/state/task-a.meta" || fail "$variant refusal changed metadata"
+      [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "$variant refusal armed poll"
+    fi
+    git -C "$dir/project" cat-file -e "$sha" 2>/dev/null && fail "registration mutated primary objects"
+  done
+  pass "direct PR accepts exact owned fork publication and refuses drift, foreign identity, drafts and unavailable proof"
 }
 
 test_valid_recording_and_merge_derivation() {
@@ -3468,6 +3554,7 @@ test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
+test_direct_pr_owned_fork_publication
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

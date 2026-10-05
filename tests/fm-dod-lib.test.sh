@@ -382,6 +382,31 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+test_direct_pr_no_forge_mode_skips_publication_read() {
+  local repo wt state fakebin
+  repo="$TMP_ROOT/no-forge-repo"
+  wt="$TMP_ROOT/no-forge-wt"
+  state="$TMP_ROOT/no-forge-state"
+  fakebin="$TMP_ROOT/no-forge-bin"
+  mkdir -p "$state" "$fakebin"
+  fm_git_worktree "$repo" "$wt" fm/no-forge
+  git -C "$wt" remote set-url origin https://github.com/o/r
+  git -C "$wt" commit -q --allow-empty -m unpublished
+  printf 'branch=fm/no-forge\n' > "$state/no-forge.meta"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'forge read\n' >> "$FM_TEST_FORGE_LOG"
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  FM_CREW_STATE_NO_FORGE=1 FM_TEST_FORGE_LOG="$state/forge.log" PATH="$fakebin:$PATH" \
+    accept_done ship direct-PR "$wt" "$repo" 'done: PR https://github.com/o/r/pull/4' \
+      "$state" no-forge "$state/no-forge.meta" >/dev/null \
+    && fail "unproven head accepted with forge reads disabled"
+  [ ! -e "$state/forge.log" ] || fail "no-forge mode queried GitHub publication"
+  pass "direct PR respects no-forge mode when local refs cannot prove publication"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -400,5 +425,6 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_direct_pr_no_forge_mode_skips_publication_read
 
 echo "all fm-dod-lib tests passed"

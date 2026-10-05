@@ -2,7 +2,8 @@
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
-# outside the worker's disposable copy; in no-mistakes mode a forge-reported
+# outside the worker's disposable copy (including the live owned-fork proof
+# for direct-PR); in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
