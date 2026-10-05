@@ -932,6 +932,9 @@ status_presentation_cursor_offset() {  # <status-file>
   manifest="$state/.status-presentation-cursor"
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
+    if [ -n "${FM_STATUS_MANIFEST_READ_PROBE:-}" ]; then
+      printf 'cursor\t%s\n' "$task" >> "$FM_STATUS_MANIFEST_READ_PROBE" || return 1
+    fi
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
     offset=
     while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do

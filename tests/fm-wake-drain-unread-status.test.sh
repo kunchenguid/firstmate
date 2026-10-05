@@ -414,15 +414,16 @@ test_snapshot_failure_is_visible() {
 }
 
 test_warm_manifest_is_parsed_once_per_presentation() {
-  local dir state out probe i task reads
+  local dir state home out probe i task context_reads cursor_reads
   dir=$(make_case one-manifest-parse); state="$dir/state"; out="$dir/drain.out"; probe="$dir/manifest-reads"
+  home="$dir/home"; mkdir -p "$home/data"
   i=1
   while [ "$i" -le 20 ]; do
     task=$(printf 'reuse-%02d' "$i")
     printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
     i=$((i + 1))
   done
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "bootstrap drain failed while creating the warm cursor manifest"
   i=1
   while [ "$i" -le 20 ]; do
@@ -431,11 +432,13 @@ test_warm_manifest_is_parsed_once_per_presentation() {
     i=$((i + 1))
   done
 
-  FM_STATUS_MANIFEST_READ_PROBE="$probe" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  FM_STATUS_MANIFEST_READ_PROBE="$probe" HOME="$home" FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "instrumented warm-manifest drain failed"
-  reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
-  [ "$reads" -eq 1 ] \
-    || fail "one presentation parsed its warm cursor manifest $reads times: $(cat "$probe")"
+  context_reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
+  cursor_reads=$(awk -F '\t' '$1 == "cursor" { count++ } END { print count + 0 }' "$probe")
+  [ "$context_reads" -eq 1 ] && [ "$cursor_reads" -eq 0 ] \
+    || fail "one presentation used $context_reads context reads and $cursor_reads standalone cursor reads: $(cat "$probe")"
   grep -F 'reuse-01 note: new reuse-01' "$out" >/dev/null \
     || fail "single-parse presentation lost the first unread note: $(cat "$out")"
   grep -F 'reuse-20 note: new reuse-20' "$out" >/dev/null \
@@ -443,11 +446,64 @@ test_warm_manifest_is_parsed_once_per_presentation() {
   pass "one warm presentation parses the cursor manifest once and preserves fleet output"
 }
 
+test_queued_signals_reuse_the_presentation_context() {
+  local dir state home out probe i task context_reads cursor_reads
+  dir=$(make_case queued-signal-context); state="$dir/state"; home="$dir/home"
+  out="$dir/drain.out"; probe="$dir/manifest-reads"; mkdir -p "$home/data"
+  i=1
+  while [ "$i" -le 12 ]; do
+    task=$(printf 'queued-%02d' "$i")
+    printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
+    i=$((i + 1))
+  done
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "bootstrap drain failed while creating the queued-signal manifest"
+  i=1
+  while [ "$i" -le 12 ]; do
+    task=$(printf 'queued-%02d' "$i")
+    printf 'working: queued update %s\n' "$task" >> "$state/$task.status"
+    append_wake "$state" signal "$task.status" "signal: $task.status" \
+      || fail "could not queue the $task signal"
+    i=$((i + 1))
+  done
+
+  FM_STATUS_MANIFEST_READ_PROBE="$probe" HOME="$home" FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "instrumented queued-signal drain failed"
+  context_reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
+  cursor_reads=$(awk -F '\t' '$1 == "cursor" { count++ } END { print count + 0 }' "$probe")
+  [ "$context_reads" -eq 1 ] && [ "$cursor_reads" -eq 0 ] \
+    || fail "queued annotations used $context_reads context reads and $cursor_reads standalone cursor reads: $(cat "$probe")"
+  grep -F 'queued-01.status: working: queued update queued-01' "$out" >/dev/null \
+    || fail "queued context reuse lost the first signal annotation: $(cat "$out")"
+  grep -F 'queued-12.status: working: queued update queued-12' "$out" >/dev/null \
+    || fail "queued context reuse lost the last signal annotation: $(cat "$out")"
+  pass "queued signal annotations reuse one validated presentation context"
+}
+
+test_queue_rows_without_a_status_snapshot_stay_valid() {
+  local dir state home out err
+  dir=$(make_case queued-without-status); state="$dir/state"; home="$dir/home"
+  out="$dir/drain.out"; err="$dir/drain.err"; mkdir -p "$home/data"
+  append_wake "$state" signal missing.status 'signal: missing.status' \
+    || fail "could not queue the missing-status signal"
+
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" \
+    "$DRAIN" > "$out" 2> "$err" \
+    || fail "queue-only presentation failed without a status snapshot: $(cat "$err")"
+  grep -F 'signal' "$out" >/dev/null \
+    || fail "queue-only presentation lost its durable wake row: $(cat "$out")"
+  grep -F 'unbound variable' "$err" >/dev/null \
+    && fail "queue-only presentation referenced an uninitialized context: $(cat "$err")"
+  pass "queue rows remain presentable when no status snapshot exists"
+}
+
 test_duplicate_manifest_row_refuses_without_advancing() {
-  local dir state out manifest original duplicate
+  local dir state home out manifest original duplicate
   dir=$(make_case duplicate-manifest); state="$dir/state"; out="$dir/drain.out"
+  home="$dir/home"; mkdir -p "$home/data"
   printf 'note: bootstrap duplicate fixture\n' > "$state/duplicate.status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "bootstrap drain failed while creating the duplicate-row fixture"
   manifest="$state/.status-presentation-cursor"
   original=$(cat "$manifest")
@@ -455,7 +511,7 @@ test_duplicate_manifest_row_refuses_without_advancing() {
   printf '%s\n' "$duplicate" >> "$manifest"
   printf 'note: must remain unread after refusal\n' >> "$state/duplicate.status"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "duplicate-row refusal changed the top-level empty-queue compatibility exit"
   grep -F 'STATUS PRESENTATION INCOMPLETE: status cursor manifest could not be read safely.' "$out" >/dev/null \
     || fail "duplicate cursor row did not fail closed visibly: $(cat "$out")"
@@ -558,6 +614,8 @@ test_status_append_serializes_with_retirement
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
 test_warm_manifest_is_parsed_once_per_presentation
+test_queued_signals_reuse_the_presentation_context
+test_queue_rows_without_a_status_snapshot_stay_valid
 test_duplicate_manifest_row_refuses_without_advancing
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation

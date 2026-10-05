@@ -598,7 +598,7 @@ print_status_sections() {
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot context annotation_manifest fully_presented='' rc=0
+  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot context='' annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
@@ -624,7 +624,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     }
   fi
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
-    fm_wake_print_annotations "$rows" "$snapshot" || rc=1
+    fm_wake_print_annotations "$rows" "$context" || rc=1
     if [ "$rc" -eq 0 ]; then
       annotation_manifest=$(fm_wake_annotation_manifest "$rows") || rc=1
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
