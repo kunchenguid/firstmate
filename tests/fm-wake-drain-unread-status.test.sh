@@ -413,6 +413,138 @@ test_snapshot_failure_is_visible() {
   pass "snapshot failures are reported visibly"
 }
 
+test_warm_manifest_is_parsed_once_per_presentation() {
+  local dir state home out probe i task context_reads cursor_reads
+  dir=$(make_case one-manifest-parse); state="$dir/state"; out="$dir/drain.out"; probe="$dir/manifest-reads"
+  home="$dir/home"; mkdir -p "$home/data"
+  i=1
+  while [ "$i" -le 20 ]; do
+    task=$(printf 'reuse-%02d' "$i")
+    printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
+    i=$((i + 1))
+  done
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "bootstrap drain failed while creating the warm cursor manifest"
+  i=1
+  while [ "$i" -le 20 ]; do
+    task=$(printf 'reuse-%02d' "$i")
+    printf 'note: new %s\n' "$task" >> "$state/$task.status"
+    i=$((i + 1))
+  done
+
+  FM_STATUS_MANIFEST_READ_PROBE="$probe" HOME="$home" FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "instrumented warm-manifest drain failed"
+  context_reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
+  cursor_reads=$(awk -F '\t' '$1 == "cursor" { count++ } END { print count + 0 }' "$probe")
+  [ "$context_reads" -eq 1 ] && [ "$cursor_reads" -eq 0 ] \
+    || fail "one presentation used $context_reads context reads and $cursor_reads standalone cursor reads: $(cat "$probe")"
+  grep -F 'reuse-01 note: new reuse-01' "$out" >/dev/null \
+    || fail "single-parse presentation lost the first unread note: $(cat "$out")"
+  grep -F 'reuse-20 note: new reuse-20' "$out" >/dev/null \
+    || fail "single-parse presentation lost the last unread note: $(cat "$out")"
+  pass "one warm presentation parses the cursor manifest once and preserves fleet output"
+}
+
+test_queued_signals_reuse_the_presentation_context() {
+  local dir state home out probe i task context_reads cursor_reads
+  dir=$(make_case queued-signal-context); state="$dir/state"; home="$dir/home"
+  out="$dir/drain.out"; probe="$dir/manifest-reads"; mkdir -p "$home/data"
+  i=1
+  while [ "$i" -le 12 ]; do
+    task=$(printf 'queued-%02d' "$i")
+    printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
+    i=$((i + 1))
+  done
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "bootstrap drain failed while creating the queued-signal manifest"
+  i=1
+  while [ "$i" -le 12 ]; do
+    task=$(printf 'queued-%02d' "$i")
+    printf 'working: queued update %s\n' "$task" >> "$state/$task.status"
+    append_wake "$state" signal "$task.status" "signal: $task.status" \
+      || fail "could not queue the $task signal"
+    i=$((i + 1))
+  done
+
+  FM_STATUS_MANIFEST_READ_PROBE="$probe" HOME="$home" FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "instrumented queued-signal drain failed"
+  context_reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
+  cursor_reads=$(awk -F '\t' '$1 == "cursor" { count++ } END { print count + 0 }' "$probe")
+  [ "$context_reads" -eq 1 ] && [ "$cursor_reads" -eq 0 ] \
+    || fail "queued annotations used $context_reads context reads and $cursor_reads standalone cursor reads: $(cat "$probe")"
+  grep -F 'queued-01.status: working: queued update queued-01' "$out" >/dev/null \
+    || fail "queued context reuse lost the first signal annotation: $(cat "$out")"
+  grep -F 'queued-12.status: working: queued update queued-12' "$out" >/dev/null \
+    || fail "queued context reuse lost the last signal annotation: $(cat "$out")"
+  pass "queued signal annotations reuse one validated presentation context"
+}
+
+test_queue_rows_without_a_status_snapshot_stay_valid() {
+  local dir state home out err
+  dir=$(make_case queued-without-status); state="$dir/state"; home="$dir/home"
+  out="$dir/drain.out"; err="$dir/drain.err"; mkdir -p "$home/data"
+  append_wake "$state" signal missing.status 'signal: missing.status' \
+    || fail "could not queue the missing-status signal"
+
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" \
+    "$DRAIN" > "$out" 2> "$err" \
+    || fail "queue-only presentation failed without a status snapshot: $(cat "$err")"
+  grep -F 'signal' "$out" >/dev/null \
+    || fail "queue-only presentation lost its durable wake row: $(cat "$out")"
+  grep -F 'unbound variable' "$err" >/dev/null \
+    && fail "queue-only presentation referenced an uninitialized context: $(cat "$err")"
+  pass "queue rows remain presentable when no status snapshot exists"
+}
+
+test_duplicate_manifest_row_refuses_without_advancing() {
+  local dir state home out manifest original duplicate
+  dir=$(make_case duplicate-manifest); state="$dir/state"; out="$dir/drain.out"
+  home="$dir/home"; mkdir -p "$home/data"
+  printf 'note: bootstrap duplicate fixture\n' > "$state/duplicate.status"
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "bootstrap drain failed while creating the duplicate-row fixture"
+  manifest="$state/.status-presentation-cursor"
+  original=$(cat "$manifest")
+  duplicate=${original%%$'\n'*}
+  printf '%s\n' "$duplicate" >> "$manifest"
+  printf 'note: must remain unread after refusal\n' >> "$state/duplicate.status"
+
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "duplicate-row refusal changed the top-level empty-queue compatibility exit"
+  grep -F 'STATUS PRESENTATION INCOMPLETE: status cursor manifest could not be read safely.' "$out" >/dev/null \
+    || fail "duplicate cursor row did not fail closed visibly: $(cat "$out")"
+  [ "$(awk -F '\t' '$1 == "duplicate" { count++ } END { print count + 0 }' "$manifest")" -eq 2 ] \
+    || fail "refused duplicate manifest was unexpectedly replaced"
+  pass "a duplicate cursor row refuses presentation without advancing its receipt"
+}
+
+test_legacy_three_column_manifest_migrates() {
+  local dir state home out manifest task ident presented fields
+  dir=$(make_case legacy-three-column); state="$dir/state"; home="$dir/home"
+  out="$dir/drain.out"; manifest="$state/.status-presentation-cursor"; mkdir -p "$home/data"
+  task=legacy
+  printf 'note: already presented\nnote: newly unread\n' > "$state/$task.status"
+  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT" "$state/$task.status") || fail "could not identify the legacy status fixture"
+  presented=$(printf 'note: already presented\n' | wc -c | tr -d '[:space:]')
+  printf '%s\t%s\t%s\n' "$task" "$ident" "$presented" > "$manifest"
+
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" \
+    "$DRAIN" > "$out" || fail "drain rejected a legacy three-column cursor manifest"
+  grep -F 'legacy note: newly unread' "$out" >/dev/null \
+    || fail "legacy cursor migration lost the unread line: $(cat "$out")"
+  grep -F 'already presented' "$out" >/dev/null \
+    && fail "legacy cursor migration replayed an already-presented line: $(cat "$out")"
+  fields=$(awk -F '\t' '$1 == "legacy" { print NF }' "$manifest")
+  [ "$fields" = 4 ] \
+    || fail "legacy cursor row was not migrated to the four-column format: $(cat "$manifest")"
+  pass "a legacy three-column cursor is reused and migrated on commit"
+}
+
 test_open_decisions_fold_is_unchanged() {
   local dir state out
   dir=$(make_case open-decisions-regression)
@@ -506,6 +638,11 @@ test_settled_retirement_refuses_orphan_decision_cursor
 test_status_append_serializes_with_retirement
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
+test_warm_manifest_is_parsed_once_per_presentation
+test_queued_signals_reuse_the_presentation_context
+test_queue_rows_without_a_status_snapshot_stay_valid
+test_duplicate_manifest_row_refuses_without_advancing
+test_legacy_three_column_manifest_migrates
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue

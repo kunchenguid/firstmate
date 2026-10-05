@@ -1655,9 +1655,9 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 
 # Print supplemental drain-time context only after the caller has committed the
 # raw queue consumption and released the append lock.
-fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
+fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot-or-context>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
-  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
+  local snapshot_task snapshot_endpoint _snapshot_ident snapshot_offset _snapshot_backstop offset last_event event_line
   local LC_ALL=C
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
@@ -1700,17 +1700,22 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     if [ "$mode" = historical ] && fm_wake_signal_seen_current "$STATE" "$path"; then
       continue
     fi
-    offset=$(fm_wake_status_cursor_offset "$path") || return 1
+    offset=
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
-      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident; do
-        if [ "$snapshot_task" = "$task" ]; then endpoint=$snapshot_endpoint; break; fi
+      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident snapshot_offset _snapshot_backstop; do
+        if [ "$snapshot_task" = "$task" ]; then
+          endpoint=$snapshot_endpoint
+          if [ -n "$snapshot_offset" ]; then offset=$snapshot_offset; fi
+          break
+        fi
       done <<EOF
 $snapshot
 EOF
       [ -n "$endpoint" ] || continue
     fi
+    if [ -z "$offset" ]; then offset=$(fm_wake_status_cursor_offset "$path") || return 1; fi
     if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then continue; fi
     if ! fm_wake_unread_events "$path" 0 "$offset" "$endpoint"; then
       # Annotation enrichment is supplemental to the already-printed durable
