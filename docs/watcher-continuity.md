@@ -104,6 +104,7 @@ That verdict accepts either of two cases:
 With that verdict, a background session keeps arming after its transient helper chain is recycled.
 [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns the Claude guard's behavior when that live owner is genuinely another session.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
+A claim that moves the lock to this session from a different or unrecorded session is announced once, added to the first exit-2 delivery this session commits afterward, so a session that started read-only learns it now holds the lock; re-anchoring this same session's own lock is not announced, and the script header owns the notice's lifecycle.
 
 ### Claude arm failures
 
@@ -485,6 +486,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 
 - The auto-arm's scope.
 - Stale and live session owners.
+- The once-per-takeover lock promotion notice.
 - Unchanged AFK and need boundaries.
 - Single-flight.
 - Bounded failure retries.

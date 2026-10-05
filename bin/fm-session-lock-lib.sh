@@ -22,6 +22,7 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 [ "$_FM_SESSION_LOCK_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_SESSION_LOCK_LIB_DIR=.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
+FM_SESSION_LOCK_LIB_DIR=${_FM_SESSION_LOCK_LIB_DIR:-/}
 unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp is
@@ -384,4 +385,107 @@ fm_session_lock_inspect() {  # <state>
   FM_LOCK_INSPECT_STATE=stale
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
   FM_LOCK_INSPECT_LIVE_HARNESS=false
+}
+
+# Read-only "is it me?" classification of the lock in state dir $1, for
+# bin/fm-lock.sh status. Kept apart from fm_session_lock_inspect so the inbox
+# readiness projection does not pay for an ancestry walk it never reports.
+#
+# Sets:
+#   FM_LOCK_INSPECT_OWNER    self|other|unknown
+#   FM_LOCK_INSPECT_SESSION  the session id recorded beside the lock, or empty
+#
+# self: fm_session_lock_owned_by_self. other: this process runs inside a
+# resolvable harness session that does not own the lock. unknown: no harness
+# session is in this process's ancestry (a cron job or a plain terminal), so
+# this caller cannot answer whose lock it is.
+# shellcheck disable=SC2034 # Output globals, read by lock status.
+FM_LOCK_INSPECT_OWNER=unknown
+# shellcheck disable=SC2034 # Output globals, read by lock status.
+FM_LOCK_INSPECT_SESSION=
+fm_session_lock_inspect_owner() {  # <state>
+  local state=$1
+  # shellcheck disable=SC2034 # Output global, read by lock status.
+  FM_LOCK_INSPECT_SESSION=$(fm_session_lock_recorded_session_id "$state" 2>/dev/null || true)
+  if fm_session_lock_owned_by_self "$state"; then
+    # shellcheck disable=SC2034 # Output global, read by lock status.
+    FM_LOCK_INSPECT_OWNER=self
+  elif fm_harness_ancestry_pids >/dev/null 2>&1; then
+    # shellcheck disable=SC2034 # Output global, read by lock status.
+    FM_LOCK_INSPECT_OWNER=other
+  else
+    # shellcheck disable=SC2034 # Output global, read by lock status.
+    FM_LOCK_INSPECT_OWNER=unknown
+  fi
+}
+
+# --- naming a Claude-shaped lock holder ----------------------------------------
+# A refusal that names only a pid and a session uuid leaves the operator to work
+# out which session that is. When the live holder is Claude-shaped,
+# `claude agents --json` (read-only; one row per active interactive or
+# background session with pid, sessionId, kind, name, status, and, for a
+# background session, its short id and state) can name it. The lookup is
+# diagnostic only: it never changes a liveness or ownership verdict, it is
+# bounded by FM_LOCK_HOLDER_LOOKUP_TIMEOUT seconds (default 2), and a missing
+# claude or jq, a failed or timed-out call, or output that is not a JSON array
+# prints nothing at all. Rows match on the lock pid first, then on the recorded
+# session id. Vendor strings lose their control characters before printing, and
+# a stop command is printed only for a background row whose short id is a plain
+# token, because `claude stop` addresses background sessions only. Nothing here
+# ever suggests signalling a pid.
+
+# Print zero or more "lock holder:" lines describing live lock pid $1, whose
+# recorded session id is $2 (may be empty). Always returns 0.
+fm_session_lock_holder_lines() {  # <lock-pid> [<recorded-session-id>]
+  local pid=$1 session=${2:-} seconds json row detail
+  local kind name status state id sid row_pid cwd
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  fm_harness_pid_alive "$pid" || return 0
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 0
+  command -v claude >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  if ! command -v fm_run_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_SESSION_LOCK_LIB_DIR/fm-timeout-lib.sh" 2>/dev/null || return 0
+  fi
+  seconds=${FM_LOCK_HOLDER_LOOKUP_TIMEOUT:-2}
+  case "$seconds" in ''|*[!0-9]*|0) seconds=2 ;; esac
+  json=$(fm_run_timed "$seconds" claude agents --json 2>/dev/null </dev/null) || return 0
+  row=$(printf '%s' "$json" | jq -r --arg pid "$pid" --arg sid "$session" '
+    def clean: (. // "") | tostring | gsub("[\u0000-\u001f\u007f]"; " ");
+    if type != "array" then error("not an array") else . end
+    | [ .[] | select(type == "object") ] as $rows
+    | ([ $rows[] | select((.pid | tostring) == $pid) ]
+       + [ $rows[] | select($sid != "" and .sessionId == $sid) ]) as $hits
+    | if ($hits | length) == 0 then "none"
+      else $hits[0] | [ (.kind | clean), (.name | clean), (.status | clean),
+        (.state | clean), (.id | clean), (.sessionId | clean), (.pid | clean),
+        (.cwd | clean) ] | join("\u001f")
+      end' 2>/dev/null) || return 0
+  [ -n "$row" ] || return 0
+  if [ "$row" = none ]; then
+    printf 'lock holder: pid %s is a live Claude Code process, but claude agents lists no session with that pid or the recorded session id, so no session can be named or stopped from here; it may be a background helper process rather than a session, and the lock still counts as held\n' "$pid"
+    return 0
+  fi
+  IFS=$'\037' read -r kind name status state id sid row_pid cwd <<<"$row"
+  [ -n "$kind" ] || kind=unknown-kind
+  [ -n "$name" ] || name='(unnamed)'
+  detail="status ${status:-unknown}"
+  [ -z "$state" ] || detail="$detail, state $state"
+  case "$id" in
+    '' | *[!A-Za-z0-9_-]*) id= ;;
+    *) detail="id $id, $detail" ;;
+  esac
+  [ -z "$cwd" ] || detail="$detail, cwd $cwd"
+  printf 'lock holder: Claude Code %s session "%s" (%s)\n' "$kind" "$name" "$detail"
+  if [ "$row_pid" != "$pid" ]; then
+    printf 'lock holder: matched by the recorded session id %s; that session is listed under pid %s, not the lock pid %s\n' \
+      "$sid" "${row_pid:-unknown}" "$pid"
+  fi
+  if [ "$kind" = background ] && [ -n "$id" ]; then
+    printf 'lock holder: to end that session and free the lock, run: claude stop %s (its conversation is kept; claude attach %s resumes it)\n' "$id" "$id"
+  elif [ "$kind" = interactive ]; then
+    printf 'lock holder: to free the lock, exit that interactive session from its own terminal\n'
+  fi
+  return 0
 }

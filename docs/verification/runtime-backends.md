@@ -638,6 +638,27 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 
 The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
 
+## Session-lock holder naming
+
+`bin/fm-session-lock-lib.sh`'s `fm_session_lock_holder_lines` names a Claude-shaped session-lock holder from the vendor's `claude agents --json` rows: `pid`, `sessionId`, `kind`, `name`, `status`, and, for a background row, its short `id` and `state`.
+The lookup only adds lines to a refusal or a status; a missing or changed shape falls back to the unnamed diagnostic, which is why this guard exists to catch that drift loudly.
+`tests/fm-lock-holder-live-e2e.test.sh` reads the real rows, checks those fields on the running session's row and on a background row when one is listed, and drives the real `bin/fm-lock.sh status` against a throwaway home whose lock records each of those real sessions.
+
+Verified 2026-10-05 on Claude Code 2.1.288 on Linux.
+
+```sh
+bash tests/fm-lock-holder-live-e2e.test.sh
+```
+
+```
+# claude 2.1.288 (Claude Code): named a real interactive session from claude agents --json
+# claude 2.1.288 (Claude Code): named a real background session from claude agents --json
+ok - lock holder: claude 2.1.288 (Claude Code) names real session-lock holders from claude agents --json (checked: interactive background)
+```
+
+On that host a background session's row pid was its `claude bg-spare` process, the same pid its session lock recorded, so the row matched on the lock pid.
+The guard submits no prompt and spends no tokens, so it runs by default wherever claude and jq are installed; rerun it after every Claude Code upgrade.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

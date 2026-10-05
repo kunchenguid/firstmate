@@ -366,6 +366,7 @@ family_for_basename() {
     fm-launch-prompt-signals-live-e2e.test.sh|\
     fm-pi-seeded-home-trust-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
+    fm-lock-holder-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-worker-account-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
@@ -776,6 +777,7 @@ tests/fm-lint-workflows.test.sh 872
 tests/fm-live-gate.test.sh 7452
 tests/fm-live-lab-up-mate.test.sh 17363
 tests/fm-live-lab.test.sh 79639
+tests/fm-lock-holder-live-e2e.test.sh 50
 tests/fm-mail-check.test.sh 7524
 tests/fm-mail.test.sh 9684
 tests/fm-muse-harness.test.sh 46548
