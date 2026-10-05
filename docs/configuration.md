@@ -478,6 +478,8 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 - A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 
+- A pi/pi-signed ship or scout task additionally records `pi_session_id=`, the Pi session id `bin/fm-spawn.sh` passes as `--session-id` on every fresh spawn whose resolved executable advertises the flag. A fresh spawn's id is `<task-id>.<spawn-gen>`, scoped to that incarnation, so re-spawning a torn-down task id creates a new session rather than resuming the abandoned attempt; a relaunch instead passes the id the record already names, and only when it names one, so relaunching a record that predates the field runs fresh while the republished record gains a new incarnation's id for its next relaunch. A relaunch whose endpoint runtime still binds a session of its own runs THAT reference and records it in place of the prior value, so the field always names the session the launch ran; a recorded value containing a slash is such a session path and is passed as `--session` rather than `--session-id`. An older Pi that does not advertise it launches fresh: a fresh spawn records nothing, while a relaunch keeps the id already recorded, so it stays resumable on a later supporting-Pi relaunch (see [`docs/agent-control.md`](agent-control.md) "Transactional relaunch").
+
 ### Task selectors
 
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.

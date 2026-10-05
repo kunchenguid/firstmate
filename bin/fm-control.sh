@@ -77,7 +77,10 @@
 #              that no longer resolves or is signed out refuses before the old
 #              agent stops.
 #              --note is required for a ship or scout, whose replacement
-#              inherits the local copy but none of the conversation; a
+#              inherits the local copy but none of the worker's unsaid context;
+#              on pi/pi-signed, when the resolved executable advertises
+#              --session-id, the replacement also resumes the task's recorded
+#              Pi session, so the conversation itself continues. A
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
@@ -95,7 +98,9 @@
 # `resume` is not a verb: it is not deterministic across the verified adapters
 # (bin/fm-control-lib.sh's header owns that reasoning). `relaunch` covers the
 # same need for every adapter because the brief on disk, not a harness-private
-# session, is the durable instruction.
+# session, is the durable instruction; on pi/pi-signed it additionally resumes
+# the task's recorded Pi session, so a closed lane continues its conversation
+# instead of re-reading the task from scratch.
 #
 # Targeting is EXACT: only a bare task id with a state/<id>.meta record in
 # THIS home is accepted, and the record must pass the shared endpoint-identity
@@ -220,7 +225,7 @@ shift 2
 if ! fm_control_verb_allowed "$VERB"; then
   {
     if [ "$VERB" = resume ]; then
-      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex and grok need a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
+      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex and grok need a session id printed at exit, opencode continues the most recent session for the cwd, and claude and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter - and for a pi/pi-signed ship or scout whose executable advertises --session-id, resumes the task's recorded session so the conversation continues."
     else
       echo "error: '$VERB' is not a control verb"
     fi
@@ -927,8 +932,9 @@ safe_checkpoint() {
 }
 
 # record_note: put the required progress note somewhere durable, and - for a
-# ship or scout, whose only record of the interrupted reasoning is the
-# conversation about to be discarded - into the instructions the replacement
+# ship or scout, whose unsaid reasoning the replacement does not inherit
+# (except on pi/pi-signed, where it resumes the task's recorded session and the
+# conversation itself continues) - into the instructions the replacement
 # actually reads. A secondmate's charter is a durable standing document and is
 # never rewritten: a secondmate reconciles its own home's records at startup,
 # so the note stays parent-side audit evidence.
