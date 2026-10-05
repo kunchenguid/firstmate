@@ -82,7 +82,17 @@ On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at
 After that bootstrap, every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session.
 It never runs in the SSH process or a Herdr pane.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
-When idle, the worker checks for newly staged work about once per second; after a lane starts or finishes it checks more frequently for a short period.
+The [`fm-remote-job-worker.sh` header](../bin/fm-remote-job-worker.sh) owns dispatch cadence and the quiet-scan latency for work arriving after its post-activity burst.
+Active-command and result waits use a separate sampling interval; the [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns its defaults, overrides, and completion, cancellation, and timeout latency contract.
+
+On macOS, worker repair serializes the replacement decision and LaunchAgent reload with other callers, including its bounded startup wait.
+A live process tracked by launchd gets time to publish readiness even if the caller that started it disconnected before publication.
+Reload waits for launchd to finish removing the old service before bootstrap, with at most 100 sleeps of 0.1 seconds plus command and scheduling time; a timeout fails the repair instead of bootstrapping during removal.
+A verified lock owner running stale code or no longer tracked by launchd is stopped identity-safely before launchd starts the current worker.
+If readiness remains stale while a verified current, launchd-tracked lock owner is alive, the command fails with `remote-job: ready heartbeat stale while verified worker lock owner is alive` rather than reloading that worker merely for the stale heartbeat.
+The repair invariant is implemented in [`fm_remote_job_repair_launchagent`](../bin/fm-remote-job-lib.sh); heartbeat ownership and cadence are documented in the worker header above.
+
+The independent heartbeat and live-owner check build on [Diabl0570's contribution](https://github.com/kunchenguid/firstmate/pull/6217), alongside [gearhead924's supervisor-multiplication work](https://github.com/kunchenguid/firstmate/pull/5851), addressing [remote reply reliability](https://github.com/kunchenguid/firstmate/issues/2921).
 
 ### Job lanes and preemption
 
@@ -487,6 +497,7 @@ When deduplication finds that the worker already moved the matching record into 
 The remote host runs no doorbell re-ring ladder of its own.
 A swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation.
 Its recovery request rings the doorbell again when it is enqueued.
+A fire-and-forget record, such as a reconcile ask, gets its single retry ring only on the local plane, and only when `config/wait-no-turns` is present: the remote steer leg owes no re-ring, so a swallowed remote doorbell for one waits for the next ring into that inbox, and a remote-side retry is known follow-up scope.
 
 ### Remote reads
 
@@ -511,6 +522,7 @@ A process-event source takes these steps:
 - It does not carry blank separators.
 
 The listener holds its claim across an empty wait and across a delta it re-arms, so a line appended during either is collected without waiting for the next supervision cycle.
+The [`fm-remote-delta-read.sh` header](../bin/fm-remote-delta-read.sh) owns snapshot sampling and its line-visibility and wait-window latency contract.
 It stops when that registration is retired, the registered command changes, or the home's owner lease lapses.
 `bin/fm-procevent.sh` owns the generic relisten rule, and `bin/fm-procevent-remote-reply.sh` owns this adapter's answer.
 
@@ -674,6 +686,7 @@ The portable tests use these pieces:
 - A stateful host-local Herdr CLI fixture.
 - A controlled account fixture for the readiness gate.
 
+[`fm-remote-job-launchagent.test.sh`](../tests/fm-remote-job-launchagent.test.sh) exercises the real worker with stubbed asynchronous `launchctl`, covering slow claim sweeps, missing readiness recovery during a sweep, stale readiness without reload, concurrent repair, untracked owners, interrupted repairs, and asynchronous service removal before bootstrap.
 The lifecycle test covers seeding a registered project that this machine has never cloned.
 It asserts that the local project tree is unchanged afterwards.
 It carries Bitbucket, self-hosted, and scp-like origins through to the remote clone.
@@ -686,6 +699,9 @@ bin/fm-test-run.sh tests/fm-secondmate-reconcile.test.sh
 bin/fm-test-run.sh tests/fm-peek-remote.test.sh
 bin/fm-test-run.sh tests/fm-crew-state.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
+bin/fm-test-run.sh tests/fm-remote-job-claim-reap.test.sh
+bin/fm-test-run.sh tests/fm-remote-job-claim-retention.test.sh
+bin/fm-test-run.sh tests/fm-remote-job-launchagent.test.sh
 bin/fm-test-run.sh tests/fm-remote-transport-lanes.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh
@@ -707,6 +723,39 @@ The doctor performs these account-level checks, and they are only ever exercised
 
 So the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.
 The audit-session facts the guard relies on are recorded with their commands in [runtime backend verification](verification/runtime-backends.md#fm-remote-server-birth-and-login-keychain-access).
+
+### Read-only post-deploy turnover check
+
+After the updated worker has started through an independently authorized deployment, observe it on the remote Mac under normal traffic for at least two hours.
+Use a console shell or plain SSH as the worker account, not `fm-on.sh` or the remote entrypoint: those paths can repair the worker and invalidate a read-only observation.
+Do not run doctor `--fix`, signal a process, change the queue or readiness timestamps, or invoke any mutating `launchctl` verb during this check.
+Run this Bash sampling loop on that Mac; it only reads service and process records and the existing state files:
+
+```bash
+label=dev.firstmate.remote-job
+state="$HOME/.firstmate/remote-job"
+for ((sample=0; sample<=120; sample++)); do
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+  service=$(launchctl print "gui/$(id -u)/$label") || break
+  printf '%s\n' "$service" | awk '
+    $1 == "pid" || $1 == "runs" || ($1 == "last" && $2 == "exit")
+  '
+  pid=$(printf '%s\n' "$service" | awk '$1 == "pid" && $2 == "=" {print $3; exit}')
+  case "$pid" in ''|*[!0-9]*) printf 'No tracked worker PID\n'; break ;; esac
+  ps -p "$pid" -o pid= -o lstart= -o command=
+  printf 'lock PID: '; cat "$state/worker.lock/pid"
+  printf 'ready PID: '; cat "$state/worker.ready"
+  mtime=$(stat -f %m "$state/worker.ready") || break
+  printf 'ready age: %ss\n' "$(( $(date +%s) - mtime ))"
+  [ "$sample" -eq 120 ] || sleep 60
+done
+```
+
+Confirm the timestamps span at least two hours, every sample has the same tracked PID and process start time, and both recorded PIDs match that tracked worker.
+Confirm launchd's `runs` count does not increase and readiness stays within the freshness bound implemented by [`fm_remote_job_probe`](../bin/fm-remote-job-lib.sh).
+A PID/start-time change or increased run count is turnover; a missing service, failed read, stale heartbeat, host reboot, or missing run counter prevents a clean no-turnover verdict.
+Minute samples alone cannot prove that readiness never stalled between samples, so retain the existing service logs and any stale-ready diagnostics alongside the observations.
+Keep dated output, the deployed commit, and the result in deployment or PR evidence rather than claiming a measured result from the portable fixtures.
 
 ### Real-host smoke test
 

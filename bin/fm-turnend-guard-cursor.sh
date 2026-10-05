@@ -28,8 +28,8 @@
 #   2. the bounded repair instruction when supervision could not be established.
 #
 # SUPERVISION HOST. A home opted in with config/supervision-host
-# (docs/configuration.md "Supervision host" owns the gate; an `off` file opts
-# out, and a Cursor home without the file does not run the host) parks on
+# (docs/configuration.md "Supervision host" owns the gate;
+# config/supervision-host-off opts out, and a Cursor home without the file does not run the host) parks on
 # bin/fm-supervision-host.sh in the arm's place, which takes eligible attended
 # wakes and all away wakes itself and exits only when main is needed; its
 # header owns the output this park reads. A "supervision-host:" line is
