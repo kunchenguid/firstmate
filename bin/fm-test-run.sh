@@ -316,7 +316,7 @@ family_for_basename() {
       printf '%s\n' real-herdr-gated
       ;;
     fm-backlog-atomicity.test.sh|\
-    fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
+    fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gotmp.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-memory-budget.test.sh|fm-startup-network.test.sh|\
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
@@ -629,7 +629,6 @@ tests/fm-extension-binding.test.sh 7398
 tests/fm-fleet-snapshot-unfinished.test.sh 7397
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-sync.test.sh 37749
-tests/fm-gate-refuse.test.sh 4977
 tests/fm-gitignore-config.test.sh 62
 tests/fm-gotmp.test.sh 1310
 tests/fm-guard-stale-banner.test.sh 32981
@@ -660,6 +659,7 @@ tests/fm-periodic-stow.test.sh 21332
 tests/fm-pr-check-security.test.sh 172215
 tests/fm-procevent-when.test.sh 17392
 tests/fm-procevent.test.sh 69715
+tests/fm-quota.test.sh 3426
 tests/fm-relay-removal.test.sh 1000
 tests/fm-profile-array-dispatch-live-e2e.test.sh 50
 tests/fm-readable-documents-live-e2e.test.sh 8400
@@ -1313,7 +1313,7 @@ families_for_changed_path() {
       ;;
     bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*)
+    bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-feishu-*|.pi/extensions/fm-primary-feishu-bridge.ts|\

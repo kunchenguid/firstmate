@@ -63,9 +63,6 @@ historical_state_cleanup() ( # <dry-run|apply> <generation>
   . "$SCRIPT_DIR/fm-pr-lib.sh"
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh"
-  # shellcheck source=bin/fm-gate-refuse-lib.sh
-  . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-  fm_refuse_if_gate_agent
   [ "$(fm_lease_actor)" = main ] || { echo 'REFUSED: historical state cleanup belongs to MAIN' >&2; exit 6; }
   fm_lease_valid_id "$id" || exit 2
   data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -184,9 +181,6 @@ if [ "${2:-}" = --complete-only ]; then
   . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
   # shellcheck source=bin/fm-teardown-endpoint-lib.sh
   . "$SCRIPT_DIR/fm-teardown-endpoint-lib.sh"
-  # shellcheck source=bin/fm-gate-refuse-lib.sh
-  . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-  fm_refuse_if_gate_agent
   [ "$(fm_lease_actor)" = main ] || { echo 'REFUSED: business completion belongs to MAIN' >&2; exit 6; }
   fm_lease_valid_id "$id" || exit 2
   fm_lease_guard "$id" 'business completion' || exit $?

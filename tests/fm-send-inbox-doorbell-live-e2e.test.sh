@@ -35,7 +35,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 fm_live_gate opt-in FM_SEND_INBOX_LIVE_E2E herdr jq
 
-unset NO_MISTAKES_GATE
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"

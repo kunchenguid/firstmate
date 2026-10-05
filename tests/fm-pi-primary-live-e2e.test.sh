@@ -13,7 +13,6 @@ fm_live_gate opt-in FM_PI_LIVE_E2E pi herdr jq
 herdr_forget_inherited_pane
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-unset NO_MISTAKES_GATE
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -189,7 +188,6 @@ run_native_ahoy_regressions() {
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$AHOY_PROJECT/bin/"
   cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$AHOY_PROJECT/.agents/skills/ahoy/SKILL.md"
