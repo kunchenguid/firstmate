@@ -1673,20 +1673,22 @@ EOF
 
 # fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
 # Prints the name and returns 0 only for the recorded structure of one dialog:
-# its heading, then its selected row alone on a row, with its footer as the
-# last non-blank row. The strings alone are not enough, because a diff, a
-# note, or a test fixture on the pane can quote all of them above a normal
-# composer. A miss returns 1 and prints nothing.
+# the heading on its own line, then its selected row alone on a row, with the
+# recorded footer as the last non-blank row. A heading buried in a sentence,
+# or a last line that only starts with the same words, is not that dialog.
+# The strings alone are not enough, because a diff, a note, or a test fixture
+# on the pane can quote all of them above a normal composer. A miss returns 1
+# and prints nothing.
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
   local screen=${1-}
   [ -n "$screen" ] || return 1
   if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
-    index($0, "Background work is running") { heading = 1 }
+    /^[ \t]*Background work is running[ \t\r]*$/ { heading = 1 }
     heading && /^[ \t]*❯ 1\. Exit and stop tasks[ \t\r]*$/ { selected = 1 }
     /[^ \t\r]/ { last = $0 }
-    END { exit !(selected && last ~ /^[ \t]*Enter to confirm/) }
+    END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
   '; then
     printf '%s' 'Claude background-task exit picker'
     return 0
@@ -1696,18 +1698,16 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
 
 # A command substitution drops a shell variable, and every composer read runs
 # inside one. The name is therefore written to FM_COMPOSER_DIALOG_SINK when
-# that path is set. The classifier verdict is unchanged.
+# that path is set. The classifier verdict is unchanged. When the sink is
+# unset the name would be discarded, so the match is skipped.
 fm_composer_note_blocking_dialog() {  # <screen>
   local name=
+  [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ] || return 1
   if name=$(fm_composer_blocking_dialog "$1"); then
-    if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
-      printf '%s' "$name" > "$FM_COMPOSER_DIALOG_SINK" || return 1
-    fi
+    printf '%s' "$name" > "$FM_COMPOSER_DIALOG_SINK" || return 1
     return 0
   fi
-  if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
-    : > "$FM_COMPOSER_DIALOG_SINK" || return 1
-  fi
+  : > "$FM_COMPOSER_DIALOG_SINK" || return 1
   return 1
 }
 

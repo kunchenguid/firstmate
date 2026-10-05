@@ -1160,6 +1160,45 @@ quoted_exit_picker_screen() {
     '╰──────────────╯'
 }
 
+test_dialog_heading_and_footer_must_be_the_recorded_lines() {
+  local screen out rc
+  screen=$(printf '%s\n' \
+    'The fixture mentions Background work is running in a sentence' \
+    '❯ 1. Exit and stop tasks' \
+    'Enter to confirm · Esc to cancel')
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a heading buried in a sentence must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  screen=$(printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'Enter to confirm the deployment')
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a last line that only starts with the confirm words must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  pass "a buried heading or a different last line is not the exit picker"
+}
+
+test_dialog_note_skips_the_match_when_no_sink_is_set() {
+  local screen out rc before after
+  screen=$(exit_picker_screen)
+  unset FM_COMPOSER_DIALOG_SINK
+  out=$(fm_composer_note_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a note without a sink should return 1, got $rc"
+  [ -z "$out" ] || fail "a note without a sink should print nothing, got '$out'"
+  [ -z "${FM_COMPOSER_DIALOG_SINK:-}" ] || fail "a note without a sink must not create one"
+  out=$(fm_composer_classify_screen 'styled=1' "$screen" 1)
+  [ "$out" = pending ] || fail "classify without a sink should stay pending, got '$out'"
+  trap 'true' RETURN
+  before=$(trap -p RETURN)
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  fm_composer_dialog_sink_release
+  after=$(trap -p RETURN)
+  trap - RETURN
+  [ "$before" = "$after" ] || fail "release replaced the caller RETURN trap: $after"
+  pass "a dialog note without a sink skips the match, and release leaves a caller RETURN trap"
+}
+
 test_quoted_exit_picker_text_is_not_a_dialog() {
   local screen out rc sink enters
   screen=$(quoted_exit_picker_screen)
@@ -1193,4 +1232,6 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
 }
 
 test_background_exit_picker_stays_pending_and_blocks_retry
+test_dialog_heading_and_footer_must_be_the_recorded_lines
+test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog

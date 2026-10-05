@@ -811,9 +811,13 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
+# A pane that already shows the recognised dialog is refused before any
+# adapter types, so that submit neither types the text nor sends Enter.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local backend=$1 rc=0
+  local backend=$1 rc=0 target label dialog
   shift
+  target=$1
+  label=${6:-}
   fm_backend_source "$backend" || return 1
   # Every Enter loop below reads the dialog sink, so it must exist before
   # any adapter types: a sink that fails here leaves the composer untouched.
@@ -821,6 +825,19 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     echo "error: the dialog check for a $backend submit could not be recorded" >&2
     return 1
   }
+  # One composer read after the sink exists and before the adapter types.
+  # The classify writes the sink; a named dialog means the next Enter would
+  # answer it.
+  if [ -n "$label" ]; then
+    fm_backend_composer_state "$backend" "$target" "$label" >/dev/null || true
+  else
+    fm_backend_composer_state "$backend" "$target" >/dev/null || true
+  fi
+  if dialog=$(fm_composer_blocking_dialog_noted); then
+    fm_composer_dialog_sink_release
+    echo "error: blocked on a prompt: $dialog" >&2
+    return 1
+  fi
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" || rc=$? ;;
     herdr) fm_backend_herdr_send_text_submit "$@" || rc=$? ;;

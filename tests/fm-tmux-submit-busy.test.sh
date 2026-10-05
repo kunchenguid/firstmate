@@ -44,7 +44,14 @@ case "${1:-}" in
   send-keys)
     shift; is_enter=0
     while [ "$#" -gt 0 ]; do
-      case "$1" in -t) shift ;; -l) ;; Enter) is_enter=1 ;; esac; shift
+      case "$1" in
+        -t) shift ;;
+        -l) ;;
+        Enter) is_enter=1 ;;
+        -*) ;;
+        *) [ -z "${FM_FAKE_SENT:-}" ] || printf 'typed %s\n' "$1" >> "$FM_FAKE_SENT" ;;
+      esac
+      shift
     done
     if [ "$is_enter" = 1 ]; then
       [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
@@ -374,6 +381,37 @@ test_exit_picker_refuses_confirming_enter() {
 }
 
 test_exit_picker_refuses_confirming_enter
+
+test_typed_submit_on_open_exit_picker_types_nothing() {
+  local dir fakebin composer sent before rc=0 err
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  dir="$TMP_ROOT/typed-on-picker"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  err="$dir/err"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$composer"
+  before=$(cat "$composer")
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    fm_backend_send_text_submit tmux win 'please continue' 3 0 0 >"$dir/out" 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a typed submit onto an open picker should refuse"
+  [ ! -s "$sent" ] || fail "a typed submit onto an open picker sent input: $(cat "$sent")"
+  [ "$(cat "$composer")" = "$before" ] || fail "a typed submit onto an open picker changed the pane"
+  grep -F 'blocked on a prompt: Claude background-task exit picker' "$err" >/dev/null \
+    || fail "the refusal should name the picker, got '$(cat "$err")'"
+  pass "fm_backend_send_text_submit: a typed message to the exit picker types nothing and sends no Enter"
+}
+
+test_typed_submit_on_open_exit_picker_types_nothing
 test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try
