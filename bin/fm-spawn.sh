@@ -4809,8 +4809,9 @@ EOF
 fi
 
 # Per-task Git environment for every kind, including secondmate, unless the
-# home opts in to keeping trailers. The strip script owns feature detection
-# and the legacy hooks directory. Real secondmate homes are firstmate clones;
+# home opts in to keeping trailers. Defer the strip script's feature detection
+# to the destination launch below: a long-lived pane daemon's Git can differ
+# from this process's Git. Real secondmate homes are firstmate clones;
 # a launch whose worktree is not git fails closed.
 GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
 if [ "$KEEP_AI_TRAILERS" = 0 ]; then

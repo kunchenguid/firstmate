@@ -990,13 +990,15 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 The optional local, gitignored `config/keep-ai-trailers` presence flag opts this home into keeping AI co-author trailers on its launched workers.
 With the flag absent, every Claude launch's inline `--settings` JSON carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, every Devin worker config sets `"attribution": false`, and every fleet launch receives pane-scoped Git configuration that strips known AI trailers at `commit-msg` time, even when a runtime injects them after the typed message.
 When the flag is present, Claude launches omit those attribution-off settings, Devin worker configs keep the user config's `attribution` setting (Devin's default is on), and fleet launches do not install or select the strip hooks, so Git uses the repository's configured hooks directly.
-`bin/fm-git-strip-ai-trailers.sh` owns the identities, launch environment, and legacy hook installation.
+[`fm-git-strip-ai-trailers.sh`](../bin/fm-git-strip-ai-trailers.sh)'s header owns the identities, launch environment, and legacy wrapper chaining and failure behavior.
+Hook support is checked at worker startup using Git from the destination launch environment's `PATH`, not the spawning Firstmate process.
 On Git with config-hook support, stripping runs before the file-based `commit-msg` hook without overriding `core.hooksPath`, so canonical-hook health checks and project hook installers run normally.
-On older Git, the launch warns and falls back to read-only wrappers under `state/<id>.git-hooks`, chaining the hooks of whichever repository Git is running in, including when `git -c core.hooksPath` supplies the pane's wrapper override.
+Without that support, the launch warns and falls back to read-only wrappers under `state/<id>.git-hooks`, preserving existing project hooks subject to the exclusions in the script header.
 With that fallback, canonical-hook identity checks still see wrappers, and a hook manager inside the pane fails instead of displacing the strip; install project hooks from outside the pane.
-An empty project `core.hooksPath` runs no project hook; any other wrapper lookup failure refuses the Git operation rather than skipping a project guard.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+Regression coverage: [`tests/fm-git-strip-ai-trailers.test.sh`](../tests/fm-git-strip-ai-trailers.test.sh) covers canonical-hook checks, hook ordering, stripping, and the legacy fallback; [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh) covers destination Git selection and setup failure at worker launch.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

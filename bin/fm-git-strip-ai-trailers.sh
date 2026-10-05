@@ -7,9 +7,11 @@
 #       Commit-msg hook mode. Git passes the proposed message file as $1.
 #       Rewrites that file in place, then exits 0 so the commit proceeds.
 #   fm-git-strip-ai-trailers.sh launch-env <hooks-dir> <worktree>
-#       Emit a shell export for a pane-scoped config commit-msg hook, leaving
-#       core.hooksPath intact. Git runs it before the file-based commit-msg.
-#       On Git without config hooks, install wrappers and emit their hooksPath.
+#       Call in the destination launch environment so the support probe uses
+#       the same Git as the worker's commits. Emit a shell export for a
+#       pane-scoped config commit-msg hook, leaving core.hooksPath intact.
+#       Git runs it before the file-based commit-msg. Without config-hook
+#       support, warn, install wrappers, and emit their hooksPath.
 #   fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
 #       Recreate <hooks-dir> as a legacy core.hooksPath: a commit-msg
 #       hook that runs this strip, plus one wrapper per client-side hook name
@@ -43,7 +45,7 @@
 # Human Co-Authored-By trailers are left untouched. Author identity is not
 # rewritten.
 #
-# ACCEPTED RESIDUAL, ruled 2026-09-17. git commit --no-verify skips every hook,
+# ACCEPTED RESIDUAL, ruled 2026-09-17. git commit --no-verify skips commit-msg,
 # so a worker that passes it still lands the trailer, as would a runtime that
 # writes the commit object without running git. Both incidents that motivated
 # this strip came through an ordinary hook-running commit, so the ruling is to
@@ -56,9 +58,8 @@
 # (lefthook's npm postinstall, pre-commit install) targets it and would
 # displace the strip. install leaves the directory and every hook in it
 # read-only, so such a manager fails loudly instead of silently winning. Hook
-# managers therefore cannot install from inside fleet panes until a registered
-# project genuinely needs it. Whoever removes the directory restores the owner
-# write bit first.
+# managers therefore cannot install from inside fleet panes using this legacy
+# fallback. Whoever removes the directory restores the owner write bit first.
 set -u
 unset CDPATH GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 
@@ -200,7 +201,7 @@ EOF
 # git's invocation rather than the wrapper body. Neither name is one
 # commit-message or lint tooling installs, which is what this chaining exists
 # to preserve. A project that does install one loses chaining for it inside
-# fleet panes only.
+# legacy-wrapper fleet panes only; config-hook mode leaves those hooks intact.
 #
 # The names kept are not free either, and that cost is accepted, ruled
 # 2026-09-17. Every wrapper call forks bash plus one git rev-parse. A plain
