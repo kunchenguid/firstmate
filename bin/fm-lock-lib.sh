@@ -38,19 +38,15 @@ fm_lock_path_mtime() {
 # finish while bounding a stalled one. Overridable for tests.
 : "${FM_LOCK_LSOF_TIMEOUT:=60}"
 
-# fm_lock_lsof_run <lsof args...>: run lsof under a wall-clock bound when the
-# host has coreutils `timeout` (or Homebrew's `gtimeout` on macOS), bare
-# otherwise. Kept inline rather than sourcing bin/fm-timeout-lib.sh so this
-# leaf lib stays self-contained. The bound reports exit 124.
-fm_lock_lsof_run() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$FM_LOCK_LSOF_TIMEOUT" lsof "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$FM_LOCK_LSOF_TIMEOUT" lsof "$@"
-  else
-    lsof "$@"
-  fi
-}
+# The bound itself is bin/fm-timeout-lib.sh's fm_run_timed, the repo's one
+# owner of bounded command execution; it reports exit 124 when the bound is hit
+# and falls back to a bash watchdog where no timeout tool exists.
+# Sourced here from this lib's own directory so leaf callers need no change, and
+# skipped when the caller already loaded it.
+if ! declare -F fm_run_timed >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-timeout-lib.sh"
+fi
 
 # fm_lock_lsof_holder <target>: 0 a process holds it, 1 provably none, 2 lsof
 # errored or hit the wall-clock bound (cannot tell). Diagnostics print on the
@@ -60,7 +56,7 @@ fm_lock_lsof_run() {
 # permanent "cannot tell" and so never recover a stale lock again.
 fm_lock_lsof_holder() {
   local target=$1 output status
-  if output=$(fm_lock_lsof_run -- "$target" 2>&1); then
+  if output=$(fm_run_timed "$FM_LOCK_LSOF_TIMEOUT" lsof -- "$target" 2>&1); then
     return 0
   else
     status=$?
