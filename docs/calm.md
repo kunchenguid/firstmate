@@ -280,10 +280,11 @@ The mod never touches tool execution or prompts, and adds to the stored transcri
 
 The bounds of the Claude Code support below are recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod).
 Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build), and for the supervision notes in the [2.1.283 record](calm-mode-feasibility.md#2026-09-28-claude-code-21283-supervision-notes) and their label in the [2.1.284 record](calm-mode-feasibility.md#2026-09-28-claude-code-21284-supervision-note-label-and-the-fm-plugin-name).
+What was tested on 2.1.289, where Claude Code's rollout flag loads the module with the environment variable unset, is in its [2.1.289 record](calm-mode-feasibility.md#2026-10-05-claude-code-21289-effort-cycling-the-per-launch-updater-switch-and-task-local-containment).
 
 - The function-hooks surface is early access and default-off.
   Claude Code states that its API may change between releases without notice.
-  The mod is verified on Claude Code 2.1.272, 2.1.280, 2.1.282, 2.1.283, and 2.1.284 and refuses nothing newer.
+  The mod is verified on Claude Code 2.1.272, 2.1.280, 2.1.282, 2.1.283, 2.1.284, and 2.1.289 and refuses nothing newer.
 - Firstmate's typed producers bound for a Claude Code pane ride the record-backed doorbell, so they hide like any operational row.
   Those producers are the away-mode daemon's escalations and a worker's launch brief.
   Only an envelope that reaches Claude Code some other way, as bare typed or launch-prompt text, arrives without its U+2063 and stays visible.
@@ -308,3 +309,7 @@ tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
 ```
+
+The live guard uses your Claude Code login for its Calm sections and for the part of its effort section that needs a request.
+The rest of its effort section runs in a throwaway `CLAUDE_CONFIG_DIR` with no login, and the guard writes none of your settings; [`effort-cue.md`](effort-cue.md#regression-entry-points) has the detail.
+It sets `DISABLE_AUTOUPDATER=1` on every launch, because a configuration directory without your own `autoUpdates` preference would otherwise let Claude Code upgrade the shared install in the background.

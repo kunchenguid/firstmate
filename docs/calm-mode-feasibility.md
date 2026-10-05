@@ -1088,3 +1088,123 @@ ok - Claude Code 2.1.280 (Claude Code) resumes the transcript with Calm's hidden
 ok - Claude Code 2.1.280 (Claude Code) with Calm off shows the supervision notes: the session-start anchor for an unprocessed captain outcome, a sailboat for a new routine outcome, an anchor for a new captain outcome, and the latch-trip note, each behind the fm: label, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each anchor once
 ok - Claude Code 2.1.280 (Claude Code) names a level in the effort cue only once a request has carried it, paints each level in a distinct theme color, cycles the setting with /effort-cycle and with the band's own focus-and-press keys, offers high again after its change was turned down at Claude Code's confirmation, follows the captain's own /effort, and leaves the starting level restored
 ```
+
+## 2026-10-05 Claude Code 2.1.289 effort cycling, the per-launch updater switch and task-local containment
+
+The shared Claude Code moved from 2.1.280 to 2.1.289 during this work, and 2.1.289 is the version the effort cue is now tested against.
+The 2.1.280 record above stays as dated history.
+Its change confirmation was not observed again on 2.1.289, because no step was taken after a reply in this round.
+
+How the install moved is the first bound recorded here.
+A manual check launched Claude Code 2.1.280 with a throwaway `CLAUDE_CONFIG_DIR` to try the `ctrl+tab` binding without editing the captain's own `keybindings.json`.
+That directory did not carry the captain's `autoUpdates: false`, so the background updater of the npm-global install upgraded the shared package to 2.1.289.
+The captain's decision was to keep 2.1.289 and re-prove the cue on it, with no restore and no downgrade.
+
+### The per-launch updater switch
+
+Claude Code documents `DISABLE_AUTOUPDATER`: "Set to `1` to disable automatic background updates. Manual `claude update` still works."
+Its setup page names the confirmation: `claude doctor` shows `disabled (set by env: DISABLE_AUTOUPDATER)` on the `Auto-updates` line.
+The installed 2.1.289 binary reads the variable from each launch's own environment ahead of the saved `autoUpdates` preference:
+
+```text
+function gEe(){if(a.DISABLE_UPDATES)return{type:"env",envVar:"DISABLE_UPDATES"};
+if(Le(process.env.DISABLE_AUTOUPDATER))return{type:"env",envVar:"DISABLE_AUTOUPDATER"};
+let e=hnt();if(e)return{type:"env",envVar:e};
+let n=le();if(n.autoUpdates===!1&&(n.installMethod!=="native"||n.autoUpdatesProtectedForNative!==!0))retu...
+```
+
+The same binary finds an npm-global install through `npm root -g` and re-checks for updates every 1800000 ms.
+`claude doctor` in a throwaway configuration seeded only with `{"hasCompletedOnboarding":true,"theme":"dark","installMethod":"global"}`, the shape of the launch that upgraded the install, printed with the switch on:
+
+```text
+Running: npm-global (2.1.289)
+Config install method: global
+Auto-updates: disabled (set by env: DISABLE_AUTOUPDATER)
+Auto-update channel: latest
+Last update attempt: none recorded
+No installation issues found.
+```
+
+A session in that configuration with the switch on, kept alive for eleven minutes, logged one updater line, `AutoUpdaterWrapper: Installation type: npm-global`, and `claude doctor` afterwards still read `Last update attempt: none recorded`.
+
+### Task-local containment
+
+Every live launch of this round ran from a byte-identical copy of the installed package, so a switch that failed could not have reached the shared install.
+
+```sh
+export PATH="<scratch>/prefix/bin:$PATH"
+export npm_config_prefix="<scratch>/prefix"
+export npm_config_cache="<scratch>/npm-cache"
+export DISABLE_AUTOUPDATER=1
+```
+
+Before each launch `command -v claude`, `npm prefix -g`, and `npm root -g` all resolved inside the copy.
+The digest of the shared package tree, the sha256 of its sorted per-file sha256 list, was `dcfcc6869f3a7c68640640a4a31be8b238400f7edf5f4ab4e156c5ac8b4725e2` before the first launch and after every launch, and the copy's digest was the same.
+On 2.1.289 the package has no `cli.js`: `bin/claude.exe` is the native arm64 binary that `install.cjs` copies from `node_modules/@anthropic-ai/claude-code-darwin-arm64`.
+
+Every future live run of the Claude guard uses this discipline: `DISABLE_AUTOUPDATER=1` on each launch, and a task-local copy of the installed package with `PATH`, `npm_config_prefix`, and `npm_config_cache` redirected to it and proven before the launch.
+The guard sets the switch on each of its own launches as well, because its effort section starts Claude Code in a throwaway configuration directory, the very shape that upgraded the install.
+
+### What 2.1.289 changed for the guard
+
+- Claude Code 2.1.289 loads hooks modules through its own rollout flag with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` unset.
+  With the captain's own configuration and no such variable in the launched process, the debug log read `hooks module fm@skills-dir loaded (worker, environment 1, tier user); events: session.start,command.run,config.set,turn.step,ui.render,ui.press`.
+  The mod stayed a complete no-op in that state, as [`calm.md`](calm.md#enabling-function-hooks) states: no cue row above the prompt, and typing `/cal` listed no `/calm`.
+  The only `hooks modules not loaded` line 2.1.289 logs is `hooks modules not loaded until workspace trust is accepted`, which is about trust and not about the flag.
+- The live guard's first section had asserted that the engine loads no module with the flag unset, which held on 2.1.280 only because the rollout flag was off for this account then.
+  On 2.1.289 it failed with exactly `not ok - Claude Code 2.1.289 (Claude Code) loaded the Calm hooks module although the flag was unset`.
+  The section now asserts the documented contract on either kind of engine, by what the captain can see, and records in its pass line which case the engine took.
+- `--model sonnet` resolves to Sonnet 5.5 on 2.1.289: the debug log read `[engine] send set_model model=claude-sonnet-5-5`.
+  The captain's settings hold saved levels for `claude-sonnet-5`, `claude-opus-5`, and `claude-opus-5-5` only, so the guard's old effort section, which stepped the real setting and put it back, would have added an entry there.
+- `claude plugin test` reads the same rollout flag from a cache.
+  A first run failed with the engine's own notice, `claude plugin test: hooks modules are turned off in this process: the rollout switch was saved off by an earlier session and is not refreshed yet`.
+  One interactive start refreshed `cachedGrowthBookFeatures.tengu_plugin_hooks_modules` in `~/.claude.json` from `false` to `true`, and the suite then passed.
+
+### ctrl+tab bound to the cycle
+
+The binding in [`effort-cue.md`](effort-cue.md#binding-it-to-one-key) was driven on 2.1.289 in a throwaway `CLAUDE_CONFIG_DIR` with no login, holding that `keybindings.json` and a `settings.json` of `{"effortLevel":"high"}`, with the mod loaded and `--model sonnet`.
+The binary accepts a `command:` action that matches `/^command:[a-zA-Z0-9:\-_]+$/`.
+Three `tmux send-keys C-Tab` on tmux 3.7c stepped the real level from the saved `high`:
+
+```text
+C-Tab #1   ❯ /effort xhigh  ⎿ Set effort level to xhigh (saved as your default for new sessions)   header "Sonnet 5.5 with xhigh effort"
+C-Tab #2   ❯ /effort max    ⎿ Set effort level to max (this session only)                           header "Sonnet 5.5 with max effort"
+C-Tab #3   ❯ /effort low    ⎿ Set effort level to low (saved as your default for new sessions)     header "Sonnet 5.5 with low effort"
+```
+
+The cue row read `◌ effort ?` after each press, because no request had carried a level.
+Every write landed in the throwaway `settings.json`, which ended as `{"effortLevel":"high","modelSettings":{"claude-sonnet-5-5":{"effortLevel":"low"}},"skipDangerousModePermissionPrompt":true}`.
+The debug log held no `hook skipped` or `threw` line naming the mod.
+tmux reports `ctrl+tab` as its own key only with `extended-keys` on: probed on tmux 3.7c with an empty configuration, `send-keys C-Tab` reached the pane as a plain tab, and as `CSI 9;5u` once the option was on.
+The guard therefore turns that option on for its own tmux server.
+
+The captain's `~/.claude/settings.json` (sha256 `cad6fa0347e40893997a3e1d58a18ee94ecc1b3a5c48d47a8d1e2f85c10e630c`) and `~/.claude/keybindings.json` (sha256 `4b01db1eeb5484d059a88daa8dc38ff9c8af2a346a948f0f4c40671d4f185af3`) were unchanged after every launch of this round.
+
+### The guard's effort section
+
+The effort section no longer moves the captain's saved level, so it has nothing to put back.
+It runs in two parts.
+
+- In a throwaway `CLAUDE_CONFIG_DIR` with no login it proves that the cue draws above the prompt and names no level before a request, and that `ctrl+tab` bound to `command:effort-cycle`, `/effort-cycle`, the captain's own `/effort`, and the band's `ctrl+x tab` and `enter` each move the level Claude Code reports in its `/effort` row and its header.
+  Nothing there can prove a level to the cue, because a session with no login sends no request.
+- With the login it proves what needs a request: the cue names a level once a request has carried it, and each proven level paints a color of its own.
+  It runs only on `claude-sonnet-5`, which the captain already has a saved level for, in sessions started with `--effort`, which saves nothing.
+  Its one step after a reply climbs from a proved `xhigh` to `max`, which Claude Code applies to the session only, so that step saves nothing whether the build confirms it or not.
+  Where the captain's settings hold no saved level for that model, the guard prints this part as `NOT RUN`.
+- The cue under `/effort auto` after a proven level is `NOT RUN` on this engine, because that command would rewrite the captain's saved level; the plugin suite covers it.
+- The section records the sha256 of the captain's `settings.json` and `keybindings.json` before it starts, and fails if either differs when it ends.
+
+The corrected guard has not been run live from this head.
+Its own pass lines on 2.1.289 are recorded here when the worker runs it under the switch and the containment above.
+
+```text
+$ claude --version
+2.1.289 (Claude Code)
+
+$ bash tests/fm-calm-claude-mod.test.sh
+ok - the effort-level policy cycles the ramp and wraps without skipping a level, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, keeps an ultracode selection across a model switch, and treats only a request that can report the selected level as proof of what is in force
+
+$ bash tests/fm-calm-claude-mod-plugin.test.sh
+ok - Claude Code 2.1.289 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings, /calm, and the effort cue's band, press, and commands while logging supervision notes
+ok - Claude Code 2.1.289 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, the clock-driven working ship, supervision notes, and the effort cue's proof-only display, colors, cycle from the saved level, survey yield, and auto
+```

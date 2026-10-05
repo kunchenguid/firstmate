@@ -75,6 +75,7 @@ Claude Code 2.1.280 asks you to confirm the first change of effort after each re
 A new session asks nothing until its first reply, a resumed one can ask from its first change if it resumes while the cache is still warm, and once the cache has expired a change applies without asking.
 Choosing `No, go back` keeps the level you had.
 A press before your next message steps on from the level you turned down; once a message has gone out at the level you kept, the next press offers the level you turned down again.
+This confirmation was observed on 2.1.280 and has not been observed again on 2.1.289, where no step after a reply has been driven yet.
 
 ### Binding it to one key
 
@@ -102,8 +103,10 @@ Some terminals keep `ctrl+tab` for their own tab switching with no way to releas
 ## Bounds
 
 Each of these is recorded with its evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-17-claude-code-21274-effort-cue-feasibility-and-the-shipped-cue), and the 2.1.280 confirmation in its [2026-10-05 record](calm-mode-feasibility.md#2026-10-05-claude-code-21280-effort-change-confirmation).
+What was tested on 2.1.289 on 2026-10-05, the `ctrl+tab` binding included, is in its [2.1.289 record](calm-mode-feasibility.md#2026-10-05-claude-code-21289-effort-cycling-the-per-launch-updater-switch-and-task-local-containment).
 
-- The function-hooks surface is early access and default-off, and Claude Code states its API may change between releases without notice; the cue was designed against Claude Code 2.1.274 and its guards last ran against 2.1.280.
+- The function-hooks surface is early access and default-off, and Claude Code states its API may change between releases without notice; the cue was designed against Claude Code 2.1.274 and its guards last ran against 2.1.289, on 2026-10-05.
+  The portable and plugin guards pass there; the live guard last passed whole on 2.1.280, and its sections corrected for 2.1.289 have not run live yet.
 - Models without an effort parameter have no level to show, and no footer badge either; on those the cue stays at `◌ effort ?`.
 - `/effort low`, `medium`, `high`, and `xhigh` save the level as your default for new sessions on that model, so cycling changes what your next session starts at, exactly as typing `/effort` yourself does.
   `max` applies to this session only, and a level above the cap for the model is set to that cap instead; neither saves anything.
@@ -121,3 +124,8 @@ tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
 ```
+
+The live guard's effort section never writes your settings.
+Its steps that save a level run in a throwaway `CLAUDE_CONFIG_DIR` with no login, where it also drives the `ctrl+tab` binding above.
+Its checks that need a request use your login on `claude-sonnet-5` in sessions started with `--effort`, only when your settings already hold a saved level for that model, and it prints them as `NOT RUN` otherwise.
+It fails if your `settings.json` or `keybindings.json` changed while the section ran.
