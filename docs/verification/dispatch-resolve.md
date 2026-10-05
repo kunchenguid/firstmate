@@ -110,6 +110,7 @@ It proves the request uses the fixed endpoint and model, carries only the projec
 It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
 `tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
+It proves the opt-in log writes exactly one owner-only record for a run that asked a question and none for a run that did not, that a directory is created only after every guard has passed, that a refusal leaves nothing on disk anywhere, that the record carries the request, the answer, the rendered block and the real exit status, that a failed call is still recorded, that the writer redacts the key even when the brief text carries it, that a relative setting anchors to the home rather than the working directory, that overlapping intakes each land one intact distinct record, and that one fm-hooks pointer line names the record without copying its payload.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1
@@ -117,3 +118,49 @@ $ bash tests/fm-dispatch-resolve.test.sh | tail -1
 ```
 
 A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command.
+
+## Opt-in log
+
+Verified 2026-10-05 against the commit that introduced the log, with the sentinel key `sentinel-key-2f7c41ab-NEVER-ON-DISK`, a fake `curl` that records what it receives, a directory of records under a scratch home, and `quota-axi` 0.1.55.
+
+**The log cannot carry the key**, answered two ways because the two can fail independently.
+By construction, the record is assembled only from the request body, the response document, and the rendered block, and the key reaches no part of that assembly; the key still leaves the process only as the header `curl` reads from file descriptor 3.
+By observation, nothing in the log directory contains the key or a header, while the recorded header shows the key really did leave:
+
+```console
+$ grep -rlF 'sentinel-key-2f7c41ab-NEVER-ON-DISK' "$LOGDIR" >/dev/null; echo "key grep exit=$?"
+key grep exit=1
+$ grep -rlE 'Authorization|Bearer' "$LOGDIR" >/dev/null; echo "header grep exit=$?"
+header grep exit=1
+$ cat "$HEADER"
+Authorization: Bearer sentinel-key-2f7c41ab-NEVER-ON-DISK
+```
+
+A third check covers a key that arrives inside the brief text itself, which is the one path where the key could reach a record without anyone intending it.
+The offline case asserts both that the fake `curl` really received the key in the request body and that the record holds `[redacted]` where the key stood, so the assertion cannot pass vacuously.
+
+**Records stay inside the home.**
+Five settings were each refused with one `dispatch-resolve: log off (...)` line, exit 0, the ordinary result on stdout, and nothing created anywhere:
+
+```console
+outside the home                   exit=0  log off (<scratch>/outside-log is not under <home>/state or <home>/data)
+home root, not state or data       exit=0  log off (<home>/logs is not under <home>/state or <home>/data)
+dot-dot escape                     exit=0  log off (<scratch>/escape-log is not under <home>/state or <home>/data)
+inside a git clone below home      exit=0  log off (<home>/data/clone/state/logs is inside a git work tree below <home>)
+symlinked state path escaping      exit=0  log off (<home>/state/link-out/logs resolves to <scratch>/elsewhere, outside <home>)
+created by any refusal: absent: <scratch>/outside-log  absent: <home>/logs  absent: <scratch>/escape-log
+                        absent: <home>/data/clone/state  absent: <scratch>/elsewhere/logs
+```
+
+A relative setting run from a different working directory landed its record under the home and left that directory with zero entries, and no `dispatch-*.json` appeared anywhere outside the accepted directories.
+
+**Permissions, concurrency, and the fm-hooks pointer.**
+A record was written at mode 0600 inside a directory created at mode 0700.
+Ten overlapping intakes against one directory produced ten records with ten distinct correlation ids and ten distinct recorded projects, all of them intact JSON, with no temporary file or other leftover.
+With an fm-hooks queue already present, one run appended exactly one line and nothing else, and a run with no fm-hooks queue created none while still writing its record:
+
+```console
+{"type":"artifact","operation":"fm-dispatch-resolve.sh","correlationId":"20261005T062827Z-70645-16544ef0","artifact":{"kind":"dispatch-resolve-log","path":"<home>/state/dispatch-hooks/dispatch-20261005T062827Z-70645-16544ef0.json"},"loggedAt":"2026-10-05T06:28:30Z"}
+```
+
+The pointer carries the operation, the correlation id, and the record path and nothing else, so it names the record without copying the question or the answer into fm-hooks' log.

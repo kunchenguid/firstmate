@@ -1000,4 +1000,209 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+# --- opt-in question/answer log ------------------------------------------------
+# The record is the durable evidence for a dispatch decision: what was sent,
+# what came back, what this run published, and how it exited. These cases drive
+# the public env var and inspect the files the tool leaves on disk, including
+# the guard that keeps them inside the home and the redaction that keeps the key
+# out of them even when the brief text itself carries it.
+DLOG="$HOME_DIR/state/dispatch-resolve"
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null; }
+record_count() { find "$1" -maxdepth 1 -name 'dispatch-*.json' 2>/dev/null | wc -l | tr -d ' '; }
+only_record() { find "$1" -maxdepth 1 -name 'dispatch-*.json' 2>/dev/null | head -n1; }
+
+write_response "$RESPONSE" rule_4 0.9
+write_quota "$QUOTA" 0.7597
+
+# unset: no directory, no file, same stdout
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "log unset exits 0"
+base_out=$out
+assert_absent "$DLOG" "log unset creates no log directory"
+
+# set: one record per run, carrying the question and the answer
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "log set exits 0"
+logged_out=$out
+# The only field that differs between two identical runs is the measured
+# latency, so normalize that one field and require the rest to be identical.
+assert_equals "$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$base_out")" \
+  "$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$logged_out")" \
+  "log set leaves stdout unchanged apart from the measured latency"
+assert_equals '700' "$(mode_of "$DLOG")" "the log directory is owner-only"
+assert_equals '1' "$(record_count "$DLOG")" "one run writes exactly one record"
+REC=$(only_record "$DLOG")
+assert_equals '600' "$(mode_of "$REC")" "the record is owner-only"
+assert_equals '0' "$(find "$DLOG" -mindepth 1 ! -name 'dispatch-*.json' | wc -l | tr -d ' ')" "the run leaves no temporary file behind"
+assert_equals 'dispatch-resolve' "$(jq -r .kind "$REC")" "the record names its kind"
+assert_equals '1' "$(jq -r .version "$REC")" "the record carries a version"
+assert_equals '0' "$(jq -r .exitStatus "$REC")" "the record carries the exit status"
+assert_equals 'clear' "$(jq -r .result.status "$REC")" "the record carries the resolved status"
+assert_equals "$logged_out" "$(jq -r .result.toon "$REC")" "the record carries the block this run published"
+assert_equals 'pager' "$(jq -r .request.state.task.project "$REC")" "the record carries the sent project"
+assert_contains "$(jq -r .request.state.task.brief "$REC")" 'off-by-one in the pager' "the record carries the sent task text"
+assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' \
+  "$(jq -c '.request.questions.rule.criteria | keys' "$REC")" "the record carries the sent question options"
+assert_equals '["rule"]' "$(jq -c '.request.questions | keys' "$REC")" "the record carries the one question that was asked"
+assert_equals 'rule_4' "$(jq -r .response.choice "$REC")" "the record carries the answer choice"
+assert_equals '0.9' "$(jq -r .response.confidence "$REC")" "the record carries the answer confidence"
+assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' \
+  "$(jq -c '.response.probabilities | keys' "$REC")" "the record carries the answer probabilities"
+assert_equals 'jev-latest' "$(jq -r .model "$REC")" "the record carries the model"
+assert_equals '200' "$(jq -r .httpStatus "$REC")" "the record carries the HTTP status"
+assert_equals "$BRIEF" "$(jq -r .brief "$REC")" "the record carries the brief path"
+assert_equals "$BRIEF" "$(jq -r .briefAbsolute "$REC")" "the record carries an absolute brief path"
+assert_no_grep "$KEY" "$REC" "the record never carries the key"
+assert_no_grep 'Authorization' "$REC" "the record never carries the request header"
+assert_no_grep 'Bearer' "$REC" "the record never carries a bearer credential"
+pass "opt-in log: one owner-only record per run carrying the question and the answer, with no key"
+
+# a relative brief path is recorded as passed and also resolved
+DLOG_REL="$HOME_DIR/state/dispatch-relative"
+( cd "$TMP_ROOT" && PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY=$KEY \
+    FM_DISPATCH_RESOLVE_LOG="$DLOG_REL" "$TOOL" brief.md --project pager >/dev/null 2>&1 )
+REC=$(only_record "$DLOG_REL")
+assert_equals 'brief.md' "$(jq -r .brief "$REC")" "a relative brief is recorded as it was passed"
+assert_equals "$BRIEF" "$(jq -r .briefAbsolute "$REC")" "a relative brief is also recorded resolved"
+assert_equals "$TMP_ROOT" "$(jq -r .cwd "$REC")" "the record carries the directory the run started in"
+pass "the record names both the brief path as passed and its resolved form"
+
+# the writer enforces the no-key rule, so a key arriving inside the brief text
+# cannot reach the record even on a path that never intends to log one
+DLOG_KEY="$HOME_DIR/state/dispatch-key"
+KEY_BRIEF="$TMP_ROOT/key-brief.md"
+printf '# Task\nRotate the %s credential in the deploy script.\n' "$KEY" > "$KEY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_KEY" run code out err "$KEY_BRIEF" --project pager
+expect_code 0 "$code" "a brief naming the key still resolves"
+assert_contains "$(cat "$LOG/body")" "$KEY" "the key really did leave in the request body, so this case is not vacuous"
+REC=$(only_record "$DLOG_KEY")
+assert_no_grep "$KEY" "$REC" "the record redacts a key that arrived inside the brief"
+assert_contains "$(jq -r .request.state.task.brief "$REC")" '[redacted]' "the redaction is visible where the key stood"
+pass "the log writer redacts the key even when the brief text carries it"
+
+# a call that failed after the question was asked is still recorded
+DLOG_FAIL="$HOME_DIR/state/dispatch-failed"
+reset_log
+FAKE_CURL_FAIL=1 TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_FAIL" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a transport failure still exits 0"
+assert_contains "$out" '  status: error' "a transport failure still reports the error outcome"
+assert_equals '1' "$(record_count "$DLOG_FAIL")" "a transport failure is still recorded"
+REC=$(only_record "$DLOG_FAIL")
+assert_equals 'error' "$(jq -r .result.status "$REC")" "the failed record carries the error status"
+assert_equals 'null' "$(jq -r .httpStatus "$REC")" "the failed record has no HTTP status"
+assert_equals 'null' "$(jq -r .response "$REC")" "the failed record has no answer"
+assert_equals 'pager' "$(jq -r .request.state.task.project "$REC")" "the failed record still carries the question that was sent"
+assert_equals '0' "$(jq -r .exitStatus "$REC")" "the failed record carries the real exit status"
+assert_contains "$(jq -r .result.toon "$REC")" 'status: error' "the failed record carries the block it published"
+pass "a call that fails after the question is recorded with its question and its exit status"
+
+# nothing asked means nothing recorded, whatever stopped it
+DLOG_QUIET="$HOME_DIR/state/dispatch-quiet"
+printf '%s\n' 'off-by-one in the pager' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_QUIET" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a withheld request still exits 0"
+assert_equals '0' "$(record_count "$DLOG_QUIET")" "a request the never-send list withheld is not recorded"
+rm -f "$NEVER_SEND"
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_QUIET" run code out err --bogus
+expect_code 2 "$code" "a usage error still exits 2"
+assert_equals '0' "$(record_count "$DLOG_QUIET")" "a usage error is not recorded"
+DLOG_OFFKEY="$HOME_DIR/state/dispatch-offkey"
+FM_DISPATCH_RESOLVE_LOG="$DLOG_OFFKEY" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "an absent key still exits 0"
+assert_absent "$DLOG_OFFKEY" "a run with no key creates nothing"
+pass "only a run that actually asked a question writes a record"
+
+# the log directory must live under the home's state or data path
+DLOG_OUTSIDE="$TMP_ROOT/outside-log"
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_OUTSIDE" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a log directory outside the home still exits 0"
+assert_contains "$err" 'dispatch-resolve: log off (' "a refused log directory says so on stderr"
+assert_contains "$out" '  status: clear' "a refused log directory does not change the result"
+assert_absent "$DLOG_OUTSIDE" "a refused log directory is never created"
+
+DLOG_HOME_ROOT="$HOME_DIR/logs"
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_HOME_ROOT" run code out err "$BRIEF" --project pager
+assert_contains "$err" 'is not under' "a directory outside state and data is refused"
+assert_absent "$DLOG_HOME_ROOT" "a refused directory beside state and data is never created"
+
+DLOG_ESCAPE="$HOME_DIR/state/../../escape-log"
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_ESCAPE" run code out err "$BRIEF" --project pager
+assert_contains "$err" 'dispatch-resolve: log off (' "a dot-dot escape is refused"
+assert_absent "$TMP_ROOT/escape-log" "a dot-dot escape creates nothing"
+
+# a git work tree below the home is refused, and nothing is created inside it
+mkdir -p "$HOME_DIR/data/clone/.git"
+DLOG_CLONE="$HOME_DIR/data/clone/state/logs"
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_CLONE" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a log directory inside a clone still exits 0"
+assert_contains "$err" 'is inside a git work tree below' "a directory inside a clone is refused"
+assert_absent "$HOME_DIR/data/clone/state" "the refusal creates nothing inside the clone"
+
+# a symlinked state path that escapes the home is refused
+mkdir -p "$TMP_ROOT/elsewhere"
+ln -s "$TMP_ROOT/elsewhere" "$HOME_DIR/state/link-out"
+DLOG_LINK="$HOME_DIR/state/link-out/logs"
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_LINK" run code out err "$BRIEF" --project pager
+assert_contains "$err" 'dispatch-resolve: log off (' "a symlinked state path that escapes the home is refused"
+assert_absent "$TMP_ROOT/elsewhere/logs" "a refused symlinked path creates nothing outside the home"
+pass "the log guard refuses anything outside the home's state or data paths, creating nothing"
+
+# a relative setting anchors to the home, never to the working directory
+mkdir -p "$TMP_ROOT/workdir"
+DLOG_REPO="$HOME_DIR/state/dispatch-repo"
+( cd "$TMP_ROOT/workdir" && PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY=$KEY \
+    FM_DISPATCH_RESOLVE_LOG=state/dispatch-repo "$TOOL" "$BRIEF" --project pager >/dev/null 2>&1 )
+assert_equals '1' "$(record_count "$DLOG_REPO")" "a relative log setting anchors under the home"
+assert_absent "$TMP_ROOT/workdir/state" "a relative log setting creates nothing in the working directory"
+pass "a relative log setting resolves against the home, not the working directory"
+
+# overlapping intakes each land their own intact record
+DLOG_CONC="$HOME_DIR/state/dispatch-concurrent"
+write_response "$RESPONSE" rule_4 0.9
+for i in 1 2 3 4 5 6 7 8; do
+  ( PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_LOG="$DLOG_CONC" \
+      "$TOOL" "$BRIEF" --project "conc-$i" > "$TMP_ROOT/conc.$i.out" 2> "$TMP_ROOT/conc.$i.err" ) &
+done
+wait
+assert_equals '8' "$(record_count "$DLOG_CONC")" "eight overlapping intakes write eight records"
+assert_equals '0' "$(find "$DLOG_CONC" -mindepth 1 ! -name 'dispatch-*.json' | wc -l | tr -d ' ')" "overlapping runs leave no partial or temporary file"
+assert_equals '8' "$(find "$DLOG_CONC" -name 'dispatch-*.json' -exec jq -r .correlationId {} + | sort -u | wc -l | tr -d ' ')" "every overlapping record has a distinct id"
+assert_equals "$(printf 'conc-%s\n' 1 2 3 4 5 6 7 8)" \
+  "$(find "$DLOG_CONC" -name 'dispatch-*.json' -exec jq -r .request.state.task.project {} + | sort)" \
+  "every overlapping run recorded its own question"
+conc_bad=0
+for record in "$DLOG_CONC"/dispatch-*.json; do
+  jq -e . "$record" >/dev/null 2>&1 || conc_bad=$((conc_bad + 1))
+done
+assert_equals '0' "$conc_bad" "every overlapping record is intact JSON"
+pass "concurrent intakes each write one intact, distinct record"
+
+# one fm-hooks pointer line names the record, without copying its payload
+HOOKS="$HOME_DIR/state/fm-hooks/queue"
+DLOG_HOOKS="$HOME_DIR/state/dispatch-hooks"
+mkdir -p "$HOOKS"
+: > "$HOOKS/events.jsonl"
+TYPESAFE_API_KEY=$KEY FM_HOOK_QUEUE="$HOOKS" FM_DISPATCH_RESOLVE_LOG="$DLOG_HOOKS" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "the fm-hooks pointer run exits 0"
+REC=$(only_record "$DLOG_HOOKS")
+assert_equals '1' "$(grep -c . "$HOOKS/events.jsonl")" "one fm-hooks line is appended per run"
+hook_line=$(cat "$HOOKS/events.jsonl")
+assert_equals 'artifact' "$(jq -r .type <<<"$hook_line")" "the pointer is an artifact event"
+assert_equals 'fm-dispatch-resolve.sh' "$(jq -r .operation <<<"$hook_line")" "the pointer names the observed operation"
+assert_equals "$(jq -r .correlationId "$REC")" "$(jq -r .correlationId <<<"$hook_line")" "the pointer shares the record's correlation id"
+assert_equals "$REC" "$(jq -r .artifact.path <<<"$hook_line")" "the pointer names the record path"
+assert_equals 'dispatch-resolve-log' "$(jq -r .artifact.kind <<<"$hook_line")" "the pointer names the artifact kind"
+assert_no_grep 'off-by-one in the pager' "$HOOKS/events.jsonl" "the pointer does not copy the question's payload"
+
+# no fm-hooks queue means no queue is invented, and the record is still written
+DLOG_NOHOOKS="$HOME_DIR/state/dispatch-no-hooks"
+TYPESAFE_API_KEY=$KEY FM_HOOK_QUEUE="$HOME_DIR/state/never-created-hooks" FM_DISPATCH_RESOLVE_LOG="$DLOG_NOHOOKS" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a run with no fm-hooks queue still exits 0"
+assert_absent "$HOME_DIR/state/never-created-hooks" "an absent fm-hooks queue is not created"
+assert_equals '1' "$(record_count "$DLOG_NOHOOKS")" "the record is still written without fm-hooks"
+pass "one fm-hooks pointer line names the record without widening result capture"
+
 printf '# all fm-dispatch-resolve tests passed\n'

@@ -62,8 +62,24 @@
 #   existing unreadable rules file, malformed rules, or missing jq), which is
 #   actionable, never selected around.
 #
+# Opt-in question/answer log: FM_DISPATCH_RESOLVE_LOG names a directory and
+#   every run that actually asks Jev a question writes ONE 0600 JSON record
+#   there - the request state and questions that were sent, the answer, the
+#   rendered block below, and the exit status - so a dispatch decision is
+#   auditable after the fact. Unset means no file, no new directory, and no
+#   changed behavior. The record is assembled from the request body, the
+#   response document, and the rendered output alone, and the writer redacts the
+#   key from the bytes it writes, so no record carries it; the key itself still
+#   leaves this process only on the curl file descriptor. The directory must sit
+#   under $FM_HOME/state or $FM_HOME/data and is refused when it resolves
+#   outside those or into a git work tree below the home, so this record can
+#   never land in a repository; a refused or unwritable log costs the log only,
+#   never the outcome. bin/fm-dispatch-log-lib.sh owns the guard, the record
+#   writer, and the one optional fm-hooks pointer line published under the home.
+#
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   TYPESAFE_API_KEY turns this tool on; it is the only setting that does.
+#   FM_DISPATCH_RESOLVE_LOG is the optional log directory (see above).
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -87,6 +103,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-env-lib.sh"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-dispatch-log-lib.sh
+. "$SCRIPT_DIR/fm-dispatch-log-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
 
@@ -111,6 +129,89 @@ usage() {
 
 BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
+REQUEST='' RESULT='' TEXT=''
+RESP_FILE='' QUOTA='' TASK_TEXT='' SEND_TEXT=''
+
+# ---- opt-in question/answer log state -------------------------------------------
+# LOG_ARMED turns on only once a question exists, so a run that never sent one
+# writes nothing. Every other name here is initialized before the EXIT trap is
+# installed, because that trap reads them on every exit path, including the ones
+# that never reach the request.
+LOG_ARMED=0 LOG_DIR='' LOG_ID='' LOG_NAME='' LOG_STARTED_AT='' LOG_HTTP='' LOG_STATUS='' LOG_BRIEF_ABS=''
+
+# dispatch_log_emit <exit-status>
+# Assemble and publish this run's record when one is owed. The request body that
+# was sent, the response document, and the rendered block are copied in whole;
+# TYPESAFE_API_KEY_PRIVATE never reaches this function, and the writer redacts it
+# from the bytes regardless. A log failure is reported and swallowed: the log is
+# a record of the decision, never a participant in it.
+# shellcheck disable=SC2329 # Invoked by the EXIT trap installed below.
+dispatch_log_emit() {
+  local rc=$1 response json path
+  [ "$LOG_ARMED" = 1 ] || return 0
+  LOG_ARMED=0
+  [ -n "$LOG_DIR" ] || return 0
+  response=null
+  if [ -n "$RESP_FILE" ] && [ -s "$RESP_FILE" ]; then
+    response=$(jq -c 'if (.answers.rule | type) == "object" then
+        { choice: (.answers.rule.choice // null),
+          confidence: (.answers.rule.confidence // null),
+          probabilities: (.answers.rule.probabilities // null),
+          model: (.model // null), usage: (.usage // null) }
+      else null end' "$RESP_FILE" 2>/dev/null) || response=null
+    [ -n "$response" ] || response=null
+  fi
+  json=$(jq -cn \
+    --arg timestamp "$(fm_dispatch_log_timestamp)" \
+    --arg started "$LOG_STARTED_AT" \
+    --arg correlation "$LOG_ID" \
+    --arg brief "$BRIEF" \
+    --arg brief_absolute "$LOG_BRIEF_ABS" \
+    --arg cwd "$PWD" \
+    --arg project "$PROJECT" \
+    --arg model "$TS_MODEL" \
+    --arg rules "$RULES_PATH" \
+    --arg http "$LOG_HTTP" \
+    --arg status "$LOG_STATUS" \
+    --argjson elapsed "$LAT_MS" \
+    --argjson request "$REQUEST" \
+    --argjson response "$response" \
+    --arg toon "$TEXT" \
+    --argjson exit_status "$rc" '
+    { kind: "dispatch-resolve", version: 1,
+      loggedAt: $timestamp, startedAt: $started, correlationId: $correlation,
+      brief: $brief, briefAbsolute: $brief_absolute, cwd: $cwd,
+      project: $project, model: $model, rulesFile: $rules,
+      httpStatus: (if $http == "" or $http == "000" then null else ($http | tonumber) end),
+      elapsedMs: $elapsed,
+      request: $request,
+      response: $response,
+      result: { status: (if $status == "" then null else $status end), toon: $toon },
+      exitStatus: $exit_status }') || {
+    printf 'dispatch-resolve: log not written (the record could not be built)\n' >&2
+    return 0
+  }
+  if path=$(fm_dispatch_log_write "$LOG_DIR" "$LOG_NAME" "$TYPESAFE_API_KEY_PRIVATE" <<<"$json"); then
+    fm_dispatch_log_hooks_index "$FM_HOME" "fm-dispatch-resolve.sh" "$LOG_ID" "$path" || true
+  else
+    printf 'dispatch-resolve: log not written (%s)\n' "$LOG_DIR/$LOG_NAME" >&2
+  fi
+  return 0
+}
+
+# The one EXIT trap owns both ends of a run: publish the record an armed run
+# owes, then remove the run's temporary files. The original exit status is
+# preserved so the log can never change what this tool decided.
+# shellcheck disable=SC2329 # Installed as the EXIT trap on the next line.
+cleanup() {
+  local rc=$? path
+  dispatch_log_emit "$rc" || true
+  for path in "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"; do
+    [ -n "$path" ] && rm -f -- "$path"
+  done
+  exit "$rc"
+}
+trap cleanup EXIT
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
@@ -135,8 +236,23 @@ fi
 [ -e "$RULES_PATH" ] || [ -L "$RULES_PATH" ] || no_rules
 [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 command -v jq >/dev/null 2>&1 || die "jq required"
+LOG_BRIEF_ABS=$(fm_dispatch_log_abs "$BRIEF" "$PWD")
+
+# ---- opt-in question/answer log -------------------------------------------------
+# Inert unless FM_DISPATCH_RESOLVE_LOG names a directory under this home. A
+# refused setting prints one line and costs the log only: the decisions, the
+# stdout shape, and the exit status are the same either way.
+if [ -n "${FM_DISPATCH_RESOLVE_LOG:-}" ]; then
+  IFS=$'\t' read -r log_state log_detail < <(fm_dispatch_log_dir "$FM_HOME" "$FM_DISPATCH_RESOLVE_LOG")
+  if [ "$log_state" = ok ] && [ -n "$log_detail" ]; then
+    LOG_DIR=$log_detail
+  else
+    LOG_DIR=''
+    printf 'dispatch-resolve: log off (%s)\n' "${log_detail:-the setting produced no result}" >&2
+  fi
+fi
+
 RULES=$(mktemp) || die "mktemp failed"
-trap 'rm -f "$RULES"' EXIT
 cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
 chmod 400 "$RULES" || die "could not protect rules snapshot"
 VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
@@ -230,8 +346,12 @@ RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
 emit_error() {
   local reason=$1
+  LOG_STATUS=error
   echo "dispatch-resolve: error ($reason)" >&2
-  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  # TEXT is what stdout gets and what the opt-in log records, so a failed run's
+  # record still carries the block it published.
+  TEXT=$(printf 'dispatch-resolve:\n  status: error\n  reason: %s' "$reason")
+  printf '%s\n' "$TEXT"
   exit 0
 }
 
@@ -240,10 +360,9 @@ if [ "$RULE_COUNT" -eq 0 ]; then
 fi
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
-QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
-TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
-SEND_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
+QUOTA=$(mktemp) || die "mktemp failed"
+TASK_TEXT=$(mktemp) || die "mktemp failed"
+SEND_TEXT=$(mktemp) || die "mktemp failed"
 
 never_send_off() {
   echo "dispatch-resolve: off ($1; nothing sent)" >&2
@@ -320,6 +439,12 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
       }
     }')
   never_send_check
+  # From here a question exists, so an opt-in run records it even when the call
+  # itself fails; every path above this line asked Jev nothing and logs nothing.
+  LOG_ARMED=1
+  LOG_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+  LOG_NAME="dispatch-$LOG_ID.json"
+  LOG_STARTED_AT=$(fm_dispatch_log_timestamp)
   T0=$(fm_timing_now_ms)
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
     -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
@@ -327,6 +452,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
     --data-binary @- 2>/dev/null) || HTTP=000
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
+  LOG_HTTP=$HTTP
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
@@ -492,6 +618,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       end
     end
   end') || emit_error "resolution failed"
+LOG_STATUS=$(jq -r '.status // empty' <<<"$RESULT" 2>/dev/null) || LOG_STATUS=''
 
 TEXT=$(jq -r '
   def flat: tostring | gsub("[\t\r\n]"; " ");
