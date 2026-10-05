@@ -113,6 +113,17 @@ printf '%s\n' '{"task_class":"bounded coding","proposed":"local/local-model","se
 printf '%s\n' '{"run_id":"trial-1","task_class":"bounded coding","provider":"local","model":"local-model","accepted":true,"elapsed_seconds":30,"interventions":0,"rework_minutes":0,"input_tokens":1000,"output_tokens":200,"ttft_seconds":1.5,"decode_tps":20,"cloud_egress":false,"head":"abc123"}' \
   | FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" record job outcome >/dev/null
 jq -s -e 'length == 2 and .[0].kind == "shadow" and .[1].kind == "outcome" and .[1].head == "abc123" and .[1].decode_tps == 20 and .[1].cloud_egress == false' "$work/home/data/job/dispatch-evidence.jsonl" >/dev/null || fail 'dispatch evidence rows missing'
+mkdir -p "$work/home/data/Fix.1" "$work/home/escape"
+printf '%s\n' '{"task_class":"bounded coding","proposed":"local/local-model","selected":"codex/gpt"}' \
+  | FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" record Fix.1 shadow >/dev/null
+printf '%s\n' '{"run_id":"trial-2","task_class":"bounded coding","provider":"local","model":"local-model","accepted":true,"elapsed_seconds":30,"interventions":0,"rework_minutes":0}' \
+  | FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" record Fix.1 outcome >/dev/null
+jq -s -e 'length == 2 and all(.[]; .task == "Fix.1") and .[0].kind == "shadow" and .[1].kind == "outcome"' "$work/home/data/Fix.1/dispatch-evidence.jsonl" >/dev/null || fail 'valid mixed-case task evidence missing'
+if printf '%s\n' '{"task_class":"bounded coding","proposed":"local/local-model","selected":"codex/gpt"}' \
+  | FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" record ../escape shadow >"$work/out" 2>"$work/err"; then
+  fail 'unsafe task id was accepted'
+fi
+[ ! -e "$work/home/escape/dispatch-evidence.jsonl" ] || fail 'unsafe task id wrote outside the task directory'
 if printf '%s\n' '{"task_class":"x","proposed":"x","selected":"y","prompt":"secret"}' \
   | FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" record job shadow >"$work/out" 2>"$work/err"; then
   fail 'free-form prompt was accepted into evidence'

@@ -16,6 +16,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
+if [ "${1:-}" = record ]; then
+  . "$SCRIPT_DIR/fm-pr-lib.sh"
+  fm_task_id_creation_valid "${2:-}" || {
+    echo "error: invalid task id" >&2
+    exit 2
+  }
+fi
 exec python3 -c "$(cat <<'PY'
 import datetime
 import ipaddress
@@ -164,8 +171,6 @@ def record(args, home):
     if len(args) != 2:
         die("record needs task-id and shadow|outcome")
     task, kind = args
-    if not task or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for ch in task):
-        die("invalid task id")
     if kind not in ("shadow", "outcome"):
         die("record kind must be shadow or outcome")
     directory = pathlib.Path(home) / "data" / task
