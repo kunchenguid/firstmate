@@ -1098,8 +1098,129 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+owner_account_forge() { # home owner-login [unconfigured]: only GH_TOKEN of that logged-in account can read o/r
+  local home=$1
+  [ "${3:-}" = unconfigured ] || : > "$home/config/contributions-owner-account"
+  mv "$home/fakebin/gh" "$home/fakebin/gh-fixture"
+  printf '%s\n' "$2" > "$home/forge/owner-login"
+  cat > "$home/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s|%s\n' "${GH_TOKEN:-active}" "$*" >> "$FORGE/calls"
+case "$*" in
+  "auth token -u $(cat "$FORGE/owner-login")")
+    [ ! -e "$FORGE/token-hang" ] || sleep 7
+    printf 'secret-owner-token\n'; exit 0 ;;
+  'auth token -u '*) printf 'no account\n' >&2; exit 1 ;;
+  auth\ *) printf 'unexpected auth call\n' >&2; exit 1 ;;
+esac
+if [ "${GH_TOKEN:-}" != secret-owner-token ]; then
+  # forge/forbidden holds the active account's 403 refusal; otherwise the repo is not found.
+  if [ -e "$FORGE/forbidden" ]; then cat "$FORGE/forbidden" >&2; else printf 'gh: Not Found (HTTP 404)\n' >&2; fi
+  exit 1
+fi
+[ "$*" != 'api repos/o/r' ] || { printf '{"permissions":{"push":true}}\n'; exit 0; }
+exec "$(dirname "$0")/gh-fixture" "$@"
+SH
+  chmod +x "$home/fakebin/gh"
+}
+
+test_owner_account_reads_repo_the_active_account_cannot() {
+  local home out
+  home=$(new_home owner-account)
+  forge_home "$home"
+  owner_account_forge "$home" o
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>&1) || fail 'owner-account poll failed'
+  [ -z "$out" ] || fail "an owner-account read still reported: $out"
+  jq -e --arg now "$NOW" '.records[0] | .error == null and .checked_at == $now' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'owner-account read did not refresh the record'
+  jq -e '.records[0].observation.can_merge == false' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'the owner account push permission was recorded as merge authority of the active account'
+  grep -Fx 'active|auth token -u o' "$home/forge/calls" >/dev/null || fail 'owner account token was never requested'
+  grep -Fx 'secret-owner-token|pr view https://github.com/o/r/pull/8 --json headRefOid,reviewDecision' "$home/forge/calls" >/dev/null \
+    || fail 'later reads of the observation did not keep the owner account'
+  ! grep -F 'auth switch' "$home/forge/calls" >/dev/null || fail 'the active account was switched'
+  ! grep -rF secret-owner-token "$home/data" "$home/state" >/dev/null || fail 'the owner token was persisted'
+  pass 'an unreadable repo is observed through the logged-in account named like its owner'
+}
+
+test_no_owner_account_stays_unavailable() {
+  local home out
+  home=$(new_home no-owner-account)
+  forge_home "$home"
+  owner_account_forge "$home" someone-else
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'no-owner-account poll failed'
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
+    || fail "a repo no logged-in account can read did not stay unavailable: $out"
+  ! grep -F 'secret-owner-token|' "$home/forge/calls" >/dev/null || fail 'another account token was used'
+  pass 'a repo no logged-in account can read keeps the unavailable behavior'
+}
+
+test_owner_token_timeout_is_budget_refusal() {
+  local home out
+  home=$(new_home owner-token-timeout)
+  forge_home "$home"
+  owner_account_forge "$home" o
+  : > "$home/forge/token-hang"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed on a timed-out owner token lookup'
+  [ -z "$out" ] || fail "a timed-out owner token lookup printed an unavailable wake: $out"
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail 'a timed-out owner token lookup rewrote the prior record'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a timed-out owner token lookup enqueued a wake'
+  pass 'an owner token lookup killed at the read bound is budget refusal and stays silent'
+}
+
+test_owner_account_fallback_is_off_by_default() {
+  local home out
+  home=$(new_home owner-account-unconfigured)
+  forge_home "$home"
+  owner_account_forge "$home" o unconfigured
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'unconfigured poll failed'
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
+    || fail "an unconfigured home did not keep the unavailable behavior: $out"
+  ! grep -F 'auth token' "$home/forge/calls" >/dev/null || fail 'an unconfigured home asked gh for another account token'
+  [ "$(cat "$home/forge/calls")" = 'active|api repos/o/r/pulls/8' ] \
+    || fail "an unconfigured home made reads beyond the active-account core read: $(cat "$home/forge/calls")"
+  pass 'without config/contributions-owner-account the owner-account fallback never runs'
+}
+
+test_rate_limited_read_does_not_use_owner_account() {
+  local home out limit
+  for limit in 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' \
+    'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)'; do
+    home=$(new_home owner-account-rate-limited)
+    forge_home "$home"
+    owner_account_forge "$home" o
+    printf '%s\n' "$limit" > "$home/forge/forbidden"
+    out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'rate-limited poll failed'
+    [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
+      || fail "a rate-limited read did not stay unavailable: $out"
+    ! grep -F 'auth token' "$home/forge/calls" >/dev/null || fail "a rate-limited read asked gh for another account token: $limit"
+    rm -rf "$home"
+  done
+  pass 'a primary or secondary rate-limit 403 never falls back to the owner account'
+}
+
+test_permission_denied_read_uses_owner_account() {
+  local home out
+  home=$(new_home owner-account-permission-denied)
+  forge_home "$home"
+  owner_account_forge "$home" o
+  printf 'gh: Resource not accessible by integration (HTTP 403)\n' > "$home/forge/forbidden"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>&1) || fail 'permission-denied poll failed'
+  [ -z "$out" ] || fail "a permission-denied read still reported: $out"
+  jq -e --arg now "$NOW" '.records[0] | .error == null and .checked_at == $now and .observation.can_merge == false' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'permission-denied read was not observed as the owner account'
+  grep -Fx 'active|auth token -u o' "$home/forge/calls" >/dev/null || fail 'owner account token was never requested'
+  pass 'a permission-denied 403 falls back to the owner account'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_owner_account_reads_repo_the_active_account_cannot test_no_owner_account_stays_unavailable test_owner_token_timeout_is_budget_refusal test_owner_account_fallback_is_off_by_default test_rate_limited_read_does_not_use_owner_account test_permission_denied_read_uses_owner_account; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

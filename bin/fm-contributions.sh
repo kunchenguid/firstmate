@@ -15,6 +15,16 @@
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
+# Reads use gh's active account. Only when the local, default-off presence
+# flag config/contributions-owner-account exists and the core read is refused
+# for that account as not found (HTTP 404) or as a permission denial (HTTP 403
+# that is not a primary or secondary rate limit), the observation retries every
+# read once as the
+# logged-in gh account whose login equals the repo owner, via gh auth token -u
+# passed as GH_TOKEN to those reads only; the active account never changes and
+# no token is printed. Without the flag, on any other refusal, or with no such
+# account, the URL stays unavailable as before. An owner-account observation
+# records can_merge false, because merges still run as the active account.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
@@ -84,6 +94,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -207,8 +218,11 @@ forge() {
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
   [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
+  # The token rides the environment of this read only, never argv or output.
+  (
+    [ -z "${FORGE_TOKEN:-}" ] || export GH_TOKEN="$FORGE_TOKEN"
+    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
+  ) 2> "$forge_err" || rc=$?
   # A kill at the read bound or the deadline is budget refusal too; only the
   # forge's own nonzero exit is unavailable evidence.
   if [ "$rc" -eq 124 ]; then
@@ -231,6 +245,13 @@ wait_forges() { # background forge pids from one independent read wave
   return "$rc"
 }
 
+owner_token() { # repo-owner -> FORGE_TOKEN of the logged-in gh account with that login
+  # A lookup cut short by the read bound or the deadline is budget refusal.
+  FORGE_TOKEN=$(FORGE_ERR="$TMP/token.err" forge auth token -u "$1") \
+    || { FORGE_TOKEN=''; [ ! -e "$TMP/budget-exhausted" ] || BUDGET_EXHAUSTED=1; return 1; }
+  [ -n "$FORGE_TOKEN" ]
+}
+
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
@@ -238,7 +259,17 @@ observe() { # canonical GitHub URL -> normalized JSON
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   BUDGET_EXHAUSTED=0
-  forge api "$endpoint" > "$TMP/core.json" || return 1
+  FORGE_TOKEN=''
+  if ! forge api "$endpoint" > "$TMP/core.json"; then
+    # Opted in, an active account that cannot see the repo gets one retry as
+    # the logged-in account named like the repo owner; the active account stays.
+    # A rate-limited 403 is not a visibility refusal and never fetches a token.
+    [ -e "$CONFIG/contributions-owner-account" ] && [ "$BUDGET_EXHAUSTED" -eq 0 ] \
+      && { grep -Fq 'HTTP 404' "$TMP/forge.err" || { grep -Fq 'HTTP 403' "$TMP/forge.err" && ! grep -Fiq 'rate limit' "$TMP/forge.err"; }; } \
+      && owner_token "${part%%/*}" || return 1
+    rm -f -- "$TMP/forge-unavailable"
+    forge api "$endpoint" > "$TMP/core.json" || return 1
+  fi
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
@@ -261,12 +292,12 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --arg owner_read "${FORGE_TOKEN:+1}" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
-          can_merge:($repo[0].permissions.push // false),
+          can_merge:($owner_read == "" and ($repo[0].permissions.push // false)),
           review_decision:($after[0].reviewDecision // ""),
           reviews:$reviews,
           checks:([ $checks[0][] | .check_runs[] | {name,id,status,conclusion,started_at} ]
