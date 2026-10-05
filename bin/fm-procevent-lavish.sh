@@ -715,7 +715,7 @@ cmd_read() {
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  perl -MJSON::PP -e '
+  perl -MJSON::PP -MB -e '
     use strict; use warnings;
     my ($path, $lifecycle, $session_ended) = @ARGV;
     open my $fh, "<", $path or exit 1;
@@ -834,12 +834,16 @@ cmd_read() {
           emit_body($comment);
         }
         if ($tag eq "choice" && $comment =~ /Context data:\s*(\{.*\})/s) {
-          my $data = eval { JSON::PP->new->decode($1) };
+          # allow_bignum keeps a huge number from decoding as a plain string.
+          my $data = eval { JSON::PP->new->allow_bignum->decode($1) };
           my $note;
           if (ref($data) eq "HASH") {
             for my $k ("note", "notes") {
-              next unless defined($data->{$k}) && !ref($data->{$k}) && length $data->{$k};
-              $note = $data->{$k};
+              my $v = $data->{$k};
+              next unless defined($v) && !ref($v);
+              my $flags = B::svref_2object(\$v)->FLAGS;
+              next unless ($flags & B::SVp_POK) && !($flags & (B::SVp_IOK | B::SVp_NOK)) && length $v;
+              $note = $v;
               last;
             }
           }

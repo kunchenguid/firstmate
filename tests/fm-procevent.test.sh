@@ -3329,9 +3329,30 @@ assert_not_contains "$out" "Context data:" \
   "a choice row with a note surfaced machine-generated context"
 assert_not_contains "$out" $'\nprompt:\n' \
   "a choice row with a note gained a freeform comment field"
-"$ROOT/bin/fm-procevent-lavish.sh" answers "$READ" >/dev/null \
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") \
   || fail "answers failed on a choice-with-note capture"
+[ "$out" = $'Q5\tB: no locks and no report\tQ5: B: no locks and no report\norder-proof\tyes\tOrder proof: yes' ] \
+  || fail "answers changed its rows for a choice-with-note capture: $out"
 pass "read prints the note attached to a choice answer"
+
+# A note is a nonempty JSON string; a number, even one too big for an
+# integer, is not a note, and the other key is still read.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]{uid,prompt,selector,tag,text}:
+  "1","Q1: A\n\nContext data:\n{\"question\": \"Q1\", \"answer\": \"A\", \"note\": 0, \"notes\": \"kept\"}","form",choice,"Q1: A"
+  "2","Q2: B\n\nContext data:\n{\"question\": \"Q2\", \"answer\": \"B\", \"note\": 123456789012345678901234567890, \"notes\": 1.5}","form",choice,"Q2: B"
+EOF
+out=$(read_out) || fail "read failed on a choice-with-numeric-note capture"
+assert_contains "$out" $'text:\n| Q1: A\nnote:\n| kept' \
+  "read skipped a string note beside a numeric one"
+assert_contains "$out" $'text:\n| Q2: B\nEND ANNOTATIONS' \
+  "read printed a numeric value as a choice note"
+pass "read prints only a string note on a choice answer"
 
 cat > "$READ" <<'EOF'
 session:
