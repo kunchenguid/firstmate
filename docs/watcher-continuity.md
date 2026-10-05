@@ -87,7 +87,8 @@ Do not run the hook as a manual arm from a tool turn: a short-lived tool process
 The hook fires on every turn end: Claude fires `StopFailure` instead of `Stop` when an API error such as a usage limit ends the turn, and a Stop-only registration left every Claude home unsupervised after one.
 On each turn end, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
-After a `StopFailure`, that exit 2 waits behind an error-aware backoff that doubles per consecutive failure to a cap and clears on the next normal Stop, while the watcher keeps cycling; an error that retrying cannot heal gets one parent-channel notice instead of a rewake (the hook header owns the classes and bounds). StopFailure handling parses the payload with `jq`; without `jq` a StopFailure firing behaves as a plain Stop, with no backoff.
+After a `StopFailure`, that exit 2 waits behind an error-aware backoff that doubles per consecutive failure to a cap and clears on the next normal Stop, while the watcher keeps cycling; an error that retrying cannot heal gets one parent-channel notice instead of a rewake (the hook header owns the classes and bounds).
+StopFailure handling parses the payload with `jq`; without `jq` a StopFailure firing behaves as a plain Stop, with no backoff.
 
 ### Claude session-lock ownership
 
