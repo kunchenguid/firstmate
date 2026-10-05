@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Claude Stop-owned watcher auto-arm (asyncRewake hook).
 #
-# Registered in tracked .claude/settings.json as a Stop command hook with
-# "asyncRewake": true and an explicit multi-hour timeout. Claude Code fires it
-# in the background on EVERY Stop of a Claude primary session, with no
+# Registered in tracked .claude/settings.json as both a Stop and a StopFailure
+# command hook with "asyncRewake": true and an explicit multi-hour timeout.
+# Claude Code fires it in the background on EVERY turn end of a Claude primary
+# session - Stop for a normal end, StopFailure INSTEAD of Stop when an API
+# error (usage limit, overload, auth failure, ...) ended the turn - with no
 # deduplication across firings. It owns routine tokenless watcher continuity
 # for Claude primaries (main home and marked secondmate homes):
 #
@@ -92,6 +94,27 @@
 #     last-resort notice per failure episode; later consecutive failures still
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
 #     until the synchronous guard has consumed its attended fail-open.
+#   - StopFailure: an API-error turn end runs every gate above unchanged, but a
+#     rewake while the error persists would end in another StopFailure within
+#     about a second, and a fresh watcher after downtime closes at once with a
+#     rearm-resurface check, so an unbounded retry would loop. Each StopFailure
+#     therefore records the episode in state/.claude-stopfailure (error class,
+#     failure count, times, the last assistant message) and sets a retry time
+#     that doubles per consecutive failure from FM_CLAUDE_STOPFAILURE_BACKOFF_BASE
+#     (60 s) to FM_CLAUDE_STOPFAILURE_BACKOFF_CAP (1800 s); the "resets ..." text
+#     of a limit message is never trusted. Every generation, whichever event
+#     started it, holds any exit 2 until that retry time, so the arm and any
+#     handling successor keep the watcher cycling and wakes queuing durably
+#     during the backoff. The hold also ends 120 s before the tracked
+#     28800 s hook timeout of this hook's own lifetime, because Claude drops
+#     the exit 2 of a hook it timed out and a host park may already have used
+#     most of that budget. The next normal Stop of the lock-owning session
+#     clears the record and ends any hold early.
+#     The classes authentication_failed, billing_error, model_not_found, and
+#     invalid_request cannot heal by retrying: such a firing records the
+#     episode with the capped retry time, publishes one line per episode on a
+#     secondmate's parent channel (bin/fm-parent-channel-lib.sh; a main home's
+#     own pane already shows the error), and exits 0 without arming.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and
@@ -119,9 +142,10 @@ usage() {
   cat <<'EOF'
 Usage: fm-claude-stop-autoarm.sh
 
-Claude Stop hook registered in .claude/settings.json; not for manual use.
-It reads the Stop payload on stdin and, in a primary home that needs
-supervision, arms the watcher or supervision host for this session.
+Claude Stop and StopFailure hook registered in .claude/settings.json; not for
+manual use. It reads the hook payload on stdin and, in a primary home that
+needs supervision, arms the watcher or supervision host for this session.
+After an API-error turn end it holds its rewake behind an error-aware backoff.
 Exit 0 is silent; exit 2 carries a rewake banner on stderr.
 EOF
 }
@@ -146,6 +170,21 @@ case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+STOPFAILURE_RECORD="$STATE/.claude-stopfailure"
+# Both bounds stay at most an hour; HOLD_LIMIT keeps any hold inside the tracked
+# 28800 s registration timeout, measured on this hook's own $SECONDS clock.
+HOLD_LIMIT=$((28800 - 120))
+BACKOFF_BASE=${FM_CLAUDE_STOPFAILURE_BACKOFF_BASE:-60}
+case "$BACKOFF_BASE" in
+  ''|*[!0-9]*|0) BACKOFF_BASE=60 ;;
+esac
+[ "$BACKOFF_BASE" -le 3600 ] || BACKOFF_BASE=60
+BACKOFF_CAP=${FM_CLAUDE_STOPFAILURE_BACKOFF_CAP:-1800}
+case "$BACKOFF_CAP" in
+  ''|*[!0-9]*) BACKOFF_CAP=1800 ;;
+esac
+[ "$BACKOFF_CAP" -le 3600 ] || BACKOFF_CAP=1800
+[ "$BACKOFF_CAP" -ge "$BACKOFF_BASE" ] || BACKOFF_CAP=$BACKOFF_BASE
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -194,6 +233,32 @@ if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
   printf '%s' "$PAYLOAD" | jq -e '(.transcript_path // "") | type == "string" and contains("/.pi/")' >/dev/null 2>&1 && exit 0
 fi
 
+# --- which turn end fired this hook -------------------------------------------
+# StopFailure replaces Stop when an API error ended the turn (header). Without
+# jq the event and class fall back to a plain field match, and the assistant
+# message is simply not recorded.
+STOPFAILURE=0
+STOPFAILURE_ERROR=
+STOPFAILURE_MESSAGE=
+if [ -n "$PAYLOAD" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    if [ "$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // "" | strings' 2>/dev/null)" = StopFailure ]; then
+      STOPFAILURE=1
+      STOPFAILURE_ERROR=$(printf '%s' "$PAYLOAD" | jq -r '.error // "" | strings' 2>/dev/null || true)
+      STOPFAILURE_MESSAGE=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // "" | strings' 2>/dev/null || true)
+    fi
+  elif printf '%s' "$PAYLOAD" | grep -Eq '"hook_event_name"[[:space:]]*:[[:space:]]*"StopFailure"'; then
+    STOPFAILURE=1
+    STOPFAILURE_ERROR=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' | head -n 1)
+  fi
+fi
+if [ "$STOPFAILURE" -eq 1 ]; then
+  case "$STOPFAILURE_ERROR" in
+    ''|*[!a-z_]*) STOPFAILURE_ERROR=unknown ;;
+  esac
+  STOPFAILURE_MESSAGE=$(printf '%s' "$STOPFAILURE_MESSAGE" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-300)
+fi
+
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
@@ -213,6 +278,110 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   RECOVER_SESSION_LOCK=1
 fi
 
+# --- StopFailure episode record and backoff (header "StopFailure") -------------
+# One key=value line per field; written whole through a temp file and rename.
+stopfailure_field() {  # <field>
+  sed -n "s/^$1=//p" "$STOPFAILURE_RECORD" 2>/dev/null | head -n 1
+}
+
+# A normal Stop of the lock-owning session proves the API answered again.
+stopfailure_reset() {
+  [ "$STOPFAILURE" -eq 1 ] || rm -f "$STOPFAILURE_RECORD" 2>/dev/null || true
+}
+
+# Record this StopFailure as the next consecutive failure of the episode and
+# set its retry time. Sets STOPFAILURE_RETRYABLE (1 or 0) and
+# STOPFAILURE_NOTIFIED (the episode's notice state before this firing).
+STOPFAILURE_RETRYABLE=1
+STOPFAILURE_NOTIFIED=0
+stopfailure_record() {
+  local now count first delay i tmp
+  now=$(date +%s)
+  count=$(stopfailure_field count)
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  count=$((count + 1))
+  first=$(stopfailure_field first_at)
+  case "$first" in ''|*[!0-9]*) first=$now ;; esac
+  STOPFAILURE_NOTIFIED=$(stopfailure_field notified)
+  [ "$STOPFAILURE_NOTIFIED" = 1 ] || STOPFAILURE_NOTIFIED=0
+  case "$STOPFAILURE_ERROR" in
+    authentication_failed|billing_error|model_not_found|invalid_request)
+      STOPFAILURE_RETRYABLE=0
+      delay=$BACKOFF_CAP
+      ;;
+    *)
+      STOPFAILURE_RETRYABLE=1
+      delay=$BACKOFF_BASE
+      i=1
+      while [ "$i" -lt "$count" ] && [ "$delay" -lt "$BACKOFF_CAP" ]; do
+        delay=$((delay * 2))
+        i=$((i + 1))
+      done
+      [ "$delay" -le "$BACKOFF_CAP" ] || delay=$BACKOFF_CAP
+      ;;
+  esac
+  tmp=$(mktemp "$STATE/.claude-stopfailure.XXXXXX") || return 1
+  {
+    printf 'error=%s\n' "$STOPFAILURE_ERROR"
+    printf 'retryable=%s\n' "$STOPFAILURE_RETRYABLE"
+    printf 'count=%s\n' "$count"
+    printf 'first_at=%s\n' "$first"
+    printf 'last_at=%s\n' "$now"
+    printf 'delay=%s\n' "$delay"
+    printf 'retry_at=%s\n' "$((now + delay))"
+    printf 'notified=%s\n' "$STOPFAILURE_NOTIFIED"
+    printf 'message=%s\n' "$STOPFAILURE_MESSAGE"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$STOPFAILURE_RECORD" || { rm -f "$tmp"; return 1; }
+}
+
+# A failure that retrying cannot heal gets one line per episode on a
+# secondmate's parent channel; a main home's pane already shows the error.
+stopfailure_notify_once() {
+  [ "$STOPFAILURE_NOTIFIED" = 1 ] && return 0
+  # shellcheck source=bin/fm-parent-channel-lib.sh
+  . "$SCRIPT_DIR/fm-parent-channel-lib.sh" 2>/dev/null || return 0
+  fm_parent_channel_report "$FM_HOME" "$STATE" \
+    "blocked: secondmate turn ended on Claude API error $STOPFAILURE_ERROR, which retrying cannot fix; supervision in this home stays paused until the credential or configuration is fixed and the mate is steered (state/.claude-stopfailure)" \
+    || return 0
+  sed 's/^notified=0$/notified=1/' "$STOPFAILURE_RECORD" > "$STOPFAILURE_RECORD.tmp" 2>/dev/null \
+    && mv -f "$STOPFAILURE_RECORD.tmp" "$STOPFAILURE_RECORD" 2>/dev/null \
+    || rm -f "$STOPFAILURE_RECORD.tmp" 2>/dev/null || true
+}
+
+# Hold an impending exit 2 until the episode's retry time, whichever event
+# started this generation. Ends early when a normal Stop cleared the record or
+# this generation lost ownership (its commit then refuses anyway), and never
+# runs into the hook timeout (HOLD_LIMIT). Returns 1
+# when there was nothing to wait for. After a real wait, AFK or a vanished need
+# is honored here exactly as at the end of the arm cycle.
+stopfailure_backoff() {
+  local retry_at waited=0
+  while [ -e "$STOPFAILURE_RECORD" ]; do
+    retry_at=$(stopfailure_field retry_at)
+    case "$retry_at" in ''|*[!0-9]*) break ;; esac
+    [ "$(date +%s)" -lt "$retry_at" ] || break
+    [ "$SECONDS" -lt "$HOLD_LIMIT" ] || break
+    fm_autoarm_still_owner "$STATE" "$MY_GEN" || break
+    waited=1
+    sleep 1
+  done
+  [ "$waited" -eq 1 ] || return 1
+  if [ -e "$STATE/.afk" ]; then
+    autoarm_record afk
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  if ! need_supervision; then
+    autoarm_record clean
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  return 0
+}
+
+[ "$RECOVER_SESSION_LOCK" -eq 1 ] || stopfailure_reset
+
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
 [ -e "$STATE/.afk" ] && exit 0
 
@@ -229,6 +398,18 @@ need_supervision || exit 0
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
+  stopfailure_reset
+fi
+
+# --- StopFailure: record the episode before any claim ---------------------------
+# Recording precedes the claim so a still-parked generation this firing defers
+# to applies the same backoff before its own exit 2.
+if [ "$STOPFAILURE" -eq 1 ]; then
+  stopfailure_record || exit 0
+  if [ "$STOPFAILURE_RETRYABLE" -eq 0 ]; then
+    stopfailure_notify_once
+    exit 0
+  fi
 fi
 
 # --- single-flight generation claim --------------------------------------------
@@ -491,6 +672,7 @@ if [ "$HEALTHY" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
+  stopfailure_backoff
   if autoarm_commit failed-suppressed; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     [ -e "$FAILURE_ALARM" ] && exit 0
@@ -519,6 +701,8 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   if [ "$HOST_MODE" -eq 0 ]; then
     start_handling_successor "$CLOSED_ARM_PID" || true
   fi
+  # The successor (or the host's own) keeps the watcher cycling meanwhile.
+  stopfailure_backoff
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     if [ "$HOST_MODE" -eq 1 ]; then
@@ -531,6 +715,10 @@ if [ "$ACTIONABLE" -eq 1 ]; then
       printf 'This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.\n'
     fi
     [ -z "$SUCCESSOR_FAILURE" ] || printf '%s\n' "$SUCCESSOR_FAILURE"
+    if [ -e "$STOPFAILURE_RECORD" ]; then
+      printf 'A recent turn ended on a Claude API error (%s, failure %s in a row), so this wake was held for a %ss backoff; if the error persists the next rewake waits longer, and a normal turn end clears the backoff.\n' \
+        "$(stopfailure_field error)" "$(stopfailure_field count)" "$(stopfailure_field delay)"
+    fi
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
@@ -567,6 +755,7 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
+  stopfailure_backoff
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat|supervision-host)' "$OUT" 2>/dev/null | head -8
@@ -580,6 +769,7 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
+stopfailure_backoff
 if autoarm_commit failed-suppressed; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2

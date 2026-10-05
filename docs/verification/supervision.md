@@ -506,6 +506,30 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 | Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
 | Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
 
+### An async StopFailure hook's exit 2 rewakes an idle session, 2026-10-05
+
+This supports the `StopFailure` registration of `bin/fm-claude-stop-autoarm.sh` and the need for its backoff.
+Claude Code's own hook catalog calls `StopFailure` fire-and-forget with exit codes ignored, so this behavior is undocumented and must be rechecked after a Claude Code upgrade.
+It was measured on Claude Code 2.1.289 on Linux x86_64, in a scratch directory on a private tmux socket with no Firstmate hooks loaded, in an interactive `claude --model claude-nonexistent-model-xyz` session, so every turn ended on a `model_not_found` API error before any inference.
+The project settings logged `UserPromptSubmit` and registered one probe on both `Stop` and `StopFailure`, the latter with `asyncRewake: true` and `timeout: 60`.
+On its first `StopFailure` the probe slept 3 seconds, printed a reply request to stderr, and exited 2; every later firing only logged and exited 0.
+
+```json
+{"hooks":{"StopFailure":[{"hooks":[{"type":"command","command":"<lab>/hook.sh","asyncRewake":true,"timeout":60}]}]}}
+```
+
+One prompt, `hello`, produced this probe log (event, epoch seconds, error class):
+
+```text
+SUBMIT 1791178313
+StopFailure 1791178314 model_not_found
+SUBMIT 1791178317
+StopFailure 1791178318 model_not_found
+```
+
+The pane showed the model error, then `● Stop hook feedback`, then a second turn that ended on the same error.
+`Stop` never fired, and the rewoken turn failed again within a second, which is the loop the hook's backoff exists to bound.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.
