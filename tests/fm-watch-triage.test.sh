@@ -359,8 +359,8 @@ test_classifier_primitives() {
     && fail "a key token in note prose changed the decision key"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
-  cat > "$state/activity.status" <<'EOF'
   register_task_fixture "$state" activity
+  cat > "$state/activity.status" <<'EOF'
 working [key=phase7]: Phase 7 started
 working [key=phase6]: Phase 6 started
 working [key=legal]: reviewing legal dependency

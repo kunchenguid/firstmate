@@ -174,7 +174,7 @@ test_pending_handoff_rejects_target_archived_before_retry() {
   PATH="$fakebin:$PATH" PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=main \
     "$HANDOFF" send source target --id "$id" "retain this exact rejected body" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 6 ] || fail "archive-before-retry fixture did not stop at the owner conflict"
-  tasks-axi "done" target --file "$home/data/backlog.md" >/dev/null \
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" archive target >/dev/null \
     || fail "archive-before-retry target could not become terminal"
 
   PATH="$fakebin:$PATH" PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=branch \

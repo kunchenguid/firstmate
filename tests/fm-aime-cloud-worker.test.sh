@@ -742,6 +742,7 @@ test_stopped_terminal_unavailable_retires_generations_and_report() {
     || fail "second terminal-unavailable retirement preparation retry was not idempotent"
 
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   before=$(file_sha256 "$report")
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
@@ -798,8 +799,12 @@ test_existing_result_unavailable_guarded_archival() {
   capture_unpublished_bytes "$home" aime "$source" '{existing-malformed-one'
   capture_unpublished_bytes "$home" aime "$source" '{existing-malformed-two'
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
 
+  FM_AIME_FAKE_REPLAY=terminal FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    FM_AIME_FAKE_SESSION_STATUS=stopped AIME="$ADAPTER" run_aime "$home" "$fakebin" prepare-retire "$id" >/dev/null || fail "stopped terminal preparation failed"
+  mark_status_presented "$home" "$id"
   FM_AIME_FAKE_REPLAY=terminal FM_AIME_FAKE_OUTPUT_MODE=unavailable \
     FM_AIME_FAKE_SESSION_STATUS=stopped retire_aime "$home" "$fakebin" "$id" >/dev/null \
     || fail "guarded task retirement did not archive an existing stopped terminal-unavailable record"
@@ -886,6 +891,7 @@ test_terminal_unavailable_retry_and_refusal_boundaries() {
     || fail "completed retirement preparation was not idempotent"
 
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   rc=0
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-task-retire.sh" "$id" >"$home/decision.out" 2>"$home/decision.err" || rc=$?
@@ -895,6 +901,7 @@ test_terminal_unavailable_retry_and_refusal_boundaries() {
   assert_present "$(state_file "$home" "$id")" \
     "decision-gate refusal removed terminal-unavailable state"
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
@@ -1303,6 +1310,7 @@ test_transient_readback_rearms_and_state_is_unknown() {
     >"$home/data/uncertain-terminal/report.md"
   chmod 0600 "$home/data/uncertain-terminal/report.md"
   fm_test_archive_goal "$home" uncertain-terminal
+  mark_status_presented "$home" uncertain-terminal
   rc=0
   FM_AIME_FAKE_REPLAY=unavailable \
     retire_aime "$home" "$fakebin" uncertain-terminal \
@@ -1373,6 +1381,7 @@ test_cloud_retirement_preserves_report() {
   [ -s "$report" ] || fail "retirement fixture has no durable report"
 
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   saved="$home/data/$id/report.saved"
   mv "$report" "$saved"
   rc=0
@@ -1403,6 +1412,7 @@ test_cloud_retirement_preserves_report() {
   assert_grep 'decision completion gate has not passed' "$home/decision-report.err" \
     "AIME retirement did not preserve the decision gate after report checks"
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
 
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
@@ -1440,6 +1450,7 @@ test_cloud_retirement_preserves_report() {
   assert_grep "Error class: \`provider-terminal-failure\`" "$home/data/$id/report.md" \
     "ordinary provider failure report changed classification"
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
@@ -1459,6 +1470,7 @@ test_cloud_retirement_preserves_report() {
   assert_grep '## Provider Result' "$home/data/$id/report.md" \
     "readable stopped-provider output was not preserved as success"
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
@@ -1486,8 +1498,8 @@ test_canonical_retirement_retires_active_state_and_preserves_provider_evidence()
   generation=$(jq -r '.execution_generation' "$(state_file "$home" "$id")")
 
   fm_test_archive_goal "$home" "$id"
-  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   mark_status_presented "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   for artifact in turn-ended progress pi-ext.ts busy-session control-relaunch \
     control-relaunch.meta-prior control-relaunch.brief-prior control-relaunch.note \
     reconcile-nudged; do
@@ -1589,6 +1601,9 @@ test_local_executor_wrappers_delegate_unchanged() {
   mkdir -p "$root/bin" "$root/home/state"
   cp "$ROOT/bin/fm-task-dispatch.sh" "$root/bin/"
   cp "$ROOT/bin/fm-task-state.sh" "$root/bin/"
+  cp "$ROOT/bin/fm-task-record.py" "$root/bin/"
+  mkdir -p "$root/home/data"
+  FM_HOME="$root/home" "$ROOT/bin/fm-tasks-axi.sh" add local-id "Local wrapper fixture" --start >/dev/null || fail "local canonical fixture failed"
   cp "$ROOT/bin/fm-task-retire.sh" "$root/bin/"
   cp "$ROOT/bin/fm-cleanup-receipt-lib.sh" "$root/bin/"
   cp "$ROOT/bin/fm-remote-execution-receipt-lib.sh" "$root/bin/"
@@ -1624,6 +1639,10 @@ SH
 }
 
 case "${FM_AIME_TEST_CASE:-}" in
+  stopped-terminal)
+    test_existing_result_unavailable_guarded_archival
+    exit 0
+    ;;
   retirement-cleanup)
     test_canonical_retirement_retires_active_state_and_preserves_provider_evidence
     exit 0

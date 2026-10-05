@@ -1368,7 +1368,9 @@ test_abandon_after_authoritative_zero_match() {
   creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
   [ "$creates" -eq 1 ] || fail "abandonment path issued another create"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null 2>&1 && fail "abandoned retirement bypassed the decision gate"
+  FM_HOME="$home" "$ROOT/bin/fm-status-append.sh" "$id" 'resolved [key=ida-submission-ambiguous]: fixture MAIN accepts authorized zero-match abandonment' || fail 'fixture decision resolution failed'
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null || fail "decision-complete abandoned retirement failed"
   assert_absent "$home/state/$id.meta" "retirement retained abandoned iDA metadata"
@@ -1412,6 +1414,7 @@ test_cancellation_and_retirement_authority() {
   rc=0; FM_HOME="$home" "$RETIRE" "$id" >"$home/retire.out" 2>"$home/retire.err" || rc=$?
   [ "$rc" -ne 0 ] || fail "retirement bypassed the decision gate"
   fm_test_archive_goal "$home" "$id"
+  mark_status_presented "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null || fail "decision-complete iDA retirement failed"
   assert_absent "$home/state/$id.meta" "retirement retained iDA metadata"
@@ -1427,11 +1430,11 @@ test_retirement_pairs_backlog_and_preserves_failed_close() {
     home=$(new_home "retire-$mode"); fakebin=$(make_fake_bytedcli "$home")
     write_ida_config "$home"; new_task "$home" "$id"
     : > "$home/sessions.tsv"
-    dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "retirement fixture dispatch failed"
+    FM_IDA_FAKE_MODE=success dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "retirement fixture dispatch failed"
     wait_phase "$home" "$id" terminal-success || fail "retirement fixture did not complete"
     fm_test_archive_goal "$home" "$id"
-    printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$home/state/$id.meta"
     mark_status_presented "$home" "$id"
+    printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$home/state/$id.meta"
     if [ "$mode" = held ]; then
       FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" hold "$id" --kind captain --reason 'Pending independent acceptance' >/dev/null || fail "hold fixture failed"
     elif [ "$mode" = archived ]; then
@@ -1492,8 +1495,8 @@ test_canonical_retirement_retires_active_state_and_preserves_provider_evidence()
   generation=$(jq -r '.generation // 1' "$(state_file "$home" "$id")")
 
   fm_test_archive_goal "$home" "$id"
-  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   mark_status_presented "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   for artifact in turn-ended progress pi-ext.ts busy-session control-relaunch \
     control-relaunch.meta-prior control-relaunch.brief-prior control-relaunch.note \
     reconcile-nudged; do
@@ -1550,6 +1553,8 @@ test_canonical_retirement_retires_active_state_and_preserves_provider_evidence()
 test_aime_compatibility_and_local_unchanged() {
   local home fakebin out rc=0
   home=$(new_home compatibility); fakebin=$(make_fake_bytedcli "$home")
+  new_task "$home" legacy-aime
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" start legacy-aime >/dev/null || fail "legacy AIME task start failed"
   mkdir -p "$home/state/cloud-tasks/legacy-aime"
   cat >"$home/state/legacy-aime.meta" <<EOF
 kind=scout
@@ -1778,6 +1783,11 @@ test_terminal_disposition_guards_remote_effects() {
 }
 
 case "${FM_REMOTE_TEST_CASE:-}" in
+  compatibility)
+    test_aime_compatibility_and_local_unchanged
+    test_remote_aime_dispatch_metadata
+    exit 0
+    ;;
   followup)
     test_followup_identity_and_unknown_submission
     exit 0

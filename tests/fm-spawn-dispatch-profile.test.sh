@@ -35,6 +35,9 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+while [ "${1#-}" != "$1" ]; do
+  case "$1" in -k|--kill-after) shift 2 ;; *) shift ;; esac
+done
 shift
 exec "$@"
 SH
@@ -56,6 +59,8 @@ make_spawn_case() {
   fm_git_worktree "$proj" "$wt" "wt-$name"
   for id in "$@"; do
     fm_test_spawn_brief "$home" "$id"
+    FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "$id" --kind ship >/dev/null \
+      || fail "profile task registration failed"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -642,10 +647,14 @@ test_worker_launch_delivers_role_scope() {
     read_case_record "$rec"
     if [ "$brief_kind" != scaffold ]; then
       fm_test_spawn_brief "$HOME_DIR" "$id"
+      FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "$id" --kind ship >/dev/null \
+        || fail "role task registration failed"
       if [ "$brief_kind" = heading ]; then
         printf '\n# Worker role\nFollow the project instructions.\n' >> "$HOME_DIR/data/$id/brief.md"
       fi
     else
+      FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" add "$id" "$id" --kind ship >/dev/null \
+        || fail "scaffold role task registration failed"
       if [ "$kind" = scout ]; then
         FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --scout >/dev/null || fail "scout scaffold failed"
       else

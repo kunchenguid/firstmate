@@ -1669,8 +1669,12 @@ while :; do
         continue
       else
         id=$(basename "$c" .check.sh)
-        watch_task_selected "$id" nonterminal || continue
+        # Registered custom checks are explicit operation facts, not ordinary
+        # task discovery. A known terminal task never receives such a check;
+        # task-bound PR polls additionally require a nonterminal record.
+        task_business_terminal "$id" && continue
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+          watch_task_selected "$id" nonterminal || continue
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL

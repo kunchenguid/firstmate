@@ -45,6 +45,7 @@ test_buried_decision_survives_many_growing_drains_and_resolution_clears_it() {
   state="$dir/state"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
+  register_task_fixture "$state" task1
   status="$state/task1.status"
   : > "$probe"
 
@@ -53,7 +54,7 @@ test_buried_decision_survives_many_growing_drains_and_resolution_clears_it() {
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$status"
   append_filler "$status" 400 >/dev/null
 
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "first drain over a large buried decision failed"
   grep -F 'task1' "$out" | grep -F '[key=api-shape]' | grep -F 'pick REST or RPC' >/dev/null \
     || fail "the buried decision did not surface on the bootstrap drain"
@@ -69,7 +70,7 @@ test_buried_decision_survives_many_growing_drains_and_resolution_clears_it() {
   # is bounded by new appends, not by total log size.
   for round in 1 2 3 4 5; do
     increment_bytes=$(append_filler "$status" 20)
-    FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
       || fail "drain $round over a growing log failed"
     grep -F 'task1' "$out" | grep -F '[key=api-shape]' | grep -F 'pick REST or RPC' >/dev/null \
       || fail "the buried decision was dropped on growth round $round"
@@ -85,7 +86,7 @@ test_buried_decision_survives_many_growing_drains_and_resolution_clears_it() {
   # clear it - not by rescanning the whole now-large file, but by folding the
   # small resolved line into the still-persisted open set.
   increment_bytes=$(printf 'resolved [key=api-shape]: went with REST\n' | tee -a "$status" | LC_ALL=C wc -c | tr -d '[:space:]')
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "resolution drain failed"
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "the resolved decision still printed as open right after resolution: $(cat "$out")"
@@ -98,7 +99,7 @@ test_buried_decision_survives_many_growing_drains_and_resolution_clears_it() {
   # closed decision is not resurrected by unrelated later growth), and the read
   # cost for this final round must still be bounded to that round's increment.
   increment_bytes=$(append_filler "$status" 20)
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "post-resolution growth drain failed"
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "a resolved decision reappeared after later unrelated growth: $(cat "$out")"
@@ -116,12 +117,13 @@ test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision() {
   state="$dir/state"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
+  register_task_fixture "$state" task2
   status="$state/task2.status"
   : > "$probe"
 
   printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$status"
   append_filler "$status" 100 >/dev/null
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "initial drain before truncation failed"
   grep -F 'task2' "$out" | grep -F '[key=migration]' >/dev/null \
     || fail "the decision did not surface before truncation"
@@ -132,7 +134,7 @@ test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision() {
   # re-fold of the new, smaller file rather than trusting a now-invalid cursor.
   printf 'needs-decision [key=migration]: rewritten after truncation\n' > "$status"
   rewritten_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "post-truncation drain failed"
   grep -F 'task2' "$out" | grep -F '[key=migration]' | grep -F 'rewritten after truncation' >/dev/null \
     || fail "the rewritten decision after truncation did not surface"
@@ -149,12 +151,13 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
   state="$dir/state"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
+  register_task_fixture "$state" task3
   status="$state/task3.status"
   : > "$probe"
 
   printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$status"
   append_filler "$status" 100 >/dev/null
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "initial drain before rotation failed"
   grep -F 'task3' "$out" | grep -F '[key=migration]' >/dev/null \
     || fail "the decision did not surface before rotation"
@@ -173,7 +176,7 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
   [ "$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')" = "$new_bytes" ] \
     || fail "test setup error: the rotated replacement is not the same size as the original"
 
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "post-rotation drain failed"
   grep -F 'task3' "$out" | grep -F '[key=migration]' | grep -F 'rewritten via rotation' >/dev/null \
     || fail "the same-size rotated file's decision did not surface (inode-identity check did not fire)"
@@ -189,12 +192,13 @@ test_read_failure_preserves_state_for_retry() {
   dir=$(make_case cursor-read-failure)
   state="$dir/state"
   reader="$dir/fail-reader"
+  register_task_fixture "$state" task4
   statusfile="$state/task4.status"
   cursor="$state/.task4.open-decisions-cursor"
   out="$dir/drain.out"
 
   printf 'needs-decision [key=x]: something important\n' > "$statusfile"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "bootstrap drain before the injected read failure failed"
   grep -F 'task4' "$out" | grep -F '[key=x]' | grep -F 'something important' >/dev/null \
     || fail "the decision did not surface on the bootstrap drain"
@@ -205,7 +209,7 @@ test_read_failure_preserves_state_for_retry() {
   printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"
   chmod +x "$reader"
 
-  FM_STATE_OVERRIDE="$state" FM_STATUS_SPAN_READER="$reader" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_STATUS_SPAN_READER="$reader" "$DRAIN" > "$out" \
     || fail "wake drain failed instead of preserving state after the injected read failure"
   [ ! -s "$out" ] \
     || fail "the failed presentation read emitted a partial status presentation: $(command cat "$out")"
@@ -213,7 +217,7 @@ test_read_failure_preserves_state_for_retry() {
   [ "$after_cursor" = "$before_cursor" ] \
     || fail "the failed read advanced or rewrote the persisted cursor"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "wake drain did not recover after the injected read failure"
   grep -F 'task4' "$out" | grep -F '[key=x]' | grep -F 'something important' >/dev/null \
     || fail "the open decision disappeared when presentation reads recovered: $(command cat "$out")"
@@ -227,6 +231,7 @@ test_cursor_cache_read_failure_refolds_without_replaying_unread_status() {
   state="$dir/state"
   fakebin="$dir/failbin"
   mkdir -p "$fakebin"
+  register_task_fixture "$state" task5
   statusfile="$state/task5.status"
   cursor="$state/.task5.open-decisions-cursor"
   out="$dir/drain.out"
@@ -238,7 +243,7 @@ test_cursor_cache_read_failure_refolds_without_replaying_unread_status() {
     printf 'note: already handled informational status\n'
   } > "$statusfile"
   append_filler "$statusfile" 40 >/dev/null
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "bootstrap drain before the cursor-cache read failure failed"
   grep -F 'task5' "$out" | grep -F '[key=cache]' | grep -F 'authoritative status' >/dev/null \
     || fail "the decision did not surface before the cursor-cache read failure"
@@ -258,7 +263,7 @@ exec "$real_cat" "\$@"
 SH
   chmod +x "$fakebin/cat"
 
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
     || fail "wake drain failed instead of refolding after the cursor-cache read failure"
   grep -F 'task5' "$out" | grep -F '[key=cache]' | grep -F 'authoritative status' >/dev/null \
     || fail "the cursor-cache read failure hid the recurring open decision: $(command cat "$out")"
@@ -277,13 +282,14 @@ test_pre_fix_cursor_refolds_corr_tagged_decision() {
   local dir state status cursor out probe status_bytes ident probe_bytes
   dir=$(make_case cursor-corr-tag-migration)
   state="$dir/state"
+  register_task_fixture "$state" task7
   status="$state/task7.status"
   cursor="$state/.task7.open-decisions-cursor"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
 
   printf 'needs-decision [corr=d448ea86afa4bf67] [key=loan-installment-cadence-amount]: pick the cadence\n' > "$status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "bootstrap drain for the corr-tag cursor migration failed"
   ident=$(sed -n 's/^ident=//p' "$cursor")
   [ -n "$ident" ] || fail "bootstrap drain did not persist a file identity"
@@ -295,7 +301,7 @@ test_pre_fix_cursor_refolds_corr_tagged_decision() {
   } > "$cursor"
   : > "$probe"
 
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "drain failed while migrating the pre-fix corr-tag cursor"
   grep -F 'task7 [key=loan-installment-cadence-amount] needs-decision: pick the cadence' "$out" >/dev/null \
     || fail "the pre-fix cursor hid the corr-tagged decision after migration: $(cat "$out")"
