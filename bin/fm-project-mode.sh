@@ -17,7 +17,8 @@
 # section 7; bin/fm-brief.sh's own header owns the --branch-prefix flag it accepts).
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
 # bin/fm-home-seed.sh and bin/fm-remote-home-seed.sh (refuse local-only seeding,
-# run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice,
+# run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice
+# and a scout's local-or-origin base choice,
 # and --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
 # bin/fm-promote.sh, which takes the forge binding from here because it is a
 # project fact rather than a task choice.
