@@ -1114,6 +1114,7 @@ case "$*" in
   auth\ *) printf 'unexpected auth call\n' >&2; exit 1 ;;
 esac
 [ "${GH_TOKEN:-}" = secret-owner-token ] || { printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1; }
+[ "$*" != 'api repos/o/r' ] || { printf '{"permissions":{"push":true}}\n'; exit 0; }
 exec "$(dirname "$0")/gh-fixture" "$@"
 SH
   chmod +x "$home/fakebin/gh"
@@ -1129,6 +1130,8 @@ test_owner_account_reads_repo_the_active_account_cannot() {
   [ -z "$out" ] || fail "an owner-account read still reported: $out"
   jq -e --arg now "$NOW" '.records[0] | .error == null and .checked_at == $now' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'owner-account read did not refresh the record'
+  jq -e '.records[0].observation.can_merge == false' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'the owner account push permission was recorded as merge authority of the active account'
   grep -Fx 'active|auth token -u o' "$home/forge/calls" >/dev/null || fail 'owner account token was never requested'
   grep -Fx 'secret-owner-token|pr view https://github.com/o/r/pull/8 --json headRefOid,reviewDecision' "$home/forge/calls" >/dev/null \
     || fail 'later reads of the observation did not keep the owner account'

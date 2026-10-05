@@ -284,12 +284,12 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --arg owner_read "${FORGE_TOKEN:+1}" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
-          can_merge:($repo[0].permissions.push // false),
+          can_merge:($owner_read == "" and ($repo[0].permissions.push // false)),
           review_decision:($after[0].reviewDecision // ""),
           reviews:$reviews,
           checks:([ $checks[0][] | .check_runs[] | {name,id,status,conclusion,started_at} ]
