@@ -812,17 +812,25 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local backend=$1
+  local backend=$1 rc=0
   shift
   fm_backend_source "$backend" || return 1
+  # Every Enter loop below reads the dialog sink, so it must exist before
+  # any adapter types: a sink that fails here leaves the composer untouched.
+  fm_composer_dialog_sink_prepare || {
+    echo "error: the dialog check for a $backend submit could not be recorded" >&2
+    return 1
+  }
   case "$backend" in
-    tmux) fm_backend_tmux_send_text_submit "$@" ;;
-    herdr) fm_backend_herdr_send_text_submit "$@" ;;
-    zellij) fm_backend_zellij_send_text_submit "$@" ;;
-    orca) fm_backend_orca_send_text_submit "$@" ;;
-    cmux) fm_backend_cmux_send_text_submit "$@" ;;
-    *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
+    tmux) fm_backend_tmux_send_text_submit "$@" || rc=$? ;;
+    herdr) fm_backend_herdr_send_text_submit "$@" || rc=$? ;;
+    zellij) fm_backend_zellij_send_text_submit "$@" || rc=$? ;;
+    orca) fm_backend_orca_send_text_submit "$@" || rc=$? ;;
+    cmux) fm_backend_cmux_send_text_submit "$@" || rc=$? ;;
+    *) echo "error: no send-text implementation for backend '$backend'" >&2; rc=1 ;;
   esac
+  fm_composer_dialog_sink_release
+  return "$rc"
 }
 
 # fm_backend_kill: remove the task's session endpoint. An already-gone target

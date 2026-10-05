@@ -674,6 +674,14 @@ do_exit() {
     fi
   fi
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+    # A submit can return before any read sees the picker: a native busy
+    # verdict needs no composer read, and a cleared composer can be read
+    # before the picker renders. Read the screen once more here.
+    : > "$FM_COMPOSER_DIALOG_SINK" || true
+    fm_backend_composer_state "$BACKEND" "$T" "$LABEL" >/dev/null 2>&1 || true
+    if [ -s "$FM_COMPOSER_DIALOG_SINK" ]; then
+      refuse_blocking_prompt "$(cat "$FM_COMPOSER_DIALOG_SINK")"
+    fi
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
   # The incarnation is over: retire its busy wiring so no stale record or

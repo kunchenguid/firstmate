@@ -362,9 +362,11 @@ test_exit_picker_refuses_confirming_enter() {
     'Enter to confirm · Esc to cancel' > "$composer"
   : > "$sent"
   touch "$dir/.swallow"
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
     fm_tmux_submit_enter_core "win" 3 0 > "$vfile" 2>/dev/null
+  fm_composer_dialog_sink_release
   [ "$(cat "$vfile")" = unknown ] || fail "exit picker should return unknown, got '$(cat "$vfile")'"
   enters=$(grep -c '^Enter$' "$sent" || true)
   [ "$enters" -eq 1 ] || fail "exit picker should get one Enter, got $enters"

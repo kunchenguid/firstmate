@@ -1113,6 +1113,8 @@ test_background_exit_picker_stays_pending_and_blocks_retry() {
   [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
   out=$(fm_composer_blocking_dialog "$(printf '%s\n' 'Background work is running' 'Exit and stop tasks')"); rc=$?
   [ "$rc" -eq 1 ] || fail "two of the three strings must not match"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' "$screen" '' '')"); rc=$?
+  [ "$rc" -eq 0 ] || fail "blank rows below the footer should still match"
   sink=$(mktemp)
   FM_COMPOSER_DIALOG_SINK=$sink
   out=$(fm_composer_classify_screen 'styled=1' "$screen" 1)
@@ -1125,7 +1127,12 @@ test_background_exit_picker_stays_pending_and_blocks_retry() {
   FM_TEST_PICKER_SCREEN=$screen
   FM_TEST_PICKER_ENTERS=$(mktemp)
   : > "$FM_TEST_PICKER_ENTERS"
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  sink=$FM_COMPOSER_DIALOG_SINK
   out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_picker_state win 3 0)
+  fm_composer_dialog_sink_release
+  [ ! -e "$sink" ] || fail "the release should remove a sink that prepare created"
+  [ -z "${FM_COMPOSER_DIALOG_SINK:-}" ] || fail "the release should unset a sink that prepare created"
   enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
   [ "$out" = unknown ] || fail "a picker must stop the retry as unknown, got '$out'"
   [ "$enters" -eq 1 ] || fail "a picker must receive one Enter, got $enters"
@@ -1134,4 +1141,56 @@ test_background_exit_picker_stays_pending_and_blocks_retry() {
   pass "the Claude background-task exit picker stays pending and receives no confirming Enter"
 }
 
+# The picker's own text, shown the way a worker pane shows it when it prints
+# this repository's diff, verification note, or a test fixture: quoted above a
+# normal composer. No picker is open, so the next Enter confirms nothing.
+quoted_exit_picker_screen() {
+  printf '%s\n' \
+    '● Here is the fixture the test uses:' \
+    "+    'Background work is running' \\" \
+    "+    '❯ 1. Exit and stop tasks' \\" \
+    "+    'Enter to confirm · Esc to cancel'" \
+    '  The selected row is "❯ 1. Exit and stop tasks" and the footer is "Enter to confirm · Esc to cancel".' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'Enter to confirm · Esc to cancel' \
+    '' \
+    '╭──────────────╮' \
+    '│ > next steer │' \
+    '╰──────────────╯'
+}
+
+test_quoted_exit_picker_text_is_not_a_dialog() {
+  local screen out rc sink enters
+  screen=$(quoted_exit_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 1 ] || fail "picker text quoted above a normal composer must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    'Background work is running' \
+    "+    '❯ 1. Exit and stop tasks' \\" \
+    'Enter to confirm · Esc to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a selected row that is not alone on its row must not match"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '❯ 1. Exit and stop tasks' \
+    'Background work is running' \
+    'Enter to confirm · Esc to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a selected row above the heading must not match"
+  FM_TEST_PICKER_SCREEN=$screen
+  FM_TEST_PICKER_ENTERS=$(mktemp)
+  : > "$FM_TEST_PICKER_ENTERS"
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  sink=$FM_COMPOSER_DIALOG_SINK
+  out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_picker_state win 3 0)
+  [ ! -s "$sink" ] || fail "quoted picker text must not be noted as a dialog, got '$(cat "$sink")'"
+  fm_composer_dialog_sink_release
+  enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+  [ "$out" = pending ] || fail "quoted picker text must keep the ordinary pending verdict, got '$out'"
+  [ "$enters" -eq 3 ] || fail "quoted picker text must keep the ordinary Enter retries, got $enters"
+  rm -f "$FM_TEST_PICKER_ENTERS"
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "picker text quoted above a normal composer is not read as a live picker"
+}
+
 test_background_exit_picker_stays_pending_and_blocks_retry
+test_quoted_exit_picker_text_is_not_a_dialog

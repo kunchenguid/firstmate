@@ -1271,12 +1271,17 @@ The Herdr lab was not running, so the Herdr path is covered by the existing fake
 Typing `/exit` while a background shell is still running opens a picker whose selected row is "Exit and stop tasks" and whose footer is "Enter to confirm · Esc to cancel".
 That screen still classifies as pending, the same verdict as unsubmitted composer text.
 A second Enter would confirm the selected row.
+The picker is recognised by its recorded structure only: the heading, then the selected row alone on its row, with the footer as the last non-blank row.
+The same strings quoted above a normal composer, as a diff, this note, or a test fixture shows them, are not a picker.
 Submit retries now stop after the Enter that opened the picker and report unknown.
 Exit reports that the worker is blocked on the Claude background-task exit picker and does not type another Enter.
+A submit can return before any read sees the picker, so exit reads the screen once more when its wait for the agent to stop times out, and names the picker there too.
 The watcher raises the existing stale wake once per unchanged screen, with that dialog name in the reason.
-A non-paused secondmate still skips pane staleness, so a secondmate parked on this picker still looks idle.
-That exemption is unchanged.
+A secondmate parked on this picker raises the same wake.
+Every other non-paused secondmate still skips pane staleness.
+A stopped agent whose pane still shows the picker text is not reported as blocked on a prompt.
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
+Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
 ### Prune and respawn
 

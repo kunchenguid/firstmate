@@ -1672,18 +1672,22 @@ EOF
 }
 
 # fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
-# Prints the name and returns 0 only when every fixed string of one recorded
-# dialog is present together. One string is not enough, because worker prose
-# can quote a heading. A miss returns 1 and prints nothing.
+# Prints the name and returns 0 only for the recorded structure of one dialog:
+# its heading, then its selected row alone on a row, with its footer as the
+# last non-blank row. The strings alone are not enough, because a diff, a
+# note, or a test fixture on the pane can quote all of them above a normal
+# composer. A miss returns 1 and prints nothing.
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
-  local screen=${1-} plain
+  local screen=${1-}
   [ -n "$screen" ] || return 1
-  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  if printf '%s\n' "$plain" | grep -F -q 'Background work is running' \
-    && printf '%s\n' "$plain" | grep -F -q 'Exit and stop tasks' \
-    && printf '%s\n' "$plain" | grep -F -q 'Enter to confirm'; then
+  if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    index($0, "Background work is running") { heading = 1 }
+    heading && /^[ \t]*❯ 1\. Exit and stop tasks[ \t\r]*$/ { selected = 1 }
+    /[^ \t\r]/ { last = $0 }
+    END { exit !(selected && last ~ /^[ \t]*Enter to confirm/) }
+  '; then
     printf '%s' 'Claude background-task exit picker'
     return 0
   fi
@@ -1717,7 +1721,7 @@ fm_composer_blocking_dialog_noted() {
 
 # Empty the sink, creating it when the caller has not. Sets
 # FM_COMPOSER_DIALOG_OWNED=1 only for a sink this call created, so a caller
-# that shares the path can still read the name after this function returns.
+# that shares the path can still read the name after the release.
 fm_composer_dialog_sink_prepare() {
   FM_COMPOSER_DIALOG_OWNED=0
   if [ -z "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
@@ -1729,7 +1733,6 @@ fm_composer_dialog_sink_prepare() {
 }
 
 fm_composer_dialog_sink_release() {
-  trap - RETURN
   if [ "${FM_COMPOSER_DIALOG_OWNED:-}" = 1 ]; then
     rm -f "$FM_COMPOSER_DIALOG_SINK"
     FM_COMPOSER_DIALOG_SINK=
@@ -1859,15 +1862,11 @@ EOF
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
   local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
-  # The first Enter can open a picker. A later Enter would confirm it.
-  fm_composer_dialog_sink_prepare || { printf 'unknown'; return 0; }
-  if [ "$FM_COMPOSER_DIALOG_OWNED" = 1 ]; then
-    trap 'fm_composer_dialog_sink_release' RETURN
-  fi
   while :; do
     "$send_key_fn" "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
     state=$("$state_fn" "$target" "$expected_label")
+    # The first Enter can open a picker. A later Enter would confirm it.
     if fm_composer_blocking_dialog_noted >/dev/null; then
       printf 'unknown'
       return 0
