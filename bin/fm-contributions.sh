@@ -7,7 +7,7 @@
 #   fm-contributions.sh pending
 #   fm-contributions.sh verdict <task> <url> <judged-head> <source-url> <captain|fleet|maintainer|nobody> <summary>
 #   fm-contributions.sh ack <task> <url> <event-token>
-#   fm-contributions.sh retire <task> <url> <captain|fleet> <reason>
+#   fm-contributions.sh retire <task> <url> captain <reason>
 #   fm-contributions.sh arm [--if-owned]
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
@@ -35,12 +35,14 @@
 #
 # retire ends one task's observation of a contribution whose forge object can
 # never be read again, such as a PR in a deleted repository. It records retired
-# with actor (captain or fleet), a non-empty reason and the UTC time, and
-# refuses a task/url pair with no saved record or with unacknowledged pending
-# signals. A retired pair leaves known, rotation and coverage even while a
+# with actor captain, a non-empty reason and the UTC time. It refuses any
+# other actor, a blank reason, and a task/url pair with no saved record or
+# with unacknowledged pending signals. A retired pair leaves known, rotation and coverage even while a
 # backlog link remains. Retiring a retired pair again is a no-op that keeps the
 # first provenance. Nothing un-retires a record, poll never retires one on its
-# own, and a later owner settled from a retired record is not retired.
+# own, and a later owner settled from a retired record is not retired. A
+# retirement always records the captain's word: the script cannot verify who
+# runs it, and the authority to retire is the captain's.
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
@@ -496,8 +498,8 @@ case "${1:-}" in
     [ "$#" -eq 5 ] || fail 'retire needs task, URL, actor and reason'
     task=$2; url=$3
     fm_pr_task_id_valid "$task" || fail 'invalid contribution task'
-    case "$4" in captain|fleet) ;; *) fail "invalid retire actor '$4'; expected one of: captain, fleet" ;; esac
-    [ -n "$5" ] || fail 'retire needs a non-empty reason'
+    [ "$4" = captain ] || fail "invalid retire actor '$4'; expected: captain"
+    [ -n "${5//[[:space:]]/}" ] || fail 'retire needs a non-empty reason'
     acquire; read_saved
     jq -e --arg task "$task" --arg url "$url" '.[] | select(.task == $task) | .records[] | select(.url == $url)' "$TMP/saved.json" > "$TMP/row.json" \
       || fail 'contribution is not recorded for this durable task'

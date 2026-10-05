@@ -652,6 +652,7 @@ case "$fault:$*" in
   fail-late:'api repos/o/r/pulls/8/reviews?'*) clock_bump 100; printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
+  not-found:'api repos/o/r/'*) printf 'HTTP 404\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
 esac
@@ -1103,7 +1104,7 @@ test_retire_ends_observation_of_a_gone_contribution() {
   home=$(new_home retire-gone)
   forge_home "$home"
   wrap_forge "$home"
-  printf 'down\n' > "$home/forge/fault"
+  printf 'not-found\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) || fail 'failing poll failed'
   [ "$out" = "$line" ] || fail "a gone repository did not raise the unavailable check: $out"
   bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
@@ -1153,23 +1154,26 @@ test_retire_is_idempotent_and_refuses_unknown_pairs() {
   home=$(new_home retire-refusals)
   forge_home "$home"
   retire() { with_home "$home" "$ROOT/bin/fm-contributions.sh" retire "$@"; }
-  retire delivery "$url" fleet 'repository deleted' >/dev/null || fail 'first retire failed'
+  retire delivery "$url" fleet 'repository deleted' >/dev/null 2>&1 && fail 'retire accepted the fleet as its actor'
+  jq -e '.records[0].retired == null' "$home/data/delivery/contributions.json" >/dev/null || fail 'a fleet retire changed the record'
+  retire delivery "$url" captain 'repository deleted' >/dev/null || fail 'first retire failed'
   before=$(cat "$home/data/delivery/contributions.json")
   retire delivery "$url" captain 'second reason' >/dev/null || fail 'repeating a retire was refused'
   [ "$(cat "$home/data/delivery/contributions.json")" = "$before" ] || fail 'repeating a retire rewrote its first provenance'
   printf -- '- [ ] linked - Linked only https://github.com/o/r/pull/30 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
-  err=$(retire linked https://github.com/o/r/pull/30 fleet gone 2>&1) && fail 'retire created a record for an unobserved pair'
+  err=$(retire linked https://github.com/o/r/pull/30 captain gone 2>&1) && fail 'retire created a record for an unobserved pair'
   case "$err" in *'not recorded for this durable task'*) ;; *) fail "unrecorded-pair refusal was unclear: $err" ;; esac
   [ ! -e "$home/data/linked/contributions.json" ] || fail 'a refused retire created a record'
-  retire other "$url" fleet gone >/dev/null 2>&1 && fail 'retire accepted a task that does not own the URL'
+  retire other "$url" captain gone >/dev/null 2>&1 && fail 'retire accepted a task that does not own the URL'
   record "$home" queued 31 open mergeable
   retire queued https://github.com/o/r/pull/31 owner gone >/dev/null 2>&1 && fail 'retire accepted an unknown actor'
-  retire queued https://github.com/o/r/pull/31 fleet '' >/dev/null 2>&1 && fail 'retire accepted an empty reason'
-  retire queued https://github.com/o/r/pull/31 fleet >/dev/null 2>&1 && fail 'retire accepted a missing reason'
+  retire queued https://github.com/o/r/pull/31 captain '' >/dev/null 2>&1 && fail 'retire accepted an empty reason'
+  retire queued https://github.com/o/r/pull/31 captain ' 	 ' >/dev/null 2>&1 && fail 'retire accepted a whitespace-only reason'
+  retire queued https://github.com/o/r/pull/31 captain >/dev/null 2>&1 && fail 'retire accepted a missing reason'
   mutate_record "$home" queued '.records[0].pending=[{token:"comment:1:x",type:"comment"}]'
-  retire queued https://github.com/o/r/pull/31 fleet gone >/dev/null 2>&1 && fail 'retire dropped an unacknowledged signal'
+  retire queued https://github.com/o/r/pull/31 captain gone >/dev/null 2>&1 && fail 'retire dropped an unacknowledged signal'
   jq -e '.records[0].retired == null' "$home/data/queued/contributions.json" >/dev/null || fail 'a refused retire changed the record'
-  pass 'retire is idempotent and refuses unknown, malformed and signal-bearing pairs'
+  pass 'retire is idempotent and refuses non-captain, unknown, malformed and signal-bearing pairs'
 }
 
 failures=0
