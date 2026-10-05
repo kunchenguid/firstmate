@@ -708,6 +708,55 @@ test_matrix_pi_dollar_status_footer_is_empty() {
     || fail "a bare dollar prompt below a glyph must still invalidate cursorless selection, got '$out'"
   pass "matrix: a dollar-first pi status footer reads empty; dead shells still refuse"
 }
+test_matrix_pi_lead_turn_frame_and_extension_rows() {
+  # Real bytes from live pi 0.87.0 lead panes on Herdr, captured while idle
+  # (w291:p22, w2RB:p2, w25S:p2, w2JS:p6Q - all read `empty` already) and
+  # while a turn was running (w2JQ:p3C, w2JR:p2, w25T:p2T - all read
+  # `unknown`). The idle pane ends with pi's EXTENSION status row
+  # (` ○ 🐴 ponytail: ⚡ FULL`) below the model footer: verified NOT to change
+  # any verdict, and pinned here so that stays true. The RUNNING pane replaces
+  # the idle pair's plain top rule with pi's titled turn frame
+  # (`── ⠧ Working ────`), which left the closing rule unpaired, so an idle
+  # lead still showing that frame read `unknown` and fm-control exit and
+  # fm-secondmate-restart refused it with `not proven empty`.
+  local rule footer ext pi_idle pi_working none frame out
+  rule='─────────────────────────────────────────────────────────────────────'
+  footer=$'~/.treehouse/firstmate-8bf1b0/1/firstmate (detached)\n↑439k ↓67k R40M CH99.9% 21.3%/1.0M (auto)  space-bunny-free • medium'
+  ext=' ○ 🐴 ponytail: ⚡ FULL'
+  pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
+
+  # The captured idle lead pane, with and without the extension row: empty.
+  assert_screen "idle pi lead pane with the extension row" empty \
+    "$CAPS_STYLED" $'transcript\n'"$rule"$'\n\n'"$rule"$'\n'"$footer"$'\n'"$ext" '' "$pi_idle"
+  assert_screen "idle pi lead pane without the extension row" empty \
+    "$CAPS_STYLED" $'transcript\n'"$rule"$'\n\n'"$rule"$'\n'"$footer" '' "$pi_idle"
+  assert_screen "idle pi lead pane on tmux with the extension row" empty \
+    "$CAPS_TMUX" $'transcript\n'"$rule"$'\n\n'"$rule"$'\n'"$footer"$'\n'"$ext" 2 "$pi_idle"
+  # A draft in that same pane is still pending: the extension row is furniture.
+  assert_screen "typed pi lead pane with the extension row" pending \
+    "$CAPS_STYLED" "$rule"$'\nfix the flaky test\n'"$rule"$'\n'"$footer"$'\n'"$ext" '' "$pi_idle"
+
+  # Pi's live turn frame: the title replaces the idle pair's top rule.
+  frame=$'transcript\n── ⠧ Working '"$rule"$'\n\n'"$rule"$'\n'"$footer"$'\n'"$ext"
+  assert_screen "idle pi lead still showing the turn frame" empty \
+    "$CAPS_STYLED" "$frame" '' "$pi_idle"
+  assert_screen "pi turn frame with a draft" pending \
+    "$CAPS_STYLED" $'transcript\n── ⠧ Working '"$rule"$'\ndraft\n'"$rule"$'\n'"$footer" '' "$pi_idle"
+  # The identity conjunction is unchanged: a working pi still defers, and a
+  # non-pi process still cannot prove the frame's blank region.
+  assert_screen "working pi turn frame defers" unknown "$CAPS_STYLED" "$frame" '' "$pi_working"
+  assert_screen "non-pi identity cannot prove the turn frame" unknown \
+    "$CAPS_STYLED" "$frame" '' "$none"
+  assert_screen "turn frame without identity capability" unknown \
+    "$CAPS_PLAIN" "$frame"
+  # A titled row never becomes the cursorless staleness boundary: a lower
+  # unmatched rule still invalidates cursorless selection (so the adapter asks
+  # for identity rather than accepting the frame).
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" $'transcript\n'"$rule"$'\n\n'"$rule"$'\n'"$rule")
+  [ "$out" = need-identity ] \
+    || fail "a lower unmatched rule below a turn frame must still refuse, got '$out'"
+  pass "matrix: pi's extension status row is furniture and its titled turn frame still needs identity + an idle pi"
+}
 test_matrix_pi_stderr_notice_rows() {
   # Real pi 0.87.0 pane bytes (captured live through `tmux capture-pane -e`
   # on an isolated idle pi; the same corruption was caught twice the same day
@@ -1151,6 +1200,7 @@ test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
+test_matrix_pi_lead_turn_frame_and_extension_rows
 test_matrix_pi_stderr_notice_rows
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border

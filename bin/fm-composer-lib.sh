@@ -785,6 +785,38 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   [ -n "$middle" ]
 }
 
+# _fm_composer_pi_titled_rule_row: 0 when a trimmed row is Pi's LIVE turn frame
+# - its composer's top rule carrying the turn title pi draws above the editor
+# (`── ⠧ Working ────────────`, captured live through Herdr on pi 0.87.0 while
+# a lead pane was between turns). Pi replaces the idle pair's plain top rule
+# with this titled one for the whole turn, so the idle shape is simply ABSENT
+# while it holds: the closing rule has no partner and every pi read of such a
+# pane - including a visibly empty composer on an idle/done lead - was
+# `unknown`, which is what made fm-control exit and fm-secondmate-restart
+# refuse (`composer state is 'unknown', not proven empty`) on panes whose
+# composer was demonstrably empty.
+#
+# Deliberately NOT merged with _fm_composer_pi_separator_row: that predicate
+# stays strictly dashes-only and still owns FM_COMPOSER_SCAN_PI_LAST_SEPARATOR
+# (the cursorless staleness boundary), which a titled row must never move.
+# This one only OPENS the same candidate, so the whole identity conjunction
+# still decides the verdict - a live idle/done pi, a real draft, and the
+# FM_COMPOSER_PI_MAX_LINES adjacency bound are unchanged.
+_fm_composer_pi_titled_rule_row() {  # <trimmed-row>
+  local row=$1 rest title
+  rest=$row
+  case "$row" in
+    '── '*) ;;
+    *) return 1 ;;
+  esac
+  while [ "${rest: -1}" = '─' ]; do rest=${rest%?}; done
+  [ "${#row}" -ge 10 ] || return 1
+  title=${row#── }
+  title=${title%"$rest"}
+  fm_composer_normalize_trim_var title
+  [ -n "$title" ]
+}
+
 # _fm_composer_titled_rule_row: 0 when a trimmed row is a composer rule with a
 # session title burned into it (Claude Code draws a named session's title into
 # its composer's TOP rule: `──────── <name> ─`, issues #5601 and #5558), proven
@@ -852,7 +884,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_GLYPH=
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH=
-  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
+  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max pi_sep pi_titled
   local probe row_glyph row_glyph_row
   local box_glyph_row=-1 box_glyph='' pi_glyph_row=-1 pi_glyph=''
   pi_max=$FM_COMPOSER_PI_MAX_LINES
@@ -898,8 +930,16 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
     # closes the preceding candidate and immediately opens the next, so an
     # earlier transcript rule can never outrank the live bottom composer pair.
-    if _fm_composer_pi_separator_row "$trimmed"; then
-      FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
+    pi_sep=0
+    pi_titled=0
+    if _fm_composer_pi_separator_row "$trimmed"; then pi_sep=1; fi
+    if [ "$pi_sep" = 0 ] && _fm_composer_pi_titled_rule_row "$trimmed"; then
+      pi_titled=1
+    fi
+    if [ "$pi_sep" = 1 ] || [ "$pi_titled" = 1 ]; then
+      if [ "$pi_sep" = 1 ]; then
+        FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
+      fi
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
