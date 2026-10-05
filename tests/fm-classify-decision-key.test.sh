@@ -705,7 +705,48 @@ test_paused_past_standing_mirror_under_unrelated_resolved() {
   pass "a held paused lane stays paused when an unrelated answer lands on the mirror"
 }
 
+# A decision firstmate already answered stays answered when a hold mirror lands
+# on top of it: the mirror must not bring the question back as the lane's
+# current line.
+test_answered_decision_stays_answered_under_standing_mirror() {
+  local dir f current asked answer
+  dir=$(case_dir answered-under-mirror)
+  f="$dir/t1.status"
+  while IFS='|' read -r asked answer; do
+    {
+      printf '%s\n' "$asked"
+      printf '%s\n' "$answer"
+      printf 'captain-held [key=captain-hold-t1-1]: review\n'
+    } > "$f"
+    [ -z "$(status_open_decisions "$f" secondmate)" ] \
+      || fail "the answered decision '$asked' still folds as open"
+    current=$(status_current_line "$f" secondmate)
+    [ "$current" != "$asked" ] \
+      || fail "a standing mirror revived the answered decision '$asked'"
+    case "$(status_line_verb "$current")" in
+      needs-decision|blocked) fail "a standing mirror reported an answered lane as '$current'" ;;
+    esac
+  done <<'EOF'
+needs-decision [key=q]: pick|resolved [key=q]: use a
+blocked: daemon socket refused|resolved [key=default]: restarted
+blocked: daemon socket refused|resolved: restarted
+EOF
+  {
+    printf 'working: start\n'
+    printf 'needs-decision [key=q]: pick\n'
+    printf 'resolved [key=q]: use a\n'
+    printf 'working: applying the answer\n'
+    printf 'captain-held [key=captain-hold-t1-1]: review\n'
+    printf 'resolved [key=other]: unrelated\n'
+  } > "$f"
+  current=$(status_current_line "$f" secondmate)
+  [ "$current" = 'working: applying the answer' ] \
+    || fail "a standing mirror hid the worker's line after an answered decision: '$current'"
+  pass "a decision answered before a hold stays answered under the standing mirror"
+}
+
 test_keyless_wait_survives_stated_default_retraction
+test_answered_decision_stays_answered_under_standing_mirror
 test_declared_wait_survives_answers_past_the_event_window
 test_declared_wait_survives_settled_hold_mirror
 test_declared_wait_keeps_standing_hold_mirror
