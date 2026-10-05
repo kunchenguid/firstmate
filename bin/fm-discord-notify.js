@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 const retryPending = process.argv[2] === "--retry-pending";
 const reportMode = process.argv[2] === "--report";
-const [trigger, taskId, key, summary, channelId, statusTaskId, ...options] = process.argv.slice(retryPending ? 3 : reportMode ? 3 : 2);
+const [trigger, taskId, key, summary, recommendation, channelId, statusTaskId, ...options] = process.argv.slice(retryPending ? 3 : reportMode ? 3 : 2);
 const token = process.env.FM_DISCORD_BOT_TOKEN;
 const home = process.env.FM_HOME || process.env.FM_ROOT || ".";
 const stateDir = process.env.FM_STATE_OVERRIDE || join(home, "state");
@@ -76,7 +76,7 @@ async function sendRecord(path, record, botId, recover) {
 	const sending = { ...record, state: "sending", attempted_at: Math.floor(Date.now() / 1000) };
 	saveRecord(path, sending);
 	const payload = {
-		content: `작업: ${record.task_id}\n${localize(record.summary)}\n선택지: ${record.options.map(localize).join(" / ")}\n이 메시지에 바로 답장해 주세요.`,
+		content: `작업: ${record.task_id}\n왜 연락했나: ${localize(record.summary)}\n필요한 결정: ${decisionPrompt(record.trigger)}\n선택지: ${record.options.map(localize).join(" / ")}\n권장안: ${localize(record.recommendation || record.options[0])}\n답장으로 선택해 주세요.`,
 		allowed_mentions: { parse: [] },
 		nonce: record.nonce,
 		enforce_nonce: true,
@@ -98,6 +98,15 @@ async function sendRecord(path, record, botId, recover) {
 		saveRecord(path, { ...sending, state: "failed" });
 		throw error;
 	}
+}
+
+function decisionPrompt(trigger) {
+	return ({
+		"captain-hold": "보류된 작업을 어떻게 진행할지",
+		"ask-user": "제안된 변경을 승인할지",
+		"pr-ready": "풀 리퀘스트를 병합할지",
+		"perm-ask": "OpenCode 요청에 권한을 줄지",
+	})[trigger] || "어떻게 진행할지";
 }
 
 async function main() {
@@ -156,7 +165,7 @@ async function main() {
 		}
 		return;
 	}
-	if (!token || !trigger || !taskId || !key || !summary || !channelId || !statusTaskId || options.length === 0) {
+	if (!token || !trigger || !taskId || !key || !summary || !recommendation || !channelId || !statusTaskId || options.length === 0) {
 		console.error("fm-discord-notify: required configuration or notification data is missing");
 		process.exitCode = 2;
 		return;
@@ -195,6 +204,7 @@ async function main() {
 		key,
 		status_task_id: statusTaskId,
 		summary,
+		recommendation,
 		options,
 		channel_id: channelId,
 		nonce,

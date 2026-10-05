@@ -1025,7 +1025,7 @@ command_hold() {
   discord_summary=$reason
   [ "${#discord_summary}" -le 1800 ] || discord_summary="${discord_summary:0:1800}…"
   "$SCRIPT_DIR/fm-discord-notify.sh" captain-hold "$id" "captain-hold-$id-$occurrence" \
-    "$discord_summary" "요청대로 진행|보류 상태로 두기" >/dev/null \
+    "$discord_summary" "요청대로 진행|보류 상태로 두기" "보류 상태로 두기" >/dev/null \
     || printf 'actionable: captain hold %s was recorded but Discord notification failed\n' "$id" >&2
   printf '%s\n' "$id"
 }

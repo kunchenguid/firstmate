@@ -210,7 +210,7 @@ push_captain_decision() {  # <task-id> <request-id> <action> <resources-json> <s
   [ "${#summary}" -le 1800 ] || summary="${summary:0:1800}…"
   "$SCRIPT_DIR/fm-discord-notify.sh" "$TRIGGER" "$task_id" "perm-$request_id" \
     "$summary" \
-    "Approve once|Approve once and remember this|Reject the request" >/dev/null \
+    "Approve once|Approve once and remember this|Reject the request" "Approve once" >/dev/null \
     || printf 'actionable: the permission request was recorded but the captain decision push failed\n' >&2
 }
 

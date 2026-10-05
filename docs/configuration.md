@@ -1426,7 +1426,7 @@ Quiet-mode status reports also use the first configured channel; the report comm
 
 When the self-hosted connector is enabled, firstmate also posts captain decisions to the first configured channel: a newly recorded captain hold (including a genuinely escalated `nm-` ask-user gate, held with the real question in its reason per `ask-user-authority`) or a pull request ready for review when `yolo=off`.
 A raw `nm-` ask-user gate observed in a worker's status log never posts by itself - most gates are decided in-scope with no captain involvement, so only the captain-hold recorded at actual escalation time reaches Discord.
-Each message includes the task id, a plain-language summary carrying the actual decision content, and the available choices.
+Each message states why contact is needed, what decision is required, the available choices, and a recommended choice that must match one of them, plus the task id.
 Pull-request review messages name the repository or project when the URL is an accepted GitHub or GitLab merge-request URL, so the captain can identify it before opening it.
 Keep the configured channel private to the captain and trusted operators; only IDs in `FM_DISCORD_AUTHORIZED_USER_IDS` can answer decisions, and replies from other channel members are ignored.
 Reply directly to a decision message.

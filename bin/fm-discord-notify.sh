@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Send one firstmate-initiated decision to the configured self-hosted Discord channel.
 # `perm-ask` carries a real OpenCode permission request; its key is `perm-<request-id>`.
-# Usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready|perm-ask> <task-id> <key> <summary> <option|option...> [status-task-id]
+# Usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready|perm-ask> <task-id> <key> <summary> <option|option...> <recommendation> [status-task-id]
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,13 +19,13 @@ if [ "${1:-}" = --report ]; then
 elif [ "${1:-}" = --retry-pending ]; then
   [ "$#" -eq 1 ] || { echo "usage: fm-discord-notify.sh --retry-pending" >&2; exit 2; }
   retry_pending=1
-elif [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
-  echo "usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready|perm-ask> <task-id> <key> <summary> <option|option...> [status-task-id]" >&2
+elif [ "$#" -lt 6 ] || [ "$#" -gt 7 ]; then
+  echo "usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready|perm-ask> <task-id> <key> <summary> <option|option...> <recommendation> [status-task-id]" >&2
   exit 2
 fi
 if [ "$retry_pending" -eq 0 ] && [ "$report_mode" -eq 0 ]; then
-  trigger=$1 task_id=$2 decision_key=$3 summary=$4 options=$5
-  status_task_id=${6:-$task_id}
+  trigger=$1 task_id=$2 decision_key=$3 summary=$4 options=$5 recommendation=$6
+  status_task_id=${7:-$task_id}
 fi
 fm_discord_load_config
 [ -n "${FM_DISCORD_TOKEN:-}" ] || {
@@ -61,6 +61,7 @@ case "$trigger:$decision_key" in
   *) echo "fm-discord-notify: trigger does not match its decision key" >&2; exit 2 ;;
 esac
 case "$summary" in *$'\n'*|*$'\r'*) echo "fm-discord-notify: summary must be one line" >&2; exit 2 ;; esac
+case "$recommendation" in ''|*$'\n'*|*$'\r'*) echo "fm-discord-notify: recommendation must be one line" >&2; exit 2 ;; esac
 
 channel_id=${FM_DISCORD_CHANNELS%%,*}
 case "$channel_id" in ''|*[!0-9]*) echo "fm-discord-notify: configured channel id is invalid" >&2; exit 2 ;; esac
@@ -69,7 +70,12 @@ IFS='|' read -r -a option_list <<< "$options"
 for option in "${option_list[@]}"; do
   [ -n "$option" ] || { echo "fm-discord-notify: options must not be empty" >&2; exit 2; }
 done
+recommendation_found=0
+for option in "${option_list[@]}"; do
+  [ "$option" = "$recommendation" ] && recommendation_found=1
+done
+[ "$recommendation_found" -eq 1 ] || { echo "fm-discord-notify: recommendation must match one offered option" >&2; exit 2; }
 
 export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_DISCORD_BOT_TOKEN="$FM_DISCORD_TOKEN"
 exec node "$SCRIPT_DIR/fm-discord-notify.js" "$trigger" "$task_id" "$decision_key" \
-  "$summary" "$channel_id" "$status_task_id" "${option_list[@]}"
+  "$summary" "$recommendation" "$channel_id" "$status_task_id" "${option_list[@]}"

@@ -47,7 +47,7 @@ test_no_token_is_inert() {
   home="$TMP_ROOT/no-token"
   mkdir -p "$home"
   out=$(PATH="$BASE_PATH" FM_HOME="$home" FM_DISCORD_BOT_TOKEN='' \
-    "$ROOT/bin/fm-discord-notify.sh" captain-hold task-a captain-hold-task-a-1 "Needs a decision" "Continue|Pause")
+    "$ROOT/bin/fm-discord-notify.sh" captain-hold task-a captain-hold-task-a-1 "Needs a decision" "Continue|Pause" "Pause")
   rc=$?
   expect_code 0 "$rc" "missing token is inert"
   [ -z "$out" ] || fail "missing token printed output: $out"
@@ -145,7 +145,7 @@ test_notify_records_reply_binding() {
     PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
     "$ROOT/bin/fm-discord-notify.sh" captain-hold task-a captain-hold-task-a-1 \
-      "Choose how to proceed" "Continue|Pause" >/dev/null \
+      "Choose how to proceed" "Continue|Pause" "Pause" >/dev/null \
     || fail "notification post failed"
   record=$(find "$home/state/x-context" -maxdepth 1 -name 'discord-notify-*.json' -print -quit)
   assert_present "$record" "notification binding is persisted"
@@ -158,7 +158,22 @@ test_notify_records_reply_binding() {
   assert_contains "$body" "Choose how to proceed" "message includes summary"
   assert_contains "$body" "Continue" "message includes options"
   assert_contains "$body" "Pause" "message includes all options"
+  assert_contains "$body" "필요한 결정: 보류된 작업을 어떻게 진행할지" "message states required decision"
+  assert_contains "$body" "권장안: Pause" "message shows its recommendation"
   pass "proactive Discord post stores the task and reply binding"
+}
+
+test_recommendation_must_be_an_offered_option() {
+  local home output rc
+  home="$TMP_ROOT/invalid-recommendation"
+  mkdir -p "$home"
+  output=$(FM_HOME="$home" FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify.sh" ask-user task-a nm-run-review \
+      "A decision is needed" "Approve|Decline" "Maybe" 2>&1); rc=$?
+  expect_code 2 "$rc" "recommendation outside the offered choices is rejected"
+  assert_equals "fm-discord-notify: recommendation must match one offered option" "$output" "recommendation validation diagnostic"
+  assert_absent "$home/state/x-context" "invalid recommendation cannot create a pending decision"
+  pass "recommendation must match an offered decision option"
 }
 
 test_failed_notification_retries_from_durable_outbox() {
@@ -172,7 +187,7 @@ test_failed_notification_retries_from_durable_outbox() {
     PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
     "$ROOT/bin/fm-discord-notify.sh" ask-user task-retry nm-run42-review \
-      "A decision is needed" "Approve|Decline" >/dev/null 2>&1; then
+      "A decision is needed" "Approve|Decline" "Decline" >/dev/null 2>&1; then
     fail "a rejected Discord send reported success"
   fi
   record=$(find "$home/state/x-context" -maxdepth 1 -name 'discord-notify-*.json' -print -quit)
@@ -203,7 +218,7 @@ test_profile_failure_keeps_retryable_intent() {
     PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
     "$ROOT/bin/fm-discord-notify.sh" ask-user task-profile nm-run43-review \
-      "A decision is needed" "Approve|Decline" >/dev/null 2>&1; then
+      "A decision is needed" "Approve|Decline" "Decline" >/dev/null 2>&1; then
     fail "a rejected profile lookup reported success"
   fi
   record=$(find "$home/state/x-context" -maxdepth 1 -name 'discord-notify-*.json' -print -quit)
@@ -599,6 +614,7 @@ test_report_requires_token
 test_report_helper_refuses_non_quiet_mode
 test_report_helper_sends_bearings_snapshot
 test_notify_records_reply_binding
+test_recommendation_must_be_an_offered_option
 test_failed_notification_retries_from_durable_outbox
 test_profile_failure_keeps_retryable_intent
 test_stale_sending_notification_recovers_without_duplicate_post

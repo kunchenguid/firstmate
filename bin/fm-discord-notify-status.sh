@@ -75,7 +75,7 @@ case "$verb:$key" in
     fi
     [ -z "$url" ] || summary="$summary $url"
     "$SCRIPT_DIR/fm-discord-notify.sh" pr-ready "$route_task_id" "$key" \
-      "$summary" "병합|열어 두기" "$task_id"
+      "$summary" "병합|열어 두기" "열어 두기" "$task_id"
     ;;
   done:*)
     note=$(status_line_note "$line")
