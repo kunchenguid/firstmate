@@ -530,7 +530,12 @@ test_worker_validation_uses_canonical_hooks() {
       mkdir -p "$CASE_DIR/project-hooks" "$destination" "$CASE_DIR/legacy-bin"
       cat >"$CASE_DIR/legacy-bin/git" <<SH
 #!/bin/sh
-case " \$* " in *' hook list commit-msg '*) exit 129 ;; esac
+case " \$* " in
+  *' hook list commit-msg '*)
+    printf '%s\n' "error: unknown subcommand: \\\`list'" >&2
+    exit 129
+    ;;
+esac
 case "\${GIT_CONFIG_KEY_0:-}" in hook.*) unset GIT_CONFIG_COUNT ;; esac
 exec '$real_git' "\$@"
 SH
@@ -599,6 +604,37 @@ SH
       pass "$direction with allowlist=$setting selects destination Git and preserves stripping and project hooks"
     done
   done
+}
+
+test_destination_git_config_error_stops_worker_launch() {
+  local rec id out status launch real_git setting destination runtime_output
+  real_git=$(command -v git)
+  for setting in absent enabled; do
+    id="destination-config-error-$setting"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    destination="$CASE_DIR/destination-bin"
+    mkdir -p "$destination" "$CASE_DIR/config-directory"
+    cat >"$destination/git" <<SH
+#!/bin/sh
+exec '$real_git' -c include.path='$CASE_DIR/config-directory' "\$@"
+SH
+    chmod +x "$destination/git"
+    [ "$setting" != enabled ] || : > "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "printf 'started\\n' > '$CASE_DIR/worker-started'")
+    status=$?
+    expect_code 0 "$status" "spawner Git should prepare the launch: $out"
+    [ -x "$HOME_DIR/state/$id.git-hooks/commit-msg" ] || fail "spawner did not prepare hooks"
+    launch=$(cat "$LAUNCH_LOG")
+    status=0
+    runtime_output=$(cd "$WT_DIR" && HOME="$HOME_DIR/user-home" PATH="$destination:$FAKEBIN_DIR:$PATH" bash -c "$launch" 2>&1) || status=$?
+    expect_code 128 "$status" "destination config-read error with allowlist=$setting must stop launch"
+    assert_contains "$runtime_output" "unable to access '$CASE_DIR/config-directory'" "launch hid the destination config-read error"
+    assert_not_contains "$runtime_output" 'using legacy' "destination config error selected legacy hooks"
+    assert_absent "$CASE_DIR/worker-started" "worker ran after destination Git config-read failure"
+  done
+  pass "destination Git config-read errors stop workers with and without the launch allowlist"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1983,6 +2019,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_worker_validation_uses_canonical_hooks
+test_destination_git_config_error_stops_worker_launch
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort

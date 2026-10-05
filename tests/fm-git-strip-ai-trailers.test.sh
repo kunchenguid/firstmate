@@ -507,7 +507,12 @@ test_launch_env_falls_back_without_config_hooks() {
   fakebin=$(fm_fakebin "$TMP_ROOT/legacy-git")
   cat >"$fakebin/git" <<EOF
 #!/bin/sh
-case " \$* " in *' hook list commit-msg '*) exit 129 ;; esac
+case " \$* " in
+  *' hook list commit-msg '*)
+    printf '%s\n' "error: unknown subcommand: \\\`list'" >&2
+    exit 129
+    ;;
+esac
 exec '$real_git' "\$@"
 EOF
   chmod +x "$fakebin/git"
@@ -523,6 +528,51 @@ EOF
   [ -f "$repo/legacy-project-pre-commit.ran" ] || fail "legacy project hook was not chained"
   assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "cursoragent@cursor.com" "legacy fallback lost stripping"
   pass "Git without config hooks receives working strip-and-chain wrappers"
+}
+
+test_launch_env_refuses_destination_git_errors() {
+  local repo hooks fakebin real_git failure launch rc expected_status expected_error
+  repo="$TMP_ROOT/destination-git-errors"
+  hooks="$TMP_ROOT/hooks-destination-git-errors"
+  make_repo "$repo"
+  "$STRIP" install "$hooks" "$repo" || fail "hook setup failed with the spawner's Git"
+  real_git=$(command -v git)
+  fakebin=$(fm_fakebin "$TMP_ROOT/failing-destination-git")
+  mkdir -p "$repo/config-directory"
+  for failure in config-read probe-error; do
+    case "$failure" in
+    config-read)
+      cat >"$fakebin/git" <<EOF
+#!/bin/sh
+exec '$real_git' -c include.path='$repo/config-directory' "\$@"
+EOF
+      expected_status=128
+      expected_error="unable to access '$repo/config-directory'"
+      ;;
+    probe-error)
+      cat >"$fakebin/git" <<EOF
+#!/bin/sh
+case " \$* " in
+  *' hook list commit-msg '*)
+    printf '%s\n' 'error: destination Git hook probe failed' >&2
+    exit 129
+    ;;
+esac
+exec '$real_git' "\$@"
+EOF
+      expected_status=129
+      expected_error='destination Git hook probe failed'
+      ;;
+    esac
+    chmod +x "$fakebin/git"
+    rc=0
+    launch=$(PATH="$fakebin:$PATH" "$STRIP" launch-env "$hooks" "$repo" 2>"$repo/launch.stderr") || rc=$?
+    expect_code "$expected_status" "$rc" "$failure must stop hook configuration"
+    assert_equals "" "$launch" "$failure emitted a usable hook export"
+    assert_contains "$(cat "$repo/launch.stderr")" "$expected_error" "$failure hid the destination Git error"
+    assert_not_contains "$(cat "$repo/launch.stderr")" 'using legacy' "$failure was mistaken for unsupported config hooks"
+  done
+  pass "destination config-read and other probe errors stop setup without a legacy export"
 }
 
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
@@ -554,6 +604,7 @@ test_plain_canonical_hook_check_and_validation
 test_config_hook_respects_repository_and_command_hookspath
 test_launch_env_quotes_the_strip_command
 test_launch_env_falls_back_without_config_hooks
+test_launch_env_refuses_destination_git_errors
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 
 echo "# all fm-git-strip-ai-trailers tests passed"

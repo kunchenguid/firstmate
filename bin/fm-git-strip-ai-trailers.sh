@@ -10,8 +10,9 @@
 #       Call in the destination launch environment so the support probe uses
 #       the same Git as the worker's commits. Emit a shell export for a
 #       pane-scoped config commit-msg hook, leaving core.hooksPath intact.
-#       Git runs it before the file-based commit-msg. Without config-hook
-#       support, warn and emit the prepared wrappers' hooksPath. Pass an
+#       Git runs it before the file-based commit-msg. If Git rejects hook list
+#       as an unknown subcommand, warn and emit the prepared wrappers' hooksPath;
+#       any other probe failure stops setup. Pass an
 #       absolute hooks directory prepared with install before launch delivery;
 #       launch-env only selects configuration, with no installation or writes.
 #   fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
@@ -252,15 +253,21 @@ EOF
 }
 
 launch_env() {
-  local hooks_dir=$1 wt=$2 command
+  local hooks_dir=$1 wt=$2 command probe_output probe_status
   [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
   command=$(quote_for_hook "$SELF")
-  if git -C "$wt" -c hook.firstmate-strip-ai-trailers.event=commit-msg \
+  if probe_output=$(LC_ALL=C git -C "$wt" -c hook.firstmate-strip-ai-trailers.event=commit-msg \
     -c "hook.firstmate-strip-ai-trailers.command=$command" \
-    -c hook.firstmate-strip-ai-trailers.enabled=true hook list commit-msg >/dev/null 2>&1; then
+    -c hook.firstmate-strip-ai-trailers.enabled=true hook list commit-msg 2>&1); then
     printf 'export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=hook.firstmate-strip-ai-trailers.event GIT_CONFIG_VALUE_0=commit-msg GIT_CONFIG_KEY_1=hook.firstmate-strip-ai-trailers.command GIT_CONFIG_VALUE_1=%s GIT_CONFIG_KEY_2=hook.firstmate-strip-ai-trailers.enabled GIT_CONFIG_VALUE_2=true; ' \
       "$(quote_for_hook "$command")"
   else
+    probe_status=$?
+    if [ "$probe_status" -ne 129 ] || [ "${probe_output%%$'\n'*}" != "error: unknown subcommand: \`list'" ]; then
+      printf '%s\n' "$probe_output" >&2
+      echo "error: cannot determine destination Git config-hook support; refusing to configure AI-trailer stripping" >&2
+      return "$probe_status"
+    fi
     echo "warning: Git config hooks unavailable; using legacy core.hooksPath wrappers for AI-trailer stripping; canonical project-hook checks may fail" >&2
     printf 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=%s; ' \
       "$(quote_for_hook "$hooks_dir")"
