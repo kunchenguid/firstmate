@@ -520,6 +520,31 @@ test_duplicate_manifest_row_refuses_without_advancing() {
   pass "a duplicate cursor row refuses presentation without advancing its receipt"
 }
 
+test_legacy_three_column_manifest_migrates() {
+  local dir state home out manifest task ident presented fields
+  dir=$(make_case legacy-three-column); state="$dir/state"; home="$dir/home"
+  out="$dir/drain.out"; manifest="$state/.status-presentation-cursor"; mkdir -p "$home/data"
+  task=legacy
+  printf 'note: already presented\nnote: newly unread\n' > "$state/$task.status"
+  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT" "$state/$task.status") || fail "could not identify the legacy status fixture"
+  presented=$(printf 'note: already presented\n' | wc -c | tr -d '[:space:]')
+  printf '%s\t%s\t%s\n' "$task" "$ident" "$presented" > "$manifest"
+
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$state" \
+    "$DRAIN" > "$out" || fail "drain rejected a legacy three-column cursor manifest"
+  grep -F 'legacy note: newly unread' "$out" >/dev/null \
+    || fail "legacy cursor migration lost the unread line: $(cat "$out")"
+  grep -F 'already presented' "$out" >/dev/null \
+    && fail "legacy cursor migration replayed an already-presented line: $(cat "$out")"
+  fields=$(awk -F '\t' '$1 == "legacy" { print NF }' "$manifest")
+  [ "$fields" = 4 ] \
+    || fail "legacy cursor row was not migrated to the four-column format: $(cat "$manifest")"
+  pass "a legacy three-column cursor is reused and migrated on commit"
+}
+
 test_open_decisions_fold_is_unchanged() {
   local dir state out
   dir=$(make_case open-decisions-regression)
@@ -617,6 +642,7 @@ test_warm_manifest_is_parsed_once_per_presentation
 test_queued_signals_reuse_the_presentation_context
 test_queue_rows_without_a_status_snapshot_stay_valid
 test_duplicate_manifest_row_refuses_without_advancing
+test_legacy_three_column_manifest_migrates
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue

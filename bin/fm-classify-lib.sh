@@ -820,10 +820,10 @@ EOF
   LC_ALL=C awk -F '\t' -v OFS='\t' '
     FILENAME == ARGV[1] {
       if (NF == 0 || (NF == 1 && $1 == "")) next
-      if (NF != 4 || $1 == "" || $2 == "" || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || seen[$1]++) exit 2
+      if ((NF != 3 && NF != 4) || $1 == "" || $2 == "" || $3 !~ /^[0-9]+$/ || (NF == 4 && $4 !~ /^[0-9]+$/) || seen[$1]++) exit 2
       cursor_ident[$1] = $2
       presented[$1] = $3
-      backstop[$1] = $4
+      backstop[$1] = (NF == 4 ? $4 : 0)
       next
     }
     {
