@@ -382,6 +382,475 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+
+# --- declared mechanical verification --------------------------------------
+#
+# The named-head gate proves a commit left the worker copy. These tests cover
+# what it cannot see: whether the change actually works. Each one puts the task
+# in the shape the structural gate already accepts - a reachable named head -
+# so only the declared check can decide the done:.
+
+landed_ship() {  # <name>; sets REPO WT
+  REPO="$TMP_ROOT/$1-repo"
+  WT="$TMP_ROOT/$1-wt"
+  fm_git_worktree "$REPO" "$WT" "fm/$1"
+  git -C "$WT" commit -q --allow-empty -m 'the fix'
+  git -C "$WT" update-ref "refs/remotes/origin/fm/$1" "$(git -C "$WT" rev-parse HEAD)"
+}
+
+declare_checks() {  # <state> <id> <line>...
+  local state=$1 id=$2
+  shift 2
+  mkdir -p "$state"
+  printf '%s\n' "$@" > "$state/$id.verify"
+  chmod 600 "$state/$id.verify"
+}
+
+serve_dir() {  # <dir>; sets SERVE_PORT SERVE_PID
+  local dir=$1 log i
+  log="$TMP_ROOT/serve-$$-$RANDOM.log"
+  # -u so the port banner flushes immediately; Python 3.14 buffers a piped stdout.
+  python3 -u -m http.server 0 --bind 127.0.0.1 --directory "$dir" > "$log" 2>&1 &
+  SERVE_PID=$!
+  for i in $(seq 1 40); do
+    SERVE_PORT=$(sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' "$log" | head -1)
+    [ -n "$SERVE_PORT" ] && return 0
+    sleep 0.25
+  done
+  kill "$SERVE_PID" 2>/dev/null
+  return 1
+}
+
+DONE_CI_READY='done: PR https://example.test/o/r/pull/9 checks green'
+
+test_declared_http_check_decides_a_structurally_perfect_done() {
+  local state reason rc port
+  if ! command -v python3 >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    fail "python3 and curl are required to exercise the declared http check"
+  fi
+  landed_ship httpgate
+  state="$TMP_ROOT/httpgate-state"
+  mkdir -p "$TMP_ROOT/httpgate-site"
+  printf 'the live fix is deployed\n' > "$TMP_ROOT/httpgate-site/index.html"
+  serve_dir "$TMP_ROOT/httpgate-site" || fail "could not start the local site"
+  port=$SERVE_PORT
+
+  declare_checks "$state" httpgate "http: http://127.0.0.1:$port/ 200 the live fix is deployed"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" httpgate "$state/httpgate.meta") \
+    || fail "a done: whose declared live check passes must be accepted: $reason"
+
+  kill "$SERVE_PID" 2>/dev/null
+  wait "$SERVE_PID" 2>/dev/null
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" httpgate "$state/httpgate.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a done: whose declared live check cannot reach the site was accepted (exit $rc)"
+  case "$reason" in
+    *"http: http://127.0.0.1:$port/ could not be fetched") ;;
+    *) fail "the refusal did not report what happened: $reason" ;;
+  esac
+  pass "the declared http check accepts a live site and refuses a dead one"
+}
+
+test_declared_http_check_refuses_preview_only_content() {
+  local state reason rc port
+  if ! command -v python3 >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    fail "python3 and curl are required to exercise the declared http check"
+  fi
+  landed_ship stale
+  state="$TMP_ROOT/stale-state"
+  mkdir -p "$TMP_ROOT/stale-site"
+  printf 'the old broken copy\n' > "$TMP_ROOT/stale-site/index.html"
+  serve_dir "$TMP_ROOT/stale-site" || fail "could not start the local site"
+  port=$SERVE_PORT
+
+  declare_checks "$state" stale "http: http://127.0.0.1:$port/ 200 the live fix is deployed"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" stale "$state/stale.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a live site still serving the old content was accepted (exit $rc)"
+  case "$reason" in
+    *"answered 200 without the live fix is deployed") ;;
+    *) fail "the refusal did not report the served content: $reason" ;;
+  esac
+
+  declare_checks "$state" stale "http: http://127.0.0.1:$port/missing 200"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" stale "$state/stale.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a 404 on the declared URL was accepted (exit $rc)"
+  case "$reason" in
+    *"answered 404, not 200") ;;
+    *) fail "the refusal did not report the status: $reason" ;;
+  esac
+
+  kill "$SERVE_PID" 2>/dev/null
+  wait "$SERVE_PID" 2>/dev/null
+  pass "a reachable site serving the wrong content or status still refuses the done:"
+}
+
+test_declared_run_and_file_checks_decide_the_done() {
+  local state reason rc
+  landed_ship runfile
+  state="$TMP_ROOT/runfile-state"
+
+  declare_checks "$state" runfile \
+    "run: test 1 = 1" \
+    "file: $WT/.git" \
+    "# a comment and a blank line are ignored" \
+    ''
+  printf 'deployed marker\n' > "$TMP_ROOT/runfile-artifact"
+  declare_checks "$state" runfile \
+    "run: test -s $TMP_ROOT/runfile-artifact" \
+    "file: $TMP_ROOT/runfile-artifact deployed marker"
+  accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" runfile "$state/runfile.meta" \
+    || fail "passing run: and file: checks must accept the done:"
+
+  declare_checks "$state" runfile "run: exit 3"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" runfile "$state/runfile.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a failing run: check was accepted (exit $rc)"
+  case "$reason" in
+    *"run: exit 3 exited nonzero") ;;
+    *) fail "the run: refusal did not name the command: $reason" ;;
+  esac
+
+  declare_checks "$state" runfile "file: $TMP_ROOT/runfile-artifact the text that never shipped"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" runfile "$state/runfile.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a file: check missing its required content was accepted (exit $rc)"
+  case "$reason" in
+    *"does not contain the text that never shipped") ;;
+    *) fail "the file: refusal did not name the missing content: $reason" ;;
+  esac
+  pass "declared run: and file: checks decide the done: in both directions"
+}
+
+# A run: command gets no declaration bytes on its stdin: one stdin-reading
+# check must not consume the lines that follow it out of the declaration.
+test_stdin_reading_run_check_does_not_skip_later_checks() {
+  local state reason rc
+  landed_ship stdinread
+  state="$TMP_ROOT/stdinread-state"
+  printf 'artifact content\n' > "$TMP_ROOT/stdinread-artifact"
+  declare_checks "$state" stdinread \
+    'run: cat' \
+    "run: grep -q artifact < $TMP_ROOT/stdinread-artifact" \
+    'run: exit 7'
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" stdinread "$state/stdinread.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a stdin-reading run: consumed the checks after it and accepted the done: (exit $rc)"
+  case "$reason" in
+    *"run: exit 7 exited nonzero") ;;
+    *) fail "a check after the stdin-reading run: never executed: $reason" ;;
+  esac
+  pass "a stdin-reading run: check cannot consume the declaration's later checks"
+}
+
+# The whole pass carries its own bound under the tightest consumer's read
+# budget: a check that hangs past FM_VERIFY_PASS_TIMEOUT refuses the claim with
+# a reason naming that bound instead of passing or stalling the read.
+test_verification_pass_bound_refuses_a_hanging_check() {
+  local state reason rc saved
+  landed_ship passbound
+  state="$TMP_ROOT/passbound-state"
+  saved=$FM_VERIFY_PASS_TIMEOUT
+  FM_VERIFY_PASS_TIMEOUT=2
+  declare_checks "$state" passbound 'run: sleep 30'
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" passbound "$state/passbound.meta")
+  rc=$?
+  FM_VERIFY_PASS_TIMEOUT=$saved
+  [ "$rc" -eq 1 ] || fail "a check hanging past the pass bound was accepted (exit $rc)"
+  case "$reason" in
+    *FM_VERIFY_PASS_TIMEOUT*) ;;
+    *) fail "the refusal did not name the pass bound: $reason" ;;
+  esac
+  pass "the verification pass bound refuses a hanging check, naming the bound"
+}
+
+# A check killed at its bound is reported as a bound expiry, distinct from a
+# command that failed on its own.
+test_check_killed_at_the_bound_is_reported_distinctly() {
+  local state reason rc saved
+  landed_ship checkbound
+  state="$TMP_ROOT/checkbound-state"
+  saved=$FM_VERIFY_TIMEOUT
+  FM_VERIFY_TIMEOUT=2
+  declare_checks "$state" checkbound 'run: sleep 30'
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" checkbound "$state/checkbound.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a check killed at the bound was accepted (exit $rc)"
+  case "$reason" in
+    *"check bound"*) ;;
+    *) fail "a check killed at the bound was not reported as a bound expiry: $reason" ;;
+  esac
+
+  declare_checks "$state" checkbound 'run: exit 7'
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" checkbound "$state/checkbound.meta")
+  rc=$?
+  FM_VERIFY_TIMEOUT=$saved
+  [ "$rc" -eq 1 ] || fail "a failing run: check was accepted (exit $rc)"
+  case "$reason" in
+    *"exited nonzero"*) ;;
+    *) fail "an instant nonzero exit lost its wording: $reason" ;;
+  esac
+  pass "a bound expiry is reported distinctly from an instant nonzero exit"
+}
+
+# A bound status (124) that the bound mechanism produces before the command
+# runs is not evidence the command timed out, so it keeps the plain failure
+# wording on every host, whatever mechanism fm-timeout-lib.sh selects there.
+test_bound_mechanism_failure_is_not_reported_as_a_timeout() {
+  local state reason rc
+  landed_ship tmpbroken
+  state="$TMP_ROOT/tmpbroken-state"
+  declare_checks "$state" tmpbroken 'run: true'
+  reason=$(
+    # shellcheck disable=SC2329  # reached indirectly through fm_dod_verify_run
+    fm_run_timed() { return 124; }
+    accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" tmpbroken "$state/tmpbroken.meta"
+  )
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a check whose bound mechanism failed before running was accepted (exit $rc)"
+  case "$reason" in
+    *"check bound"* | *"pass bound"*) fail "a fast bound-mechanism failure was reported as a timeout: $reason" ;;
+    *"run: true exited nonzero"*) ;;
+    *) fail "the bound-mechanism refusal lost its wording: $reason" ;;
+  esac
+  pass "a bound mechanism failure before the command runs is not reported as a timeout"
+}
+
+# The file: kind honors the same per-check bound as run: and http:: a check
+# that cannot complete inside the bound refuses naming the bound instead of
+# hanging or reporting an ordinary failure.
+test_file_check_runs_under_the_per_check_bound() {
+  local state reason rc saved
+  landed_ship filebound
+  state="$TMP_ROOT/filebound-state"
+  printf 'deployed marker\n' > "$TMP_ROOT/filebound-target"
+  saved=$FM_VERIFY_TIMEOUT
+  FM_VERIFY_TIMEOUT=2
+  declare_checks "$state" filebound "file: $TMP_ROOT/filebound-target deployed marker"
+  reason=$(
+    # shellcheck disable=SC2329  # reached indirectly through fm_dod_verify_file_check
+    fm_run_timed() { sleep "$1"; return 124; }
+    accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" filebound "$state/filebound.meta"
+  )
+  rc=$?
+  FM_VERIFY_TIMEOUT=$saved
+  [ "$rc" -eq 1 ] || fail "a file: check that could not finish inside the bound was accepted (exit $rc)"
+  case "$reason" in
+    *"file: $TMP_ROOT/filebound-target hit the 2s check bound"*) ;;
+    *) fail "the file: bound expiry was not reported as a bound expiry: $reason" ;;
+  esac
+  pass "a file: check runs under the per-check bound and names its expiry"
+}
+
+# A file: target that exists but cannot be read is reported as unreadable, not
+# as missing the required text, so the refusal names what the operator must fix.
+test_unreadable_file_check_target_is_named_unreadable() {
+  local state reason rc target
+  landed_ship fileunread
+  state="$TMP_ROOT/fileunread-state"
+  target="$TMP_ROOT/fileunread-target"
+  printf 'deployed marker\n' > "$target"
+  chmod 000 "$target"
+  if [ -r "$target" ]; then
+    chmod 600 "$target"
+    pass "unreadable file: target case skipped (running with read override)"
+    return 0
+  fi
+  declare_checks "$state" fileunread "file: $target deployed marker"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" fileunread "$state/fileunread.meta")
+  rc=$?
+  chmod 600 "$target"
+  [ "$rc" -eq 1 ] || fail "an unreadable file: target was accepted (exit $rc)"
+  case "$reason" in
+    *"file: $target could not be read") ;;
+    *) fail "an unreadable file: target was not named unreadable: $reason" ;;
+  esac
+  pass "an unreadable file: target is refused as unreadable, not as missing text"
+}
+
+# A declaration past the size cap is refused before it is loaded.
+test_oversized_declaration_is_refused() {
+  local state reason rc
+  landed_ship bigdecl
+  state="$TMP_ROOT/bigdecl-state"
+  declare_checks "$state" bigdecl 'run: true'
+  head -c $((FM_VERIFY_MAX_BYTES + 1)) /dev/zero | tr '\0' '#' >> "$state/bigdecl.verify"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" bigdecl "$state/bigdecl.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "an oversized declaration was accepted (exit $rc)"
+  case "$reason" in
+    *"larger than $FM_VERIFY_MAX_BYTES bytes"*) ;;
+    *) fail "the oversized refusal did not name the cap: $reason" ;;
+  esac
+  pass "an oversized declaration is refused"
+}
+
+# NUL padding is dropped by command substitution, so the cap must count the
+# file's bytes: a small passing check padded past the cap with NULs is refused.
+test_nul_padded_oversized_declaration_is_refused() {
+  local state reason rc
+  landed_ship nuldecl
+  state="$TMP_ROOT/nuldecl-state"
+  declare_checks "$state" nuldecl 'run: true'
+  head -c $((FM_VERIFY_MAX_BYTES + 1)) /dev/zero >> "$state/nuldecl.verify"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" nuldecl "$state/nuldecl.meta" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a NUL-padded oversized declaration was accepted (exit $rc)"
+  case "$reason" in
+    *"larger than $FM_VERIFY_MAX_BYTES bytes"*) ;;
+    *) fail "the NUL-padded refusal did not name the cap: $reason" ;;
+  esac
+  pass "a NUL-padded oversized declaration is refused"
+}
+
+# A configured pass bound above the ceiling is held to it, so the pass still
+# finishes inside the fleet snapshot's default crew-state read.
+test_configured_pass_bound_is_used_unchanged() {
+  local state reason rc
+  landed_ship passcfg
+  state="$TMP_ROOT/passcfg-state"
+  declare_checks "$state" passcfg 'run: sleep 30'
+  reason=$(
+    FM_VERIFY_PASS_TIMEOUT=2
+    # shellcheck source=bin/fm-dod-lib.sh
+    . "$ROOT/bin/fm-dod-lib.sh"
+    accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" passcfg "$state/passcfg.meta"
+  )
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a check hanging past the configured pass bound was accepted (exit $rc)"
+  case "$reason" in
+    *"FM_VERIFY_PASS_TIMEOUT pass bound (2s)"*) ;;
+    *) fail "the configured pass bound was not the one bounding the pass: $reason" ;;
+  esac
+  pass "a configured pass bound below the maximum bounds the pass unchanged"
+}
+
+test_pass_bound_at_the_maximum_is_used_unchanged() {
+  local state reason rc
+  landed_ship passmax
+  state="$TMP_ROOT/passmax-state"
+  declare_checks "$state" passmax 'run: sleep 30'
+  reason=$(
+    FM_VERIFY_PASS_TIMEOUT=5
+    # shellcheck source=bin/fm-dod-lib.sh
+    . "$ROOT/bin/fm-dod-lib.sh"
+    accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" passmax "$state/passmax.meta"
+  )
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a check hanging past the pass bound was accepted (exit $rc)"
+  case "$reason" in
+    *"FM_VERIFY_PASS_TIMEOUT pass bound (5s)"*) ;;
+    *) fail "a pass bound at the maximum was not used as configured: $reason" ;;
+  esac
+  pass "a pass bound at the maximum bounds the pass unchanged"
+}
+
+test_pass_bound_above_the_maximum_is_refused() {
+  local state reason rc
+  landed_ship passover
+  state="$TMP_ROOT/passover-state"
+  declare_checks "$state" passover 'run: true'
+  reason=$(
+    FM_VERIFY_PASS_TIMEOUT=6
+    # shellcheck source=bin/fm-dod-lib.sh
+    . "$ROOT/bin/fm-dod-lib.sh"
+    accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" passover "$state/passover.meta"
+  )
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a pass bound above the maximum was accepted (exit $rc)"
+  case "$reason" in
+    *"FM_VERIFY_PASS_TIMEOUT=6s exceeds the 5s maximum"*"crew-state read budget"*) ;;
+    *) fail "the refusal did not name the configured value and the maximum: $reason" ;;
+  esac
+  pass "a pass bound above the maximum refuses and names both numbers"
+}
+
+# A declaration that passes the private-file check but then fails to read is
+# refused, never treated as an empty declaration that gates nothing.
+test_declaration_read_failure_is_refused() {
+  local state reason rc
+  landed_ship readfail
+  state="$TMP_ROOT/readfail-state"
+  declare_checks "$state" readfail 'run: false'
+  reason=$(
+    # shellcheck disable=SC2329
+    head() { if [[ "${!#}" == *.verify ]]; then return 1; fi; command head "$@"; }
+    accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" readfail "$state/readfail.meta"
+  )
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a declaration that failed to read was accepted (exit $rc)"
+  case "$reason" in
+    *"declared verification cannot be read: $state/readfail.verify"*) ;;
+    *) fail "the read failure did not name the unreadable declaration: $reason" ;;
+  esac
+  pass "a declaration that fails to read refuses the done:"
+}
+
+test_absent_declaration_leaves_the_done_ungated() {
+  local state
+  landed_ship nodecl
+  state="$TMP_ROOT/nodecl-state"
+  mkdir -p "$state"
+  accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" nodecl "$state/nodecl.meta" \
+    || fail "a task that declares no verification must behave exactly as before"
+  pass "no declaration is no gate"
+}
+
+test_untrusted_or_unreadable_declaration_is_refused() {
+  local state reason rc
+  landed_ship untrusted
+  state="$TMP_ROOT/untrusted-state"
+
+  declare_checks "$state" untrusted 'run: true'
+  chmod 644 "$state/untrusted.verify"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" untrusted "$state/untrusted.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a world-readable declaration was trusted (exit $rc)"
+  case "$reason" in
+    *"is not a firstmate-private file"*) ;;
+    *) fail "the refusal did not name the untrusted declaration: $reason" ;;
+  esac
+
+  rm -f "$state/untrusted.verify"
+  ln -s /dev/null "$state/untrusted.verify"
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" untrusted "$state/untrusted.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a symlinked declaration was trusted (exit $rc)"
+  rm -f "$state/untrusted.verify"
+  pass "a declaration that is not a firstmate-private file refuses the done:"
+}
+
+test_malformed_declared_check_is_refused() {
+  local state reason rc
+  landed_ship malformed
+  state="$TMP_ROOT/malformed-state"
+
+  declare_checks "$state" malformed 'browser: open the page and look at it'
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" malformed "$state/malformed.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "an unknown declared check was accepted (exit $rc)"
+  case "$reason" in
+    *"unknown check: browser") ;;
+    *) fail "the refusal did not name the unknown check: $reason" ;;
+  esac
+
+  declare_checks "$state" malformed 'http: http://127.0.0.1:1/'
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" malformed "$state/malformed.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "an http: check with no expected status was accepted (exit $rc)"
+  case "$reason" in
+    *"names no expected status"*) ;;
+    *) fail "the refusal did not name the missing status: $reason" ;;
+  esac
+
+  declare_checks "$state" malformed 'run:'
+  reason=$(accept_done ship no-mistakes "$WT" "$REPO" "$DONE_CI_READY" "$state" malformed "$state/malformed.meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a check naming no target was accepted (exit $rc)"
+  pass "a malformed declared check refuses the done: rather than being skipped"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -400,5 +869,23 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_declared_http_check_decides_a_structurally_perfect_done
+test_declared_http_check_refuses_preview_only_content
+test_declared_run_and_file_checks_decide_the_done
+test_stdin_reading_run_check_does_not_skip_later_checks
+test_verification_pass_bound_refuses_a_hanging_check
+test_check_killed_at_the_bound_is_reported_distinctly
+test_bound_mechanism_failure_is_not_reported_as_a_timeout
+test_file_check_runs_under_the_per_check_bound
+test_unreadable_file_check_target_is_named_unreadable
+test_oversized_declaration_is_refused
+test_nul_padded_oversized_declaration_is_refused
+test_configured_pass_bound_is_used_unchanged
+test_pass_bound_at_the_maximum_is_used_unchanged
+test_pass_bound_above_the_maximum_is_refused
+test_declaration_read_failure_is_refused
+test_absent_declaration_leaves_the_done_ungated
+test_untrusted_or_unreadable_declaration_is_refused
+test_malformed_declared_check_is_refused
 
 echo "all fm-dod-lib tests passed"
