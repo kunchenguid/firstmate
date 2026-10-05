@@ -86,6 +86,7 @@ make_settle_case() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
+Task token budget: 400000
 ## Captain's intent
 Exercise settled-worktree detection for $id.
 
@@ -152,6 +153,28 @@ test_already_settled_pane_costs_one_confirm_read() {
   reads=$(cat "$COUNTFILE")
   [ "$reads" -eq 3 ] || fail "already-settled pane took $reads reads to confirm - expected the first read, one confirmation, and the launch-boundary cwd check"
   pass "an already-settled pane confirms on the next read, not a whole extra cycle"
+}
+
+test_workflow_dispatch_gate_refuses_before_allocating_a_worktree() {
+  local rec id out status gates
+  id=settle-workflow-refused-z3
+  rec=$(make_settle_case settle-workflow-refused "$id" 0)
+  read_settle_record "$rec"
+  gates="$HOME_DIR/workflow-gates.py"
+  cat > "$gates" <<'EOF'
+#!/usr/bin/env python3
+import sys
+print("REFUSE dispatch: 6 workers reach the cap of 6")
+raise SystemExit(1)
+EOF
+  chmod +x "$gates"
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$gates" run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "workflow dispatch refusal must stop a ship spawn"
+  assert_contains "$out" 'REFUSE dispatch: 6 workers reach the cap of 6' "spawn must relay the named workflow gate"
+  assert_contains "$out" 'land work, lower machine load, wait for a worker, or restore quota' "spawn refusal must name a recovery path"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "workflow refusal published task metadata"
+  pass "fm-spawn refuses a ship before worktree allocation when the workflow gate refuses"
 }
 
 # make_primary_case <name> <id> <stale_reads> builds the linked-home shape: the
@@ -223,6 +246,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
+test_workflow_dispatch_gate_refuses_before_allocating_a_worktree
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 

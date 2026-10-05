@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--workflow-gate-override] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -105,6 +105,8 @@
 #   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
 #   docs/cmux-backend.md),
 #   then tmux.
+#   --workflow-gate-override bypasses a refusal only when the current Captain's
+#   intent contains the exact words "override the workflow dispatch gate".
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
 #   adapter, and experimental zellij, orca, and cmux adapters. Orca owns both
 #   the task worktree and terminal, so ship/scout Orca spawns do not run
@@ -665,6 +667,7 @@ MODE=
 YOLO=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
+WORKFLOW_GATE_OVERRIDE=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -786,6 +789,7 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --workflow-gate-override) WORKFLOW_GATE_OVERRIDE=1 ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -820,6 +824,10 @@ done
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
+}
+[ "$WORKFLOW_GATE_OVERRIDE" -eq 0 ] || { [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ]; } || {
+  echo "error: --workflow-gate-override applies only to a fresh ship spawn" >&2
+  exit 2
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -1495,6 +1503,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$WORKFLOW_GATE_OVERRIDE" -eq 0 ] || shared_args+=(--workflow-gate-override)
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -3106,6 +3115,58 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   elif fm_brief_base_branches "$BRIEF" >/dev/null; then
     echo "error: $BRIEF records a Base branch line but the spawn has no --base-branch; pass the brief's base with --base-branch or re-scaffold the brief without one" >&2
     exit 1
+  fi
+  if [ "$KIND" = ship ]; then
+    "$FM_ROOT/bin/fm-captain-reminder.sh" "$ID" "$BRIEF" "$DATA" || {
+      echo "error: could not record repeated captain instruction for $ID; fix $DATA/captain-reminders.jsonl before spawning" >&2
+      exit 1
+    }
+  fi
+  if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ] && { [ "${FM_TEST_SEAM:-0}" != 1 ] || [ "${FM_TEST_WORKFLOW_GATE:-0}" = 1 ]; }; then
+    workflow_gates="$FM_HOME/projects/workflow/scripts/gates.py"
+    if [ "${FM_TEST_SEAM:-0}" = 1 ] && [ -n "${FM_WORKFLOW_GATES_SCRIPT:-}" ]; then
+      workflow_gates=$FM_WORKFLOW_GATES_SCRIPT
+    fi
+    if [ ! -f "$workflow_gates" ]; then
+      echo "error: workflow dispatch gate unavailable at $workflow_gates; register the workflow project before spawning" >&2
+      exit 1
+    fi
+    unlanded=0
+    workers=0
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      meta_kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      meta_id=${meta##*/}
+      meta_id=${meta_id%.meta}
+      [ "$meta_kind" != secondmate ] || continue
+      crew_state=$(FM_CREW_STATE_NO_FORGE=1 "$FM_ROOT/bin/fm-crew-state.sh" "$meta_id" 2>/dev/null | sed -n 's/^state: \([^ ]*\).*/\1/p')
+      case "$crew_state" in
+        working|parked|blocked|paused) workers=$((workers + 1)) ;;
+        done|failed) ;;
+        *) echo "error: workflow dispatch gate could not read worker count for $meta_id; reconcile task state before spawning" >&2; exit 1 ;;
+      esac
+      if [ "$meta_kind" = ship ] && ! grep -Fq ": merged $meta_id " "$STATE/$meta_id.status" 2>/dev/null; then
+        unlanded=$((unlanded + 1))
+      fi
+    done
+    token_budget=$(sed -n 's/^Task token budget: \([0-9][0-9]*\)$/\1/p' "$BRIEF" | head -1)
+    if [ -z "$token_budget" ]; then
+      echo "error: workflow dispatch gate could not read Task token budget from $BRIEF; add a numeric budget before spawning" >&2
+      exit 1
+    fi
+    gate_out=$(uv run --no-project "$workflow_gates" --root "${workflow_gates%/scripts/gates.py}" dispatch \
+      --unlanded "$unlanded" --workers "$workers" --token-budget "$token_budget" 2>&1) || gate_rc=$?
+    gate_rc=${gate_rc:-0}
+    if [ "$gate_rc" -ne 0 ]; then
+      captain_intent=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
+      if [ "$WORKFLOW_GATE_OVERRIDE" -eq 1 ] && printf '%s\n' "$captain_intent" | grep -Fqi 'override the workflow dispatch gate'; then
+        printf 'warning: explicit current captain instruction overrides the workflow dispatch gate: %s\n' "$gate_out" >&2
+      else
+        printf '%s\n' "$gate_out" >&2
+        echo "error: ship spawn refused by the workflow dispatch gate; land work, lower machine load, wait for a worker, or restore quota before retrying" >&2
+        exit "$gate_rc"
+      fi
+    fi
   fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.

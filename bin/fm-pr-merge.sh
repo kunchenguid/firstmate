@@ -402,6 +402,73 @@ merge_control_cleanup() {
   fm_afk_contract_lock_release || true
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
 }
+
+scope_check_pr() {
+  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" diff diff_file rc
+  [ -f "$brief" ] || { echo "error: merge scope check cannot read $brief" >&2; return 1; }
+  case "$PROVIDER" in
+    github) diff=$(gh-axi pr diff "$PR_NUMBER" --full -R "$PR_OWNER/$PR_REPO" 2>&1) || {
+      echo "error: merge scope check could not read changed files for $URL: $diff" >&2
+      return 1
+    } ;;
+    gitlab) diff=$(GITLAB_HOST="$PR_HOST" glab mr diff "$PR_NUMBER" -R "$PROJECT_URL" 2>&1) || {
+      echo "error: merge scope check could not read changed files for $URL: $diff" >&2
+      return 1
+    } ;;
+    *) return 0 ;;
+  esac
+  diff_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-scope.XXXXXX") || return 1
+  printf '%s\n' "$diff" >"$diff_file"
+  rc=0
+  uv run --no-project - "$brief" "$diff_file" <<'PY' || rc=$?
+import re
+import sys
+import fnmatch
+from pathlib import Path
+
+brief = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r"(?ms)^## Firstmate spec\s*\n(.*?)(?=^##?\s|\Z)", brief)
+if not match:
+    print("error: merge scope check cannot find ## Firstmate spec in the task brief")
+    raise SystemExit(1)
+spec = match.group(1)
+allowed = {value.strip().strip(".,;:") for value in re.findall(r"`([^`]+)`", spec)
+           if "/" in value and not value.startswith(("http://", "https://"))}
+allowed.update(re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*?-]+)+)", spec))
+diff = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
+files = []
+additions = deletions = 0
+for line in diff.splitlines():
+    file_match = re.match(r"diff --git a/(.*?) b/(.*)$", line)
+    if file_match:
+        path = file_match.group(2)
+        if path not in files:
+            files.append(path)
+    elif line.startswith("+") and not line.startswith("+++"):
+        additions += 1
+    elif line.startswith("-") and not line.startswith("---"):
+        deletions += 1
+
+if diff.strip() and not files:
+    print("error: merge scope check could not parse the forge diff; retry after the forge returns a complete diff")
+    raise SystemExit(1)
+
+def in_scope(path):
+    return any(path == name or (name.endswith("/") and path.startswith(name)) or fnmatch.fnmatchcase(path, name)
+               for name in allowed) or (
+        "test" in spec.casefold() and path.startswith("tests/") and path.endswith((".test.sh", ".test.py")))
+
+outside = [path for path in files if not in_scope(path)]
+print(f"scope diff: +{additions} -{deletions}; changed files: {', '.join(files) if files else 'none'}")
+if outside:
+    print("error: merge refused; files outside the Firstmate spec scope: " + ", ".join(outside))
+    print("fix: remove those changes or name the permitted files in ## Firstmate spec")
+    raise SystemExit(1)
+PY
+  rm -f -- "$diff_file"
+  return "$rc"
+}
+
 trap merge_control_cleanup EXIT
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
 fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
@@ -412,6 +479,10 @@ fi
 if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
   echo "error: task $ID changed incarnation while waiting to merge; refusing" >&2
   exit 1
+fi
+
+if [ "${FM_TEST_SEAM:-0}" != 1 ] || [ "${FM_TEST_SCOPE_CHECK:-0}" = 1 ]; then
+  scope_check_pr || exit 1
 fi
 
 # Reading the merge request state needs both tools. Report them together and

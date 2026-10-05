@@ -150,10 +150,6 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
-  exit 0
-fi
-
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # A genuinely-marked secondmate home runs its OWN primary firstmate session, so
 # force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
@@ -167,6 +163,17 @@ fi
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+LAST_ASSISTANT_MESSAGE=$(printf '%s' "$PAYLOAD" | jq -r 'if type == "object" then (.last_assistant_message // "") else "" end' 2>/dev/null || true)
+if [ -n "$LAST_ASSISTANT_MESSAGE" ] && printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq '(^|[^[:alpha:]])(completed|finished|implemented|fixed|shipped|merged|verified|passed)([^[:alpha:]]|$)'; then
+  if ! printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq '(^|[^[:alpha:]])(not|never|haven.t|hasn.t|didn.t|won.t)[[:space:][:alnum:]]{0,16}(completed|finished|implemented|fixed|shipped|merged|verified|passed)([^[:alpha:]]|$)' \
+    && ! printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq 'https://[^[:space:]]+/(pull|merge_requests)/[0-9]+|(^|[^[:alpha:]])(checks?|tests?|ci|validation).*?(passed|green|success)([^[:alpha:]]|$)'; then
+    printf 'warning: completion claim has no linked evidence; include a PR URL or a check result before ending the turn\n' >&2
+  fi
+fi
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  exit 0
+fi
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh

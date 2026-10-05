@@ -36,6 +36,8 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/home/data" "$case_dir/home/config" "$fakebin"
+  mkdir -p "$case_dir/home/data/task-x1"
+  printf '%s\n' '## Firstmate spec' "\`bin/allowed.sh\`" > "$case_dir/home/data/task-x1/brief.md"
   fm_git_init_commit "$case_dir/wt"
   git -C "$case_dir/wt" update-ref refs/remotes/origin/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
   cp "$ROOT/.tasks.toml" "$case_dir/home/.tasks.toml"
@@ -156,10 +158,14 @@ assert_logged_gh_merge() {
 add_gh_mocks() {
   local case_dir=$1 head=$2
   write_github_live_json "$case_dir" "$head"
+  : > "$case_dir/pr.diff"
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
+  "pr diff")
+    [ -f "$FM_TEST_PR_DIFF" ] && cat "$FM_TEST_PR_DIFF"
+    ;;
   "pr view")
     [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
     printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
@@ -451,11 +457,19 @@ glab_merge_line() {
 }
 
 run_pr_merge() {
-  local case_dir=$1 rc; shift
+  local case_dir=$1 rc task_id; shift
+  task_id=$1
+  if [ ! -f "${FM_TEST_HOME:-$case_dir/home}/data/$task_id/brief.md" ]; then
+    mkdir -p "${FM_TEST_HOME:-$case_dir/home}/data/$task_id"
+    printf '%s\n' '## Firstmate spec' "\`bin/allowed.sh\`" > "${FM_TEST_HOME:-$case_dir/home}/data/$task_id/brief.md"
+  fi
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="${FM_TEST_HOME:-$case_dir/home}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_SEAM="${FM_TEST_SEAM:-0}" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_PR_DIFF="$case_dir/pr.diff" \
+  FM_TEST_SCOPE_CHECK="${FM_TEST_SCOPE_CHECK:-0}" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
@@ -3832,6 +3846,30 @@ test_allow_missing_follows_the_allow_red_rules() {
   pass "fm-pr-merge --allow-missing is single use, attended-only, and GitHub-only like --allow-red"
 }
 
+test_scope_check_refuses_file_outside_brief_spec() {
+  local case_dir out rc
+  case_dir=$(make_case scope-outside)
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  cat > "$case_dir/pr.diff" <<'EOF'
+diff --git a/docs/outside.md b/docs/outside.md
+index 1111111..2222222 100644
+--- a/docs/outside.md
++++ b/docs/outside.md
+@@ -1 +1,2 @@
+-old
++new
+EOF
+  set +e
+  out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/17 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "scope check must refuse a file outside the Firstmate spec"
+  assert_contains "$out" 'scope diff: +1 -1; changed files: docs/outside.md' "scope refusal must print its diff stat"
+  assert_contains "$out" 'files outside the Firstmate spec scope: docs/outside.md' "scope refusal must name the unexpected file"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "scope refusal must happen before the forge merge"
+  pass "fm-pr-merge: refuses a PR that changes a file outside the brief scope"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -3882,6 +3920,7 @@ test_red_and_unreported_checks_are_reported_together
 test_unreadable_required_set_refuses
 test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
+test_scope_check_refuses_file_outside_brief_spec
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
