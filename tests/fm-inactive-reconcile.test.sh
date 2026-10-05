@@ -34,6 +34,7 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_CREW_READ_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_CREW_READ_LOG"
 printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
 SH
   fm_test_fake_herdr_send "$fake"
@@ -247,6 +248,25 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
+test_queued_execution_artifacts_are_never_reconciled() {
+  local id phase
+  for phase in "done" failed; do
+    make_world "queued-$phase"
+    for id in queued queued-held; do
+      write_child "$MAIN" "$id" "$phase: old retained execution"
+      FM_HOME="$MAIN" "$ROOT/bin/fm-tasks-axi.sh" reopen "$id" >/dev/null || fail 'queued transition failed'
+    done
+    FM_HOME="$MAIN" "$ROOT/bin/fm-tasks-axi.sh" hold queued-held --kind captain --reason 'explicit queued hold' >/dev/null || fail 'queued hold failed'
+    FM_CREW_READ_LOG="$WORLD/crew-reads" FM_FAKE_CREW_STATE="$phase" run_reconcile "$MAIN" --startup || fail 'queued reconciliation scan failed'
+    [ ! -s "$WORLD/crew-reads" ] || fail 'queued or queued-held metadata reached executor read'
+    [ ! -s "$MAIN/state/.wake-queue" ] || fail 'queued old execution generated an inactive wake'
+    [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail 'queued old execution generated an outcome receipt'
+    [ ! -s "$WORLD/forge.log" ] || fail 'queued old execution reached provider/forge read'
+  done
+  pass 'queued and queued-held old done/failed artifacts produce zero execution reads or inactive outcomes'
+}
+
+test_queued_execution_artifacts_are_never_reconciled
 test_main_direct_terminal_presentation_receipt
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely

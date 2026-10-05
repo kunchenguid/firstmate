@@ -337,8 +337,17 @@ def backfill_preview(data: Path, state: Path) -> dict[str, Any]:
                 read(data, task_id)
                 candidate(task_id, path, "canonical")
             elif name == "lifecycle.json":
-                value = load_source(path)
-                if value.get("schema") not in ("fm-task-lifecycle.v1", "fm-task-lifecycle.v2") or value.get("task_id") != task_id:
+                if path.is_symlink() or not path.is_file():
+                    raise Refusal(f"unsafe migration source: {path}")
+                try:
+                    value = json.loads(path.read_bytes())
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    ignored.append({"path": str(path), "reason": "malformed noncanonical lifecycle source"})
+                    continue
+                if not isinstance(value, dict) or value.get("schema") not in ("fm-task-lifecycle.v1", "fm-task-lifecycle.v2"):
+                    ignored.append({"path": str(path), "reason": "invalid noncanonical lifecycle schema"})
+                    continue
+                if value.get("task_id") != task_id:
                     raise Refusal(f"invalid lifecycle identity: {path}")
                 candidate(task_id, path, "lifecycle", {key: value[key] for key in ("title", "kind", "repo") if key in value})
             else:

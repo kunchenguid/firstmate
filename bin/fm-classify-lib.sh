@@ -271,7 +271,7 @@ status_line_is_task_event() {
     || [[ "$line" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}[[:space:]]+ ]]; then
     line=${line#* }
   fi
-  case "$line" in *:*) ;; *) return 1 ;; esac
+  case "$line" in *:*) ;; *) status_is_captain_relevant "$line"; return $? ;; esac
   status_is_terminal_verb "$line" && return 0
   verb=$(status_line_verb "$line")
   case "$verb" in
@@ -488,7 +488,7 @@ EOF
 # presentation has its separate operational contract and is left untouched.
 _fm_decision_dispositions() { # <state>
   local data=${FM_DATA_OVERRIDE:-${FM_HOME:-${1%/state}}/data}
-  if [ -n "${STATUS_TASK_DISPOSITIONS:-}" ]; then printf '%s\n' "$STATUS_TASK_DISPOSITIONS"
+  if [ "${STATUS_TASK_DISPOSITIONS+x}" = x ]; then printf '%s\n' "$STATUS_TASK_DISPOSITIONS"
   else fm_task_disposition_snapshot "$data"; fi
 }
 _fm_decision_candidate() { # <dispositions> <id>
@@ -811,12 +811,17 @@ EOF
   return 0
 }
 
-status_presentation_snapshot() {  # <state>
-  local state=$1 f task size ident
+status_presentation_snapshot() {  # <state> [explicit-task-ids]
+  local state=$1 selected=${2:-} f task size ident
   for f in "$state"/*.status; do
+    task=${f##*/}; task=${task%.status}
+    if [ "$#" -ge 2 ]; then
+      case "
+$selected
+" in *$'\n'"$task"$'\n'*) ;; *) continue ;; esac
+    fi
     [ -e "$f" ] || continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
-    task=$(basename "$f"); task="${task%.status}"
     size=$(_fm_status_file_size "$f") || return 1
     size=${size//[[:space:]]/}
     ident=$(_fm_open_decisions_file_ident "$f") || return 1
@@ -1334,8 +1339,8 @@ $snapshot
 EOF
 }
 
-status_commit_presentation_snapshot() {  # <state> <snapshot-or-context>
-  local state=$1 snapshot=$2 task endpoint ident presented backstop f cur_ident size tmp acknowledged_task acknowledged_endpoint
+status_commit_presentation_snapshot() {  # <state> <snapshot-or-context> [--preserve-unselected]
+  local state=$1 snapshot=$2 preserve=${3:-} task endpoint ident presented backstop f cur_ident size tmp acknowledged_task acknowledged_endpoint
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident presented backstop; do
@@ -1365,6 +1370,17 @@ EOF
   done <<EOF
 $snapshot
 EOF
+  if [ "$preserve" = --preserve-unselected ] && [ -f "$state/.status-presentation-cursor" ]; then
+    # The caller holds the presentation lock and validated this manifest when
+    # capturing context. Copy untouched receipt rows without opening old logs.
+    LC_ALL=C awk -F '\t' '
+      NR == FNR { order[++count]=$1; updated[$1]=$0; next }
+      { if ($1 in updated) { print updated[$1]; delete updated[$1] } else print }
+      END { for (i=1; i<=count; i++) if (order[i] in updated) print updated[order[i]] }
+    ' "$tmp" "$state/.status-presentation-cursor" > "$tmp.kept" || { rm -f "$tmp" "$tmp.kept"; return 1; }
+    mv -f "$tmp.kept" "$tmp" || { rm -f "$tmp" "$tmp.kept"; return 1; }
+    if cmp -s "$tmp" "$state/.status-presentation-cursor"; then rm -f "$tmp"; return 0; fi
+  fi
   mv -f "$tmp" "$state/.status-presentation-cursor" || { rm -f "$tmp"; return 1; }
 }
 

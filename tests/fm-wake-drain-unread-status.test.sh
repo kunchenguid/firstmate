@@ -429,17 +429,18 @@ test_snapshot_failure_is_visible() {
   pass "snapshot failures are reported visibly"
 }
 
-test_warm_manifest_is_parsed_once_per_presentation() {
+test_warm_manifest_context_is_reused_per_presentation() {
   local dir state home out probe i task context_reads cursor_reads
   dir=$(make_case one-manifest-parse); state="$dir/state"; out="$dir/drain.out"; probe="$dir/manifest-reads"
   home="$dir/home"; mkdir -p "$home/data"
   i=1
   while [ "$i" -le 20 ]; do
     task=$(printf 'reuse-%02d' "$i")
+    register_task_fixture "$state" "$task"
     printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
     i=$((i + 1))
   done
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "bootstrap drain failed while creating the warm cursor manifest"
   i=1
   while [ "$i" -le 20 ]; do
@@ -449,17 +450,17 @@ test_warm_manifest_is_parsed_once_per_presentation() {
   done
 
   FM_STATUS_MANIFEST_READ_PROBE="$probe" HOME="$home" FM_HOME="$home" \
-    FM_DATA_OVERRIDE="$home/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "instrumented warm-manifest drain failed"
   context_reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
   cursor_reads=$(awk -F '\t' '$1 == "cursor" { count++ } END { print count + 0 }' "$probe")
   [ "$context_reads" -eq 1 ] && [ "$cursor_reads" -eq 0 ] \
     || fail "one presentation used $context_reads context reads and $cursor_reads standalone cursor reads: $(cat "$probe")"
   grep -F 'reuse-01 note: new reuse-01' "$out" >/dev/null \
-    || fail "single-parse presentation lost the first unread note: $(cat "$out")"
+    || fail "context reuse lost the first unread note: $(cat "$out")"
   grep -F 'reuse-20 note: new reuse-20' "$out" >/dev/null \
-    || fail "single-parse presentation lost the last unread note: $(cat "$out")"
-  pass "one warm presentation parses the cursor manifest once and preserves fleet output"
+    || fail "context reuse lost the last unread note: $(cat "$out")"
+  pass "one warm presentation reuses one validated cursor context and preserves fleet output"
 }
 
 test_queued_signals_reuse_the_presentation_context() {
@@ -469,10 +470,11 @@ test_queued_signals_reuse_the_presentation_context() {
   i=1
   while [ "$i" -le 12 ]; do
     task=$(printf 'queued-%02d' "$i")
+    register_task_fixture "$state" "$task"
     printf 'note: bootstrap %s\n' "$task" > "$state/$task.status"
     i=$((i + 1))
   done
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "bootstrap drain failed while creating the queued-signal manifest"
   i=1
   while [ "$i" -le 12 ]; do
@@ -484,7 +486,7 @@ test_queued_signals_reuse_the_presentation_context() {
   done
 
   FM_STATUS_MANIFEST_READ_PROBE="$probe" HOME="$home" FM_HOME="$home" \
-    FM_DATA_OVERRIDE="$home/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "instrumented queued-signal drain failed"
   context_reads=$(awk -F '\t' '$1 == "context" { count++ } END { print count + 0 }' "$probe")
   cursor_reads=$(awk -F '\t' '$1 == "cursor" { count++ } END { print count + 0 }' "$probe")
@@ -504,7 +506,7 @@ test_queue_rows_without_a_status_snapshot_stay_valid() {
   append_wake "$state" signal missing.status 'signal: missing.status' \
     || fail "could not queue the missing-status signal"
 
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     "$DRAIN" > "$out" 2> "$err" \
     || fail "queue-only presentation failed without a status snapshot: $(cat "$err")"
   grep -F 'signal' "$out" >/dev/null \
@@ -520,7 +522,7 @@ test_duplicate_manifest_row_refuses_without_advancing() {
   home="$dir/home"; mkdir -p "$home/data"
   printf 'note: bootstrap duplicate fixture\n' > "$state/duplicate.status"
   register_task_fixture "$state" "duplicate"
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
     || fail "bootstrap drain failed while creating the duplicate-row fixture"
   manifest="$state/.status-presentation-cursor"
   original=$(cat "$manifest")
@@ -529,7 +531,7 @@ test_duplicate_manifest_row_refuses_without_advancing() {
   printf 'note: must remain unread after refusal\n' >> "$state/duplicate.status"
   register_task_fixture "$state" "duplicate"
 
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "duplicate-row refusal changed the top-level empty-queue compatibility exit"
   grep -F 'STATUS PRESENTATION INCOMPLETE: status cursor manifest could not be read safely.' "$out" >/dev/null \
     || fail "duplicate cursor row did not fail closed visibly: $(cat "$out")"
@@ -543,6 +545,7 @@ test_legacy_three_column_manifest_migrates() {
   dir=$(make_case legacy-three-column); state="$dir/state"; home="$dir/home"
   out="$dir/drain.out"; manifest="$state/.status-presentation-cursor"; mkdir -p "$home/data"
   task=legacy
+  register_task_fixture "$state" "$task"
   printf 'note: already presented\nnote: newly unread\n' > "$state/$task.status"
   ident=$(FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-classify-lib.sh"
@@ -551,7 +554,7 @@ test_legacy_three_column_manifest_migrates() {
   presented=$(printf 'note: already presented\n' | wc -c | tr -d '[:space:]')
   printf '%s\t%s\t%s\n' "$task" "$ident" "$presented" > "$manifest"
 
-  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
+  HOME="$home" FM_HOME="$home" FM_DATA_OVERRIDE="$dir/data" FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" \
     "$DRAIN" > "$out" || fail "drain rejected a legacy three-column cursor manifest"
   grep -F 'legacy note: newly unread' "$out" >/dev/null \
     || fail "legacy cursor migration lost the unread line: $(cat "$out")"
@@ -650,6 +653,93 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
+test_terminal_unqueued_status_is_inert_but_explicit_obligations_survive() {
+  local dir state id out manifest before row
+  dir=$(make_case terminal-discovery-boundary); state="$dir/state"
+  for id in ended archived; do
+    register_task_fixture "$state" "$id"
+    prime_cursor "$state" "$state/$id.status"
+  done
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" "done" ended >/dev/null || fail 'done fixture failed'
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" archive archived >/dev/null || fail 'archive fixture failed'
+  manifest="$state/.status-presentation-cursor"
+  cp "$manifest" "$dir/before"
+  for id in ended archived orphan; do printf 'note: %s unqueued historical append\n' "$id" >> "$state/$id.status"; done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" || fail 'terminal-only empty drain failed'
+  [ ! -s "$dir/out" ] || fail "terminal-only ordinary drain read historical notes: $(cat "$dir/out")"
+  cmp -s "$manifest" "$dir/before" || fail 'terminal-only drain mutated its cursor manifest'
+  register_task_fixture "$state" active
+  printf 'note: positive current action\n' > "$state/active.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" || fail 'mixed drain failed'
+  out=$(cat "$dir/out")
+  assert_contains "$out" 'active note: positive current action' 'in-flight informational status disappeared'
+  assert_not_contains "$out" 'unqueued historical append' 'terminal or unknown log entered ordinary discovery'
+  for id in ended archived; do
+    before=$(awk -F '\t' -v id="$id" '$1==id' "$dir/before")
+    row=$(awk -F '\t' -v id="$id" '$1==id' "$manifest")
+    [ "$before" = "$row" ] || fail 'mixed drain changed an unselected terminal receipt'
+  done
+  for id in ended archived orphan; do
+    append_wake "$state" signal "$id.status" "signal: $state/$id.status" || fail 'explicit historical signal failed'
+  done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail 'explicit obligation drain failed'
+  out=$(cat "$dir/out")
+  for id in ended archived orphan; do
+    assert_contains "$out" "$id.status" 'explicit raw wake was dropped'
+    assert_contains "$out" "note: $id unqueued historical append" 'explicit captured answer was dropped'
+  done
+  assert_contains "$(cat "$dir/err")" 'WAKE_ACK_REQUIRED:' 'explicit wake lost acknowledgement'
+  assert_contains "$(cat "$dir/err")" '--recovery-generation' 'explicit wake lost generation acknowledgement'
+  pass 'unqueued terminal/orphan status is inert, active notes remain visible, and explicit wakes retain their byte/ack obligations'
+}
+
+test_captured_status_span_survives_subsequent_archival() {
+  local dir state
+  dir=$(make_case captured-terminal-boundary); state="$dir/state"
+  register_task_fixture "$state" captured
+  printf 'note: captured before archive\n' > "$state/captured.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    snapshot=$(status_presentation_snapshot "$STATE" captured) || exit 1
+    "$1/bin/fm-tasks-axi.sh" archive captured >/dev/null || exit 1
+    printf "note: unqueued after archive\n" >> "$STATE/captured.status"
+    scan_unread_surface_snapshot "$STATE" "$snapshot" > "$2" || exit 1
+    status_commit_presentation_snapshot "$STATE" "$snapshot" || exit 1
+  ' _ "$ROOT" "$dir/captured.out" || fail 'captured span exercise failed'
+  assert_grep 'captured before archive' "$dir/captured.out" 'previously captured presentation was lost'
+  assert_not_contains "$(cat "$dir/captured.out")" 'unqueued after archive' 'captured span read beyond its byte endpoint'
+  cp "$state/.status-presentation-cursor" "$dir/before"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/next" || fail 'post-capture terminal drain failed'
+  [ ! -s "$dir/next" ] || fail 'ordinary drain read post-archive appended status'
+  cmp -s "$dir/before" "$state/.status-presentation-cursor" || fail 'ordinary drain advanced post-archive cursor'
+  pass 'an explicitly captured span survives archival and does not admit later historical appends'
+}
+
+test_canonical_failure_preserves_only_explicit_status_obligations() {
+  local dir state out
+  dir=$(make_case corrupt-owner-obligation); state="$dir/state"
+  register_task_fixture "$state" broken
+  printf '{broken' > "$dir/data/broken/task.json"
+  printf 'note: explicit independent byte obligation\n' > "$state/orphan.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail 'owner-failure empty drain failed'
+  out=$(cat "$dir/out")
+  assert_contains "$out" 'canonical task inventory unavailable' 'owner failure was hidden'
+  assert_not_contains "$out" 'independent byte obligation' 'owner failure fell back to orphan discovery'
+  [ ! -e "$state/.status-presentation-cursor" ] || fail 'owner failure created an ordinary status cursor'
+  append_wake "$state" signal orphan.status 'signal: orphan.status' || fail 'explicit signal failed'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail 'owner-failure explicit drain failed'
+  out=$(cat "$dir/out")
+  assert_contains "$out" 'canonical task inventory unavailable' 'explicit receipt concealed business-owner failure'
+  assert_contains "$out" 'note: explicit independent byte obligation' 'business-owner failure dropped explicit queued bytes'
+  assert_contains "$out" 'orphan.status' 'business-owner failure dropped raw signal'
+  assert_not_contains "$out" 'STATUS OUTCOME BACKSTOP (' 'owner failure inferred automatic task outcome'
+  pass 'canonical failure admits no ordinary status discovery while preserving explicit raw and byte obligations'
+}
+
+test_canonical_failure_preserves_only_explicit_status_obligations
+test_terminal_unqueued_status_is_inert_but_explicit_obligations_survive
+test_captured_status_span_survives_subsequent_archival
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -663,7 +753,7 @@ test_settled_retirement_refuses_orphan_decision_cursor
 test_status_append_serializes_with_retirement
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
-test_warm_manifest_is_parsed_once_per_presentation
+test_warm_manifest_context_is_reused_per_presentation
 test_queued_signals_reuse_the_presentation_context
 test_queue_rows_without_a_status_snapshot_stay_valid
 test_duplicate_manifest_row_refuses_without_advancing

@@ -22,10 +22,10 @@
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
 #
-# Direct ordinary crewmates whose newest meta, status, or
+# Only canonical in-flight direct ordinary crewmates whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. It then uses
-# fm-crew-state.sh as the sole current-state source.
+# fm-crew-state.sh for current execution facts; the inventory owns business state.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
 # Working, paused, parked, blocked, unknown, and captain-held work retain their
@@ -385,7 +385,7 @@ scan() {
     echo 'RECONCILE: canonical task inventory unavailable; no artifact discovery fallback' >&2
     return 1
   }
-  SCAN_TASK_IDS=$(printf '%s' "$listing" | jq -r '.tasks[] | select(.state=="queued" or .state=="in_flight") | .id') || return 1
+  SCAN_TASK_IDS=$(printf '%s' "$listing" | jq -r '.tasks[] | select(.state=="in_flight") | .id') || return 1
   SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then

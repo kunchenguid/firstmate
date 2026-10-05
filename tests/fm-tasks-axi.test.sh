@@ -158,20 +158,32 @@ for name in ('old', 'home-record', 'orphan-report'):
 (root/'state/orphan-report.status').write_text('old opaque status bytes\n')
 (root/'state/status-only.status').write_text('done: legacy report without acceptance proof\n')
 (root/'state/transferred-only.status').write_text('needs-decision [corr=review] [key=route]: choose route\ncaptain-held [key=route]: transferred to durable hold\n')
+(root/'state/bare-merged.status').write_text('working: old work\nmerged\n')
+(root/'state/bare-ready.status').write_text('working: old work\nPR ready\n')
+(root/'state/unrelated.status').write_text('working: old work\nunrelated free prose\n')
+for name in ('corrupt-report', 'corrupt-only', 'corrupt-shape', 'independent-report'):
+    (root/'data'/name).mkdir()
+for name in ('corrupt-report', 'independent-report'):
+    (root/'data'/name/'report.md').write_text('preserved independent report')
+for name in ('corrupt-report', 'corrupt-only'):
+    (root/'data'/name/'lifecycle.json').write_text('{broken')
+(root/'data/corrupt-shape/lifecycle.json').write_text('[]')
 (root/'state/timestamp-only.status').write_text('[2026-01-01T12:00:00Z] working: legacy timestamp\n12:00:01 resolved: legacy answer\n')
 (root/'data/backlog.md').write_text('## Done\n- [x] legacy - Legacy title (kind: ship) (repo: known) (done 2020-01-01)\n')
 existing = {p: p.read_bytes() for p in (root/'data').glob('*/task.json')}
 manifest = root/'preview.json'
 manifest.write_text(run('backfill-archived', '--state-dir', str(root/'state'), '--preview').stdout)
 preview = json.loads(manifest.read_text())
-assert {e['id'] for e in preview['entries'] if e['disposition']=='absent'} == {'old','orphan-report','status-only','transferred-only','timestamp-only','legacy'}
+assert {e['id'] for e in preview['entries'] if e['disposition']=='absent'} == {'old','orphan-report','status-only','transferred-only','timestamp-only','bare-merged','bare-ready','corrupt-report','independent-report','legacy'}
 assert any(e['id']=='home-record' for e in preview['exclusions'])
+assert sum('noncanonical lifecycle' in e['reason'] for e in preview['ignored_sources'])==3
+assert not any(e['id'] in ('corrupt-only','corrupt-shape','unrelated') for e in preview['entries'])
 # Creation after preview wins without the importer overwriting the new active record.
 run('add', 'old', 'Concurrently created', '--start')
 existing[root/'data/old/task.json'] = (root/'data/old/task.json').read_bytes()
 run('backfill-archived', '--state-dir', str(root/'state'), '--apply-file', str(manifest))
 for p, raw in existing.items(): assert p.read_bytes() == raw
-for name in ('orphan-report','status-only','transferred-only','timestamp-only','legacy'):
+for name in ('orphan-report','status-only','transferred-only','timestamp-only','bare-merged','bare-ready','corrupt-report','independent-report','legacy'):
     record = json.loads((root/'data'/name/'task.json').read_bytes())
     assert record['state']=='archived' and record['completion'] is None
     assert not any(record['progress'].values())
@@ -197,6 +209,15 @@ published = (root/'data/partial-a/task.json').read_bytes()
 run('backfill-archived', '--state-dir', str(root/'state'), '--apply-file', str(manifest))
 assert (root/'data/partial-a/task.json').read_bytes()==published
 assert json.loads((root/'data/partial-b/task.json').read_bytes())['state']=='archived'
+# Unsafe historical ownership is still a refusal, independently of valid reports.
+(root/'data/mismatched').mkdir()
+(root/'data/mismatched/lifecycle.json').write_text(json.dumps({'schema':'fm-task-lifecycle.v1','task_id':'someone-else'}))
+run('backfill-archived','--state-dir',str(root/'state'),'--preview',ok=False)
+(root/'data/mismatched/lifecycle.json').unlink()
+(root/'data/unsafe').mkdir()
+(root/'data/unsafe/lifecycle.json').symlink_to(root/'data/corrupt-report/lifecycle.json')
+run('backfill-archived','--state-dir',str(root/'state'),'--preview',ok=False)
+(root/'data/unsafe/lifecycle.json').unlink()
 # A corrupt canonical record is never interpreted as absent and never overwritten.
 (root/'data/broken').mkdir(); (root/'data/broken/task.json').write_text('{broken')
 run('inventory',ok=False)
