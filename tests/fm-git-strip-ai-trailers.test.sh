@@ -346,6 +346,59 @@ test_git_c_override_still_strips_and_chains_commit_hooks() {
   pass "a git -c hooksPath override still strips the trailer and chains the project's hooks"
 }
 
+# Execute the recipe from the generated public brief, not a duplicate command
+# in this test: it must expose canonical hooks without changing the pane.
+test_scaffolded_canonical_hook_check() {
+  local repo hooks home kind recipe mode effective rc
+  repo="$TMP_ROOT/canonical-check"
+  home="$TMP_ROOT/brief-home"
+  make_repo "$repo"
+  mkdir -p "$home/data" "$repo/project-hooks"
+  write_marker_hook "$repo/project-hooks/pre-commit" canonical-pre-commit
+  git -C "$repo" config core.hooksPath project-hooks
+  hooks="$TMP_ROOT/hooks-canonical"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  cat >"$repo/health-check" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+actual=$(git rev-parse --path-format=absolute --git-path hooks/pre-commit)
+expected="$PWD/project-hooks/pre-commit"
+[ -x "$actual" ] && [ "$actual" = "$expected" ] || exit 42
+exit "${CHECK_EXIT:-0}"
+EOF
+  chmod +x "$repo/health-check"
+  (cd "$repo" && with_hooks_env "$hooks" ./health-check)
+  rc=$?
+  expect_code 42 "$rc" "pane override must reproduce the canonical-hook health-check failure"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    mode=(--mode "$kind")
+    [ "$kind" != scout ] || mode=(--scout)
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "canonical-$kind" example "${mode[@]}" >/dev/null ||
+      fail "could not scaffold $kind instructions"
+    recipe=$(awk '/^env .* PROJECT_HEALTH_CHECK / {sub(/PROJECT_HEALTH_CHECK .*/, "./health-check"); print}' \
+      "$home/data/canonical-$kind/brief.md")
+    [ -n "$recipe" ] || fail "$kind brief has no executable health-check recipe"
+    (cd "$repo" && with_hooks_env "$hooks" bash -c "$recipe") ||
+      fail "$kind scaffolded recipe did not pass canonical-hook health check"
+    (cd "$repo" && CHECK_EXIT=23 with_hooks_env "$hooks" bash -c "$recipe")
+    rc=$?
+    expect_code 23 "$rc" "$kind recipe must preserve health-check failures"
+    # git -c also propagates its override to child commands through PARAMETERS.
+    (cd "$repo" && with_hooks_env "$hooks" git -c core.hooksPath="$hooks" \
+      -c "alias.health=!$recipe" health) || fail "$kind recipe retained git -c hooks override"
+  done
+  effective=$(with_hooks_env "$hooks" git -C "$repo" rev-parse --path-format=absolute --git-path hooks)
+  assert_equals "$hooks" "$effective" "health check must not change the pane override"
+  with_hooks_env "$hooks" git -C "$repo" commit -q --allow-empty \
+    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: after canonical check' ||
+    fail "ordinary commit after health check failed"
+  [ -f "$repo/canonical-pre-commit.ran" ] || fail "canonical project hook was not chained"
+  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "cursoragent@cursor.com" \
+    "trailer stripping was lost after canonical-hook health check"
+  pass "all worker briefs provide a command-scoped canonical-hook check without disabling subsequent commit protection"
+}
+
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
   msg="$TMP_ROOT/msg.txt"
@@ -371,6 +424,7 @@ test_unresolvable_project_hookspath_still_refuses
 test_valueless_project_hookspath_still_refuses
 test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
+test_scaffolded_canonical_hook_check
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 
 echo "# all fm-git-strip-ai-trailers tests passed"
