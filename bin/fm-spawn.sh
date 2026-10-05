@@ -4489,7 +4489,18 @@ if [ "$KIND" = secondmate ]; then
   busy_notify_turnend=false
   if [ "$RAW_LAUNCH" -ne 0 ]; then
     case "$HARNESS" in
-    claude* | pi | pi-signed | omp) WIRING_HARNESS= ;;
+    claude* | pi | pi-signed | omp)
+      WIRING_HARNESS=
+      if [ -e "$STATE_REAL/$ID.busy-gen" ]; then
+        "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --current-gen || {
+          echo "error: failed to retire the earlier busy-state contract for $ID" >&2
+          exit 1
+        }
+      fi
+      ;;
+    esac
+    case "$HARNESS" in
+    claude*) rm -f "$WT/.fm-busy-stop" ;;
     esac
   fi
 fi

@@ -784,6 +784,25 @@ test_raw_secondmate_launch_writes_no_busy_wiring() {
     out=$(classify "$harness" "$id" "$state")
     [ "$out" = "unknown missing" ] || fail "raw $harness secondmate must classify unknown missing, got '$out'"
   done
+
+  case_dir="$TMP_ROOT/sm-raw-over-armed"
+  id='sm-raw-over-armed'
+  out=$(spawn_secondmate_harness "$case_dir" "$id" claude) \
+    || fail "canonical claude secondmate spawn failed: $out"
+  state="$case_dir/primary/state"
+  sm="$case_dir/sm"
+  assert_present "$state/$id.busy-gen" "canonical claude secondmate spawn did not arm a busy generation"
+  assert_present "$sm/.fm-busy-stop" "canonical claude secondmate spawn did not write the Stop pointer"
+  : > "$case_dir/launch.log"
+  out=$(FM_BACKEND=tmux FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    fm_test_run_spawn "$case_dir/primary" "$sm" "$case_dir/fake/fakebin" "$id" "$sm" 'claude --fm-raw-flag' --secondmate) \
+    || fail "raw claude respawn over an armed secondmate must succeed: $out"
+  assert_contains "$(cat "$case_dir/launch.log")" 'claude --fm-raw-flag' "raw respawn did not launch the raw command"
+  assert_absent "$state/$id.busy-gen" "raw respawn kept the earlier busy generation"
+  assert_absent "$state/$id.busy-state" "raw respawn kept the earlier busy record"
+  assert_absent "$sm/.fm-busy-stop" "raw respawn kept the earlier Stop pointer"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "unknown missing" ] || fail "raw respawn over an armed secondmate must classify unknown missing, got '$out'"
   pass "a raw claude, pi, pi-signed, or omp secondmate launch writes no busy wiring and classifies unknown"
 }
 
