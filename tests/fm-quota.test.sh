@@ -184,3 +184,32 @@ if kill -0 "$hang_pid" 2>/dev/null; then
   fail "timed-out Codex child remained alive"
 fi
 pass "timed-out provider child is reaped without touching another process"
+
+cat > "$FAKEBIN/traex" <<'SH'
+#!/usr/bin/env bash
+set -eu
+sleep 30 &
+printf '%s\n' "$!" > "${FM_QUOTA_DESCENDANT_PID:?}"
+exit 0
+SH
+chmod +x "$FAKEBIN/traex"
+started_ns=$(date +%s%N)
+set +e
+PATH="$FAKEBIN:$PATH" FM_QUOTA_TIMEOUT_MS=150 FM_QUOTA_DESCENDANT_PID="$TMP_ROOT/descendant.pid" \
+  "$TOOL" --json --provider traex > "$TMP_ROOT/descendant.json"
+descendant_rc=$?
+set -e
+elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
+[ "$descendant_rc" -eq 1 ] || fail "provider descendant timeout did not produce exit 1"
+[ "$elapsed_ms" -lt 1800 ] || fail "provider descendant held the query open for ${elapsed_ms}ms"
+descendant_pid=$(cat "$TMP_ROOT/descendant.pid")
+tries=0
+while kill -0 "$descendant_pid" 2>/dev/null && [ "$tries" -lt 20 ]; do
+  sleep 0.05
+  tries=$((tries + 1))
+done
+if kill -0 "$descendant_pid" 2>/dev/null; then
+  kill -KILL "$descendant_pid" 2>/dev/null || true
+  fail "provider descendant survived after its launcher exited"
+fi
+pass "timeout reaps the owned process group after its leader exits"

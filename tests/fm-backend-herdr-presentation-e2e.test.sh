@@ -437,7 +437,7 @@ EOF
 
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'while :; do sleep 60; done'" --mode review-PR --yolo off --backend herdr
 }
 
@@ -462,7 +462,7 @@ finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
 
 teardown_task() {  # <id> <home>
   local id=$1 home=$2
-  FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force

@@ -167,7 +167,7 @@ created=$("$HELPER" run "$SESSION" workspace create --cwd "$PROJECT" --label ins
 PANE=$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$PANE" ] || fail 'could not start isolated Pi session'
 "$HELPER" run "$SESSION" terminal session control "$PANE" --cols 160 --rows 44 </dev/null >/dev/null || fail 'could not size lab viewport'
-printf -v launch '%q ' env "FM_HOME=$HOME_DIR" "FM_ROOT_OVERRIDE=$PROJECT" FM_GATE_REFUSE_BYPASS=1 \
+printf -v launch '%q ' env "FM_HOME=$HOME_DIR" "FM_ROOT_OVERRIDE=$PROJECT" \
   pi --approve --no-tools --session "$PI_SESSION" -e "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 "$HELPER" run "$SESSION" pane run "$PANE" "$launch" || fail 'could not start isolated Pi session'
 

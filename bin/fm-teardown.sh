@@ -268,8 +268,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -587,7 +585,6 @@ teardown_retained_copy() (
   local copy_lock='' copy_lock_held=0 WT PROJ KIND=ship MODE=no-mistakes PR_URL=''
   # shellcheck source=bin/fm-lease-lib.sh
   . "$SCRIPT_DIR/fm-lease-lib.sh"
-  fm_refuse_if_gate_agent
   [ "$(fm_lease_actor)" = main ] || { echo 'REFUSED: retained copy cleanup belongs to MAIN' >&2; exit 6; }
   fm_lease_guard "$ID" 'retained copy cleanup' || exit $?
   lock=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -726,9 +723,6 @@ fm_lock_try_acquire "$CONTROL_LOCK" || {
   exit 1
 }
 CONTROL_LOCK_HELD=1
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
-# down a worktree (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
 fm_backlog_record_present "$META" "task record" "$STATE" || {

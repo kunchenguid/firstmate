@@ -93,9 +93,11 @@ function taskChild(command, args) {
 }
 
 function signalTaskChild(child, signal) {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child.pid) return;
   try {
-    if (process.platform === "win32") child.kill(signal);
+    if (process.platform === "win32") {
+      if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+    }
     else process.kill(-child.pid, signal);
   } catch (error) {
     if (error?.code !== "ESRCH") throw error;
@@ -103,7 +105,7 @@ function signalTaskChild(child, signal) {
 }
 
 function waitForExit(child) {
-  if (child.exitCode !== null || child.signalCode !== null) {
+  if (!activeChildren.has(child)) {
     return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
   }
   return new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
@@ -121,7 +123,7 @@ async function waitWithTimeout(promise, milliseconds) {
 }
 
 async function stopTaskChild(child) {
-  if (child.exitCode !== null || child.signalCode !== null) {
+  if (!activeChildren.has(child)) {
     return { forced: false, code: child.exitCode, signal: child.signalCode };
   }
   const exit = waitForExit(child);

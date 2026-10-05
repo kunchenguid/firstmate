@@ -34,9 +34,6 @@ if [ "${1:-}" = --check ] && [ "${2:-}" = --terminal ] && [ "${4:-}" = --pid ] &
 fi
 [ "${1:-}" = --apply ] && [ "$#" = 2 ] || { echo 'error: use --check --terminal ID --pid ORIGINAL_PID or --apply RECEIPT' >&2; exit 2; }
 RECEIPT=$2
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-backend.sh

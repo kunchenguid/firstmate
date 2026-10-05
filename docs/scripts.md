@@ -3,7 +3,7 @@
 The first mate drives these; interactive entrypoints work by hand too, while `*-lib.sh` files are sourced helpers.
 Each row is one purpose clause only: the script's own header comment is the authoritative description of its behavior, flags, and contracts, so read the header before first use.
 If you have changed away from the firstmate home in an interactive shell, invoke these scripts by absolute path through the repo's `bin/` directory; the scripts self-locate internally after they start.
-`docs/sessionstart-nudge.md` covers the silent session-open hook use; `fm-gate-refuse-lib.sh`'s header owns historical validation-context refusal for fleet lifecycle entrypoints.
+`docs/sessionstart-nudge.md` covers the silent session-open hook use.
 
 | Script                   | Purpose                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
@@ -62,7 +62,6 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-procevent-when.sh`   | Fire a trust-bound deterministic action at most once when its registered condition holds, then wake with the outcome |
 | `fm-procevent-aime.sh`   | Adapt AIME event replay and result readback to the generic process-event transport    |
 | `fm-procevent-ida.sh`    | Reconcile iDA identity, submit once, normalize readback, capture reports, and re-arm through process-event transport |
-| `fm-gate-refuse-lib.sh`  | Historical validation-context refusal for fleet lifecycle entrypoints                 |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with loud cycle endings and bounded lifecycle ledger |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes and exit on actionable ones |
