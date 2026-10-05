@@ -115,7 +115,9 @@ jobs:
       - name: Install the Pi package for the Pi extension tests
         run: |
           set -eu
-          npm install -g @earendil-works/pi-coding-agent
+          # Pinned: Pi 0.99.x changed stock tool rendering and breaks the
+          # Calm/branch extension parity tests. Bump after porting the extensions.
+          npm install -g @earendil-works/pi-coding-agent@0.87.1
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable parallel shard 1
         run: |
@@ -219,7 +221,9 @@ jobs:
       - name: Install the Pi package for the Pi extension tests
         run: |
           set -eu
-          npm install -g @earendil-works/pi-coding-agent
+          # Pinned: Pi 0.99.x changed stock tool rendering and breaks the
+          # Calm/branch extension parity tests. Bump after porting the extensions.
+          npm install -g @earendil-works/pi-coding-agent@0.87.1
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
