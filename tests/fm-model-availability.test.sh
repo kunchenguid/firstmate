@@ -8,7 +8,7 @@ mkdir -p "$dir/bin"
 cat > "$dir/bin/quota-axi" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
-  models) printf '{"models":[]}\n' ;;
+  models) touch "$FM_TEST_MODELS_QUERIED"; printf '{"models":[]}\n' ;;
   *) printf '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"model:fable","percentRemaining":53}]}]}\n' ;;
 esac
 EOF
@@ -30,9 +30,11 @@ printf 'cursor-fable - current account model\n'
 EOF
 chmod +x "$dir/bin/quota-axi" "$dir/bin/pi" "$dir/bin/pi-signed" "$dir/bin/cursor-agent"
 tool="$ROOT/bin/fm-model-availability.sh"
+export FM_TEST_MODELS_QUERIED="$dir/models-queried"
 out=$(PATH="$dir/bin:$PATH" "$tool" claude fable)
 printf '%s' "$out" | jq -e '.harness == "claude" and .model == "fable" and
   .resolution == "uncertain" and .harnessCatalog.status == "unverified" and
+  (has("curatedModels") | not) and
   (.quotaModelScopes | any(.provider == "claude" and .scope == "model:fable"))' >/dev/null \
   || fail "Fable quota evidence was turned into a false Claude unavailability verdict: $out"
 out=$(PATH="$dir/bin:$PATH" "$tool" pi claude-fable-5)
@@ -53,4 +55,5 @@ printf '%s' "$out" | jq -e '.resolution == "available" and .harnessCatalog.sourc
 out=$(PATH="$dir/bin:$PATH" "$tool" cursor cursor-fable)
 printf '%s' "$out" | jq -e '.resolution == "available" and (.harnessCatalog.source | contains("cursor-agent --list-models"))' >/dev/null \
   || fail "verified Cursor catalog did not prove its own model: $out"
+test ! -e "$FM_TEST_MODELS_QUERIED" || fail "model availability queried quota's curated catalog"
 printf 'ok - Fable quota and harness evidence remain separate\n'

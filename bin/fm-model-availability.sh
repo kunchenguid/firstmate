@@ -75,14 +75,8 @@ quota_evidence=$(printf '%s' "$quota" | jq -c --arg model "$model" '
     {provider, scope:("model:" + $model), state:(.state.status // "unknown"),
      percentRemaining: ([.windows[]? | select(.id == ("model:" + $model)) | .percentRemaining] | first // null)}]
 ')
-model_catalog='{}'
-if command -v quota-axi >/dev/null 2>&1; then
-  model_catalog=$(quota-axi models --json --no-credential-refresh 2>/dev/null) || model_catalog='{}'
-fi
-if ! printf '%s' "$model_catalog" | jq -e 'type == "object"' >/dev/null 2>&1; then model_catalog='{}'; fi
-curated=$(printf '%s' "$model_catalog" | jq -c --arg model "$model" '[.models[]? | select(.id == $model) | {provider,id}]')
 jq -nc --arg harness "$harness" --arg model "$model" --arg status "$catalog_status" \
-  --arg source "$catalog_source" --argjson quota "$quota_evidence" --argjson curated "$curated" '
+  --arg source "$catalog_source" --argjson quota "$quota_evidence" '
   {harness:$harness,model:$model,harnessCatalog:{status:$status,source:$source},
-   quotaModelScopes:$quota,curatedModels:$curated,
+   quotaModelScopes:$quota,
    resolution:(if $status == "available" then "available" elif $status == "unsupported" then "unsupported-on-this-harness" else "uncertain" end)}'
