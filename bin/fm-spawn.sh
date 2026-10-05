@@ -2787,10 +2787,14 @@ rovo_config_override_flag() {
 # Firstmate worker always reads outside its cwd - a secondmate's steers live
 # in the PARENT home's state/<id>.inbox, and a ship or scout worker's launch
 # record, steers, and brief live in this home's state/operational-inbox,
-# state/<id>.inbox, and data/<id>, with the code root's .agents/skills named
-# by its definition of done - so every Claude launch, fresh spawn and
-# relaunch, in both permission modes, grants exactly those task-channel
-# directories. Paths resolve the way rovo_config_override_flag resolves them
+# state/<id>.inbox, and data/<id>, plus the code root's .agents/skills so the
+# worker can read the skill file the launch role names - so every Claude
+# launch, fresh spawn and relaunch, in both permission modes, grants exactly
+# those task-channel directories. The skills grant is that directory, not the
+# checkout root: Claude registers skills from <added-dir>/.claude/skills, so
+# adding the root would register them and would also open the whole checkout.
+# The launch role tells the worker to read the file instead. Paths resolve
+# the way rovo_config_override_flag resolves them
 # (real paths under the task's home). The state channel dirs are created
 # lazily by their first record, so they are made here: an --add-dir naming a
 # directory that does not exist at launch would leave the channel created
@@ -3063,7 +3067,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   {
-    fm_brief_worker_role "$STATE" "$ID" &&
+    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then

@@ -401,4 +401,31 @@ test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
 
+# A worker whose session root is another project cannot resolve a Firstmate
+# skill through the Skill tool. The launch role must name the skill file,
+# which the file-read grant already covers, and must not name the skill as a
+# tool target.
+test_worker_role_names_skill_file_for_a_foreign_project() {
+  local foreign role_file path
+  foreign="$TMP_ROOT/foreign-project"
+  mkdir -p "$foreign/.claude/skills"
+  role_file="$TMP_ROOT/worker-role.txt"
+  path="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
+  [ -f "$path" ] || fail "Firstmate skill file is missing at $path"
+  [ ! -e "$foreign/.claude/skills/firstmate-coding-guidelines/SKILL.md" ] ||
+    fail "the foreign project registers firstmate-coding-guidelines"
+  fm_brief_worker_role "$TMP_ROOT/state" upstream-4751 "$ROOT" >"$role_file"
+  assert_grep "$path" "$role_file" "worker role did not name the readable skill file"
+  assert_grep "Read that file directly." "$role_file" "worker role did not tell the worker to read the skill file"
+  assert_grep "The Skill tool cannot resolve it from a project worktree" "$role_file" \
+    "worker role still offers the Skill tool as the way to follow the skill"
+  if fm_brief_worker_role "$TMP_ROOT/state" upstream-4751 "" >"$TMP_ROOT/empty-role.out" 2>"$TMP_ROOT/empty-role.err"; then
+    fail "worker role rendered without a code root"
+  fi
+  assert_contains "$(cat "$TMP_ROOT/empty-role.err")" "code root is required" "missing code root did not say why"
+  pass "worker role names the skill file a foreign project cannot resolve by skill name"
+}
+
+test_worker_role_names_skill_file_for_a_foreign_project
+
 echo "all fm-dod-lib tests passed"
