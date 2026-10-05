@@ -130,6 +130,10 @@ Long document paragraph 09 keeps the target below the fold for navigation verifi
 
 Long document paragraph 10 keeps the target below the fold for navigation verification.
 
+## 重复标题-2
+
+This distinct title reserves the suffix that naive repeated-title anchors would reuse.
+
 ## 重复标题
 
 The second repeated heading is the exact navigation target.
@@ -436,10 +440,11 @@ try {
   const taskDirectory = page.locator("#task-document .document-toc");
   if (!await taskDirectory.isVisible()) throw new Error("task document directory was not visible at desktop width");
   const directoryLabels = await taskDirectory.locator("a").allTextContents();
-  if (directoryLabels.join("|") !== "Rendered report|中文：范围 / 安全？|重复标题|重复标题|<img id=toc-unsafe src=x onerror=globalThis.tocExecuted=true>") throw new Error(`task document directory did not reflect rendered headings: ${directoryLabels.join("|")}`);
+  if (directoryLabels.join("|") !== "Rendered report|中文：范围 / 安全？|重复标题|重复标题-2|重复标题|<img id=toc-unsafe src=x onerror=globalThis.tocExecuted=true>") throw new Error(`task document directory did not reflect rendered headings: ${directoryLabels.join("|")}`);
   const repeatedLinks = taskDirectory.getByRole("link", { name: "重复标题", exact: true });
   const repeatedIds = await page.locator("#task-document-rendered").getByRole("heading", { name: "重复标题", exact: true }).evaluateAll(nodes => nodes.map(node => node.id));
-  if (new Set(repeatedIds).size !== 2 || !repeatedIds.every(id => id.startsWith("task-document-rendered-重复标题"))) throw new Error(`repeated Chinese headings did not receive unique stable anchors: ${repeatedIds.join(",")}`);
+  const allHeadingIds = await page.locator("#task-document-rendered :is(h1,h2,h3,h4,h5,h6)").evaluateAll(nodes => nodes.map(node => node.id));
+  if (new Set(allHeadingIds).size !== allHeadingIds.length || new Set(repeatedIds).size !== 2 || !repeatedIds.every(id => id.startsWith("task-document-rendered-重复标题"))) throw new Error(`heading anchors were not unique across repeated and suffixed Chinese titles: ${allHeadingIds.join(",")}`);
   if (await taskDirectory.locator('li[data-level="3"]').filter({ hasText: "重复标题" }).count() !== 1) throw new Error("directory did not preserve heading hierarchy");
   const directoryBounds = await taskDirectory.boundingBox();
   const bodyBounds = await page.locator("#task-document-rendered").boundingBox();
@@ -450,9 +455,11 @@ try {
   const directoryClickResult = await page.evaluate(() => ({ scrollY: window.scrollY, activeId: document.activeElement?.id }));
   if (repeatedTargetTop < 60 || repeatedTargetTop >= 1000 || directoryClickResult.scrollY <= scrollBeforeDirectoryClick || directoryClickResult.activeId !== repeatedIds[1]) throw new Error(`directory click did not target the exact repeated heading: ${JSON.stringify({ repeatedTargetTop, scrollBeforeDirectoryClick, ...directoryClickResult })}`);
   if (await page.locator("#toc-unsafe").count() || await page.evaluate(() => globalThis.tocExecuted === true)) throw new Error("heading label became active HTML through the document body or directory");
-  await page.setViewportSize({ width: 720, height: 900 });
+  await page.setViewportSize({ width: 1100, height: 900 });
   if (await taskDirectory.isVisible()) throw new Error("narrow layout squeezed the document beside a visible directory");
   if (!await page.locator("#task-document-rendered").isVisible() || await page.locator("#task-document-rendered").evaluate(element => element.getBoundingClientRect().width < 500)) throw new Error("narrow layout did not preserve a readable document body");
+  await page.setViewportSize({ width: 720, height: 900 });
+  if (await taskDirectory.isVisible() || !await page.locator("#task-document-rendered").isVisible()) throw new Error("mobile layout did not preserve the single-column document body");
   await page.setViewportSize({ width: 1440, height: 1000 });
   if (await page.locator("#task-document-brief").isDisabled() || await page.locator("#task-document-report").isDisabled()) throw new Error("both-document task did not expose both document selectors");
   await page.locator("#task-document-brief").click();
@@ -461,7 +468,7 @@ try {
   if (await taskDirectory.isVisible() || await taskDirectory.locator("a").count()) throw new Error("no-heading document retained a stale directory from the previous report");
   await page.locator("#task-document-report").click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
-  if (!await taskDirectory.isVisible() || await taskDirectory.locator("a").count() !== 5) throw new Error("switching back did not rebuild the current document directory");
+  if (!await taskDirectory.isVisible() || await taskDirectory.locator("a").count() !== 6) throw new Error("switching back did not rebuild the current document directory");
   await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
   delayUserScrollReport = true;
   await dashboardReportCard.click();
@@ -483,7 +490,7 @@ try {
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   if (new URL(page.url()).pathname !== `/report/${process.env.VIEWER_REPORT_ID}`) throw new Error(`task report did not navigate to its dedicated route: ${page.url()}`);
   const reportDirectory = page.locator("#report .document-toc");
-  if (!await reportDirectory.isVisible() || await reportDirectory.locator("a").count() !== 5) throw new Error("dedicated report route did not render its current document directory");
+  if (!await reportDirectory.isVisible() || await reportDirectory.locator("a").count() !== 6) throw new Error("dedicated report route did not render its current document directory");
   const sourceText = await page.locator("#report .report-source pre").textContent();
   const expectedSource = fs.readFileSync(`${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`, "utf8");
   if (sourceText !== expectedSource) throw new Error("dedicated Report content differed from its selected canonical document");
@@ -695,7 +702,7 @@ try {
   const report = `${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`;
   fs.appendFileSync(report, "\n## Refreshed section\n\nreport refresh marker\n");
   await page.getByRole("heading", { name: "Refreshed section" }).waitFor({ state: "visible", timeout: 3000 });
-  if (await page.locator("#report .document-toc a").count() !== 6) throw new Error("report refresh did not rebuild the directory from the changed document");
+  if (await page.locator("#report .document-toc a").count() !== 7) throw new Error("report refresh did not rebuild the directory from the changed document");
   let releaseArtifactReport = () => {};
   let markArtifactReportStarted;
   const artifactReportStarted = new Promise(resolve => { markArtifactReportStarted = resolve; });

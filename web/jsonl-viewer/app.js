@@ -293,7 +293,7 @@ function renderMarkdown(container, source) {
   clearRenderedDocument(container);
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
   const headings = [];
-  const anchorCounts = new Map();
+  const emittedAnchors = new Set();
   let index = 0;
   while (index < lines.length) {
     const line = lines[index];
@@ -317,9 +317,11 @@ function renderMarkdown(container, source) {
       const element = document.createElement(`h${heading[1].length}`);
       appendInline(element, heading[2]);
       const baseAnchor = headingAnchor(element.textContent, "section");
-      const count = (anchorCounts.get(baseAnchor) || 0) + 1;
-      anchorCounts.set(baseAnchor, count);
-      element.id = `${container.id}-${baseAnchor}${count === 1 ? "" : `-${count}`}`;
+      let anchor = baseAnchor;
+      let suffix = 2;
+      while (emittedAnchors.has(anchor)) anchor = `${baseAnchor}-${suffix++}`;
+      emittedAnchors.add(anchor);
+      element.id = `${container.id}-${anchor}`;
       element.tabIndex = -1;
       container.append(element);
       headings.push({ element, level: heading[1].length });
