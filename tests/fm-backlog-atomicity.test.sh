@@ -576,13 +576,21 @@ SH
 }
 
 write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
-  local case_dir=$1 id=$2 kind=$3 mode=$4
+  local case_dir=$1 id=$2 kind=$3 mode=$4 project
   shift 4
+  project=$case_dir/absent-project
+  # A ship whose worktree is absent proves its work pushed from its recorded
+  # branch, so a ship record gets a project holding that branch on a remote.
+  if [ "$kind" = ship ]; then
+    project=$case_dir/landed-project
+    fm_test_pushed_branch_project "$project" "fm/$id"
+    set -- "branch=fm/$id" "$@"
+  fi
   fm_write_meta "$(home_of "$case_dir")/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$case_dir/absent-worktree" \
-    "project=$case_dir/absent-project" \
+    "project=$project" \
     "harness=claude" \
     "kind=$kind" \
     "mode=$mode" \
