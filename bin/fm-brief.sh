@@ -686,6 +686,8 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+8. Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command - issues close through
+   the PR body's \`closes #N\` on merge, and the project board is not used.
 
 $WAIT_BLOCK$INBOX_SECTION
 

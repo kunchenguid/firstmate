@@ -355,6 +355,10 @@ STUB
       "$mode: promoted worker did not receive the Captain's intent subsection"
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
+    assert_grep "Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command" "$payload" \
+      "$mode: promoted worker did not receive the manual issue and project-command ban"
+    assert_grep "issues close through the PR body's \`closes #N\` on merge, and the project board is not used" "$payload" \
+      "$mode: promoted worker did not receive the issue-lifecycle rationale"
 
     # Both the delivered prompt and persisted relaunch brief are public outputs.
     for contract in "$payload" "$home/data/$id/brief.md"; do
@@ -390,6 +394,14 @@ STUB
   # shellcheck disable=SC2016  # single quotes are deliberate: the placeholders must stay literal
   assert_grep 'needs-decision [at=<epoch>] [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
     "promoted no-mistakes worker did not receive the structured escalation event"
+  assert_grep "# Current no-mistakes intent contract" "$payload" \
+    "promoted no-mistakes worker did not receive the intent contract section"
+  assert_grep "append this one fixed sentence to the \`--intent\` string, verbatim" "$payload" \
+    "promoted no-mistakes worker was not told to append the manual-close ban to --intent"
+  assert_grep "\"Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command - issues close through the PR body's \`closes #N\` on merge, and the project board is not used.\"" "$payload" \
+    "promoted no-mistakes worker did not receive the fixed --intent sentence"
+  assert_no_grep "# Current no-mistakes intent contract" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
+    "promoted direct-PR worker received the no-mistakes intent contract"
   assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
     "promoted no-mistakes worker did not receive the --yes prohibition"
   assert_grep "It is banned fleet-wide" "$payload" \
@@ -571,7 +583,7 @@ EOF
 # public brief/spawn/promote path. Filling both subsections lets the spawn
 # delivery checks proceed (the fake tmux still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
-  local rec home proj fakebin out status id brief meta intent_body spec_body authorized
+  local rec home proj fakebin out status id brief meta intent_body spec_body authorized overlay
   rec=$(make_home subsections)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -684,6 +696,11 @@ EOF
   assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract's overlay dropped the self-sufficiency pointer"
+  overlay=$(awk '$0 == "# Current no-mistakes intent contract" { emit=1 } emit { print }' "$home/data/$id/launch-brief.md")
+  assert_contains "$overlay" "append this one fixed sentence to the \`--intent\` string, verbatim, as the sole exception" \
+    "launch overlay did not tell the worker to append the manual-close ban to --intent"
+  assert_contains "$overlay" "Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command - issues close through the PR body's \`closes #N\` on merge, and the project board is not used." \
+    "launch overlay dropped the manual issue-close ban sentence"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"
