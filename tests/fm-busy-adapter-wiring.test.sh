@@ -445,6 +445,10 @@ spawn_secondmate_harness() { # <case-dir> <id> <harness> [extra fake tools...]
   fakebin=$(make_spawn_fakebin "$case_dir/fake" "$harness" "$@")
   fm_test_spawn_home "$primary" "$harness"
   seed_secondmate_home "$sm" "$id" "${SECONDMATE_HOME_GUARD:-}"
+  if [ -n "${SECONDMATE_LOCAL_SETTINGS:-}" ]; then
+    mkdir -p "$sm/.claude"
+    cp "$SECONDMATE_LOCAL_SETTINGS" "$sm/.claude/settings.local.json"
+  fi
   : > "$case_dir/launch.log"
   FM_BACKEND=tmux FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     fm_test_run_spawn "$primary" "$sm" "$fakebin" "$id" "$sm" "$harness" --secondmate
@@ -491,16 +495,21 @@ SH
 }
 
 test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
-  local case_dir id=sm-claude primary sm state settings out
+  local case_dir id=sm-claude primary sm state settings launch out
   case_dir="$TMP_ROOT/sm-claude"
   primary="$case_dir/primary"
   sm="$case_dir/sm"
   out=$(spawn_secondmate_harness "$case_dir" "$id" claude) \
     || fail "claude secondmate spawn failed: $out"
   state="$primary/state"
-  settings="$sm/.claude/settings.local.json"
+  settings="$state/$id.claude-settings.json"
+  launch=$(cat "$case_dir/launch.log")
   assert_present "$state/$id.busy-state" "claude secondmate spawn did not arm the busy contract"
   assert_present "$settings" "claude secondmate spawn did not write hook settings"
+  assert_contains "$launch" "--settings '$settings'" \
+    "claude secondmate launch did not pass the state settings file"
+  [ ! -e "$sm/.claude/settings.local.json" ] \
+    || fail "claude secondmate spawn wrote the home's settings.local.json"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seeded secondmate must classify busy fm-spawn, got '$out'"
   out=$(fm_busy_classify tmux "firstmate:fm-$id" claude "$id" "$state" 'working on the charter')
@@ -515,7 +524,7 @@ test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
     || fail "a secondmate inside an armed turn published a durable stall notification"
 
   rm -f "$state/$id.turn-ended"
-  fire_secondmate_stop "$sm" parallel || fail "secondmate Stop was blocked with nothing to supervise"
+  fire_secondmate_stop "$sm" parallel "$settings" || fail "secondmate Stop was blocked with nothing to supervise"
   [ ! -e "$state/$id.turn-ended" ] || fail "a secondmate Stop touched the parent's turn-ended marker"
   out=$(classify claude "$id" "$state")
   [ "$out" = "idle claude-hook" ] || fail "secondmate Stop must classify idle claude-hook, got '$out'"
@@ -539,28 +548,28 @@ run_secondmate_stop_guard() { # <sm-home>
       bash "$ROOT/bin/fm-turnend-guard.sh" --claude >/dev/null 2>&1
 }
 
-run_secondmate_local_stop_hooks() { # <sm-home>
+run_secondmate_local_stop_hooks() { # <settings-file>
   local cmd
-  jq -r '.hooks.Stop[]?.hooks[]?.command' "$1/.claude/settings.local.json" \
+  jq -r '.hooks.Stop[]?.hooks[]?.command' "$1" \
     | while IFS= read -r cmd; do sh -c "$cmd" </dev/null; done
 }
 
-# Claude runs the home's settings.local.json Stop hooks beside its tracked Stop
+# Claude runs the --settings Stop hooks beside the home's tracked Stop
 # guard, in parallel, so their order is not fixed. Fire one Stop event in the
 # given order and return the guard's status.
-fire_secondmate_stop() { # <sm-home> <guard-first|guard-last|parallel>
-  local sm=$1 status
+fire_secondmate_stop() { # <sm-home> <guard-first|guard-last|parallel> <settings>
+  local sm=$1 settings=$3 status
   case "$2" in
     guard-first)
       run_secondmate_stop_guard "$sm"; status=$?
-      run_secondmate_local_stop_hooks "$sm"
+      run_secondmate_local_stop_hooks "$settings"
       ;;
     guard-last)
-      run_secondmate_local_stop_hooks "$sm"
+      run_secondmate_local_stop_hooks "$settings"
       run_secondmate_stop_guard "$sm"; status=$?
       ;;
     parallel)
-      run_secondmate_local_stop_hooks "$sm" &
+      run_secondmate_local_stop_hooks "$settings" &
       run_secondmate_stop_guard "$sm"; status=$?
       wait
       ;;
@@ -580,7 +589,7 @@ test_secondmate_claude_stop_guard_owns_the_stop_verdict() {
   out=$(spawn_secondmate_harness "$case_dir" "$id" claude) \
     || fail "claude secondmate spawn failed: $out"
   state="$primary/state"
-  settings="$sm/.claude/settings.local.json"
+  settings="$state/$id.claude-settings.json"
   gen=$(cat "$state/$id.busy-gen")
   git -C "$sm" status --porcelain | grep -F '.fm-busy-stop' >/dev/null \
     && fail "the secondmate Stop pointer is not excluded from the home's git status"
@@ -588,7 +597,7 @@ test_secondmate_claude_stop_guard_owns_the_stop_verdict() {
   : > "$sm/state/child.meta"
   for order in guard-first guard-last parallel; do
     run_claude_hook "$settings" UserPromptSubmit || fail "secondmate UserPromptSubmit hook failed"
-    fire_secondmate_stop "$sm" "$order"; status=$?
+    fire_secondmate_stop "$sm" "$order" "$settings"; status=$?
     expect_code 2 "$status" "the secondmate guard must block a blind Stop with a task in flight ($order)"
     out=$(classify claude "$id" "$state")
     [ "$out" = "busy claude-hook" ] \
@@ -605,7 +614,7 @@ test_secondmate_claude_stop_guard_owns_the_stop_verdict() {
   rm -f "$sm/state/child.meta"
   for order in guard-first guard-last parallel; do
     run_claude_hook "$settings" UserPromptSubmit || fail "secondmate UserPromptSubmit hook failed"
-    fire_secondmate_stop "$sm" "$order"; status=$?
+    fire_secondmate_stop "$sm" "$order" "$settings"; status=$?
     expect_code 0 "$status" "the secondmate guard must allow a Stop with nothing to supervise ($order)"
     out=$(classify claude "$id" "$state")
     [ "$out" = "idle claude-hook" ] || fail "an allowed Stop must record idle ($order), got '$out'"
@@ -640,7 +649,7 @@ test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook() {
   out=$(SECONDMATE_HOME_GUARD="$old_guard" spawn_secondmate_harness "$case_dir" "$id" claude) \
     || fail "claude secondmate spawn failed: $out"
   state="$primary/state"
-  settings="$sm/.claude/settings.local.json"
+  settings="$state/$id.claude-settings.json"
 
   run_claude_hook "$settings" UserPromptSubmit || fail "secondmate UserPromptSubmit hook failed"
   out=$(classify claude "$id" "$state")
@@ -652,6 +661,25 @@ test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook() {
     || fail "an older home guard cannot close the turn, so the Stop hook must record idle, got '$out'"
   [ ! -e "$state/$id.turn-ended" ] || fail "a secondmate Stop touched the parent's turn-ended marker"
   pass "a claude secondmate whose home guard predates .fm-busy-stop keeps the Stop idle hook"
+}
+
+test_secondmate_claude_spawn_leaves_local_settings_untouched() {
+  local case_dir id=sm-claude-local primary sm state prior out
+  case_dir="$TMP_ROOT/sm-claude-local"
+  primary="$case_dir/primary"
+  sm="$case_dir/sm"
+  prior="$case_dir/local.json"
+  mkdir -p "$case_dir"
+  printf '%s\n' '{"permissions":{"allow":["Bash(echo hi)"]}}' > "$prior"
+  out=$(SECONDMATE_LOCAL_SETTINGS="$prior" spawn_secondmate_harness "$case_dir" "$id" claude) \
+    || fail "claude secondmate spawn failed: $out"
+  state="$primary/state"
+  cmp -s "$prior" "$sm/.claude/settings.local.json" \
+    || fail "claude secondmate spawn rewrote settings.local.json"
+  jq -e '.hooks.UserPromptSubmit and .feedbackDrafts == "off"' \
+    "$state/$id.claude-settings.json" >/dev/null \
+    || fail "busy hooks were not written to the state settings file"
+  pass "a claude secondmate spawn leaves an existing settings.local.json untouched"
 }
 
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend() {
@@ -762,6 +790,7 @@ test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
 test_secondmate_claude_spawn_arms_busy_for_the_stall_gate
 test_secondmate_claude_stop_guard_owns_the_stop_verdict
 test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook
+test_secondmate_claude_spawn_leaves_local_settings_untouched
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend
 test_secondmate_omp_extension_reports_busy_without_a_parent_turnend
 test_secondmate_opencode_plugin_closes_without_a_parent_turnend
