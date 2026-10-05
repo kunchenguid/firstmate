@@ -198,7 +198,7 @@ function safeLinkTarget(target) {
 }
 
 function appendInline(container, source) {
-  const pattern = /(!?)\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|`([^`]+)`/g;
+  const pattern = /(!?)\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|`([^`]+)`|\*\*([^*\n]+)\*\*/g;
   let offset = 0;
   for (const match of source.matchAll(pattern)) {
     container.append(document.createTextNode(source.slice(offset, match.index)));
@@ -206,6 +206,10 @@ function appendInline(container, source) {
       const code = document.createElement("code");
       code.textContent = match[4];
       container.append(code);
+    } else if (match[5] !== undefined) {
+      const strong = document.createElement("strong");
+      strong.textContent = match[5];
+      container.append(strong);
     } else if (match[1] === "!") {
       const omitted = document.createElement("span");
       omitted.className = "omitted-image";
