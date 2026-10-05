@@ -77,6 +77,11 @@
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
 #                pair carries the shape and no identity is needed.
+#   herdr-cursor-live - Cursor on Herdr: either a complete matching half-block
+#                envelope or the current borderless composer followed only by
+#                its exact bottom footer pair. History and error screens can
+#                retain `→` rows without editable input, so incomplete,
+#                mismatched, uncontained, and non-bottom rows remain unknown.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -735,7 +740,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 #   [cursor_row] zero-based row index of the cursor within <screen>, only
 #                meaningful when caps carry cursor=1.
 #   [identity]   "<agent>\t<status>" from the backend's native identity probe,
-#                or `probe-absent` when the probe found no live identity; only
+#                with a third version field for Herdr Cursor layout proof, or
+#                `probe-absent` when the probe found no live identity; only
 #                meaningful when caps carry identity=1.
 # Prints exactly one verdict: empty | pending | pending-unproven | unknown,
 # or the internal sentinel `need-identity` when caps declare identity=1, no
@@ -1595,6 +1601,102 @@ _fm_composer_select_cursorless() {
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 
+# _fm_composer_halfblock_row_shape: print a normalized all-half-block row.
+# The minimum width rejects incidental glyphs while the caller compares the
+# returned spaces exactly, so a `▄` top cannot pair with a different-width `▀`.
+_fm_composer_halfblock_row_shape() {  # <row> <glyph>
+  local row=$1 glyph=$2 shape
+  fm_composer_normalize_trim_var row
+  case "$glyph" in
+    ▄) case "$row" in ▄▄▄*) ;; *) return 1 ;; esac ;;
+    ▀) case "$row" in ▀▀▀*) ;; *) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+  shape=${row//"$glyph"/ }
+  case "$shape" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  printf '%s' "$shape"
+}
+
+_fm_composer_cursor_footer_row() {  # <row>
+  local row=$1 count
+  fm_composer_normalize_trim_var row
+  case "$row" in
+    '') return 0 ;;
+    *' tasks') count=${row% tasks} ;;
+    *' task') count=${row% task} ;;
+    Cursor*'Run Everything') return 0 ;;
+    \~/*' · '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
+    /*' · '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
+    *) return 1 ;;
+  esac
+  case "$count" in
+    ''|*[!0-9]*) return 1 ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+# _fm_composer_halfblock_encloses_arrow: 0 only when <arrow-row> is inside a
+# complete bottom-live Herdr Cursor envelope with matching rules.
+_fm_composer_halfblock_encloses_arrow() {  # <plain-screen> <arrow-row>
+  local plain=$1 arrow=$2 rows row top_shape='' bottom_shape='' candidate
+  rows=$(printf '%s\n' "$plain" | awk 'END { print NR }')
+  row=$((arrow - 1))
+  candidate=$(_fm_composer_screen_row "$row" "$plain")
+  top_shape=$(_fm_composer_halfblock_row_shape "$candidate" ▄) || return 1
+  [ -n "$top_shape" ] || return 1
+  row=$((arrow + 1))
+  while [ "$row" -lt "$rows" ]; do
+    candidate=$(_fm_composer_screen_row "$row" "$plain")
+    case "$candidate" in
+      *▄*|*▀*)
+        bottom_shape=$(_fm_composer_halfblock_row_shape "$candidate" ▀) || return 1
+        break
+        ;;
+    esac
+    row=$((row + 1))
+  done
+  [ -n "$bottom_shape" ] && [ "$top_shape" = "$bottom_shape" ] || return 1
+  row=$((row + 1))
+  while [ "$row" -lt "$rows" ]; do
+    candidate=$(_fm_composer_screen_row "$row" "$plain")
+    _fm_composer_cursor_footer_row "$candidate" || return 1
+    row=$((row + 1))
+  done
+}
+
+# Current Cursor releases omit the half-block rules. In that shape, only the
+# exact bottom footer pair can prove that the arrow is the live composer.
+_fm_composer_cursor_bottom_footer_after_arrow() {  # <plain-screen> <arrow-row>
+  local plain=$1 row=$2 rows candidate state=model
+  rows=$(printf '%s\n' "$plain" | awk 'END { print NR }')
+  row=$((row + 1))
+  while [ "$row" -lt "$rows" ]; do
+    candidate=$(_fm_composer_screen_row "$row" "$plain")
+    fm_composer_normalize_trim_var candidate
+    if [ -z "$candidate" ]; then
+      row=$((row + 1))
+      continue
+    fi
+    case "$state:$candidate" in
+      model:Grok*' High Fast'|model:Grok*' High Fast'*'Run Everything') state=path ;;
+      path:\~/*' · '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) state=complete ;;
+      path:/*' · '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) state=complete ;;
+      *) return 1 ;;
+    esac
+    row=$((row + 1))
+  done
+  [ "$state" = complete ]
+}
+
+_fm_composer_cursor_live_arrow() {  # <plain-screen> <arrow-row>
+  _fm_composer_halfblock_encloses_arrow "$@" \
+    || _fm_composer_cursor_bottom_footer_after_arrow "$@"
+}
+
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
@@ -1671,14 +1773,19 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# The only Cursor-rendered layouts accepted on the Herdr-specific path are
+# those verified against this exact release. Any other release stays unknown.
+FM_COMPOSER_HERDR_CURSOR_LAYOUT_VERSION=2026.10.01-e373342
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 kv plain
+  local styled=0 cursor=0 has_identity=0 herdr=0 kv plain glyph agent identity_rest version
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
       cursor=1) cursor=1 ;;
       identity=1) has_identity=1 ;;
+      herdr=1) herdr=1 ;;
     esac
   done <<EOF
 $caps
@@ -1689,10 +1796,53 @@ EOF
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy"
+  # Herdr's Cursor identity is needed only for an arrow candidate. This keeps
+  # the native probe lazy while ensuring a history arrow cannot prove input.
+  if [ "$herdr" = 1 ] && [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ]; then
+    local candidate_raw candidate_trim candidate_glyph=''
+    candidate_raw=$(_fm_composer_screen_row "$FM_COMPOSER_SCAN_BARE_ROW" "$plain")
+    candidate_trim=$candidate_raw
+    fm_composer_normalize_trim_var candidate_trim
+    if fm_composer_leading_agent_glyph_var candidate_glyph "$candidate_trim" \
+       && [ "$candidate_glyph" = '→' ]; then
+      if [ -z "$identity" ]; then
+        printf 'need-identity'
+        return 0
+      fi
+      [ "$identity" != probe-absent ] || { printf 'unknown'; return 0; }
+      agent=${identity%%$'\t'*}
+      identity_rest=${identity#*$'\t'}
+      if [ -z "$agent" ] || [ "$identity_rest" = "$identity" ]; then
+        printf 'unknown'
+        return 0
+      fi
+      if [ "$agent" = cursor ]; then
+        version=${identity_rest#*$'\t'}
+        if [ "$identity_rest" = "$version" ] \
+           || [ "$version" != "$FM_COMPOSER_HERDR_CURSOR_LAYOUT_VERSION" ]; then
+          printf 'unknown'
+          return 0
+        fi
+      fi
+    fi
+  fi
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
       printf 'unknown'; return 0
+    fi
+    agent=${identity%%$'\t'*}
+    if [ "$herdr" = 1 ] && [ "$agent" = cursor ] \
+       && [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ]; then
+      candidate_raw=$(_fm_composer_screen_row "$FM_COMPOSER_SCAN_BARE_ROW" "$plain")
+      candidate_trim=$candidate_raw
+      fm_composer_normalize_trim_var candidate_trim
+      if fm_composer_leading_agent_glyph_var candidate_glyph "$candidate_trim" \
+         && [ "$candidate_glyph" = '→' ] \
+         && ! _fm_composer_cursor_live_arrow "$plain" "$FM_COMPOSER_SCAN_BARE_ROW"; then
+        printf 'unknown'
+        return 0
+      fi
     fi
     if [ "$FM_COMPOSER_SCAN_BOX_TOP" -ge 0 ]; then
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SCAN_BOX_AMBIG" \
@@ -1749,6 +1899,19 @@ EOF
   if ! _fm_composer_select_cursorless "$plain"; then
     printf 'unknown'
     return 0
+  fi
+  agent=${identity%%$'\t'*}
+  if [ "$herdr" = 1 ] && [ "$agent" = cursor ] \
+     && [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
+    candidate_raw=$(_fm_composer_screen_row "$FM_COMPOSER_SELECTED_FIRST" "$plain")
+    candidate_trim=$candidate_raw
+    fm_composer_normalize_trim_var candidate_trim
+    if fm_composer_leading_agent_glyph_var candidate_glyph "$candidate_trim" \
+       && [ "$candidate_glyph" = '→' ] \
+       && ! _fm_composer_cursor_live_arrow "$plain" "$FM_COMPOSER_SELECTED_FIRST"; then
+      printf 'unknown'
+      return 0
+    fi
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in
     pi)

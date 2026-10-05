@@ -2114,9 +2114,14 @@ The typed submit path's idle baseline is therefore structurally unreachable for 
 | Text typed, not submitted | `pending` | no busy token |
 | Mid-turn | `pending` (placeholder plus `ctrl+c to stop` on one row) | `ctrl+c to stop` |
 
-Herdr draws the composer's rules with the half-block glyphs U+2584 and U+2580 rather than the box-drawing family.
+The older verified release drew the composer's rules with the half-block glyphs U+2584 and U+2580 rather than the box-drawing family.
 Before those were taught to the shared edge detector, a bare composer's wrap region ran through its own closing rule and swallowed the model and path footer, so an idle pane read `pending`.
 Measured as an A/B on the same live pane, the pre-fix classifier returned `pending` and the current one returned `empty`.
+
+Current Cursor releases can instead render a borderless composer followed by a two-row model/action and repository footer.
+The Herdr capability profile now marks this backend explicitly, and the shared classifier requires native Cursor identity plus either that exact footer at the bottom of the viewport or a complete matching half-block envelope whose remaining lower rows are recognized Cursor footer rows.
+This keeps a genuine unsent draft `pending` while a history or exhausted/error screen with an uncontained, incomplete, mismatched, or stale `→` row remains `unknown`.
+`test_matrix_herdr_cursor_requires_complete_halfblock_envelope` and `test_matrix_herdr_cursor_accepts_current_bottom_footer` in `tests/fm-composer-lib.test.sh` pin those fail-closed bounds.
 
 The idle fix alone did not confirm typed delivery, because the composer branch reads the mid-turn row instead.
 With the rendered-footer transition in place, a typed-plane `bin/fm-send.sh` invocation exited 0 and the steer executed in the pane; the same send previously exited 1 with `delivery unconfirmed; verdict=pending` on a message that had actually landed.

@@ -156,7 +156,8 @@ test_real_text_is_pending() {
 ESC=$(printf '\033')
 NBSP=$(printf '\302\240')
 CAPS_TMUX=$'styled=1\ncursor=1\nidentity=1\nrows=0'
-CAPS_STYLED=$'styled=1\ncursor=0\nidentity=1\nrows=20'      # herdr
+CAPS_STYLED=$'styled=1\ncursor=0\nidentity=1\nrows=20'      # generic styled backend
+CAPS_HERDR_CURSOR=$'styled=1\ncursor=0\nidentity=1\nherdr=1\nrows=20'
 CAPS_STYLED_NOID=$'styled=1\ncursor=0\nidentity=0\nrows=20' # zellij
 CAPS_PLAIN=$'styled=0\ncursor=0\nidentity=0\nrows=20'       # cmux, orca
 
@@ -206,12 +207,16 @@ test_matrix_claude_arrow_statusline_footer() {
   footer=$'\n  → repo git:(fm/branch)× | Opus 5 | ctx 15%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
   screen="$pair$footer"
   assert_screen "claude idle under an arrow statusline on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "identified claude idle under an arrow statusline on herdr" empty \
+    "$CAPS_HERDR_CURSOR" "$screen" '' "$claude_idle"
   assert_screen "claude idle under an arrow statusline on zellij" empty "$CAPS_STYLED_NOID" "$screen"
   assert_screen "claude idle under an arrow statusline on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   # The protection this must NOT remove: real unsubmitted text in that same
   # composer, under that same statusline, still refuses.
   typed=$'transcript line\n────────────────────────\n❯ fix the login bug\n────────────────────────'"$footer"
   assert_screen "claude typed under an arrow statusline" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  assert_screen "identified claude typed under an arrow statusline on herdr" pending \
+    "$CAPS_HERDR_CURSOR" "$typed" '' "$claude_idle"
   # The live second defect: a stray SGR mouse report left in the composer by
   # a click in the pane is real pending content, not furniture.
   residue=$'transcript line\n────────────────────────\n❯ <65;77;27M\n────────────────────────'"$footer"
@@ -417,10 +422,73 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   case "$plain" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
   ESC_LOCAL=$(printf '\033')
   screen=$'transcript\n ▄▄▄▄▄▄▄▄\n'"  ${ESC_LOCAL}[2m→ ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")
+  out=$(fm_composer_classify_screen "$CAPS_HERDR_CURSOR" "$screen" '' $'cursor\tblocked\t2026.10.01-e373342')
   [ "$out" = empty ] \
-    || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
-  pass "matrix: herdr half-block rules bound a bare composer's wrap region"
+    || fail "an idle cursor composer inside a complete Herdr envelope must read empty, got '$out'"
+  # The same shape on a non-Herdr styled backend retains the existing generic
+  # bare-composer behavior, proving this safety boundary is path-specific.
+  assert_screen "half-block cursor shape on a non-Herdr backend" empty \
+    "$CAPS_STYLED" "$screen"
+  pass "matrix: Herdr Cursor half-block rules bound a bare composer's wrap region"
+}
+
+test_matrix_herdr_cursor_requires_complete_halfblock_envelope() {
+  local history wrapped incomplete mismatched uncontained stale lower out footer
+  footer=$'  Cursor Grok 4.5 High · 7%           Run Everything\n  ~/wt · 39418af'
+  history=$'turn_ended/error\nagent state done\n  → Add a follow-up'
+  assert_screen "Herdr Cursor history-only arrow" unknown "$CAPS_HERDR_CURSOR" \
+    "$history" '' $'cursor\tblocked\t2026.10.01-e373342'
+
+  wrapped=$'turn_ended/error\n ▄▄▄▄▄▄▄▄\n  → first wrapped line\nsecond wrapped line\n ▀▀▀▀▀▀▀▀\n'"$footer"
+  assert_screen "Herdr Cursor wrapped pending envelope" pending "$CAPS_HERDR_CURSOR" \
+    "$wrapped" '' $'cursor\tblocked\t2026.10.01-e373342'
+
+  incomplete=$'turn_ended/error\n ▄▄▄▄▄▄▄▄\n  → Add a follow-up\n  Cursor footer'
+  assert_screen "Herdr Cursor incomplete envelope" unknown "$CAPS_HERDR_CURSOR" \
+    "$incomplete" '' $'cursor\tblocked\t2026.10.01-e373342'
+
+  mismatched=$'turn_ended/error\n ▄▄▄▄▄▄▄▄\n  → Add a follow-up\n ▀▀▀▀▀\n  Cursor footer'
+  assert_screen "Herdr Cursor mismatched envelope" unknown "$CAPS_HERDR_CURSOR" \
+    "$mismatched" '' $'cursor\tblocked\t2026.10.01-e373342'
+
+  uncontained=$' ▄▄▄▄▄▄▄▄\n  transcript history\n ▀▀▀▀▀▀▀▀\n  → Add a follow-up'
+  assert_screen "Herdr Cursor uncontained history candidate" unknown "$CAPS_HERDR_CURSOR" \
+    "$uncontained" '' $'cursor\tblocked\t2026.10.01-e373342'
+
+  stale=$'turn_ended/error\n ▄▄▄▄▄▄▄▄\n  → Add a follow-up\n ▀▀▀▀▀▀▀▀\nerror: usage exhausted\n  → prior history'
+  assert_screen "stale complete Herdr Cursor envelope" unknown "$CAPS_HERDR_CURSOR" \
+    "$stale" '' $'cursor\tblocked\t2026.10.01-e373342'
+
+  lower=$'turn_ended/error\n  → history prompt\n ▄▄▄▄▄▄▄▄\n  \033[2m→ \033[0;7mA\033[0;2mdd a follow-up\033[0m\n ▀▀▀▀▀▀▀▀\n'"$footer"
+  assert_screen "Herdr Cursor history above lower live composer" empty "$CAPS_HERDR_CURSOR" \
+    "$lower" '' $'cursor\tblocked\t2026.10.01-e373342'
+
+  out=$(fm_composer_classify_screen "$CAPS_HERDR_CURSOR" "$history")
+  [ "$out" = need-identity ] || fail "Herdr Cursor arrow must request identity before classifying, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_HERDR_CURSOR" "$history" '' probe-absent)
+  [ "$out" = unknown ] || fail "missing Herdr Cursor identity must remain unknown, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_HERDR_CURSOR" "$lower" '' $'\tblocked\t2026.10.01-e373342')
+  [ "$out" = unknown ] || fail "missing Herdr Cursor agent name must remain unknown, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_HERDR_CURSOR" "$lower" '' $'cursor\tblocked\t2026.10.02-deadbee')
+  [ "$out" = unknown ] || fail "an unverified later Cursor layout must remain unknown, got '$out'"
+  pass "matrix: Herdr Cursor arrows require a complete matching half-block envelope"
+}
+
+test_matrix_herdr_cursor_accepts_current_bottom_footer() {
+  local empty pending stale footer
+  footer=$'  Grok 4.6 High Fast                  Run Everything\n  ~/wt · e57df84'
+  empty=$'turn_ended/error\n\n  \033[2m→ \033[0;7mP\033[0;2mlan, search, build anything\033[0m\n\n\n'"$footer"
+  assert_screen "current borderless Herdr Cursor empty composer" empty \
+    "$CAPS_HERDR_CURSOR" "$empty" '' $'cursor\tunknown\t2026.10.01-e373342'
+
+  pending=$'turn_ended/error\n\n  → validation draft 8472 - do not submit\n\n\n'"$footer"
+  assert_screen "current borderless Herdr Cursor pending composer" pending \
+    "$CAPS_HERDR_CURSOR" "$pending" '' $'cursor\tunknown\t2026.10.01-e373342'
+
+  stale=$'turn_ended/error\n  \033[2m→ \033[0;7mP\033[0;2mlan, search, build anything\033[0m\n\n'"$footer"$'\nerror: usage exhausted'
+  assert_screen "current borderless Herdr Cursor footer followed by history" unknown \
+    "$CAPS_HERDR_CURSOR" "$stale" '' $'cursor\tunknown\t2026.10.01-e373342'
+  pass "matrix: current Herdr Cursor bottom footer proves only the live composer"
 }
 
 test_matrix_omp_status_row_bounds_bare_composer() {
@@ -1029,6 +1097,8 @@ test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
+test_matrix_herdr_cursor_requires_complete_halfblock_envelope
+test_matrix_herdr_cursor_accepts_current_bottom_footer
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity

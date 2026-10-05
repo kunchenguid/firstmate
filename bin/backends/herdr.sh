@@ -3169,9 +3169,30 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
 # backing the shared classifier's separated (pi) shape - the genuine herdr
 # primitive no other backend has natively.
-fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
+fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>[\t<version>]"
+  local identity agent info version
   fm_backend_herdr_parse_target "$1" || return 1
-  fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") \
+    || return 1
+  agent=${identity%%$'\t'*}
+  if [ "$agent" != cursor ]; then
+    printf '%s' "$identity"
+    return 0
+  fi
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info \
+    --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  version=$(printf '%s' "$info" | jq -r --arg pane "$FM_BACKEND_HERDR_PANE" '
+    select(.result.type == "pane_process_info")
+    | select(.result.process_info.pane_id == $pane)
+    | [.result.process_info.foreground_processes[]?
+       | ([.argv0 // empty] + (.argv // []) + [.cmdline // empty])[]
+       | strings
+       | try capture("cursor-agent/versions/(?<version>2026[.][0-9]{2}[.][0-9]{2}-[0-9a-f]+)(?:/|[[:space:]])").version]
+    | unique
+    | if length == 1 then .[0] else empty end
+  ' 2>/dev/null) || return 1
+  [ -n "$version" ] || return 1
+  printf '%s\t%s' "$identity" "$version"
 }
 
 # fm_backend_herdr_composer_state: thin adapter - capture plus capabilities
@@ -3195,9 +3216,9 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
-    caps=$(printf 'styled=1\ncursor=0\nidentity=1')
+    caps=$(printf 'styled=1\ncursor=0\nidentity=1\nherdr=1')
   elif cap=$(fm_backend_herdr_visible_capture "$target"); then
-    caps=$(printf 'styled=0\ncursor=0\nidentity=1')
+    caps=$(printf 'styled=0\ncursor=0\nidentity=1\nherdr=1')
   else
     printf 'unknown'
     return 0

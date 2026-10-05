@@ -626,6 +626,10 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 - opencode's left bar.
 - The Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
 
+Cursor is stricter because completed and exhausted screens can retain an old `→` row that resembles an editable composer.
+On Herdr, a Cursor arrow proves a live composer only when it is inside the current bottom matching half-block envelope, or when the borderless current-release shape is followed by Cursor's exact model/action and repository footer pair at the bottom of the viewport.
+Missing identity, incomplete or mismatched rules, and any unrecognized row below either shape remain `unknown`; genuine text inside a proven live composer remains `pending`.
+
 ### Pi composer states
 
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's.
