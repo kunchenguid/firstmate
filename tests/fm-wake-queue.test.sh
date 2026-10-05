@@ -2507,6 +2507,37 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+# A stale primary lock whose abandoned .steal serialization mutex (and its own
+# stale .steal.steal) is still in place must be recovered WITHOUT recursing
+# down an ever-growing .steal.steal... chain: the steal-mutex acquisition
+# path reclaimed recursively until "File name too long".
+test_stale_steal_chain_recovers_without_unbounded_suffixes() {
+  local dir state rc
+  dir=$(make_case stale-steal-chain)
+  state="$dir/state"
+  rc=0
+  mkdir -p "$state"
+  dir="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture.lock"
+    dead=999999
+    mkdir -p "$dir/primary" && echo "$dead" > "$dir/primary/pid"
+    ln -s "$dir/primary" "$lock"
+    for suffix in ".steal" ".steal.steal"; do
+      mkdir -p "$lock$suffix-owner" && echo "$dead" > "$lock$suffix-owner/pid"
+      ln -s "$lock$suffix-owner" "$lock$suffix"
+      touch -t 202001010000 "$lock$suffix" "$lock$suffix-owner"
+    done
+    touch -t 202001010000 "$dir/primary" "$lock"
+    fm_lock_try_acquire "$lock" || exit 20
+    [ -L "$lock" ] || exit 21
+    [ ! -e "$lock.steal.steal.steal" ] && [ ! -L "$lock.steal.steal.steal" ] || exit 22
+    fm_lock_release "$lock" || exit 23
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "${rc:-0}" -eq 0 ] || fail "stale .steal chain was not recovered (rc=$rc)"
+  pass "stale .steal chain recovers without growing .steal suffixes"
+}
+
 test_subshell_lock_ownership_without_bashpid() {
   local dir state rc
   dir=$(make_case subshell-lock-ownership)
@@ -3422,6 +3453,7 @@ SH
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_stale_steal_chain_recovers_without_unbounded_suffixes
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
