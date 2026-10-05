@@ -4564,7 +4564,7 @@ BUSY_GEN=
     # again" rules, and rewriting it drops them. The secondmate hooks go in
     # a firstmate-owned state/<id>.claude-settings.json passed through
     # --settings. Claude Code merges hook entries across settings files
-    # (https://code.claude.com/docs/en/settings-reference) and keeps any key
+    # (https://code.claude.com/docs/en/hooks) and keeps any key
     # the flag omits (https://code.claude.com/docs/en/cli-reference), so the
     # home's tracked Stop guard and its settings.local.json both stay.
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"

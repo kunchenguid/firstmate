@@ -951,6 +951,7 @@ test_secondmate_claude_relaunch_keeps_local_settings() {
   prior='{"permissions":{"allow":["Bash(echo hi)"]}}'
   printf '%s\n' "$prior" > "$dir/smhome/.claude/settings.local.json"
   printf '%s\n' '{"feedbackDrafts":"on"}' > "$home/state/sml.claude-settings.json"
+  printf 'gen=retired\n' > "$dir/smhome/.fm-busy-stop"
   {
     echo "window=fmses:fm-sml"
     echo "endpoint_task_id=sml"
@@ -974,7 +975,9 @@ test_secondmate_claude_relaunch_keeps_local_settings() {
     || fail "relaunch rewrote the mate home's settings.local.json"
   [ ! -e "$home/state/sml.claude-settings.json" ] \
     || fail "relaunch left the retired claude settings file in place"
-  pass "fm-control relaunch: a claude secondmate keeps settings.local.json and retires the state settings file"
+  [ ! -e "$dir/smhome/.fm-busy-stop" ] \
+    || fail "relaunch left the retired Stop pointer in the mate home"
+  pass "fm-control relaunch: a claude secondmate keeps settings.local.json and retires the state settings file and the Stop pointer"
 }
 
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {

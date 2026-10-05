@@ -139,7 +139,7 @@ real_harness_stays_up() {  # <harness> <version> <case> <id> <bin>
       ;;
     claude)
       "$REAL_TMUX" -L "$SOCKET" new-window -d -t firstmate: -n "live-$harness" -c "$sm" -- \
-        "$bin" \
+        "$bin" --settings "$state/$id.claude-settings.json" \
         || fail "$harness $version: could not start the real binary"
       ;;
     *)
