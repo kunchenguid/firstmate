@@ -732,11 +732,14 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
-test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
-  local case_dir out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
-  case_dir=$(make_case tasks-axi-close-gerrit)
+# Teardown of a landed ship whose recorded pr= is <url>, under a tasks-axi that
+# refuses every --pr link but a canonical GitHub pull request, must close the
+# item with "<label> <url>" as its note.
+assert_teardown_closes_with_a_forge_note() {  # <case-name> <url> <label>
+  local case_dir out real_tasks_axi url=$2 label=$3
+  case_dir=$(make_case "$1")
   write_meta "$case_dir" no-mistakes ship
-  printf 'pr=%s\n' "$gerrit_url" >> "$case_dir/state/task-x1.meta"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
   # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
   # GitHub pull request, so this case keeps reproducing whatever the installed
@@ -756,14 +759,20 @@ exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 
-  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Gerrit task failed: $out"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a task landed as $url failed: $out"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
-    || fail "teardown left a landed Gerrit task's backlog item at $(backlog_row_state "$case_dir"): $out"
+    || fail "teardown left the backlog item landed as $url at $(backlog_row_state "$case_dir"): $out"
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
-    | grep -F "body: \"Gerrit change $gerrit_url\"" >/dev/null \
-    || fail "closed Gerrit backlog item did not record its change URL as a note"
+    | grep -F "body: \"$label $url\"" >/dev/null \
+    || fail "the closed backlog item did not record $url as a $label note"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
-    "a landed Gerrit close left its pending-close record behind"
+    "the close of $url left its pending-close record behind"
+}
+
+test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
+  local case_dir out
+  assert_teardown_closes_with_a_forge_note tasks-axi-close-gerrit \
+    https://gerrit.example.com/c/project/+/12345 "Gerrit change"
 
   case_dir=$(make_case tasks-axi-close-github-under-refusal)
   write_meta "$case_dir" no-mistakes ship
@@ -775,6 +784,14 @@ SH
     | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
     || fail "a GitHub pull request no longer closed as the item's pr link"
   pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
+}
+
+test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
+  assert_teardown_closes_with_a_forge_note tasks-axi-close-gitlab-nested \
+    https://gitlab.com/group/subgroup/project/-/merge_requests/42 "GitLab merge request"
+  assert_teardown_closes_with_a_forge_note tasks-axi-close-gitlab-self-hosted \
+    https://git.example.org/team/project/-/merge_requests/6 "GitLab merge request"
+  pass "teardown closes a landed GitLab task with its merge request URL as a note on any host"
 }
 
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
@@ -4506,6 +4523,7 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
+test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
