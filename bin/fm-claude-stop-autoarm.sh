@@ -109,7 +109,9 @@
 #     28800 s hook timeout of this hook's own lifetime, because Claude drops
 #     the exit 2 of a hook it timed out and a host park may already have used
 #     most of that budget. The next normal Stop of the lock-owning session
-#     clears the record and ends any hold early.
+#     clears the record and ends any hold early. The payload is parsed with jq
+#     only: without jq a StopFailure firing behaves as a plain Stop, with no
+#     record, backoff, or non-retryable notice.
 #     The classes authentication_failed, billing_error, model_not_found, and
 #     invalid_request cannot heal by retrying: such a firing records the
 #     episode with the capped retry time, publishes one line per episode on a
@@ -234,22 +236,17 @@ if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
 fi
 
 # --- which turn end fired this hook -------------------------------------------
-# StopFailure replaces Stop when an API error ended the turn (header). Without
-# jq the event and class fall back to a plain field match, and the assistant
-# message is simply not recorded.
+# StopFailure replaces Stop when an API error ended the turn (header). The
+# payload is parsed with jq only; without jq a StopFailure firing is treated as
+# a plain Stop, like the pi-code and foreign-host gates, so its backoff needs jq.
 STOPFAILURE=0
 STOPFAILURE_ERROR=
 STOPFAILURE_MESSAGE=
-if [ -n "$PAYLOAD" ]; then
-  if command -v jq >/dev/null 2>&1; then
-    if [ "$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // "" | strings' 2>/dev/null)" = StopFailure ]; then
-      STOPFAILURE=1
-      STOPFAILURE_ERROR=$(printf '%s' "$PAYLOAD" | jq -r '.error // "" | strings' 2>/dev/null || true)
-      STOPFAILURE_MESSAGE=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // "" | strings' 2>/dev/null || true)
-    fi
-  elif printf '%s' "$PAYLOAD" | grep -Eq '"hook_event_name"[[:space:]]*:[[:space:]]*"StopFailure"'; then
+if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+  if [ "$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // "" | strings' 2>/dev/null)" = StopFailure ]; then
     STOPFAILURE=1
-    STOPFAILURE_ERROR=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' | head -n 1)
+    STOPFAILURE_ERROR=$(printf '%s' "$PAYLOAD" | jq -r '.error // "" | strings' 2>/dev/null || true)
+    STOPFAILURE_MESSAGE=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // "" | strings' 2>/dev/null || true)
   fi
 fi
 if [ "$STOPFAILURE" -eq 1 ]; then
