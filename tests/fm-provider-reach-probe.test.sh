@@ -67,21 +67,21 @@ SH
   chmod +x "$fakebin/curl"
 
   # Fake resolver: rcode/name output shape driven by env, like the real dig.
-  cat > "$fakebin/dig" <<'SH'
+  make_fake_dig "$fakebin"
+
+  # Stand-in for a tool that takes the bare authority but is not a name lookup at
+  # all. macOS ships /usr/bin/dscacheutil and calls it as `-q host -a <name>`; `host`
+  # is not one of its directory-service categories, so it answers EVERY name with its
+  # usage block and exit 64. That mis-shaped answer is what an accidentally listed
+  # non-lookup tool looks like, so the probe's default path is asserted against this
+  # stand-in rather than against live traffic or the host's real binary.
+  cat > "$fakebin/dscacheutil" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_DIG_LOG:-/dev/null}"
-case "${FM_FAKE_DIG_MODE:-address}" in
-  nxdomain) printf 'status: NXDOMAIN\nno answer\n' ; exit 0 ;;
-  empty) printf ';; no addresses\n'; exit 0 ;;
-  servfail) printf 'status: SERVFAIL\n'; exit 0 ;;
-  timestamp) printf '2026-10-04T12:34:56Z\n'; exit 0 ;;
-  ipv6) printf '2001:db8::1\n'; exit 0 ;;
-  fail) printf 'connection failed\n'; exit 9 ;;
-  hang) sleep 30; printf 'ok\n'; exit 0 ;;
-  *) printf '1.2.3.4\n'; exit 0 ;;
-esac
+printf 'Usage: dscacheutil -cachedelete | -flushcache | -L | -q name | -m | [-n network] | -x uid/gid | [ -i | -o ] attribute...\n' >&2
+exit 64
 SH
-  chmod +x "$fakebin/dig"
+  chmod +x "$fakebin/dscacheutil"
 
   # jq and quota-axi are present so a regression that reintroduced either
   # dependency would be exercised rather than silently satisfied.
@@ -93,6 +93,27 @@ exit 0
 SH
     chmod +x "$fakebin/$tool"
   done
+}
+
+# make_fake_dig <dir> [argv-log]: the address-answering resolver stand-in. It
+# records its own argv so an assertion can prove which candidate actually ran.
+make_fake_dig() {
+  local dir=$1 log=${2-${FM_FAKE_DIG_LOG:-/dev/null}}
+  cat > "$dir/dig" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+case "\${FM_FAKE_DIG_MODE:-address}" in
+  nxdomain) printf 'status: NXDOMAIN\nno answer\n' ; exit 0 ;;
+  empty) printf ';; no addresses\n'; exit 0 ;;
+  servfail) printf 'status: SERVFAIL\n'; exit 0 ;;
+  timestamp) printf '2026-10-04T12:34:56Z\n'; exit 0 ;;
+  ipv6) printf '2001:db8::1\n'; exit 0 ;;
+  fail) printf 'connection failed\n'; exit 9 ;;
+  hang) sleep 30; printf 'ok\n'; exit 0 ;;
+  *) printf '1.2.3.4\n'; exit 0 ;;
+esac
+SH
+  chmod +x "$dir/dig"
 }
 
 # run_probe <dir> <args...>: probe with the stand-ins armed and DNS pinned to the
@@ -209,16 +230,41 @@ out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=ipv6 FM_PROVIDER_REACH_DNS_TOOL=di
 expect_code 0 "$rc" "IPv6 address answer proceeds to HTTP"
 assert_contains "$out" "dns=ok" "an IPv6 address record is recognized"
 
-# --- the default resolver list never names a tool it calls wrongly ----------
-# macOS ships /usr/bin/dscacheutil, and `-q host` is not one of its categories: it
-# prints its usage block and exits 64 for every name. A candidate list that led with
-# it recorded "resolver errored" (dns=fail rc=64) for names dig and host both answer
-# NXDOMAIN, so the false shape itself is pinned here, on this host's real tools.
-default_list=$(sed -nE 's/^[[:space:]]*for tool in \$\{FM_PROVIDER_REACH_DNS_TOOL:-([^}]*)\}.*/\1/p' "$SCRIPT")
-assert_contains "$default_list" "/usr/bin/dig" "the default list leads with dig"
-case "$default_list" in
-  *dscacheutil*) fail "the default resolver list still names dscacheutil, which it cannot call correctly" ;;
+# --- the default resolver path never mistakes a non-lookup tool's usage block
+# --- for a name answer --------------------------------
+# macOS ships /usr/bin/dscacheutil, which this probe must not call: `-q host` is not
+# one of its categories, so it answers every name with its usage block and exit 64.
+# A build that led its candidate list with it recorded "the resolver errored"
+# (dns=fail dns_detail=rc=64) for names dig and host both report as NXDOMAIN. The
+# guard below is behavioral: it runs the DEFAULT resolution path - no resolver
+# override at all - against an isolated stand-in of that exact shape, so it proves
+# what the probe reports rather than what its source text happens to contain.
+usage_dir=$TMP_ROOT/usage-only-resolver
+mkdir -p "$usage_dir"
+cat > "$usage_dir/dscacheutil" <<'SH'
+#!/usr/bin/env bash
+printf 'Usage: dscacheutil -cachedelete | -flushcache | -L | -q name | -m\n' >&2
+exit 64
+SH
+chmod +x "$usage_dir/dscacheutil"
+: > "$usage_dir/noise.log"
+# `host` is named after the directory-service category dscacheutil was once called
+# with, so if a future default list ever leads with that call shape the stand-in
+# captures it verbatim and the last assertion below fails loudly instead of quietly.
+out=$(PATH="$usage_dir:$BASE_PATH" env -u FM_PROVIDER_REACH_DNS_TOOL \
+  FM_FAKE_CURL_URL_LOG="$usage_dir/noise.log" FM_FAKE_DIG_LOG="$usage_dir/noise.log" \
+  "$SCRIPT" --host api.example.invalid 2>&1); rc=$?
+assert_not_contains "$out" "dns=fail" "the default resolver path never reports the usage block as a failed lookup"
+assert_not_contains "$out" "rc=64" "a usage-block exit 64 from a non-lookup tool is never surfaced as a resolver status"
+assert_not_contains "$out" "Usage:" "the probe line never carries a tool's usage text"
+case $out in
+  *dns=ok*|*dns=nxdomain*|*dns=skipped*) : ;;
+  *) fail "the default resolver path reported an undeclared dns class: $out" ;;
 esac
+assert_not_contains "$out" "http=200" "this case resolves nothing real, so no verdict may come from an HTTP answer"
+if [ -s "$usage_dir/noise.log" ]; then
+  fail "the default resolver list calls a tool it cannot pass correctly: $(cat "$usage_dir/noise.log")"
+fi
 if [ -x /usr/bin/dscacheutil ]; then
   # First-hand proof of why it is excluded: the call this probe used answers usage.
   ds_out=$(/usr/bin/dscacheutil -q host -a api.example.invalid 2>&1); ds_rc=$?
@@ -226,13 +272,40 @@ if [ -x /usr/bin/dscacheutil ]; then
   [ "$ds_rc" -ne 0 ] || fail "dscacheutil returned success where it was expected to error"
 fi
 
-# --- a missing resolver is disclosed, not invented --------------------------
+# --- a preference list tries every entry until one is installed -------------
+# The configured value is one tool OR a whitespace-separated list, so availability
+# is decided per entry. A build that tested the whole string as a single executable
+# skipped the resolver that was actually on PATH and reported `dns=skipped`
+# `dns_tool_missing=dig host` for a name that resolves through dig.
+later_dir=$TMP_ROOT/list-second-entry; new_case "$later_dir"
+mkdir -p "$later_dir/onlydig"
+make_fake_dig "$later_dir/onlydig" "$later_dir/pref.log"
+: > "$later_dir/pref.log"
+out=$(PATH="$later_dir/onlydig:$later_dir:$BASE_PATH" FM_FAKE_CURL_CODE=200 \
+  FM_PROVIDER_REACH_DNS_TOOL='nosuchresolver dig' \
+  FM_FAKE_CURL_URL_LOG="$later_dir/urls.log" "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 0 "$rc" "a usable later entry in the list still gets its HTTP phase"
+assert_contains "$out" "dns=ok" "an installed entry further down the list is tried, not skipped"
+assert_contains "$out" "dns_detail=1.2.3.4" "the tried entry's own answer is reported"
+assert_not_contains "$out" "dns_tool_missing" "a partially usable list is never disclosed as a missing resolver"
+assert_not_contains "$out" "dns=fail" "an absent earlier entry is skipped, not reported as a lookup failure"
+[ "$(grep -c . "$later_dir/pref.log")" = 1 ] || fail "expected exactly one resolver call, got: $(cat "$later_dir/pref.log")"
+assert_contains "$(cat "$later_dir/pref.log")" "api.xhyapi.com" "the tried resolver was handed the probed authority"
+
+# --- every entry missing is disclosed as a skipped lookup -------------------
+# The same preference-list semantics, from the other end: when no listed entry is
+# installed, nothing was looked up, and that stays a disclosure rather than becoming
+# an outage claim. The probe must still complete its HTTP phase.
 tmp=$TMP_ROOT/no-dns-tool; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=200 FM_PROVIDER_REACH_DNS_TOOL=no-such-resolver \
   "$SCRIPT" xhy 2>&1); rc=$?
 expect_code 0 "$rc" "a missing resolver does not block the HTTP phase"
 assert_contains "$out" "dns=skipped" "a missing resolver reports dns=skipped"
 assert_contains "$out" "dns_tool_missing" "a missing resolver is disclosed in the line"
+assert_not_contains "$out" "dns_tool_missing=no-such-resolver" "the disclosure names no usable resolver without echoing the list back"
+if [ -s "$tmp/urls.log" ]; then
+  fail "a missing resolver skipped the HTTP phase instead of reporting its verdict: $(cat "$tmp/urls.log")"
+fi
 
 # --- the bound is real, on both phases --------------------------------------
 tmp=$TMP_ROOT/hang-http; new_case "$tmp"
@@ -289,11 +362,43 @@ tmp=$TMP_ROOT/both-targets; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" xhy --host api.example.invalid 2>&1); rc=$?
 expect_code 2 "$rc" "a target and --host together are refused"
 
-tmp=$TMP_ROOT/host-no-authority; new_case "$tmp"
-out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" --host '/not-a-host' 2>&1); rc=$?
-expect_code 2 "$rc" "a host yielding no authority exits invalid-target"
-assert_contains "$out" "result=invalid-target" "an authority-less probe says invalid-target"
+# --- an authority-less registered target is its own verdict, never a guess ----
+# The guard lives on the registered-target path. Its base URL is recorded data, so
+# the suite reaches the defect through the documented FM_PROVIDER_REACH_TARGET_BASE
+# seam - armed only under FM_TEST_SEAM, replacing the recorded URL of an already
+# registered target and registering nothing.
+tmp=$TMP_ROOT/target-no-authority; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_PROVIDER_REACH_TARGET_BASE='https://' "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 2 "$rc" "a registered target with no authority exits 2"
+assert_contains "$out" "result=invalid-target" "an authority-less target says invalid-target"
 assert_contains "$out" "base_url_has_no_authority" "it names why"
+assert_contains "$out" "probe=xhy" "the line still identifies the probed target"
+assert_contains "$out" "dns=skipped http=none" "an invalid target resolves nothing and requests nothing"
+[ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "expected exactly one probe line, got: $out"
+[ ! -s "$tmp/dig.log" ] || fail "an invalid target still ran a resolver: $(cat "$tmp/dig.log")"
+[ ! -s "$tmp/urls.log" ] || fail "an invalid target still issued an HTTP request: $(cat "$tmp/urls.log")"
+
+# The seam must not become a way to register a target: an unregistered name stays a
+# usage refusal, and an unset seam leaves the recorded URL in charge.
+tmp=$TMP_ROOT/seam-registers-nothing; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_PROVIDER_REACH_TARGET_BASE='https://api.example.invalid/v1/models' \
+  "$SCRIPT" nosuchprovider 2>&1); rc=$?
+expect_code 2 "$rc" "a base URL alone does not register a target"
+assert_contains "$out" "no probe is registered" "the refusal still names the missing registration"
+
+# Outside an armed suite the seam is inert, so a leaked variable cannot silently
+# redirect a registered target at another endpoint.
+tmp=$TMP_ROOT/seam-inert; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=200 FM_FAKE_DIG_MODE=address \
+  FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+  env -u FM_TEST_SEAM FM_PROVIDER_REACH_TARGET_BASE='https://seam.example.invalid' \
+  "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 0 "$rc" "an unarmed seam changes nothing"
+assert_contains "$out" "http=200" "an unarmed seam still completes the probe"
+assert_contains "$(cat "$tmp/urls.log")" "https://api.xhyapi.com/v1/models" "an unarmed seam keeps the recorded base URL"
+assert_not_contains "$(cat "$tmp/urls.log")" "seam.example.invalid" "an unarmed seam does not redirect the request"
 
 tmp=$TMP_ROOT/host-userinfo; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" --host user:pass@api.example.invalid 2>&1); rc=$?

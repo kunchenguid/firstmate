@@ -24,19 +24,21 @@ The classes below are the shapes this home has actually recorded from the regist
 | `401` / `403` | `routed-auth` | 10 | a request reached the endpoint and was answered with an authorization refusal | usability - no credential is sent, so this is routing evidence only |
 | `2xx` | `reachable` | 0 | the endpoint is routable and answering on the probed path | model availability, credential validity, or that a large or long-output request succeeds |
 | other codes including `5xx` | `server-error` | 11 | the endpoint answered but is unhealthy or behaves unexpectedly | the cause |
-| resolver tool absent | `dns=skipped`, then the HTTP verdict | per HTTP | nothing about DNS; disclosed as `dns_tool_missing` | - |
+| no configured resolver is installed (the whole preference list misses) | `dns=skipped`, then the HTTP verdict | per HTTP | nothing about DNS; disclosed as `dns_tool_missing` | - |
 | no usable curl executable | `tool-missing` | 64 | this surface could not be probed | any claim about the endpoint |
 
 ## Resolver candidates and one recorded misclassification
 
-The default candidate list is `/usr/bin/dig` then `/usr/bin/host`; `FM_PROVIDER_REACH_DNS_TOOL` overrides it with one tool or a preference list, which is also what keeps the suite deterministic on every host.
+The default candidate list is `/usr/bin/dig` then `/usr/bin/host`; `FM_PROVIDER_REACH_DNS_TOOL` overrides it with one tool or a whitespace-separated preference list, which is also what keeps the suite deterministic on every host.
+Availability is decided **per entry**, in order, by the resolution phase itself: an entry that is not an installed executable is skipped without being run, and the lookup stops at the first entry that answers.
+A build here instead tested the entire configured value as a single executable before ever calling a resolver, so `FM_PROVIDER_REACH_DNS_TOOL="dig host"` matched nothing, the installed `dig` was never consulted, and the line reported `dns=skipped dns_tool_missing=dig host` for a name that resolves. The class of the finding (exit 20, HTTP still attempted from the fallthrough) hid it.
 
 It previously led with macOS's `/usr/bin/dscacheutil`, called as `-q host -a <name>`.
 That is not one of its directory-service categories, so it answered **every** name with its usage block and exit 64, and because those calls come first in the list they set the DNS phase: an NXDOMAIN endpoint was recorded as `dns=fail dns_detail=rc=64` - "the resolver errored" - rather than "the name resolves to nothing".
 The exit verdict stayed 20 by fallthrough, so the class was right and the shape was wrong.
 Reproduced first-hand on this host: `dscacheutil -q host -a api.xhyapi.com` prints usage and exits 64 while `dig` reports `status: NXDOMAIN` and `host` reports `not found: 3(NXDOMAIN)` for the same name.
 A reader must therefore treat `dns=fail rc=<code>` from any build before this correction as an unusable lookup, not as evidence about the endpoint.
-`tests/fm-provider-reach-probe.test.sh` now pins the candidate list so a tool the probe cannot call correctly cannot re-enter it.
+`tests/fm-provider-reach-probe.test.sh` proves both shapes behaviorally, with local stand-ins only: a preference list whose usable entry is not first still reports `dns=ok`, and the default resolution path never reports a `dscacheutil`-style usage block (`Usage:` plus exit 64) as a lookup failure or as an answer.
 
 Two asymmetries are load-bearing and are the reason the verdicts are not collapsed into exit-success:
 
@@ -50,6 +52,7 @@ Two asymmetries are load-bearing and are the reason the verdicts are not collaps
 | `xhy` | `https://api.xhyapi.com/v1/models` | Unauthenticated `GET`. The path answers `401` when the route is live, which is what makes the `routed-auth` class distinguishable from an outage. |
 
 Any added target requires its discriminator behavior to be verified first-hand and recorded here before registration.
+The registered-target path is reachable through the CLI, so its configuration contract is guarded too: a base URL that yields no request authority is its own verdict, `result=invalid-target` with exit 2, printed as the probe's single line before any resolver or request runs. Since every currently recorded URL carries an authority, the suite reaches this through the documented `FM_PROVIDER_REACH_TARGET_BASE` seam (armed only by `FM_TEST_SEAM=1`), which replaces the recorded base URL of an already registered target and registers nothing - an unregistered target stays an `invalid-input` refusal, and a leaked seam value alone changes nothing outside a suite.
 
 ## Why the dispatch configuration cannot carry a health predicate
 

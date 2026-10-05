@@ -63,10 +63,21 @@
 #                                     used. Zero is rejected because `timeout 0`
 #                                     and the Perl fallback's `alarm 0` both mean
 #                                     "no deadline".
-#   FM_PROVIDER_REACH_DNS_TOOL        override the resolver CLI, or a
-#                                     whitespace-separated preference list (default:
-#                                     /usr/bin/dig, then /usr/bin/host).
-#                                     Tests use it to keep DNS deterministic.
+#   FM_PROVIDER_REACH_DNS_TOOL        one resolver CLI, or a whitespace-separated
+#                                     preference list tried in order until one that
+#                                     is installed answers (default: /usr/bin/dig,
+#                                     then /usr/bin/host). Each entry takes the
+#                                     bare authority and no other argument, so a
+#                                     tool needs its own entry - and a token that
+#                                     is not an installed tool is skipped, never
+#                                     run. Tests use it to keep DNS deterministic.
+#   FM_PROVIDER_REACH_TARGET_BASE     test seam for the registered-target table:
+#                                     when FM_TEST_SEAM is 1, this replaces the
+#                                     recorded base URL of the named registered
+#                                     target. It registers nothing, so an
+#                                     unregistered target stays a refusal and an
+#                                     unset value keeps the recorded URL.
+#                                     Unset outside a test suite.
 #   FM_TEST_SEAM                      when 1, allow FM_PROVIDER_REACH_CURL_CMD to
 #                                     name the curl executable, so a suite can
 #                                     prove the curl-absent branch on a host whose
@@ -77,6 +88,7 @@ set -u
 
 DEFAULT_TIMEOUT=10
 XHY_BASE=https://api.xhyapi.com/v1/models
+DNS_DEFAULT_CANDIDATES='/usr/bin/dig /usr/bin/host'
 
 usage() {
   cat <<'EOF'
@@ -190,9 +202,14 @@ else
   die_input "no probe is registered for target '$TARGET'"
 fi
 
-# A registered target that cannot yield an authority is a configuration defect,
-# never a healthy probe: report it as its own verdict instead of letting curl
-# invent a connection failure.
+# A recorded base URL with no host part cannot yield a request authority: that is a
+# registration defect, never a healthy probe, so it gets its own verdict before any
+# resolver or request runs instead of letting curl invent a connection failure. The
+# seam below is the only way to stand such a registration up under test; outside an
+# armed suite every target probes the URL recorded above it.
+if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_PROVIDER_REACH_TARGET_BASE:-}" ]; then
+  BASE=$FM_PROVIDER_REACH_TARGET_BASE
+fi
 AUTHORITY=$(printf '%s\n' "$BASE" | sed -nE 's|^https?://([^/?#]+).*|\1|p')
 if [ -z "$AUTHORITY" ]; then
   printf 'probe=%s dns=skipped http=none result=invalid-target base_url_has_no_authority\n' "$PROBE"
@@ -208,11 +225,17 @@ DETAIL=''
 # output never becomes an outage claim. When the lookup already found no address
 # the HTTP phase is skipped, because dialing a name with no address adds noise,
 # not information.
+#
+# Availability is decided per candidate inside dns_probe, never by testing the
+# whole configured value as one executable: an override may be a preference list,
+# and `command -v "dig host"` fails while dig itself sits right there on PATH.
+# A pre-gate over the combined string silently skipped the resolver that was
+# actually installed and reported a lookup that never ran as dns=skipped.
 dns_probe() {
   local tool out rc first
   # The override is one tool or a whitespace-separated preference list; unset
   # means this host's own candidates in order.
-  for tool in ${FM_PROVIDER_REACH_DNS_TOOL:-/usr/bin/dig /usr/bin/host}; do
+  for tool in ${FM_PROVIDER_REACH_DNS_TOOL:-$DNS_DEFAULT_CANDIDATES}; do
     [ -n "$tool" ] || continue
     case "$tool" in
       /*) [ -x "$tool" ] || continue ;;
@@ -253,19 +276,13 @@ dns_probe() {
   return 1
 }
 
-DNS_TOOL=${FM_PROVIDER_REACH_DNS_TOOL:-}
-if [ -n "$DNS_TOOL" ] && ! command -v "$DNS_TOOL" >/dev/null 2>&1 \
-   && [ ! -x "$DNS_TOOL" ]; then
-  DETAIL="${DETAIL} dns_tool_missing=$DNS_TOOL"
+DNS_RESULT=$(dns_probe)
+if [ -n "$DNS_RESULT" ]; then
+  DNS=${DNS_RESULT%% *}
+  DETAIL="${DETAIL} dns_detail=${DNS_RESULT#* }"
 else
-  dns_result=$(dns_probe)
-  if [ -n "$dns_result" ]; then
-    DNS=${dns_result%% *}
-    DETAIL="${DETAIL} dns_detail=${dns_result#* }"
-  else
-    DNS=skipped
-    DETAIL="${DETAIL} dns_tool_missing"
-  fi
+  DNS=skipped
+  DETAIL="${DETAIL} dns_tool_missing"
 fi
 
 # ---- emit terminal DNS-only results ------------------------------------------
