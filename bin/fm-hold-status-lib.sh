@@ -221,7 +221,8 @@ _fm_status_wait_scan_file() {  # <status-file> <mirror-ere> [<skip-ere>]
 # to the first other event, and print it when it is a hold mirror (matching
 # <mirror-ere>) or a pause none of those resolved lines share a phase key with.
 # Lines matching <skip-ere> are read past, and with one given any other event
-# it stops at is printed too, which is the worker's own view under a hold.
+# it stops at is printed too, which is the worker's own view under a hold;
+# a decision one of those resolved lines answered is not.
 # Returns 1 when every event is a resolved line, so a caller reading a bounded
 # window knows to widen it.
 _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-ere> [<skip-ere>]
@@ -245,6 +246,15 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-
     case "$verb" in
       "$resolve") ;;
       "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") ;;
+      needs-decision|blocked)
+        [ -n "$skip" ] || return 0
+        key=$(_fm_decision_key "$line") || key=
+        case "${keys//"$_FM_CLASSIFY_KEYLESS_PHASE"/default}" in
+          *$'\n'"$key"$'\n'*) return 0 ;;
+        esac
+        printf '%s\n' "$line"
+        return 0
+        ;;
       *)
         [ -z "$skip" ] || printf '%s\n' "$line"
         return 0
