@@ -626,7 +626,7 @@ describe("the effort cue", () => {
       await turn($, w);
       expect(await cueLabel($)).toBe("◕ xhigh");
     }
-    // A second press before the next request steps on past it, so the ramp never sticks there.
+    // A second press before the next request steps on past it, where a press after one asks for it again.
     await press($);
     await press($);
     expect(journal.runs.at(-1)).toEqual({ command: "effort", args: "low" });
@@ -859,6 +859,28 @@ describe("the effort cue", () => {
     await $.command.run(command("effort", "ultracode"));
     // No request has run before this one, so there is no earlier model for it to differ from.
     await runStep($, "xhigh");
+    expect(await cueLabel($)).toBe("◌ effort ?");
+  });
+
+  test("claims no level from a request under another model while ultracode is selected", async ($, on) => {
+    world(on);
+    stepper(on);
+    await $.session.start(sessionStart);
+    await runStep($, "high");
+    await $.command.run(command("effort", "ultracode"));
+    // The model picker switches models without any event; Claude Code keeps ultracode across it.
+    await runStep($, "xhigh", undefined, "claude-opus-5");
+    expect(await cueLabel($)).toBe("◌ effort ?");
+  });
+
+  test("claims no level after /model while ultracode is selected", async ($, on) => {
+    world(on);
+    stepper(on);
+    await $.session.start(sessionStart);
+    await runStep($, "high");
+    await $.command.run(command("effort", "ultracode"));
+    await $.command.run(command("model", "claude-opus-5"));
+    await runStep($, "xhigh", undefined, "claude-opus-5");
     expect(await cueLabel($)).toBe("◌ effort ?");
   });
 

@@ -54,7 +54,8 @@ A command the plugin sees leaves the cue at `◌ effort ?` until the next reques
 Running `/effort` is not proof that it took: Claude Code can decline a level your plan or your model does not offer, or set the highest level allowed instead, and it says so in its own output rather than by failing.
 So the cue never names the level that was asked for, only a level a request carried.
 The cycle learns nothing from a step either: no event tells the plugin that Claude Code declined a level, and a request that shows the session where it was looks the same whether the level was declined, the change was turned down at Claude Code's own confirmation described below, or you moved it back with the effort slider or the model picker.
-So a level your model or plan does not offer stays on the ramp, the press that asks for it leaves the level where Claude Code's own message says, and the next press steps on: cycling past such a level takes one extra press each lap.
+So a level your model or plan does not offer stays on the ramp, and the press that asks for it leaves the level where Claude Code's own message says.
+Another press before your next message steps on past it; once a message has gone out at the level that stayed, the next press asks for the same level again.
 For every other way the level moves, see [What the cue can know](#what-the-cue-can-know).
 
 The cycle visits `low`, `medium`, `high`, `xhigh`, and `max`.
@@ -72,7 +73,8 @@ If Claude Code refuses to run `/effort` at all, a transient notice says so, and 
 
 Claude Code 2.1.280 asks you to confirm the first change of effort after each reply while the conversation's prompt cache is warm, because a change makes the next message re-read the whole history, so such a step is one press and then `enter` on `Yes`.
 A new session asks nothing until its first reply, a resumed one can ask from its first change if it resumes while the cache is still warm, and once the cache has expired a change applies without asking.
-Choosing `No, go back` keeps the level you had, and the next press offers the same level again.
+Choosing `No, go back` keeps the level you had.
+A press before your next message steps on from the level you turned down; once a message has gone out at the level you kept, the next press offers the level you turned down again.
 
 ### Binding it to one key
 

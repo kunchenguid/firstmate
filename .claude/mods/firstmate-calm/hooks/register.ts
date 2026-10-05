@@ -85,6 +85,7 @@ import {
   normalizeEffortLevel,
   parseEffortSelection,
   savedEffortLevel,
+  selectionAfterModelSwitch,
   type EffortLevel,
 } from "../lib/fm-effort-level.ts";
 
@@ -299,8 +300,9 @@ function invalidateDrawings($: EngineInterface): void {
  * carries that output. A request that later shows the session where it was proves nothing
  * either: a change turned down at Claude Code's own confirmation, and one made back through
  * the effort slider or the model picker, look exactly the same. So the cycle learns nothing
- * from a step, every level stays on the ramp, and a level the model does not offer costs one
- * press per lap.
+ * from a step and every level stays on the ramp: a press before the next request steps on
+ * from the level this one asked for, and once a request proves the session stayed, the next
+ * press asks for that level again.
  *
  * The selection is recorded before the command is run, so a second keystroke during the run
  * steps from the level this one is selecting rather than repeating it; a run the host
@@ -564,7 +566,7 @@ export const register: Register = (on) => {
     if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     const result = await next(e);
-    selectedEffort($, undefined);
+    selectedEffort($, selectionAfterModelSwitch(effortSelected));
     return result;
   });
 
@@ -602,7 +604,9 @@ export const register: Register = (on) => {
       // would start is its own. Before the first request no model has been learned, and the
       // level selected so far was selected in this session under its own model, so only a
       // model that differs from a learned one reconsiders it.
-      if (effortModel !== undefined && e.model !== effortModel) effortSelected = undefined;
+      if (effortModel !== undefined && e.model !== effortModel) {
+        effortSelected = selectionAfterModelSwitch(effortSelected);
+      }
       effortModel = e.model;
       const confirmed = confirmedEffortLevel(effortSelected, normalizeEffortLevel(e.effort));
       if (confirmed !== undefined) effortSelected = confirmed;

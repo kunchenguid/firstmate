@@ -96,8 +96,10 @@ export function normalizeEffortLevel(value: unknown): EffortLevel | undefined {
  *
  * Every level on the ramp stays on it. Claude Code reports a level it will not take only in
  * its own output, which no event carries, so nothing here can know a level is refused, and a
- * level a model does not offer costs one press per lap rather than being passed over on a
- * guess. This decides only what to ask for next and says nothing about what is in force.
+ * level a model does not offer is never passed over on a guess: a step taken before the next
+ * request steps on from the level the last one asked for, and once a request proves the
+ * session stayed, the next step asks for that level again. This decides only what to ask for
+ * next and says nothing about what is in force.
  */
 export function cycleEffortLevel(current: EffortLevel): EffortLevel {
   const at = (EFFORT_CYCLE as readonly string[]).indexOf(current);
@@ -129,8 +131,23 @@ export function confirmedEffortLevel(
   selected: EffortLevel | undefined,
   reported: EffortLevel | undefined,
 ): EffortLevel | undefined {
-  if (selected !== undefined && !(TURN_STEP_LEVELS as readonly string[]).includes(selected)) return undefined;
+  if (selected !== undefined && !requestCanReport(selected)) return undefined;
   return reported;
+}
+
+/**
+ * What a model switch leaves of the last level a command selected: nothing, so the next
+ * request or the new model's saved level decides where a step starts, unless that level is
+ * one no request can report. Claude Code carries `ultracode` across a model switch, so
+ * forgetting it would let the next request's `xhigh` read as proof of a level not in force.
+ */
+export function selectionAfterModelSwitch(selected: EffortLevel | undefined): EffortLevel | undefined {
+  return selected !== undefined && !requestCanReport(selected) ? selected : undefined;
+}
+
+/** Whether a main-loop request can report `level` as the effort it asks for. */
+function requestCanReport(level: EffortLevel): boolean {
+  return (TURN_STEP_LEVELS as readonly string[]).includes(level);
 }
 
 /** The settings shape a saved effort level is read out of. */

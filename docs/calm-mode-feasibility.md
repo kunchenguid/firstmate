@@ -1048,7 +1048,7 @@ A probe in the guard's own tmux shape that submits one Sonnet turn, and a probe 
 - Escape takes the `No, go back` path: Claude Code prints `Kept effort level as medium`, and the footer stays at `think:med`.
 - Before any turn `/effort high` applied with no confirmation, and so did a second raise before the next turn (`high` to `xhigh`) and a change down from there (`xhigh` to `low`).
 
-Two more facts were read out of the installed 2.1.280 binary rather than probed.
+Three more facts were read out of the installed 2.1.280 binary rather than probed.
 
 - The confirmation is not limited to raises.
   It is raised for any change that resolves to a different level, while the session's output-token count is above zero and differs from the count at the last confirmed change, and while the conversation's prompt cache is warm.
@@ -1057,6 +1057,9 @@ Two more facts were read out of the installed 2.1.280 binary rather than probed.
 - `/effort` saves only `low`, `medium`, `high`, and `xhigh`, as `modelSettings.<model>.effortLevel`.
   `max` reports `(this session only)` and saves nothing.
   A level above the cap from the settings, the organization, or the model catalog is set to that cap instead, reported as `Effort '<asked>' exceeds the cap for <model> set by your settings or organization; set to '<cap>' instead`, and that saves nothing either.
+- A model switch through the picker keeps `ultracode`.
+  It sets `ultracode` from the effort the picker carries, which starts at `ultracode` while that is on, and leaves it untouched when the switch carries no effort at all.
+  So the mod keeps an `ultracode` selection across a model switch, whether it sees `/model` or only a request naming another model, and the next request's `xhigh` proves nothing.
 
 Before this build the mod read a step that asked for a level and left the session where it already was as a level the model declined, so turning a change down at that confirmation made the ramp pass the level over until a request named another model.
 Two revisions of this fix tried to keep that decline memory, and both still guessed.
@@ -1064,7 +1067,7 @@ The first judged a step by the entry the run saved for the session's model, whic
 The second learned a decline only from a step taken before the session's first reply, where no confirmation can be raised, but the captain moving the level back through the effort slider or the model picker before that reply looks exactly the same, and the decline it recorded was never dropped.
 No surface the mod already uses carries an explicit refusal: `/effort` reports one only in its own output, and a `command.run` result carries no denial.
 So the mod now learns nothing from a step at all: it reads nothing from the settings about one, keeps no declined levels, and has no notice for a ramp with nothing left on it.
-Every level stays on the ramp, and a level the model or plan does not offer costs one extra press per lap.
+Every level stays on the ramp: a press made before the next request steps on past a level the model or plan does not offer, and once a request proves the level stayed, the next press asks for that level again.
 This supersedes the decline memory in the 2026-09-17 record above, and the settings check, decline memory, nothing-left notice, and test world that saves every level described in the earlier commit messages of the branch that shipped this cue; none of them is present behavior.
 The live guard accepts the confirmation wherever an effort change can raise it, including the restore on exit, and where the build asks it, the guard turns the first raise down, proves the level kept, and proves the next step after a turn offers the same level again.
 The live run below was taken against the first revision.
@@ -1072,7 +1075,7 @@ The path it drives, a change turned down after a reply, records nothing under an
 
 ```text
 $ bash tests/fm-calm-claude-mod.test.sh
-ok - the effort-level policy cycles the ramp and wraps without skipping a level, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, and treats only a request that can report the selected level as proof of what is in force
+ok - the effort-level policy cycles the ramp and wraps without skipping a level, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, keeps an ultracode selection across a model switch, and treats only a request that can report the selected level as proof of what is in force
 
 $ bash tests/fm-calm-claude-mod-plugin.test.sh
 ok - Claude Code 2.1.280 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings, /calm, and the effort cue's band, press, and commands while logging supervision notes

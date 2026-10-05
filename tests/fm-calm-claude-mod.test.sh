@@ -704,11 +704,18 @@ check(effort.confirmedEffortLevel("ultracode", "xhigh") === undefined, "a reques
 check(effort.confirmedEffortLevel("ultracode", undefined) === undefined, "ultracode plus a request without a level proves nothing");
 check(effort.confirmedEffortLevel(undefined, undefined) === undefined, "a request carrying no level proves nothing");
 check(effort.confirmedEffortLevel("low", undefined) === undefined, "a request carrying no level proves nothing even after a selection");
+
+// A model switch forgets where a step starts, except a selection no request can report.
+for (const level of effort.TURN_STEP_LEVELS) {
+  check(effort.selectionAfterModelSwitch(level) === undefined, \`a model switch forgets the selected \${level}\`);
+}
+check(effort.selectionAfterModelSwitch(undefined) === undefined, "a model switch leaves no selection as none");
+check(effort.selectionAfterModelSwitch("ultracode") === "ultracode", "ultracode survives a model switch, so no request can be read as proof");
 console.log("effort-ok");
 JS
   out=$(run_node "$TMP_ROOT/effort.mjs" 2>&1) || fail "effort-level policy: $out"
   assert_contains "$out" "effort-ok" "the effort-level policy check did not complete"
-  pass "the effort-level policy cycles the ramp and wraps without skipping a level, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, and treats only a request that can report the selected level as proof of what is in force"
+  pass "the effort-level policy cycles the ramp and wraps without skipping a level, keeps ultracode out of a blind cycle, holds no level for auto, names one Claude Code theme key and glyph per level, sizes the rule to the row, reads the saved level a first step climbs from, keeps an ultracode selection across a model switch, and treats only a request that can report the selected level as proof of what is in force"
 }
 
 test_plugin_shape
