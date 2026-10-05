@@ -255,9 +255,45 @@ function startsMarkdownBlock(lines, index) {
     || (line.includes("|") && isTableSeparator(lines[index + 1] ?? ""));
 }
 
-function renderMarkdown(container, source) {
+function headingAnchor(text, fallback) {
+  const anchor = text.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu, "-").replace(/^-|-$/g, "");
+  return anchor || fallback;
+}
+
+function renderDocumentDirectory(container, headings) {
+  const reader = container.closest(".document-reader");
+  const directory = reader?.querySelector(".document-toc");
+  if (!reader || !directory) return;
+  const list = directory.querySelector("ol");
+  list.replaceChildren();
+  reader.classList.toggle("has-directory", headings.length > 0);
+  directory.hidden = headings.length === 0;
+  for (const heading of headings) {
+    const item = document.createElement("li");
+    item.dataset.level = String(heading.level);
+    const link = document.createElement("a");
+    link.href = `#${heading.element.id}`;
+    link.textContent = heading.element.textContent;
+    link.addEventListener("click", event => {
+      event.preventDefault();
+      heading.element.scrollIntoView({ block: "start" });
+      heading.element.focus({ preventScroll: true });
+    });
+    item.append(link);
+    list.append(item);
+  }
+}
+
+function clearRenderedDocument(container) {
   container.replaceChildren();
+  renderDocumentDirectory(container, []);
+}
+
+function renderMarkdown(container, source) {
+  clearRenderedDocument(container);
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  const headings = [];
+  const anchorCounts = new Map();
   let index = 0;
   while (index < lines.length) {
     const line = lines[index];
@@ -280,7 +316,13 @@ function renderMarkdown(container, source) {
     if (heading) {
       const element = document.createElement(`h${heading[1].length}`);
       appendInline(element, heading[2]);
+      const baseAnchor = headingAnchor(element.textContent, "section");
+      const count = (anchorCounts.get(baseAnchor) || 0) + 1;
+      anchorCounts.set(baseAnchor, count);
+      element.id = `${container.id}-${baseAnchor}${count === 1 ? "" : `-${count}`}`;
+      element.tabIndex = -1;
       container.append(element);
+      headings.push({ element, level: heading[1].length });
       index += 1;
       continue;
     }
@@ -342,6 +384,7 @@ function renderMarkdown(container, source) {
     appendInline(paragraph, paragraphLines.join(" "));
     container.append(paragraph);
   }
+  renderDocumentDirectory(container, headings);
 }
 
 function renderContent(container, content) {
@@ -618,7 +661,7 @@ function clearArtifactSelection(source) {
   state.loading = false;
   state.reportContent = null;
   elements.sessionTitle.textContent = source === "report" ? "Choose a report" : source === "supervisor" ? "Choose a supervisor session" : "Choose a journal";
-  elements.reportRendered.replaceChildren();
+  clearRenderedDocument(elements.reportRendered);
   elements.report.querySelector(".report-source pre").textContent = "";
   elements.events.replaceChildren();
   setStatus(source === "report" ? "Select a task report from the library." : "Select a work journal from the session list.");
@@ -830,7 +873,7 @@ function clearTaskDocument(message) {
   state.taskDocumentContent = null;
   elements.taskDocumentType.hidden = true;
   elements.taskDocumentType.textContent = "";
-  elements.taskDocumentRendered.replaceChildren();
+  clearRenderedDocument(elements.taskDocumentRendered);
   elements.taskDocumentSource.hidden = true;
   elements.taskDocumentSource.querySelector("pre").textContent = "";
   elements.taskDocumentEmpty.hidden = false;
@@ -1030,7 +1073,7 @@ async function selectSession(session, { updateRoute = true } = {}) {
   selectDisplay(reportSelected);
   if (reportSelected) {
     state.reportContent = null;
-    elements.reportRendered.replaceChildren();
+    clearRenderedDocument(elements.reportRendered);
     elements.report.querySelector(".report-source pre").textContent = "";
     showNotice();
     await loadReport({ resetDisplay: true });
