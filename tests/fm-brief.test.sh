@@ -294,6 +294,46 @@ ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
 
+test_worker_briefs_include_post_merge_verification_and_decision_context() {
+  local home id brief
+  home="$TMP_ROOT/post-merge-rules-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR; do
+    id="brief-post-merge-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode brief scaffold failed"
+    brief="$home/data/$id/brief.md"
+    assert_grep "Whether you may merge a PR is determined by this task's merge posture" "$brief" \
+      "$mode brief must retain task merge-posture authority"
+    assert_grep "full test suite on the merged tree" "$brief" "$mode brief must test the merged tree"
+    assert_grep "end-to-end test and recalculate the feature" "$brief" "$mode brief must verify functionality after merge"
+    assert_grep "revert to the state before the merge and report the failure" "$brief" \
+      "$mode brief must require rollback and reporting on failure"
+    assert_no_grep "Never merge a PR" "$brief" "$mode brief must not forbid all worker merges"
+  done
+
+  for kind in scout secondmate; do
+    id="brief-decision-context-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null 2>&1 \
+        || fail "scout brief scaffold failed"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 \
+        || fail "secondmate charter scaffold failed"
+    fi
+    brief="$home/data/$id/brief.md"
+    if [ "$kind" = scout ]; then
+      assert_grep 'background and each option with its consequence' "$brief" \
+        "$kind brief must require decision background and option consequences"
+    else
+      assert_grep 'consequence of each option' "$brief" \
+        "$kind brief must require decision background and option consequences"
+    fi
+    assert_no_grep 'summary of options' "$brief" "$kind brief must not retain the underspecified decision template"
+  done
+  pass "fm-brief.sh: worker merge authority, post-merge checks, rollback, and decision context render in all briefs"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -301,7 +341,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-direct-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
+  assert_grep "When it does not authorize you to merge, the configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
@@ -1472,6 +1512,7 @@ test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
+test_worker_briefs_include_post_merge_verification_and_decision_context
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection

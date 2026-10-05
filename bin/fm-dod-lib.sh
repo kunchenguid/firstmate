@@ -200,13 +200,13 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   fi
   case "$mode" in
     direct-PR)
-      printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). Never merge a PR."
+      printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). Whether you may merge a PR is determined by this task's merge posture: when it does not authorize you to merge, wait for the configured merge authority. When it does authorize you to merge, first verify the branch merges into the latest default branch without conflicts in a disposable worktree, then run the full test suite on the merged tree and confirm zero failures beyond the default branch baseline, then end-to-end test and recalculate the feature on the merged tree. If that post-merge functional verification fails, revert to the state before the merge and report the failure."
       ;;
     local-only)
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
       ;;
     no-mistakes)
-      printf '%s\n' "1. Never push to $target. Never merge a PR."
+      printf '%s\n' "1. Never push to $target. Whether you may merge a PR is determined by this task's merge posture: when it does not authorize you to merge, wait for the configured merge authority. When it does authorize you to merge, first verify the branch merges into the latest default branch without conflicts in a disposable worktree, then run the full test suite on the merged tree and confirm zero failures beyond the default branch baseline, then end-to-end test and recalculate the feature on the merged tree. If that post-merge functional verification fails, revert to the state before the merge and report the failure."
       ;;
     *)
       echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
@@ -472,7 +472,8 @@ A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+The task's recorded merge posture decides whether you may merge the PR. When it does not authorize you to merge, the configured merge authority decides whether to merge the PR; firstmate relays the outcome. When it authorizes you to merge, follow Rule 1's complete post-merge verification and rollback requirements.
+Do NOT run /no-mistakes.
 EOF
       ;;
     local-only:*)
@@ -507,6 +508,7 @@ A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
+The task's recorded merge posture decides whether you may merge the PR. When it does not authorize you to merge, the configured merge authority decides whether to merge the PR; firstmate relays the outcome. When it authorizes you to merge, follow Rule 1's complete post-merge verification and rollback requirements.
 EOF
       ;;
     *)
