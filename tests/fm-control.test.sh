@@ -13,7 +13,9 @@
 #      and a record bound to another task are all refused.
 #   4. Verb allowlist: no arbitrary text, no raw keys, no resume.
 #   5. Lifecycle states: busy interrupts first, idle does not, already-stopped
-#      is idempotent success, and an agent that does not stop fails closed.
+#      is idempotent success, an agent that does not stop is reported
+#      unconfirmed and never failed, and a stop landing after the primary
+#      window but inside the confirm window is success.
 #   6. Marker non-regression: a control command to a kind=secondmate task
 #      carries NO from-firstmate marker and opens no pending-reply expectation,
 #      while fm-send's marking of the same task is untouched.
@@ -81,7 +83,8 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 # that is the harness's exit command flips `command` to a shell (the agent
 # stopped), and a literal carrying a launch brief flips it to the value in
 # `becomes` (a new agent came up). FM_FAKE_NEVER_DIES suppresses the first, so
-# a stubborn agent can be tested too.
+# a stubborn agent can be tested too. FM_FAKE_EXIT_DELAY=<seconds> delays that
+# flip instead, modelling a stop that lands after the primary exit window.
 make_tmux_stub() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -129,7 +132,18 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/literal"
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
-        printf 'zsh' > "$D/command"
+        if [ -n "${FM_FAKE_EXIT_DELAY:-}" ]; then
+          # Late-success model: the agent stops only FM_FAKE_EXIT_DELAY seconds
+          # after receiving its exit command, so the stop lands after the
+          # control plane's primary exit window but inside its confirm window.
+          # printf, not print: awk's default %g OFMT renders an epoch-sized
+          # sum in scientific notation, which the deadline comparison below
+          # would then never reach.
+          printf '%s' "$(awk -v now="${EPOCHREALTIME:-$SECONDS}" \
+            -v d="$FM_FAKE_EXIT_DELAY" 'BEGIN{printf "%.6f\n", now + d}')" > "$D/exit-deadline"
+        else
+          printf 'zsh' > "$D/command"
+        fi
       fi
       case "$payload" in
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) cat "$D/becomes" > "$D/command" ;;
@@ -148,6 +162,20 @@ case "${1:-}" in
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
+      fi
+      if [ "$payload" = Escape ] && [ -n "${FM_FAKE_INTERRUPT_DISAPPEARS:-}" ]; then
+        # The seat closes itself on the interrupt: the recorded window vanishes
+        # from the session inventory, so the endpoint is authoritatively absent.
+        printf '%s\n' 'other-window' > "$D/windows"
+      fi
+      if [ "$payload" = Escape ] && [ -n "${FM_FAKE_INTERRUPT_BLURS:-}" ]; then
+        # The interrupt lands but the classifier cannot positively attribute
+        # the seat: the foreground command reads as neither agent nor shell.
+        printf 'python' > "$D/command"
+        if [ -n "${FM_FAKE_INTERRUPT_STOP_DELAY:-}" ]; then
+          printf '%s' "$(awk -v now="${EPOCHREALTIME:-$SECONDS}" \
+            -v d="$FM_FAKE_INTERRUPT_STOP_DELAY" 'BEGIN{printf "%.6f\n", now + d}')" > "$D/exit-deadline"
+        fi
       fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
         if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
@@ -169,7 +197,21 @@ case "${1:-}" in
             printf '1\n'
           fi
           exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          # A state read costs FM_FAKE_STATE_DELAY of wall clock, so a test can
+          # pin bounds that must hold when a poll iteration is slow.
+          [ -z "${FM_FAKE_STATE_DELAY:-}" ] || /bin/sleep "$FM_FAKE_STATE_DELAY"
+          # The PR's fake agent stops only once its exit deadline has passed,
+          # so a stop that lands after the exit window still lands inside the
+          # confirm window.
+          if [ -f "$D/exit-deadline" ]; then
+            if [ "$(awk -v n="${EPOCHREALTIME:-$SECONDS}" \
+              -v d="$(cat "$D/exit-deadline")" 'BEGIN{print (n >= d) ? 1 : 0}')" = 1 ]; then
+              printf 'zsh' > "$D/command"
+              rm -f "$D/exit-deadline"
+            fi
+          fi
+          cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
@@ -193,7 +235,129 @@ if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
   printf 'zsh' > "$FM_FAKE_DIR/command"
   printf '%s\n' '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}' >> "$FM_FAKE_MUSE_LOG"
 fi
+case "${1:-}" in *[!0-9.]*|'') exit 0 ;; esac
+/bin/sleep "$1"
 exit 0
+SH
+  chmod +x "$fb/sleep"
+  printf '%s\n' "$fb"
+}
+
+# A herdr stub for the control plane's absence proofs and exit verification:
+# the recorded session's server is running and the recorded pane holds a
+# registered claude with a live foreground process. Per-test env shapes the
+# choreography: FM_FAKE_HERDR_INTERRUPT_STOPS_SERVER stops the server on the
+# interrupt key (so the raw read widens to `missing`),
+# FM_FAKE_HERDR_INTERRUPT_BREAKS_SEAT both stops it and destroys the pane,
+# FM_FAKE_HERDR_RESTART_POLLS paces the restart - each status call answers
+# false until the count is spent, so server_ensure burns 0.5s per poll -
+# FM_FAKE_HERDR_SERVER_START_FAILS keeps the server down (the proof stays
+# unproven), FM_FAKE_HERDR_START_FAILS_FIRST lets only later launch attempts
+# succeed, FM_FAKE_HERDR_SLEEP_SCALE shrinks every sleep, FM_FAKE_EXIT_DELAY
+# flips the agent to gone that many seconds after the exit command is typed,
+# and FM_FAKE_EXIT_CLOSES_SEAT destroys the pane when the exit command is
+# typed - the seat that closed itself on exit. Every call is appended to
+# fake/herdr-log as the side-effect record.
+make_herdr_stub() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+printf '%s\n' "$*" >> "$D/herdr-log"
+case "${1:-} ${2:-}" in
+  'status --json')
+    running=true
+    if [ -f "$D/herdr-stopped" ]; then
+      running=false
+    elif [ -f "$D/herdr-restarting" ]; then
+      count=$(cat "$D/herdr-restart-count" 2>/dev/null || printf 0)
+      if [ "$count" -lt "${FM_FAKE_HERDR_RESTART_POLLS:-0}" ]; then
+        printf '%s\n' "$((count + 1))" > "$D/herdr-restart-count"
+        running=false
+      else
+        rm -f "$D/herdr-restarting" "$D/herdr-restart-count"
+      fi
+    fi
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":%s}}\n' "$running"
+    exit 0 ;;
+  'server'|'server '*)
+    attempt=$(cat "$D/herdr-server-attempts" 2>/dev/null || printf 0)
+    printf '%s\n' "$((attempt + 1))" > "$D/herdr-server-attempts"
+    if [ -z "${FM_FAKE_HERDR_SERVER_START_FAILS:-}" ] \
+      && [ "$attempt" -ge "${FM_FAKE_HERDR_START_FAILS_FIRST:-0}" ]; then
+      rm -f "$D/herdr-stopped"
+      : > "$D/herdr-restarting"
+      printf '0\n' > "$D/herdr-restart-count"
+    fi
+    exit 0 ;;
+  'pane get')
+    if [ -f "$D/herdr-stopped" ]; then
+      echo 'error: could not connect to the herdr server' >&2
+      exit 1
+    elif [ -f "$D/herdr-pane-gone" ]; then
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    else
+      printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' \
+        "${3:-}" "$(cat "$D/cwd" 2>/dev/null || printf /tmp)"
+    fi
+    exit 0 ;;
+  'agent get')
+    if [ -f "$D/herdr-exit-deadline" ] \
+      && [ "$(awk -v n="${EPOCHREALTIME:-$SECONDS}" -v d="$(cat "$D/herdr-exit-deadline")" \
+        'BEGIN{print (n >= d) ? 1 : 0}')" = 1 ]; then
+      printf '{"error":{"code":"agent_not_found"}}\n'
+    elif [ -f "$D/herdr-enter" ]; then
+      printf '{"result":{"agent":{"agent_status":"working"}}}\n'
+    else
+      printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+    fi
+    exit 0 ;;
+  'pane process-info')
+    # `pane process-info --pane <id>`: the pane's own live claude foreground.
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' "${4:-}"
+    exit 0 ;;
+  'pane read')
+    case " $* " in *' --format ansi '*) exit 1 ;; esac
+    printf '╭────╮\n│    │\n╰────╯\n'
+    exit 0 ;;
+  'pane send-text')
+    if [ -n "${FM_FAKE_EXIT_CLOSES_SEAT:-}" ]; then
+      : > "$D/herdr-pane-gone"
+    elif [ -n "${FM_FAKE_EXIT_DELAY:-}" ]; then
+      printf '%s' "$(awk -v now="${EPOCHREALTIME:-$SECONDS}" \
+        -v d="$FM_FAKE_EXIT_DELAY" 'BEGIN{printf "%.6f\n", now + d}')" \
+        > "$D/herdr-exit-deadline"
+    fi
+    exit 0 ;;
+  'pane send-keys')
+    case "${4:-}" in
+      enter) : > "$D/herdr-enter" ;;
+      *)
+        if [ -n "${FM_FAKE_HERDR_INTERRUPT_BREAKS_SEAT:-}" ]; then
+          : > "$D/herdr-stopped"
+          : > "$D/herdr-pane-gone"
+        elif [ -n "${FM_FAKE_HERDR_INTERRUPT_STOPS_SERVER:-}" ]; then
+          : > "$D/herdr-stopped"
+        else
+          : > "$D/herdr-pane-gone"
+        fi
+        ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+t=${1:-}
+case "$t" in ''|*[!0-9.]*) exit 0 ;; esac
+if [ -n "${FM_FAKE_HERDR_SLEEP_SCALE:-}" ]; then
+  t=$(awk -v t="$t" -v f="$FM_FAKE_HERDR_SLEEP_SCALE" 'BEGIN{printf "%.3f", t * f}')
+fi
+exec /bin/sleep "$t"
 SH
   chmod +x "$fb/sleep"
   printf '%s\n' "$fb"
@@ -248,6 +412,10 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_INTERRUPT_DISAPPEARS="${FM_FAKE_INTERRUPT_DISAPPEARS:-}" \
+    FM_FAKE_INTERRUPT_BLURS="${FM_FAKE_INTERRUPT_BLURS:-}" \
+    FM_FAKE_INTERRUPT_STOP_DELAY="${FM_FAKE_INTERRUPT_STOP_DELAY:-}" \
+    FM_FAKE_STATE_DELAY="${FM_FAKE_STATE_DELAY:-}" \
     FM_FAKE_DEVIN_PICKER_STUCK="${FM_FAKE_DEVIN_PICKER_STUCK:-}" \
     "$CONTROL" "$@" 2>&1
 }
@@ -935,7 +1103,252 @@ test_exit_accepts_agent_stopped_by_busy_interrupt() {
   pass "fm-control exit: an interrupt-stopped agent satisfies the gone-state postcondition"
 }
 
-test_agent_that_does_not_stop_fails_closed() {
+# A post-interrupt raw `missing` is not a stop finding: it conflates a
+# destroyed endpoint with one merely unreachable from this seat, so it is
+# routed through the control plane's one absence proof. Proven absent reports
+# `endpoint-gone` - the same outcome the entry path reports for the same state
+# - and an unprovable one falls to the staged waits, which end
+# exit=unconfirmed. Neither direction ever claims a definite stop failure.
+test_post_interrupt_missing_without_an_absence_proof_is_unconfirmed() {
+  local dir out rc gen
+  dir=$(new_case interrupt-vanishes-unproven)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(FM_FAKE_INTERRUPT_DISAPPEARS=1 FM_CONTROL_EXIT_CONFIRM_WAIT=0.05 \
+    run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an endpoint whose absence tmux cannot prove must not claim a stop"$'\n'"$out"
+  assert_contains "$out" "exit-interrupted t1 interrupt=delivered verified=unattributed cancel=unconfirmed exit-command=not-sent agent-state=missing exit=unconfirmed" \
+    "the staged windows should end unconfirmed with the observed state"
+  assert_not_contains "$out" "did not stop" \
+    "an unprovable read must never become a definite stop-failure claim"
+  assert_not_contains "$out" "endpoint-gone" \
+    "exit must not report a stop tmux cannot prove"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "exit should deliver the busy agent's interrupt sequence"
+  [ -z "$(literals "$dir")" ] \
+    || fail "an endpoint exit cannot trust must receive no lifecycle command"
+  pass "fm-control exit: a post-interrupt missing endpoint tmux cannot prove ends unconfirmed, never failed"
+}
+
+test_post_interrupt_missing_proven_absent_reports_endpoint_gone() {
+  local dir out rc gen log
+  command -v jq >/dev/null 2>&1 \
+    || { echo "skip - the herdr absence proof parses JSON with jq"; return 0; }
+  dir=$(new_case interrupt-vanishes-proven)
+  make_herdr_stub "$dir" >/dev/null
+  add_task "$dir" t1 claude ship herdr 'fmlab:%7'
+  {
+    echo "herdr_session=fmlab"
+    echo "herdr_workspace_id=ws1"
+    echo "herdr_tab_id=tab1"
+    echo "herdr_pane_id=%7"
+  } >> "$dir/home/state/t1.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a proven-absent endpoint after the interrupt is success"$'\n'"$out"
+  log=$(cat "$dir/fake/herdr-log")
+  assert_contains "$out" "endpoint-gone t1 harness=claude" \
+    "a proven-absent endpoint must report the outcome the proof established"
+  assert_not_contains "$out" "stopped t1" \
+    "a proven-absent endpoint is endpoint-gone, not a bare stop at a dead address"
+  assert_not_contains "$out" "did not stop" \
+    "a proven stop must never be reported as a stop failure"
+  assert_contains "$log" "pane send-keys" \
+    "the busy agent's interrupt must have been delivered through herdr"
+  assert_not_contains "$log" "send-text" \
+    "a proven-absent endpoint must receive no exit command"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit should retire busy wiring for an endpoint that went with its agent"
+  pass "fm-control exit: a proven-absent post-interrupt endpoint reports endpoint-gone, never a failure"
+}
+
+# The staged windows are wall-clock bounds: a poll iteration's own work - a
+# slow provider read, a slow absence proof - is charged to the window, so the
+# unconfirmed report's named window sizes are the windows that actually
+# elapsed rather than a count of cheap poll steps.
+test_staged_wait_windows_are_wall_clock_bounded() {
+  local dir out rc gen t0 t1 total base delay
+  # The bound is measured against the same exit with instant reads, so the
+  # fixed process overhead of a loaded host is not charged to the windows.
+  for delay in 0 0.3; do
+    dir=$(new_case "wall-clock-windows-$delay")
+    add_task "$dir" t1 claude
+    alive_as "$dir" claude
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+    printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+    t0=${EPOCHREALTIME:-$(date +%s)}
+    out=$(FM_FAKE_NEVER_DIES=1 FM_FAKE_STATE_DELAY=$delay \
+      FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_EXIT_CONFIRM_WAIT=0.05 \
+      run_control "$dir" t1 exit); rc=$?
+    t1=${EPOCHREALTIME:-$(date +%s)}
+    total=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.3f", b - a}')
+    [ "$delay" = 0 ] && base=$total
+  done
+  expect_code 1 "$rc" "an agent that never stops must not report success"$'\n'"$out"
+  assert_contains "$out" "exit=unconfirmed" \
+    "the stubborn agent should still end unconfirmed"
+  awk -v t="$total" -v b="$base" 'BEGIN{exit !(t - b < 2.4)}' \
+    || fail "the 0.05s+0.05s staged windows stretched to ${total}s of wall clock (${base}s with instant reads) when each provider read took 0.3s"
+  pass "fm-control exit: the staged windows hold their wall-clock bound when a poll iteration is slow"
+}
+
+# The exit window is measured from exit-command delivery, not from the
+# pre-delivery absence proof: the restart proof burns ~7.5s of unscaled real
+# sleeps before the command is sent, and with the documented window overrides
+# (5s primary, 3s confirm) the fake stop ~4.8s after delivery reports
+# `stopped`, where a wait anchored at the proof would already have expired
+# both windows before the stop and read `exit=unconfirmed`.
+test_exit_window_starts_at_exit_command_delivery() {
+  local dir out rc gen log
+  command -v jq >/dev/null 2>&1 \
+    || { echo "skip - the herdr absence proof parses JSON with jq"; return 0; }
+  dir=$(new_case exit-window-delivery)
+  make_herdr_stub "$dir" >/dev/null
+  add_task "$dir" t1 claude ship herdr 'fmlab:%7'
+  {
+    echo "herdr_session=fmlab"
+    echo "herdr_workspace_id=ws1"
+    echo "herdr_tab_id=tab1"
+    echo "herdr_pane_id=%7"
+  } >> "$dir/home/state/t1.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 \
+    FM_CONTROL_EXIT_WAIT=5 FM_CONTROL_EXIT_CONFIRM_WAIT=3 \
+    FM_FAKE_HERDR_INTERRUPT_STOPS_SERVER=1 \
+    FM_FAKE_HERDR_RESTART_POLLS=15 \
+    FM_FAKE_EXIT_DELAY=6 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 0 "$rc" "a stop inside the window must be success"$'\n'"$out"
+  log=$(cat "$dir/fake/herdr-log")
+  assert_contains "$out" "stopped t1 harness=claude" \
+    "the stop after exit-command delivery should be reported stopped"
+  assert_not_contains "$out" "exit=unconfirmed" \
+    "a stop inside the delivery-anchored window must never read unconfirmed"
+  assert_contains "$log" "server" \
+    "the absence proof should have restarted the recorded session's server before delivery"
+  pass "fm-control exit: the exit window is measured from exit-command delivery, not the pre-delivery proof"
+}
+
+# The not-sent path still charges its pre-wait absence proof against the
+# primary window: when the proof is slow, the unconfirmed report names the
+# window actually waited, never the full configured exit window the proof
+# time already consumed.
+test_not_sent_path_charges_the_pre_wait_proof_to_the_window() {
+  local dir out rc gen log window e
+  command -v jq >/dev/null 2>&1 \
+    || { echo "skip - the herdr absence proof parses JSON with jq"; return 0; }
+  dir=$(new_case not-sent-charging)
+  make_herdr_stub "$dir" >/dev/null
+  add_task "$dir" t1 claude ship herdr 'fmlab:%7'
+  {
+    echo "herdr_session=fmlab"
+    echo "herdr_workspace_id=ws1"
+    echo "herdr_tab_id=tab1"
+    echo "herdr_pane_id=%7"
+  } >> "$dir/home/state/t1.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=2 FM_CONTROL_EXIT_CONFIRM_WAIT=0.05 \
+    FM_FAKE_HERDR_INTERRUPT_STOPS_SERVER=1 \
+    FM_FAKE_HERDR_SERVER_START_FAILS=1 \
+    FM_FAKE_HERDR_SLEEP_SCALE=0.1 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 1 "$rc" "an unprovable post-interrupt missing must end unconfirmed"$'\n'"$out"
+  log=$(cat "$dir/fake/herdr-log")
+  assert_contains "$out" "agent-state=missing exit=unconfirmed" \
+    "the staged windows should end unconfirmed with the observed state"
+  assert_contains "$log" "server" \
+    "the absence proof should have attempted the restart before the waits"
+  e=2
+  window=$(printf '%s\n' "$out" | sed -n 's/.*within the \([0-9][0-9.]*\)s exit window.*/\1/p')
+  [ -n "$window" ] || fail "the unconfirmed report should name the window it waited: $out"
+  awk -v w="$window" -v e="$e" 'BEGIN{exit !(w + 0 < e)}' \
+    || fail "the pre-wait proof was not charged to the primary window: the report claims ${window}s of a ${e}s exit window"
+  pass "fm-control exit: the not-sent path charges its pre-wait absence proof to the primary window"
+}
+
+# A stop the delivered-exit wait observes as proof-proven gone gets the
+# endpoint's own outcome: the seat closes itself when the exit command lands,
+# the wait's raw read is `missing`, the shared proof establishes gone, and
+# exit reports `endpoint-gone` - the same label the immediate re-read and a
+# second exit give that physical event, never `stopped` at a dead address.
+test_delivered_wait_observing_proven_gone_reports_endpoint_gone() {
+  local dir out rc gen
+  command -v jq >/dev/null 2>&1 \
+    || { echo "skip - the herdr absence proof parses JSON with jq"; return 0; }
+  dir=$(new_case delivered-wait-gone)
+  make_herdr_stub "$dir" >/dev/null
+  add_task "$dir" t1 claude ship herdr 'fmlab:%7'
+  {
+    echo "herdr_session=fmlab"
+    echo "herdr_workspace_id=ws1"
+    echo "herdr_tab_id=tab1"
+    echo "herdr_pane_id=%7"
+  } >> "$dir/home/state/t1.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 \
+    FM_FAKE_HERDR_INTERRUPT_STOPS_SERVER=1 \
+    FM_FAKE_HERDR_RESTART_POLLS=1 \
+    FM_FAKE_EXIT_CLOSES_SEAT=1 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 0 "$rc" "a wait-observed proven-gone endpoint is success"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone t1 harness=claude" \
+    "a seat that closed itself on exit must report endpoint-gone from the wait"
+  assert_not_contains "$out" "stopped t1" \
+    "a proven-absent endpoint must never be labeled a bare stop at a dead address"
+  assert_not_contains "$out" "exit=unconfirmed" \
+    "a proof-proven stop is a success, never unconfirmed"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit should retire busy wiring for an endpoint that went with its agent"
+  pass "fm-control exit: the delivered-exit wait labels a proof-proven gone endpoint endpoint-gone"
+}
+
+# The withheld (exit-command-not-sent) path carries the same label: an
+# immediate proof that cannot establish absence but becomes provably gone
+# during the staged wait reports `endpoint-gone`, matching the delivered-exit
+# wait and the immediate re-read.
+test_withheld_wait_observing_proven_gone_reports_endpoint_gone() {
+  local dir out rc gen
+  command -v jq >/dev/null 2>&1 \
+    || { echo "skip - the herdr absence proof parses JSON with jq"; return 0; }
+  dir=$(new_case withheld-wait-gone)
+  make_herdr_stub "$dir" >/dev/null
+  add_task "$dir" t1 claude ship herdr 'fmlab:%7'
+  {
+    echo "herdr_session=fmlab"
+    echo "herdr_workspace_id=ws1"
+    echo "herdr_tab_id=tab1"
+    echo "herdr_pane_id=%7"
+  } >> "$dir/home/state/t1.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=5 FM_CONTROL_EXIT_CONFIRM_WAIT=1 \
+    FM_FAKE_HERDR_INTERRUPT_BREAKS_SEAT=1 \
+    FM_FAKE_HERDR_START_FAILS_FIRST=1 \
+    FM_FAKE_HERDR_SLEEP_SCALE=0.1 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 0 "$rc" "a wait-observed proven-gone endpoint is success"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone t1 harness=claude" \
+    "a gap the wait's proof closes must report endpoint-gone from the withheld path"
+  assert_not_contains "$out" "stopped t1" \
+    "a proven-absent endpoint must never be labeled a bare stop at a dead address"
+  assert_not_contains "$out" "exit=unconfirmed" \
+    "a proof-proven stop is a success, never unconfirmed"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit should retire busy wiring for an endpoint that went with its agent"
+  pass "fm-control exit: the withheld wait labels a proof-proven gone endpoint endpoint-gone"
+}
+
+test_agent_that_does_not_stop_reports_unconfirmed_never_failed() {
   local dir out rc gen
   dir=$(new_case stubborn)
   add_task "$dir" t1 claude
@@ -944,18 +1357,94 @@ test_agent_that_does_not_stop_fails_closed() {
   printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
   out=$(env FM_FAKE_NEVER_DIES=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
     FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
+    FM_CONTROL_EXIT_CONFIRM_WAIT=0.05 \
     "$CONTROL" t1 exit 2>&1); rc=$?
-  expect_code 1 "$rc" "an agent that ignores its exit command should fail closed"
-  assert_contains "$out" "did not stop" "the failure should say the agent did not stop"
+  expect_code 1 "$rc" "an agent whose stop state is never observed must not report success"
+  assert_contains "$out" "exit=unconfirmed" \
+    "an unobserved stop must be reported unconfirmed"
+  assert_not_contains "$out" "did not stop" \
+    "a window's expiry must never be claimed as a definite stop failure"
   assert_contains "$out" "exit-delivered t1 interrupt=delivered verified=agent-alive cancel=unconfirmed exit-command=delivered agent-state=alive exit=unconfirmed" \
-    "the failure should distinguish delivered lifecycle input from the unconfirmed exit"
+    "the unconfirmed report should distinguish delivered lifecycle input from the unobserved stop"
   assert_not_contains "$out" "nothing was changed" \
-    "the failure must not deny the lifecycle input that was delivered"
+    "the report must not deny the lifecycle input that was delivered"
   [ "$(keys_sent "$dir")" = Escape ] \
     || fail "a stubborn busy agent should receive its interrupt sequence"
   [ "$(literals "$dir")" = /exit ] \
     || fail "a stubborn busy agent should receive its exit command"
-  pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
+  pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed, never failed, exit"
+}
+
+# The fleet failure pattern this pins (recorded 2026-09-05): a fixed window
+# reported a succeeded exit as failed - the pane had already printed its
+# resume line and returned to a shell prompt while the check kept asserting
+# the agent did not stop. The stop landing after the primary window, inside
+# the confirm window, is SUCCESS.
+test_ambiguous_post_interrupt_evidence_reports_unconfirmed_never_failed() {
+  local dir out rc gen
+  dir=$(new_case interrupt-blur)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(FM_FAKE_INTERRUPT_BLURS=1 FM_CONTROL_EXIT_CONFIRM_WAIT=0.05 \
+    run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an unattributable post-interrupt seat must not report success"$'\n'"$out"
+  assert_contains "$out" "exit=unconfirmed" \
+    "ambiguous post-interrupt evidence must be reported unconfirmed"
+  assert_not_contains "$out" "did not stop" \
+    "ambiguous post-interrupt evidence must never be claimed as a definite stop failure"
+  assert_not_contains "$out" "nothing was changed" \
+    "the report must not deny the interrupt that was delivered"
+  assert_contains "$out" "exit-interrupted t1 interrupt=delivered verified=unattributed cancel=unconfirmed exit-command=not-sent agent-state=ambiguous exit=unconfirmed" \
+    "the unconfirmed report should distinguish the delivered interrupt and the withheld exit command from the unattributable seat"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "a busy agent whose post-interrupt state blurs should receive its interrupt sequence"
+  [ -z "$(literals "$dir")" ] \
+    || fail "an unattributed post-interrupt seat must not receive a lifecycle command"
+  pass "fm-control exit: ambiguous post-interrupt evidence is unconfirmed, never failed, and takes no exit command"
+}
+
+test_stop_landing_during_ambiguous_post_interrupt_wait_is_success() {
+  local dir out rc gen
+  dir=$(new_case interrupt-blur-stop)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(FM_FAKE_INTERRUPT_BLURS=1 FM_FAKE_INTERRUPT_STOP_DELAY=0.3 \
+    FM_CONTROL_EXIT_CONFIRM_WAIT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a positive stop observed during the post-interrupt waits is success"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=claude" \
+    "a stop landing inside the post-interrupt confirm window should be reported stopped"
+  assert_not_contains "$out" "endpoint-gone" \
+    "a wait-observed dead endpoint is the ordinary stopped, never the gone endpoint's own outcome"
+  assert_not_contains "$out" "exit=unconfirmed" \
+    "a succeeded exit must never be reported as unconfirmed"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit should retire busy wiring for a stop observed after ambiguous evidence"
+  pass "fm-control exit: a positively observed stop after ambiguous post-interrupt evidence is success"
+}
+
+test_exit_reports_late_stop_as_success() {
+  local dir out rc
+  dir=$(new_case late-stop)
+  add_task "$dir" t1 pi
+  alive_as "$dir" pi
+  out=$(env FM_FAKE_EXIT_DELAY=1.6 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.02 FM_CONTROL_EXIT_WAIT=0.05 \
+    FM_CONTROL_EXIT_CONFIRM_WAIT=2 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 0 "$rc" "a stop that lands after the exit window but inside the confirm window is success"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=pi" \
+    "the late stop should be reported as stopped"
+  assert_not_contains "$out" "endpoint-gone" \
+    "a wait-observed dead endpoint is the ordinary stopped, never the gone endpoint's own outcome"
+  assert_not_contains "$out" "exit=unconfirmed" \
+    "a succeeded exit must never be reported as unconfirmed"
+  assert_not_contains "$out" "did not stop" \
+    "a succeeded exit must never be reported as failed"
+  pass "fm-control exit: a late stop inside the confirm window is success, never failure"
 }
 
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
@@ -1104,7 +1593,17 @@ test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
-test_agent_that_does_not_stop_fails_closed
+test_post_interrupt_missing_without_an_absence_proof_is_unconfirmed
+test_post_interrupt_missing_proven_absent_reports_endpoint_gone
+test_staged_wait_windows_are_wall_clock_bounded
+test_exit_window_starts_at_exit_command_delivery
+test_not_sent_path_charges_the_pre_wait_proof_to_the_window
+test_delivered_wait_observing_proven_gone_reports_endpoint_gone
+test_withheld_wait_observing_proven_gone_reports_endpoint_gone
+test_agent_that_does_not_stop_reports_unconfirmed_never_failed
+test_ambiguous_post_interrupt_evidence_reports_unconfirmed_never_failed
+test_stop_landing_during_ambiguous_post_interrupt_wait_is_success
+test_exit_reports_late_stop_as_success
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
