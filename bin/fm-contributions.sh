@@ -18,7 +18,8 @@
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, and notified tokens.
+# observation, verdict, seen event tokens, pending events, notified tokens and
+# failures (the URL's consecutive unavailable observations).
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -37,8 +38,9 @@
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
 # a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# seconds or the deadline, whichever comes first. A read killed at the
+# deadline is budget refusal, never a forge failure; one killed at the
+# five-second bound is a miss (below). A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -48,19 +50,37 @@
 # and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# attempted at most once per poll and its observation applied to every owner.
-# A final observation applies
-# to every owner without another forge read. When the budget refuses a read
-# mid-observation, that URL's records stay untouched and the poll moves to the
-# next URL that still has a full observation reserve; only a genuine forge
-# failure or head change records an error.
+# taken up at most once per poll and its observation applied to every owner.
+# A final observation applies to every owner without another forge read. When
+# the budget refuses a read mid-observation, that URL's records stay untouched
+# and the poll moves to the next URL that still has a full observation reserve.
+# A failed observation is classified by whether the forge answered. A read
+# that shows it got no answer - gh reports a connection, DNS or
+# closed-connection (EOF) failure, or the read hits its five-second bound
+# before the deadline - is a miss, as is a head that changed during the
+# read: the host, not the forge, is the usual cause (a sleeping laptop's
+# dark wakes reach no network), so a
+# miss is unmeasured, never a failure, and leaves every owner's record
+# untouched exactly like a budget refusal. Every other failed read is
+# unavailable: an HTTP or GraphQL error, an authentication refusal, malformed
+# data, or a gh that cannot run the read. A failed observation is re-read
+# once within the same poll when the reservation still fits; the second
+# outcome is the poll's. An unavailable read records checked_at, a fixed
+# error, and failures, the URL's consecutive unavailable observations applied
+# to every owner; a miss leaves that count alone.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
-# observation, with a stale error beside it cleared.
-# A genuine failure prints its unavailable line only when it starts an episode
-# (no prior owner has an error); a successful read ends the episode.
+# observation, with a stale error and failure count beside it cleared.
+# The unavailable line prints only when failures reaches exactly two, the
+# second consecutive unavailable observation, so one flaky read never wakes
+# firstmate while a persistent failure still does; a record whose error
+# predates the count is treated as already announced. A miss never wakes,
+# however long it persists: a read that never gets an answer stays quiet and
+# surfaces through the fleet digest's coverage view instead, as bearings'
+# checked/known coverage and "not recently checked" fleet work. A successful
+# read ends the failure episode and clears error and failures.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -202,22 +222,41 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+  local remaining at_deadline=1 rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
+  [ "$remaining" -le 5 ] || { remaining=5; at_deadline=0; }
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
-  if [ "$rc" -eq 124 ]; then
+  [ "$rc" -ne 0 ] || return 0
+  if [ "$rc" -eq 124 ] && [ "$at_deadline" -eq 1 ]; then
+    # A kill at the deadline is budget refusal, never forge evidence.
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
-  elif [ "$rc" -ne 0 ]; then
+  elif [ "$rc" -eq 124 ] || grep -Eqi 'error connecting to|dial tcp|no such host|connection refused|network is unreachable|i/o timeout|TLS handshake timeout|connection reset|: EOF|unexpected EOF|broken pipe|closed network connection|server closed idle connection|connection lost' "$forge_err"; then
+    # No answer reached this host: the five-second read bound with budget
+    # left, or a connection, DNS or closed-connection failure.
+    : > "$TMP/forge-missed"
+  else
+    # Anything else is a failure the fleet must see: an HTTP or GraphQL
+    # answer, an authentication refusal, or a broken local forge CLI.
     : > "$TMP/forge-unavailable"
   fi
   return "$rc"
+}
+
+forge_class() { # prints observe's status after a failed read: 1 unavailable, 2 missed
+  # A budget refusal without either marker is 1 with BUDGET_EXHAUSTED set.
+  if [ ! -e "$TMP/forge-unavailable" ] && [ -e "$TMP/forge-missed" ]; then
+    printf '2\n'
+  else
+    printf '1\n'
+  fi
+}
+
+malformed() { # the forge answered, but not with usable data
+  : > "$TMP/forge-unavailable"
 }
 
 wait_forges() { # background forge pids from one independent read wave
@@ -233,15 +272,15 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/forge-missed"
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   BUDGET_EXHAUSTED=0
-  forge api "$endpoint" > "$TMP/core.json" || return 1
-  jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
+  FORGE_ERR="$TMP/core.err" forge api "$endpoint" > "$TMP/core.json" || return "$(forge_class)"
+  jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || { malformed; return 1; }
   if [ "$kind" = pull ]; then
-    head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
+    head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || { malformed; return 1; }
     FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
     FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
@@ -254,11 +293,12 @@ observe() { # canonical GitHub URL -> normalized JSON
     local statuses_pid=$!
     FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
-    wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" || return 1
-    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
-    after=$(jq -er .headRefOid "$TMP/after.json")
-    [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
+    wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" || return "$(forge_class)"
+    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || { malformed; return 1; }
+    FORGE_ERR="$TMP/head.err" forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return "$(forge_class)"
+    after=$(jq -er .headRefOid "$TMP/after.json") || { malformed; return 1; }
+    # A push that lands mid-read is a race, not forge evidence: unmeasured.
+    [ "$head" = "$after" ] || return 2
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
       --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
@@ -277,15 +317,15 @@ observe() { # canonical GitHub URL -> normalized JSON
             | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
-                 author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
+                 author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || { malformed; return 1; }
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
     FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
     FORGE_ERR="$TMP/issue-events.err" forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
     local events_pid=$!
-    wait_forges "$comments_pid" "$events_pid" || return 1
-    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
+    wait_forges "$comments_pid" "$events_pid" || return "$(forge_class)"
+    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || { malformed; return 1; }
     jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" '
       $core[0] as $c | {state:$c.state,head:null,
         ready:any($c.labels[]; (.name | ascii_downcase) == ($label | ascii_downcase)),
@@ -294,12 +334,12 @@ observe() { # canonical GitHub URL -> normalized JSON
             | {token:("comment:" + (.id|tostring) + ":" + (.updated_at // "")),type:"comment",source:.html_url,
                head:null,author:.user.login,body:(.body // "" | .[:500])})
           + [$timeline[0][] | .[] | select(.event == "labeled" and (.label.name | ascii_downcase) == ($label | ascii_downcase))
-             | {token:("ready-for-pr:" + (.id | tostring)),type:"ready-for-pr",source:$c.html_url,head:null,body:"filed issue reached ready-for-pr"}])}' > "$TMP/observation.json" || return 1
+             | {token:("ready-for-pr:" + (.id | tostring)),type:"ready-for-pr",source:$c.html_url,head:null,body:"filed issue reached ready-for-pr"}])}' > "$TMP/observation.json" || { malformed; return 1; }
   fi
   jq_lib -ne --arg url "$url" --arg kind "$kind" --slurpfile observed "$TMP/observation.json" '
     {schema:"fm-contributions.v1",task:"observation",records:[{url:$url,
       kind:(if $kind == "pull" then "pr" else "issue" end),pending:[],seen:[],observation:$observed[0]}]}
-    | valid_record' >/dev/null
+    | valid_record' >/dev/null || { malformed; return 1; }
 }
 
 publish_pending() { # task canonical-url record-file
@@ -338,18 +378,18 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
+        $final[0] + {error:null,failures:0,pending:[],notified:[]}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
-        $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null}' > "$TMP/row.json"
+        $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null,failures:0}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
 }
 
 poll() {
-  local task url old kind error observed
+  local task url old kind observed failures
   local -a row
   acquire
   get_input
@@ -384,12 +424,29 @@ poll() {
     observed=0
     observe "$url" || observed=$?
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
-    # Wake once per failure episode: only when no owner has a prior error.
-    if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
-      'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
-        .error == null)' "${row[@]:1}" >/dev/null; then
-      printf 'contributions: observation unavailable for %s\n' "$url"
+    # One failed observation is re-read once within the poll when a whole
+    # observation still fits; a transient miss or error then costs nothing.
+    if [ "$observed" -ne 0 ] && [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ]; then
+      observed=0
+      observe "$url" || observed=$?
+      [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
     fi
+    # Unmeasured: every owner's prior observation and failure count stand.
+    [ "$observed" -ne 2 ] || continue
+    failures=0
+    case "$observed" in
+      0) ;;
+      1)
+        # The URL's consecutive unavailable observations, shared by every
+        # owner; a record whose error predates the count was announced under
+        # the earlier once-per-error contract, so it never re-announces.
+        failures=$(jq -nr --slurpfile saved "$TMP/saved.json" --arg url "$url" --args '
+          [$ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first
+           | if . == null or .error == null then 0 else (.failures // 2) end] | max + 1' "${row[@]:1}")
+        # Wake once per failure episode, on its second consecutive failure.
+        [ "$failures" -ne 2 ] || printf 'contributions: observation unavailable for %s\n' "$url"
+        ;;
+    esac
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
       fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
@@ -403,13 +460,14 @@ poll() {
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
-          | $old + {checked_at:$now,error:null,
+          | $old + {checked_at:$now,error:null,failures:0,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
-        error='forge observation unavailable or changed during read'
-        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
+        jq --arg now "$NOW" --argjson failures "$failures" \
+          '.checked_at=$now | .error="forge observation unavailable" | .failures=$failures' \
+          "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
