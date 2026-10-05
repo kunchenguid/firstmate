@@ -79,6 +79,21 @@ def _child(slave, master, session):
 
 
 def _process_start(pid):
+    # Must match bin/fm-herdr-lab.sh's fm_herdr_lab_process_start: /proc start
+    # ticks count from boot, so a host clock step cannot change them the way it
+    # re-renders ps lstart.
+    try:
+        with open("/proc/%d/stat" % pid, encoding="utf-8") as handle:
+            stat = handle.read()
+    except OSError:
+        return _process_lstart(pid)
+    fields = stat.rpartition(")")[2].split()
+    if len(fields) < 20 or not fields[19].isdigit():
+        raise RuntimeError("process start ticks unavailable")
+    return "proc-starttime=%s" % fields[19]
+
+
+def _process_lstart(pid):
     result = subprocess.run(
         ["ps", "-p", str(pid), "-o", "lstart="],
         check=True,

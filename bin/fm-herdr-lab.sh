@@ -32,6 +32,8 @@
 # bin/fm-herdr-lab-viewer.py owns the pty mechanics.
 # Start succeeds only when that session reports a foreground client and the
 # recorded viewer process still matches its launch identity.
+# When /proc stat is readable, the viewer records start ticks for both processes;
+# otherwise it records ps lstart, and existing ps lstart records remain readable.
 # Stop signals only identity-matched recorded processes and retains its
 # ownership record until detach is confirmed or the session is stopped or
 # absent; teardown refuses when that stop cannot be confirmed.
@@ -207,8 +209,39 @@ fm_herdr_lab_viewer_reason() { # <session>
   printf '%s' "$out" | jq -r '.result.reason // empty' 2>/dev/null
 }
 
+# Prints the process start identity the viewer launcher records. /proc stat
+# field 22 counts clock ticks since boot, so a host clock step cannot change it;
+# ps lstart re-renders those ticks against the wall-clock boot time and would
+# disown a running viewer after a clock step.
 fm_herdr_lab_process_start() { # <pid>
+  local stat_line starttime
+  local -a stat_fields
+  if [ -r "/proc/$1/stat" ]; then
+    stat_line=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    # After the final comm delimiter, array index 19 is proc stat field 22.
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'proc-starttime=%s' "$starttime"
+    return 0
+  fi
+  fm_herdr_lab_process_lstart "$1"
+}
+
+fm_herdr_lab_process_lstart() { # <pid>
   LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+fm_herdr_lab_process_start_matches() { # <pid> <recorded-start>
+  local current
+  case "$2" in
+    proc-starttime=*) current=$(fm_herdr_lab_process_start "$1") || return 1 ;;
+    # A record written before start-tick identity holds ps lstart text; keep
+    # honoring it so an upgrade does not strand a running viewer.
+    *) current=$(fm_herdr_lab_process_lstart "$1") || return 1 ;;
+  esac
+  [ -n "$current" ] && [ "$current" = "$2" ]
 }
 
 fm_herdr_lab_process_parent() { # <pid>
@@ -225,7 +258,7 @@ fm_herdr_lab_viewer_recorded_value() { # <session> <key>
 }
 
 fm_herdr_lab_viewer_owned_pair() { # <session>
-  local launcher_pid viewer_pid launcher_start viewer_start current_start parent_pid
+  local launcher_pid viewer_pid launcher_start viewer_start parent_pid
   launcher_pid=$(fm_herdr_lab_viewer_recorded_value "$1" launcher_pid) || return 1
   viewer_pid=$(fm_herdr_lab_viewer_recorded_value "$1" viewer_pid) || return 1
   case "$launcher_pid:$viewer_pid" in
@@ -233,10 +266,8 @@ fm_herdr_lab_viewer_owned_pair() { # <session>
   esac
   launcher_start=$(fm_herdr_lab_viewer_recorded_value "$1" launcher_start) || return 1
   viewer_start=$(fm_herdr_lab_viewer_recorded_value "$1" viewer_start) || return 1
-  current_start=$(fm_herdr_lab_process_start "$launcher_pid") || return 1
-  [ -n "$current_start" ] && [ "$current_start" = "$launcher_start" ] || return 1
-  current_start=$(fm_herdr_lab_process_start "$viewer_pid") || return 1
-  [ -n "$current_start" ] && [ "$current_start" = "$viewer_start" ] || return 1
+  fm_herdr_lab_process_start_matches "$launcher_pid" "$launcher_start" || return 1
+  fm_herdr_lab_process_start_matches "$viewer_pid" "$viewer_start" || return 1
   parent_pid=$(fm_herdr_lab_process_parent "$viewer_pid") || return 1
   [ "$parent_pid" = "$launcher_pid" ] || return 1
   printf '%s %s' "$launcher_pid" "$viewer_pid"

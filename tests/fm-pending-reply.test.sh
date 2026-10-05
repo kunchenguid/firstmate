@@ -32,6 +32,8 @@
 #  17. Recovery and escalation grace are measured from the relevant turn's
 #      completion, never from delivery or send time, and each takes one fresh,
 #      uncached status read - accepting any verb - immediately before firing
+#  18. A live recovery sender survives a host clock step, a reused pid does
+#      not, and a sender recorded in the legacy ps form is still recognized
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1992,6 +1994,72 @@ test_escalated_undelivered_correlation_stays_retryable() {
   pass "an escalated correlation stays retryable only while undelivered"
 }
 
+# A fake /proc plus a ps that renders lstart the way procps does: boot time
+# (btime, which a host clock step moves) plus the process's start ticks.
+make_clock_step_proc() {  # <dir> <pid> <starttime> -> fakebin
+  local dir=$1 pid=$2 starttime=$3 fb="$1/clock-fakebin"
+  mkdir -p "$dir/proc/$pid" "$fb"
+  printf 'btime 1784094040\n' > "$dir/proc/stat"
+  printf '%s (sender) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 %s 20 21\n' \
+    "$pid" "$starttime" > "$dir/proc/$pid/stat"
+  printf 'bash\0-c\0recovery sender\0' > "$dir/proc/$pid/cmdline"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+pid=$2
+btime=$(sed -n 's/^btime //p' "$FM_PROC_ROOT_OVERRIDE/stat")
+stat=$(cat "$FM_PROC_ROOT_OVERRIDE/$pid/stat") || exit 1
+read -r -a fields <<< "${stat##*)}"
+printf 'started-at-%s bash -c recovery sender\n' "$((btime + fields[19] / 100))"
+SH
+  chmod +x "$fb/ps"
+  printf '%s\n' "$fb"
+}
+
+test_recovery_sender_survives_host_clock_step() {
+  local home state corr rec fb proc pid=4242 identity legacy
+  home=$(setup_parent clock-step)
+  state="$home/state"
+  proc="$home/proc"
+  fb=$(make_clock_step_proc "$home" "$pid" 987654)
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "clock step recovery")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  identity=$(PATH="$fb:$PATH" FM_PROC_ROOT_OVERRIDE="$proc" fm_pending_reply_pid_identity "$pid") \
+    || fail "fake sender identity should be observable"
+  fm_pending_reply_set "$rec" recovery_attempted_epoch 2500 || fail "attempt precommit failed"
+  fm_pending_reply_set "$rec" recovery_sender_pid "$pid" || fail "sender pid commit failed"
+  fm_pending_reply_set "$rec" recovery_sender_identity "$identity" || fail "sender identity commit failed"
+  fm_pending_reply_set "$rec" phase recovery_sending || fail "sending phase failed"
+
+  printf 'btime 1784094016\n' > "$proc/stat"
+  PATH="$fb:$PATH" FM_PROC_ROOT_OVERRIDE="$proc" fm_pending_reply_tick_one "$state" "$corr" unknown \
+    || fail "clock-step recovery tick failed"
+  [ "$(phase_of "$state" "$corr")" = recovery_sending ] \
+    || fail "a host clock step made the live recovery sender read as dead"
+
+  printf '%s (sender) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987655 20 21\n' "$pid" > "$proc/$pid/stat"
+  PATH="$fb:$PATH" FM_PROC_ROOT_OVERRIDE="$proc" fm_pending_reply_tick_one "$state" "$corr" unknown \
+    || fail "reused-pid recovery tick failed"
+  [ "$(fm_pending_reply_get "$rec" recovery_delivery_outcome)" = unknown ] \
+    || fail "a reused sender pid must still read as a dead sender"
+
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "legacy identity recovery")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  legacy=$(PATH="$fb:$PATH" FM_PROC_ROOT_OVERRIDE="$proc" ps -p "$pid" -o lstart= -o command=)
+  fm_pending_reply_set "$rec" recovery_attempted_epoch 2500 || fail "legacy attempt precommit failed"
+  fm_pending_reply_set "$rec" recovery_sender_pid "$pid" || fail "legacy sender pid commit failed"
+  fm_pending_reply_set "$rec" recovery_sender_identity "$legacy" || fail "legacy sender identity commit failed"
+  fm_pending_reply_set "$rec" phase recovery_sending || fail "legacy sending phase failed"
+  PATH="$fb:$PATH" FM_PROC_ROOT_OVERRIDE="$proc" fm_pending_reply_tick_one "$state" "$corr" unknown \
+    || fail "legacy recovery tick failed"
+  [ "$(phase_of "$state" "$corr")" = recovery_sending ] \
+    || fail "a sender recorded in the legacy ps form was stranded by the upgrade"
+  pass "a recovery sender's identity survives a host clock step and keeps legacy records"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2040,5 +2108,6 @@ test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
+test_recovery_sender_survives_host_clock_step
 
 printf 'ok - all pending-reply tests passed\n'

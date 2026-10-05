@@ -451,6 +451,69 @@ test_viewer_stop_requires_the_recorded_parent() {
   pass "fm-herdr-lab: viewer ownership requires the recorded parent"
 }
 
+# Drives the real launcher against a sleeping viewer, then emulates a host
+# clock step with a ps whose lstart text changes afterwards, as procps output
+# does when the wall-clock boot time moves.
+test_viewer_ownership_survives_host_clock_step() {
+  local name="fm-lab-viewer-clock-$$" record viewer_bin="$TMP_ROOT/clock-viewer-bin"
+  local step="$TMP_ROOT/clock-stepped" launcher_pid pair viewer_pid launcher_lstart viewer_lstart
+  if [ ! -r "/proc/$$/stat" ]; then
+    echo "skip: fm-herdr-lab: no /proc start ticks on this host; ps lstart is its identity"
+    return 0
+  fi
+  mkdir -p "$viewer_bin" "$TRIPWIRES"
+  cat > "$viewer_bin/herdr" <<SH
+#!/usr/bin/env bash
+exec "$REAL_SLEEP" 30
+SH
+  cat > "$viewer_bin/ps" <<SH
+#!/usr/bin/env bash
+out=\$("$(command -v ps)" "\$@") || exit
+case " \$* " in
+  *" lstart= "*) [ ! -e "\$FM_FAKE_CLOCK_STEP" ] || out="stepped \$out" ;;
+esac
+printf '%s\n' "\$out"
+SH
+  chmod +x "$viewer_bin/herdr" "$viewer_bin/ps"
+  record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
+  FM_FAKE_CLOCK_STEP="$step" PATH="$viewer_bin:$PATH" \
+    python3 "$ROOT/bin/fm-herdr-lab-viewer.py" "$name" "$record" >/dev/null 2>&1 &
+  launcher_pid=$!
+  # The launcher terminates and reaps its viewer, including before recording it.
+  trap 'kill -TERM "$launcher_pid" 2>/dev/null || true; wait "$launcher_pid" 2>/dev/null || true; fm_test_cleanup' EXIT
+  while [ ! -f "$record" ]; do
+    kill -0 "$launcher_pid" 2>/dev/null || fail "the viewer launcher exited before recording its pair"
+    "$REAL_SLEEP" 0.01
+  done
+  viewer_pid=$(sed -n 's/^viewer_pid=//p' "$record")
+
+  launcher_lstart=$(fm_herdr_lab_process_lstart "$launcher_pid")
+  viewer_lstart=$(fm_herdr_lab_process_lstart "$viewer_pid")
+  : > "$step"
+  assert_not_equals "$launcher_lstart" \
+    "$(FM_FAKE_CLOCK_STEP="$step" PATH="$viewer_bin:$PATH" fm_herdr_lab_process_lstart "$launcher_pid")" \
+    "the clock step did not change the launcher's legacy identity"
+  assert_not_equals "$viewer_lstart" \
+    "$(FM_FAKE_CLOCK_STEP="$step" PATH="$viewer_bin:$PATH" fm_herdr_lab_process_lstart "$viewer_pid")" \
+    "the clock step did not change the viewer's legacy identity"
+  pair=$(FM_FAKE_CLOCK_STEP="$step" PATH="$viewer_bin:$PATH" run_with_fake fm_herdr_lab_viewer_owned_pair "$name") \
+    || fail "a host clock step disowned the running lab viewer"
+  assert_equals "$launcher_pid $viewer_pid" "$pair" "the stepped ownership check named the wrong pair"
+
+  rm -f "$step"
+  printf 'launcher_pid=%s\nlauncher_start=%s\nviewer_pid=%s\nviewer_start=%s\n' \
+    "$launcher_pid" "$launcher_lstart" "$viewer_pid" "$viewer_lstart" > "$record"
+  run_with_fake fm_herdr_lab_viewer_owned_alive "$name" \
+    || fail "a viewer recorded in the legacy lstart form was stranded by the upgrade"
+
+  kill -TERM "$launcher_pid" 2>/dev/null || true
+  wait "$launcher_pid" 2>/dev/null || true
+  trap fm_test_cleanup EXIT
+  kill -0 "$viewer_pid" 2>/dev/null && fail "the launcher left its viewer running"
+  rm -f "$record"
+  pass "fm-herdr-lab: viewer ownership survives a host clock step and keeps legacy records"
+}
+
 test_interrupted_viewer_start_cancels_launcher() {
   local name="fm-lab-viewer-interrupt-$$" command_pid launcher_pid status=0
   local started="$TMP_ROOT/viewer-interrupt-started" attached="$TMP_ROOT/viewer-interrupt-attached"
@@ -548,6 +611,7 @@ test_viewer_timeout_allows_launcher_escalation
 test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
 test_viewer_stop_requires_the_recorded_parent
+test_viewer_ownership_survives_host_clock_step
 test_interrupted_viewer_start_cancels_launcher
 test_teardown_refuses_while_viewer_attached
 test_viewer_stop_retains_record_when_detach_is_unreadable
