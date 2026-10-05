@@ -176,6 +176,7 @@ async function captureEvidence(name) {
 }
 let pendingTaskDelay = null;
 let failNextTaskRequest = false;
+let removeReconciliationOnNextTaskRequest = false;
 function delayNextTaskRequest() {
   let markStarted;
   let release;
@@ -221,6 +222,10 @@ await page.route("**/api/tasks*", async route => {
       documentTypes: [],
       documentModifiedAt: "2026-10-03T00:00:01Z",
     });
+    if (removeReconciliationOnNextTaskRequest) {
+      removeReconciliationOnNextTaskRequest = false;
+      body.tasks = body.tasks.filter(task => task.status !== "Needs reconciliation");
+    }
   }
   await route.fulfill({ response, json: body });
 });
@@ -617,6 +622,19 @@ try {
   await (await staleReportResponse).finished();
   await page.waitForTimeout(100);
   if (await page.getByText("stale delayed report body", { exact: true }).count()) throw new Error("stale report response replaced the current report");
+
+  await page.locator("#source").selectOption("tasks");
+  await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  const preChangedTaskTotal = await page.locator('#sessions .task-card').count();
+  removeReconciliationOnNextTaskRequest = true;
+  const changedTaskDelay = delayNextTaskRequest();
+  await changedTaskDelay.started;
+  changedTaskDelay.release();
+  await page.waitForTimeout(500);
+  const changedCounts = await page.locator("#task-counts strong").allTextContents();
+  if (changedCounts.includes("0") || await page.locator('#task-counts').getByText("Needs reconciliation", { exact: true }).count() !== 0) throw new Error(`changed refresh rendered an empty reconciliation card: ${changedCounts.join(",")}`);
+  const changedTaskTotal = await page.locator('#sessions .task-card').count();
+  if (changedTaskTotal !== preChangedTaskTotal - 1) throw new Error(`changed refresh did not render the changed task inventory: ${preChangedTaskTotal} -> ${changedTaskTotal}`);
 
   storagePage = await browser.contexts()[0].newPage();
   await storagePage.addInitScript(() => {

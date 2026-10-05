@@ -699,10 +699,14 @@ function taskGroups() {
     .map(status => ({
       key: status,
       label: status,
-      matches: task => status === "Completed"
-        ? task.status === "Completed" || task.status === "Needs reconciliation"
-        : task.status === status,
+      matches: task => taskStatusMatches(status, task),
     }));
+}
+
+function taskStatusMatches(status, task) {
+  return status === "Completed"
+    ? task.status === "Completed" || task.status === "Needs reconciliation"
+    : task.status === status;
 }
 
 function taskMatches(task, query) {
@@ -974,7 +978,8 @@ function renderSessions() {
   const query = elements.sessionSearch.value.toLowerCase();
   if (source === "tasks") {
     const group = taskGroups().find(candidate => candidate.key === taskStatusFilter);
-    const matches = state.tasks.filter(task => (!group || group.matches(task)) && taskMatches(task, query));
+    const matches = state.tasks.filter(task => (!taskStatusFilter
+      || (group ? group.matches(task) : taskStatusMatches(taskStatusFilter, task))) && taskMatches(task, query));
     elements.sessions.replaceChildren();
     for (const task of matches) elements.sessions.append(taskCard(task));
     if (!matches.length) {
