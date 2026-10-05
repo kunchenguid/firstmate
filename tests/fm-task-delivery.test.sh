@@ -308,7 +308,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta out sendroot payload mode id brief_dod delivered_dod contract
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -355,6 +355,18 @@ STUB
       "$mode: promoted worker did not receive the Captain's intent subsection"
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
+
+    # Both the delivered prompt and persisted relaunch brief are public outputs.
+    for contract in "$payload" "$home/data/$id/brief.md"; do
+      assert_grep "This replaces the scout rule limiting outside-worktree writes to the report and status file." "$contract" \
+        "$mode: $contract retained the scout-only write restriction"
+      assert_grep "Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$home/data/$id/\` or a temporary directory." "$contract" \
+        "$mode: $contract omitted the ship scratch-location rule"
+      assert_grep "Outside the worktree, write only that task material and the status and steering-inbox records authorized below." "$contract" \
+        "$mode: $contract omitted the ship outside-worktree write boundary"
+      assert_grep "Leave the worktree clean before reporting done." "$contract" \
+        "$mode: $contract omitted the clean-before-done rule"
+    done
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
