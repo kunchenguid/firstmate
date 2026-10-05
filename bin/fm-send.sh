@@ -440,6 +440,12 @@ fm_send_resolve_target() { # <raw-target>
 
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
+# Tell the composer's Pi banner adapter which Pi executable drew this task's
+# pane; the pane identity alone reports `pi` for both pi and pi-signed.
+unset FM_COMPOSER_PI_EXECUTABLE
+case "$TARGET_HARNESS" in
+  pi|pi-signed) export FM_COMPOSER_PI_EXECUTABLE="$TARGET_HARNESS" ;;
+esac
 T=$RESOLVED_TARGET
 shift
 

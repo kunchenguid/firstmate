@@ -340,6 +340,7 @@ for _teardown_source in \
   fm-marker-lib.sh \
   fm-tmux-lib.sh \
   fm-composer-lib.sh \
+  fm-composer-pi-adapter.sh \
   fm-cursor-lib.sh \
   fm-nm-run-lib.sh \
   fm-wake-lib.sh \

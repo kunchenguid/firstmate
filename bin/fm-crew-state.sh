@@ -222,6 +222,12 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+# Tell the composer's Pi banner adapter which Pi executable drew this task's
+# pane; the pane identity alone reports `pi` for both pi and pi-signed.
+unset FM_COMPOSER_PI_EXECUTABLE
+case "$HARNESS" in
+  pi|pi-signed) export FM_COMPOSER_PI_EXECUTABLE="$HARNESS" ;;
+esac
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
 
