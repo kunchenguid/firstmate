@@ -86,6 +86,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
 2. Read every current memory file completely: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`.
    Treat an absent local file as absent, not as an invitation to manufacture content.
    Note any `Memory layering` declaration in them (schema: `docs/configuration.md`) and which declared tiers this session can reach; every later step consults it.
+   When neither `data/captain.md` nor `data/captain-shared.md` holds one, note that for the receipt and treat the local files as the only owners.
    In a primary home, all three are curation inputs under their existing ownership rules.
    In a secondmate home, `data/captain-shared.md` is a read-only primary-owned input: count it, never edit it, and curate only the editable local files.
    Every mutation in the rest of this pass, including reinforcement, retiering, decay archival, legacy migration, consolidation, budget archival, and offload, applies only to an editable memory file.
@@ -268,6 +269,7 @@ Report the outcome in plain captain-facing language with all of these facts:
 - one or more actions for each of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, using only `unchanged`, `added`, `rewritten`, `pruned`, `routed`, `archived`, or `proposed-offload`; adding or replacing a migration marker is `rewritten`, never a new action verb such as `migrated`;
 - each durable finding filed outside memory and its authoritative owner, including every capture to a declared memory tier;
 - every finding or pruned entry a declared tier should hold but this session could not reach, named so a session that can reach it captures it;
+- when no `Memory layering` declaration was found, one line saying so and pointing at the re-seed step in `docs/configuration.md` under External memory tiers;
 - each archived entry's reason, each autonomous offload's live destination and actual relief, and, when a pinned candidate was proposed, the `proposed-offload` section with every candidate's fields;
 - every unresolved exception, including a primary-owned shared-file constraint in a secondmate home, and every concrete captain decision opened for an over-budget result;
 - each open record this pass filed or corrected, and each one it deliberately left alone with the judgment it is waiting on;

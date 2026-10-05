@@ -146,6 +146,7 @@ Route durable knowledge to its most specific owner:
 
 - A home may declare authoritative external memory tiers in a `Memory layering` section of its captain-preference files ([`docs/configuration.md`](docs/configuration.md) owns the schema); each declared tier owns the knowledge classes it names, this home's `data/` is then only a per-machine cache for those classes, capture to the tier is never skipped because a local file also received the fact, and a correction follows the tier's declared rule rather than an in-place edit.
 - When a worker's harness cannot reach a declared tier, firstmate captures on the worker's behalf from its report.
+- With no declaration, local files are the only owners and `stow` reports the missing declaration in its receipt.
 - Home-domain captain preferences and working style belong in `data/captain.md` after inspect-then-update.
 - Captain preferences shared across secondmate domains belong in the primary home's `data/captain-shared.md` under the `secondmate-provisioning` contract.
 - Fleet-local operational facts no declared tier owns belong in curated, home-local `data/learnings.md`.
