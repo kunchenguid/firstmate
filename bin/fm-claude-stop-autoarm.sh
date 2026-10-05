@@ -438,11 +438,18 @@ stopfailure_cover_hold() {
 # episode that is not retryable ends the generation quietly instead: the wake
 # stays durable, and a rewake cannot heal what the notice already reported.
 # After a real wait, AFK or a vanished need is honored here exactly as at the
-# end of the arm cycle.
-stopfailure_backoff() {
-  local waited=0
+# end of the arm cycle. With "watched", the wait happens only when a healthy
+# watcher is verified after the cover attempt: the first failure notice of an
+# episode is the only way to tell the model its supervision is down, so it is
+# never held behind a backoff nothing is covering.
+stopfailure_backoff() {  # [watched]
+  local waited=0 hold=1
   stopfailure_cover_hold
-  while stopfailure_hold_pending; do
+  if [ "${1:-}" = watched ] \
+    && ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+    hold=0
+  fi
+  while [ "$hold" -eq 1 ] && stopfailure_hold_pending; do
     [ "$SECONDS" -lt "$HOLD_LIMIT" ] || break
     fm_autoarm_still_owner "$STATE" "$MY_GEN" || break
     waited=1
@@ -803,10 +810,6 @@ if [ "$ACTIONABLE" -eq 1 ]; then
       printf 'This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.\n'
     fi
     [ -z "$SUCCESSOR_FAILURE" ] || printf '%s\n' "$SUCCESSOR_FAILURE"
-    if [ -e "$STOPFAILURE_RECORD" ]; then
-      printf 'A recent turn ended on a Claude API error (%s, failure %s in a row), so this wake was held for a %ss backoff; if the error persists the next rewake waits longer, and a normal turn end clears the backoff.\n' \
-        "$(stopfailure_field error)" "$(stopfailure_field count)" "$(stopfailure_field delay)"
-    fi
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
@@ -843,7 +846,7 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  stopfailure_backoff
+  stopfailure_backoff watched
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat|supervision-host)' "$OUT" 2>/dev/null | head -8

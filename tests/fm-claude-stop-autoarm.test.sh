@@ -1753,7 +1753,6 @@ test_stopfailure_registration_rewakes_after_backoff() {
   ended=$(cat "$dir/state/hook-ended")
   [ "$ended" -ge "$retry_at" ] || fail "rewake exited at $ended, before the backoff retry time $retry_at"
   assert_contains "$out" "stale: fixture-win actionable" "StopFailure rewake must carry the wake line"
-  assert_contains "$out" "Claude API error (rate_limit, failure 1 in a row)" "StopFailure rewake must name the backoff"
   pass "auto-arm: the tracked StopFailure registration arms and holds its rewake until the backoff retry time"
 }
 
@@ -1774,7 +1773,6 @@ test_stopfailure_backoff_doubles_to_cap_and_resets_on_stop() {
   out=$(FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=1 FM_CLAUDE_STOPFAILURE_BACKOFF_CAP=2 run_autoarm "$dir" 2>&1); status=$?
   expect_code 2 "$status" "a normal Stop after the episode must rewake on an actionable close"
   [ ! -e "$dir/state/.claude-stopfailure" ] || fail "a normal Stop must clear the StopFailure episode"
-  case "$out" in *"Claude API error"*) fail "a normal Stop's rewake must not mention a cleared backoff: $out" ;; esac
   out=$(FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=1 FM_CLAUDE_STOPFAILURE_BACKOFF_CAP=2 \
     run_autoarm "$dir" "$STOPFAILURE_PAYLOAD" 2>/dev/null); status=$?
   expect_code 2 "$status" "a StopFailure in a new episode must rewake"
@@ -1867,7 +1865,6 @@ test_stopfailure_host_handback_holds_with_a_live_watcher() {
   [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] || fail "exactly one watcher cycle must start for the hold: $(cat "$dir/state/successor-ran")"
   assert_contains "$(cat "$dir/state/successor-ran")" "predecessor=4242" "the hold's watcher must name the closed host cycle, not the hook, as its predecessor"
   [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the held handback must still rewake once, got rc $(cat "$dir/state/hook-rc")"
-  assert_contains "$(cat "$dir/state/hook.out")" "Claude API error (rate_limit, failure 1 in a row)" "the held rewake must name the backoff"
   pass "auto-arm: a host hand-back held for a StopFailure backoff keeps a watcher cycle live during the hold"
 }
 
@@ -1935,13 +1932,14 @@ test_stopfailure_non_retryable_silences_a_parked_generation() {
   pass "auto-arm: a non-retryable StopFailure silences an earlier parked generation's rewake"
 }
 
-# A failed arm leaves no watcher, so the backoff hold starts one itself rather
-# than waiting through the hold uncovered.
+# A failed arm leaves no watcher, so a later (already-noticed) failure's backoff
+# hold starts one itself rather than waiting through the hold uncovered.
 test_stopfailure_failed_arm_hold_starts_a_watcher() {
   local dir rc
   dir=$(make_primary_dir "$TMP_ROOT/stopfailure-failed-arm")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" failed
+  : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/successor-park"
   FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=4 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" "$FAKE_CLAUDE" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
@@ -1959,10 +1957,29 @@ test_stopfailure_failed_arm_hold_starts_a_watcher() {
   '; rc=$?
   rm -f "$dir/state/successor-park"
   expect_code 0 "$rc" "failed-arm hold scenario did not complete"
-  assert_present "$dir/state/hook-held" "no watcher cycle started before the failure notice's hold ended"
-  [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the failure notice must still rewake after the hold, got rc $(cat "$dir/state/hook-rc")"
-  assert_contains "$(cat "$dir/state/hook.out")" "watcher auto-arm FAILED" "the held failure must still carry its notice"
-  pass "auto-arm: a StopFailure hold after a failed arm starts a watcher cycle before the failure notice"
+  assert_present "$dir/state/hook-held" "no watcher cycle started before the suppressed retry's hold ended"
+  [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the suppressed retry must still rewake after the hold, got rc $(cat "$dir/state/hook-rc")"
+  pass "auto-arm: a StopFailure hold after a failed arm starts a watcher cycle before the suppressed retry"
+}
+
+# The first failure notice of an episode is not held behind the backoff when no
+# watcher can be verified: it is the only signal that supervision is down.
+test_stopfailure_first_failure_notice_is_not_held_without_a_watcher() {
+  local dir out status started elapsed retry_at
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-first-notice")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  : > "$dir/state/successor-fail"
+  started=$(date +%s)
+  out=$(FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=30 run_autoarm "$dir" "$STOPFAILURE_PAYLOAD" 2>&1); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 2 "$status" "the first failure notice must rewake: $out"
+  assert_contains "$out" "watcher auto-arm FAILED" "the first failure notice must be delivered"
+  assert_present "$dir/state/successor-ran" "the hold must still try to start a watcher before giving up"
+  [ "$elapsed" -lt 20 ] || fail "the first failure notice was held ${elapsed}s behind the backoff with no watcher"
+  retry_at=$(stopfailure_field "$dir" retry_at)
+  [ "$(date +%s)" -lt "$retry_at" ] || fail "the notice must arrive before the episode's retry time"
+  pass "auto-arm: the first failure notice of a StopFailure episode is delivered promptly when no watcher can be started"
 }
 
 # An undelivered parent notice is retried inside the firing and, when it still
@@ -2130,6 +2147,7 @@ test_stopfailure_host_handback_holds_with_a_live_watcher
 test_stopfailure_non_retryable_notifies_parent_once
 test_stopfailure_non_retryable_silences_a_parked_generation
 test_stopfailure_failed_arm_hold_starts_a_watcher
+test_stopfailure_first_failure_notice_is_not_held_without_a_watcher
 test_stopfailure_notice_is_retried
 test_stopfailure_backoff_knobs_are_decimal
 test_stopfailure_concurrent_firings_notify_once
