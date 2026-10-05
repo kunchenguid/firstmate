@@ -70,8 +70,9 @@
 #                           recorded when it is opened and updated when a
 #                           later session is reminded; empty until then
 #   escalation_dismissed_epoch=
-#                           when a later session found the operator's keyed
-#                           close of this escalation; once set, the record is
+#                           when a reminder pass, in any session, found the
+#                           operator's keyed close of this escalation
+#                           (flag present only); once set, the record is
 #                           neither reminded nor rescanned. Cleared when the
 #                           record escalates
 #   escalation_dismiss_scan=
