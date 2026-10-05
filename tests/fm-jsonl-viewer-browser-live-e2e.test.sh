@@ -301,6 +301,9 @@ try {
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count() !== 1) throw new Error("completed task counter was not rendered");
+  const completedCounter = page.locator('#task-counts').getByRole("button", { name: /Completed/ });
+  if (await completedCounter.locator("strong").textContent() !== "42") throw new Error("completed counter did not combine completed and reconciliation tasks");
+  if (await page.locator('#task-counts').getByText("Needs reconciliation", { exact: true }).count() !== 0) throw new Error("Needs reconciliation counter was rendered separately");
   if (await page.locator('#sessions .task-card[data-category="held"]').count() !== 3) throw new Error("held task category was not rendered separately");
   if (await page.locator('#sessions .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
   const completedTaskCount = await page.locator('#sessions .task-card[data-category="completed"]').count();
@@ -310,8 +313,10 @@ try {
     .filter(card => card.textContent.includes("Needs reconciliation") || card.textContent.includes("Dashboard completed task"))
     .map(card => card.textContent.includes("Needs reconciliation") ? "reconciliation" : "completed"));
   if (sharedCompletedOrder[0] !== "completed" || sharedCompletedOrder.at(-1) !== "reconciliation") throw new Error(`completed and reconciliation tasks did not share title ordering: ${sharedCompletedOrder.join(",")}`);
-  await page.locator("#task-counts").getByRole("button", { name: /Needs reconciliation/ }).click();
-  if (await page.locator('#sessions .task-card').count() !== 1 || !await page.locator('#sessions .task-card').first().textContent().then(text => text.includes("Needs reconciliation"))) throw new Error("Needs reconciliation counter did not filter the task list");
+  await completedCounter.click();
+  if (await page.locator('#sessions .task-card').count() !== 42) throw new Error("combined Completed counter did not filter both task groups");
+  if (await page.locator('#sessions .task-card[data-category="completed"]').count() !== 41) throw new Error("completed filter changed completed task membership");
+  if (await page.locator('#sessions .task-card[data-category="held"]').filter({ hasText: "Needs reconciliation" }).count() !== 1) throw new Error("combined Completed filter omitted reconciliation task");
   await page.getByRole("button", { name: "View all tasks" }).click();
   if (await page.locator('#sessions .task-card').count() !== 49) throw new Error("View all tasks did not clear the status-card filter");
   const initialTaskCategories = await page.locator('#sessions .task-card').evaluateAll(cards => cards.slice(0, 4).map(card => card.dataset.category));
@@ -342,7 +347,7 @@ try {
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
-  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "4,2,1,41,1") throw new Error("background task refresh did not preserve loaded counts");
+  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "4,2,42,1") throw new Error("background task refresh did not preserve loaded counts");
   if (!await dashboardReportCardNode.evaluate(node => node.isConnected)) throw new Error("background task refresh replaced the unchanged task generation before the response");
   if (!await page.locator("#sessions").evaluate(element => element.scrollHeight > element.clientHeight)) throw new Error("dashboard fixture was not tall enough to exercise sidebar scrolling");
   await dashboardReportCard.click();
