@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--workflow-gate-override] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -112,8 +112,6 @@
 #   unparsable output, or an absent script is an infrastructure failure: one
 #   notice, and the spawn continues. --token-budget is passed only when the
 #   brief has a "Task token budget: N" line; otherwise the gate's default applies.
-#   --workflow-gate-override bypasses a refusal only when the current Captain's
-#   intent contains the exact words "override the workflow dispatch gate".
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
 #   adapter, and experimental zellij, orca, and cmux adapters. Orca owns both
 #   the task worktree and terminal, so ship/scout Orca spawns do not run
@@ -674,7 +672,6 @@ MODE=
 YOLO=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
-WORKFLOW_GATE_OVERRIDE=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -796,7 +793,10 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
-  --workflow-gate-override) WORKFLOW_GATE_OVERRIDE=1 ;;
+  --*)
+    echo "error: unknown option '$a'" >&2
+    exit 2
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -831,10 +831,6 @@ done
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
-}
-[ "$WORKFLOW_GATE_OVERRIDE" -eq 0 ] || { [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ]; } || {
-  echo "error: --workflow-gate-override applies only to a fresh ship spawn" >&2
-  exit 2
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -1510,7 +1506,6 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
-  [ "$WORKFLOW_GATE_OVERRIDE" -eq 0 ] || shared_args+=(--workflow-gate-override)
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -3168,14 +3163,9 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         else error("invalid refusal contract")
         end
       ' 2>/dev/null); then
-        captain_intent=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
-        if [ "$WORKFLOW_GATE_OVERRIDE" -eq 1 ] && printf '%s\n' "$captain_intent" | grep -Fqi 'override the workflow dispatch gate'; then
-          printf 'warning: explicit current captain instruction overrides the workflow dispatch gate: %s\n' "$gate_text" >&2
-        else
-          printf 'workflow dispatch gate refused: %s\n' "$gate_text" >&2
-          echo "error: ship spawn refused by the workflow dispatch gate; land work, lower machine load, wait for a worker, or restore quota before retrying" >&2
-          exit 1
-        fi
+        printf 'workflow dispatch gate refused: %s\n' "$gate_text" >&2
+        printf 'error: adjust the reported limit and fix; workflow limits: %s/projects/workflow/registry/; budget-controlled limits: %s/projects/workflow/registry/budgets.md\n' "$FM_HOME" "$FM_HOME" >&2
+        exit 1
       elif [ "$gate_rc" -ne 0 ]; then
         echo "notice: workflow dispatch gate failed to run (exit $gate_rc); spawning without it" >&2
       fi

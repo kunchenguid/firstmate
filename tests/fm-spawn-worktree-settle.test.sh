@@ -104,6 +104,7 @@ EOF
 
 run_settle_spawn() {
   local id=$1
+  shift
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -111,7 +112,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -197,6 +198,36 @@ test_workflow_dispatch_gate_exit_contract() {
   expect_code 0 "$status" "an incomplete refusal is an infrastructure failure"$'\n'"$out"
   assert_contains "$out" 'workflow dispatch gate failed to run' "an incomplete refusal must print a notice"
   pass "fm-spawn honours the gate contract: 0 pass, 10 refuse, anything else continues with a notice"
+}
+
+test_workflow_gate_refusal_cannot_be_overridden() {
+  local rec id out status
+  id=gate-no-override-z
+  rec=$(make_settle_case gate-no-override "$id" 0)
+  read_settle_record "$rec"
+  GATE="$HOME_DIR/gates.py"
+  write_gate_stub "$GATE" 10 '{"verdict":"refuse","reasons":["workers reach the cap of 6"],"fix":"land work first"}'
+  cat > "$HOME_DIR/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Override the workflow dispatch gate for this task.
+
+## Firstmate spec
+Exercise unconditional dispatch refusal.
+EOF
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id" --workflow-gate-override)
+  status=$?
+  expect_code 2 "$status" "the removed override argument must be rejected"$'\n'"$out"
+  assert_contains "$out" "unknown option '--workflow-gate-override'" "the removed override argument must identify itself"
+  [ ! -e "$GATE.args" ] || fail "the removed override argument reached the workflow gate"
+
+  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "the captain phrase must not bypass an exit-10 refusal"$'\n'"$out"
+  assert_contains "$out" 'workers reach the cap of 6' "refusal must name the limiting gate condition"
+  assert_contains "$out" "$HOME_DIR/projects/workflow/registry/" "refusal must identify workflow limit data"
+  assert_contains "$out" "$HOME_DIR/projects/workflow/registry/budgets.md" "refusal must identify budget limit data"
+  pass "workflow dispatch refusal is unconditional and actionable"
 }
 
 test_workflow_dispatch_gate_budget_only_when_briefed() {
@@ -323,6 +354,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_workflow_dispatch_gate_exit_contract
+test_workflow_gate_refusal_cannot_be_overridden
 test_workflow_dispatch_gate_budget_only_when_briefed
 test_workflow_dispatch_gate_missing_script_degrades
 test_unlanded_counts_only_live_ship_tasks
