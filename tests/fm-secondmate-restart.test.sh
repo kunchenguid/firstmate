@@ -107,7 +107,17 @@ case "${1:-}" in
     for a in "$@"; do
       if [ "$prev" = -t ]; then target=$a; fi
       case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
+        *cursor_y*)
+          # While armed, the composer read answers like a mate still mid-turn:
+          # no provable cursor row, so the composer state is `unknown`.
+          n=$(cat "$D/unknown-reads" 2>/dev/null || echo 0)
+          if [ "$n" -gt 0 ]; then
+            printf '%s' "$((n - 1))" > "$D/unknown-reads"
+            printf 'x\n'
+          else
+            printf '1\n'
+          fi
+          exit 0 ;;
         *pane_current_command*)
           if [ -f "$D/command.$target" ]; then cat "$D/command.$target"; else cat "$D/command"; fi
           printf '\n'; exit 0 ;;
@@ -645,6 +655,39 @@ test_persist_waits_are_polled_together() {
   pass "T10 pending persist answers are polled as one fleet"
 }
 
+# --- T10b: a mate still mid-turn after its answer waits, bounded, for empty --
+test_answered_mate_waits_for_an_empty_composer() {
+  local dir out rc
+  dir=$(new_case idle-wait)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  # The first composer reads are `unknown`, as for a pi lead still finishing
+  # the turn that wrote its answer; fm-control would refuse its exit then.
+  printf '3' > "$dir/fake/unknown-reads"
+
+  out=$(FM_SECONDMATE_IDLE_WAIT=30 run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "a mate whose composer reads empty within the bound should restart"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "the mate was not restarted once its composer read empty"
+  [ "$(cat "$dir/fake/unknown-reads")" = 0 ] \
+    || fail "the restart did not wait through the unknown composer reads"
+
+  dir=$(new_case idle-wait-bound)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf '100000' > "$dir/fake/unknown-reads"
+
+  out=$(FM_SECONDMATE_IDLE_WAIT=2 run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "a mate still busy at the bound must not be reported as restarted"$'\n'"$out"
+  assert_contains "$out" "nudged: sm1:" "a mate still busy at the bound must get the re-read message"
+  assert_contains "$out" "still busy 2s later" "the nudge must say the mate stayed busy"
+  assert_not_contains "$out" "restarted: sm1" "a busy mate must not be restarted"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "a busy mate was sent its exit command"
+  assert_absent "$dir/home/state/sm1.control-relaunch" "a relaunch was opened for a busy mate"
+  pass "T10b an answered mate restarts once its composer reads empty, and is nudged when it never does"
+}
+
 # --- T11: a failed post-stop relaunch is not described as a nudge ------------
 test_post_stop_failure_is_reported_unreached() {
   local dir out rc
@@ -860,6 +903,7 @@ test_remote_mate_restarts_over_the_transport_hop
 test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
+test_answered_mate_waits_for_an_empty_composer
 test_post_stop_failure_is_reported_unreached
 test_relaunches_do_not_block_persist_polling
 test_unpublished_worker_result_is_accounted_for
