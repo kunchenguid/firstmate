@@ -161,6 +161,17 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  // Pi invalidates a ctx when it disposes the session, as a signal mid-run does,
+  // and every later read of it throws. A settle or deferred repaint landing then
+  // has no live UI to update, so it skips rather than throwing into the shutdown.
+  const liveUi = (ctx: { readonly ui: ExtensionUIContext }): ExtensionUIContext | undefined => {
+    try {
+      return ctx.ui;
+    } catch {
+      return undefined;
+    }
+  };
+
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
   const calmPreferencePath = resolve(configDirectory, "calm");
@@ -457,7 +468,7 @@ export default function (pi: ExtensionAPI) {
         // rows that consult Calm live in render(), such as operational user rows,
         // need without appending anything to the transcript.
         repaintCalmToolRows();
-        ctx.ui.setStatus("firstmate-calm", undefined);
+        liveUi(ctx)?.setStatus("firstmate-calm", undefined);
       }, 0);
       return undefined;
     });
@@ -471,12 +482,14 @@ export default function (pi: ExtensionAPI) {
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
     agentRunActive = false;
-    applyWorkingPresentation(ctx.ui);
+    const ui = liveUi(ctx);
+    if (ui) applyWorkingPresentation(ui);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
-    applyWorkingPresentation(ctx.ui);
+    const ui = liveUi(ctx);
+    if (ui) applyWorkingPresentation(ui);
   });
 
   pi.registerCommand("calm", {
