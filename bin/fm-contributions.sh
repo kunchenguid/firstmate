@@ -69,8 +69,11 @@
 # contribution author and this home's own authenticated login, read once per
 # poll with `gh api user`; a repository this home owns would otherwise turn
 # every thank-you it posts into a wake) and issue transitions to ready-for-pr
-# persist as pending before any wake. poll appends ordinary durable check wakes through fm-wake-lib
-# and emits only newly durable signals for the authenticated check to surface.
+# persist as pending before any wake. Self-authored events still enter seen, so
+# a later poll whose login lookup fails or runs out of budget (login unknown,
+# no self exclusion) does not re-wake them. poll appends ordinary durable check
+# wakes through fm-wake-lib and emits only newly durable signals for the
+# authenticated check to surface.
 # ack removes
 # only the named pending token. A crash after enqueue can duplicate a wake but
 # cannot consume the pending signal. Source bodies are data, never commands.
