@@ -303,21 +303,46 @@ test_reclaims_stale_session_lock_before_arming() {
         printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
       ' 2>&1); status=$?
-  expect_code 2 "$status" "a dead recorded session owner must be reclaimed and the takeover announced"
+  expect_code 2 "$status" "a dead recorded session owner must be reclaimed before the actionable rewake"
   expected_owner=$(cat "$dir/state/expected-owner")
   actual_owner=$(cat "$dir/state/.lock")
   [ "$actual_owner" = "$expected_owner" ] || fail "stale session lock was not claimed by the current harness: expected $expected_owner, got $actual_owner"
-  assert_contains "$out" "firstmate fleet lock: this session now holds this home's session lock" "the takeover from an unrecorded session was not announced"
-  [ ! -e "$dir/state/arm-ran" ] || fail "the notice-only takeover firing must leave arming to the next Stop"
-  [ "$(epoch_outcome "$dir")" = promoted ] || fail "stale-lock recovery must record outcome=promoted"
-  pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh and the takeover announced"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming the stale session lock"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "stale-lock recovery must record outcome=rewake"
+  pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
 }
 
 # --- lock promotion notice ----------------------------------------------------
 # A session that started without the lock and later takes it over through the
-# stale-owner recovery must hear about it once, from the takeover itself. These
-# cases run three Stop firings inside ONE fake Claude session holding a trusted
-# id, so the lock pid stays put across firings.
+# stale-owner recovery must hear about it once. These cases run three Stop
+# firings inside ONE fake Claude session holding a trusted id, so the lock pid
+# stays put across firings: the first firing reclaims and exits 0 (AFK appears
+# mid-cycle, or its rewake commit is refused), the second commits a rewake, and
+# the third commits another.
+write_promotion_arm_fixture() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+if [ -e "$FM_HOME/state/afk-next" ]; then
+  rm -f "$FM_HOME/state/afk-next"
+  : > "$FM_HOME/state/.afk"
+fi
+# Without a downtime recovery marker the rewake commit is refused; the marker
+# stays absent for every arm (the handling successor too) of this firing.
+if [ -e "$FM_HOME/state/refuse-next" ]; then
+  rm -f "$FM_HOME/state/.watcher-down"
+else
+  printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+fi
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'stale: fixture-win actionable\n'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
 run_three_firings_in_one_session() {  # <dir> <session-id>
   local dir=$1 sid=$2
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_HOME="$dir" FM_TEST_SID="$sid" "$FAKE_CLAUDE" -c '
@@ -327,55 +352,60 @@ run_three_firings_in_one_session() {  # <dir> <session-id>
       printf "%s\n" "{\"session_id\":\"$FM_TEST_SID\"}" \
         | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/firing-$n.out" 2>&1
       printf "%s\n" "$?" > "$FM_HOME/state/firing-$n.rc"
-      if [ -e "$FM_HOME/state/arm-ran" ]; then wc -l < "$FM_HOME/state/arm-ran" > "$FM_HOME/state/arms-after-$n"; else echo 0 > "$FM_HOME/state/arms-after-$n"; fi
+      [ ! -e "$FM_HOME/state/.lock-promotion-notice" ] || : > "$FM_HOME/state/notice-pending-after-$n"
+      rm -f "$FM_HOME/state/.afk" "$FM_HOME/state/refuse-next"
     done
     :
   '
 }
 
-test_promotion_is_announced_once_on_the_takeover() {
+test_promotion_is_announced_once_on_the_first_committed_rewake() {
   local dir notice
   dir=$(make_primary_dir "$TMP_ROOT/promotion")
   : > "$dir/state/task.meta"
   printf '9999999\n' > "$dir/state/.lock"
   printf 'SID-PREVIOUS\n' > "$dir/state/.lock-session"
-  write_arm_fixture "$dir" actionable
+  : > "$dir/state/afk-next"
+  write_promotion_arm_fixture "$dir"
   run_three_firings_in_one_session "$dir" SID-PROMOTED
   notice="firstmate fleet lock: this session now holds this home's session lock (harness pid $(cat "$dir/state/session-pid"), Claude session SID-PROMOTED, which is this session's current id)."
 
-  expect_code 2 "$(cat "$dir/state/firing-1.rc")" "the reclaiming firing must deliver the takeover notice"
+  expect_code 0 "$(cat "$dir/state/firing-1.rc")" "the reclaiming firing ended under AFK and must stay silent"
   [ "$(cat "$dir/state/.lock")" = "$(cat "$dir/state/session-pid")" ] || fail "the first firing did not reclaim the dead owner's lock"
-  assert_contains "$(cat "$dir/state/firing-1.out")" "$notice" "the takeover itself did not announce it"
-  assert_contains "$(cat "$dir/state/firing-1.out")" "no longer applies; bin/fm-lock.sh status confirms ownership" \
-    "the notice must say the read-only restriction is lifted"
-  assert_not_contains "$(cat "$dir/state/firing-1.out")" "stale: fixture-win actionable" "the takeover rewake must carry only the notice"
-  [ "$(cat "$dir/state/arms-after-1")" = 0 ] || fail "the notice-only takeover firing must not arm"
+  [ -e "$dir/state/notice-pending-after-1" ] || fail "an undelivered promotion notice must stay pending past a silent exit"
 
-  expect_code 2 "$(cat "$dir/state/firing-2.rc")" "the next firing must arm and commit its actionable rewake"
-  [ "$(cat "$dir/state/arms-after-2")" = 1 ] || fail "the firing after the takeover notice must arm normally"
-  assert_contains "$(cat "$dir/state/firing-2.out")" "stale: fixture-win actionable" "the next firing must deliver its ordinary rewake"
-  assert_not_contains "$(cat "$dir/state/firing-2.out")" "firstmate fleet lock:" "the promotion notice must be delivered only once per takeover"
+  expect_code 2 "$(cat "$dir/state/firing-2.rc")" "the second firing must commit its actionable rewake"
+  assert_contains "$(cat "$dir/state/firing-2.out")" "$notice" "the first committed rewake after the takeover did not announce it"
+  assert_contains "$(cat "$dir/state/firing-2.out")" "no longer applies; bin/fm-lock.sh status confirms ownership" \
+    "the notice must say the read-only restriction is lifted"
+  assert_contains "$(cat "$dir/state/firing-2.out")" "stale: fixture-win actionable" "the notice must ride the ordinary rewake, not replace it"
+  [ ! -e "$dir/state/notice-pending-after-2" ] || fail "a delivered promotion notice must be consumed"
+
   expect_code 2 "$(cat "$dir/state/firing-3.rc")" "the third firing must commit its actionable rewake"
   assert_not_contains "$(cat "$dir/state/firing-3.out")" "firstmate fleet lock:" "the promotion notice must be delivered only once per takeover"
-  pass "auto-arm: taking the lock over from another session is announced once, by the takeover itself"
+  pass "auto-arm: taking the lock over from another session is announced once, on the first committed rewake"
 }
 
-test_promotion_is_announced_when_no_wake_follows() {
+test_promotion_notice_survives_a_refused_rewake_commit() {
   local dir
-  dir=$(make_primary_dir "$TMP_ROOT/promotion-no-wake")
+  dir=$(make_primary_dir "$TMP_ROOT/promotion-refused")
   : > "$dir/state/task.meta"
   printf '9999999\n' > "$dir/state/.lock"
   printf 'SID-PREVIOUS\n' > "$dir/state/.lock-session"
-  write_arm_fixture "$dir" clean
-  run_three_firings_in_one_session "$dir" SID-QUIET
-  expect_code 2 "$(cat "$dir/state/firing-1.rc")" "a takeover must be announced even when the arm would close cleanly"
-  assert_contains "$(cat "$dir/state/firing-1.out")" "firstmate fleet lock: this session now holds this home's session lock" \
-    "the takeover notice must not wait for a later wake"
-  [ "$(cat "$dir/state/arms-after-1")" = 0 ] || fail "the notice-only takeover firing must not arm"
-  [ "$(cat "$dir/state/arms-after-2")" -ge 1 ] || fail "the firing after the takeover notice must arm normally"
-  assert_not_contains "$(cat "$dir/state/firing-2.out")$(cat "$dir/state/firing-3.out")" "firstmate fleet lock:" \
-    "the promotion notice must be delivered only once per takeover"
-  pass "auto-arm: a takeover is announced even when no later wake follows"
+  : > "$dir/state/refuse-next"
+  write_promotion_arm_fixture "$dir"
+  run_three_firings_in_one_session "$dir" SID-REFUSED
+
+  expect_code 0 "$(cat "$dir/state/firing-1.rc")" "the reclaiming firing's refused rewake commit must stay silent"
+  [ "$(cat "$dir/state/.lock")" = "$(cat "$dir/state/session-pid")" ] || fail "the first firing did not reclaim the dead owner's lock"
+  [ -e "$dir/state/notice-pending-after-1" ] || fail "a refused rewake commit must leave the promotion notice pending"
+
+  expect_code 2 "$(cat "$dir/state/firing-2.rc")" "the second firing must commit its actionable rewake"
+  assert_contains "$(cat "$dir/state/firing-2.out")" "firstmate fleet lock: this session now holds this home's session lock" \
+    "the next committed rewake after a refused commit did not announce the takeover"
+  [ ! -e "$dir/state/notice-pending-after-2" ] || fail "a delivered promotion notice must be consumed"
+  assert_not_contains "$(cat "$dir/state/firing-3.out")" "firstmate fleet lock:" "the promotion notice must be delivered only once per takeover"
+  pass "auto-arm: a promotion notice survives a refused rewake commit and rides the next committed rewake"
 }
 
 test_reanchoring_this_sessions_own_lock_is_not_a_promotion() {
@@ -384,17 +414,31 @@ test_reanchoring_this_sessions_own_lock_is_not_a_promotion() {
   : > "$dir/state/task.meta"
   printf '9999999\n' > "$dir/state/.lock"
   printf 'SID-SAME\n' > "$dir/state/.lock-session"
-  write_arm_fixture "$dir" actionable
+  write_promotion_arm_fixture "$dir"
   run_three_firings_in_one_session "$dir" SID-SAME
   [ "$(cat "$dir/state/.lock")" = "$(cat "$dir/state/session-pid")" ] || fail "the same session did not re-anchor its own lock"
-  [ "$(cat "$dir/state/arms-after-1")" = 1 ] || fail "a same-session re-anchor must arm on the same firing"
   for n in 1 2 3; do
     expect_code 2 "$(cat "$dir/state/firing-$n.rc")" "same-session firing $n must commit its rewake"
     assert_not_contains "$(cat "$dir/state/firing-$n.out")" "firstmate fleet lock:" \
       "re-anchoring this session's own lock after a recycled helper is not a promotion"
   done
-  [ ! -e "$dir/state/.lock-promotion-announced" ] || fail "a same-session re-anchor must not record a promotion"
-  pass "auto-arm: re-anchoring this session's own lock announces no promotion"
+  for n in 1 2 3; do
+    [ ! -e "$dir/state/notice-pending-after-$n" ] || fail "a same-session re-anchor must not record a promotion notice"
+  done
+  pass "auto-arm: re-anchoring this session's own lock records no promotion notice"
+}
+
+test_stale_promotion_notice_for_another_lock_is_dropped() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/promotion-stale")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  printf '424242\nSID-ELSEWHERE\n' > "$dir/state/.lock-promotion-notice"
+  out=$(run_autoarm "$dir" 2>&1); status=$?
+  expect_code 2 "$status" "the owning session's actionable rewake must still commit"
+  assert_not_contains "$out" "firstmate fleet lock:" "a notice recorded for a different lock pid must never be delivered"
+  [ ! -e "$dir/state/.lock-promotion-notice" ] || fail "a stale promotion notice must be discarded"
+  pass "auto-arm: a pending promotion notice for a lock this session does not hold is dropped unprinted"
 }
 
 test_inert_when_lock_held_by_other_harness() {
@@ -1796,9 +1840,10 @@ test_fm_lock_status_still_works_with_shared_lib() {
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
-test_promotion_is_announced_once_on_the_takeover
-test_promotion_is_announced_when_no_wake_follows
+test_promotion_is_announced_once_on_the_first_committed_rewake
+test_promotion_notice_survives_a_refused_rewake_commit
 test_reanchoring_this_sessions_own_lock_is_not_a_promotion
+test_stale_promotion_notice_for_another_lock_is_dropped
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
