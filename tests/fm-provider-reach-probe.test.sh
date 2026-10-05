@@ -42,6 +42,7 @@ make_standins() {
 #!/usr/bin/env bash
 url=''
 out=/dev/null
+printf '%s\n' "$*" >> "${FM_FAKE_CURL_LOG:-/dev/null}"
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
@@ -72,6 +73,9 @@ printf '%s\n' "$*" >> "${FM_FAKE_DIG_LOG:-/dev/null}"
 case "${FM_FAKE_DIG_MODE:-address}" in
   nxdomain) printf 'status: NXDOMAIN\nno answer\n' ; exit 0 ;;
   empty) printf ';; no addresses\n'; exit 0 ;;
+  servfail) printf 'status: SERVFAIL\n'; exit 0 ;;
+  timestamp) printf '2026-10-04T12:34:56Z\n'; exit 0 ;;
+  ipv6) printf '2001:db8::1\n'; exit 0 ;;
   fail) printf 'connection failed\n'; exit 9 ;;
   hang) sleep 30; printf 'ok\n'; exit 0 ;;
   *) printf '1.2.3.4\n'; exit 0 ;;
@@ -186,6 +190,25 @@ expect_code 20 "$rc" "a failed lookup exits 20"
 assert_contains "$out" "dns=fail" "a failed lookup is its own dns class"
 assert_contains "$out" "result=unreachable" "a failed lookup wording is unreachable"
 
+# --- resolver errors and successful no-address answers are distinct ----------
+tmp=$TMP_ROOT/dns-servfail; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=servfail FM_PROVIDER_REACH_DNS_TOOL=dig \
+  "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 20 "$rc" "SERVFAIL exits 20"
+assert_contains "$out" "dns=fail" "SERVFAIL is a resolver error"
+
+tmp=$TMP_ROOT/timestamp-not-address; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=timestamp FM_PROVIDER_REACH_DNS_TOOL=dig \
+  "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 20 "$rc" "timestamp-only answer exits 20"
+assert_contains "$out" "dns=nxdomain" "timestamp digits are not classified as an IP address"
+
+tmp=$TMP_ROOT/ipv6-address; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=ipv6 FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_CODE=200 "$SCRIPT" xhy 2>&1); rc=$?
+expect_code 0 "$rc" "IPv6 address answer proceeds to HTTP"
+assert_contains "$out" "dns=ok" "an IPv6 address record is recognized"
+
 # --- the default resolver list never names a tool it calls wrongly ----------
 # macOS ships /usr/bin/dscacheutil, and `-q host` is not one of its categories: it
 # prints its usage block and exits 64 for every name. A candidate list that led with
@@ -235,6 +258,7 @@ urls=$(cat "$tmp/urls.log")
 assert_contains "$urls" "https://api.xhyapi.com/v1/models" "the registered target probes its recorded base URL"
 [ "$(printf '%s\n' "$urls" | grep -c .)" = 1 ] || fail "expected exactly one HTTP request, got: $urls"
 calls=$(cat "$tmp/calls.log")
+assert_contains "$calls" "-q" "curl receives -q to ignore user curl configuration"
 assert_not_contains "$calls" "-H" "the probe sends no auth header"
 assert_not_contains "$calls" "Authorization" "the probe sends no Authorization header"
 assert_not_contains "$calls" "$SENTINEL_KEY" "no ambient credential value reaches the request"
@@ -270,6 +294,12 @@ out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" --host '/not-a-host' 2>&1); rc=$?
 expect_code 2 "$rc" "a host yielding no authority exits invalid-target"
 assert_contains "$out" "result=invalid-target" "an authority-less probe says invalid-target"
 assert_contains "$out" "base_url_has_no_authority" "it names why"
+
+tmp=$TMP_ROOT/host-userinfo; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" --host user:pass@api.example.invalid 2>&1); rc=$?
+expect_code 2 "$rc" "a host with userinfo is refused"
+assert_contains "$out" "must not contain userinfo" "userinfo refusal is explicit"
+[ ! -s "$tmp/urls.log" ] || fail "userinfo host reached curl: $(cat "$tmp/urls.log")"
 
 # --- a missing curl is its own outcome, never another one -------------------
 # The curl-absent branch cannot be reached by shrinking PATH on a host whose real
