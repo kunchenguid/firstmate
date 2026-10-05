@@ -109,7 +109,7 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      sh -c 'printf "%s\n" "$PPID"' > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -211,7 +211,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
+      bash -c "echo \$PPID" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
@@ -327,6 +327,19 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
   pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
 }
 
+test_runs_under_a_shell_without_bashpid() {
+  local out rc=0
+  if [ ! -x /bin/bash ] || /bin/bash -c '[ -n "${BASHPID+set}" ]'; then
+    pass 'skipped: /bin/bash here has BASHPID'
+    return
+  fi
+  out=$(/bin/bash -c 'set -u; . "$1/bin/fm-timeout-lib.sh"; fm_exec_timed 5 1 echo bounded' _ "$ROOT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_exec_timed aborted on a shell without BASHPID (rc=$rc): $out"
+  [ "$out" = bounded ] || fail "fm_exec_timed lost the command output on a shell without BASHPID: $out"
+  pass 'fm_exec_timed completes under set -u on a shell without BASHPID'
+}
+
+test_runs_under_a_shell_without_bashpid
 test_passes_the_command_status_and_output_through
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound

@@ -36,9 +36,10 @@
 #       the bounded subtree orphaned behind it). The owner is captured before
 #       the watchdog starts: FM_EXEC_TIMED_OWNER_PID when the caller names it,
 #       else the calling script ($$) when fm_exec_timed runs in a subshell,
-#       else the shell's parent. The escalation starts once that owner is gone
-#       or the watchdog's parent changes, so an owner that dies while the
-#       watchdog is still starting is detected too. The timeout/gtimeout
+#       else the shell's parent (bash 3.2, lacking BASHPID, keeps $$ there).
+#       The escalation starts once that owner is gone or the watchdog's
+#       parent changes, so an owner that dies while the watchdog is still
+#       starting is detected too. The timeout/gtimeout
 #       fallback does not track the owner: it bounds the command only by its
 #       deadline and grace, so owner death alone does not stop the command.
 #       Exit status is the command's own, except 124 (the bound was hit) or
@@ -221,7 +222,11 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     exit 125
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
-  [ "$owner" != "$BASHPID" ] || owner=$PPID
+  # bash 3.2 (macOS /bin/bash) has no BASHPID, and a bare read is fatal under
+  # set -u. owner is never empty, so there the subshell-identity correction is
+  # skipped and owner stays $$: right in a subshell, but outside one that is
+  # the watchdog itself, leaving only the parent-change check to see it die.
+  [ "$owner" != "${BASHPID:-}" ] || owner=$PPID
   unset FM_EXEC_TIMED_OWNER_PID
   if command -v perl >/dev/null 2>&1; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '

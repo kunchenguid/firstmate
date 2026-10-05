@@ -503,6 +503,14 @@ jobs:
             exit 1
           }
 
+          timeout_output=$(/bin/bash tests/fm-timeout-lib.test.sh)
+          printf '%s\n' "$timeout_output"
+          timeout_count=$(printf '%s\n' "$timeout_output" | grep -c '^ok - ')
+          [ "$timeout_count" -eq 16 ] || {
+            echo "::error::expected 16 timeout-lib bash 3.2 tests, got $timeout_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
