@@ -1019,6 +1019,26 @@ if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
 fi
 pass "truncation is detected, escalated once, and not silently rebased"
 
+# The break does not advance the cursor, so a later read of the unchanged
+# remote log reports the same break. An operator resolve in between must not
+# make that repeat look like a new break.
+printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator accepted the break' \
+  >> "$PARENT/state/ios.status"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "operator resolve left the continuity decision open"
+rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
+set +e
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" > "$TMP_ROOT/handle-resolved.out" 2>&1
+handle_rc=$?
+set -e
+[ "$handle_rc" -eq 3 ] || fail "repeated continuity handling returned an unexpected status: $handle_rc"
+remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "a repeated continuity break appended again after the operator resolve"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "a repeated continuity break reopened the decision the operator resolved"
+pass "a repeated continuity break after an operator resolve appends nothing"
+
 rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"

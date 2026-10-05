@@ -550,41 +550,21 @@ _fm_status_unstamped() {  # <status-line> <out-var> -> line with its stamp remov
 # all other bytes, including correlation metadata, still identify the event.
 # Both sides normalize through _fm_status_untimed, so a stamped retry of an
 # already-recorded event can never read as a new one.
-# A needs-decision or blocked line is one episode of a keyed decision. A later
-# resolved line for that same key ends the episode when the fold would close
-# on it, and the next identical line is a new episode. A resolve for another
-# key, or one the reserved-key rule rejects, does not end it. Any other line
-# stays recorded for the life of the file.
+# A match stays recorded for the life of the file, whatever follows it: a
+# later resolved line for the same key does not make the line new again, so a
+# caller that re-reads an unchanged source after an operator resolve (the
+# continuity break in bin/fm-procevent-remote-reply.sh, which does not advance
+# its cursor) appends nothing. A caller that owns evidence of a new episode
+# decides that itself, as bin/fm-pending-reply-lib.sh's escalation does.
 status_event_recorded() {  # <status-file> <new-status-line>
-  local wanted line untimed open_match=1
-  local wanted_verb='' wanted_key='' opener=1
-  local resolve verb key
+  local wanted line untimed
   [ -f "$1" ] || return 1
   _fm_status_untimed "$2" wanted
-  status_line_verb "$wanted" wanted_verb
-  case "$wanted_verb" in
-    needs-decision|blocked)
-      if wanted_key=$(_fm_decision_key "$wanted"); then
-        opener=0
-      fi
-      ;;
-  esac
-  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     _fm_status_untimed "$line" untimed
-    if [ "$untimed" = "$wanted" ]; then
-      open_match=0
-      continue
-    fi
-    [ "$opener" -eq 0 ] && [ "$open_match" -eq 0 ] || continue
-    status_line_verb "$line" verb
-    [ "$verb" = "$resolve" ] || continue
-    key=$(_fm_decision_key "$line") || continue
-    [ "$key" = "$wanted_key" ] || continue
-    _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || continue
-    open_match=1
+    [ "$untimed" != "$wanted" ] || return 0
   done < "$1"
-  return "$open_match"
+  return 1
 }
 
 # --- durable keyed decisions ------------------------------------------------
