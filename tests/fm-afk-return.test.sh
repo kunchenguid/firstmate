@@ -650,6 +650,22 @@ test_return_brief_lists_landed_work_awaiting_cleanup() {
   pass "the return brief lists landed work whose worker is still up, from the durable merge marker only, without gating on it and never offering a secondmate for teardown"
 }
 
+test_return_brief_lists_a_failed_lane_under_a_standing_hold() {
+  local dir out section
+  dir="$TMP_ROOT/brief-failed-held"
+  install_runner "$dir"
+  contract_in "$dir" enter --words 'keep the fleet moving' >/dev/null 2>&1 || fail "could not confirm the away-posture record"
+  printf 'window=synthetic:fm-t1\nbackend=tmux\nkind=ship\n' > "$dir/home/state/t1.meta"
+  printf 'working: start\nfailed: build broke\ncaptain-held [key=captain-hold-t1-1]: retry or drop?\n' > "$dir/home/state/t1.status"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+
+  out=$(run_return "$dir" begin) || fail "a return with only a held failed lane should clear: $out"
+  section=$(printf '%s\n' "$out" | sed -n '/^Tried and failed, or could not be fixed:$/,/^Landed, cleanup due:$/p')
+  assert_contains "$section" '  - t1: failed: build broke' "a standing hold mirror hid the lane's failure from the brief"
+  pass "the return brief lists a failed lane while a standing hold mirror is the last status line"
+}
+
 test_return_brief_keeps_refresh_history() {
   local dir out first_epoch
   dir="$TMP_ROOT/brief-refresh"
@@ -1365,6 +1381,7 @@ test_unreadable_superseded_archive_keeps_return_gated
 test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_lists_landed_work_awaiting_cleanup
+test_return_brief_lists_a_failed_lane_under_a_standing_hold
 test_return_brief_points_at_the_drain_on_a_host_home_only
 test_return_brief_all_silent_window_does_not_point_at_drain
 test_return_keeps_catchup_gated_when_the_drain_cannot_record_outcomes

@@ -61,16 +61,17 @@ _fm_hold_unstamped_match() {  # <line> <ere>
 # A settled hold is read past (_fm_hold_settled_drop): its hold-command lines
 # are bookkeeping, not worker state, so a lane that was done, paused, or failed
 # before the hold, or whose transferred needs-decision was just answered, reads
-# that way to the watcher, the away-mode daemon, and the return brief again,
-# whatever the worker appends after the settlement. A hold or transfer still
-# standing is returned raw, because those readers must see it.
+# that way to the watcher and the away-mode daemon again, whatever the worker
+# appends after the settlement. A hold or transfer still standing is returned
+# raw, because those readers must see it.
 last_status_line() {  # <status-file> [<previous-event-var>]
   _fm_last_status_event "$(_fm_hold_line_ere "$1")" '' "$@"
 }
 
 # last_status_line read past bin/fm-captain-hold.sh's hold mirror at all
 # times. Those lines are the hold command's, not the worker's, so a reader of
-# the worker's own state (crew state, the terminal-outcome ledger) must not let
+# the worker's own state (crew state, the terminal-outcome ledger, the return
+# brief's failed listing) must not let
 # them displace the event the worker last wrote; a settled transfer is read
 # past exactly as last_status_line reads it. The watcher and away-mode daemon
 # read last_status_line directly, which keeps a standing hold visible to them.

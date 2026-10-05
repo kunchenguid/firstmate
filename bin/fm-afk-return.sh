@@ -647,7 +647,7 @@ EOF
     task=$(basename "$meta"); task=${task%.meta}
     status="$STATE/$task.status"
     status_path_readable "$status" || continue
-    last=$(last_status_line "$status")
+    last=$(last_worker_status_line "$status")
     [ "$(status_line_verb "$last")" = failed ] || continue
     count=$((count + 1))
     printf '  - %s: %s\n' "$task" "$(printf '%s' "$last" | clean_field)"
