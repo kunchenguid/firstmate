@@ -38,6 +38,9 @@
 # github_branch_rules_unavailable_on_plan owns the narrow plan-unavailable
 # exception; every other unreadable required source refuses.
 # Every failing condition is reported, not just the first.
+# When the task brief has a comma-separated "Scope paths:" glob line,
+# scope_check_pr refuses a PR whose complete forge file list leaves those
+# globs; a missing line or an unreadable file list warns and continues.
 # The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
