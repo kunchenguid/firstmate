@@ -92,7 +92,7 @@ MARKDOWN
 cat > "$REPORT_DIR/report.md" <<'MARKDOWN'
 # Rendered report
 
-Readable paragraph with `inline code` and [safe link](https://example.com).
+Readable paragraph with **strong prose** and `inline code` and [safe link](https://example.com).
 
 - first item
 - second item
@@ -102,6 +102,9 @@ Readable paragraph with `inline code` and [safe link](https://example.com).
 | Check | Result |
 | --- | --- |
 | Browser | Passed |
+| **A** | **0** |
+
+Code keeps `**literal markers**` unchanged.
 
 ```js
 const literal = "<img id=code-unsafe src=x>";
@@ -578,6 +581,10 @@ try {
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   if (await page.locator("#journal-filters").isVisible() || await page.locator("#journal-actions").isVisible() || await page.locator("#events").isVisible()) throw new Error("journal-only controls remained visible in report mode");
   if (!await page.locator(".markdown-body table").count()) throw new Error("Markdown table was not rendered");
+  const strongTexts = await page.locator(".markdown-body strong").allTextContents();
+  if (!strongTexts.includes("strong prose") || !strongTexts.includes("A") || !strongTexts.includes("0")) throw new Error("Markdown strong emphasis was not rendered in prose and table cells");
+  if ((await page.locator("#report-rendered").textContent()).includes("**strong prose**") || (await page.locator("#report-rendered table").textContent()).includes("**A**")) throw new Error("Markdown strong delimiters remained literal in rendered content");
+  if (!await page.locator(".markdown-body code").filter({ hasText: "**literal markers**" }).count()) throw new Error("Markdown code literal containing strong markers was not preserved");
   if (!await page.locator(".markdown-body pre code").filter({ hasText: "const literal" }).count()) throw new Error("fenced code was not rendered");
   if (!await page.locator(".markdown-body blockquote").filter({ hasText: "quoted evidence" }).count()) throw new Error("blockquote was not rendered");
   if (await page.locator(".markdown-body li").count() !== 2) throw new Error("Markdown list was not rendered");
