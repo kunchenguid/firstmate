@@ -610,6 +610,15 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
+## Contribution owner-account reads (config/contributions-owner-account)
+
+The optional local, gitignored `config/contributions-owner-account` presence flag opts this home into a default-off credential fallback for the contribution check.
+With it present, a contribution whose repo the active gh account cannot read is observed once more as the logged-in gh account whose login equals the repo owner, without switching the active account; such an observation never records merge authority.
+With the flag absent the check reads only as the active account and never asks gh for another account's token.
+Only the file's presence is read, so its contents are ignored.
+The flag is a home-local credential choice and is not inherited by secondmate homes.
+`bin/fm-contributions.sh`'s header owns the exact retry, budget, and merge-authority mechanics.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
