@@ -621,11 +621,35 @@ fm_dod_nm_custody_returned() {  # <worktree>
 
 # 0 when <sha> is reachable from a ref that survives the disposable worktree:
 # any remote-tracking ref, or - for local-only - heads in the project clone.
-fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
-  local wt=$1 project=$2 mode=$3 sha=$4
+# A publishing mode's head is often pushed by a gate the project clone never
+# fetched from, so when no local ref holds it the worker copy's branch and then
+# its GitLab merge-request head are fetched from the project clone's origin
+# (bounded, quiet) and the same ref check runs again; a failed or timed-out
+# fetch leaves the refusal standing.
+fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha> [<url>]
+  local wt=$1 project=$2 mode=$3 sha=$4 url=${5:-} branch mr_number
   fm_dod_ref_contains "$wt" refs/remotes "$sha" && return 0
   fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
-  [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
+  if [ "$mode" = local-only ]; then
+    fm_dod_ref_contains "$project" refs/heads "$sha"
+    return
+  fi
+  [ -n "$project" ] && [ -d "$project" ] || return 1
+  if branch=$(git -C "$wt" symbolic-ref -q --short HEAD 2>/dev/null) \
+    && GIT_TERMINAL_PROMPT=0 fm_run_timed 5 git -C "$project" fetch --quiet --no-tags origin \
+      "+refs/heads/$branch:refs/remotes/origin/$branch" >/dev/null 2>&1 \
+    && fm_dod_ref_contains "$project" refs/remotes "$sha"; then
+    return 0
+  fi
+  if [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+    mr_number=$FM_PR_NUMBER
+    GIT_TERMINAL_PROMPT=0 fm_run_timed 5 git -C "$project" fetch --quiet --no-tags origin \
+      "+refs/merge-requests/$mr_number/head:refs/remotes/origin/merge-requests/$mr_number/head" \
+      >/dev/null 2>&1 || return 1
+    fm_dod_ref_contains "$project" refs/remotes "$sha"
+    return
+  fi
+  return 1
 }
 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
@@ -675,7 +699,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
     return 1
   fi
-  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha" "$url"; then
     return 0
   fi
   printf '%s\n' "named head $sha is unreachable outside the worker copy"
