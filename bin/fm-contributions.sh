@@ -38,9 +38,9 @@
 # with actor (captain or fleet), a non-empty reason and the UTC time, and
 # refuses a task/url pair with no saved record or with unacknowledged pending
 # signals. A retired pair leaves known, rotation and coverage even while a
-# backlog link remains; snapshot discloses only the retired count. Retiring a
-# retired pair again is a no-op that keeps the first provenance. Nothing
-# un-retires a record; poll never retires one on its own.
+# backlog link remains. Retiring a retired pair again is a no-op that keeps the
+# first provenance. Nothing un-retires a record, poll never retires one on its
+# own, and a later owner settled from a retired record is not retired.
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
@@ -175,7 +175,6 @@ project() {
     | .valid_until = (if ($rows | length) > 0 and all($rows[]; .final) then $now else .valid_until end) + $max_age
     | .captain_omitted = ([0, (.captain | length) - 20] | max)
     | .captain |= .[:20]
-    | .retired = retired($saved[0])
     | . + (if $all == "--all" then {rows:$rows} else {} end)'
 }
 
@@ -343,14 +342,14 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
   jq -n --slurpfile saved "$TMP/saved.json" --arg url "$url" '
     [$saved[0][] | .records[] | select(.url == $url
       and (.observation.state | IN("merged","closed")))] as $final
-    | ([$final[] | select(.error == null)] | first) // ($final | first)' > "$TMP/final.json"
+    | $final | sort_by([.retired != null, .error != null]) | first' > "$TMP/final.json"
   for task in "$@"; do
     fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
     jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
+        $final[0] + {error:null,pending:[],notified:[]} | del(.retired)' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '

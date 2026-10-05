@@ -36,7 +36,6 @@ def known($input; $saved):
   # A retired record ends that task's ownership even while a backlog link remains.
   | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
   | map(select(. as $pair | any($retired[]; . == $pair) | not));
-def retired($saved): [$saved[] | .records[] | select(.retired != null)] | length;
 def latest_checks:
   group_by(.name) | map(sort_by([(.started_at // ""),(.id // 0)]) | last);
 def projected($input; $saved; $now; $max_age):
