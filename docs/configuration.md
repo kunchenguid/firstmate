@@ -992,7 +992,7 @@ With the flag absent, every Claude launch's inline `--settings` JSON carries `"a
 When the flag is present, Claude launches omit those attribution-off settings, Devin worker configs keep the user config's `attribution` setting (Devin's default is on), and fleet launches do not install or select the strip hooks, so Git uses the repository's configured hooks directly.
 `bin/fm-git-strip-ai-trailers.sh` owns the identities, launch environment, and legacy hook installation.
 On Git with config-hook support, stripping runs before the file-based `commit-msg` hook without overriding `core.hooksPath`, so canonical-hook health checks and project hook installers run normally.
-On older Git, the launch falls back to read-only wrappers under `state/<id>.git-hooks`, chaining the hooks of whichever repository Git is running in, including when `git -c core.hooksPath` supplies the pane's wrapper override.
+On older Git, the launch warns and falls back to read-only wrappers under `state/<id>.git-hooks`, chaining the hooks of whichever repository Git is running in, including when `git -c core.hooksPath` supplies the pane's wrapper override.
 With that fallback, canonical-hook identity checks still see wrappers, and a hook manager inside the pane fails instead of displacing the strip; install project hooks from outside the pane.
 An empty project `core.hooksPath` runs no project hook; any other wrapper lookup failure refuses the Git operation rather than skipping a project guard.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.

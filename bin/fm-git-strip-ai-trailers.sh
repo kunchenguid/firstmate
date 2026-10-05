@@ -261,6 +261,7 @@ launch_env() {
   else
     install_hooks "$hooks_dir" "$wt" || return 1
     hooks_dir=$(CDPATH='' cd -- "$hooks_dir" && pwd -P) || return 1
+    echo "warning: Git config hooks unavailable; using legacy core.hooksPath wrappers for AI-trailer stripping; canonical project-hook checks may fail" >&2
     printf 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=%s; ' \
       "$(quote_for_hook "$hooks_dir")"
   fi

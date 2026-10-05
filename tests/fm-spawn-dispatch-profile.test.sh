@@ -513,7 +513,7 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step() {
 }
 
 test_worker_validation_uses_canonical_hooks() {
-  local rec id out status launch real_git direction setting destination check expected
+  local rec id out status launch real_git direction setting destination check expected runtime_output
   real_git=$(command -v git)
   for direction in native-to-legacy legacy-to-native; do
     for setting in absent enabled; do
@@ -575,8 +575,17 @@ SH
       expect_code 0 "$status" "$direction with allowlist=$setting should spawn: $out"
       [ ! -e "$HOME_DIR/state/$id.git-hooks" ] || fail "spawner prematurely selected legacy wrappers"
       launch=$(cat "$LAUNCH_LOG")
-      (cd "$WT_DIR" && HOME="$HOME_DIR/user-home" PATH="$destination:$FAKEBIN_DIR:$PATH" bash -c "$launch") ||
-        fail "$direction with allowlist=$setting ordinary worker validation failed"
+      runtime_output=$(cd "$WT_DIR" && HOME="$HOME_DIR/user-home" PATH="$destination:$FAKEBIN_DIR:$PATH" bash -c "$launch" 2>&1) ||
+        fail "$direction with allowlist=$setting ordinary worker validation failed: $runtime_output"
+      case "$direction" in
+      native-to-legacy)
+        assert_contains "$runtime_output" "using legacy core.hooksPath wrappers" "worker did not receive the fallback warning"
+        assert_contains "$runtime_output" "canonical project-hook checks may fail" "worker warning omitted the compatibility limit"
+        ;;
+      legacy-to-native)
+        assert_equals "" "$runtime_output" "native worker warned unexpectedly"
+        ;;
+      esac
       assert_equals "$expected" "$(cat "$CASE_DIR/effective-hook")" "destination chose the wrong hook mode"
       [ -f "$WT_DIR/project-pre-commit.ran" ] || fail "project pre-commit did not run"
       assert_contains "$(git -C "$WT_DIR" log -1 --format=%B)" "fix: canonical validation" "worker validation did not commit"

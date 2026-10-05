@@ -362,7 +362,7 @@ test_git_c_override_still_strips_and_chains_commit_hooks() {
 }
 
 test_plain_canonical_hook_check_and_validation() {
-  local repo hooks project_hooks variant legacy launch rc head body
+  local repo hooks project_hooks variant launch rc head body
   for variant in default relative absolute late; do
     repo="$TMP_ROOT/canonical-$variant"
     make_repo "$repo"
@@ -382,7 +382,8 @@ test_plain_canonical_hook_check_and_validation() {
       ;;
     esac
     hooks="$TMP_ROOT/hooks-canonical-$variant"
-    launch=$("$STRIP" launch-env "$hooks" "$repo") || fail "could not prepare $variant launch"
+    launch=$("$STRIP" launch-env "$hooks" "$repo" 2>"$repo/launch.stderr") || fail "could not prepare $variant launch"
+    assert_equals "" "$(cat "$repo/launch.stderr")" "$variant native launch warned unexpectedly"
     [ ! -e "$hooks" ] || fail "config-hook launch installed legacy wrappers"
     mkdir -p "$project_hooks"
     cat >"$repo/health-check" <<'EOF'
@@ -418,11 +419,6 @@ EOF
     git -C "$repo" config hook.project.command "printf 'config-commit-msg\\n' >> hook-order"
     git -C "$repo" config hook.firstmate-strip-ai-trailers.enabled false
     export EXPECTED_PRE_COMMIT="$project_hooks/pre-commit"
-    legacy="$TMP_ROOT/legacy-canonical-$variant"
-    "$STRIP" install "$legacy" "$repo" || fail "legacy install failed"
-    (cd "$repo" && with_hooks_env "$legacy" ./health-check)
-    rc=$?
-    expect_code 42 "$rc" "legacy hooksPath must reproduce the reported failure"
     (cd "$repo" && eval "$launch"; ./health-check && sh -c './health-check' &&
       git -c 'alias.health=!./health-check' health) || fail "$variant plain canonical hook check failed"
     head=$(git -C "$repo" rev-parse HEAD)
@@ -514,7 +510,10 @@ case " \$* " in *' hook list commit-msg '*) exit 129 ;; esac
 exec '$real_git' "\$@"
 EOF
   chmod +x "$fakebin/git"
-  launch=$(PATH="$fakebin:$PATH" "$STRIP" launch-env "$hooks" "$repo") || fail "legacy launch preparation failed"
+  launch=$(PATH="$fakebin:$PATH" "$STRIP" launch-env "$hooks" "$repo" 2>"$repo/launch.stderr") || fail "legacy launch preparation failed"
+  assert_contains "$(cat "$repo/launch.stderr")" "using legacy core.hooksPath wrappers" "legacy launch did not warn about its hook override"
+  assert_contains "$(cat "$repo/launch.stderr")" "canonical project-hook checks may fail" "legacy warning omitted the compatibility limit"
+  assert_equals 1 "$(grep -c '^warning:' "$repo/launch.stderr")" "legacy launch must warn exactly once"
   effective=$(eval "$launch"; git -C "$repo" rev-parse --path-format=absolute --git-path hooks)
   assert_equals "$hooks" "$effective" "unsupported Git did not receive legacy wrappers"
   (eval "$launch"; git -C "$repo" commit -q --allow-empty \
