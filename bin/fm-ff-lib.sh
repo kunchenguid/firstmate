@@ -8,7 +8,8 @@
 #   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
-#     base_mode is that local commit, with NO fetch and no origin dependency.
+#     base_mode is that local commit, with NO fetch. Detached targets have no
+#     origin dependency; named-branch targets refresh origin's default first.
 #
 # A REMOTE secondmate home follows that same primary commit. Its host cannot read
 # this object store, so bin/fm-spawn.sh and bin/fm-bootstrap.sh hand the commit to
@@ -16,11 +17,11 @@
 # THIS ff_target with it as the base, so the guards below stay the only copy of the
 # ancestry rules.
 #
-# A linked-worktree secondmate home already holds the primary's commit in the
-# shared object store, so its local-HEAD sync is a purely local fast-forward that
-# never touches the network. A local standalone clone moves through that path
-# only when it already has the target; otherwise it is skipped until the origin
-# path updates it.
+# A detached linked-worktree secondmate home already holds the primary's commit
+# in the shared object store, so its local-HEAD sync is a purely local
+# fast-forward that never touches the network. A local standalone clone moves
+# through that path only when it already has the target; otherwise it is skipped
+# until the origin path updates it.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
@@ -397,12 +398,7 @@ ff_target() {
   fi
 
   local default base cur instr local_rev base_rev before after out
-  default=$(default_branch "$dir") || {
-    echo "$label: skipped: cannot determine default branch"
-    return 0
-  }
-
-  # Resolve the fast-forward base from base_mode (see header).
+  # Fetch before resolving origin/HEAD so a newly named default has a tracking ref.
   if [ "$base_mode" = origin ]; then
     if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
       echo "$label: skipped: no origin remote"
@@ -412,6 +408,23 @@ ff_target() {
       echo "$label: skipped: fetch failed"
       return 0
     fi
+  fi
+
+  cur=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  # Named-branch updates must not trust the spawn-base refresh window. Detached
+  # local-commit sync moves no branch and retains its origin-independent path.
+  if { [ "$base_mode" = origin ] || [ -n "$cur" ]; } \
+    && git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$dir" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "$label: skipped: cannot refresh origin's default branch"
+      return 0
+    fi
+  fi
+  default=$(default_branch "$dir") || {
+    echo "$label: skipped: cannot determine default branch"
+    return 0
+  }
+  if [ "$base_mode" = origin ]; then
     base="origin/$default"
   else
     base="$base_mode"
@@ -422,7 +435,6 @@ ff_target() {
     return 0
   fi
 
-  cur=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
   if [ -z "$cur" ] && [ "$allow_detached" != yes ]; then
     echo "$label: skipped: detached HEAD, expected $default"
     return 0

@@ -118,19 +118,11 @@ resolve_project_arg() {
 }
 
 default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+  local ref
+  # Fetch has populated the tracking refs; now resolve the branch to update.
+  git -C "$PROJ" remote set-head origin --auto >/dev/null 2>&1 || return 1
+  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
+  echo "${ref#origin/}"
 }
 
 first_line() {

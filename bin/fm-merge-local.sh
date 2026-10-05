@@ -80,8 +80,10 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 
 default_branch() {
   local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
+  if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+    # The spawn-base refresh window must never select a branch to update.
+    git -C "$PROJ" remote set-head origin --auto >/dev/null 2>&1 || return 1
+    ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
     echo "${ref#origin/}"
     return 0
   fi
@@ -102,7 +104,7 @@ if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
 fi
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected a freshly resolved origin/HEAD, or local main/master without origin" >&2; exit 1; }
 
 # The project's main checkout must be on its default branch and clean, so the
 # fast-forward lands predictably (firstmate never writes here otherwise).
