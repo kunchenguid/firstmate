@@ -533,6 +533,110 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm_fake_bitbucket_curl <fakebin> <fixture-dir>
+# Drops a curl stub that answers the Bitbucket Cloud REST API 2.0 the way
+# bin/fm-pr-lib.sh calls it, so no test reaches the network. Each route answers
+# <fixture-dir>/<route>.json with the HTTP status in <route>.code (200 when
+# absent, 404 when the JSON is absent), printed the way curl's
+# -w '\n%{http_code}' prints it. Routes: pr (the pull request, which answers
+# pr-moved.json from the full read numbered in pr-moved.at, the second by
+# default, when that file exists, and pr-post.json once a merge was requested), commit (an abbreviated-hash
+# resolution, answered by commit-<abbreviation>.json when that exists), statuses and statuses-2 (the second page), restrictions, model,
+# default-reviewers, tasks, and merge (whose request body is kept in
+# merge-body.json, and which gets no HTTP response at all, the way curl fails
+# in transport, when merge.transport-failure exists). The credential is
+# checked against FM_TEST_BB_EXPECT_USER, the escaped "email:token" curl's
+# config should carry on stdin, and a mismatch answers 401. Every argument
+# vector is appended to curl-argv.log and every config to curl-config.log, so a
+# case can prove the token never reached an argument.
+fm_fake_bitbucket_curl() {
+  local fakebin=$1 dir=$2
+  mkdir -p "$dir"
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+dir='$dir'
+SH
+  cat >> "$fakebin/curl" <<'SH'
+printf '%s\n' "$*" >> "$dir/curl-argv.log"
+config=$(cat)
+printf '%s\n' "$config" >> "$dir/curl-config.log"
+method=GET url='' data=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -X) method=$2; shift 2 ;;
+    --data-binary) data=$2; shift 2 ;;
+    -H|-w|-K|--connect-timeout|--max-time) shift 2 ;;
+    https://*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+respond() {
+  local route=$1 code=200 body=''
+  if [ -f "$dir/$route.json" ]; then
+    body=$(cat "$dir/$route.json")
+    [ ! -f "$dir/$route.code" ] || code=$(cat "$dir/$route.code")
+  else
+    body='Not Found'
+    code=404
+  fi
+  printf '%s\n%s' "$body" "$code"
+  exit 0
+}
+[ "$config" = "user = \"${FM_TEST_BB_EXPECT_USER-}\"" ] \
+  || { printf '%s\n%s' '{"type":"error","error":{"message":"Unauthorized"}}' 401; exit 0; }
+case "$url" in
+  https://api.bitbucket.org/2.0/*) path=${url#https://api.bitbucket.org/2.0/} ;;
+  *) printf 'fake curl: unexpected host in %s\n' "$url" >&2; exit 6 ;;
+esac
+case "$method $path" in
+  "POST "*/pullrequests/*/merge)
+    printf '%s' "$data" > "$dir/merge-body.json"
+    : > "$dir/merge-called"
+    [ ! -e "$dir/merge.transport-failure" ] || exit 28
+    respond merge
+    ;;
+  "GET "*/pullrequests/*/tasks*) respond tasks ;;
+  "GET "*/pullrequests/*"?fields=id,state")
+    if [ -e "$dir/merge-called" ] && [ -f "$dir/pr-post.json" ]; then respond pr-post; fi
+    respond pr
+    ;;
+  "GET "*/pullrequests/*)
+    if [ -e "$dir/merge-called" ] && [ -f "$dir/pr-post.json" ]; then respond pr-post; fi
+    reads=$(( $(cat "$dir/pr-reads" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$reads" > "$dir/pr-reads"
+    if [ -f "$dir/pr-moved.json" ] && [ "$reads" -ge "$(cat "$dir/pr-moved.at" 2>/dev/null || echo 2)" ]; then
+      respond pr-moved
+    fi
+    respond pr
+    ;;
+  "GET "*/commit/*"/statuses"*page=2*) respond statuses-2 ;;
+  "GET "*/commit/*"/statuses"*) respond statuses ;;
+  "GET "*/commit/*"?fields=hash")
+    abbrev=${path%\?fields=hash}
+    abbrev=${abbrev##*/}
+    [ ! -f "$dir/commit-$abbrev.json" ] || respond "commit-$abbrev"
+    respond commit
+    ;;
+  "GET "*/branch-restrictions*) respond restrictions ;;
+  "GET "*/effective-branching-model) respond model ;;
+  "GET "*/effective-default-reviewers*) respond default-reviewers ;;
+esac
+respond unrouted
+SH
+  chmod +x "$fakebin/curl"
+}
+
+# fm_bitbucket_pr_json <id> <state> <abbreviated-head> [draft] [destination] [participants-json]
+# One Bitbucket pull request record in the API's own shape, where the head is
+# the abbreviated hash the API reports.
+fm_bitbucket_pr_json() {
+  local id=$1 state=$2 head=$3 draft=${4:-false} dest=${5:-main} participants=${6:-[]}
+  printf '{"type":"pullrequest","id":%s,"state":"%s","draft":%s,' "$id" "$state" "$draft"
+  printf '"source":{"branch":{"name":"fm/task-x1"},"commit":{"hash":"%s","type":"commit"}},' "$head"
+  printf '"destination":{"branch":{"name":"%s"},"commit":{"hash":"0123456789ab"}},' "$dest"
+  printf '"participants":%s,"close_source_branch":true}\n' "$participants"
+}
+
 # fm_fake_claude_outside_read_gate <fakebin>
 # Drops a claude stub that models the 2.1.257 outside-read gate instead of
 # answering like a generic exit-0 tool: it resolves its own cwd and every

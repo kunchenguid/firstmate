@@ -1600,6 +1600,62 @@ test_terminal_passed_with_failed_gitlab_read_reports_unknown() {
   pass "terminal passed run handles failed GitLab read"
 }
 
+run_crew_state_bitbucket() {  # <case-dir> <id>
+  NO_MISTAKES_BITBUCKET_EMAIL=captain@example.invalid \
+  NO_MISTAKES_BITBUCKET_API_TOKEN=synthetic-token \
+  FM_TEST_BB_EXPECT_USER=captain@example.invalid:synthetic-token \
+    run_crew_state "$@"
+}
+
+test_terminal_passed_with_bitbucket_pr_reads_its_state() {
+  reset_fakes
+  local d url out
+  d=$(new_case passed-bitbucket-pr)
+  url=https://bitbucket.org/example/repo/pull-requests/12
+  make_repo_on_branch "$d/wt" fm/feat-dbitbucket
+  make_fakebin "$d" >/dev/null
+  fm_fake_bitbucket_curl "$d/fakebin" "$d/bb"
+  fm_write_meta "$d/state/feat-dbitbucket.meta" "window=fm:fm-feat-dbitbucket" \
+    "worktree=$d/wt" "kind=ship" "pr=$url"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dbitbucket "$url")"
+  fm_bitbucket_pr_json 12 OPEN 0123456789ab > "$d/bb/pr.json"
+  out=$(run_crew_state_bitbucket "$d" feat-dbitbucket)
+  assert_contains "$out" "run passed: PR open" "open Bitbucket PR state is named"
+  assert_not_contains "$out" "PR merged" "open Bitbucket PR must not be reported merged"
+  fm_bitbucket_pr_json 12 DECLINED 0123456789ab > "$d/bb/pr.json"
+  out=$(run_crew_state_bitbucket "$d" feat-dbitbucket)
+  assert_contains "$out" "run passed: PR closed" "declined Bitbucket PR is reported closed"
+  fm_bitbucket_pr_json 12 MERGED 0123456789ab > "$d/bb/pr.json"
+  out=$(run_crew_state_bitbucket "$d" feat-dbitbucket)
+  assert_contains "$out" "run passed: PR merged" "merged Bitbucket PR is reported merged"
+  assert_grep 'repositories/example/repo/pullrequests/12?fields=id,state' "$d/bb/curl-argv.log" \
+    "Bitbucket PR read addresses the parsed workspace and repository"
+  pass "terminal passed run reads open, declined, and merged Bitbucket PR state"
+}
+
+test_terminal_passed_with_unreadable_bitbucket_pr_reports_unknown() {
+  reset_fakes
+  local d url out
+  d=$(new_case passed-unreadable-bitbucket-pr)
+  url=https://bitbucket.org/example/repo/pull-requests/13
+  make_repo_on_branch "$d/wt" fm/feat-dbitbucketunknown
+  make_fakebin "$d" >/dev/null
+  fm_fake_bitbucket_curl "$d/fakebin" "$d/bb"
+  fm_write_meta "$d/state/feat-dbitbucketunknown.meta" "window=fm:fm-feat-dbitbucketunknown" \
+    "worktree=$d/wt" "kind=ship" "pr=$url"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dbitbucketunknown "$url")"
+  fm_bitbucket_pr_json 13 MERGED 0123456789ab > "$d/bb/pr.json"
+  printf '403\n' > "$d/bb/pr.code"
+  out=$(run_crew_state_bitbucket "$d" feat-dbitbucketunknown)
+  assert_contains "$out" "run passed: PR state unknown (unreadable)" "a refused Bitbucket read is honest unknown"
+  rm -f "$d/bb/pr.code"
+  out=$(NO_MISTAKES_BITBUCKET_EMAIL='' NO_MISTAKES_BITBUCKET_API_TOKEN='' \
+    run_crew_state "$d" feat-dbitbucketunknown)
+  assert_contains "$out" "run passed: PR state unknown (unreadable)" "a Bitbucket read without the credential is honest unknown"
+  assert_not_contains "$out" "PR merged" "an unreadable Bitbucket PR must not be reported merged"
+  pass "terminal passed run reports an unreadable Bitbucket PR as unknown"
+}
+
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged() {
   reset_fakes
   local d url read_log out
@@ -5554,6 +5610,8 @@ test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
 test_terminal_passed_with_failed_gitlab_read_reports_unknown
+test_terminal_passed_with_bitbucket_pr_reads_its_state
+test_terminal_passed_with_unreadable_bitbucket_pr_reports_unknown
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged
 test_terminal_passed_with_merged_gerrit_change_reports_merged
 test_terminal_passed_with_unreadable_gerrit_change_reports_unknown
