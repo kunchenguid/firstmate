@@ -498,36 +498,42 @@ test_launch_env_quotes_the_strip_command() {
 }
 
 test_launch_env_falls_back_without_config_hooks() {
-  local repo hooks fakebin real_git launch effective
-  repo="$TMP_ROOT/legacy-launch"
-  hooks="$TMP_ROOT/hooks-legacy-launch"
-  make_repo "$repo"
-  write_marker_hook "$repo/.git/hooks/pre-commit" legacy-project-pre-commit
+  local repo hooks fakebin real_git launch effective unsupported
   real_git=$(command -v git)
-  fakebin=$(fm_fakebin "$TMP_ROOT/legacy-git")
-  cat >"$fakebin/git" <<EOF
+  for unsupported in no-hook no-list; do
+    repo="$TMP_ROOT/legacy-launch-$unsupported"
+    hooks="$TMP_ROOT/hooks-legacy-launch-$unsupported"
+    make_repo "$repo"
+    write_marker_hook "$repo/.git/hooks/pre-commit" legacy-project-pre-commit
+    fakebin=$(fm_fakebin "$TMP_ROOT/legacy-git-$unsupported")
+    cat >"$fakebin/git" <<EOF
 #!/bin/sh
 case " \$* " in
   *' hook list commit-msg '*)
+    if [ '$unsupported' = no-hook ]; then
+      printf '%s\n' "git: 'hook' is not a git command. See 'git --help'." >&2
+      exit 1
+    fi
     printf '%s\n' "error: unknown subcommand: \\\`list'" >&2
     exit 129
     ;;
 esac
 exec '$real_git' "\$@"
 EOF
-  chmod +x "$fakebin/git"
-  "$STRIP" install "$hooks" "$repo" || fail "legacy hook setup failed"
-  launch=$(PATH="$fakebin:$PATH" "$STRIP" launch-env "$hooks" "$repo" 2>"$repo/launch.stderr") || fail "legacy launch preparation failed"
-  assert_contains "$(cat "$repo/launch.stderr")" "using legacy core.hooksPath wrappers" "legacy launch did not warn about its hook override"
-  assert_contains "$(cat "$repo/launch.stderr")" "canonical project-hook checks may fail" "legacy warning omitted the compatibility limit"
-  assert_equals 1 "$(grep -c '^warning:' "$repo/launch.stderr")" "legacy launch must warn exactly once"
-  effective=$(eval "$launch"; git -C "$repo" rev-parse --path-format=absolute --git-path hooks)
-  assert_equals "$hooks" "$effective" "unsupported Git did not receive legacy wrappers"
-  (eval "$launch"; git -C "$repo" commit -q --allow-empty \
-    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: legacy fallback') || fail "legacy commit failed"
-  [ -f "$repo/legacy-project-pre-commit.ran" ] || fail "legacy project hook was not chained"
-  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "cursoragent@cursor.com" "legacy fallback lost stripping"
-  pass "Git without config hooks receives working strip-and-chain wrappers"
+    chmod +x "$fakebin/git"
+    "$STRIP" install "$hooks" "$repo" || fail "legacy hook setup failed"
+    launch=$(PATH="$fakebin:$PATH" "$STRIP" launch-env "$hooks" "$repo" 2>"$repo/launch.stderr") || fail "$unsupported legacy launch preparation failed"
+    assert_contains "$(cat "$repo/launch.stderr")" "using legacy core.hooksPath wrappers" "$unsupported legacy launch did not warn about its hook override"
+    assert_contains "$(cat "$repo/launch.stderr")" "canonical project-hook checks may fail" "$unsupported legacy warning omitted the compatibility limit"
+    assert_equals 1 "$(grep -c '^warning:' "$repo/launch.stderr")" "$unsupported legacy launch must warn exactly once"
+    effective=$(eval "$launch"; git -C "$repo" rev-parse --path-format=absolute --git-path hooks)
+    assert_equals "$hooks" "$effective" "$unsupported Git did not receive legacy wrappers"
+    (eval "$launch"; PATH="$fakebin:$PATH" git -C "$repo" commit -q --allow-empty \
+      --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: legacy fallback') || fail "$unsupported legacy commit failed"
+    [ -f "$repo/legacy-project-pre-commit.ran" ] || fail "$unsupported legacy project hook was not chained"
+    assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "cursoragent@cursor.com" "$unsupported legacy fallback lost stripping"
+    pass "Git with $unsupported receives working strip-and-chain wrappers"
+  done
 }
 
 test_launch_env_refuses_destination_git_errors() {
@@ -539,7 +545,7 @@ test_launch_env_refuses_destination_git_errors() {
   real_git=$(command -v git)
   fakebin=$(fm_fakebin "$TMP_ROOT/failing-destination-git")
   mkdir -p "$repo/config-directory"
-  for failure in config-read probe-error; do
+  for failure in config-read probe-error probe-error-1; do
     case "$failure" in
     config-read)
       cat >"$fakebin/git" <<EOF
@@ -549,18 +555,19 @@ EOF
       expected_status=128
       expected_error="unable to access '$repo/config-directory'"
       ;;
-    probe-error)
+    probe-error | probe-error-1)
+      expected_status=129
+      [ "$failure" != probe-error-1 ] || expected_status=1
       cat >"$fakebin/git" <<EOF
 #!/bin/sh
 case " \$* " in
   *' hook list commit-msg '*)
     printf '%s\n' 'error: destination Git hook probe failed' >&2
-    exit 129
+    exit $expected_status
     ;;
 esac
 exec '$real_git' "\$@"
 EOF
-      expected_status=129
       expected_error='destination Git hook probe failed'
       ;;
     esac

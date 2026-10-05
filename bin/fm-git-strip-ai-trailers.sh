@@ -10,9 +10,9 @@
 #       Call in the destination launch environment so the support probe uses
 #       the same Git as the worker's commits. Emit a shell export for a
 #       pane-scoped config commit-msg hook, leaving core.hooksPath intact.
-#       Git runs it before the file-based commit-msg. If Git rejects hook list
-#       as an unknown subcommand, warn and emit the prepared wrappers' hooksPath;
-#       any other probe failure stops setup. Pass an
+#       Git runs it before the file-based commit-msg. If Git reports an unknown
+#       hook command or list subcommand, warn and emit the prepared wrappers'
+#       hooksPath; any other probe failure stops setup. Pass an
 #       absolute hooks directory prepared with install before launch delivery;
 #       launch-env only selects configuration, with no installation or writes.
 #   fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
@@ -263,11 +263,14 @@ launch_env() {
       "$(quote_for_hook "$command")"
   else
     probe_status=$?
-    if [ "$probe_status" -ne 129 ] || [ "${probe_output%%$'\n'*}" != "error: unknown subcommand: \`list'" ]; then
+    case "$probe_status:${probe_output%%$'\n'*}" in
+    "129:error: unknown subcommand: \`list'" | "1:git: 'hook' is not a git command. See 'git --help'.") ;;
+    *)
       printf '%s\n' "$probe_output" >&2
       echo "error: cannot determine destination Git config-hook support; refusing to configure AI-trailer stripping" >&2
       return "$probe_status"
-    fi
+      ;;
+    esac
     echo "warning: Git config hooks unavailable; using legacy core.hooksPath wrappers for AI-trailer stripping; canonical project-hook checks may fail" >&2
     printf 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=%s; ' \
       "$(quote_for_hook "$hooks_dir")"

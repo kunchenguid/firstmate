@@ -516,7 +516,7 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step() {
 test_worker_validation_uses_canonical_hooks() {
   local rec id out status launch real_git direction setting destination check expected runtime_output
   real_git=$(command -v git)
-  for direction in native-to-legacy legacy-to-native; do
+  for direction in native-to-no-hook native-to-legacy legacy-to-native; do
     for setting in absent enabled; do
       id="canonical-$direction-$setting"
       rec=$(make_spawn_case "$id" claude "$id")
@@ -532,6 +532,10 @@ test_worker_validation_uses_canonical_hooks() {
 #!/bin/sh
 case " \$* " in
   *' hook list commit-msg '*)
+    if [ '$direction' = native-to-no-hook ]; then
+      printf '%s\n' "git: 'hook' is not a git command. See 'git --help'." >&2
+      exit 1
+    fi
     printf '%s\n' "error: unknown subcommand: \\\`list'" >&2
     exit 129
     ;;
@@ -557,7 +561,7 @@ cp "$1" project-message
 SH
       chmod +x "$CASE_DIR/health-check" "$CASE_DIR/project-hooks/"{pre-commit,commit-msg}
       case "$direction" in
-      native-to-legacy)
+      native-to-no-hook | native-to-legacy)
         ln -s "$CASE_DIR/legacy-bin/git" "$destination/git"
         check=
         expected="$HOME_DIR/state/$id.git-hooks/pre-commit"
@@ -588,7 +592,7 @@ SH
       runtime_output=$(cd "$WT_DIR" && HOME="$HOME_DIR/user-home" PATH="$destination:$FAKEBIN_DIR:$PATH" bash -c "$launch" 2>&1) ||
         fail "$direction with allowlist=$setting ordinary worker validation failed: $runtime_output"
       case "$direction" in
-      native-to-legacy)
+      native-to-no-hook | native-to-legacy)
         assert_contains "$runtime_output" "using legacy core.hooksPath wrappers" "worker did not receive the fallback warning"
         assert_contains "$runtime_output" "canonical project-hook checks may fail" "worker warning omitted the compatibility limit"
         ;;
