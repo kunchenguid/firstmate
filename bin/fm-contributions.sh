@@ -240,12 +240,9 @@ wait_forges() { # background forge pids from one independent read wave
 }
 
 owner_token() { # repo-owner -> FORGE_TOKEN of the logged-in gh account with that login
-  local remaining
-  remaining=$((DEADLINE - $(date +%s)))
-  [ "$remaining" -gt 0 ] || return 1
-  [ "$remaining" -le 5 ] || remaining=5
-  FORGE_TOKEN=$(fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh auth token -u "$1" 2>/dev/null) || { FORGE_TOKEN=''; return 1; }
+  # A lookup cut short by the read bound or the deadline is budget refusal.
+  FORGE_TOKEN=$(FORGE_ERR="$TMP/token.err" forge auth token -u "$1") \
+    || { FORGE_TOKEN=''; [ ! -e "$TMP/budget-exhausted" ] || BUDGET_EXHAUSTED=1; return 1; }
   [ -n "$FORGE_TOKEN" ]
 }
 
