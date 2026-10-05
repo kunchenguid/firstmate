@@ -194,9 +194,11 @@ try:
     require(fresh.returncode == 0, "a fresh leftover beat must not restore foreign-owner blocking")
 
     stop(owner)
+    # The replacement's first Stop takes the dead owner's lock over and only
+    # announces it (exit 2, no arm); its next Stop, in the same process, arms.
     replacement = start(
         env,
-        'printf \'%s\\n\' \'{"session_id":"replacement","stop_hook_active":true}\' | "$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"; printf "replacement_rc=%s\\n" "$?"; sleep 1',
+        'for n in 1 2; do printf \'%s\\n\' \'{"session_id":"replacement","stop_hook_active":true}\' | "$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"; printf "replacement_rc=%s\\n" "$?"; done; sleep 1',
         "replacement.txt",
     )
     until(

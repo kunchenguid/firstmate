@@ -21,13 +21,15 @@
 #     ancestry remains inert, so a competing session never arms or rewakes.
 #   - Promotion notice: a recovery that moves the lock to this session from a
 #     different (or unrecorded) session is otherwise silent, so the session can
-#     keep acting read-only from its earlier refusal. The hook records a pending
-#     notice in state/.lock-promotion-notice naming the new lock pid and this
-#     session's trusted id, and the first exit 2 this session commits afterward
-#     appends it to the delivered stderr once, then removes it. A notice whose
-#     pid no longer is this session's lock is discarded unprinted. Re-anchoring
-#     this same session's own lock after its helper chain was recycled is not a
-#     promotion and records nothing.
+#     keep acting read-only from its earlier refusal. The firing that took the
+#     lock over announces it at once: after winning its generation it commits
+#     outcome "promoted" and exits 2 carrying only the notice, without arming,
+#     so the notice reaches the agent even when no actionable wake follows; the
+#     next Stop firing holds the lock and arms normally. The lock pid and this
+#     session's trusted id are recorded in state/.lock-promotion-announced
+#     first, so a concurrent firing that also recovered the same takeover stays
+#     silent. Re-anchoring this same session's own lock after its helper chain
+#     was recycled is not a promotion and announces nothing.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -213,7 +215,7 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
-LOCK_PROMOTION_NOTICE="$STATE/.lock-promotion-notice"
+LOCK_PROMOTED=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
@@ -232,53 +234,6 @@ need_supervision() {
 }
 need_supervision || exit 0
 
-# --- lock promotion notice ------------------------------------------------------
-# Record a pending notice after this session took the lock over from prior
-# recorded session id $1 (may be empty). Best-effort: a failed write only loses
-# the notice, never the recovery.
-record_lock_promotion() {  # <prior-recorded-session-id>
-  local prior=$1 trusted pid tmp
-  trusted=$(fm_session_lock_trusted_session_id 2>/dev/null || true)
-  [ -n "$trusted" ] && [ "$trusted" = "$prior" ] && return 0
-  pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  tmp=$(mktemp "$STATE/.lock-promotion-notice.XXXXXX" 2>/dev/null) || return 0
-  if printf '%s\n%s\n' "$pid" "$trusted" > "$tmp" 2>/dev/null; then
-    mv -f "$tmp" "$LOCK_PROMOTION_NOTICE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
-  else
-    rm -f "$tmp" 2>/dev/null
-  fi
-  return 0
-}
-
-# Print the pending promotion notice to stderr once and remove it. Called only
-# after this generation's exit 2 is committed, so the harness delivers it with
-# that exit; a notice whose pid is no longer this session's lock is dropped.
-deliver_lock_promotion_notice() {
-  local pid='' session='' current
-  [ -f "$LOCK_PROMOTION_NOTICE" ] && [ ! -L "$LOCK_PROMOTION_NOTICE" ] || return 0
-  { IFS= read -r pid; IFS= read -r session; } < "$LOCK_PROMOTION_NOTICE" 2>/dev/null || true
-  rm -f "$LOCK_PROMOTION_NOTICE" 2>/dev/null || return 0
-  current=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
-  [ -n "$pid" ] && [ "$pid" = "$current" ] || return 0
-  fm_session_lock_owned_by_self "$STATE" || return 0
-  case "$session" in *[!A-Za-z0-9._:-]*) session= ;; esac
-  {
-    if [ -n "$session" ]; then
-      printf 'firstmate fleet lock: this session now holds this home'"'"'s session lock (harness pid %s, Claude session %s, which is this session'"'"'s current id).\n' "$pid" "$session"
-    else
-      printf 'firstmate fleet lock: this session now holds this home'"'"'s session lock (harness pid %s).\n' "$pid"
-    fi
-    printf 'Its Stop hook took the lock over automatically after the previous holder'"'"'s process ended, so any read-only restriction from an earlier lock refusal in this session no longer applies; bin/fm-lock.sh status confirms ownership.\n'
-  } >&2
-}
-
-# Exit 2 for a generation whose terminal outcome is already committed.
-autoarm_exit_committed() {
-  deliver_lock_promotion_notice
-  exit 2
-}
-
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
 # remain the single acquisition owner, then re-verify current-session identity
@@ -287,7 +242,9 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   PRIOR_LOCK_SESSION=$(fm_session_lock_recorded_session_id "$STATE" 2>/dev/null || true)
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
-  record_lock_promotion "$PRIOR_LOCK_SESSION"
+  PROMOTED_SESSION=$(fm_session_lock_trusted_session_id 2>/dev/null || true)
+  [ -n "$PROMOTED_SESSION" ] && [ "$PROMOTED_SESSION" = "$PRIOR_LOCK_SESSION" ] \
+    || LOCK_PROMOTED=1
 fi
 
 # --- single-flight generation claim --------------------------------------------
@@ -346,6 +303,31 @@ autoarm_record() {  # <outcome>
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
 }
 
+# --- lock promotion notice ------------------------------------------------------
+# This firing took the lock over from a different or unrecorded session: tell
+# the agent now, in a notice-only rewake, instead of waiting for a wake that may
+# never come (header). The record is written before the commit and checked
+# under this generation's ownership, so one takeover is announced at most once.
+if [ "$LOCK_PROMOTED" -eq 1 ]; then
+  PROMOTED_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
+  PROMOTION_RECORD="$STATE/.lock-promotion-announced"
+  if [ "$(cat "$PROMOTION_RECORD" 2>/dev/null)" != "$(printf '%s\n%s' "$PROMOTED_PID" "$PROMOTED_SESSION")" ] \
+    && fm_autoarm_still_owner "$STATE" "$MY_GEN" \
+    && printf '%s\n%s\n' "$PROMOTED_PID" "$PROMOTED_SESSION" > "$PROMOTION_RECORD" 2>/dev/null; then
+    case "$PROMOTED_SESSION" in *[!A-Za-z0-9._:-]*) PROMOTED_SESSION= ;; esac
+    {
+      if [ -n "$PROMOTED_SESSION" ]; then
+        printf 'firstmate fleet lock: this session now holds this home'"'"'s session lock (harness pid %s, Claude session %s, which is this session'"'"'s current id).\n' "$PROMOTED_PID" "$PROMOTED_SESSION"
+      else
+        printf 'firstmate fleet lock: this session now holds this home'"'"'s session lock (harness pid %s).\n' "$PROMOTED_PID"
+      fi
+      printf 'Its Stop hook took the lock over automatically after the previous holder'"'"'s process ended, so any read-only restriction from an earlier lock refusal in this session no longer applies; bin/fm-lock.sh status confirms ownership.\n'
+    } >&2
+    autoarm_commit promoted && exit 2
+    exit 0
+  fi
+fi
+
 # Claude terminates the complete async-hook process tree when the configured
 # hook timeout expires. The arm is intentionally allowed to follow a healthy
 # watcher until its next wake, so that wait cannot be shortened without adding
@@ -371,10 +353,10 @@ handle_autoarm_signal() {
   if [ ! -e "$FAILURE_NOTICE" ]; then
     printf 'firstmate watcher auto-arm INTERRUPTED by %s - the Stop-owned automatic supervision mechanism did not reach a terminal watcher outcome.\n' "$signal" >&2
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n' >&2
-    autoarm_commit failed "$FAILURE_NOTICE" && autoarm_exit_committed
+    autoarm_commit failed "$FAILURE_NOTICE" && exit 2
     exit 0
   fi
-  autoarm_commit failed-suppressed && autoarm_exit_committed
+  autoarm_commit failed-suppressed && exit 2
   exit 0
 }
 
@@ -553,7 +535,7 @@ if [ "$HEALTHY" -eq 1 ]; then
   if autoarm_commit failed-suppressed; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     [ -e "$FAILURE_ALARM" ] && exit 0
-    autoarm_exit_committed
+    exit 2
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
@@ -594,7 +576,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   } >&2
   if autoarm_commit rewake; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    autoarm_exit_committed
+    exit 2
   fi
   if [ "$HOST_MODE" -eq 1 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN" \
     && fm_recovery_marker_snapshot "$STATE/.watcher-down" \
@@ -609,7 +591,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     fi
     if [ "$LOST_HANDBACK_COMMITTED" -eq 1 ]; then
       [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-      autoarm_exit_committed
+      exit 2
     fi
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
@@ -634,14 +616,14 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   } >&2
   if autoarm_commit failed "$FAILURE_NOTICE"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    autoarm_exit_committed
+    exit 2
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
 if autoarm_commit failed-suppressed; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  autoarm_exit_committed
+  exit 2
 fi
 [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
 exit 0
