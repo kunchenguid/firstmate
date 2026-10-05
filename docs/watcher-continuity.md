@@ -496,7 +496,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
 - Host-timeout HUP/TERM/INT translation into the same durable failure handoff.
-- The tracked `StopFailure` registration, its doubling capped backoff, a parked generation holding its rewake until a normal Stop clears the episode, the one-notice non-retryable path, and the unchanged scope, AFK, and need gates.
+- The tracked `StopFailure` registration, its doubling capped backoff, a parked generation holding its rewake until a normal Stop clears the episode (and going quiet after a non-retryable error), a watcher cycling through every hold, the retried one-notice non-retryable path, and the unchanged scope, AFK, and need gates.
 
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
 [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.

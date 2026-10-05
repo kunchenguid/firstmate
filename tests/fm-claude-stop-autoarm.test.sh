@@ -1839,6 +1839,8 @@ test_stopfailure_host_handback_holds_with_a_live_watcher() {
   write_host_fixture "$dir" handed-back
   write_arm_fixture "$dir" actionable
   : > "$dir/state/successor-park"
+  printf 'arm_pid=4242\twatcher_pid=4243\torigin=started\tstarted_at=1\tended_at=2\texit_code=0\tsignal=none\treason=stale\tbeacon_age=1\tlock_before=x\tlock_after=x\tsuccessor=none\n' \
+    > "$dir/state/.watch-cycle-exits.log"
   FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=4 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" "$FAKE_CLAUDE" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >"$FM_HOME/state/hook.out" 2>&1 &
@@ -1863,6 +1865,7 @@ test_stopfailure_host_handback_holds_with_a_live_watcher() {
   assert_present "$dir/state/hook-held" "the hook had already exited when the hold's watcher started"
   assert_present "$dir/state/successor-alive" "no live watcher cycle ${successor:-none} was running during the backoff hold"
   [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] || fail "exactly one watcher cycle must start for the hold: $(cat "$dir/state/successor-ran")"
+  assert_contains "$(cat "$dir/state/successor-ran")" "predecessor=4242" "the hold's watcher must name the closed host cycle, not the hook, as its predecessor"
   [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the held handback must still rewake once, got rc $(cat "$dir/state/hook-rc")"
   assert_contains "$(cat "$dir/state/hook.out")" "Claude API error (rate_limit, failure 1 in a row)" "the held rewake must name the backoff"
   pass "auto-arm: a host hand-back held for a StopFailure backoff keeps a watcher cycle live during the hold"
@@ -1897,6 +1900,150 @@ test_stopfailure_non_retryable_notifies_parent_once() {
   [ ! -e "$main/state/arm-ran" ] || fail "a non-retryable StopFailure in a main home must not arm"
   [ "$(stopfailure_field "$main" error)" = authentication_failed ] || fail "a main home must keep the durable episode record"
   pass "auto-arm: a non-retryable StopFailure records the episode, notifies a parent once, and never loops"
+}
+
+# A non-retryable StopFailure ends every earlier generation's rewake too: the
+# parked generation closes quietly instead of rewaking into the same error once
+# its retry time passes.
+test_stopfailure_non_retryable_silences_a_parked_generation() {
+  local dir rc
+  dir=$(make_secondmate_dir "$TMP_ROOT/stopfailure-parked-auth")
+  mkdir -p "$TMP_ROOT/stopfailure-parked-auth-parent/state"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$TMP_ROOT/stopfailure-parked-auth-parent" > "$dir/.fm-secondmate-parent"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" gated-actionable
+  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=1 FM_CLAUDE_STOPFAILURE_BACKOFF_CAP=2 SF_PAYLOAD="$AUTH_FAILURE_PAYLOAD" "$FAKE_CLAUDE" -c '
+    stop="{\"session_id\":\"sess-autoarm\",\"hook_event_name\":\"Stop\"}"
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "$stop" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/parked.err" &
+    parked=$!
+    i=0
+    while [ ! -e "$FM_HOME/state/arm-waiting" ]; do
+      [ "$i" -lt 200 ] || exit 90
+      sleep 0.05
+      i=$((i + 1))
+    done
+    printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>&1
+    sleep 3
+    : > "$FM_HOME/state/arm-release"
+    wait "$parked"
+    echo "$?" > "$FM_HOME/state/parked-rc"
+  '; rc=$?
+  expect_code 0 "$rc" "non-retryable parked-generation scenario did not complete"
+  [ "$(cat "$dir/state/parked-rc")" = 0 ] || fail "an earlier generation must not rewake after a non-retryable StopFailure, got rc $(cat "$dir/state/parked-rc")"
+  [ ! -s "$dir/state/parked.err" ] || fail "the silenced generation must emit no banner: $(cat "$dir/state/parked.err")"
+  pass "auto-arm: a non-retryable StopFailure silences an earlier parked generation's rewake"
+}
+
+# A failed arm leaves no watcher, so the backoff hold starts one itself rather
+# than waiting through the hold uncovered.
+test_stopfailure_failed_arm_hold_starts_a_watcher() {
+  local dir rc
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-failed-arm")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  : > "$dir/state/successor-park"
+  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=4 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >"$FM_HOME/state/hook.out" 2>&1 &
+    hook=$!
+    i=0
+    while [ ! -s "$FM_HOME/state/successor-ran" ]; do
+      [ "$i" -lt 100 ] || exit 90
+      sleep 0.05
+      i=$((i + 1))
+    done
+    kill -0 "$hook" 2>/dev/null && : > "$FM_HOME/state/hook-held"
+    wait "$hook"
+    echo "$?" > "$FM_HOME/state/hook-rc"
+  '; rc=$?
+  rm -f "$dir/state/successor-park"
+  expect_code 0 "$rc" "failed-arm hold scenario did not complete"
+  assert_present "$dir/state/hook-held" "no watcher cycle started before the failure notice's hold ended"
+  [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the failure notice must still rewake after the hold, got rc $(cat "$dir/state/hook-rc")"
+  assert_contains "$(cat "$dir/state/hook.out")" "watcher auto-arm FAILED" "the held failure must still carry its notice"
+  pass "auto-arm: a StopFailure hold after a failed arm starts a watcher cycle before the failure notice"
+}
+
+# An undelivered parent notice is retried inside the firing and, when it still
+# cannot be appended, handed back to the episode for the next firing.
+test_stopfailure_notice_is_retried() {
+  local parent dir status channel lines
+  parent="$TMP_ROOT/stopfailure-retry-parent"
+  mkdir -p "$parent/state"
+  channel="$parent/state/sm-autoarm-1.status"
+  dir=$(make_secondmate_dir "$TMP_ROOT/stopfailure-retry-mate")
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$dir/.fm-secondmate-parent"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+
+  mkdir "$channel"
+  ( sleep 0.5; rmdir "$channel" ) &
+  run_autoarm "$dir" "$AUTH_FAILURE_PAYLOAD" >/dev/null 2>&1; status=$?
+  wait
+  expect_code 0 "$status" "a retried notice must not rewake"
+  lines=$(grep -c 'authentication_failed' "$channel" 2>/dev/null || true)
+  [ "$lines" = 1 ] || fail "a transiently failing append must be retried within the firing, saw ${lines:-0} notices"
+  [ "$(stopfailure_field "$dir" notified)" = 1 ] || fail "a delivered notice must stay claimed"
+
+  rm -rf "$dir/state/.claude-stopfailure" "$channel"
+  mkdir "$channel"
+  run_autoarm "$dir" "$AUTH_FAILURE_PAYLOAD" >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "an undeliverable notice must not rewake"
+  [ "$(stopfailure_field "$dir" notified)" = 0 ] || fail "an undelivered notice must be handed back to the episode"
+  rmdir "$channel"
+  run_autoarm "$dir" "$AUTH_FAILURE_PAYLOAD" >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "the later firing must not rewake"
+  lines=$(grep -c 'authentication_failed' "$channel" 2>/dev/null || true)
+  [ "$lines" = 1 ] || fail "the next firing must deliver the handed-back notice once, saw ${lines:-0}"
+  [ "$(stopfailure_field "$dir" notified)" = 1 ] || fail "the delivered notice must be claimed again"
+  pass "auto-arm: a failed parent-channel notice is retried in the firing and handed back to the episode"
+}
+
+# Zero-padded knob values are decimal: 08 and 09 must not break the arithmetic
+# and 00 must not disable the backoff.
+test_stopfailure_backoff_knobs_are_decimal() {
+  local dir out status last_at retry_at
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-knobs")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=08 FM_CLAUDE_STOPFAILURE_BACKOFF_CAP=09 \
+    run_autoarm "$dir" "$AUTH_FAILURE_PAYLOAD" 2>&1); status=$?
+  expect_code 0 "$status" "zero-padded knobs must not break the hook: $out"
+  [ "$(stopfailure_field "$dir" delay)" = 9 ] || fail "a cap of 09 must read as 9, got $(stopfailure_field "$dir" delay)"
+  last_at=$(stopfailure_field "$dir" last_at)
+  retry_at=$(stopfailure_field "$dir" retry_at)
+  [ "$((retry_at - last_at))" = 9 ] || fail "retry_at must sit 9s after the failure, got $((retry_at - last_at))"
+
+  rm -f "$dir/state/.claude-stopfailure"
+  out=$(FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=00 FM_CLAUDE_STOPFAILURE_BACKOFF_CAP=03 \
+    run_autoarm "$dir" "$AUTH_FAILURE_PAYLOAD" 2>&1); status=$?
+  expect_code 0 "$status" "a zero base must not break the hook: $out"
+  [ "$(stopfailure_field "$dir" delay)" = 60 ] || fail "a base of 00 must fall back to the 60s default, got $(stopfailure_field "$dir" delay)"
+  pass "auto-arm: zero-padded StopFailure backoff knobs are read as decimal"
+}
+
+# Concurrent StopFailure firings serialize on the episode record: every one is
+# counted and the episode's single notice is published once.
+test_stopfailure_concurrent_firings_notify_once() {
+  local parent dir lines
+  parent="$TMP_ROOT/stopfailure-race-parent"
+  mkdir -p "$parent/state"
+  dir=$(make_secondmate_dir "$TMP_ROOT/stopfailure-race-mate")
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$dir/.fm-secondmate-parent"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  FM_HOME="$dir" SF_PAYLOAD="$AUTH_FAILURE_PAYLOAD" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    for n in 1 2 3 4 5 6; do
+      printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>&1 &
+    done
+    wait
+  '
+  lines=$(grep -c 'authentication_failed' "$parent/state/sm-autoarm-1.status" 2>/dev/null || true)
+  [ "$lines" = 1 ] || fail "concurrent non-retryable firings must publish one notice, saw ${lines:-0}"
+  [ "$(stopfailure_field "$dir" count)" = 6 ] || fail "every concurrent firing must be counted, got $(stopfailure_field "$dir" count)"
+  pass "auto-arm: concurrent StopFailure firings count every failure and notify once"
 }
 
 test_stopfailure_keeps_the_stop_gates() {
@@ -1981,6 +2128,11 @@ test_stopfailure_backoff_doubles_to_cap_and_resets_on_stop
 test_stopfailure_backoff_holds_parked_generation_until_normal_stop
 test_stopfailure_host_handback_holds_with_a_live_watcher
 test_stopfailure_non_retryable_notifies_parent_once
+test_stopfailure_non_retryable_silences_a_parked_generation
+test_stopfailure_failed_arm_hold_starts_a_watcher
+test_stopfailure_notice_is_retried
+test_stopfailure_backoff_knobs_are_decimal
+test_stopfailure_concurrent_firings_notify_once
 test_stopfailure_keeps_the_stop_gates
 test_long_poll_grace_reaches_arm_wrapper
 test_host_off_flag_keeps_the_arm
