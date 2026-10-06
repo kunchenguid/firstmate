@@ -2965,22 +2965,25 @@ EOF
 }
 
 # fm_backend_herdr_projection_repo_parent_close_fresh <session> <parent-id>:
-# close the repo parent THIS spawn just created when its first child could not
-# be ordered ahead of it, so no parent without worktree provenance is left
-# standing between the home block and the task row, where it would break this
-# task's restart binding and the ordering of every later spawn
-# (docs/herdr-backend.md "Presentation spaces"). The caller holds the
-# presentation session lock and passes only the id
+# the single grouping exception to "touch nothing": remove the repo parent THIS
+# spawn just created when its first child could not be ordered ahead of it, so
+# no parent without worktree provenance is left standing between the home block
+# and the task row, where it would break this task's restart binding and the
+# ordering of every later spawn (docs/herdr-backend.md "Presentation spaces").
+# The caller holds the presentation session lock and passes only the id
 # fm_backend_herdr_projection_repo_parent_ensure reported in
 # FM_BACKEND_HERDR_REPO_PARENT_CREATED in this same spawn, never an adopted or
-# pre-existing parent. The close is refused with one warning and status 1
-# unless the parent is still childless: Herdr's own `worktree list` for it
-# names no other open workspace in its group, and it still holds only its
-# seeded tab. The close runs under the focus snapshot and restore, is never
-# forced or retried, and counts only once the workspace list no longer shows
-# the parent; status 0 means the exact parent is confirmed gone.
+# pre-existing parent. Nothing happens, with one warning and status 1, unless
+# the parent is still childless: Herdr's own `worktree list` for it names no
+# other open workspace in its group, and it holds exactly one tab with exactly
+# one seeded pane. The removal is never a workspace close: the seeded pane goes
+# through fm_backend_herdr_projection_close_pane_focus_preserving, which
+# snapshots and restores focus, lets Herdr remove the emptied workspace through
+# its pane-death path, and refuses when that tab is the active one with a live
+# client. It is never forced, renamed, or retried, and status 0 means the exact
+# parent is confirmed gone from the workspace list.
 fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
-  local session=$1 parent=$2 group source others tabs focus_before presence
+  local session=$1 parent=$2 group source others tabs panes pane presence
   [ -n "$parent" ] || return 1
   if ! group=$(fm_backend_herdr_cli "$session" worktree list --workspace "$parent" 2>/dev/null) \
     || ! source=$(printf '%s' "$group" | jq -er '.result.source.source_workspace_id | select(type == "string" and length > 0)' 2>/dev/null); then
@@ -3011,19 +3014,21 @@ fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
     echo "warning: herdr repo grouping left the parent $parent it just created in place because it holds more than its seeded tab" >&2
     return 1
   fi
-  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-    echo "warning: herdr repo grouping could not capture exact active workspace and tab before closing the parent $parent it just created; leaving it in place" >&2
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$parent" 2>/dev/null) || panes=
+  pane=$(printf '%s' "$panes" | jq -er '
+    select((.result.panes | type) == "array" and (.result.panes | length) == 1)
+    | .result.panes[0].pane_id | select(type == "string" and length > 0)
+  ' 2>/dev/null) || {
+    echo "warning: herdr repo grouping left the parent $parent it just created in place because it does not hold exactly one seeded pane" >&2
     return 1
   }
-  if ! fm_backend_herdr_cli "$session" workspace close "$parent" >/dev/null 2>&1; then
-    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "repo parent close" || true
-    echo "warning: herdr repo grouping could not close the parent $parent it just created; leaving it in place" >&2
+  if ! fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane"; then
+    echo "warning: herdr repo grouping could not close the parent $parent it just created without risking focus; leaving it in place" >&2
     return 1
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "repo parent close" || true
   presence=$(fm_backend_herdr_workspace_presence_state "$session" "$parent")
   if [ "$presence" != dead ]; then
-    echo "warning: herdr repo grouping closed the parent $parent it just created but the workspace list still lists it; leaving it in place" >&2
+    echo "warning: herdr repo grouping closed the seeded pane of the parent $parent it just created but the workspace list still lists it; leaving it in place" >&2
     return 1
   fi
 }

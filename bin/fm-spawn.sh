@@ -3996,11 +3996,12 @@ else
               # ahead of it. Without the move this parent, still without any
               # provenance, would stand between the home block and this task
               # and break this task's restart binding and every later spawn's
-              # ordering, so the exact parent this spawn created is closed
-              # while it is still childless and the task stays in the flat
-              # row the ordering warning already announced. An adopted or
-              # pre-existing parent is never closed; a refused close leaves
-              # the parent as it was, with its own warning
+              # ordering, so the exact parent this spawn created is removed
+              # while it is still childless, through the focus-preserving
+              # pane close and never a workspace close, and the task stays in
+              # the flat row the ordering warning already announced. An
+              # adopted or pre-existing parent is never touched; a refused
+              # removal leaves the parent as it was, with its own warning
               # (docs/herdr-backend.md "Presentation spaces").
               if fm_backend_herdr_projection_repo_parent_close_fresh "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED"; then
                 echo "warning: herdr repo grouping closed the repo parent $HERDR_REPO_PARENT_CREATED it created for this task because the task could not be placed ahead of it; leaving this task's space flat" >&2

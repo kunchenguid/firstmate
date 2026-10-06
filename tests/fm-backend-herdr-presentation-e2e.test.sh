@@ -1052,8 +1052,9 @@ pass "real Herdr lab: forced workspace.move failure leaves a successful worker i
 
 # The first task on a repository creates that repository's parent, and only
 # the ordering move puts the task ahead of it. When that move fails at runtime
-# the spawn closes exactly the parent it just created while it is still
-# childless, so no parent without provenance is left standing, the task stays
+# the spawn removes exactly the parent it just created while it is still
+# childless, through its seeded pane and never a workspace close, so no parent
+# without provenance is left standing, the task stays
 # in the flat row, and the next task on the repository groups normally.
 if [ "$GROUPING_CAPABLE" = 1 ]; then
   FRESH_PROJECT_DIR="$TMP_ROOT/fresh-project"
@@ -1072,7 +1073,7 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
   grep -F "workspace move failed or had an ambiguous response" "$TMP_ROOT/fresh-fail.err" >/dev/null 2>&1 \
     || fail "fresh-repository move failure did not report the best-effort ordering warning: $(cat "$TMP_ROOT/fresh-fail.err")"
   grep -F "closed the repo parent" "$TMP_ROOT/fresh-fail.err" >/dev/null 2>&1 \
-    || fail "fresh-repository move failure did not report closing the parent it created: $(cat "$TMP_ROOT/fresh-fail.err")"
+    || fail "fresh-repository move failure did not report removing the parent it created: $(cat "$TMP_ROOT/fresh-fail.err")"
   FRESH_FAIL_META="$HOME_DIR/state/fresh-fail.meta"
   remember_meta_worktree "$FRESH_FAIL_META" >/dev/null
   FRESH_FAIL_WSID=$(grep '^herdr_workspace_id=' "$FRESH_FAIL_META" | cut -d= -f2-)
@@ -1085,18 +1086,18 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
   assert_flat_row "$FRESH_FAIL_WSID" "fresh-repository move failure"
   lab pane get "$FRESH_FAIL_PANE" >/dev/null 2>&1 \
     || fail "fresh-repository move failure cleaned up the task pane"
-  FRESH_CLOSES=$(sed -n "$((FRESH_FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "workspace" && $2 == "close" { print $3 }')
-  [ "$(printf '%s\n' "$FRESH_CLOSES" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
-    || fail "fresh-repository move failure ran these workspace close calls instead of exactly one: $FRESH_CLOSES"
-  [ "$FRESH_CLOSES" != "$FRESH_FAIL_WSID" ] \
-    || fail "fresh-repository move failure closed the task's own workspace"
-  if lab workspace get "$FRESH_CLOSES" >/dev/null 2>&1; then
-    fail "fresh-repository move failure reported closing parent $FRESH_CLOSES but Herdr still has it"
+  FRESH_CALLS=$(sed -n "$((FRESH_FAIL_START + 1)),\$p" "$HERDR_CALL_LOG")
+  if printf '%s\n' "$FRESH_CALLS" | awk -F '\t' '$1 == "workspace" && $2 == "close" { found = 1 } END { exit !found }'; then
+    fail "fresh-repository move failure used a workspace close instead of the focus-preserving pane path"
   fi
+  FRESH_PARENT_PANE_CLOSES=$(printf '%s\n' "$FRESH_CALLS" | awk -F '\t' '$1 == "pane" && $2 == "close" && $3 != "'"$FRESH_FAIL_PANE"'" { print $3 }')
+  [ "$(printf '%s\n' "$FRESH_PARENT_PANE_CLOSES" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
+    || fail "fresh-repository move failure closed these panes instead of exactly the parent's seeded pane: $FRESH_PARENT_PANE_CLOSES"
+  assert_cleanup_focus_preserved "$FRESH_FAIL_FOCUS_START" "$FRESH_PARENT_PANE_CLOSES" "$CAPTAIN_FOCUS"
   if sed -n "$((FRESH_FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -E $'^(tab\tclose|workspace\trename|session\t(stop|delete)|server)' >/dev/null 2>&1; then
     fail "fresh-repository move failure performed a tab close, rename, or session lifecycle call"
   fi
-  pass "real Herdr lab: a runtime move failure on a repository's first task closes the fresh childless parent and leaves the task flat"
+  pass "real Herdr lab: a runtime move failure on a repository's first task removes the fresh childless parent through its pane and leaves the task flat"
 
   FRESH_OK_FOCUS_START=$(focus_audit_line_count)
   spawn_task fresh-ok "$HOME_DIR" "$FRESH_PROJECT_DIR" > "$TMP_ROOT/fresh-ok.out" 2> "$TMP_ROOT/fresh-ok.err" \

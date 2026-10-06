@@ -3984,74 +3984,111 @@ SH
     fi
   done
 
-  # The spawn then closes only the exact parent it created, only while that
-  # parent is still childless (its group opens no other workspace and it still
-  # holds only its seeded tab), under the focus snapshot, and counts the close
-  # only once the workspace list no longer shows the parent.
+  # The spawn then removes only the exact parent it created, only while that
+  # parent is still childless (its group opens no other workspace, it holds
+  # one tab with one seeded pane), by closing that pane through the
+  # focus-preserving pane path and never a workspace close, and counts the
+  # removal only once the workspace list no longer shows the parent.
+  local wt_one tabs_one panes_one pane_info pane_gone stub_env
+  wt_one='{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"}]}}'
+  tabs_one='{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false}]}}'
+  panes_one='{"result":{"panes":[{"pane_id":"wF:t1:p1","tab_id":"wF:t1","workspace_id":"wF"}]}}'
+  pane_info='{"result":{"pane":{"pane_id":"wF:t1:p1","tab_id":"wF:t1","workspace_id":"wF"}}}'
+  pane_gone='{"error":{"code":"pane_not_found","message":"pane not found"}}'
+  # The emptying-close plan has its own tests; here it reports the plain path.
+  cat > "$TMP_ROOT/repo-fresh-close-stubs.sh" <<'SH'
+fm_backend_herdr_emptying_close_plan() { printf 'plain\n'; }
+fm_backend_herdr_projection_focus_restore() { return 0; }
+fm_backend_herdr_projection_focus_snapshot() { printf '%s' "${FOCUS_SNAP:-$(printf 'w1\tw1:t1')}"; }
+SH
+  stub_env=". \"\$0/bin/backends/herdr.sh\"; . \"$TMP_ROOT/repo-fresh-close-stubs.sh\""
   dir="$TMP_ROOT/repo-fresh-close"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' '{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"},{"path":"/tmp/pool/1","open_workspace_id":null}]}}' > "$resp/1.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false}]}}' > "$resp/2.out"
-  printf '%s\n' "$later_layout" | jq -c 'del(.result.workspaces[2])' > "$resp/4.out"
+  printf '%s\n' "$tabs_one" > "$resp/2.out"
+  printf '%s\n' "$panes_one" > "$resp/3.out"
+  printf '%s\n' "$pane_info" > "$resp/4.out"
+  printf '%s\n' "$pane_gone" > "$resp/6.out"
+  printf '%s\n' "$later_layout" | jq -c 'del(.result.workspaces[2])' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF' "$ROOT" 2>&1)
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
   status=$?
-  [ "$status" -eq 0 ] || fail "closing the fresh childless repo parent failed: $out"
-  [ -z "$out" ] || fail "closing the fresh childless repo parent warned: $out"
-  [ "$(grep -c $'\x1fworkspace\x1fclose\x1f' "$log")" = 1 ] \
-    || fail "the fresh parent close ran $(grep -c $'\x1fworkspace\x1fclose\x1f' "$log") workspace close calls"
-  assert_contains "$(cat "$log")" $'workspace\x1fclose\x1fwF' "the close did not name the exact fresh parent"
-  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "the fresh parent close closed a pane"
-  assert_not_contains "$(cat "$log")" $'tab\x1fclose' "the fresh parent close closed a tab"
+  [ "$status" -eq 0 ] || fail "removing the fresh childless repo parent failed: $out"
+  [ -z "$out" ] || fail "removing the fresh childless repo parent warned: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fwF:t1:p1' "the removal did not close the parent's seeded pane"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "the fresh parent removal used a workspace close"
+  assert_not_contains "$(cat "$log")" $'tab\x1fclose' "the fresh parent removal closed a tab"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' "the fresh parent removal renamed a workspace"
 
   # A parent whose group already opens another workspace is left alone.
   dir="$TMP_ROOT/repo-fresh-close-has-child"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' '{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"},{"path":"/tmp/pool/2","open_workspace_id":"wX"}]}}' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF' "$ROOT" 2>&1)
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
   status=$?
-  [ "$status" -eq 1 ] || fail "a repo parent whose group opens another workspace was closed (status $status): $out"
+  [ "$status" -eq 1 ] || fail "a repo parent whose group opens another workspace was removed (status $status): $out"
   assert_contains "$out" "already groups" "a parent with a grouped workspace did not explain why it stays"
-  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "a parent with a grouped workspace was closed"
+  assert_not_contains "$(cat "$log")" $'close' "a parent with a grouped workspace was closed"
 
   # A parent holding more than its seeded tab is left alone.
   dir="$TMP_ROOT/repo-fresh-close-extra-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '%s\n' '{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"}]}}' > "$resp/1.out"
+  printf '%s\n' "$wt_one" > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false},{"tab_id":"wF:t2","workspace_id":"wF","label":"2","focused":false}]}}' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF' "$ROOT" 2>&1)
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
   status=$?
-  [ "$status" -eq 1 ] || fail "a repo parent with an extra tab was closed (status $status): $out"
+  [ "$status" -eq 1 ] || fail "a repo parent with an extra tab was removed (status $status): $out"
   assert_contains "$out" "more than its seeded tab" "a parent with an extra tab did not explain why it stays"
-  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "a parent with an extra tab was closed"
+  assert_not_contains "$(cat "$log")" $'close' "a parent with an extra tab was closed"
 
-  # A close Herdr refuses is reported and never forced or retried.
+  # A pane close Herdr refuses is reported and never forced or retried.
   dir="$TMP_ROOT/repo-fresh-close-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '%s\n' '{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"}]}}' > "$resp/1.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false}]}}' > "$resp/2.out"
-  printf '%s\n' '{"error":{"code":"workspace_group_close_required","message":"closing this workspace closes its worktree group"}}' > "$resp/3.err"
-  printf '%s\n' 1 > "$resp/3.exit"
+  printf '%s\n' "$wt_one" > "$resp/1.out"
+  printf '%s\n' "$tabs_one" > "$resp/2.out"
+  printf '%s\n' "$panes_one" > "$resp/3.out"
+  printf '%s\n' "$pane_info" > "$resp/4.out"
+  printf '%s\n' '{"error":{"code":"pane_close_refused","message":"refused"}}' > "$resp/5.err"
+  printf '%s\n' 1 > "$resp/5.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF' "$ROOT" 2>&1)
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
   status=$?
-  [ "$status" -eq 1 ] || fail "a refused repo parent close was reported as done (status $status): $out"
+  [ "$status" -eq 1 ] || fail "a refused repo parent pane close was reported as done (status $status): $out"
   assert_contains "$out" "could not close" "a refused close did not warn"
-  [ "$(grep -c $'\x1fworkspace\x1fclose\x1f' "$log")" = 1 ] || fail "a refused close was retried"
+  [ "$(grep -c $'\x1fpane\x1fclose\x1f' "$log")" = 1 ] || fail "a refused close was retried"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "a refused pane close fell back to a workspace close"
 
-  # A close the workspace list does not confirm is reported, not assumed.
+  # A parent whose seeded tab is the active tab under a live client cannot be
+  # removed without changing what the captain sees, so nothing is mutated.
+  dir="$TMP_ROOT/repo-fresh-close-active"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$wt_one" > "$resp/1.out"
+  printf '%s\n' "$tabs_one" > "$resp/2.out"
+  printf '%s\n' "$panes_one" > "$resp/3.out"
+  printf '%s\n' "$pane_info" > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_FAKE_HERDR_FOREGROUND_REASON=cleared \
+    FOCUS_SNAP=$'wF\twF:t1' bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "an active-tab repo parent was removed under a live client (status $status): $out"
+  assert_not_contains "$(cat "$log")" $'close' "an active-tab repo parent removal mutated Herdr"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' "an active-tab repo parent removal renamed a workspace"
+
+  # A removal the workspace list does not confirm is reported, not assumed.
   dir="$TMP_ROOT/repo-fresh-close-unconfirmed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '%s\n' '{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"}]}}' > "$resp/1.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false}]}}' > "$resp/2.out"
-  printf '%s\n' "$layout" > "$resp/4.out"
+  printf '%s\n' "$wt_one" > "$resp/1.out"
+  printf '%s\n' "$tabs_one" > "$resp/2.out"
+  printf '%s\n' "$panes_one" > "$resp/3.out"
+  printf '%s\n' "$pane_info" > "$resp/4.out"
+  printf '%s\n' "$pane_gone" > "$resp/6.out"
+  printf '%s\n' "$layout" > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF' "$ROOT" 2>&1)
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
   status=$?
-  [ "$status" -eq 1 ] || fail "an unconfirmed repo parent close was reported as done (status $status): $out"
-  assert_contains "$out" "still lists" "an unconfirmed close did not warn"
+  [ "$status" -eq 1 ] || fail "an unconfirmed repo parent removal was reported as done (status $status): $out"
+  assert_contains "$out" "still lists" "an unconfirmed removal did not warn"
 
   # With the fresh parent gone nothing unknown stands between the home and its
   # children, so a later spawn needs no move and publishes its exact binding.
@@ -4072,7 +4109,7 @@ SH
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_live_binding_matches fmtest "$1" w6 w6:t1 w6:t1:p1 w1 firstmate "└ later · p:$1" later' "$ROOT" "$later_token" && status=0 || status=$?
   expect_code 0 "$status" "a later spawn's exact restart binding after the fresh parent close"
-  pass "herdr repo grouping: a fresh parent whose first child did not land ahead of it is closed by exact id while still childless, and later spawns order and bind normally"
+  pass "herdr repo grouping: a fresh parent whose first child did not land ahead of it is removed by exact id through its seeded pane while still childless, and later spawns order and bind normally"
 }
 
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
