@@ -2800,7 +2800,7 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
     FM_FAKE_CREW_STATE='state: paused · source: status-log · parked' \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   if [ "$mode" = exit ]; then
@@ -2913,6 +2913,68 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     [ "$bare" -eq 1 ] || fail "[$name] elapsed re-surface changed the wake identity: $(cat "$state/.wake-queue")"
   done
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
+}
+
+# A parked pane that never settles: its display ticks on every capture (a
+# clock), so no hash is ever seen twice and the stable-hash surface, which owns
+# both the first sight and the cadence, is never reached. The declaration must
+# still get its bounded recheck from the changed-hash path, and only once it has
+# stood a whole cadence.
+test_declared_wait_on_a_never_settling_pane_keeps_the_bounded_recheck() {
+  local spec name status_line wording dir state fakebin out statusf window key sig wakes
+  for spec in \
+    'paused-ticking-pane|paused: waiting on the validation run to finish|awaiting external' \
+    'captain-held-ticking-pane|captain-held [key=route]: awaiting the captain on the routing call|awaiting the captain'
+  do
+    name=${spec%%|*}; status_line=${spec#*|}; wording=${status_line#*|}; status_line=${status_line%%|*}
+    dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; statusf="$state/parked.status"
+    window="test:fm-parked"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+    printf '%s\n' "$status_line" > "$statusf"
+    # Aged before the first observation, as the own-work case above explains.
+    set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+    mv "$fakebin/tmux" "$fakebin/tmux.real"
+    cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = capture-pane ]; then
+  tick_file="$(dirname "$0")/capture-tick"
+  tick=$(( $(cat "$tick_file" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "$tick" > "$tick_file"
+  printf 'parked, clock %s\n' "$tick"
+  exit 0
+fi
+exec "$(dirname "$0")/tmux.real" "$@"
+SH
+    chmod +x "$fakebin/tmux"
+
+    # Inside the cadence the ticking pane stays quiet.
+    FM_TEST_PAUSE_RESURFACE=999 parked_watch_round "$state" "$fakebin" "$out" "$dir/unused-pane.txt" "$window" absorb \
+      || fail "[$name] a ticking pane woke a declared wait inside its recheck cadence: $(cat "$out")"
+    wakes=$(wedge_stale_wakes "$state" "$window")
+    [ "$wakes" -eq 0 ] || fail "[$name] a ticking pane queued $wakes wake(s) inside the recheck cadence"
+    [ ! -e "$state/.stale-$key" ] || fail "[$name] an unsettled hash kept a stale suppressor"
+
+    # The declaration has now stood a whole cadence: exactly one recheck.
+    FM_TEST_PAUSE_RESURFACE=240 parked_watch_round "$state" "$fakebin" "$out" "$dir/unused-pane.txt" "$window" exit \
+      || fail "[$name] a declared wait on a never-settling pane got no bounded recheck"
+    wakes=$(wedge_stale_wakes "$state" "$window")
+    [ "$wakes" -eq 1 ] || fail "[$name] the bounded recheck queued $wakes wakes instead of one"
+    grep -F "$wording" "$state/.wake-queue" >/dev/null \
+      || fail "[$name] the recheck lost its declared-wait wording: $(cat "$state/.wake-queue")"
+    grep -F 'possible wedge' "$state/.wake-queue" >/dev/null && fail "[$name] the recheck became a wedge"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the bounded recheck"
+
+    # The pane keeps ticking: the recheck just fired holds the next cadence.
+    FM_TEST_PAUSE_RESURFACE=240 parked_watch_round "$state" "$fakebin" "$out" "$dir/unused-pane.txt" "$window" absorb \
+      || fail "[$name] a ticking pane rechecked again inside the cadence: $(cat "$out")"
+    wakes=$(wedge_stale_wakes "$state" "$window")
+    [ "$wakes" -eq 0 ] || fail "[$name] a ticking pane rechecked $wakes more time(s) inside the cadence"
+  done
+  pass "a declared wait on a pane whose hash changes every poll is rechecked once per cadence"
 }
 
 test_live_paused_until_controls_recheck_time() {
@@ -6711,6 +6773,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_own_work_wait_keeps_first_alert_then_long_cadence
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
+test_declared_wait_on_a_never_settling_pane_keeps_the_bounded_recheck
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer

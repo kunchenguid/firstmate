@@ -3172,11 +3172,18 @@ EOF
           paused)
             # A secondmate is admitted here only for its declared-wait cadence.
             # An ordinary crew's first stable sight owns the one stale wake, so a
-            # hash that has not settled must not enter that cadence: writing the
-            # stale suppressor now would hide the new hash from the stable-hash surface.
+            # hash that has not settled keeps no stale suppressor: one left here
+            # would hide the new hash from the stable-hash surface. A pane that
+            # never settles (a displayed clock) never reaches that surface, so a
+            # declaration that has stood a whole cadence takes its recheck here.
+            # Inside the cadence the recheck stays out, because a replacement
+            # declaration would otherwise wake here ahead of its plain first sight.
             if [ "$kind" = secondmate ]; then
               handle_paused_stale "$w" "$task" "$h"
             else
+              if [ "$(age_of "$STATE/$task.status")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+                handle_paused_stale "$w" "$task" "$h"
+              fi
               clear_stale_hash_tracking "$key"
             fi
             ;;
