@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Azure DevOps Services PR identity, live verification and completion transport.
 
-Usage: fm-azure-pr.py parse|head|merged|landed|complete <canonical-pr-url>
+Usage: fm-azure-pr.py parse|head|ready-head|merged|landed|complete <canonical-pr-url>
 `parse` prints host, repository path and number; `head` prints the live source
-SHA; `merged` prints only `merged` after proof; `landed` prints the completed
+SHA; `ready-head` first refuses a positively identified draft.
+`merged` prints only `merged` after proof; `landed` prints the completed
 source SHA. `complete` is called only by fm-pr-merge.sh under its authority
 locks and repeats verification immediately before PATCH.
 Requires python3 and az with azure-devops (1.0.5+). REST 7.1 via devops invoke
@@ -158,8 +159,10 @@ class Azure:
         require(iterations and all(type(x.get("id")) is int for x in iterations), "unreadable Azure iterations")
         return max(iterations, key=lambda x: x["id"])
 
-    def source_head(self):
-        self.pr()
+    def source_head(self, *, reject_draft=False):
+        pr = self.pr()
+        require(not reject_draft or pr.get("isDraft") is not True,
+                f"{self.i.url} is a draft pull request; mark it ready for review before registering merge monitoring")
         return sha(self.latest_iteration().get("sourceRefCommit", {}).get("commitId"))
 
     def verify(self):
@@ -305,7 +308,7 @@ class Azure:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("parse", "head", "merged", "landed", "complete"))
+    parser.add_argument("action", choices=("parse", "head", "ready-head", "merged", "landed", "complete"))
     parser.add_argument("url")
     args = parser.parse_args()
     try:
@@ -314,8 +317,8 @@ def main():
             print(identity.host, identity.path, identity.number, sep="\n")
             return
         azure = Azure(identity)
-        if args.action == "head":
-            print(azure.source_head())
+        if args.action in ("head", "ready-head"):
+            print(azure.source_head(reject_draft=args.action == "ready-head"))
         elif args.action == "merged":
             azure.landed()
             print("merged")

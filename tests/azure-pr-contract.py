@@ -72,8 +72,10 @@ class AzureContract(unittest.TestCase):
         (self.dir / "bin/az").chmod(0o700)
         self.env = dict(os.environ, AZ_FIXTURE=str(self.dir), FM_HOME=str(self.dir),
                         FM_STATE_OVERRIDE=str(self.dir / "state"), FM_ROOT_OVERRIDE=str(ROOT),
+                        FM_CONFIG_OVERRIDE=str(self.dir / "config"), FM_DATA_OVERRIDE=str(self.dir / "data"),
                         PATH=str(self.dir / "bin") + os.pathsep + os.environ['PATH'],
                         GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", FM_BACKLOG_AUTOTRANSITION="0")
+        self.env.pop("FM_PR_CHECK_MERGE", None)
         self.pr = dict(pullRequestId=7, status="active", isDraft=False, mergeStatus="succeeded",
                        mergeFailureType="none", repository=dict(id=REPO, name="repo", project=dict(id=PROJECT, name="Project")),
                        sourceRefName="refs/heads/users/example/fix", targetRefName="refs/heads/main",
@@ -163,6 +165,63 @@ class AzureContract(unittest.TestCase):
         p = self.script("fm-pr-check.sh", "task", URL)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("pr_head=" + current, (self.dir / "state/task.meta").read_text())
+
+    def test_registration_refuses_draft_transition_before_publication(self):
+        (self.dir / "config/fleet-ledger").touch()
+        (self.dir / ".fm-secondmate-home").write_text("azure-fixture\n")
+        (self.dir / ".fm-secondmate-parent").write_text("schema=fm-secondmate-parent.v1\nroute=remote\n")
+        p = self.run_helper("head")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, HEAD + "\n")
+        self.save("pullRequests", dict(self.pr, isDraft=True))
+        meta = self.dir / "state/task.meta"
+        before = meta.read_bytes()
+        p = self.script("fm-pr-check.sh", "task", URL)
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertIn("draft", p.stderr)
+        self.assertIn(URL, p.stderr)
+        self.assertEqual(meta.read_bytes(), before)
+        for name in ("task.check.sh", "task.pr-poll", "task.pr-poll-registration",
+                     "fleet-ledger.jsonl", "parent-replies.status"):
+            self.assertFalse((self.dir / "state" / name).exists(), name)
+        self.assertFalse((self.dir / "patch").exists())
+
+        self.save("pullRequests", self.pr)
+        p = self.script("fm-pr-check.sh", "task", URL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("pr=" + URL, meta.read_text().splitlines())
+        self.assertIn("pr_head=" + HEAD, meta.read_text().splitlines())
+        self.assertTrue((self.dir / "state/task.check.sh").is_file())
+        self.assertEqual((self.dir / "state/task.pr-poll").read_text(),
+                         "azuredevops\n" + URL + "\ndev.azure.com\nexample/Project/_git/repo\n7\n")
+        events = [json.loads(line) for line in (self.dir / "state/fleet-ledger.jsonl").read_text().splitlines()]
+        self.assertEqual([(e["event"], e["task"], e["pr"]) for e in events], [("task.pr_ready", "task", URL)])
+        self.assertIn("child task PR ready: " + URL, (self.dir / "state/parent-replies.status").read_text())
+
+    def test_registration_accepts_non_draft_or_unknown_draft_field(self):
+        for label, value in (("ready", False), ("null", None), ("missing", None)):
+            with self.subTest(label=label):
+                pr = dict(self.pr, isDraft=value)
+                if label == "missing":
+                    pr.pop("isDraft")
+                self.save("pullRequests", pr)
+                task = "task-" + label
+                meta = self.dir / "state" / (task + ".meta")
+                meta.write_text("kind=ship\nmode=no-mistakes\nyolo=off\n")
+                p = self.script("fm-pr-check.sh", task, URL)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertIn("pr=" + URL, meta.read_text().splitlines())
+                self.assertIn("pr_head=" + HEAD, meta.read_text().splitlines())
+                self.assertTrue((self.dir / "state" / (task + ".check.sh")).is_file())
+
+    def test_merge_reregistration_keeps_completion_draft_guard(self):
+        self.save("pullRequests", dict(self.pr, isDraft=True))
+        p = self.script("fm-pr-merge.sh", "task", URL)
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertIn("Azure PR is not active, non-draft and immediately mergeable", p.stderr)
+        self.assertIn("pr=" + URL, (self.dir / "state/task.meta").read_text().splitlines())
+        self.assertTrue((self.dir / "state/task.check.sh").is_file())
+        self.assertFalse((self.dir / "patch").exists())
 
     def test_revision_bound_completion(self):
         p = self.run_helper("complete")

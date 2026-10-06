@@ -11,12 +11,12 @@
 # self-hosted instance. Azure Services URLs use bin/fm-azure-pr.py and require
 # python3 and az/azure-devops; a failed live identity/head read refuses
 # registration rather than arming an unusable Azure poll.
-# A GitHub pull request the forge reports as a draft is refused, naming the draft
-# state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
+# A GitHub or Azure pull request the forge reports as a draft is refused, naming
+# the draft state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
 # Mark the pull request ready for review, then arm again; a lane that keeps a
 # draft on purpose declares a wait instead of reporting done. An unreadable
-# draft state does not refuse, matching how the head read below is optional.
+# draft field does not refuse; Azure still requires a live identity/head read.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -136,7 +136,11 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
 fi
 
 if [ "$PROVIDER" = azuredevops ]; then
-  PR_HEAD=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" head "$URL") || {
+  AZURE_HEAD_ACTION=ready-head
+  if [ "${FM_PR_CHECK_MERGE:-}" = 1 ]; then
+    AZURE_HEAD_ACTION=head
+  fi
+  PR_HEAD=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" "$AZURE_HEAD_ACTION" "$URL") || {
     echo "error: Azure PR identity/head unavailable; registration refused" >&2
     exit 1
   }
