@@ -434,8 +434,9 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
 
 # The durable deliberate-stop marker: state/<id>.deliberate-stop. Written by
 # bin/fm-control.sh's exit verb (the stop path itself, never inferred later
-# from status prose), cleared by a relaunch (bin/fm-spawn.sh --relaunch) and by
-# teardown, and read by bin/fm-watch.sh. Presence means the task's worker was
+# from status prose), cleared by any spawn that republishes the task's record
+# (a relaunch, or a fresh spawn reviving an existing record) and by teardown,
+# and read by bin/fm-watch.sh. Presence means the task's worker was
 # deliberately stopped, so its idle endpoint is a parked task: the watcher gives
 # it the declared-pause treatment - a long bounded recheck cadence, never a
 # stale or wedge escalation - instead of treating it as a worker that stopped

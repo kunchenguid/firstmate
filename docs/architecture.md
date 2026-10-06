@@ -207,7 +207,7 @@ A keyed `needs-decision` or `blocked` transition accepted by the whole-file deci
 The fold remains the sole owner of open/closed semantics, including same-key reopening and reserved-key handling, shared with the durable OPEN DECISIONS surface.
 The always-on watcher also uses that library's absorb classification on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon maintains distinct wedge and declared-wait recheck cadences.
 The daemon's stale-routing precedence, declared-wait aging, and steering-inbox exception are owned by [Classification policy](../.agents/skills/afk/SKILL.md#classification-policy).
-A deliberately stopped parked task uses the same bounded recheck cadence until relaunch or teardown clears its durable stop marker.
+A deliberately stopped parked task uses the same bounded recheck cadence until a spawn that republishes its record or teardown clears its durable stop marker.
 In away mode, seen-status dedupe does not clear possible-wedge aging for nonterminal progress, so housekeeping still re-escalates an unchanged idle pane at the configured bound.
 Away-mode housekeeping has no worktree-write deferral of its own, so while `state/.afk` exists a quiet crew that is writing its own worktree still escalates as a possible wedge at that bound.
 The daemon batches the escalations selected by that policy into a single-line digest using the canonical `away-supervisor` kind from `bin/fm-operational-input.sh`; a Claude Code primary receives that owner's record-backed doorbell instead of the stripped invisible marker, so firstmate can distinguish the escalation from ordinary captain messages.
