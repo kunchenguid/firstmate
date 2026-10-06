@@ -162,12 +162,14 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
-# That refusal is why a Herdr task's endpoint is closed BEFORE its processes
-# are reaped and its worktree returned: its pane root shell sits inside the
-# leased slot (docs/herdr-backend.md "Watching and task containers"), so
-# either step would end that shell and let Herdr remove the pane through its
-# pane-death path with no close to refuse. A close that cannot be confirmed
-# stops the teardown there, leaving the pane, the isolated copy, its pool
+# That refusal is why a Herdr task stops every process except its pane root
+# shell BEFORE the endpoint close, and reaps that shell and returns its
+# worktree only after it: the root shell sits inside the leased slot
+# (docs/herdr-backend.md "Watching and task containers"), so either step would
+# end that shell and let Herdr remove the pane through its pane-death path with
+# no close to refuse, while the stopped worker leaves the shell idle for the
+# focus-safe removal. A close that cannot be confirmed stops the teardown
+# there, leaving the pane with its root shell, the isolated copy, its pool
 # slot, and every record untouched for a rerun. A secondmate's own pane runs
 # that same close in its original later position, because task-worktree
 # cleanup never touches a secondmate's copy or pane.

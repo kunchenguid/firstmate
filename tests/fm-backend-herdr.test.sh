@@ -3791,7 +3791,7 @@ test_attach_worktree_requires_exact_open_workspace_and_already_open() {
 }
 
 test_projection_order_repo_parent_counts_as_home_block_member() {
-  local dir log resp fb mover mover_log out status layout
+  local dir log resp fb mover mover_log out status layout fresh_case
   layout='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"wR","label":"project","focused":false,"worktree":{"is_linked_worktree":false,"repo_name":"project","checkout_path":"/repo"}},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":true},{"workspace_id":"wS","label":"2ndmate-alpha · project","focused":false,"worktree":{"is_linked_worktree":false,"repo_name":"project","checkout_path":"/repo"}},{"workspace_id":"w4","label":"└ a1 · p:QwErTyUiOpAsDfGhJkLzXc","focused":false},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
   cat > "$TMP_ROOT/repo-order-mover" <<'SH'
 #!/usr/bin/env bash
@@ -3820,26 +3820,43 @@ SH
   [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w5"$'\t'"3" ] \
     || fail "the new child did not land after the primary block including its repo parent (mover log: $(cat "$mover_log"))"
 
-  # The exact repo parent id passed by the spawn counts even when the row
-  # carries no provenance the layout read can see.
-  dir="$TMP_ROOT/repo-order-by-id"; mkdir -p "$dir/responses"
-  log="$dir/log"; resp="$dir/responses"; mover_log="$dir/mover.log"; : > "$log"; : > "$mover_log"
-  printf '%s\n' "$layout" | jq -c 'del(.result.workspaces[1].worktree)' > "$resp/1.out"
-  printf '%s\n' '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}' > "$resp/2.out"
-  printf '%s\n' "$REPO_TREE_SCHEMA" > "$resp/3.out"
-  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
-    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w3\tw3:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate w1 wR' "$ROOT" 2>&1)
-  status=$?
-  [ "$status" -eq 0 ] || fail "id-anchored repo-parent ordering must not fail the spawn"
-  [ -z "$out" ] || fail "id-anchored repo-parent ordering emitted a warning: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w5"$'\t'"3" ] \
-    || fail "the exact repo parent id was not counted as a block member (mover log: $(cat "$mover_log"))"
+  # A fresh repo parent carries no provenance yet, so it is never a block
+  # member: its first child lands in the home block ahead of it, and a parent
+  # whose attach never happened leaves every later spawn a valid layout.
+  cat > "$TMP_ROOT/repo-order-fresh-mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+cat "$FM_FAKE_MOVER_RESPONSE"
+SH
+  chmod +x "$TMP_ROOT/repo-order-fresh-mover"
+  for fresh_case in first-child:1 later-spawn:2; do
+    dir="$TMP_ROOT/repo-order-fresh-${fresh_case%%:*}"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; mover_log="$dir/mover.log"; : > "$log"; : > "$mover_log"
+    if [ "${fresh_case%%:*}" = first-child ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"wF","label":"foo","focused":false},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+      printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false},{"workspace_id":"wF","label":"foo","focused":false}]}}' > "$dir/mover.out"
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"└ t1 · p:QwErTyUiOpAsDfGhJkLzXc","focused":false},{"workspace_id":"wF","label":"foo","focused":false},{"workspace_id":"wB","label":"bar","focused":false},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+      printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"└ t1 · p:QwErTyUiOpAsDfGhJkLzXc","focused":false},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false},{"workspace_id":"wF","label":"foo","focused":false},{"workspace_id":"wB","label":"bar","focused":false}]}}' > "$dir/mover.out"
+    fi
+    printf '%s\n' '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}' > "$resp/2.out"
+    printf '%s\n' "$REPO_TREE_SCHEMA" > "$resp/3.out"
+    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+      FM_BACKEND_HERDR_WORKSPACE_MOVER="$TMP_ROOT/repo-order-fresh-mover" FM_FAKE_MOVER_LOG="$mover_log" \
+      FM_FAKE_MOVER_RESPONSE="$dir/mover.out" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate w1' "$ROOT" 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] || fail "fresh repo-parent ordering (${fresh_case%%:*}) must not fail the spawn"
+    [ -z "$out" ] || fail "fresh repo-parent ordering (${fresh_case%%:*}) emitted a warning: $out"
+    [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w5"$'\t'"${fresh_case#*:}" ] \
+      || fail "fresh repo-parent ordering (${fresh_case%%:*}) did not land the child in the home block ahead of the fresh parent (mover log: $(cat "$mover_log"))"
+  done
 
-  # A label-only "project" row with neither provenance nor the exact id is an
-  # unknown row, exactly as before: the layout is ambiguous and nothing moves.
+  # A label-only "project" row without provenance between the home and its
+  # children is an unknown row, exactly as before: the layout is ambiguous
+  # and nothing moves.
   dir="$TMP_ROOT/repo-order-label-only"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; mover_log="$dir/mover.log"; : > "$log"; : > "$mover_log"
   printf '%s\n' "$layout" | jq -c 'del(.result.workspaces[1].worktree)' > "$resp/1.out"
@@ -3851,7 +3868,7 @@ SH
   [ "$status" -eq 0 ] || fail "label-only ordering must not fail the spawn"
   assert_contains "$out" "ambiguous workspace layout" "a label-only repo row was treated as a block member"
   [ ! -s "$mover_log" ] || fail "a label-only repo row still moved the new child"
-  pass "herdr presentation ordering: a repo parent of this home is a block member by provenance or exact id, never by label alone"
+  pass "herdr presentation ordering: a repo parent of this home is a block member only by provenance, so a fresh parent never strands later spawns"
 }
 
 test_live_binding_accepts_repo_parent_between_home_and_child() {
@@ -3868,23 +3885,14 @@ test_live_binding_accepts_repo_parent_between_home_and_child() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_live_binding_matches fmtest "$1" w5 w5:t1 w5:t1:p1 w1 firstmate "└ new · p:$1" new' "$ROOT" "$token" && status=0 || status=$?
   expect_code 0 "$status" "binding with a provenance-carrying repo parent between home and child"
 
-  # Without provenance the row is foreign unless the spawn names its exact id.
+  # Without provenance the row is foreign.
   dir="$TMP_ROOT/repo-binding-label-only"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' "$layout" | jq -c 'del(.result.workspaces[1].worktree)' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_live_binding_matches fmtest "$1" w5 w5:t1 w5:t1:p1 w1 firstmate "└ new · p:$1" new' "$ROOT" "$token" && status=0 || status=$?
   expect_code 1 "$status" "binding with a label-only row between home and child"
-
-  dir="$TMP_ROOT/repo-binding-by-id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '%s\n' "$layout" | jq -c 'del(.result.workspaces[1].worktree)' > "$resp/1.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w5:t1","workspace_id":"w5","label":"new","focused":true}]}}' > "$resp/2.out"
-  printf '%s\n' '{"result":{"panes":[{"pane_id":"w5:t1:p1","tab_id":"w5:t1"}]}}' > "$resp/3.out"
-  fb=$(make_herdr_fakebin "$dir")
-  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_live_binding_matches fmtest "$1" w5 w5:t1 w5:t1:p1 w1 firstmate "└ new · p:$1" new wR' "$ROOT" "$token" && status=0 || status=$?
-  expect_code 0 "$status" "binding with the exact repo parent id between home and child"
-  pass "herdr presentation binding: a repo parent of this home may sit between the home workspace and its child by provenance or exact id"
+  pass "herdr presentation binding: a repo parent of this home may sit between the home workspace and its child only by provenance"
 }
 
 test_projection_reclaim_refusal_matrix_is_non_mutating() {

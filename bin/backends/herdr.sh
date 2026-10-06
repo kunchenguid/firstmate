@@ -1529,8 +1529,8 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # current workspace-create response.
 # After a successful move, every pre-existing workspace id sequence excluding
 # the new id must be byte-identical to the pre-move sequence.
-fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>] [<repo-parent-workspace-id>]
-  local session=$1 created=$2 parent=$3 parent_ws=${4:-} repo_parent_ws=${5:-} list analysis current desired socket mover response move_status focus_before move_capable
+fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>]
+  local session=$1 created=$2 parent=$3 parent_ws=${4:-} list analysis current desired socket mover response move_status focus_before move_capable
   local before_existing after_existing
   [ -n "$parent" ] || {
     echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
@@ -1541,7 +1541,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     return 0
   }
   analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" \
-    --arg repo_parent_ws "$repo_parent_ws" "$FM_BACKEND_HERDR_REPO_PARENT_JQ_DEFS"'
+    "$FM_BACKEND_HERDR_REPO_PARENT_JQ_DEFS"'
     def is_parent:
       if ($parent_ws | length) > 0
       then .workspace_id == $parent_ws
@@ -1561,8 +1561,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       is_new_child or is_legacy_child_for($owner);
     def is_block_member_for($owner):
       is_child_for($owner)
-      or is_repo_parent_of($owner)
-      or ((($repo_parent_ws | length) > 0) and .workspace_id == $repo_parent_ws);
+      or is_repo_parent_of($owner);
     (.result.workspaces // null) as $spaces
     | select(($spaces | type) == "array" and ($spaces | length) > 0)
     | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $created)]) as $matches
@@ -2994,9 +2993,9 @@ fm_backend_herdr_projection_attach_worktree() {  # <session> <parent> <task-ws> 
 # position inside the exact parent workspace's contiguous block of children
 # and this home's repo parents.
 # This read-only predicate grants no mutation authority by itself.
-fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label> [<repo-parent-workspace-id>]
+fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
-  local parent_label=$7 workspace_label=$8 task_label=$9 repo_parent_ws=${10:-} list tabs panes
+  local parent_label=$7 workspace_label=$8 task_label=$9 list tabs panes
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e \
     --arg token "$token" \
@@ -3004,7 +3003,6 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
     --arg parent_workspace "$parent_workspace" \
     --arg parent_label "$parent_label" \
     --arg workspace_label "$workspace_label" \
-    --arg repo_parent_ws "$repo_parent_ws" \
     "$FM_BACKEND_HERDR_REPO_PARENT_JQ_DEFS"'
       def is_new_child:
         (.label | type) == "string"
@@ -3031,7 +3029,6 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
             ($spaces[$i] | is_new_child)
             or ($spaces[$i] | is_legacy_child_for($parent_label))
             or ($spaces[$i] | is_repo_parent_of($parent_label))
-            or ((($repo_parent_ws | length) > 0) and $spaces[$i].workspace_id == $repo_parent_ws)
           ))
       | select(. == true)
     ' >/dev/null 2>&1 || return 1
@@ -3278,28 +3275,19 @@ EOF
   return 0
 }
 
-# fm_backend_herdr_projection_journal_workspaces: print the ids of every
-# workspace whose label carries the journal's token, one per line, or fail
-# when the journal or the workspace list cannot be read. Read-only input to
-# the teardown correlation below; no verdict here authorizes a mutation.
-fm_backend_herdr_projection_journal_workspaces() {  # <session> <journal> <task-id>
-  local session=$1 journal=$2 id=$3 token list
-  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
-  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
-  printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
-  printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
-    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null
-}
-
 # fm_backend_herdr_projection_endpoint_matches_journal: read-only correlation
 # for retiring a successful projection journal after normal exact-pane
 # teardown.
 # Exactly one token-bearing workspace must match the endpoint workspace.
 # This verdict never authorizes a Herdr mutation.
 fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace-id> <journal> <task-id>
-  local matches
-  matches=$(fm_backend_herdr_projection_journal_workspaces "$1" "$3" "$4") || return 1
-  [ "$matches" = "$2" ]
+  local session=$1 workspace_id=$2 journal=$3 id=$4 token list matches
+  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
+    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
+  [ "$matches" = "$workspace_id" ]
 }
 
 # fm_backend_herdr_projection_token_workspace_gone: true only when the named
