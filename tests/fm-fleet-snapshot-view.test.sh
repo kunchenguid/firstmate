@@ -9,6 +9,7 @@ set -u
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
+JQ_BIN=$(command -v jq)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
@@ -149,6 +150,36 @@ test_empty_fleet_json() {
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
   pass "empty fleet snapshot and view use explicit absence markers"
+}
+
+test_contribution_input_handles_argument_limit_backlog() {
+  local home fakebin out
+  home=$(make_home contribution-argmax)
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\${#arg}" -gt 65536 ]; then
+    echo "jq: Argument list too long" >&2
+    exit 126
+  fi
+done
+exec "$JQ_BIN" "\$@"
+SH
+  chmod +x "$fakebin/jq"
+  {
+    printf '## In flight\n\n## Queued\n'
+    LC_ALL=C tr '\\0' x < /dev/zero | head -c 100000
+    printf '\n\n## Done\n'
+  } > "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
+    || fail "contribution input must transport a backlog larger than the jq argument budget"
+  printf '%s' "$out" | jq -e '
+    .backlog.records | length == 1
+      and .[0].structured == false
+      and (.[0].raw | length == 100000)
+  ' >/dev/null || fail "large contribution backlog changed while using file transport"
+  pass "contribution input transports a large backlog through files"
 }
 
 test_fixture_snapshot_json() {
@@ -1153,6 +1184,7 @@ EOF
 }
 
 test_empty_fleet_json
+test_contribution_input_handles_argument_limit_backlog
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
