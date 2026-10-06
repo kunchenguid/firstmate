@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Live run</title>
+<style>
+/* ============================================================
+   Live run board - Firstmate design tokens, subset.
+   Tokens are copied from .agents/skills/bearings/assets/board-template.html
+   (itself the compiled adoption of the Firstmate Design System), because the
+   captain reads this page beside the fleet board and the two must not look
+   like different products. Only the tokens this page uses are copied.
+   Portrait first: one column, nothing wider than a fold.
+   ============================================================ */
+@import url("https://fonts.googleapis.com/css2?family=Chango&family=Jost:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap");
+
+:root {
+  --rust-600: #a93a1f; --rust-500: #c0452a; --rust-100: #f4d8c9; --rust-050: #fbece3;
+  --navy-700: #1a2238; --navy-500: #2a3656;
+  --gold-600: #b5791c; --gold-500: #e0a52e; --gold-100: #f8ecc9;
+  --ocean-600: #2f6688; --ocean-500: #3c7ea6; --ocean-050: #e8f1f5;
+  --sea-700: #234e3a; --sea-500: #2f6b4f; --sea-200: #b9d4c5; --sea-050: #e9f2ec;
+  --paper-000: #fbf4e2; --paper-100: #f6ecd3; --paper-300: #e7d6ae;
+  --cream-line: #ddc89c;
+  --ink-900: #241c14; --ink-700: #3f3224; --ink-500: #6f5e46; --ink-300: #9c8a6c;
+  --white: #fffdf7;
+  --font-display: "Chango", "Cooper Black", Rockwell, Georgia, serif;
+  --font-sans: "Jost", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --shadow-sm: 0 1px 2px rgba(36, 28, 20, 0.06), 0 4px 10px rgba(36, 28, 20, 0.06);
+  --radius-sm: 9px; --radius-md: 12px; --radius-lg: 18px; --radius-pill: 999px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  color: var(--ink-700);
+  background: var(--paper-100);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 600px; margin: 0 auto; padding: 16px 14px 48px; }
+.card {
+  background: var(--white);
+  border: 1px solid var(--cream-line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 14px 16px;
+  margin: 0 0 12px;
+  min-width: 0;
+}
+.card > * { min-width: 0; }
+h1 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 2px; color: var(--ink-900); }
+.caption { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-300); font-weight: 600; }
+.mono { font-family: var(--font-mono); }
+.trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 100%; }
+
+/* verdict */
+.verdict { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 2px 0 4px; }
+.pill {
+  font-weight: 700; font-size: .82rem; letter-spacing: .1em; text-transform: uppercase;
+  padding: 5px 12px; border-radius: var(--radius-pill); border: 1px solid transparent; white-space: nowrap;
+}
+.note { font-size: .86rem; color: var(--ink-500); min-width: 0; }
+.v-ok { background: var(--sea-050); color: var(--sea-700); border-color: var(--sea-200); }
+.v-warn { background: var(--gold-100); color: var(--gold-600); border-color: var(--gold-500); }
+.v-bad { background: var(--rust-050); color: var(--rust-600); border-color: var(--rust-500); }
+.v-info { background: var(--ocean-050); color: var(--ocean-600); border-color: var(--ocean-500); }
+
+/* the headline number */
+.headline { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 2px; }
+.headline .big { font-family: var(--font-mono); font-size: 3.1rem; font-weight: 700; line-height: 1; color: var(--ink-900); }
+.headline .unit { font-size: 1rem; color: var(--ink-500); }
+.sub { font-size: .88rem; color: var(--ink-500); }
+
+/* progress bar */
+.bar { height: 14px; background: var(--paper-300); border-radius: var(--radius-pill); overflow: hidden; margin: 10px 0 6px; }
+.bar > i { display: block; height: 100%; background: var(--sea-500); border-radius: var(--radius-pill); transition: width .4s ease; }
+.bar.stalled > i { background: var(--rust-500); }
+.bar.slow > i { background: var(--gold-500); }
+.barrow { display: flex; justify-content: space-between; gap: 10px; font-size: .88rem; color: var(--ink-700); }
+
+/* rows of facts */
+.rows { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; margin: 8px 0 0; font-size: .92rem; }
+.rows .k { color: var(--ink-500); min-width: 0; }
+.rows .v { font-family: var(--font-mono); font-weight: 500; color: var(--ink-900); text-align: right; white-space: nowrap; }
+.rows .v.warn { color: var(--gold-600); }
+.rows .v.bad { color: var(--rust-600); }
+.rows .v.ok { color: var(--sea-700); }
+.hint { font-size: .76rem; color: var(--ink-300); margin-top: 6px; }
+
+/* mini bars for health */
+.mb { height: 7px; background: var(--paper-300); border-radius: var(--radius-pill); overflow: hidden; margin: 4px 0 0; }
+.mb > i { display: block; height: 100%; background: var(--ocean-500); }
+.mb.warn > i { background: var(--gold-500); }
+.mb.bad > i { background: var(--rust-500); }
+
+/* errors + outcome */
+.err { font-family: var(--font-mono); font-size: .76rem; background: var(--rust-050); border: 1px solid var(--rust-100); border-radius: var(--radius-sm); padding: 6px 8px; margin: 6px 0 0; overflow-wrap: anywhere; }
+.outcome { border-width: 2px; }
+.outcome.ok { border-color: var(--sea-500); background: var(--sea-050); }
+.outcome.bad { border-color: var(--rust-500); background: var(--rust-050); }
+.outcome h2 { font-family: var(--font-display); font-size: 1.15rem; margin: 0 0 4px; color: var(--ink-900); }
+.hidden { display: none !important; }
+.stale {
+  background: var(--rust-600); color: var(--white); border-radius: var(--radius-md);
+  padding: 10px 12px; margin: 0 0 12px; font-weight: 600;
+}
+.stale.ended { background: var(--navy-500); }
+.spark { display: block; width: 100%; height: 34px; margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="stale" class="stale hidden"></div>
+
+  <div class="card">
+    <div class="caption" id="label">live run</div>
+    <div class="verdict">
+      <span class="pill v-info" id="verdict">waiting</span>
+      <span class="note" id="verdict-note">reading the run's own output files</span>
+    </div>
+    <div class="sub mono" id="updated">no sample yet</div>
+  </div>
+
+  <div class="card">
+    <div class="caption">Progress</div>
+    <div class="headline">
+      <span class="big" id="gap">-</span><span class="unit">seconds since the last progress line</span>
+    </div>
+    <div class="sub" id="cadence">this run's own cadence is not known yet</div>
+    <div class="bar" id="bar"><i id="barfill" style="width:0%"></i></div>
+    <div class="barrow">
+      <span id="sources">sources: -</span>
+      <span class="mono" id="phase">phase: -</span>
+    </div>
+    <div class="rows">
+      <span class="k">Currently copying</span><span class="v" id="current">-</span>
+      <span class="k">Last line written</span><span class="v trunc" id="lastline" title="">-</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="caption">Is it alive</div>
+    <div class="rows">
+      <span class="k">Watched process</span><span class="v" id="pid">-</span>
+      <span class="k">Running for</span><span class="v" id="elapsed">-</span>
+      <span class="k">CPU time used (all processes of this run)</span><span class="v" id="cpu">-</span>
+      <span class="k">CPU rate</span><span class="v" id="cpurate">-</span>
+      <span class="k">Memory (resident)</span><span class="v" id="rss">-</span>
+      <span class="k">Processes seen</span><span class="v" id="procs">-</span>
+    </div>
+    <svg class="spark" id="cpuspark" viewBox="0 0 300 34" preserveAspectRatio="none" aria-label="CPU time over this page's session"></svg>
+    <div class="hint">CPU advancing between refreshes is the honest liveness signal; elapsed time is not, because a starved process accrues it while doing nothing.</div>
+  </div>
+
+  <div class="card">
+    <div class="caption">Health</div>
+    <div class="rows">
+      <span class="k">Dolt memory, this run only</span><span class="v" id="wdolt">-</span>
+      <span class="k">Host load vs cores</span><span class="v" id="load">-</span>
+    </div>
+    <div class="mb" id="loadbar"><i id="loadfill" style="width:0%"></i></div>
+    <div class="rows">
+      <span class="k">Swap used</span><span class="v" id="swap">-</span>
+    </div>
+    <div class="mb" id="swapbar"><i id="swapfill" style="width:0%"></i></div>
+    <div class="rows">
+      <span class="k">Output directory</span><span class="v" id="scratch">-</span>
+      <span class="k">All Dolt servers (host-wide)</span><span class="v" id="dolt">-</span>
+    </div>
+    <svg class="spark" id="memspark" viewBox="0 0 300 34" preserveAspectRatio="none" aria-label="history of Dolt memory"></svg>
+    <div class="hint" id="memhint">Dolt memory over the run's own trace; a climb toward the earlier 10GB ceiling is the constraint returning.</div>
+  </div>
+
+  <div class="card">
+    <div class="caption">Errors and warnings</div>
+    <div class="rows">
+      <span class="k">Failure-class lines in the current phase log</span><span class="v" id="errcount">-</span>
+      <span class="k">Content-disagreeing ids the build accepted</span><span class="v" id="coll">-</span>
+      <span class="k">Losing rows skipped and preserved</span><span class="v" id="losers">-</span>
+    </div>
+    <div id="errlines"></div>
+  </div>
+
+  <div class="card outcome hidden" id="outcome">
+    <h2 id="outcome-title">-</h2>
+    <div class="sub" id="outcome-detail"></div>
+    <div class="rows" id="outcome-exits"></div>
+    <div id="outcome-defects"></div>
+  </div>
+
+  <div class="card">
+    <div class="caption">Watch</div>
+    <div class="rows">
+      <span class="k">Sample taken</span><span class="v" id="sampled">-</span>
+      <span class="k">Refresh interval</span><span class="v" id="interval">-</span>
+      <span class="k">Last change</span><span class="v" id="lastchange">-</span>
+    </div>
+    <div class="hint" id="watchhint">This page refreshes itself; it does not need reloading.</div>
+  </div>
+</div>
+
+<script>
+// __FM_LIVE_CONFIG__
+(function () {
+  "use strict";
+  var CFG = (window.FM_LIVE || {});
+  var dataUrl = CFG.data || "live.json";
+  var last = null;
+  var lastAt = 0;
+  var cpuHistory = [];
+  var lastChange = "";
+
+  function el(id) { return document.getElementById(id); }
+  function text(id, v) { var e = el(id); if (e) { e.textContent = v; } }
+  function dur(s) {
+    s = Math.max(0, Math.round(s || 0));
+    if (s < 60) { return s + "s"; }
+    if (s < 3600) { return Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s"; }
+    return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+  }
+  function mb(v) { return (v >= 1024 ? (v / 1024).toFixed(2) + " GB" : Math.round(v) + " MB"); }
+  function setBar(id, pct, cls) {
+    var fill = el(id + "fill");
+    var bar = el(id);
+    if (fill) { fill.style.width = Math.max(0, Math.min(100, pct)) + "%"; }
+    if (bar) { bar.className = (id === "bar" ? "bar" : "mb") + (cls ? " " + cls : ""); }
+  }
+  function verdictClass(v) {
+    if (v === "progressing" || v === "finished-ok") { return "v-ok"; }
+    if (v === "slow" || v === "unknown-cadence" || v === "unwatched") { return "v-warn"; }
+    if (v === "finished-failed" || v === "stalled" || v === "errors" || v === "gone") { return "v-bad"; }
+    return "v-info";
+  }
+  function spark(svg, values, color) {
+    if (!svg) { return; }
+    svg.innerHTML = "";
+    if (!values || values.length < 2) { return; }
+    var min = Math.min.apply(null, values);
+    var max = Math.max.apply(null, values);
+    var span = (max - min) || 1;
+    var step = 300 / (values.length - 1);
+    var pts = values.map(function (v, i) {
+      return (i * step).toFixed(1) + "," + (32 - ((v - min) / span) * 30).toFixed(1);
+    }).join(" ");
+    var ns = "http://www.w3.org/2000/svg";
+    var poly = document.createElementNS(ns, "polyline");
+    poly.setAttribute("points", pts);
+    poly.setAttribute("fill", "none");
+    poly.setAttribute("stroke", color);
+    poly.setAttribute("stroke-width", "1.5");
+    svg.appendChild(poly);
+  }
+
+  function render(d) {
+    text("label", d.label || "live run");
+    text("verdict", (d.verdict || "unknown").replace(/-/g, " "));
+    el("verdict").className = "pill " + verdictClass(d.verdict);
+    text("verdict-note", d.verdict_note || "");
+
+    var p = d.progress || {};
+    var pr = d.process || {};
+    var h = d.health || {};
+
+    text("gap", p.gap_s === undefined ? "-" : p.gap_s);
+    text("cadence", p.cadence_known
+      ? "longest gap between progress lines so far: " + dur(p.max_gap_s)
+      : "no second progress timestamp yet, so there is no cadence to compare against");
+
+    var total = p.sources_total || 0;
+    var done = p.sources_done || 0;
+    var pct = total ? (done / total) * 100 : 0;
+    setBar("bar", pct, d.verdict === "stalled" ? "stalled" : (d.verdict === "slow" ? "slow" : ""));
+    text("sources", total ? done + " of " + total + " sources copied" : "source count not in the log yet");
+    text("phase", "phase: " + (p.phase || "-"));
+    text("current", p.current_source
+      ? p.current_source + (p.current_beads ? " (" + p.current_beads + " beads)" : "")
+      : "-");
+    text("lastline", p.last_line || "-");
+    el("lastline").title = p.last_line || "";
+
+    text("pid", pr.alive ? "pid " + pr.pid : "not running");
+    el("pid").className = "v " + (pr.alive ? "ok" : "bad");
+    text("elapsed", pr.etime ? dur(pr.elapsed_s) + "  (" + pr.etime + ")" : "-");
+    text("cpu", (pr.cpu_s || 0) + "s");
+    text("cpurate", pr.cpu_delta_s > 0
+      ? "+" + pr.cpu_delta_s + "s over the last " + dur(pr.window_s)
+      : "no CPU accrued over the last " + dur(pr.window_s));
+    el("cpurate").className = "v " + (pr.cpu_delta_s > 0 ? "ok" : "warn");
+    text("rss", mb(pr.rss_mb || 0));
+    text("procs", pr.count || 0);
+
+    text("wdolt", mb(h.work_dolt_rss_mb || 0));
+    text("load", (h.load_1m || 0) + " on " + (h.cores || 1) + " cores");
+    var lpc = (h.load_1m || 0) / (h.cores || 1);
+    el("load").className = "v " + (lpc > 2 ? "bad" : (lpc > 1 ? "warn" : "ok"));
+    setBar("loadbar", Math.min(100, (lpc / 4) * 100), lpc > 2 ? "bad" : (lpc > 1 ? "warn" : ""));
+    text("swap", Math.round(h.swap_used_mb || 0) + " of " + Math.round(h.swap_total_mb || 0) + " MB");
+    var spct = h.swap_total_mb ? (h.swap_used_mb / h.swap_total_mb) * 100 : 0;
+    setBar("swapbar", spct, spct > 66 ? "bad" : (spct > 33 ? "warn" : ""));
+    text("scratch", (h.scratch_mb || 0) + " MB" + (h.scratch_delta_mb > 0
+      ? " (+" + h.scratch_delta_mb + " MB, measured " + dur(h.scratch_measured_s) + " ago)" : ""));
+    text("dolt", mb(h.dolt_rss_mb || 0));
+
+    var e = d.errors || {};
+    text("errcount", e.count ? e.count + " found" : "none");
+    el("errcount").className = "v " + (e.count ? "bad" : "ok");
+    var box = el("errlines");
+    box.innerHTML = "";
+    (e.lines || []).forEach(function (line) {
+      var div = document.createElement("div");
+      div.className = "err";
+      div.textContent = line;
+      box.appendChild(div);
+    });
+
+    var c = d.collisions || {};
+    text("coll", (c.accepted_content_disagreements || 0) +
+      (c.accepted_content_disagreements ? " (build ran with --allow-collisions)" : ""));
+    text("losers", c.skipped_losing_rows || 0);
+
+    var o = d.outcome;
+    if (o) {
+      el("outcome").className = "card outcome " + (o.ok ? "ok" : "bad");
+      text("outcome-title", o.title || "");
+      text("outcome-detail", o.detail || "");
+      var ex = el("outcome-exits");
+      ex.innerHTML = "";
+      var e2 = d.exit || {};
+      [["build", e2.build, e2.build_note], ["verification", e2.verify, e2.verify_note]].forEach(function (pair) {
+        if (!pair[1]) { return; }
+        var k = document.createElement("span"); k.className = "k"; k.textContent = pair[0] + " exit";
+        var v = document.createElement("span"); v.className = "v";
+        v.textContent = pair[1] + (pair[2] ? " - " + pair[2] : "");
+        ex.appendChild(k); ex.appendChild(v);
+      });
+      var dbox = el("outcome-defects");
+      dbox.innerHTML = "";
+      (o.defects || []).forEach(function (line) {
+        var div = document.createElement("div");
+        div.className = "err";
+        div.textContent = line;
+        dbox.appendChild(div);
+      });
+      // A failed outcome shows where the log left off: the last lines the run
+      // wrote are the most direct answer to "what happened".
+      if (!o.ok) {
+        (d.log_tail || []).slice(-4).forEach(function (line) {
+          var div = document.createElement("div");
+          div.className = "err";
+          div.textContent = line;
+          dbox.appendChild(div);
+        });
+      }
+    } else {
+      el("outcome").className = "card outcome hidden";
+    }
+
+    text("sampled", d.sampled_iso || "-");
+    var mon = d.monitor || {};
+    text("interval", mon.stopped ? "watch ended" : "every " + (mon.interval_s || 3) + "s");
+    text("watchhint", mon.stopped
+      ? "The watch stopped because " + (mon.reason || "the run reached a final state") + ". The numbers above are its last reading."
+      : "This page refreshes itself; it does not need reloading.");
+
+    if (last && p.sources_done !== undefined && p.sources_done !== last.progress.sources_done) {
+      lastChange = "source progress at " + new Date().toLocaleTimeString();
+    } else if (last && pr.cpu_s !== last.process.cpu_s) {
+      lastChange = "CPU moved at " + new Date().toLocaleTimeString();
+    }
+    text("lastchange", lastChange || "no change seen yet");
+
+    cpuHistory.push({ t: d.sampled_at, cpu: pr.cpu_s });
+    if (cpuHistory.length > 40) { cpuHistory.shift(); }
+    spark(el("cpuspark"), cpuHistory.map(function (r) { return r.cpu; }), "#2f6b4f");
+    spark(el("memspark"), (d.history_mem || []).map(function (r) { return r.dolt_rss_mb; }), "#3c7ea6");
+    last = d;
+  }
+
+  function stale(reason, ageS) {
+    var box = el("stale");
+    var stopped = last && last.monitor && last.monitor.stopped;
+    box.classList.remove("hidden");
+    box.className = stopped ? "stale ended" : "stale";
+    box.textContent = stopped
+      ? "The watch ended because " + (last.monitor.reason || "the run reached a final state") +
+        ". Showing the last reading, " + dur(ageS) + " old."
+      : "NO LIVE DATA - no sample for " + dur(ageS) + " (" + reason + "). The page is showing the last reading it has.";
+    if (last) {
+      text("watchhint", stopped
+        ? "The watch has finished; this page will not refresh further unless a watch is started again."
+        : "This page is not receiving fresh samples, so the numbers above are frozen.");
+    } else {
+      text("verdict", "waiting for the first sample");
+    }
+  }
+
+  function tick() {
+    fetch(dataUrl + "?t=" + Date.now(), { cache: "no-store" })
+      .then(function (r) { if (!r.ok) { throw new Error("HTTP " + r.status); } return r.json(); })
+      .then(function (d) {
+        lastAt = Date.now();
+        el("stale").classList.add("hidden");
+        render(d);
+      })
+      .catch(function (err) {
+        var ageS = lastAt ? (Date.now() - lastAt) / 1000 : 0;
+        if (last) {
+          var staleAfter = (last.monitor && last.monitor.stale_after_s) || 12;
+          if (ageS > staleAfter) { stale(String(err.message || err), ageS); }
+        } else {
+          text("verdict", "waiting for the first sample");
+          text("verdict-note", "no sample file readable yet at " + dataUrl);
+        }
+      });
+  }
+
+  function ageTick() {
+    if (!last) { return; }
+    var ageS = (Date.now() - lastAt) / 1000;
+    if (!lastAt) { return; }
+    var staleAfter = (last.monitor && last.monitor.stale_after_s) || 12;
+    var mon = last.monitor || {};
+    text("updated", "sampled " + new Date(lastAt).toLocaleTimeString() +
+      " - updated " + dur(ageS) + " ago" + (mon.stopped ? " - watch ended" : ""));
+    if (mon.stopped) {
+      if (ageS > 2) { stale("watch ended", ageS); }
+    } else if (ageS > staleAfter) {
+      stale("no fresh sample", ageS);
+    }
+    // The headline number ticks between samples so a frozen page is visually
+    // obvious even while nothing else on it changes.
+    if (!mon.stopped && ageS < staleAfter) {
+      var p = last.progress || {};
+      text("gap", p.gap_s === undefined ? "-" : (p.gap_s + Math.round((Date.now() - lastAt) / 1000)));
+    }
+  }
+
+  tick();
+  setInterval(tick, 2000);
+  setInterval(ageTick, 1000);
+})();
+</script>
+<noscript><p style="padding:16px">This page needs JavaScript; it refreshes itself from the run's own progress files.</p></noscript>
+</body>
+</html>
