@@ -119,9 +119,9 @@ fm_mem_alert_state_read() {
 
 fm_mem_alert_state_write() {
   local value=$1 dir
-  dir=${FM_MEM_ALERT_STATE%/*}
-  [ -n "$dir" ] && [ ! -d "$dir" ] && mkdir -p "$dir" 2>/dev/null
-  (umask 077; printf '%s\n' "$value" > "$FM_MEM_ALERT_STATE") 2>/dev/null || true
+  dir=$(dirname "$FM_MEM_ALERT_STATE")
+  mkdir -p "$dir" || return 1
+  (umask 077; printf '%s\n' "$value" > "$FM_MEM_ALERT_STATE") || return 1
 }
 
 cmd_status() {
@@ -176,7 +176,7 @@ cmd_check() {
   if [ "$used" -lt "$threshold" ]; then
     # Below the alert level: re-arm so the next crossing alerts again.
     if [ "$prev" != armed ]; then
-      fm_mem_alert_state_write armed
+      fm_mem_alert_state_write armed || die "could not persist armed state: $FM_MEM_ALERT_STATE"
     fi
     return 0
   fi
@@ -188,7 +188,7 @@ cmd_check() {
   top=$(fm_mem_alert_top_process "$procfs")
   body=$(fm_mem_alert_body "$used" "$threshold" "$top")
   if fm_mem_alert_emit "$body"; then
-    fm_mem_alert_state_write fired
+    fm_mem_alert_state_write fired || die "could not persist fired state: $FM_MEM_ALERT_STATE"
   else
     printf 'fm-mem-alert: alert emission failed\n' >&2
     return 1

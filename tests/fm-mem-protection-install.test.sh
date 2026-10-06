@@ -153,8 +153,83 @@ test_status_runs_on_a_bare_home() {
   pass "status reports every part on a bare home"
 }
 
+test_config_write_failures_stop_installation() {
+  local root home mode rc out
+  root=$(fm_test_tmproot fm-mem-protection-install)
+  for mode in directory heavy-suites campaign-runner; do
+    home="$root/$mode"
+    mkdir -p "$home"
+    if [ "$mode" = directory ]; then
+      printf 'blocked\n' > "$home/config"
+    else
+      mkdir -p "$home/config/$mode"
+    fi
+    rc=0
+    out=$("$INSTALLER" install-config --home "$home" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode write failure returned success"
+    case "$out" in *"could not"*) ;; *) fail "write failure not diagnosed: $out" ;; esac
+    case "$out" in *"install: heavy suites refused"*) fail "failed install reported success" ;; esac
+    if [ "$mode" != campaign-runner ]; then
+      [ ! -e "$home/config/campaign-runner" ] || fail "continued after posture write failure"
+    fi
+  done
+  pass "configuration directory and both policy writes fail closed"
+}
+
+test_generated_file_failures_prevent_activation() {
+  local root home fakebin mode rc out units
+  root=$(fm_test_tmproot fm-mem-protection-install)
+  home="$root/home"
+  mkdir -p "$home/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$home/bin/fm-mem-alert.sh"
+  chmod +x "$home/bin/fm-mem-alert.sh"
+  fakebin=$(fm_fakebin "$root")
+  fm_fake_exit0 "$fakebin" earlyoom
+  cat > "$fakebin/sudo" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$INSTALL_LOG"
+SH
+  cat > "$fakebin/systemctl" <<'SH'
+#!/bin/sh
+case "$*" in is-enabled*|is-active*) exit 1 ;; esac
+printf '%s\n' "$*" >> "$INSTALL_LOG"
+SH
+  chmod +x "$fakebin/sudo" "$fakebin/systemctl"
+  for mode in defaults service timer; do
+    units="$root/$mode/systemd/user"
+    mkdir -p "$units"
+    if [ "$mode" = defaults ]; then
+      printf 'blocked\n' > "$root/blocked"
+      cat > "$fakebin/mktemp" <<'SH'
+#!/bin/sh
+printf '%s\n' "$BLOCKED_DEFAULTS"
+SH
+      chmod +x "$fakebin/mktemp"
+    else
+      rm -f "$fakebin/mktemp"
+      mkdir "$units/fm-mem-alert.$mode"
+    fi
+    : > "$root/install.log"
+    rc=0
+    out=$(PATH="$fakebin:$PATH" INSTALL_LOG="$root/install.log" \
+      BLOCKED_DEFAULTS="$root/blocked/defaults" XDG_CONFIG_HOME="$root/$mode" \
+      "$INSTALLER" install --home "$home" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode generation failure returned success"
+    case "$out" in *"could not write"*) ;; *) fail "generation failure not diagnosed: $out" ;; esac
+    case "$(cat "$root/install.log")" in *"--user daemon-reload"*|*"--user enable"*) fail "activated failed units" ;; esac
+    if [ "$mode" = defaults ]; then
+      case "$(cat "$root/install.log")" in *"install -m"*|*"systemctl enable"*|*"systemctl restart"*) fail "activated failed defaults" ;; esac
+    fi
+    [ ! -e "$home/config/heavy-suites" ] || fail "continued after generated file failure"
+  done
+  pass "failed defaults or either unit cannot reach dependent activation"
+}
+
 test_print_policy_semantics
 test_install_refuses_a_missing_alert_executable
 test_config_install_is_idempotent
 test_config_write_refuses_a_captain_edit
 test_status_runs_on_a_bare_home
+
+test_config_write_failures_stop_installation
+test_generated_file_failures_prevent_activation

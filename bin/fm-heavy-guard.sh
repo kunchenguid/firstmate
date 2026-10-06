@@ -8,11 +8,9 @@
 #
 # Usage:
 #   fm-heavy-guard.sh status
-#   fm-heavy-guard.sh classify <token>...
 #   fm-heavy-guard.sh check [--lane <lane>] [--family <family>] [--selection <mode>] [--token <name>] [--path <value>]...
 #
 # `status`   prints the posture and the rules that classify heavy work.
-# `classify` prints `heavy` or `light` for each token and exits 0.
 # `check`    exits 0 when the described work may run here, 3 when it is heavy and
 #            the posture routes it away, and 2 on a usage error. The refusal
 #            names the configured campaign runner.
@@ -174,18 +172,6 @@ cmd_status() {
   printf 'heavy-selections=all,full,full-ci\n'
 }
 
-cmd_classify() {
-  local token
-  [ "$#" -ge 1 ] || die "classify requires at least one token"
-  for token in "$@"; do
-    if fm_heavy_token_is_heavy "$token"; then
-      printf 'heavy %s\n' "$token"
-    else
-      printf 'light %s\n' "$token"
-    fi
-  done
-}
-
 cmd_check() {
   local posture lane='' family='' selection='' token='' path='' detail='' heavy=0
   posture=$(fm_heavy_posture) || exit $?
@@ -234,7 +220,6 @@ main() {
   shift
   case "$sub" in
     status) cmd_status "$@" ;;
-    classify) cmd_classify "$@" ;;
     check) cmd_check "$@" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;

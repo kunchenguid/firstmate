@@ -256,6 +256,7 @@ cmd_exec() {
     die "memory box unavailable ($(fm_mem_box_unsupported_reason)); refusing to run lane '$lane' unboxed"
   fi
 
+  unset FM_MEM_BOX_CAP
   exec systemd-run --user --scope --quiet --collect \
     -p "MemoryMax=$cap" -p MemorySwapMax=0 -- "$@"
 }

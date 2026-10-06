@@ -22,20 +22,6 @@ test_status_reports_local_by_default() {
   pass "unconfigured posture is local"
 }
 
-test_classify_names_heavy_tokens() {
-  local root cfg out
-  root=$(fm_test_tmproot fm-heavy-guard)
-  cfg="$root/config"
-  mkdir -p "$cfg"
-  out=$(FM_CONFIG_OVERRIDE="$cfg" "$GUARD" classify acceptance e2e unit foo) \
-    || fail "classify exited non-zero"
-  printf '%s\n' "$out" | grep -qx 'heavy acceptance' || fail "acceptance should classify heavy"
-  printf '%s\n' "$out" | grep -qx 'heavy e2e' || fail "e2e should classify heavy"
-  printf '%s\n' "$out" | grep -qx 'light unit' || fail "unit should classify light"
-  printf '%s\n' "$out" | grep -qx 'light foo' || fail "foo should classify light"
-  pass "classify separates heavy from light tokens"
-}
-
 test_local_posture_allows_heavy_work() {
   local root cfg out
   root=$(fm_test_tmproot fm-heavy-guard)
@@ -54,7 +40,7 @@ test_remote_posture_refuses_and_names_the_runner() {
   mkdir -p "$cfg"
   printf 'remote-only\n' > "$cfg/heavy-suites"
   printf '/campaign/runner\n' > "$cfg/campaign-runner"
-  for args in "--selection all" "--lane heavy" "--family real-herdr-gated" "--path acceptance.cjs"; do
+  for args in "--selection all" "--lane heavy" "--family real-herdr-gated" "--path acceptance.cjs" "--token acceptance" "--token e2e"; do
     rc=0
     # shellcheck disable=SC2086 # the argument string is a deliberate, fixed word list.
     out=$(FM_CONFIG_OVERRIDE="$cfg" "$GUARD" check $args 2>&1) || rc=$?
@@ -175,7 +161,6 @@ test_remote_alias_is_rejected() {
 }
 
 test_status_reports_local_by_default
-test_classify_names_heavy_tokens
 test_local_posture_allows_heavy_work
 test_remote_posture_refuses_and_names_the_runner
 test_unknown_posture_is_an_error

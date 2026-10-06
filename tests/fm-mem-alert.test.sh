@@ -111,8 +111,39 @@ test_status_reports_thresholds_and_state() {
   pass "status reports thresholds, sample, and state"
 }
 
+test_state_write_failures_are_reported() {
+  local transition sample rc out
+  for transition in armed fired; do
+    setup
+    mkdir -p "${STATE%/*}"
+    if [ "$transition" = armed ]; then
+      printf 'fired\n' > "$STATE"
+      sample=$LOW
+    else
+      sample=$HIGH
+    fi
+    rc=0
+    out=$( (ulimit -c 0; ulimit -f 0; run_check "$STATE" "$sample" "$PROC" "$OUT" --emit true) 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$transition persistence failure returned success"
+    case "$out" in *"could not persist $transition state"*) ;; *) fail "missing persistence diagnostic: $out" ;; esac
+    if [ "$transition" = armed ]; then
+      printf 'fired\n' > "$STATE"
+    fi
+    run_check "$STATE" "$sample" "$PROC" "$OUT" || fail "$transition transition failed after restoring writes"
+    [ "$(cat "$STATE")" = "$transition" ] || fail "$transition state was not persisted"
+  done
+  setup
+  printf 'blocked\n' > "$ROOT_DIR/blocked"
+  rc=0
+  run_check "$ROOT_DIR/blocked/state" "$HIGH" "$PROC" "$OUT" --emit true >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "state directory creation failure returned success"
+  pass "state directory and both transition write failures return errors"
+}
+
 test_below_threshold_does_not_alert
 test_crossing_alerts_once_and_names_the_top_process
 test_rearms_below_threshold_and_alerts_again
 test_regular_scan_finds_the_largest_process
 test_status_reports_thresholds_and_state
+
+test_state_write_failures_are_reported

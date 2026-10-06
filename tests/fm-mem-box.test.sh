@@ -109,31 +109,27 @@ test_spawn_carries_the_home_and_cap_into_the_pane() {
   proj="$root/project"
   wt="$root/wt"
   fm_test_spawn_home "$home" codex
-  printf 'worker=2G\n' > "$home/config/memory-box"
+  printf 'worker=2G\ntest=1G\n' > "$home/config/memory-box"
   fm_test_spawn_brief "$home" boxed-worker
   fm_git_worktree "$proj" "$wt" boxed-worker
   fakebin=$(fm_test_make_spawn_fakebin "$root/fake" codex)
-  fm_test_fake_systemd_run "$fakebin"
   panelog="$root/pane.log"
   FM_FAKE_PANE_LOG="$panelog" fm_test_run_spawn "$home" "$wt" "$fakebin" boxed-worker "$proj" --mode no-mistakes --yolo off \
     || fail "spawn failed"
   command=$(grep '^exec env .*fm-mem-box.sh' "$panelog")
   [ -n "$command" ] || fail "pane received no box entry"
-  cat > "$fakebin/systemd-run" <<'SH'
-#!/bin/sh
-while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-SH
   cat > "$fakebin/pane-shell" <<'SH'
 #!/bin/sh
-printf '%s\n' "$FM_HOME" "$FM_CONFIG_OVERRIDE" "$FM_MEM_BOX_CAP"
+printf '%s\n' "$FM_HOME" "$FM_CONFIG_OVERRIDE" "${FM_MEM_BOX_CAP-unset}"
+exec "$BOX" exec test -- printf 'nested test ran\n'
 SH
   chmod +x "$fakebin/systemd-run" "$fakebin/pane-shell"
   out=$(FM_HOME="$root/stale" FM_CONFIG_OVERRIDE="$root/stale/config" FM_MEM_BOX_CAP=8G \
+    BOX="$BOX" FM_FAKE_SYSTEMD_LOG="$root/scopes" \
     SHELL="$fakebin/pane-shell" PATH="$fakebin:$PATH" bash -c "$command") || fail "pane entry failed"
-  [ "$out" = "$(printf '%s\n' "$home" "$home/config" 2147483648)" ] || fail "pane used stale policy: $out"
-  pass "spawned pane uses the spawning home's resolved cap and config"
+  [ "$out" = "$(printf '%s\n' "$home" "$home/config" unset 'nested test ran')" ] || fail "pane used stale policy: $out"
+  [ "$(cat "$root/scopes")" = "$(printf '%s\n' '2147483648 0' '1073741824 0')" ] || fail "nested test inherited worker cap"
+  pass "spawned pane consumes worker cap and nested tests use their own lane cap"
 }
 
 test_heavy_lane_consults_the_guard() {
@@ -164,7 +160,6 @@ test_spawn_refuses_box_and_delivery_failures() {
     fm_test_spawn_brief "$home" failed-worker
     fm_git_worktree "$proj" "$wt" failed-worker
     fakebin=$(fm_test_make_spawn_fakebin "$root/$mode/fake" codex)
-    fm_test_fake_systemd_run "$fakebin"
     mv "$fakebin/tmux" "$fakebin/tmux-ok"
     cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash

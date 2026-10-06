@@ -198,8 +198,8 @@ write_config_noclobber() {
   if [ -f "$path" ] && [ "$current" != "$value" ]; then
     die "refusing to replace $path (holds '$current')"
   fi
-  mkdir -p "$(dirname "$path")"
-  (umask 077; printf '%s\n' "$value" > "$path")
+  mkdir -p "$(dirname "$path")" || die "could not create configuration directory for $path"
+  (umask 077; printf '%s\n' "$value" > "$path") || die "could not write $path"
 }
 
 install_earlyoom() {
@@ -232,7 +232,7 @@ install_earlyoom() {
   fi
   local tmp
   tmp=$(mktemp) || die "could not create a temporary file"
-  earlyoom_defaults_content > "$tmp"
+  earlyoom_defaults_content > "$tmp" || { rm -f "$tmp"; die "could not write temporary earlyoom defaults"; }
   sudo install -m 0644 "$tmp" "$FM_MP_EARLYOOM_DEFAULTS" || { rm -f "$tmp"; die "could not write $FM_MP_EARLYOOM_DEFAULTS"; }
   rm -f "$tmp"
   sudo systemctl enable earlyoom >/dev/null || die "could not enable earlyoom"
@@ -245,7 +245,7 @@ install_timer() {
   [ -x "$home/bin/fm-mem-alert.sh" ] || die "alert executable missing: $home/bin/fm-mem-alert.sh"
   mkdir -p "$FM_MP_USER_UNIT_DIR" || die "could not create $FM_MP_USER_UNIT_DIR"
   (umask 022
-    service_content "$home" > "$FM_MP_USER_UNIT_DIR/$FM_MP_SERVICE"
+    service_content "$home" > "$FM_MP_USER_UNIT_DIR/$FM_MP_SERVICE" &&
     timer_content > "$FM_MP_USER_UNIT_DIR/$FM_MP_TIMER") \
     || die "could not write user units"
   XDG_RUNTIME_DIR=$runtime systemctl --user daemon-reload || die "could not reload user units"

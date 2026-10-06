@@ -333,6 +333,7 @@ fm_test_make_spawn_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse "$@"
+  fm_test_fake_systemd_run "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
