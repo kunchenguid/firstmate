@@ -1026,8 +1026,13 @@ remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
   || fail "continuity replay duplicated the escalation"
 first_offset=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
 first_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
-assert_grep "at offset ${first_offset} prefix ${first_hash}" "$PARENT/state/ios.status" \
+first_prefix=$(printf '%.12s' "$first_hash")
+assert_grep "at offset ${first_offset} prefix ${first_prefix} retirements 0" "$PARENT/state/ios.status" \
   "continuity break did not record the reader position"
+assert_no_grep "prefix ${first_hash}" "$PARENT/state/ios.status" \
+  "continuity break recorded the full prefix hash"
+assert_absent "$PARENT/state/remote-replies/ios.retirements" \
+  "a route that has never been retired gained a retirement count"
 status_line_at_epoch "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" >/dev/null \
   || fail "new continuity escalation has unknown emission time"
 if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -1056,6 +1061,29 @@ remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
   || fail "a repeated continuity break reopened the decision the operator resolved"
 pass "a repeated continuity break after an operator resolve appends nothing"
 
+# The published line recorded the full prefix and no retirement count. The
+# same unchanged break, on a route that has never been retired, must stay closed.
+cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-canonical-break"
+awk -v full="$first_hash" '
+  /blocked \[key=remote-reply-continuity-ios\]/ {
+    sub(/ prefix [0-9a-f]{12} retirements 0$/, " prefix " full)
+  }
+  { print }
+' "$PARENT/state/ios.status" > "$TMP_ROOT/ios-status-no-count"
+mv "$TMP_ROOT/ios-status-no-count" "$PARENT/state/ios.status"
+rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
+set +e
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" > "$TMP_ROOT/handle-no-count.out" 2>&1
+handle_rc=$?
+set -e
+[ "$handle_rc" -eq 3 ] || fail "a continuity break after a line with no retirement count returned an unexpected status: $handle_rc"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "a line with no retirement count reopened an unchanged break"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "a line with no retirement count reopened the decision the operator resolved"
+mv "$TMP_ROOT/ios-status-canonical-break" "$PARENT/state/ios.status"
+pass "an unchanged break recorded without a retirement count stays closed"
+
 rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
@@ -1068,6 +1096,9 @@ remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" >/dev/null 2>&1 || [ "$
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
+recorded_retirements=$(cat "$PARENT/state/remote-replies/ios.retirements" 2>/dev/null || true)
+[ "$recorded_retirements" = count=1 ] \
+  || fail "adapter retirement did not record its count (got: ${recorded_retirements:-absent})"
 assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "adapter retirement left a caught-up watermark a later route could inherit"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
@@ -1130,13 +1161,14 @@ assert_grep "offset=$restored_bytes" "$PARENT/state/remote-replies/ios.cursor" \
   || fail "repairing the route appended a continuity break"
 [ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
   || fail "repairing the route reopened the continuity decision"
-break_repaired_route "second"
+break_repaired_route "second" 3
 RESULT_SECOND=$RESULT_BREAK
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
   || fail "a later continuity break after repair appended nothing"
 second_offset=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
 second_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
-assert_grep "at offset ${second_offset} prefix ${second_hash}" "$PARENT/state/ios.status" \
+second_prefix=$(printf '%.12s' "$second_hash")
+assert_grep "at offset ${second_offset} prefix ${second_prefix} retirements 1" "$PARENT/state/ios.status" \
   "a later continuity break after repair did not record its reader position"
 assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
   $'remote-reply-continuity-ios\t' \
@@ -1153,7 +1185,7 @@ pass "a later continuity break after repair and re-advance opens the decision ag
 # reason only. It does not match the new line, so this same break appends once.
 awk '
   /blocked \[key=remote-reply-continuity-ios\]/ {
-    sub(/ at offset [0-9]+ prefix [0-9a-f]+$/, "")
+    sub(/ at offset [0-9]+ prefix [0-9a-f]+( retirements [0-9]+)?$/, "")
   }
   { print }
 ' "$PARENT/state/ios.status" > "$TMP_ROOT/ios-status-old-format"
@@ -1169,7 +1201,7 @@ set -e
 [ "$handle_rc" -eq 3 ] || fail "a continuity break after an old-format line returned an unexpected status: $handle_rc"
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 3 ] \
   || fail "a continuity break after an old-format line appended nothing"
-assert_grep "at offset ${second_offset} prefix ${second_hash}" "$PARENT/state/ios.status" \
+assert_grep "at offset ${second_offset} prefix ${second_prefix} retirements 1" "$PARENT/state/ios.status" \
   "a continuity break after an old-format line did not record the reader position"
 assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
   $'remote-reply-continuity-ios\t' \
@@ -1181,5 +1213,63 @@ assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
   $'remote-reply-continuity-ios\t' \
   "a repeated read after the old-format upgrade closed the decision"
 pass "an old-format continuity line does not swallow the next break"
+
+# No retirement this time. The cursor leaves the escalated offset only because
+# the reader consumed new bytes, and that alone makes the next break new.
+LOG_RESTORED=$'working: route restored and readable again\n'
+LOG_EXTENDED=$LOG_RESTORED$'working: route extended without retirement\n'
+resolve_and_extend_route "second" "$LOG_EXTENDED"
+break_repaired_route "third" 3
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 4 ] \
+  || fail "a later continuity break after the cursor moved without retirement appended nothing"
+moved_offset=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
+moved_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
+moved_prefix=$(printf '%.12s' "$moved_hash")
+assert_grep "at offset ${moved_offset} prefix ${moved_prefix} retirements 1" "$PARENT/state/ios.status" \
+  "a later continuity break after the cursor moved did not record its reader position"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a later continuity break after the cursor moved without retirement did not reopen the decision"
+pass "a later continuity break after the cursor moves without retirement opens the decision again"
+
+# Retire, put the same bytes back, and break at the same offset. The retirement
+# count makes that line new, so the decision opens once. The repeat stays silent.
+printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator accepted the break' \
+  >> "$PARENT/state/ios.status"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "operator resolve left the extended continuity decision open"
+remote_env "$ADAPTER" retire ios >/dev/null
+recorded_retirements=$(cat "$PARENT/state/remote-replies/ios.retirements" 2>/dev/null || true)
+[ "$recorded_retirements" = count=2 ] \
+  || fail "the second retirement did not advance the count (got: ${recorded_retirements:-absent})"
+printf '%s' "$LOG_EXTENDED" > "$REMOTE/state/parent-replies.status"
+remote_env "$ADAPTER" arm ios >/dev/null
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the restored route was not read"
+assert_grep "offset=${moved_offset}" "$PARENT/state/remote-replies/ios.cursor" \
+  "restoring the same bytes did not reach the same offset"
+restored_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
+[ "$restored_hash" = "$moved_hash" ] || fail "restoring the same bytes changed the prefix hash"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 4 ] \
+  || fail "restoring the same bytes appended a continuity break"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "restoring the same bytes reopened the continuity decision"
+break_repaired_route "retired-same" 3
+RESULT_RETIRED=$RESULT_BREAK
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 5 ] \
+  || fail "a continuity break after an identical restore appended nothing"
+assert_grep "at offset ${moved_offset} prefix ${moved_prefix} retirements 2" "$PARENT/state/ios.status" \
+  "a continuity break after an identical restore did not record the new retirement count"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a continuity break after an identical restore did not reopen the decision"
+remote_env "$ADAPTER" ingest ios "$RESULT_RETIRED" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 5 ] \
+  || fail "a repeated read of the break after an identical restore appended again"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a repeated read of the break after an identical restore closed the decision"
+pass "a continuity break after retirement and an identical restore opens the decision once"
 
 echo "ALL TESTS PASSED"
