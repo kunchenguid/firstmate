@@ -909,7 +909,7 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
   steer=$(printf '%s' "$inbox_body" | "$ROOT/bin/fm-operational-input.sh" body)
   [[ $steer =~ ^delivery=[0-9a-f]{16}\ (.*)$ ]] \
     || fail "the child-first drain steer does not carry a fire-and-forget delivery id: $steer"
-  [ "${BASH_REMATCH[1]}" = "Drain pending rows in this home's wake queue, then resume idle supervision." ] \
+  [ "${BASH_REMATCH[1]}" = "Wake row 7 is still queued in this home. Run bin/fm-wake-drain.sh and read its whole output, handle what it presents, then run the exact WAKE_ACK_REQUIRED command it prints, which is what removes the row. Then resume idle supervision." ] \
     || fail "the child-first ring wrote the wrong drain instruction: $steer"
   grep -F '[ENTER]' "$dir/sent" >/dev/null \
     || fail "the child-first ring did not submit the doorbell: $(cat "$dir/sent" 2>/dev/null)"
@@ -1042,7 +1042,7 @@ test_secondmate_genuine_stall_after_idle_ring_still_alarms() {
 # than escalated to the parent on the first interval. Its turn ends stay in its
 # own home: the extension never touches this home's turn-ended marker.
 test_spawned_idle_pi_secondmate_is_rung_once() {
-  local dir state sub fakebin spawnbin out ext inbox_count
+  local dir state sub fakebin spawnbin out ext inbox_count steer
   dir=$(make_case secondmate-pi-idle-ring)
   state="$dir/state"
   # The spawn refuses a secondmate home inside the launching home.
@@ -1099,7 +1099,61 @@ EOF
     || fail "an idle pi secondmate was not rung exactly once: $(cat "$dir/sent" 2>/dev/null)"
   inbox_count=$(find "$state/mate.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
   [ "$inbox_count" = 1 ] || fail "an idle pi secondmate ring wrote $inbox_count drain steers, want 1"
-  pass "an idle pi secondmate with a stalled queue is rung once and raises no parent wake on the first interval"
+  # A lead told only to drain presented the row, cut WAKE_ACK_REQUIRED off its
+  # output, and left the row queued, so the ring names the row and the ack.
+  steer=$(sed '1,/^--$/d' "$state/mate.inbox/"*.msg)
+  case "$steer" in
+    *"Wake row 7 is still queued"*WAKE_ACK_REQUIRED*) : ;;
+    *) fail "the pi lead ring does not name the frozen row and its acknowledgement: $steer" ;;
+  esac
+
+  # The lead's supervision branch holds the next frozen row under a live
+  # grant: that is a turn in progress the busy record never sees, and the
+  # lead's main conversation cannot drain it, so neither ring nor alarm.
+  printf '100\t8\tcheck\trouted\tcheck: branch row\n' > "$sub/state/.wake-queue"
+  FM_STATE_OVERRIDE="$sub/state" "$GRANT" activate "$$" lead-branch \
+    || fail "could not activate the lead's branch grant owner"
+  FM_STATE_OVERRIDE="$sub/state" "$GRANT" publish lead-branch 8 \
+    || fail "could not grant the frozen row to the lead's branch"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "branch-first" progress mate "$(printf '1002\t100-8')"
+  printf '1004\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "branch" tick
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-branch.out" >/dev/null \
+    || fail "a row held by the lead's live branch grant was escalated: $(cat "$dir/watch-branch.out")"
+  [ "$(grep -c -F '[ENTER]' "$dir/sent" 2>/dev/null || true)" = 1 ] \
+    || fail "a row held by the lead's live branch grant rang the lead's main conversation: $(cat "$dir/sent")"
+  FM_STATE_OVERRIDE="$sub/state" "$GRANT" deactivate "$$" lead-branch \
+    || fail "could not retire the lead's branch grant"
+
+  # A lead launched before its busy record existed has no trusted idle
+  # verdict, so it is not typed into and the parent alarm stays.
+  "$ROOT/bin/fm-busy-event.sh" retire "$state" mate --current-gen \
+    || fail "could not remove the pi lead's busy record"
+  printf '100\t9\tcheck\trouted\tcheck: unrecorded row\n' > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "unrecorded-first" progress mate "$(printf '1004\t100-9')"
+  printf '1006\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "unrecorded" alert
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=9 idle=2s' "$dir/watch-unrecorded.out" >/dev/null \
+    || fail "a pi lead with no busy record did not keep the parent alarm: $(cat "$dir/watch-unrecorded.out")"
+  [ "$(grep -c -F '[ENTER]' "$dir/sent" 2>/dev/null || true)" = 1 ] \
+    || fail "a pi lead with no busy record was rung: $(cat "$dir/sent")"
+  pass "an idle pi lead is rung once to drain and acknowledge its row; a branch-held row and a lead with no busy record are not rung"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {
