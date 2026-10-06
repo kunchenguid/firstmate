@@ -3850,6 +3850,7 @@ else
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     HERDR_REPO_PARENT_WORKSPACE_ID=""
+    HERDR_REPO_PARENT_CREATED=""
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -3942,11 +3943,21 @@ else
             # best effort: any refusal leaves the id empty and the task in
             # its flat row with one warning, except that a client below the
             # presentation floor or without worktree groups stays quiet.
-            # The attach itself happens after the pane's root shell has
-            # provably entered the leased task worktree, still under this lock.
+            # The ensure runs in this shell so it can also report whether it
+            # created the parent just now; a parent this spawn created is
+            # closed again below if the ordering move that must put this task
+            # ahead of it does not land. The attach itself happens after the
+            # pane's root shell has provably entered the leased task
+            # worktree, still under this lock.
             if fm_backend_herdr_worktree_group_capable "$HERDR_SES"; then
-              HERDR_REPO_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_repo_parent_ensure \
-                "$HERDR_SES" "$PROJ_ABS" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID") || HERDR_REPO_PARENT_WORKSPACE_ID=""
+              if fm_backend_herdr_projection_repo_parent_ensure \
+                "$HERDR_SES" "$PROJ_ABS" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" >/dev/null; then
+                HERDR_REPO_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_REPO_PARENT_ID
+                HERDR_REPO_PARENT_CREATED=$FM_BACKEND_HERDR_REPO_PARENT_CREATED
+              else
+                HERDR_REPO_PARENT_WORKSPACE_ID=""
+                HERDR_REPO_PARENT_CREATED=""
+              fi
             else
               case $? in
                 2) echo "warning: herdr repo grouping could not read the client protocol; leaving this task's space flat" >&2 ;;
@@ -3977,6 +3988,26 @@ else
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
+            if [ -n "$HERDR_REPO_PARENT_CREATED" ] \
+              && [ "$HERDR_REPO_PARENT_CREATED" = "$HERDR_REPO_PARENT_WORKSPACE_ID" ] \
+              && [ "${FM_BACKEND_HERDR_PROJECTION_ORDER_PLACED:-0}" != 1 ]; then
+              # A fresh repo parent joins its home block only once its first
+              # child attaches, and that ordering move is what puts the child
+              # ahead of it. Without the move this parent, still without any
+              # provenance, would stand between the home block and this task
+              # and break this task's restart binding and every later spawn's
+              # ordering, so the exact parent this spawn created is closed
+              # while it is still childless and the task stays in the flat
+              # row the ordering warning already announced. An adopted or
+              # pre-existing parent is never closed; a refused close leaves
+              # the parent as it was, with its own warning
+              # (docs/herdr-backend.md "Presentation spaces").
+              if fm_backend_herdr_projection_repo_parent_close_fresh "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED"; then
+                echo "warning: herdr repo grouping closed the repo parent $HERDR_REPO_PARENT_CREATED it created for this task because the task could not be placed ahead of it; leaving this task's space flat" >&2
+                HERDR_REPO_PARENT_WORKSPACE_ID=""
+              fi
+              HERDR_REPO_PARENT_CREATED=""
+            fi
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
             if [ -n "$HERDR_HOME_ID" ] &&
               fm_backend_herdr_projection_live_binding_matches \

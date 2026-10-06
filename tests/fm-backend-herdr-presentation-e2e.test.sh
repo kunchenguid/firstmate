@@ -387,6 +387,26 @@ assert_focus_is() {  # <expected> <case-name>
 
 focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
 
+# A session stop and re-provision stands in for a Herdr restart. Where the
+# restored session's focus lands is Herdr's own choice (0.7.x can land it on a
+# task tab while 0.9.x restores the exact pre-stop tab), so every restart
+# re-pins the captain's tab and records what the restore did, which keeps the
+# captain-focus assertions below about Firstmate's own mutations only.
+restart_lab_session() {  # <case-name>
+  local case_name=$1 landed
+  PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+    || fail "could not stop the isolated session for $case_name"
+  PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+    || fail "could not reprovision the isolated session for $case_name"
+  landed=$(focus_snapshot)
+  if [ "$landed" != "$CAPTAIN_FOCUS" ]; then
+    lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+      || fail "could not re-pin the captain tab after the $case_name restart landed focus on $landed"
+  fi
+  printf 'session-restart\t%s\t%s\t%s\n' "$landed" "$(focus_snapshot)" "$SECOND_TWO_TAB" >> "$FOCUS_AUDIT_LOG"
+  assert_focus_is "$CAPTAIN_FOCUS" "re-pinning the captain tab after the $case_name restart"
+}
+
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
   changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
@@ -1030,6 +1050,90 @@ FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F 
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
+# The first task on a repository creates that repository's parent, and only
+# the ordering move puts the task ahead of it. When that move fails at runtime
+# the spawn closes exactly the parent it just created while it is still
+# childless, so no parent without provenance is left standing, the task stays
+# in the flat row, and the next task on the repository groups normally.
+if [ "$GROUPING_CAPABLE" = 1 ]; then
+  FRESH_PROJECT_DIR="$TMP_ROOT/fresh-project"
+  make_project "$FRESH_PROJECT_DIR"
+  FRESH_REPO_LABEL=$(basename "$FRESH_PROJECT_DIR")
+  mkdir -p "$HOME_DIR/data/fresh-fail" "$HOME_DIR/data/fresh-ok"
+  write_ship_brief "$HOME_DIR" fresh-fail 'Fresh repository ordering failure fixture.'
+  write_ship_brief "$HOME_DIR" fresh-ok 'Fresh repository regrouping fixture.'
+  FRESH_FAIL_START=$(log_line_count)
+  FRESH_FAIL_FOCUS_START=$(focus_audit_line_count)
+  FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAIL_MOVER" \
+    spawn_task fresh-fail "$HOME_DIR" "$FRESH_PROJECT_DIR" > "$TMP_ROOT/fresh-fail.out" 2> "$TMP_ROOT/fresh-fail.err" \
+    || fail "fresh-repository move-failure spawn should still succeed: $(cat "$TMP_ROOT/fresh-fail.err")"
+  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository move failure"
+  assert_raw_presentation_mutations_preserved_since "$FRESH_FAIL_FOCUS_START" "fresh-repository move failure"
+  grep -F "workspace move failed or had an ambiguous response" "$TMP_ROOT/fresh-fail.err" >/dev/null 2>&1 \
+    || fail "fresh-repository move failure did not report the best-effort ordering warning: $(cat "$TMP_ROOT/fresh-fail.err")"
+  grep -F "closed the repo parent" "$TMP_ROOT/fresh-fail.err" >/dev/null 2>&1 \
+    || fail "fresh-repository move failure did not report closing the parent it created: $(cat "$TMP_ROOT/fresh-fail.err")"
+  FRESH_FAIL_META="$HOME_DIR/state/fresh-fail.meta"
+  remember_meta_worktree "$FRESH_FAIL_META" >/dev/null
+  FRESH_FAIL_WSID=$(grep '^herdr_workspace_id=' "$FRESH_FAIL_META" | cut -d= -f2-)
+  FRESH_FAIL_PANE=$(grep '^herdr_pane_id=' "$FRESH_FAIL_META" | cut -d= -f2-)
+  FRESH_LIST=$(lab workspace list) || fail "could not inspect the fresh-repository fallback"
+  [ "$(printf '%s' "$FRESH_LIST" | jq -r --arg label "$FRESH_REPO_LABEL" '[.result.workspaces[] | select(.label == $label)] | length')" = 0 ] \
+    || fail "fresh-repository move failure left a repo parent standing: $(printf '%s' "$FRESH_LIST" | jq -c '[.result.workspaces[].label]')"
+  [ "$(printf '%s' "$FRESH_LIST" | jq -r '.result.workspaces[-1].workspace_id')" = "$FRESH_FAIL_WSID" ] \
+    || fail "fresh-repository move failure did not leave the task in Herdr's default appended order"
+  assert_flat_row "$FRESH_FAIL_WSID" "fresh-repository move failure"
+  lab pane get "$FRESH_FAIL_PANE" >/dev/null 2>&1 \
+    || fail "fresh-repository move failure cleaned up the task pane"
+  FRESH_CLOSES=$(sed -n "$((FRESH_FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "workspace" && $2 == "close" { print $3 }')
+  [ "$(printf '%s\n' "$FRESH_CLOSES" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
+    || fail "fresh-repository move failure ran these workspace close calls instead of exactly one: $FRESH_CLOSES"
+  [ "$FRESH_CLOSES" != "$FRESH_FAIL_WSID" ] \
+    || fail "fresh-repository move failure closed the task's own workspace"
+  if lab workspace get "$FRESH_CLOSES" >/dev/null 2>&1; then
+    fail "fresh-repository move failure reported closing parent $FRESH_CLOSES but Herdr still has it"
+  fi
+  if sed -n "$((FRESH_FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -E $'^(tab\tclose|workspace\trename|session\t(stop|delete)|server)' >/dev/null 2>&1; then
+    fail "fresh-repository move failure performed a tab close, rename, or session lifecycle call"
+  fi
+  pass "real Herdr lab: a runtime move failure on a repository's first task closes the fresh childless parent and leaves the task flat"
+
+  FRESH_OK_FOCUS_START=$(focus_audit_line_count)
+  spawn_task fresh-ok "$HOME_DIR" "$FRESH_PROJECT_DIR" > "$TMP_ROOT/fresh-ok.out" 2> "$TMP_ROOT/fresh-ok.err" \
+    || fail "spawn after the fresh-repository move failure failed: $(cat "$TMP_ROOT/fresh-ok.err")"
+  assert_focus_is "$CAPTAIN_FOCUS" "spawn after the fresh-repository move failure"
+  assert_raw_presentation_mutations_preserved_since "$FRESH_OK_FOCUS_START" "spawn after the fresh-repository move failure"
+  if grep -E 'workspace move failed|closed the repo parent|leaving this task.s space flat' "$TMP_ROOT/fresh-ok.err" >/dev/null 2>&1; then
+    fail "spawn after the fresh-repository move failure fell back to the flat row or closed a parent: $(cat "$TMP_ROOT/fresh-ok.err")"
+  fi
+  FRESH_OK_META="$HOME_DIR/state/fresh-ok.meta"
+  remember_meta_worktree "$FRESH_OK_META" >/dev/null
+  FRESH_OK_WSID=$(grep '^herdr_workspace_id=' "$FRESH_OK_META" | cut -d= -f2-)
+  FRESH_PARENT_WSID=$(repo_parent_id "$FRESH_REPO_LABEL" "spawn after the fresh-repository move failure")
+  assert_linked_child "$FRESH_OK_WSID" "$(grep '^worktree=' "$FRESH_OK_META" | cut -d= -f2-)" "$FRESH_PROJECT_DIR" "spawn after the fresh-repository move failure" "$TMP_ROOT/fresh-ok.err"
+  [ "$(grep '^version=' "$HOME_DIR/state/fresh-ok.herdr-presentation")" = version=2 ] \
+    || fail "spawn after the fresh-repository move failure did not publish an exact restart binding"
+  FRESH_OK_LIST=$(lab workspace list) || fail "could not inspect the layout after the fresh-repository regrouping"
+  printf '%s' "$FRESH_OK_LIST" | jq -e --arg child "$FRESH_OK_WSID" --arg parent "$FRESH_PARENT_WSID" --arg flat "$FRESH_FAIL_WSID" --arg alpha "$SECOND_ONE_WSID" '
+    [.result.workspaces[].workspace_id] as $ids
+    | ($ids | index($child)) < ($ids | index($alpha))
+    and ($ids | index($flat)) > ($ids | index($alpha))
+    and ($ids | index($parent)) == (($ids | length) - 1)
+  ' >/dev/null 2>&1 \
+    || fail "the task after the fresh-repository move failure did not land in the primary block ahead of its newly created parent: $(printf '%s' "$FRESH_OK_LIST" | jq -c '[.result.workspaces[].label]')"
+  pass "real Herdr lab: the next task on that repository creates the parent again, lands ahead of it, attaches, and binds"
+  teardown_task fresh-fail "$HOME_DIR" > "$TMP_ROOT/fresh-fail-teardown.out" 2> "$TMP_ROOT/fresh-fail-teardown.err" \
+    || fail "fresh-repository move-failure teardown failed: $(cat "$TMP_ROOT/fresh-fail-teardown.err")"
+  teardown_task fresh-ok "$HOME_DIR" > "$TMP_ROOT/fresh-ok-teardown.out" 2> "$TMP_ROOT/fresh-ok-teardown.err" \
+    || fail "fresh-repository regrouping teardown failed: $(cat "$TMP_ROOT/fresh-ok-teardown.err")"
+  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository teardowns"
+  # Parents persist by design; this fixture removes its own now-childless one
+  # through the lab so the cases below see the layout they already expect.
+  lab workspace close "$FRESH_PARENT_WSID" >/dev/null \
+    || fail "could not remove the fresh-repository fixture's childless parent"
+  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository fixture parent removal"
+fi
+
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
@@ -1474,12 +1578,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     "└ $EXPECTED_CONCISE · p:"*) ;;
     *) fail "$RESTART_ID fresh projection label did not apply concise prefix handling: $OLD_RESTART_LABEL" ;;
   esac
-  PATH="$HERDR_ORIGINAL_PATH" \
-    "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-    || fail "could not stop the isolated session for $RESTART_ID validation"
-  PATH="$HERDR_ORIGINAL_PATH" \
-    "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-    || fail "could not reprovision the isolated session for $RESTART_ID validation"
+  restart_lab_session "$RESTART_ID validation"
   # Stopping the whole Herdr session also ends the anchor's agent. Its restored
   # shell remains useful as the durable layout anchor, but its task record no
   # longer represents a live slot owner and must not poison later slot reuse.
@@ -1531,10 +1630,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   fi
 
   if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
-    PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-      || fail "could not stop the isolated session for idempotent reclaim"
-    PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-      || fail "could not reprovision the isolated session for idempotent reclaim"
+    restart_lab_session "idempotent reclaim"
     PRIOR_RESTART_WT=$NEW_RESTART_WT
     PRIOR_RESTART_PANE=$NEW_RESTART_PANE
     spawn_task "$RESTART_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-idempotent.out" 2> "$TMP_ROOT/$RESTART_ID-idempotent.err" \
@@ -1581,10 +1677,7 @@ CROSS_BOUND_HOME=$(grep '^home=' "$SECOND_HOME_A/state/$CROSS_RESTART_ID.herdr-p
   || fail "cross-home restart journal did not bind the secondmate's exact home"
 [ ! -e "$HOME_DIR/state/$CROSS_RESTART_ID.herdr-presentation" ] \
   || fail "cross-home restart published a journal in the primary home"
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-  || fail "could not stop the isolated session for cross-home restart"
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-  || fail "could not reprovision the isolated session for cross-home restart"
+restart_lab_session "cross-home restart"
 spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/cross-restart-resume.out" 2> "$TMP_ROOT/cross-restart-resume.err" \
   || fail "cross-home same-identity reclaim failed: $(cat "$TMP_ROOT/cross-restart-resume.err")"
 CROSS_NEW_WT=$(remember_meta_worktree "$CROSS_RESTART_META")
@@ -1609,10 +1702,7 @@ spawn_task "$RESPAWN_ABORT_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/
   || fail "respawn-abort fixture's first projected spawn failed: $(cat "$TMP_ROOT/abort-resume-first.err")"
 RESPAWN_ABORT_META="$HOME_DIR/state/$RESPAWN_ABORT_ID.meta"
 RESPAWN_ABORT_FIRST_WT=$(remember_meta_worktree "$RESPAWN_ABORT_META")
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-  || fail "could not stop the isolated session for the respawn-abort fixture"
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-  || fail "could not reprovision the isolated session for the respawn-abort fixture"
+restart_lab_session "the respawn-abort fixture"
 # Stand in for a recorded copy that is gone: give the real slot back and point
 # the surviving record at a path that no longer exists.
 "$REAL_TREEHOUSE" return --force "$RESPAWN_ABORT_FIRST_WT" >/dev/null 2>&1 || true
@@ -1658,10 +1748,7 @@ PRIMARY_WAVE_WSID=$(grep '^herdr_workspace_id=' "$PRIMARY_WAVE_META" | cut -d= -
 BRAVO_WAVE_WSID=$(grep '^herdr_workspace_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
 PRIMARY_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
 BRAVO_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-  || fail "could not stop the isolated session for concurrent recovery"
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-  || fail "could not reprovision the isolated session for concurrent recovery"
+restart_lab_session "concurrent recovery"
 CONCURRENT_RECOVERY_FOCUS=$(focus_snapshot)
 spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
 PRIMARY_WAVE_PID=$!

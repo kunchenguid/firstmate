@@ -1529,9 +1529,16 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # current workspace-create response.
 # After a successful move, every pre-existing workspace id sequence excluding
 # the new id must be byte-identical to the pre-move sequence.
+# FM_BACKEND_HERDR_PROJECTION_ORDER_PLACED reports the outcome to the caller:
+# 1 when the created workspace sits at its desired position on return, either
+# already there or by a verified move, and 0 after every other exit, so the
+# spawn can tell whether a repo parent it created in the same call still
+# stands ahead of its first child
+# (fm_backend_herdr_projection_repo_parent_close_fresh).
 fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>]
   local session=$1 created=$2 parent=$3 parent_ws=${4:-} list analysis current desired socket mover response move_status focus_before move_capable
   local before_existing after_existing
+  FM_BACKEND_HERDR_PROJECTION_ORDER_PLACED=0
   [ -n "$parent" ] || {
     echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
     return 0
@@ -1623,7 +1630,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       return 0
       ;;
   esac
-  [ "$current" != "$desired" ] || return 0
+  [ "$current" != "$desired" ] || { FM_BACKEND_HERDR_PROJECTION_ORDER_PLACED=1; return 0; }
 
   if fm_backend_herdr_workspace_move_capable "$session"; then
     move_capable=0
@@ -1692,6 +1699,8 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation workspace move returned an unverifiable order; leaving worker running without cleanup" >&2
     return 0
   fi
+  # shellcheck disable=SC2034  # the spawn consumes the placement outcome
+  FM_BACKEND_HERDR_PROJECTION_ORDER_PLACED=1
 
   before_existing=$(printf '%s' "$analysis" | jq -c '.existing' 2>/dev/null)
   after_existing=$(printf '%s' "$response" | jq -c --arg created "$created" '[.result.workspaces[] | select(.workspace_id != $created) | .workspace_id]' 2>/dev/null)
@@ -2812,6 +2821,12 @@ fm_backend_herdr_projection_repo_parent_label() {  # <home-label> <repo-name>
 # print its workspace id. The caller holds the presentation session lock and
 # calls this BEFORE creating the task workspace, so the parent is older than
 # every child Herdr could otherwise elect as the repository's group source.
+# On success the same id is also left in FM_BACKEND_HERDR_REPO_PARENT_ID, and
+# FM_BACKEND_HERDR_REPO_PARENT_CREATED holds that id only when this very call
+# created the parent (empty for an adopted one), so a caller running the
+# function in its own shell can hand exactly the parent it created to
+# fm_backend_herdr_projection_repo_parent_close_fresh when the task's ordering
+# move does not land; no journal records a fresh parent.
 # The repository name and root come from Herdr's own `worktree list --cwd`
 # read, and <clone> must be that repository's root, so grouping is never
 # attempted from inside a nested or foreign checkout.
@@ -2838,6 +2853,8 @@ fm_backend_herdr_projection_repo_parent_label() {  # <home-label> <repo-name>
 fm_backend_herdr_projection_repo_parent_ensure() {  # <session> <clone> <home-label> [<home-workspace-id>]
   local session=$1 clone=$2 home_label=$3 home_ws=${4:-} clone_real worktrees repo_root repo_root_real repo_name label
   local list source candidate candidates matches=0 match="" wsid group group_source group_root group_root_real focus_before out created
+  FM_BACKEND_HERDR_REPO_PARENT_ID=""
+  FM_BACKEND_HERDR_REPO_PARENT_CREATED=""
   clone_real=$(cd "$clone" 2>/dev/null && pwd -P) || clone_real=$clone
   worktrees=$(fm_backend_herdr_cli "$session" worktree list --cwd "$clone" 2>/dev/null) || worktrees=
   repo_root=$(printf '%s' "$worktrees" | jq -er '.result.source.repo_root | select(type == "string" and length > 0)' 2>/dev/null) || repo_root=
@@ -2878,6 +2895,7 @@ fm_backend_herdr_projection_repo_parent_ensure() {  # <session> <clone> <home-la
       ' 2>/dev/null) || candidate=
     fi
     if [ -n "$candidate" ]; then
+      FM_BACKEND_HERDR_REPO_PARENT_ID=$candidate
       printf '%s' "$candidate"
       return 0
     fi
@@ -2912,6 +2930,7 @@ EOF
     return 1
   fi
   if [ "$matches" -eq 1 ]; then
+    FM_BACKEND_HERDR_REPO_PARENT_ID=$match
     printf '%s' "$match"
     return 0
   fi
@@ -2938,7 +2957,75 @@ EOF
     echo "warning: herdr repo grouping got an incomplete create response for '$label'; leaving this task's space flat" >&2
     return 1
   }
+  # shellcheck disable=SC2034  # the spawn consumes the resolved parent id
+  FM_BACKEND_HERDR_REPO_PARENT_ID=$created
+  # shellcheck disable=SC2034  # the spawn consumes the created-here marker
+  FM_BACKEND_HERDR_REPO_PARENT_CREATED=$created
   printf '%s' "$created"
+}
+
+# fm_backend_herdr_projection_repo_parent_close_fresh <session> <parent-id>:
+# close the repo parent THIS spawn just created when its first child could not
+# be ordered ahead of it, so no parent without worktree provenance is left
+# standing between the home block and the task row, where it would break this
+# task's restart binding and the ordering of every later spawn
+# (docs/herdr-backend.md "Presentation spaces"). The caller holds the
+# presentation session lock and passes only the id
+# fm_backend_herdr_projection_repo_parent_ensure reported in
+# FM_BACKEND_HERDR_REPO_PARENT_CREATED in this same spawn, never an adopted or
+# pre-existing parent. The close is refused with one warning and status 1
+# unless the parent is still childless: Herdr's own `worktree list` for it
+# names no other open workspace in its group, and it still holds only its
+# seeded tab. The close runs under the focus snapshot and restore, is never
+# forced or retried, and counts only once the workspace list no longer shows
+# the parent; status 0 means the exact parent is confirmed gone.
+fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
+  local session=$1 parent=$2 group source others tabs focus_before presence
+  [ -n "$parent" ] || return 1
+  if ! group=$(fm_backend_herdr_cli "$session" worktree list --workspace "$parent" 2>/dev/null) \
+    || ! source=$(printf '%s' "$group" | jq -er '.result.source.source_workspace_id | select(type == "string" and length > 0)' 2>/dev/null); then
+    echo "warning: herdr repo grouping could not read the worktree group of the parent $parent it just created; leaving it in place" >&2
+    return 1
+  fi
+  if [ "$source" = "$parent" ]; then
+    others=$(printf '%s' "$group" | jq -r --arg parent "$parent" '
+      [.result.worktrees[]? | select((.open_workspace_id | type) == "string" and .open_workspace_id != $parent)] | length
+    ' 2>/dev/null) || others=
+    case "$others" in
+      0) ;;
+      ''|*[!0-9]*)
+        echo "warning: herdr repo grouping could not parse the worktree group of the parent $parent it just created; leaving it in place" >&2
+        return 1
+        ;;
+      *)
+        echo "warning: herdr repo grouping left the parent $parent it just created in place because it already groups $others other open workspace(s)" >&2
+        return 1
+        ;;
+    esac
+  fi
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$parent" 2>/dev/null) || {
+    echo "warning: herdr repo grouping could not read the tabs of the parent $parent it just created; leaving it in place" >&2
+    return 1
+  }
+  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array" and (.result.tabs | length) == 1' >/dev/null 2>&1; then
+    echo "warning: herdr repo grouping left the parent $parent it just created in place because it holds more than its seeded tab" >&2
+    return 1
+  fi
+  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "warning: herdr repo grouping could not capture exact active workspace and tab before closing the parent $parent it just created; leaving it in place" >&2
+    return 1
+  }
+  if ! fm_backend_herdr_cli "$session" workspace close "$parent" >/dev/null 2>&1; then
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "repo parent close" || true
+    echo "warning: herdr repo grouping could not close the parent $parent it just created; leaving it in place" >&2
+    return 1
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "repo parent close" || true
+  presence=$(fm_backend_herdr_workspace_presence_state "$session" "$parent")
+  if [ "$presence" != dead ]; then
+    echo "warning: herdr repo grouping closed the parent $parent it just created but the workspace list still lists it; leaving it in place" >&2
+    return 1
+  fi
 }
 
 # fm_backend_herdr_projection_attach_worktree <session> <parent> <task-ws> <worktree>:
