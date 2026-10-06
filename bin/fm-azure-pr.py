@@ -68,7 +68,7 @@ class Identity:
                     and len(parts) in (5, 6), "unsupported Azure Services host or route")
             self.org = "https://" + self.host
             if len(parts) == 6:
-                component(parts[0])
+                require(parts[0] == "DefaultCollection", "unsupported Azure Services collection")
         self.project = component(parts[-5])
         self.repo = component(parts[-3])
         self.number = parts[-1]

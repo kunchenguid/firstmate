@@ -149,12 +149,28 @@ class AzureContract(unittest.TestCase):
                 self.assertNotEqual(self.run_helper("parse", url).returncode, 0)
         self.assertFalse((self.dir / "calls").exists())
 
+    def test_arbitrary_legacy_collections_refuse_before_transport(self):
+        for collection in ("Anything", "OtherCollection", "defaultcollection", "%44efaultCollection"):
+            url = f"https://example.visualstudio.com/{collection}/Project/_git/repo/pullrequest/7"
+            with self.subTest(collection=collection):
+                for action in ("parse", "head"):
+                    p = self.run_helper(action, url)
+                    self.assertNotEqual(p.returncode, 0, p.stdout)
+                p = subprocess.run(["bash", "-c", '. "$1/bin/fm-pr-lib.sh"; fm_pr_url_parse "$2"', "_", str(ROOT), url],
+                                   env=self.env, text=True, capture_output=True)
+                self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertEqual(self.calls(), [])
+
     def test_legacy_collection_transport_uses_root_organization_url(self):
-        url = "https://example.visualstudio.com/DefaultCollection/Project/_git/repo/pullrequest/7"
-        p = self.run_helper("head", url)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        organizations = [call[call.index("--organization") + 1] for call in self.calls()]
-        self.assertEqual(organizations, ["https://example.visualstudio.com", "https://example.visualstudio.com"])
+        for path in ("DefaultCollection/Project", "Project"):
+            url = f"https://example.visualstudio.com/{path}/_git/repo/pullrequest/7"
+            with self.subTest(path=path):
+                before = len(self.calls())
+                p = self.run_helper("head", url)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stdout, HEAD + "\n")
+                organizations = [call[call.index("--organization") + 1] for call in self.calls()[before:]]
+                self.assertEqual(organizations, ["https://example.visualstudio.com", "https://example.visualstudio.com"])
 
     def test_head_uses_current_iteration_source(self):
         current = "e" * 40

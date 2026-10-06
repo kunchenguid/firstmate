@@ -44,39 +44,61 @@ SHA = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 def anchors(base, value):
     """Return base-line -> value-line matches forced by all optimal alignments.
 
-    Equal-line edges and insertion/deletion edges whose score remains optimal
-    form a DAG. Visit that DAG once, retaining every tie, including deletion or
-    insertion ties on equal lines. An anchor may neither be deleted on any path
-    nor match multiple occurrences. No path enumeration or fuzzy matching occurs.
+    Equal-line edges and optimal insertion/deletion edges form a DAG inside an
+    edit-distance band. A band is complete only when its width covers the total
+    edit distance, hence every optimal path. Visit that DAG retaining every tie,
+    including deletion or insertion ties on equal lines. An anchor may neither
+    be deleted on any path nor match multiple occurrences.
     """
     if base == value:
         return dict(enumerate(range(len(base))))
     n, m = len(base), len(value)
-    if (n + 1) * (m + 1) > MAX_ALIGNMENT_CELLS:
-        raise Unknown("text alignment exceeds the exact-proof memory bound")
-    scores = [array("I", [0]) * (m + 1) for _ in range(n + 1)]
-    for i in range(n - 1, -1, -1):
-        row, below = scores[i], scores[i + 1]
-        for j in range(m - 1, -1, -1):
-            row[j] = max(below[j], row[j + 1],
-                         1 + below[j + 1] if base[i] == value[j] else 0)
+    width = max(1, abs(n - m))
+    unreachable = n + m + 1
+    while True:
+        cells = sum(min(m, i + width) - max(0, i - width) + 1 for i in range(n + 1))
+        if cells > MAX_ALIGNMENT_CELLS:
+            raise Unknown("text alignment exceeds the exact-proof memory bound")
+        starts = [max(0, i - width) for i in range(n + 1)]
+        stops = [min(m, i + width) + 1 for i in range(n + 1)]
+        scores = [array("I", [unreachable]) * (stop - start) for start, stop in zip(starts, stops)]
+
+        def distance(i, j):
+            if i > n or not starts[i] <= j < stops[i]:
+                return unreachable
+            return scores[i][j - starts[i]]
+
+        for i in range(n, -1, -1):
+            row = scores[i]
+            for j in range(stops[i] - 1, starts[i] - 1, -1):
+                if i == n and j == m:
+                    best = 0
+                else:
+                    best = min(unreachable, 1 + distance(i + 1, j), 1 + distance(i, j + 1))
+                    if i < n and j < m and base[i] == value[j]:
+                        best = min(best, distance(i + 1, j + 1))
+                row[j - starts[i]] = best
+        if distance(0, 0) <= width:
+            break
+        scores.clear()
+        width = min(n + m, width * 2)
     matches = [set() for _ in base]
     deleted = set()
     # A row frontier avoids retaining a Python object for every visited cell.
     frontier = {0}
     for i in range(n + 1):
         following = set()
-        for j in range(m + 1):
+        for j in range(starts[i], stops[i]):
             if j not in frontier:
                 continue
-            score = scores[i][j]
-            if j < m and scores[i][j + 1] == score:
+            score = distance(i, j)
+            if j < m and 1 + distance(i, j + 1) == score:
                 frontier.add(j + 1)
             if i < n:
-                if scores[i + 1][j] == score:
+                if 1 + distance(i + 1, j) == score:
                     deleted.add(i)
                     following.add(j)
-                if j < m and base[i] == value[j] and 1 + scores[i + 1][j + 1] == score:
+                if j < m and base[i] == value[j] and distance(i + 1, j + 1) == score:
                     matches[i].add(j)
                     following.add(j + 1)
         frontier = following

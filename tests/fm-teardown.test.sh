@@ -742,11 +742,14 @@ make_path_without_lsof() {  # <case-dir>
 
 test_history_location_containment_matrix() {
   local scenario route case_dir merged local_head expected rc
+  local -a scenarios=(unlanded-delete landed-delete unlanded-replace same-file-restoration
+    literal-path ordinary-path successive-upstream one-upstream partial-two-file
+    whole-file-restoration missing-intermediate-tree complete-enumeration
+    large-rebased-upstream large-rebased-unlanded large-alignment-bound)
+  [ "$#" -eq 0 ] || scenarios=("$@")
   PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/containment-contract.py" \
     || fail "independent small-history containment oracle failed"
-  for scenario in unlanded-delete landed-delete unlanded-replace same-file-restoration \
-    literal-path ordinary-path successive-upstream one-upstream partial-two-file \
-    whole-file-restoration missing-intermediate-tree complete-enumeration; do
+  for scenario in "${scenarios[@]}"; do
     for route in pr default; do
       case_dir=$(make_case "history-$scenario-$route")
       write_meta "$case_dir" no-mistakes ship
@@ -755,19 +758,35 @@ test_history_location_containment_matrix() {
         || fail "$scenario: could not construct independent history"
       merged=$(cat "$case_dir/merged-sha")
       local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      case "$scenario" in
+        large-*)
+          [ "$(git -C "$case_dir/wt" rev-parse HEAD:shared.txt)" != "$(git -C "$case_dir/wt" rev-parse "$merged:shared.txt")" ] \
+            || fail "$scenario: fixture must require non-identical text alignment"
+          if git -C "$case_dir/wt" merge-base --is-ancestor "$local_head" "$merged"; then
+            fail "$scenario: fixture must require rewritten-history proof"
+          fi
+          ;;
+      esac
       if [ "$route" = pr ]; then
         add_gh_pr_merged_for_head "$case_dir" "$merged" "$merged"
         append_pr_meta_url "$case_dir"
+        case "$scenario" in
+          large-*) printf 'base_branch=unavailable-fallback\n' >> "$case_dir/state/task-x1.meta" ;;
+        esac
       else
         add_gh_axi_error "$case_dir"
       fi
       case "$scenario" in
-        landed-delete|successive-upstream|one-upstream) expected=0 ;;
+        landed-delete|successive-upstream|one-upstream|large-rebased-upstream) expected=0 ;;
         *) expected=1 ;;
       esac
       rc=0
       run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
       expect_code "$expected" "$rc" "$scenario/$route: wrong final-content verdict"$'\n'"$(cat "$case_dir/stderr")"
+      if [ "$scenario" = large-alignment-bound ]; then
+        assert_grep 'text alignment exceeds the exact-proof memory bound' "$case_dir/stderr" \
+          "$scenario/$route: refusal did not report bounded-computation exhaustion"
+      fi
       if [ "$expected" = 1 ]; then
         assert_refusal_retained_task_state "$case_dir" "$scenario/$route" "$local_head"
       else
@@ -776,7 +795,7 @@ test_history_location_containment_matrix() {
       fi
     done
   done
-  pass "history/location containment passes the combined 24-case matrix and independent oracles"
+  pass "history/location containment passes the selected PR/default cases and independent oracles"
 }
 
 test_dirty_initialized_nested_submodule_refuses() {
@@ -5049,6 +5068,11 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
     "retained-sources: the ordinary refusal was replaced"
   pass "present required sources still reach the ordinary teardown refusal"
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY" "$@"
+  exit $?
+fi
 
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
