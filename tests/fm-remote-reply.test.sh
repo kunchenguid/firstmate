@@ -1068,4 +1068,47 @@ assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "adapter retirement left a caught-up watermark a later route could inherit"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
 
+# The resolved break above stays closed through an unchanged re-read. Repair
+# the log, let the reader advance, and truncate again: that later break is a
+# different episode and must open the same decision again.
+printf 'working: route restored and readable again\n' > "$REMOTE/state/parent-replies.status"
+restored_bytes=$(wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+remote_env "$ADAPTER" arm ios >/dev/null
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the repaired route was not read"
+assert_grep "offset=$restored_bytes" "$PARENT/state/remote-replies/ios.cursor" \
+  "the repaired route did not advance the cursor"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "repairing the route appended a continuity break"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "repairing the route reopened the continuity decision"
+stop_reply_listener || fail "the reply listener did not stop before the second continuity break"
+: > "$REMOTE/state/parent-replies.status"
+GEN=$((GEN + 1))
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-second-break.out" 2>&1 &
+RUNNER=$!
+wait "$RUNNER" || fail "the second continuity break was not captured"
+RESULT_SECOND=$(find "$PARENT/state/procevent-inbox" -name "$SID.$GEN.result" -print -quit)
+[ -n "$RESULT_SECOND" ] || fail "the second continuity break produced no durable result"
+[ "$(remote_env "$ADAPTER" classify "$RESULT_SECOND")" = continuity-broken ] \
+  || fail "the repaired route's truncation was not classified as a continuity break"
+set +e
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_SECOND" > "$TMP_ROOT/handle-second-break.out" 2>&1
+handle_rc=$?
+set -e
+[ "$handle_rc" -eq 3 ] || [ "$handle_rc" -eq 0 ] || fail "the second continuity break returned an unexpected status: $handle_rc"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "a later continuity break after repair appended nothing"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a later continuity break after repair did not reopen the decision"
+remote_env "$ADAPTER" ingest ios "$RESULT_SECOND" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "a repeated read of the later continuity break appended again"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a repeated read of the later continuity break closed the decision"
+pass "a later continuity break after repair and re-advance opens the decision again"
+
 echo "ALL TESTS PASSED"

@@ -164,6 +164,88 @@ write_cursor() { # <id> <offset> <hash>
   mv -f -- "$tmp" "$path"
 }
 
+# The continuity line names only the route and the reason, so
+# status_event_recorded treats every later break of that same kind as the
+# line already on the log. This file is the episode the continuity caller
+# owns: the cursor it last escalated, and whether retirement has reset that
+# episode since. An unchanged re-read still has that cursor and no reset, so
+# the recorded line stays recorded. Retirement keeps the status log and
+# deletes the cursor, which is why the reset has to be recorded here.
+continuity_episode_path() { printf '%s/%s.continuity\n' "$CURSOR_DIR" "$1"; }
+
+read_continuity_episode() { # <id>; sets EPISODE_PRESENT, EPISODE_OFFSET, EPISODE_HASH, EPISODE_RETIRED
+  local path offset hash schema retired
+  path=$(continuity_episode_path "$1")
+  EPISODE_PRESENT=0
+  EPISODE_OFFSET=
+  EPISODE_HASH=
+  EPISODE_RETIRED=0
+  [ -e "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || die "continuity episode is unsafe: $path"
+  schema=$(sed -n 's/^schema=//p' "$path")
+  offset=$(sed -n 's/^offset=//p' "$path")
+  hash=$(sed -n 's/^prefix_sha256=//p' "$path")
+  retired=$(sed -n 's/^retired=//p' "$path")
+  [ "$schema" = fm-remote-reply-continuity.v1 ] || die "continuity episode has an incompatible schema: $path"
+  case "$retired" in 0|1) ;; *) die "continuity episode has an invalid retirement mark: $path" ;; esac
+  if [ -n "$offset" ] || [ -n "$hash" ]; then
+    case "$offset" in ''|*[!0-9]*) die "continuity episode has an invalid offset: $path" ;; esac
+    case "$hash" in *[!A-Fa-f0-9]*|'') die "continuity episode has an invalid hash: $path" ;; esac
+    [ "${#hash}" -eq 64 ] || die "continuity episode has an invalid hash length: $path"
+  elif [ "$retired" -ne 1 ]; then
+    die "continuity episode has no cursor: $path"
+  fi
+  EPISODE_PRESENT=1
+  EPISODE_OFFSET=$offset
+  EPISODE_HASH=$(printf '%s' "$hash" | tr 'A-F' 'a-f')
+  EPISODE_RETIRED=$retired
+}
+
+write_continuity_episode() { # <id> <offset> <hash> <retired 0|1>
+  local id=$1 offset=$2 hash=$3 retired=$4 path tmp
+  case "$retired" in 0|1) ;; *) return 1 ;; esac
+  if [ "$retired" -eq 0 ] || [ -n "$offset" ] || [ -n "$hash" ]; then
+    case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+    case "$hash" in *[!A-Fa-f0-9]*|'') return 1 ;; esac
+    [ "${#hash}" -eq 64 ] || return 1
+  fi
+  mkdir -p "$CURSOR_DIR" || return 1
+  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
+  path=$(continuity_episode_path "$id")
+  [ ! -L "$path" ] || return 1
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.continuity.XXXXXX") || return 1
+  {
+    printf 'schema=fm-remote-reply-continuity.v1\n'
+    printf 'offset=%s\n' "$offset"
+    printf 'prefix_sha256=%s\n' "$hash"
+    printf 'retired=%s\n' "$retired"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path"
+}
+
+# 0 when this break is a different episode from the one last escalated.
+continuity_break_is_new_episode() { # <id> <offset> <hash>
+  read_continuity_episode "$1"
+  [ "$EPISODE_PRESENT" -eq 1 ] || return 1
+  [ "$EPISODE_RETIRED" -eq 1 ] && return 0
+  [ "$EPISODE_OFFSET" = "$2" ] && [ "$EPISODE_HASH" = "$3" ] && return 1
+  return 0
+}
+
+mark_continuity_episode_retired() { # <id>
+  local path
+  path=$(continuity_episode_path "$1")
+  [ ! -L "$path" ] || die "continuity episode is unsafe: $path"
+  if [ ! -e "$path" ]; then
+    write_continuity_episode "$1" '' '' 1 || die "cannot record remote reply retirement"
+    return 0
+  fi
+  read_continuity_episode "$1"
+  write_continuity_episode "$1" "$EPISODE_OFFSET" "$EPISODE_HASH" 1 \
+    || die "cannot record remote reply retirement"
+}
+
 ingest_receipt_matches() { # <id> <sequence> <result>
   local path stored actual count
   path=$(ingest_receipt_path "$1" "$2")
@@ -482,7 +564,7 @@ stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-a
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc appended=0 cursor_already=0 lock status_file source_record tmp
-  local fetch_rc append_rc offered='' delivered_map='' mirrored='' status_additions='' source_additions='' undelivered=''
+  local fetch_rc append_rc new_episode=0 offered='' delivered_map='' mirrored='' status_additions='' source_additions='' undelivered=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -545,11 +627,26 @@ cmd_ingest() {
   fi
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
+    # status_event_recorded stays the unchanged re-read. A moved cursor, or
+    # retirement since the episode was recorded, is a later break and must
+    # append even when the line text matches. The same-second stamp would
+    # also match append_status_once's exact line, so a new episode appends
+    # directly.
     append_rc=0
-    if status_event_recorded "$status_file" "$line"; then
+    new_episode=0
+    if continuity_break_is_new_episode "$id" "$CURSOR_OFFSET" "$CURSOR_HASH"; then
+      new_episode=1
+    fi
+    if [ "$new_episode" -eq 1 ]; then
+      printf '%s\n' "$(status_stamp_line "$line")" >> "$status_file" || append_rc=2
+    elif status_event_recorded "$status_file" "$line"; then
       append_rc=1
     else
       append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
+    fi
+    if [ "$append_rc" -eq 0 ]; then
+      write_continuity_episode "$id" "$CURSOR_OFFSET" "$CURSOR_HASH" 0 \
+        || { fm_lock_release "$lock"; die "cannot record continuity episode"; }
     fi
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
@@ -745,6 +842,7 @@ cmd_retire_finalize_locked() {
   rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
+  mark_continuity_episode_retired "$id"
 }
 
 cmd_retire() {
