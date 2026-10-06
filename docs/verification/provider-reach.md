@@ -2,23 +2,18 @@
 
 Audience: maintainer verification.
 
-This record supports the one bounded reachability probe in `bin/fm-provider-reach-probe.sh`.
-The motivating lesson is that probing the wrong host can produce a false outage reading; this opt-in probe makes the selected endpoint's result machine-readable and reproducible without changing dispatch preferences or gating dispatch.
-It records only facts that must be re-established when the probed endpoint or the probe's own classification changes.
-Incident chronology and quota posture stay in private reports.
+This record documents the behavior contract exercised by the local regression suite for `bin/fm-provider-reach-probe.sh`.
+It records no live endpoint result and makes no claim about any provider's current health.
 
 The probe collects a fact and renders no verdict. It reads no dispatch configuration, holds no provider table, and decides no eligibility; `.agents/skills/quota-array-dispatch/SKILL.md` owns those judgments.
 
-## What each observed HTTP class does and does not prove
+## What each HTTP class does and does not prove
 
-Verified against local stand-ins in `tests/fm-provider-reach-probe.test.sh`, which pins every expected value to a fake resolver and a fake curl rather than to live traffic.
-The curl-configuration isolation is proven separately with the host's real curl and a loopback listener, so no third-party traffic and no credential value is ever needed.
-Read the process exit code as the primary verdict: 0 means reachable only, 10 means routed-auth, 11 means server-error, 20 means unreachable, 2 means invalid input or host configuration, and 64 means curl is unavailable.
-The `dns=` and `http=` fields refine the reason; in particular `dns=fail` means the resolver errored, while `dns=nxdomain` means a successful lookup found no address.
-The HTTP phase captures only the status code: the response body is discarded to `/dev/null`, no temp file is created, and a valid status survives curl's non-zero exit (for example a truncated body after a 2xx header), with only an absent or malformed code mapped to `000`.
-The classes below are the shapes this home has actually recorded from the endpoint.
+This section owns the interpretation of the probe's classes; [`--help`](../../bin/fm-provider-reach-probe.sh) owns exact invocation and exit-status mechanics.
+The regression pointer is `tests/fm-provider-reach-probe.test.sh`, whose local stand-ins avoid relying on live provider traffic.
+The classes below describe possible probe outcomes, not evidence of a provider's current state.
 
-| Observed | `result=` | Exit | Proven | Not proven |
+| Outcome | `result=` | Exit | Proven | Not proven |
 | --- | --- | --- | --- | --- |
 | DNS successfully reports NXDOMAIN, no answer, or an answer without an address record | `unreachable` with `dns=nxdomain` | 20 | the lookup found no usable address | anything about HTTP, because no request is sent |
 | DNS resolution tool errors or reports SERVFAIL, FORMERR, REFUSED, or timeout (carries `dns_detail=rc=<code>` when available) | `unreachable` with `dns=fail` | 20 | the lookup itself did not complete usefully | anything about HTTP, because no request is sent either - `rc=` names the resolver's own status, not an upstream verdict |
@@ -29,43 +24,20 @@ The classes below are the shapes this home has actually recorded from the endpoi
 | no configured resolver is installed (the whole preference list misses) | `dns=skipped`, then the HTTP verdict | per HTTP | nothing about DNS; disclosed as `dns_tool_missing` | - |
 | no usable curl executable | `tool-missing` | 64 | this surface could not be probed | any claim about the endpoint |
 
-## Resolver candidates and one recorded misclassification
+## Resolver candidate behavior
 
-The default candidate list is `/usr/bin/dig` then `/usr/bin/host`; `FM_PROVIDER_REACH_DNS_TOOL` overrides it with one tool or a whitespace-separated preference list, which is also what keeps the suite deterministic on every host.
-The resolver receives only the host component of `--host`: a `:port` suffix and bracketed IPv6 syntax are stripped, and an IP-literal host skips the lookup entirely (`dns=skipped dns_detail=dns_literal`) because it is already an address, so the HTTP phase still runs.
-The value is split on whitespace only, with pathname expansion disabled for that split, so a glob character in the value stays a literal token and cannot expand into an unrelated executable.
-Availability is decided **per entry**, in order, by the resolution phase itself: an entry that is not an installed executable is skipped without being run, and the lookup stops at the first entry that answers.
-A build here instead tested the entire configured value as a single executable before ever calling a resolver, so `FM_PROVIDER_REACH_DNS_TOOL="dig host"` matched nothing, the installed `dig` was never consulted, and the line reported `dns=skipped dns_tool_missing=dig host` for a name that resolves. The class of the finding (exit 20, HTTP still attempted from the fallthrough) hid it.
-
-It previously led with macOS's `/usr/bin/dscacheutil`, called as `-q host -a <name>`.
-That is not one of its directory-service categories, so it answered **every** name with its usage block and exit 64, and because those calls come first in the list they set the DNS phase: an NXDOMAIN endpoint was recorded as `dns=fail dns_detail=rc=64` - "the resolver errored" - rather than "the name resolves to nothing".
-The exit verdict stayed 20 by fallthrough, so the class was right and the shape was wrong.
-Reproduced first-hand on this host: `dscacheutil -q host -a api.example.invalid` prints usage and exits 64 while `dig` reports `status: NXDOMAIN` and `host` reports `not found: 3(NXDOMAIN)` for the same name.
-A reader must therefore treat `dns=fail rc=<code>` from any build before this correction as an unusable lookup, not as evidence about the endpoint.
-The default list names no such tool, and `tests/fm-provider-reach-probe.test.sh` proves the classification behaviorally, with local stand-ins only: a preference list whose usable entry is not first still reports `dns=ok`, BIND `host`'s `not found: 2(SERVFAIL)` and `not found: 5(REFUSED)` wording is reported as `dns=fail`, and a dscacheutil-style usage block with exit 64 is likewise `dns=fail` rather than a successful no-address answer.
+The default candidates are `/usr/bin/dig` and `/usr/bin/host`; `FM_PROVIDER_REACH_DNS_TOOL` can override them with one tool or a whitespace-separated preference list.
+Candidates that are not installed are skipped, and resolver errors (timeout, non-zero exit, SERVFAIL, FORMERR, or REFUSED) advance to the next installed candidate.
+A valid no-address answer is terminal, so a later candidate cannot turn NXDOMAIN/NODATA into a positive result.
+The resolver receives only the host component of `--host`; a port is removed and a bracketed IPv6 literal is unwrapped, while IP literals skip DNS and proceed to HTTP.
+The deterministic regression cases for fallback, terminal no-address answers, and resolver output classification are in `tests/fm-provider-reach-probe.test.sh`.
 
 Two asymmetries are load-bearing and are the reason the verdicts are not collapsed into exit-success:
 
 - A `401`/`403` shares no meaning with a `000`. The first is a live endpoint refusing an unauthenticated request; the second is the signature of an unreachable provider. Recording either as "down", or the first as "up", would misroute the next dispatch decision.
-- A `2xx` is deliberately worded `reachable`, never `available`. This home has recorded an outage where small requests returned `200` while long-output requests hung for 60 seconds, so a successful probe is not evidence that a heavy pipeline run will finish.
+- A `2xx` is deliberately worded `reachable`, never `available`. A successful response to this bounded request does not establish that a larger or longer request will finish.
 
-## Endpoint selection
+## Dispatch configuration
 
-The probe ships no provider endpoint and takes no positional target: the caller names the endpoint explicitly with `--host <host[:port][/path]>`.
-This host's configured xhy endpoint is `xhyapi.com` (not `api.xhyapi.com`) and its base is `https://xhyapi.com/v1/models`, so a local check passes `--host xhyapi.com/v1/models`.
-Nothing in the probe reads or transmits a credential.
-
-A `--host` value that yields no request authority is its own verdict, `result=invalid-target` with exit 2, printed as the probe's single line before any resolver or request runs.
-The suite reaches it with `--host '/not-a-host'`, which leaves the constructed base URL with no host part, and asserts that neither a resolver nor curl was run.
-
-## Why the dispatch configuration cannot carry a health predicate
-
-Established by inspecting both consumers of `config/crew-dispatch.json` in this repository:
-
-- The bootstrap validator (`crew_dispatch_validate` in `bin/fm-bootstrap.sh`) and the resolver's stricter preflight (`rules_err` in `bin/fm-dispatch-resolve.sh`) enumerate exactly the consumed keys: rule `when`, `use`, `why`, `approval`, `min_confidence`, `select`, `floor`, and profile `harness`, `model`, `effort`, `provider`, `floor`.
-- `bin/fm-dispatch-resolve.sh` renders its answer as `profile: --harness <h> [--model <m>] [--effort <e>]` only, so a profile cannot carry any additional axis forward to a spawn.
-- Neither consumer has any code path that runs an external command, reads a health signal, or observes an outage; the only condition inputs available are quota percentages from one `quota-axi` snapshot and the harness catalog.
-
-An outage is therefore invisible to the ladder in principle, not just unconfigured: a provider whose endpoint does not resolve can still report ample remaining quota. Adding a field would require a new config-executes-command surface plus a caching and failure policy across two validators, the resolver, `fm-spawn.sh`, and `docs/configuration.md`'s schema ownership - machinery beyond the scope of a single-point fix.
-
-What the existing schema already expresses is a quota floor (`floor.scope`, `floor.min_percent`, rule-level and profile-level), which falls through or escalates on a *measured* shortfall. That remains the right declaration for capacity, and it is orthogonal to reachability.
+The authoritative description of dispatch schema limits and quota-floor semantics is [`docs/configuration.md`](../configuration.md).
+This probe supplies reachability evidence only; routing that evidence to an eligible candidate remains a separate judgment owned by `.agents/skills/quota-array-dispatch/SKILL.md`.
