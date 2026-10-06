@@ -3463,6 +3463,8 @@ test_dialog_name_survives_seen_terminal_status() {
   [ "$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)" = 'Claude background-task exit picker' ] \
     || fail "a seen terminal dialog stale did not keep the name: $(cat "$state/.subsuper-dialog-$key" 2>/dev/null)"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a first-sight dialog stale escalated instead of waiting: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "a seen terminal dialog stale did not record the persistence marker"
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"

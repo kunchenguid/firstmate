@@ -1726,20 +1726,25 @@ clear_stale_hash_tracking() {  # <window-key>
 # not show the picker removes it, so a closed picker is not escalated.
 # Both this and the second-mate cleanup below run on every poll that misses,
 # so each tests for its file first and forks nothing when there is none.
-clear_dialog_suffix() {  # <task>
+# A worker's next stale wake lets the daemon settle its own persistence marker.
+# A second mate returns to the idle exemption and sends no such wake, so its
+# marker goes with the name, or housekeeping would age a healthy idle mate.
+clear_dialog_suffix() {  # <task> [secondmate]
   local key=${1-}
   [ -n "$key" ] || return 0
   key=${key//:/_}
   key=${key//\//_}
   key=${key//./_}
-  [ ! -e "$STATE/.subsuper-dialog-$key" ] || rm -f "$STATE/.subsuper-dialog-$key"
+  [ -e "$STATE/.subsuper-dialog-$key" ] || return 0
+  rm -f "$STATE/.subsuper-dialog-$key"
+  [ "${2-}" != secondmate ] || rm -f "$STATE/.subsuper-stale-$key"
 }
 
 # Bookkeeping a second mate gains only while the picker is positively visible.
 # A miss returns the mate to the idle exemption, so those files must not remain.
 # The stale path writes the hash file first, so its absence means none exist.
 clear_secondmate_dialog_bookkeeping() {  # <window-key> <task>
-  clear_dialog_suffix "$2"
+  clear_dialog_suffix "$2" secondmate
   [ -e "$STATE/.hash-$1" ] || return 0
   clear_stale_hash_tracking "$1"
   rm -f "$STATE/.hash-$1" "$STATE/.count-$1"

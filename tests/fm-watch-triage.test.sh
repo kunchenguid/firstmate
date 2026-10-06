@@ -6927,7 +6927,51 @@ test_secondmate_exit_picker_is_reported_then_cleared() {
   pass "a second mate on the exit picker is reported, and the bookkeeping is cleared when it closes"
 }
 
+# In away mode the daemon self-handles the named wake and leaves two files
+# under the task key: the saved name and the persistence marker housekeeping
+# ages. Those files are the daemon's persisted state, written here as it
+# writes them. A mate back in the idle exemption sends no further stale wake,
+# so the miss poll has to take the marker with the name.
+test_secondmate_closed_picker_drops_away_persistence_marker() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case secondmate-exit-picker-away); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-picker-away-mate"
+  write_exit_picker "$capture_file"
+  key=$(prime_picker_window "$state" awaymate "$window" secondmate "$capture_file" 'working: the parent supervises this secondmate')
+  date '+%s' > "$state/.afk"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a second mate on the exit picker stayed quiet in away mode: $(cat "$out")"
+  grep -F "stale: $window (blocked-on-prompt: Claude background-task exit picker)" "$out" >/dev/null \
+    || fail "the away-mode second mate wake did not name the dialog: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the away-mode second mate picker wake"
+  printf '%s' 'Claude background-task exit picker' > "$state/.subsuper-dialog-awaymate"
+  date '+%s' > "$state/.subsuper-stale-awaymate"
+  printf 'idle while the parent supervises\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an away-mode second mate off the picker exited: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an away-mode second mate off the picker still woke: $(cat "$out")"
+  [ ! -e "$state/.subsuper-dialog-awaymate" ] || fail "the closed picker left the saved dialog name"
+  [ ! -e "$state/.subsuper-stale-awaymate" ] \
+    || fail "the closed picker left the away persistence marker on an idle second mate"
+  [ ! -e "$state/.hash-$key" ] || fail "the closed picker left the away-mode second mate hash"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a second mate whose picker closes in away mode keeps no away persistence marker"
+}
+
 test_exit_picker_stale_names_the_dialog
 test_exit_picker_wedge_keeps_climbing
 test_quoted_exit_picker_stays_ordinary_stale
 test_secondmate_exit_picker_is_reported_then_cleared
+test_secondmate_closed_picker_drops_away_persistence_marker
