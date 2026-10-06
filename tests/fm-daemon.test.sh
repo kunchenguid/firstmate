@@ -3440,15 +3440,13 @@ test_dialog_name_after_demand_deep_inspection_still_escalates() {
 
 # /exit on a finished worker with a background shell is what opens the picker,
 # so the status is already `done:` and already escalated when the stale wake
-# arrives. That worker is still parked, and the picker has to be reported.
-test_dialog_name_survives_seen_terminal_status() {
-  local dir state fakebin win pane key reason
+# arrives. That wake self-handles exactly as a plain stale does: no persistence
+# marker, and no later wedge.
+test_seen_terminal_dialog_stale_clears_like_a_plain_stale() {
+  local dir state win key reason
   dir=$(make_supercase dialog-name-terminal)
   state="$dir/state"
-  fakebin="$dir/fakebin"
   win="sess:fm-picker-done"
-  pane="$dir/pane.txt"
-  printf 'idle on the picker\n' > "$pane"
   fm_write_meta "$state/picker-done.meta" "window=$win" "backend=tmux"
   printf 'done: shipped the change\n' > "$state/picker-done.status"
   seen_through "$state" picker-done
@@ -3460,26 +3458,13 @@ test_dialog_name_survives_seen_terminal_status() {
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
   grep -F 'stale + terminal (already escalated by signal)' "$dir/daemon.log" >/dev/null \
     || fail "the fixture did not take the seen terminal self-handle path: $(cat "$dir/daemon.log")"
-  [ "$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)" = 'Claude background-task exit picker' ] \
-    || fail "a seen terminal dialog stale did not keep the name: $(cat "$state/.subsuper-dialog-$key" 2>/dev/null)"
-  [ ! -s "$state/.subsuper-escalations" ] || fail "a first-sight dialog stale escalated instead of waiting: $(cat "$state/.subsuper-escalations")"
-  [ -e "$state/.subsuper-stale-$key" ] \
-    || fail "a seen terminal dialog stale did not record the persistence marker"
-  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
-  grep -F 'blocked-on-prompt: Claude background-task exit picker' "$state/.subsuper-escalations" >/dev/null \
-    || fail "the away escalation for a seen terminal status dropped the dialog name: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
-  grep -F "$win" "$state/.subsuper-escalations" >/dev/null \
-    || fail "the away escalation did not name the window: $(cat "$state/.subsuper-escalations")"
-  : > "$state/.subsuper-escalations"
-  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
-  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
-  [ ! -e "$state/.subsuper-stale-$key" ] \
-    || fail "a closed picker left a wedge marker on a finished worker"
   [ ! -e "$state/.subsuper-dialog-$key" ] \
-    || fail "a closed picker left the saved dialog name on a finished worker"
-  pass "a dialog name on a seen terminal status reaches the away escalation"
+    || fail "a seen terminal dialog stale kept the saved name"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "a seen terminal dialog stale recorded a wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a seen terminal dialog stale escalated: $(cat "$state/.subsuper-escalations")"
+  pass "a seen terminal status on the picker clears like a plain stale"
 }
 
 # The first stale wake after a new `done:` escalates from the status log, and
@@ -3500,6 +3485,6 @@ test_dialog_name_joins_unseen_status_escalation() {
 }
 
 test_dialog_name_survives_away_self_handle
-test_dialog_name_survives_seen_terminal_status
+test_seen_terminal_dialog_stale_clears_like_a_plain_stale
 test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates

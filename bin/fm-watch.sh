@@ -1723,13 +1723,10 @@ clear_stale_hash_tracking() {  # <window-key>
 
 # The away daemon copies a dialog name off a self-handled stale wake into this
 # file, keyed the same way as its persistence marker. A later poll that does
-# not show the picker removes it, so a closed picker is not escalated.
-# Both this and the second-mate cleanup below run on every poll that misses,
-# so each tests for its file first and forks nothing when there is none.
-# A worker's next stale wake lets the daemon settle its own persistence marker.
-# A second mate returns to the idle exemption and sends no such wake, so its
-# marker goes with the name, or housekeeping would age a healthy idle mate.
-clear_dialog_suffix() {  # <task> [secondmate]
+# not show the picker removes it, so a closed picker is not named on the wedge
+# that marker still ages toward. The test for the file runs first and forks
+# nothing when there is none.
+clear_dialog_suffix() {  # <task>
   local key=${1-}
   [ -n "$key" ] || return 0
   key=${key//:/_}
@@ -1737,17 +1734,6 @@ clear_dialog_suffix() {  # <task> [secondmate]
   key=${key//./_}
   [ -e "$STATE/.subsuper-dialog-$key" ] || return 0
   rm -f "$STATE/.subsuper-dialog-$key"
-  [ "${2-}" != secondmate ] || rm -f "$STATE/.subsuper-stale-$key"
-}
-
-# Bookkeeping a second mate gains only while the picker is positively visible.
-# A miss returns the mate to the idle exemption, so those files must not remain.
-# The stale path writes the hash file first, so its absence means none exist.
-clear_secondmate_dialog_bookkeeping() {  # <window-key> <task>
-  clear_dialog_suffix "$2" secondmate
-  [ -e "$STATE/.hash-$1" ] || return 0
-  clear_stale_hash_tracking "$1"
-  rm -f "$STATE/.hash-$1" "$STATE/.count-$1"
 }
 
 # Name a blocking dialog on an existing stale reason. The name stays inside the
@@ -3055,31 +3041,20 @@ EOF
       clear_pause_tracking "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
-    # the pane-stale path only for a status-declared wait's bounded re-surface,
-    # or when this poll's capture positively shows the Claude background-task
-    # exit picker. A miss clears the hash, count, and stale bookkeeping that
-    # positive sight wrote. This gate reads the shared predicate rather than
-    # the pause verb alone so it includes a declared `captain-held` status. A
-    # hold recorded only in the backlog while the mate still says `working:`
-    # or `done:` is outside this guard: reaching it would require backlog reads
-    # for windows this gate deliberately skips, putting that read on the
-    # ordinary poll hot path. The picker check is one plain 40-line capture,
-    # the same read the stale path already takes, and a hit reuses those bytes.
-    # The matcher is defined in this shell by the fm-pending-reply-lib.sh
-    # source at the top of this file, which reaches fm-composer-lib.sh through
-    # fm-tmux-lib.sh. The capture runs in a subshell and loads nothing here.
-    dialog=
+    # the pane-stale path ONLY to serve a status-declared wait's bounded
+    # re-surface. This gate reads the shared predicate rather than the pause verb
+    # alone so it includes a declared `captain-held` status. A hold recorded only
+    # in the backlog while the mate still says `working:` or `done:` is outside
+    # this guard: reaching it would require backlog reads for windows this gate
+    # deliberately skips, putting that read on the ordinary poll hot path.
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
-      tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-      if ! dialog=$(fm_composer_blocking_dialog "$tail40"); then
-        clear_secondmate_dialog_bookkeeping "$key" "$task"
-        continue
-      fi
-    else
-      tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-      dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=
-      [ -n "$dialog" ] || clear_dialog_suffix "$task"
+      continue
     fi
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # The matcher is already defined in this shell. It reads the capture this
+    # poll already takes, and a miss drops a name the away daemon saved.
+    dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=
+    [ -n "$dialog" ] || clear_dialog_suffix "$task"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -3100,10 +3075,7 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        # A non-paused second mate only reaches here when the picker matched,
-        # and that sight uses the same stale path as any other window. A
-        # declared wait keeps this pause cadence, without the dialog name.
-        if [ "$kind" = secondmate ] && status_is_paused_or_captain_held "$last"; then
+        if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;

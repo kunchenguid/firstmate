@@ -523,10 +523,9 @@ unknown_wake_acknowledge_flushed() {  # <state> <buffer>
 # Marker:   state/.subsuper-stale-<key>   contains the epoch first seen idle.
 # Dialog:   state/.subsuper-dialog-<key>   the blocking-dialog name copied off a
 #           self-handled stale wake, so the persistence line can still say it.
-#           While it is named, a terminal status still ages the stale marker,
-#           because a worker parked on a dialog after `done:` is not finished.
-#           Removed with the stale marker, and by the watcher when the pane
-#           no longer shows the dialog.
+#           A terminal status still clears the stale marker, and this file goes
+#           with it. The watcher also removes it when the pane no longer shows
+#           the dialog.
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last reported file signature and
 #           classified byte offset, so failures and events do not re-fire while
@@ -1650,22 +1649,13 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
-  # A first-sight stale is self-handled. The name has to be copied aside here,
-  # because the distilled line does not keep the parenthetical and housekeeping
-  # builds the persistence line from the marker, not from this wake. A status
-  # escalation is built from the status log, so the name is added to it here.
-  if [ "$kind" = stale ] && [ -n "$dialog_name" ]; then
-    case "$action" in
-      self)
-        task=$(window_to_task "$arg" "$state")
-        printf '%s' "$dialog_name" > "$state/.subsuper-dialog-$(_stale_key "$task")" || return 1
-        ;;
-      escalate)
-        case "$distilled" in
-          *"blocked-on-prompt: $dialog_name"*) ;;
-          *) distilled="$distilled (blocked-on-prompt: $dialog_name)" ;;
-        esac
-        ;;
+  # A status escalation is built from the status log, which does not carry
+  # the parenthetical, so the name is added to that line here. A self-handled
+  # stale copies the name only when it keeps the persistence marker, below.
+  if [ "$kind" = stale ] && [ "$action" = escalate ] && [ -n "$dialog_name" ]; then
+    case "$distilled" in
+      *"blocked-on-prompt: $dialog_name"*) ;;
+      *) distilled="$distilled (blocked-on-prompt: $dialog_name)" ;;
     esac
   fi
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
@@ -1720,11 +1710,16 @@ handle_wake() {  # <reason> <state>
             esac
           fi
         fi
-        if [ "$_clear_wedge" = 1 ] && [ -z "$dialog_name" ]; then
+        if [ "$_clear_wedge" = 1 ]; then
           stale_marker_remove "$arg" "$state"
         else
           pause_marker_remove "$arg" "$state"
           stale_marker_record "$arg" "$state"
+          # The distilled line drops the parenthetical. Housekeeping builds the
+          # persistence line from this file, not from the wake it just absorbed.
+          if [ -n "$dialog_name" ]; then
+            printf '%s' "$dialog_name" > "$state/.subsuper-dialog-$(_stale_key "$task")" || return 1
+          fi
         fi
       fi
       log "self-handle: $reason -> $distilled"

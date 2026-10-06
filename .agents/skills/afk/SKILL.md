@@ -186,7 +186,8 @@ Classify each wake this way, applying the steering-inbox exception before status
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
   This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
   A stale detail that ends with `blocked-on-prompt:` and a dialog name means the pane shows that dialog, so the worker cannot continue until someone answers it.
-  The escalation keeps that name, whether it comes from the status log or from housekeeping, and a terminal status that was already reported still ages to the housekeeping escalation while the dialog is named.
+  An escalation this path already sends keeps that name, whether it comes from the status log or from housekeeping.
+  A terminal status that was already reported still clears the persistence marker, the same as a stale with no dialog name.
   A declared wait keeps the pause cadence and does not carry the name.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle.
