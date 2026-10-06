@@ -221,6 +221,10 @@ WATCH_HOME_EXISTED=0
 # (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# The park marker (state/<id>.parked): bin/fm-park-lib.sh owns the format and
+# the read rules; park_gate below applies it to the pane-staleness loop.
+# shellcheck source=bin/fm-park-lib.sh
+. "$SCRIPT_DIR/fm-park-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and its
 # away-or-quiet reading, which is all this watcher reads (away_record_present
@@ -1567,6 +1571,43 @@ busy_turn_over_age() {  # <task>
   progress="$STATE/$task.progress"
   if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+# A task firstmate parked on purpose (bin/fm-park.sh) is outside the pane-stale
+# path entirely: no declared-wait recheck and no possible-wedge aging, because
+# its stopped worker can never append the status line those rechecks age
+# against. Returns 0 when the loop must skip the task, after clearing any
+# bookkeeping a prior unparked life left behind. A marker that exists but cannot
+# be read is NOT treated as absent: it raises one stale wake per distinct bad
+# marker naming the problem, and the task then falls through to the ordinary
+# path so the noise the marker was meant to remove is visible rather than hidden.
+park_gate() {  # <window> <task> <window-key>
+  local win=$1 task=$2 key=$3 st=0 sig
+  [ -n "$task" ] || return 1
+  fm_park_status "$STATE" "$task" || st=$?
+  case "$st" in
+    0)
+      clear_pause_tracking "$key"
+      rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.park-bad-$key"
+      clear_write_tracking "$key"
+      triage_log "absorbed stale (parked by firstmate, never rechecked): $win"
+      return 0
+      ;;
+    2)
+      sig=$(stat_mtime "$(fm_park_path "$STATE" "$task")" || true)
+      sig="$sig:$FM_PARK_ERR"
+      if [ "$(cat "$STATE/.park-bad-$key" 2>/dev/null || true)" != "$sig" ]; then
+        fm_wake_append stale "$win" "stale: $win (park marker unreadable, not treated as absent: $FM_PARK_ERR; repair it with bin/fm-park.sh park|unpark)" || exit 1
+        printf '%s' "$sig" > "$STATE/.park-bad-$key"
+        wake "stale: $win (park marker unreadable, not treated as absent: $FM_PARK_ERR; repair it with bin/fm-park.sh park|unpark)"
+      fi
+      return 1
+      ;;
+    *)
+      rm -f "$STATE/.park-bad-$key"
+      return 1
+      ;;
+  esac
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -3002,6 +3043,7 @@ EOF
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
+    park_gate "$w" "$task" "$key" && continue
     last=$(status_declared_wait_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"

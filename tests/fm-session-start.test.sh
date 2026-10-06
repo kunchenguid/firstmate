@@ -1210,6 +1210,42 @@ EOF
   pass "status tail lines are capped with a truncation marker while the full log stays reachable"
 }
 
+test_parked_work_is_listed_with_its_reason() {
+  local rec root home fakebin out
+  rec=$(new_world parked-work)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'kind=ship\n' > "$home/state/task-held.meta"
+  printf 'paused: waiting on firstmate\n' > "$home/state/task-held.status"
+  printf 'parked [at=1700000000]: queued behind the one-worker rule\n' > "$home/state/task-held.parked"
+  chmod 0700 "$home/state/task-held.parked"
+  printf 'kind=ship\n' > "$home/state/task-bad.meta"
+  printf 'garbage\n' > "$home/state/task-bad.parked"
+  chmod 0700 "$home/state/task-bad.parked"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Parked work" "digest did not label parked work"
+  assert_contains "$out" "task-held: parked at 1700000000 - queued behind the one-worker rule" "digest did not list the parked task with its reason"
+  assert_contains "$out" "task-bad: PARK MARKER UNREADABLE" "digest treated a malformed park marker as absent"
+  [ "$(cat "$home/state/task-held.status")" = 'paused: waiting on firstmate' ] || fail "digest rewrote the worker's status file"
+
+  rec=$(new_world no-parked-work)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "Parked work" "digest listed a parked section with nothing parked"
+
+  pass "the digest lists parked tasks with their reasons and flags an unreadable marker"
+}
+
 test_orphan_status_logs_are_printed() {
   local rec root home fakebin out matched_count orphan_count
   rec=$(new_world orphan-status)
@@ -3052,6 +3088,7 @@ test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_parked_work_is_listed_with_its_reason
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon

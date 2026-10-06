@@ -621,6 +621,8 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-park-lib.sh
+. "$SCRIPT_DIR/fm-park-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -5564,6 +5566,10 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+
+# A successful spawn or relaunch ends any park (bin/fm-park.sh), so a task that
+# comes back cannot stay invisible to supervision.
+fm_park_clear "$STATE" "$ID" || echo "warning: task $ID is running again but its park marker $(fm_park_path "$STATE" "$ID") could not be removed; remove it with bin/fm-park.sh unpark $ID or the task stays exempt from supervision rechecks" >&2
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

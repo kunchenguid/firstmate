@@ -2509,6 +2509,95 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# A task firstmate parked on purpose (bin/fm-park.sh) raises neither the declared-wait
+# recheck nor possible-wedge aging, however old its worker's last status line is. The
+# same task without the marker is rechecked as before, so the marker is the only
+# thing that changed; a marker that cannot be read raises an alarm instead of
+# being treated as absent.
+park_watch_case() {  # <name> <status-line>: sets the PK_* globals, leaves the watcher unstarted
+  PK_DIR=$(make_case "$1"); PK_STATE="$PK_DIR/state"; PK_FAKEBIN="$PK_DIR/fakebin"
+  PK_OUT="$PK_DIR/watch.out"; PK_CAP="$PK_DIR/pane.txt"; PK_WIN="test:fm-held"
+  local statusf="$PK_STATE/held.status" back
+  printf 'idle, holding' > "$PK_CAP"
+  printf 'window=%s\nkind=ship\n' "$PK_WIN" > "$PK_STATE/held.meta"
+  printf '%s\n' "$2" > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  printf '%s' "$(seen_sig "$statusf")" > "$PK_STATE/.seen-held_status"
+  PK_KEY=$(printf '%s' "$PK_WIN" | tr ':/.' '___')
+  printf '%s' "$(hash_text "idle, holding")" > "$PK_STATE/.hash-$PK_KEY"
+  printf '1\n' > "$PK_STATE/.count-$PK_KEY"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding'
+}
+
+park_watch_start() {
+  PATH="$PK_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$PK_WIN" FM_FAKE_TMUX_CAPTURE="$PK_CAP" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_STATE_OVERRIDE="$PK_STATE" FM_CREW_STATE_BIN="$PK_FAKEBIN/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$PK_OUT" &
+  PK_PID=$!
+}
+
+write_park_marker() {  # <state> <task> <line> [mode]
+  printf '%s\n' "$3" > "$1/$2.parked"
+  chmod "${4:-0700}" "$1/$2.parked"
+}
+
+test_parked_task_raises_no_declared_wait_recheck() {
+  local status_before
+  park_watch_case park-declared 'paused: waiting for firstmate to say go'
+  write_park_marker "$PK_STATE" held 'parked [at=1700000000]: queued behind the one-worker rule'
+  status_before=$(cat "$PK_STATE/held.status")
+  park_watch_start
+  wait_poll_cycle "$PK_STATE" "$PK_PID" || { reap "$PK_PID"; fail "watcher woke for a parked task's declared wait: $(cat "$PK_OUT")"; }
+  wait_poll_cycle "$PK_STATE" "$PK_PID" || { reap "$PK_PID"; fail "watcher woke for a parked task on a later poll: $(cat "$PK_OUT")"; }
+  reap "$PK_PID"
+  [ ! -s "$PK_OUT" ] || fail "parked task printed a wake: $(cat "$PK_OUT")"
+  [ ! -s "$PK_STATE/.wake-queue" ] || fail "parked task enqueued a wake"
+  [ ! -e "$PK_STATE/.paused-$PK_KEY" ] || fail "parked task was recorded as a declared pause"
+  [ "$(cat "$PK_STATE/held.status")" = "$status_before" ] || fail "the park path wrote to the worker's status file"
+  pass "a parked task raises no declared-wait recheck and leaves the worker's status file alone"
+}
+
+test_parked_task_raises_no_wedge_aging() {
+  park_watch_case park-wedge 'working: step three of the change'
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · nothing running'
+  write_park_marker "$PK_STATE" held 'parked [at=1700000000]: queued behind the one-worker rule'
+  park_watch_start
+  wait_poll_cycle "$PK_STATE" "$PK_PID" || { reap "$PK_PID"; fail "watcher woke for a parked task: $(cat "$PK_OUT")"; }
+  sleep 3
+  wait_poll_cycle "$PK_STATE" "$PK_PID" || { reap "$PK_PID"; fail "watcher aged a parked task into a wedge wake: $(cat "$PK_OUT")"; }
+  reap "$PK_PID"
+  [ ! -e "$PK_STATE/.stale-since-$PK_KEY" ] || fail "parked task started a wedge timer"
+  [ ! -s "$PK_STATE/.wake-queue" ] || fail "parked task enqueued a wedge wake"
+  pass "a parked task is never aged toward a possible-wedge wake"
+}
+
+test_unparked_task_is_rechecked_unchanged() {
+  park_watch_case park-control 'paused: waiting for firstmate to say go'
+  park_watch_start
+  wait_for_exit "$PK_PID" 100 || { reap "$PK_PID"; fail "an unparked declared wait no longer rechecks"; }
+  grep -F "awaiting external" "$PK_OUT" >/dev/null || fail "unparked recheck lost its declared-wait wording: $(cat "$PK_OUT")"
+  pass "without the marker a declared wait is rechecked exactly as before"
+}
+
+test_malformed_park_marker_is_refused_not_absent() {
+  local mode
+  for mode in content perms; do
+    park_watch_case "park-bad-$mode" 'paused: waiting for firstmate to say go'
+    if [ "$mode" = content ]; then
+      write_park_marker "$PK_STATE" held 'not a marker'
+    else
+      write_park_marker "$PK_STATE" held 'parked [at=1700000000]: reason' 0644
+    fi
+    park_watch_start
+    wait_for_exit "$PK_PID" 100 || { reap "$PK_PID"; fail "a $mode-malformed park marker was silently treated as absent"; }
+    grep -F "park marker unreadable" "$PK_OUT" >/dev/null || fail "$mode-malformed marker wake did not name the problem: $(cat "$PK_OUT")"
+  done
+  pass "a malformed or unsafe park marker raises a named alarm instead of being read as absent"
+}
+
 # Own background work is a declared wait using the same existing paused verb.
 # This intentionally keeps the first-sight alert, then uses the long cadence.
 # The backend/current-state fixtures are not live-harness evidence.
@@ -6698,6 +6787,10 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_parked_task_raises_no_declared_wait_recheck
+test_parked_task_raises_no_wedge_aging
+test_unparked_task_is_rechecked_unchanged
+test_malformed_park_marker_is_refused_not_absent
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_own_work_wait_keeps_first_alert_then_long_cadence
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

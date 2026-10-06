@@ -369,6 +369,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-park-lib.sh
+. "$SCRIPT_DIR/fm-park-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
@@ -923,6 +925,26 @@ for meta in "$STATE"/*.meta; do
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+
+# Parked work: tasks firstmate stopped on purpose (bin/fm-park.sh). They raise no
+# recheck wakes, so the digest is where they stay visible. A malformed marker is
+# printed as an error, never skipped as if it were absent.
+PARKED_FOUND=0
+for parked in "$STATE"/*.parked; do
+  [ -e "$parked" ] || [ -L "$parked" ] || continue
+  if [ "$PARKED_FOUND" -eq 0 ]; then
+    subsection "Parked work (state/*.parked: stopped on purpose, no rechecks until relaunched)"
+    PARKED_FOUND=1
+  fi
+  id=$(basename "$parked" .parked)
+  park_rc=0
+  fm_park_status "$STATE" "$id" || park_rc=$?
+  if [ "$park_rc" -eq 0 ]; then
+    printf '%s: parked at %s - %s\n' "$id" "$FM_PARK_AT" "$FM_PARK_REASON"
+  else
+    printf '%s: PARK MARKER UNREADABLE - %s (repair with bin/fm-park.sh park|unpark)\n' "$id" "${FM_PARK_ERR:-unreadable}"
+  fi
+done
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0

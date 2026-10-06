@@ -185,6 +185,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
+# The park marker (state/<id>.parked) owner: a parked task is never rechecked.
+# shellcheck source=bin/fm-park-lib.sh
+. "$FM_DAEMON_DIR/fm-park-lib.sh"
 # The away-posture record owner: while state/.afk-contract exists an item held
 # for the captain is never rechecked (the watcher applies the same rule).
 # shellcheck source=bin/fm-afk-contract.sh
@@ -1234,6 +1237,8 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
+    # Parked by firstmate (bin/fm-park.sh): no wedge aging, no recheck.
+    if fm_park_status "$state" "$task"; then rm -f "$marker"; continue; fi
     last=$(status_declared_wait_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
@@ -1275,6 +1280,8 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
+    # Parked by firstmate (bin/fm-park.sh): no declared-wait recheck.
+    if fm_park_status "$state" "$task"; then rm -f "$marker"; continue; fi
     last=$(status_declared_wait_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"

@@ -301,6 +301,10 @@ Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `
 Invoke the `/quiet` skill instead when the captain says `/quiet` or asks for quiet mode, or `state/.afk` already exists in quiet mode (`fm_afk_mode` in `bin/fm-wake-lib.sh`).
 Load `away-quiet-supervision` whenever either mode is invoked, either record exists, or a marked away-supervisor message arrives.
 
+### Parking a task
+
+To stop a worker on purpose and hold its work queued, run `bin/fm-park.sh park <id> --reason "..."` instead of appending to its status file; a parked task raises no rechecks and shows in the digest, and the next spawn or relaunch clears it.
+
 ### Stuck-worker trigger
 
 For the full `stuck-crewmate-recovery` trigger, including a live worker claiming its no-mistakes pipeline is dead, unreachable, or timed out, follow that skill's description.
