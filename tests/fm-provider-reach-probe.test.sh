@@ -465,6 +465,47 @@ assert_not_contains "$out" "dns=fail" "an absent earlier entry is skipped, not r
 [ "$(grep -c . "$later_dir/pref.log")" = 1 ] || fail "expected exactly one resolver call, got: $(cat "$later_dir/pref.log")"
 assert_contains "$(cat "$later_dir/pref.log")" "$PROBE_HOST" "the tried resolver was handed the probed authority"
 
+# --- resolver failures fall through to later candidates --------------------
+# A configured preference list means try the next installed resolver after a
+# timeout, non-zero exit, or SERVFAIL/REFUSED response. A valid no-address result
+# remains terminal, so this fixture also verifies that the second resolver ran
+# only for the error cases.
+for mode in servfail fail hang; do
+  tmp=$TMP_ROOT/resolver-fallback-$mode; new_case "$tmp"
+  cat > "$tmp/firstresolver" <<'SH'
+#!/usr/bin/env bash
+case "${FM_FAKE_FIRST_MODE:-}" in
+  servfail) printf 'status: SERVFAIL\n'; exit 0 ;;
+  fail) printf 'resolver failed\n'; exit 9 ;;
+  hang) sleep 30; exit 0 ;;
+esac
+SH
+  chmod +x "$tmp/firstresolver"
+  make_fake_dig "$tmp" "$tmp/second.log"
+  : > "$tmp/second.log"
+  out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_FIRST_MODE="$mode" FM_FAKE_DIG_MODE=address \
+    FM_PROVIDER_REACH_DNS_TOOL='firstresolver dig' FM_PROVIDER_REACH_PROBE_TIMEOUT=1 \
+    FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+  expect_code 0 "$rc" "a $mode first resolver falls through to a working candidate"
+  assert_contains "$out" "dns=ok" "a successful later resolver determines dns=ok after $mode"
+  assert_contains "$out" "result=reachable" "HTTP follows the successful fallback after $mode"
+  [ "$(grep -c . "$tmp/second.log")" = 1 ] || fail "the second resolver did not run after $mode: $(cat "$tmp/second.log")"
+done
+
+tmp=$TMP_ROOT/resolver-fallback-nxdomain; new_case "$tmp"
+cat > "$tmp/firstresolver" <<'SH'
+#!/usr/bin/env bash
+printf 'status: NXDOMAIN\nno answer\n'
+SH
+chmod +x "$tmp/firstresolver"
+make_fake_dig "$tmp" "$tmp/second.log"
+: > "$tmp/second.log"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=address \
+  FM_PROVIDER_REACH_DNS_TOOL='firstresolver dig' "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 20 "$rc" "a valid NXDOMAIN answer is terminal"
+assert_contains "$out" "dns=nxdomain" "NXDOMAIN remains terminal with a later candidate configured"
+[ ! -s "$tmp/second.log" ] || fail "the second resolver ran after terminal NXDOMAIN: $(cat "$tmp/second.log")"
+
 # --- every entry missing is disclosed as a skipped lookup -------------------
 # The same preference-list semantics, from the other end: when no listed entry is
 # installed, nothing was looked up, and that stays a disclosure rather than becoming
