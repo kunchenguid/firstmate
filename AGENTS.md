@@ -230,6 +230,8 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
+`bin/fm-dod-lib.sh` owns whether and how a worker may merge its own task PR, including the mandatory post-merge verification and rollback rule that follows.
+
 Delivery mode and `yolo` are orthogonal.
 `yolo` governs merge authority only: with it off, the captain approves every PR merge and every local-only landing; with it on, firstmate merges green, in-scope work itself.
 Never merge a red PR, or one with a required check that has not reported, under either setting unless a current explicit captain instruction names the GitHub check to waive; `bin/fm-pr-merge.sh`'s header owns the attended-only waiver mechanics and remaining guards.
