@@ -635,6 +635,31 @@ test_optional_event_time() {
   [ -n "$(status_open_decisions "$dir/state/task.status")" ] || fail "time cleared an open decision"
   printf '%s\n' 'resolved [at=1700000001] [key=timed]: answered' >> "$dir/state/task.status"
   [ -z "$(status_open_decisions "$dir/state/task.status")" ] || fail "timed resolution did not close decision"
+  # The parent publisher uses the same retry check, and a resolve does not
+  # make a published line new: a keyed blocker and a note each stay once.
+  line='blocked [key=remote-reply-continuity-ios]: remote reply continuity broke for ios (truncated)'
+  : > "$dir/state/episode.status"
+  fm_parent_channel_append_once "$dir/state/episode.status" "$line" \
+    || fail "first continuity append failed"
+  fm_parent_channel_append_once "$dir/state/episode.status" "$line" \
+    || fail "open continuity retry failed"
+  [ "$(wc -l < "$dir/state/episode.status")" -eq 1 ] \
+    || fail "an open continuity blocker was duplicated"
+  printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator rebased the mirror' \
+    >> "$dir/state/episode.status"
+  fm_parent_channel_append_once "$dir/state/episode.status" "$line" \
+    || fail "continuity retry after the resolve failed"
+  [ "$(wc -l < "$dir/state/episode.status")" -eq 2 ] \
+    || fail "a resolve made a recorded continuity blocker append again"
+  [ -z "$(status_open_decisions "$dir/state/episode.status")" ] \
+    || fail "a continuity retry reopened the resolved decision"
+  line='note: remote document did not transfer for ios: data/reply/missing.md - absent'
+  printf '%s\n' "$line" > "$dir/state/note.status"
+  printf '%s\n' 'resolved: closed the default decision' >> "$dir/state/note.status"
+  fm_parent_channel_append_once "$dir/state/note.status" "$line" \
+    || fail "note retry failed"
+  [ "$(wc -l < "$dir/state/note.status")" -eq 2 ] \
+    || fail "a resolve duplicated a note"
   pass "optional event time preserves parsing and legacy unknown time"
 }
 
