@@ -607,11 +607,6 @@ clear_retired_meta_busy_gen() {  # <gen>
     fm_lock_release "$lock"
     return 1
   }
-  chmod --reference="$meta" "$tmp" || chmod 0600 "$tmp" || {
-    rm -f "$tmp"
-    fm_lock_release "$lock"
-    return 1
-  }
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     rm -f "$tmp"
     fm_lock_release "$lock"
@@ -628,9 +623,6 @@ retire_busy_incarnation() {
       && "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$gen" >/dev/null 2>&1; then
       clear_retired_meta_busy_gen "$gen" || true
     fi
-  else
-    gen=$(fm_meta_get "$STATE/$ID.meta" busy_gen)
-    [ -z "$gen" ] || clear_retired_meta_busy_gen "$gen" || true
   fi
 }
 
