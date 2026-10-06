@@ -111,6 +111,7 @@ case "\${FM_FAKE_DIG_MODE:-address}" in
     ';; SERVER: 100.100.100.100#53(100.100.100.100)' \
     'nodata.example.invalid. 300 IN A 1.2.3.4' ; exit 0 ;;
   ipv6) printf '2001:db8::1\n'; exit 0 ;;
+  a-noanswer) if [ "\${2:-}" = AAAA ]; then printf '2001:db8::1\n'; else printf ';; no A records\n'; fi; exit 0 ;;
   fail) printf 'connection failed\n'; exit 9 ;;
   hang) sleep 30; printf 'ok\n'; exit 0 ;;
   *) printf '1.2.3.4\n'; exit 0 ;;
@@ -376,10 +377,12 @@ assert_contains "$out" "dns=ok" "a real address record is still recognized"
 assert_contains "$out" "dns_detail=nodata.example.invalid. 300 IN A 1.2.3.4" "the reported detail is the answer record, not the banner"
 
 tmp=$TMP_ROOT/ipv6-address; new_case "$tmp"
-out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=ipv6 FM_PROVIDER_REACH_DNS_TOOL=dig \
-  FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 0 "$rc" "IPv6 address answer proceeds to HTTP"
-assert_contains "$out" "dns=ok" "an IPv6 address record is recognized"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=a-noanswer FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "an AAAA-only answer proceeds to HTTP"
+assert_contains "$out" "dns=ok" "an AAAA-only name is not classified as no-address"
+assert_not_contains "$out" "dns=nxdomain" "an AAAA-only name is never reported as NXDOMAIN"
+assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "an AAAA-only name still reaches the HTTP probe"
 
 # --- the resolver sees only the host, never a port or an IP literal ---------
 # `--host` admits an optional port and IP-literal authorities. The resolver takes
@@ -610,6 +613,32 @@ expect_code 20 "$rc" "the direct connection to a closed loopback port is unreach
 assert_contains "$out" "http=000" "the probe completed its own request without the user proxy"
 [ ! -s "$probe_log" ] || fail "curl honored the user .curlrc proxy despite -q: $(cat "$probe_log")"
 
+# --- proxy environment is explicit, credential-safe, and reported ------------
+proxy_env=(-u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy)
+for proxy_name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
+  tmp=$TMP_ROOT/proxy-credential-$proxy_name; new_case "$tmp"
+  out=$(env "${proxy_env[@]}" "$proxy_name=http://private:secret@proxy.example:8080" \
+    PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
+    FM_FAKE_CURL_LOG="$tmp/calls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+  expect_code 2 "$rc" "$proxy_name credentials are refused"
+  assert_contains "$out" "proxy URL carries credentials" "$proxy_name refusal uses fixed safe text"
+  assert_not_contains "$out" "private:secret" "$proxy_name credentials are never echoed"
+  [ ! -s "$tmp/calls.log" ] || fail "$proxy_name was not refused before curl ran: $(cat "$tmp/calls.log")"
+done
+
+tmp=$TMP_ROOT/proxy-safe; new_case "$tmp"
+out=$(env "${proxy_env[@]}" https_proxy='http://proxy.example:8080' \
+  PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
+  FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "credential-free proxy remains allowed"
+assert_contains "$out" "route=via-proxy" "proxied result is labeled"
+
+tmp=$TMP_ROOT/direct; new_case "$tmp"
+out=$(env "${proxy_env[@]}" PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_DIG_MODE=address FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "proxy-free direct request completes"
+assert_contains "$out" "route=direct" "direct result is labeled"
+
 # --- unknown and malformed input are refusals, never silent guesses ---------
 tmp=$TMP_ROOT/unknown-target; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig "$SCRIPT" nosuchprovider 2>&1); rc=$?
@@ -643,6 +672,15 @@ out=$(PATH="$tmp:$BASE_PATH" "$SCRIPT" --host "$PROBE_HOST" extra 2>&1); rc=$?
 expect_code 2 "$rc" "an unexpected extra argument is refused"
 
 # --- an authority-less --host is its own verdict, never a guess --------------
+tmp=$TMP_ROOT/full-url; new_case "$tmp"
+make_fake_dig "$tmp" "$tmp/dig.log"
+out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" --host 'https://example.invalid/path' 2>&1); rc=$?
+expect_code 2 "$rc" "a full URL is refused"
+assert_contains "$out" "must be a host[:port][/path], not a URL" "full URL refusal explains the expected form"
+[ ! -s "$tmp/dig.log" ] || fail "a full URL reached the resolver"
+[ ! -s "$tmp/urls.log" ] || fail "a full URL reached curl"
+
 tmp=$TMP_ROOT/host-no-authority; new_case "$tmp"
 make_fake_dig "$tmp" "$tmp/dig.log"
 out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
