@@ -3704,6 +3704,7 @@ else
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    HERDR_FRESH_PROJECTION=0
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -3721,7 +3722,13 @@ else
         fi
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
-        if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+        if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
+          fm_backend_herdr_projection_retry_fresh_safe \
+            "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME"; then
+          rm -f "$HERDR_PRESENTATION_JOURNAL" || exit 1
+          spawn_herdr_presentation_order_lock_release
+          HERDR_FRESH_PROJECTION=1
+        elif [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
@@ -3750,6 +3757,9 @@ else
           spawn_herdr_presentation_order_lock_release
         fi
       elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+        HERDR_FRESH_PROJECTION=1
+      fi
+      if [ "$HERDR_FRESH_PROJECTION" = 1 ]; then
         # Session lock path resolution and exact parent binding both need a
         # live named-session socket before journal publication.
         if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then

@@ -2986,6 +2986,34 @@ EOF
   return 0
 }
 
+# A metadata-free retry may start a fresh projection only after the exact
+# version 2 workspace has disappeared. The journal's home and session must
+# still match, its original parent must remain exact, and no workspace may
+# carry its token. A renamed bound workspace or an unreadable list stays
+# quarantined for the ordinary flat fallback. This check never mutates Herdr.
+fm_backend_herdr_projection_retry_fresh_safe() {  # <session> <journal> <task-id> <home>
+  local session=$1 journal=$2 id=$3 home=$4 home_id list
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || return 1
+  home_id=$(fm_backend_herdr_projection_home_identity "$home") || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$home_id" ] || return 1
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e \
+    --arg bound "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" \
+    --arg parent "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+    --arg parent_label "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
+    --arg suffix " · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" '
+      (.result.workspaces | type) == "array"
+      and all(.result.workspaces[]; type == "object"
+        and (.workspace_id | type) == "string" and .workspace_id != ""
+        and (.label | type) == "string")
+      and ([.result.workspaces[] | select(.workspace_id == $bound)] | length) == 0
+      and ([.result.workspaces[] | select(.label | endswith($suffix))] | length) == 0
+      and ([.result.workspaces[] | select(.workspace_id == $parent and .label == $parent_label)] | length) == 1
+    ' >/dev/null 2>&1
+}
+
 # fm_backend_herdr_projection_endpoint_matches_journal: read-only correlation
 # for retiring a successful projection journal after normal exact-pane
 # teardown.

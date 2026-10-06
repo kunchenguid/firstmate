@@ -247,7 +247,7 @@ An unconverged opt-out keeps the default projection in that home until convergen
 Presentation is a best-effort visual projection, never task ownership or lifecycle authority.
 A presentation journal is the per-task record in this home's `state/` that binds a task to its projected workspace.
 
-Only a fresh task with neither metadata nor an existing presentation journal is eligible for projected creation.
+Only a task with neither metadata nor an unresolved presentation journal is eligible for projected creation.
 Creation proceeds in this order:
 
 1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
@@ -361,8 +361,11 @@ Once the exact pane is confirmed gone, teardown retires the task's own journal w
 ### Restart recovery
 
 Recovery is deliberately conservative and presentation-only.
-An existing journal suppresses another projected create.
+An existing journal suppresses another projected create until recovery proves it can safely retire a failed launch's stale binding.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
+
+A metadata-free retry may retire its own version 2 journal and create a new projection when the bound workspace is gone, no workspace carries its token, the physical home and named session match, and the original parent still has its exact id and label.
+An unreadable workspace list, a renamed bound workspace, or an unverified token match keeps the journal and uses the ordinary flat fallback without touching that workspace.
 
 A same-identity version 2 binding may replace one exact agent-free restart husk in place.
 A husk is a restored same-labeled tab with a missing pane or no registered agent, as [Restart and liveness behavior](#restart-and-liveness-behavior) describes.
@@ -465,7 +468,7 @@ Any of these preserves the candidate and lets session startup continue with at m
   Session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
-- Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
+- Regaining a dedicated space after a task has already launched flat requires stopping that task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
 - The visible token is only a restart-stable correlator and never substitutes for the exact binding.
 
 ### Presentation tests
@@ -473,6 +476,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 | Test | What it covers |
 | --- | --- |
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
+| `tests/fm-backend-herdr-presentation-retry-e2e.test.sh` | Failed-fetch retry creates a new projection only after the bound workspace is gone; token collisions and renamed bound workspaces remain untouched. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
