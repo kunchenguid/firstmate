@@ -147,8 +147,6 @@ JS
     return 0
     ;;
   esac
-  # The measured case: comm does not reach the interpreter arm, so ancestry
-  # cannot see the bundle and the marker is the only detection path.
   cat > "$dir/gemini" <<'JS'
 const { spawnSync } = require('child_process');
 const env = { ...process.env };
@@ -157,11 +155,31 @@ for (const k of ['GEMINI_CLI', 'CLAUDECODE', 'CURSOR_AGENT', 'CURSOR_INVOKED_AS'
 const r = spawnSync(process.env.FM_HARNESS_BIN, { env, encoding: 'utf8' });
 process.stdout.write(r.stdout || '');
 JS
-  out=$(FM_HARNESS_BIN="$HARNESS" node "$dir/gemini" 2>/dev/null | tr -d '\n')
+  # The measured case: the installed bundle's comm does not reach the
+  # interpreter arm, so ancestry cannot see the bundle and the marker is the
+  # only detection path. Pin that shape HERMETICALLY: hosts differ in how node
+  # names its main thread (MainThread, node-MainThread, ...), and a
+  # node-prefixed comm would legitimately re-enter the `node*` interpreter arm
+  # and detect the fixture by its script path. A fake ps reports comm=
+  # MainThread for every queried pid - exactly the measured gemini-cli shape -
+  # while ppid= and args= delegate to the real ps so the parent chain stays
+  # real. Host thread naming can no longer flip the verdict.
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-bundle")
+  real_ps=$(command -v ps)
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+# comm= is pinned to the measured bundle shape; everything else delegates.
+case "\$*" in
+  *comm=*) printf '%s\n' 'MainThread'; exit 0 ;;
+esac
+exec "$PS_BIN" "\$@"
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HARNESS_BIN="$HARNESS" PS_BIN="$real_ps" PATH="$fakebin:$PATH" node "$dir/gemini" 2>/dev/null | tr -d '\n')
   [ "$out" != gemini ] \
-    || fail "node reports comm=$comm here, so ancestry must not be claiming gemini; got '$out'"
+    || fail "with the bundle's measured comm=MainThread shape pinned, ancestry must not be claiming gemini; got '$out'"
   # And the marker closes exactly that gap on the same process shape.
-  out=$(FM_HARNESS_BIN="$HARNESS" GEMINI_CLI=1 node -e '
+  out=$(FM_HARNESS_BIN="$HARNESS" PS_BIN="$real_ps" PATH="$fakebin:$PATH" GEMINI_CLI=1 node -e '
 const { spawnSync } = require("child_process");
 const r = spawnSync(process.env.FM_HARNESS_BIN, { encoding: "utf8" });
 process.stdout.write(r.stdout || "");' 2>/dev/null | tr -d '\n')

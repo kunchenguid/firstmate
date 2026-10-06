@@ -74,7 +74,7 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 # must join a tier, and a job-level value outside these tiers is exactly the
 # one-off number the policy removed.
 FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate'
-NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
+NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial tests-beads macos-stock-bash'
 HEAVY_TIER_JOBS='tests-herdr'
 
 # Print the one timeout every listed job shares; fail on any disagreement.
@@ -249,7 +249,28 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+# The published tasks-axi is markdown-only, so the beads-backend suites must
+# not gate: the required serial lane opts out with FM_LIVE_BEADS=0, and the
+# non-gating tests-beads job runs them against a beads-capable tasks-axi, where
+# a missing backend is still a hard failure.
+test_beads_suites_run_only_in_the_optional_lane() {
+  ruby -ryaml - "$CI_WORKFLOW" <<'RUBY' || fail "beads suites are not confined to the optional lane"
+jobs = YAML.load_file(ARGV[0]).fetch("jobs")
+serial_env = jobs.fetch("tests-portable-serial").fetch("steps").map { |s| s["env"] || {} }
+raise "required serial lane does not opt out of the beads suites" unless serial_env.any? { |e| e["FM_LIVE_BEADS"].to_s == "0" }
+beads = jobs.fetch("tests-beads")
+raise "tests-beads must be non-gating" unless beads["continue-on-error"] == true
+commands = beads.fetch("steps").flat_map { |s| s["run"].to_s.lines.map(&:strip) }
+%w[tests/fm-beads-actor.test.sh tests/fm-stale-sweep.test.sh].each do |suite|
+  raise "tests-beads does not run #{suite}" unless commands.include?("bash #{suite}")
+end
+raise "tests-beads must not opt out of the beads backend" if beads.fetch("steps").any? { |s| (s["env"] || {}).key?("FM_LIVE_BEADS") }
+RUBY
+  pass "beads-backend suites run only in the non-gating tests-beads lane"
+}
+
 test_ci_matrices_match_executable_partitions
+test_beads_suites_run_only_in_the_optional_lane
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_are_never_cancelled

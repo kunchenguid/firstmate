@@ -213,6 +213,16 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # The stale-sweep suite drives a real scratch Beads graph through the
+      # real bd 1.2.x CLI; without bd every fixture row fails to create and
+      # the suite fails fast, so the binary is a required serial-lane tool.
+      # @beads/bd's postinstall skips the binary download whenever CI is set,
+      # so unset it for the install (GitHub Actions always exports CI=true).
+      - name: Install beads (bd) for the stale-sweep suite
+        run: |
+          set -eu
+          env -u CI npm install -g @beads/bd
+          bd version
       # The Pi extension tests read the installed Pi package's own types and
       # runtime, so without it they gate-skip and pass silently. It is a public
       # npm package and needs no credential, so CI can hold the real thing.
@@ -228,6 +238,9 @@ jobs:
           # leaving a shard of the required lane unrun.
           FM_SERIAL_LANE: portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}
           FM_SERIAL_SHARD: ${{ matrix.shard }}
+          # Published tasks-axi is markdown-only; the beads-backend checks run
+          # in the non-gating tests-beads lane until a release carries beads.
+          FM_LIVE_BEADS: "0"
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
@@ -243,6 +256,43 @@ jobs:
           name: fm-test-timing-portable-serial-${{ matrix.shard }}
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.shard }}.json
           if-no-files-found: warn
+
+  # Non-gating: the beads-actor suite and the stale-sweep reclaim checks need a
+  # tasks-axi that operates the Beads backend, which no published release
+  # carries yet (upstream PR #53). Build that lineage at a pinned commit here;
+  # promote these suites back to the required lane once npm tasks-axi ships
+  # the beads backend.
+  tests-beads:
+    name: Behavior tests (Beads backend, optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install beads-capable tasks-axi
+        env:
+          TASKS_AXI_REPO: https://github.com/RooseveltAdvisors/tasks-axi.git
+          TASKS_AXI_SHA: 8c6f96eb58924fd094053eb1a57dd57c64655bbd
+        run: |
+          set -eu
+          src="$RUNNER_TEMP/tasks-axi-src"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 "$TASKS_AXI_REPO" "$TASKS_AXI_SHA"
+          git -C "$src" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$src" rev-parse HEAD)" = "$TASKS_AXI_SHA"
+          (cd "$src" && npm install --ignore-scripts --no-audit --no-fund && npm pack)
+          npm install -g "$src"/tasks-axi-*.tgz
+          tasks-axi --version
+      - name: Install beads (bd)
+        run: |
+          set -eu
+          env -u CI npm install -g @beads/bd@1.2.2
+          bd version
+      - name: Run the beads-backend suites
+        run: |
+          set -eu
+          bash tests/fm-stale-sweep.test.sh
+          bash tests/fm-beads-actor.test.sh
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
   # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
@@ -446,8 +496,8 @@ jobs:
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 18 ] || {
-            echo "::error::expected 18 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq 19 ] || {
+            echo "::error::expected 19 snapshot/fleet-view tests, got $snapshot_count"
             exit 1
           }
 
@@ -524,7 +574,7 @@ jobs:
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
-          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          tracked=$(git ls-files -- data state config projects .no-mistakes .tasks.toml)
           if [ -n "$tracked" ]; then
             echo "::error::Personal fleet paths are tracked in git:"
             printf '%s\n' "$tracked"

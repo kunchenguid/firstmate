@@ -176,6 +176,21 @@ fm_tasks_axi_backend() {  # <tasks-axi-working-directory>
   fm_tasks_axi_backend_resolve "$1"
 }
 
+# Export the audit-trail actor for firstmate's own backlog writes. bd
+# attributes every state change to $BEADS_ACTOR (bd --help: default is
+# $BEADS_ACTOR, git user.name, then $USER), which collapses a whole fleet into
+# one actor in the shared Beads graph, and tasks-axi's beads backend shells
+# out to bd. Firstmate records itself as firstmate@<basename of FM_HOME>
+# unless a caller already exported an explicit actor: bin/fm-spawn.sh exports
+# the worker's task id (the registered secondmate name for a --secondmate
+# spawn) so the dispatch claim, the worker's pane, and everything the worker
+# claims, holds, or closes carry who did it.
+fm_tasks_axi_export_actor() {
+  [ -n "${BEADS_ACTOR:-}" ] && return 0
+  BEADS_ACTOR="firstmate@$(basename "${FM_HOME:-firstmate}")"
+  export BEADS_ACTOR
+}
+
 fm_backlog_backend_value() {
   local config_dir=$1 backend_file value
   backend_file="$config_dir/backlog-backend"

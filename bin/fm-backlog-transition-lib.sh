@@ -35,7 +35,9 @@
 # because `--file` would override the adapter's own workspace path. The parent of
 # the data directory is the addressing root rather than FM_HOME, so a home whose
 # data directory is relocated keeps its backlog and its archive together. A root
-# with no `.tasks.toml` gets tasks-axi's built-in defaults.
+# with no `.tasks.toml` gets tasks-axi's built-in defaults. Selecting markdown
+# through a `.tasks.toml` does not waive the file: the selector says which
+# backend, not where its store lives.
 # bin/fm-tasks-axi-lib.sh owns backend precedence and configuration failures.
 #
 # CRASH RECOVERY. Only teardown needs a durable record: it removes the meta and
@@ -63,6 +65,7 @@ FM_BACKLOG_TRANSITION_SKIP=
 FM_BACKLOG_TRANSITION_ERROR=
 FM_BACKLOG_ROW_RESULT=
 FM_BACKLOG_ROW_STATE=
+FM_BACKLOG_ROW_TITLE=
 FM_BACKLOG_ROW_ERROR=
 # Set by fm_backlog_row_probe on a found row: the tasks-axi hold kind, empty when
 # the row is not held.
@@ -194,6 +197,65 @@ fm_backlog_data_relative() {  # <data-dir>
   esac
 }
 
+fm_backlog_markdown_file() {  # <data-dir>
+  local data root config configured='' candidate
+  data=$(fm_backlog_data_absolute "$1") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  config="$root/.tasks.toml"
+  if [ ! -e "$config" ] && [ ! -L "$config" ]; then
+    fm_backlog_file "$data"
+    return $?
+  fi
+  # The configured [markdown] path is resolved from the root, so it describes
+  # this home's backlog only while the data directory sits at its default
+  # <root>/data. A home that relocated its data directory carries its backlog
+  # with it, and the stock path this config ships with must not pull reads back
+  # to the vacated default - that is how a relocated home ended up addressing an
+  # empty backlog and treating an existing captain call as a task to create.
+  if [ "$(fm_backlog_data_relative "$data")" != data ]; then
+    fm_backlog_file "$data"
+    return $?
+  fi
+  configured=$(awk '
+      BEGIN { table = "root" }
+      {
+        line = $0
+        if (line ~ /^[[:space:]]*\[[^]]+\][[:space:]]*(#.*)?$/) {
+          table = line
+          sub(/[[:space:]]*#.*/, "", table)
+          gsub(/[[:space:]\[\]]/, "", table)
+          next
+        }
+        if (table == "markdown" && line ~ /^[[:space:]]*path[[:space:]]*=/) {
+          sub(/^[^=]*=[[:space:]]*/, "", line)
+          quote = substr(line, 1, 1)
+          if (quote == "\"" || quote == sprintf("%c", 39)) {
+            rest = substr(line, 2)
+            ending = index(rest, quote)
+            tail = substr(rest, ending + 1)
+            if (ending > 1 && tail ~ /^[[:space:]]*(#.*)?$/) {
+              print substr(rest, 1, ending - 1)
+            }
+          }
+          exit
+        }
+      }
+    ' "$config") || return 1
+  if [ -n "$configured" ]; then
+    case "$configured" in
+      /*) printf '%s\n' "$configured" ;;
+      *) printf '%s/%s\n' "$root" "$configured" ;;
+    esac
+    return 0
+  fi
+  for candidate in "$root/backlog.md" "$root/data/backlog.md"; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s/backlog.md\n' "$root"
+}
 
 # The parent an authorized data directory was named from, kept in the caller's
 # own path shape. fm_backlog_record_parent_authorized only applies its FM_HOME
@@ -250,11 +312,18 @@ fm_backlog_source_present() {  # <data-dir> <authorized-data-dir> [root authoriz
     FM_BACKLOG_TRANSITION_ERROR=$backend
     return 2
   }
-  file=$(fm_backlog_file "$data") || return 1
   if [ "$backend" = markdown ]; then
-    fm_backlog_record_present "$file" "backlog file" "$authorized_data"
+    # The data directory must still resolve inside this home before the file
+    # it addresses is checked: the FM_HOME guard keys on the root's spelling,
+    # so probing the default file inside the data directory catches a data
+    # directory symlinked outside the home even when a configured [markdown]
+    # path addresses a file elsewhere inside the home.
+    fm_backlog_record_parent_authorized "$(fm_backlog_file "$data")" "backlog file" "$authorized_data" parent-only || return 1
+    file=$(fm_backlog_markdown_file "$data") || return 1
+    fm_backlog_record_present "$file" "backlog file" "$root"
     return $?
   fi
+  file=$(fm_backlog_file "$data") || return 1
   fm_backlog_record_parent_authorized "$file" "backlog data directory" "$authorized_data" parent-only
 }
 
@@ -262,7 +331,7 @@ fm_backlog_source_present() {  # <data-dir> <authorized-data-dir> [root authoriz
 # alike: sets FM_BACKLOG_AXI_ROOT to the cd target and FM_BACKLOG_AXI_FILE to
 # the markdown --file path, empty for every other backend. This is the single
 # place that decision is made. A markdown backlog is addressed as
-# <data>/backlog.md so the change lands in the home that owns the task
+# fm_backlog_markdown_file's file so the change lands in the home that owns the task
 # regardless of the caller's working directory; any other configured adapter
 # is addressed by that root alone, because --file would override the adapter's
 # own workspace path. The caller invokes fm_tasks_axi inside its own subshell
@@ -280,7 +349,7 @@ fm_backlog_tasks_axi_addressing() {  # <data-dir>
   }
   FM_BACKLOG_AXI_ROOT=$root
   if [ "$backend" = markdown ]; then
-    FM_BACKLOG_AXI_FILE=$(fm_backlog_file "$data") || return 1
+    FM_BACKLOG_AXI_FILE=$(fm_backlog_markdown_file "$data") || return 1
   fi
 }
 
@@ -307,7 +376,7 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     return 2
   }
   if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") || return 2
+    file=$(fm_backlog_markdown_file "$data") || return 2
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
       FM_BACKLOG_TRANSITION_SKIP="this home keeps no markdown backlog at $file"
       return 1
@@ -428,11 +497,13 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
+    FM_BACKLOG_ROW_TITLE=
     FM_BACKLOG_ROW_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
   FM_BACKLOG_ROW_RESULT=error
   FM_BACKLOG_ROW_STATE=
+  FM_BACKLOG_ROW_TITLE=
   FM_BACKLOG_ROW_HOLD_KIND=
   FM_BACKLOG_ROW_ERROR=
   fm_backlog_source_present "$data" "$authorized_data"
@@ -460,6 +531,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     return "$command_status"
   fi
   state=$(printf '%s\n' "$out" | sed -n 's/^  state: *//p' | head -1)
+  FM_BACKLOG_ROW_TITLE=$(printf '%s\n' "$out" | sed -n 's/^  title: *//p' | head -1)
   held=$(printf '%s\n' "$out" | sed -n 's/^  held: *//p' | head -1)
   blocked=$(printf '%s\n' "$out" | sed -n 's/^  blocked: *//p' | head -1)
   hold_kind=$(printf '%s\n' "$out" | sed -n 's/^  hold_kind: *//p' | head -1)
@@ -478,8 +550,12 @@ fm_backlog_row_probe() {  # <data-dir> <id>
 
 # Run one tasks-axi mutation against <home>'s backlog, capturing its first
 # output line in FM_BACKLOG_TRANSITION_ERROR on failure. The home boundary is
-# authorized through fm_backlog_source_present first; fm_backlog_tasks_axi owns
-# how the selected adapter is addressed (ADDRESSING above).
+# authorized through fm_backlog_source_present first; addressing owns how the
+# selected adapter is addressed (ADDRESSING above). The mutation carries the
+# caller's exported audit-trail actor, defaulting to firstmate's own identity
+# through fm_tasks_axi_export_actor (bin/fm-spawn.sh deliberately pre-exports
+# the worker's task id so a dispatch claim is attributed to the worker that
+# takes the work).
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   local data authorized_data=$1 verb=$2 id=$3 out command_status source_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
@@ -494,6 +570,7 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   fm_backlog_tasks_axi_addressing "$data"
   source_status=$?
   [ "$source_status" -eq 0 ] || return "$source_status"
+  fm_tasks_axi_export_actor
   if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
     out=$(cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" --file "$FM_BACKLOG_AXI_FILE" 2>&1)
   else
