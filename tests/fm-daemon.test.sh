@@ -3438,5 +3438,66 @@ test_dialog_name_after_demand_deep_inspection_still_escalates() {
   pass "a dialog name after demand-deep-inspection still escalates, and a declared wait still pauses"
 }
 
+# /exit on a finished worker with a background shell is what opens the picker,
+# so the status is already `done:` and already escalated when the stale wake
+# arrives. That worker is still parked, and the picker has to be reported.
+test_dialog_name_survives_seen_terminal_status() {
+  local dir state fakebin win pane key reason
+  dir=$(make_supercase dialog-name-terminal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-picker-done"
+  pane="$dir/pane.txt"
+  printf 'idle on the picker\n' > "$pane"
+  fm_write_meta "$state/picker-done.meta" "window=$win" "backend=tmux"
+  printf 'done: shipped the change\n' > "$state/picker-done.status"
+  seen_through "$state" picker-done
+  key=$(printf '%s' picker-done | tr ':/.' '___')
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "a seen terminal stale with no dialog recorded a wedge marker"
+  reason="stale: $win (blocked-on-prompt: Claude background-task exit picker)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F 'stale + terminal (already escalated by signal)' "$dir/daemon.log" >/dev/null \
+    || fail "the fixture did not take the seen terminal self-handle path: $(cat "$dir/daemon.log")"
+  [ "$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)" = 'Claude background-task exit picker' ] \
+    || fail "a seen terminal dialog stale did not keep the name: $(cat "$state/.subsuper-dialog-$key" 2>/dev/null)"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a first-sight dialog stale escalated instead of waiting: $(cat "$state/.subsuper-escalations")"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  grep -F 'blocked-on-prompt: Claude background-task exit picker' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the away escalation for a seen terminal status dropped the dialog name: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F "$win" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the away escalation did not name the window: $(cat "$state/.subsuper-escalations")"
+  : > "$state/.subsuper-escalations"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "a closed picker left a wedge marker on a finished worker"
+  [ ! -e "$state/.subsuper-dialog-$key" ] \
+    || fail "a closed picker left the saved dialog name on a finished worker"
+  pass "a dialog name on a seen terminal status reaches the away escalation"
+}
+
+# The first stale wake after a new `done:` escalates from the status log, and
+# that one line is all the captain gets, so it has to carry the name too.
+test_dialog_name_joins_unseen_status_escalation() {
+  local dir state win
+  dir=$(make_supercase dialog-name-unseen)
+  state="$dir/state"
+  win="sess:fm-picker-new"
+  fm_write_meta "$state/picker-new.meta" "window=$win" "backend=tmux"
+  printf 'done: shipped the change\n' > "$state/picker-new.status"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    handle_wake "stale: $win (blocked-on-prompt: Claude background-task exit picker)" "$state"
+  grep -F 'done: shipped the change' "$state/.subsuper-escalations" \
+    | grep -F 'blocked-on-prompt: Claude background-task exit picker' >/dev/null \
+    || fail "an unseen status escalation dropped the dialog name: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "a dialog name joins the escalation of an unseen status"
+}
+
 test_dialog_name_survives_away_self_handle
+test_dialog_name_survives_seen_terminal_status
+test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates

@@ -1724,19 +1724,25 @@ clear_stale_hash_tracking() {  # <window-key>
 # The away daemon copies a dialog name off a self-handled stale wake into this
 # file, keyed the same way as its persistence marker. A later poll that does
 # not show the picker removes it, so a closed picker is not escalated.
+# Both this and the second-mate cleanup below run on every poll that misses,
+# so each tests for its file first and forks nothing when there is none.
 clear_dialog_suffix() {  # <task>
-  local key
-  [ -n "${1:-}" ] || return 0
-  key=$(printf '%s' "$1" | tr ':/.' '___')
-  rm -f "$STATE/.subsuper-dialog-$key"
+  local key=${1-}
+  [ -n "$key" ] || return 0
+  key=${key//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  [ ! -e "$STATE/.subsuper-dialog-$key" ] || rm -f "$STATE/.subsuper-dialog-$key"
 }
 
 # Bookkeeping a second mate gains only while the picker is positively visible.
 # A miss returns the mate to the idle exemption, so those files must not remain.
+# The stale path writes the hash file first, so its absence means none exist.
 clear_secondmate_dialog_bookkeeping() {  # <window-key> <task>
+  clear_dialog_suffix "$2"
+  [ -e "$STATE/.hash-$1" ] || return 0
   clear_stale_hash_tracking "$1"
   rm -f "$STATE/.hash-$1" "$STATE/.count-$1"
-  clear_dialog_suffix "$2"
 }
 
 # Name a blocking dialog on an existing stale reason. The name stays inside the
@@ -1750,13 +1756,6 @@ stale_reason_naming_dialog() {  # <reason> [dialog-name]
     *\)) printf '%s' "${reason%)}" ", blocked-on-prompt: $name)" ;;
     *) printf '%s' "$reason (blocked-on-prompt: $name)" ;;
   esac
-}
-
-# The matcher lives in fm-composer-lib.sh, which the backend capture sources.
-# A capture that did not load it is treated as no dialog.
-pane_blocking_dialog() {  # <screen>
-  command -v fm_composer_blocking_dialog >/dev/null 2>&1 || return 1
-  fm_composer_blocking_dialog "$1"
 }
 
 clear_pause_tracking() {  # <window-key>
@@ -3061,16 +3060,19 @@ EOF
     # for windows this gate deliberately skips, putting that read on the
     # ordinary poll hot path. The picker check is one plain 40-line capture,
     # the same read the stale path already takes, and a hit reuses those bytes.
+    # The matcher is defined in this shell by the fm-pending-reply-lib.sh
+    # source at the top of this file, which reaches fm-composer-lib.sh through
+    # fm-tmux-lib.sh. The capture runs in a subshell and loads nothing here.
     dialog=
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-      if ! dialog=$(pane_blocking_dialog "$tail40"); then
+      if ! dialog=$(fm_composer_blocking_dialog "$tail40"); then
         clear_secondmate_dialog_bookkeeping "$key" "$task"
         continue
       fi
     else
       tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-      dialog=$(pane_blocking_dialog "$tail40") || dialog=
+      dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=
       [ -n "$dialog" ] || clear_dialog_suffix "$task"
     fi
     h=$(printf '%s' "$tail40" | hash_pane)
