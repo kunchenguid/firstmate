@@ -202,7 +202,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -224,6 +224,12 @@
 #   config/claude-permission-mode is not mapped: Devin auto approves read-only
 #   tools, unlike Claude auto. Effort is part of Devin model ids, so the
 #   independent --effort axis is recorded but omitted from argv.
+#   Command Code (`commandcode`) is worker-only: --yolo and --trust allow
+#   unattended tools in a fresh worktree, and --mod loads the tracked
+#   bin/fm-commandcode-mod.ts busy-state writer for that one process with the
+#   task's generation in --mod-option values; no global or project config is
+#   edited. Its --effort is passed only where the model's accepted set is
+#   verified, because an unknown value exits the launch.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -414,6 +420,8 @@
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
+#     __COMMANDCODEBIN__ resolved Command Code executable
+#     __COMMANDCODEMOD__ --mod and --mod-option arguments of the busy-state mod
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
@@ -431,7 +439,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, devin, and commandcode are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1923,7 +1931,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2247,6 +2255,13 @@ launch_template() {
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
   devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Command Code receives the typed launch envelope after -- as its initial
+  # message. --yolo bypasses permission prompts, --trust skips the folder-trust
+  # prompt of a fresh worktree, and --skip-onboarding skips taste onboarding.
+  # __COMMANDCODEMOD__ loads the tracked busy-state mod for this process only.
+  # NO_COLOR is cleared and COLORTERM pinned so the composer placeholder keeps
+  # the truecolor styling the shared composer guard reads.
+  commandcode) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR COLORTERM=truecolor __COMMANDCODEBIN__ --yolo --trust --skip-onboarding --no-auto-update __MODELFLAG____EFFORTFLAG____COMMANDCODEMOD__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2357,7 +2372,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, devin, and commandcode are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2371,7 +2386,9 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+# commandcode has none either: only its worker busy mod is verified, and
+# docs/supervision-protocols/ carries no Command Code wake protocol (1.74.1).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2396,6 +2413,12 @@ case "$HARNESS" in
 devin)
   DEVIN_BIN=$(command -v devin) || {
     echo "error: devin executable not found on PATH" >&2
+    exit 1
+  }
+  ;;
+commandcode)
+  COMMANDCODE_BIN=$(command -v commandcode) || {
+    echo "error: commandcode executable not found on PATH" >&2
     exit 1
   }
   ;;
@@ -2676,7 +2699,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2717,6 +2740,18 @@ effort_flag_for_harness() {
     # omitted rather than passed as known-bad values (record-and-omit).
     case "$effort" in
     low | medium | high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  commandcode)
+    # Command Code's --effort set is model-scoped and an unknown value exits
+    # the launch (verified, 1.74.1). Both DeepSeek V4.1 Flash models accept
+    # off|low|high|max, so medium and xhigh are omitted there, and every other
+    # model, whose set is unverified, keeps its own default (record-and-omit).
+    case "$model:$effort" in
+    deepseek/deepseek-v4.1-flash:low | deepseek/deepseek-v4.1-flash:high | deepseek/deepseek-v4.1-flash:max | \
+      deepseek/deepseek-v4.1-flash-fast:low | deepseek/deepseek-v4.1-flash-fast:high | deepseek/deepseek-v4.1-flash-fast:max)
+      printf -- '--effort %s ' "$(shell_quote "$effort")"
+      ;;
     esac
     ;;
   pi | pi-signed)
@@ -4634,7 +4669,7 @@ if [ "$KIND" != secondmate ]; then
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin)
+  gemini | devin | commandcode)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4681,6 +4716,13 @@ EOF
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       FM_KEEP_AI_TRAILERS="$KEEP_AI_TRAILERS" "$SCRIPT_DIR/fm-devin-config.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
     fi
+    ;;
+  commandcode)
+    # Command Code's busy wiring rides the launch command (__COMMANDCODEMOD__).
+    # Its taste learning, which has no per-process switch, seeds
+    # .commandcode/taste/ in the project on every start (verified, 1.74.1) and
+    # learns into it, so that vendor runtime state stays out of worker commits.
+    exclude_path '.commandcode/taste/'
     ;;
   gemini)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -5280,6 +5322,18 @@ devin)
   LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "$DEVIN_BIN")"}
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
   ;;
+commandcode)
+  LAUNCH=${LAUNCH//__COMMANDCODEBIN__/"$(shell_quote "$COMMANDCODE_BIN")"}
+  COMMANDCODEMOD=
+  if [ -n "${BUSY_GEN:-}" ]; then
+    COMMANDCODEMOD="--mod $(shell_quote "$FM_ROOT/bin/fm-commandcode-mod.ts")"
+    COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmWriter=$FM_ROOT/bin/fm-busy-event.sh")"
+    COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmState=$STATE_REAL")"
+    COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmId=$ID")"
+    COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmGen=$BUSY_GEN") "
+  fi
+  LAUNCH=${LAUNCH//__COMMANDCODEMOD__/$COMMANDCODEMOD}
+  ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
@@ -5308,7 +5362,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

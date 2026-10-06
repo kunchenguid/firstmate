@@ -102,10 +102,14 @@ fm_tmux_composer_caps() {
 #     row between two stale rules stays unknown.
 #   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
 #     idle/working vocabulary herdr's probe reports natively.
-# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
-# live pi.
+# It answers Command Code the same way, from its anchored `command-code`
+# foreground process name and its own verified busy footer: its composer is a
+# bare `❯` row between the same two rules, and its placeholder needs the
+# identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
+# Prints "<agent><TAB>idle" or "<agent><TAB>working" for agent pi or
+# commandcode; exits 1 when the pane is neither.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
+  local target=$1 tty pgid tpgid comm found=0 status agent=pi
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
@@ -114,6 +118,7 @@ fm_tmux_composer_identity() {  # <target>
         [ "$pgid" = "$tpgid" ] || continue
         case "${comm##*/}" in
           pi|pi-signed|pi-launcher|Pi) found=1 ;;
+          command-code) found=1; agent=commandcode ;;
         esac
       done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
@@ -127,10 +132,10 @@ EOF
     esac
   fi
   [ "$found" -eq 1 ] || return 1
-  status=$(fm_pane_busy_state "$target" pi)
+  status=$(fm_pane_busy_state "$target" "$agent")
   case "$status" in
-    busy) printf 'pi\tworking' ;;
-    idle) printf 'pi\tidle' ;;
+    busy) printf '%s\tworking' "$agent" ;;
+    idle) printf '%s\tidle' "$agent" ;;
     *) return 1 ;;
   esac
 }
@@ -166,6 +171,15 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # harness is untouched.
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+  fi
+  # Command Code parks its terminal cursor below its footer too, drawing its
+  # own reverse-video cursor cell in the composer (verified live, Command Code
+  # 1.74.1), so it takes the same cursorless reclassification, gated on its own
+  # process identity and read with that identity.
+  if [ "$verdict" = unknown ] && identity=$(fm_tmux_composer_identity "$target") \
+     && [ "${identity%%$'\t'*}" = commandcode ]; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
 }

@@ -49,8 +49,9 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # single binary, comm=agy with argv[0]=agy), and a glob would claim
     # unrelated commands containing that fragment. devin is anchored the same
     # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
-    # claims an unrelated command.
-    agy|devin) printf 'agent' ;;
+    # claims an unrelated command. Command Code is anchored on its own process
+    # title (verified, Command Code 1.74.1: comm=command-code).
+    agy|devin|command-code) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then

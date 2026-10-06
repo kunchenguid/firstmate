@@ -255,6 +255,14 @@ fm_composer_normalize_trim_var() {  # <varname>
 # the tightest margin over the 128 default in the fleet. Above ~150 that glyph is
 # stripped as ghost text, which is why the bare-glyph fallback below must also
 # recognise every agent glyph from the UNSTRIPPED plain row.
+# Command Code draws its idle placeholder in truecolor 38;2;138;148;168,
+# luminance ~147.3, while its typed text is the default foreground (verified
+# live, Command Code 1.74.1 with COLORTERM=truecolor, which its launch pins; a
+# 256-colour terminal gets the untested 38;5;145 instead). Raising the fleet-wide
+# ceiling to reach it would over-strip other harnesses, so only a screen that the
+# backend's identity probe attributes to Command Code is read with
+# FM_COMPOSER_COMMANDCODE_GHOST_LUMA_MAX (default 160) in its place
+# (fm_composer_classify_screen).
 # The dim/faint and dark-foreground states are tracked together as "de-emphasis";
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
@@ -353,6 +361,7 @@ fm_composer_strip_ghost() {
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; omp: "Working…"; grok: "Ctrl+c:cancel"; agy: "esc to cancel";
 # devin: "esc twice to interrupt" and its "❭ Guide Devin while it works" working composer.
+# commandcode: "esc to interrupt" beside a bullet-framed elapsed cell.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -382,6 +391,12 @@ FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[
 # Devin 3000.11.1: the working composer and interrupt hint are independent
 # delivery signals. Neither is used as semantic worker-state evidence.
 FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT='esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
+# Command Code 1.74.1 renders one status row while a turn runs, for example
+# ` ○ Contemplificating…  esc to interrupt • 2s • ↓ 41`: the `esc to interrupt`
+# token and the bullet-framed elapsed cell are independent delivery signals, and
+# the idle footer carries neither. Delivery guard only; recorded worker state
+# comes from the commandcode-mod writer in bin/fm-busy-lib.sh.
+FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT='esc to interrupt|•[[:space:]]+[0-9]+[smh]([[:space:]]+[0-9]+[smh])*[[:space:]]+•'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
@@ -430,6 +445,7 @@ fm_busy_lines_match() {  # [harness]
     case "$harness" in
       claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
       devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
+      commandcode) regex=$FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
@@ -467,9 +483,12 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). Devin renders the anchored `Ask Devin to build features,
 # fix bugs, or work on your code` as dim text after its `❭` glyph (verified
-# live, devin 3000.11.1). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# live, devin 3000.11.1). Command Code renders the anchored `Ask your question...`
+# after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
+# bright for the default ghost ceiling, which FM_COMPOSER_COMMANDCODE_GHOST_LUMA_MAX
+# below owns. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -1754,6 +1773,16 @@ fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   done <<EOF
 $caps
 EOF
+  # A Command Code identity (`commandcode` from the tmux probe, `cmd` from
+  # Herdr's native agent detection) reads this one screen with Command Code's
+  # placeholder ceiling; see fm_composer_strip_ghost.
+  if [ "$has_identity" = 1 ]; then
+    case "${identity%%$'\t'*}" in
+      commandcode|cmd)
+        local FM_COMPOSER_GHOST_LUMA_MAX=${FM_COMPOSER_COMMANDCODE_GHOST_LUMA_MAX:-160}
+        ;;
+    esac
+  fi
   [ "$cursor" = 1 ] || cy=''
   if [ -n "$cy" ]; then
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
