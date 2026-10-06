@@ -3330,8 +3330,21 @@ SH
   pass "a renumbered registration is never re-recorded around a tampered artifact:$exercised, or a pending retirement"
 }
 
+PR_POLL_HOLDER_PID=
+PR_POLL_HOLDER_DIR=
+
+poll_publish_job_owned() {  # <pid>: only a job created by this fixture shell
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  case $'\n'"$(jobs -p)"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
 start_poll_publish_holder() {  # <dir> <state> <id>
   local dir=$1 state=$2 id=$3 i
+  [ -z "$PR_POLL_HOLDER_PID" ] || fail "previous fixture publication holder was not joined"
+  PR_POLL_HOLDER_DIR=$dir
   PR_POLL_HOLDER_ACQUIRED="$dir/poll-publish-holder-acquired"
   PR_POLL_HOLDER_RELEASE="$dir/poll-publish-holder-release"
   PR_POLL_HOLDER_LOCK="$state/.pr-poll-publish-$id.lock"
@@ -3353,14 +3366,110 @@ SH
     [ -e "$PR_POLL_HOLDER_ACQUIRED" ] && return 0
     sleep 0.02
   done
-  kill "$PR_POLL_HOLDER_PID" 2>/dev/null || true
-  wait "$PR_POLL_HOLDER_PID" 2>/dev/null || true
+  if poll_publish_job_owned "$PR_POLL_HOLDER_PID"; then
+    kill "$PR_POLL_HOLDER_PID" 2>/dev/null || true
+    wait "$PR_POLL_HOLDER_PID" 2>/dev/null || true
+  fi
+  PR_POLL_HOLDER_PID=
   fail "poll publication holder did not acquire its lock"
 }
 
 release_poll_publish_holder() {
-  : > "$PR_POLL_HOLDER_RELEASE"
-  wait "$PR_POLL_HOLDER_PID" || fail "poll publication holder did not release its lock"
+  local status=0
+  [ -n "$PR_POLL_HOLDER_PID" ] || return 0
+  poll_publish_job_owned "$PR_POLL_HOLDER_PID" || {
+    echo "refusing to release an unowned fixture publication holder" >&2
+    return 1
+  }
+  case "$PR_POLL_HOLDER_RELEASE" in
+    "$TMP_ROOT"/*/poll-publish-holder-release) ;;
+    *) echo "refusing a release path outside the fixture root" >&2; return 1 ;;
+  esac
+  : > "$PR_POLL_HOLDER_RELEASE" || return 1
+  wait "$PR_POLL_HOLDER_PID" || status=$?
+  PR_POLL_HOLDER_PID=
+  return "$status"
+}
+
+cleanup_poll_publish_fixture() {
+  local status=$? cleanup_status=0 child error_log
+  trap - EXIT
+  set +e
+  # Release before removing the fixture root: otherwise the holder waits for a
+  # deleted marker forever and its inherited output hides the original failure.
+  release_poll_publish_holder || cleanup_status=$?
+  if [ "$status" -ne 0 ] && [ -n "$PR_POLL_HOLDER_DIR" ] \
+    && [ "${dir:-}" = "$PR_POLL_HOLDER_DIR" ]; then
+    for child in "${watcher_pid:-}" "${rearm_pid:-}"; do
+      if poll_publish_job_owned "$child"; then
+        wait "$child" || true
+      fi
+    done
+    for error_log in "$PR_POLL_HOLDER_DIR/watch.err" "$PR_POLL_HOLDER_DIR/rearm.err"; do
+      if [ -f "$error_log" ] && [ ! -L "$error_log" ]; then
+        printf 'fixture stderr (%s):\n' "$error_log" >&2
+        cat "$error_log" >&2
+      fi
+    done
+  fi
+  fm_test_cleanup || cleanup_status=$?
+  [ "$status" -ne 0 ] || status=$cleanup_status
+  exit "$status"
+}
+
+trap cleanup_poll_publish_fixture EXIT
+# Let EXIT release owned holders before the shared helper removes their homes.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 131' QUIT
+
+test_poll_publish_failure_cleanup() {
+  local dir out rc pid identity
+  dir=$(make_case poll-publish-failure-cleanup)
+  PR_POLL_HOLDER_PID=$$
+  PR_POLL_HOLDER_RELEASE="$dir/poll-publish-holder-release"
+  rc=0
+  release_poll_publish_holder > "$dir/unowned.out" 2>&1 || rc=$?
+  PR_POLL_HOLDER_PID=
+  [ "$rc" -ne 0 ] || fail "fixture cleanup accepted a pid that was not its child"
+  assert_absent "$dir/poll-publish-holder-release" "unowned holder received a release marker"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -u'
+    declare -f poll_publish_job_owned start_poll_publish_holder release_poll_publish_holder cleanup_poll_publish_fixture
+    cat <<'SH'
+. "$1/tests/lib.sh"
+PR_POLL_HOLDER_PID=
+PR_POLL_HOLDER_DIR=
+TMP_ROOT=$(fm_test_tmproot poll-publish-cleanup-child)
+trap cleanup_poll_publish_fixture EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 131' QUIT
+dir="$TMP_ROOT/holder"
+mkdir -p "$dir/home/state"
+start_poll_publish_holder "$dir" "$dir/home/state" task-a
+printf '%s\n' "$PR_POLL_HOLDER_PID" > "$2/holder.pid"
+fm_test_pid_identity "$PR_POLL_HOLDER_PID" > "$2/holder.identity"
+printf '%s\n' 'synthetic watcher stderr retained on failure' > "$dir/watch.err"
+exit 17
+SH
+  } > "$dir/cleanup-child.sh"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  rc=0
+  out=$(fm_run_timed 20 /bin/bash "$dir/cleanup-child.sh" "$ROOT" "$dir" 2>&1) || rc=$?
+  expect_code 17 "$rc" "fixture cleanup must preserve the failing exit, not time out: $out"
+  assert_contains "$out" 'synthetic watcher stderr retained on failure' \
+    "fixture cleanup lost watcher stderr"
+  pid=$(cat "$dir/holder.pid")
+  identity=$(cat "$dir/holder.identity")
+  [ -n "$identity" ] || fail "fixture publication holder identity was not captured"
+  [ "$(fm_test_pid_identity "$pid" 2>/dev/null || true)" != "$identity" ] \
+    || fail "fixture publication holder survived its failed owner"
+  pass "publication-holder failure cleanup joins only owned children and preserves stderr and exit status"
 }
 
 test_device_rerecord_serializes_direct_rearm() {
@@ -3393,7 +3502,7 @@ test_device_rerecord_serializes_direct_rearm() {
     || fail "blocked direct re-arm replaced the published registration"
   cmp -s "$dir/published.check.sh" "$state/task-a.check.sh" \
     || fail "blocked direct re-arm replaced the published check"
-  release_poll_publish_holder
+  release_poll_publish_holder || fail "poll publication holder did not release its lock"
   wait "$rearm_pid" || fail "direct re-arm failed after poll publication release: $(cat "$dir/rearm.err")"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "released direct re-arm did not publish a strict poll"
   [ "$(sed -n 4p "$state/task-a.pr-poll-registration")" = "$url_b" ] \
@@ -3430,7 +3539,9 @@ SH
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher_pid=$!
-  for i in $(seq 1 100); do
+  # Watcher startup and its first device-shift proof precede this phase; allow
+  # bounded headroom without releasing publication or changing the predicate.
+  for i in $(seq 1 500); do
     [ -d "$state/.control-task-a.lock" ] && break
     sleep 0.02
   done
@@ -3440,7 +3551,7 @@ SH
   [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$original" ] \
     || fail "blocked watcher rewrote a device-shifted registration"
   [ ! -e "$dir/registration-renamed" ] || fail "blocked watcher renamed the registration"
-  release_poll_publish_holder
+  release_poll_publish_holder || fail "poll publication holder did not release its lock"
   rc=0
   wait "$watcher_pid" || rc=$?
   [ "$rc" -eq 0 ] || fail "released watcher re-record failed: $(cat "$dir/watch.err")"
@@ -3489,6 +3600,7 @@ test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
+test_poll_publish_failure_cleanup
 test_device_rerecord_serializes_direct_rearm
 test_device_rerecord_serializes_rerecord
 test_postrename_poll_validation_revokes_and_retries
