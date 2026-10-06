@@ -93,10 +93,15 @@
 # contract; the remote enqueue deduplicates onto the same record). The resend
 # resets the record to awaiting_report and leaves the published escalation
 # decision open: a confirmed delivery does not settle the request, only a
-# correlated report does. A later missed-report escalation reuses that key
-# rather than opening a duplicate, and only the ordinary resolve close closes
-# it. A delivered record, whatever its phase, is never reset. Without this, a
-# wake retried only through its owner
+# correlated report does. A later escalation reuses that key rather than
+# opening a duplicate while the decision stays open, and only the ordinary
+# resolve close closes it. Once that close is in the log, the next escalation
+# of a record that already escalated and was reset is a new episode: it
+# appends a new blocked line for the same key, even one identical to the
+# first, and the fold opens the decision again. That reopen belongs to this
+# escalation alone; status_event_recorded (bin/fm-classify-lib.sh) stays an
+# idempotent retry check for every caller. A delivered record, whatever its
+# phase, is never reset. Without this, a wake retried only through its owner
 # (bin/fm-backlog-handoff.sh's receiver wake) stayed refused forever once the
 # watcher escalated between the lost transport and the next resume.
 #
@@ -1257,7 +1262,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed now payload parent_status line kind first display
-  local delivered task_id meta sm_home remote_host grace age
+  local delivered task_id meta sm_home remote_host grace age key new_episode
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -1318,8 +1323,19 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   fi
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
-  if ! status_event_recorded "$parent_status" "$line"; then
+  key=$(fm_pending_reply_escalation_key "$corr")
+  line="blocked [key=$key]: $payload"
+  # A record that already escalated reaches here again only after a reset, so
+  # a closed decision means the operator settled the earlier episode and this
+  # loss is a new one. While the decision is open the identical line is a retry.
+  new_episode=1
+  if [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ]; then
+    case $'\n'"$(status_open_decisions "$parent_status")" in
+      *$'\n'"$key"$'\t'*) ;;
+      *) new_episode=0 ;;
+    esac
+  fi
+  if [ "$new_episode" -eq 0 ] || ! status_event_recorded "$parent_status" "$line"; then
     printf '%s\n' "$(status_stamp_line "$line")" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
