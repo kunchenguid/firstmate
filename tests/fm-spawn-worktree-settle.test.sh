@@ -248,11 +248,16 @@ test_workflow_dispatch_gate_budget_defaults_to_the_registry_limit() {
   pass "fm-spawn passes the brief token budget, or the workflow registry limit without one"
 }
 
-# Copies the installed workflow gate and its budget owner into the case home so
+# Integration proof against the real workflow gate. Prerequisite:
+# FM_TEST_WORKFLOW_ROOT names a workflow clone holding scripts/gates.py,
+# scripts/check.py, and registry/budgets.md. Portable CI does not set it, so CI
+# does not cover this proof; once it is set, a missing or unreadable gate input
+# fails the test. The gate and its budget owner are copied into the case home so
 # the real gates.py decides; quota and machine load are pinned for determinism.
-install_real_workflow_gate() {  # <home>; returns 1 when no workflow checkout exists
-  local src=${FM_TEST_WORKFLOW_ROOT:-$ROOT/projects/workflow} dst="$1/projects/workflow"
-  [ -f "$src/scripts/gates.py" ] && [ -f "$src/scripts/check.py" ] && [ -f "$src/registry/budgets.md" ] || return 1
+install_real_workflow_gate() {  # <home>
+  local src=$FM_TEST_WORKFLOW_ROOT dst="$1/projects/workflow"
+  [ -r "$src/scripts/gates.py" ] && [ -r "$src/scripts/check.py" ] && [ -r "$src/registry/budgets.md" ] \
+    || fail "FM_TEST_WORKFLOW_ROOT=$src has no readable scripts/gates.py, scripts/check.py, and registry/budgets.md"
   mkdir -p "$dst/scripts" "$dst/registry" "$1/pin"
   cp "$src/scripts/gates.py" "$src/scripts/check.py" "$dst/scripts/"
   cp "$src/registry/budgets.md" "$dst/registry/"
@@ -267,12 +272,13 @@ SH
 test_real_workflow_gate_budget_paths() {
   local rec id out status
   id=gate-real-default-z
-  rec=$(make_settle_case gate-real-default "$id" 0)
-  read_settle_record "$rec"
-  if ! install_real_workflow_gate "$HOME_DIR"; then
-    echo "skip: no workflow checkout at ${FM_TEST_WORKFLOW_ROOT:-$ROOT/projects/workflow} (set FM_TEST_WORKFLOW_ROOT)"
+  if [ -z "${FM_TEST_WORKFLOW_ROOT:-}" ]; then
+    echo "skip: real workflow gate integration proof needs FM_TEST_WORKFLOW_ROOT; portable CI does not cover it"
     return 0
   fi
+  rec=$(make_settle_case gate-real-default "$id" 0)
+  read_settle_record "$rec"
+  install_real_workflow_gate "$HOME_DIR"
   out=$(PYTHONPATH="$HOME_DIR/pin" FM_TEST_WORKFLOW_GATE=1 run_settle_spawn "$id")
   status=$?
   expect_code 0 "$status" "the real gate must pass a brief without a budget at the registry limit"$'\n'"$out"
