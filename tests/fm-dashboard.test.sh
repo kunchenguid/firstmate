@@ -106,6 +106,50 @@ test_the_page_answers_the_questions_with_the_fixture_numbers() {
   pass "the page answers the questions with the fixture's numbers"
 }
 
+green_pr() {  # <home> <task> <url>: a fresh observed open PR with green checks the captain could merge
+  mkdir -p "$1/data/$2"
+  jq -n --arg task "$2" --arg url "$3" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    {schema:"fm-contributions.v1",task:$task,records:[{
+      url:$url,kind:"pr",checked_at:$at,error:null,pending:[],seen:[],verdict:null,
+      observation:{head:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",state:"open",draft:false,mergeable:"mergeable",
+        review_decision:"",can_merge:true,
+        checks:[{name:"test",id:1,status:"completed",conclusion:"success",started_at:$at}],
+        reviews:[],events:[]}}]}' > "$1/data/$2/contributions.json"
+}
+
+test_totals_count_only_work_that_waits() {
+  local home page text out want
+  home=$(make_home live)
+  # alpha-fix's own record names its project, so its PR resolves to alpha whatever the repo is called.
+  printf -- '- alpha [no-mistakes +yolo] - fixture project (added 2026-07-11)\n- delta [direct-PR] - fixture project (added 2026-07-11)\n' \
+    > "$home/data/projects.md"
+  green_pr "$home" alpha-fix https://github.com/o/alpha-repo/pull/11
+  green_pr "$home" delta-pr https://github.com/o/delta/pull/12
+  green_pr "$home" ghost-pr https://github.com/o/ghost/pull/13
+  printf '# parked by the captain\nbeta\n' > "$home/config/parked-homes"
+  mkdir -p "$home/mates/alpha/data"
+  printf -- '- alpha - fixture domain (home: %s; scope: fixture; projects: alpha; added 2026-07-11)\n' \
+    "$home/mates/alpha" >> "$home/data/secondmates.md"
+  # The home's flow check reports two finished lanes for every home it is asked about.
+  cat > "$home/config/fm-flow-check.sh" <<'EOF'
+#!/bin/sh
+[ -d "$1/data" ] || exit 1
+printf 'x\t3\t1\t0\t2\t0\t-1\n'
+EOF
+  chmod +x "$home/config/fm-flow-check.sh"
+  out=$(FM_HOME="$home" "$DASH" build) || fail "build failed: $out"
+  page="$home/state/dashboard/index.html"
+  text=$(page_text "$page")
+  for want in "Waiting on you 2 2 merge approvals, 0 decisions" "delta-pr main Merge approval ghost-pr main Merge approval" \
+    "Finished, not landed 6 waiting to merge Merged today" "Merged today 3 yesterday 0" \
+    "Queued and ready 3" "of 6 open lanes" "beta Parked"; do
+    case "$text" in *"$want"*) ;; *) fail "page text lacks '$want': $text" ;; esac
+  done
+  ! grep -q 'pull/11' "$page" || fail "a green PR in a +yolo project waits on the captain: $text"
+  grep -q '<h3>beta</h3><span class="chip ">Parked</span></div></div>' "$page" || fail "the parked home card shows numbers"
+  pass "totals leave out parked homes and self-merged PRs, and count finished lanes now"
+}
+
 SERVE_PID=
 trap '[ -z "$SERVE_PID" ] || kill "$SERVE_PID" 2>/dev/null; fm_test_cleanup' EXIT
 
@@ -165,5 +209,6 @@ test_missing_or_malformed_sources_hide_only_their_part() {
 }
 
 test_the_page_answers_the_questions_with_the_fixture_numbers
+test_totals_count_only_work_that_waits
 test_missing_or_malformed_sources_hide_only_their_part
 test_serve_answers_the_page_and_nothing_else
