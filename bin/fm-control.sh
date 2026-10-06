@@ -356,6 +356,10 @@ RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
+# OpenCode's composer exit key changed between its 1.x and 2.x lines; the major
+# spawn detected is recorded here so the exit command below matches the running
+# agent. Absent (a legacy record or a non-opencode task) it stays empty.
+OPENCODE_MAJOR=$(fm_meta_get "$META" opencode_version); OPENCODE_MAJOR=${OPENCODE_MAJOR%%.*}
 
 HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
@@ -636,7 +640,7 @@ do_exit() {
       esac
       ;;
   esac
-  cmd=$(fm_control_exit_command "$HARNESS")
+  cmd=$(fm_control_exit_command "$HARNESS" "$OPENCODE_MAJOR")
   hazard=$(fm_control_interrupt_hazard_signal "$HARNESS")
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
@@ -665,20 +669,32 @@ do_exit() {
   # legitimately report anything. Only a hard transport failure aborts; the
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
-  # swallows the first Enter.
-  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
-  [ "$verdict" != send-failed ] \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
-  # The submitting Enter can open the picker. The agent is still alive, and
-  # another Enter would confirm the selected row. A dead agent may leave the
-  # same text behind; that is not a prompt still waiting.
-  if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
-    dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
-    if [ "$(agent_state)" != dead ]; then
-      refuse_blocking_prompt "$dialog"
-    fi
-  fi
+  # swallows the first Enter. OpenCode 2 exits from an idle composer on a single
+  # Ctrl-C (verified on 2.0.21); typing /exit also exits but opens a completion
+  # popup, so the raw key plane avoids that popup interacting with the typed
+  # submit verification.
+  case "$cmd" in
+    C-c)
+      fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
+        || die "the exit key could not be sent to task $ID on $BACKEND"
+      verdict=key_delivered
+      ;;
+    *)
+      verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
+        || die "the exit command could not be sent to task $ID on $BACKEND"
+      [ "$verdict" != send-failed ] \
+        || die "the exit command could not be sent to task $ID on $BACKEND"
+      # The submitting Enter can open the picker. The agent is still alive, and
+      # another Enter would confirm the selected row. A dead agent may leave the
+      # same text behind; that is not a prompt still waiting.
+      if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+        dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
+        if [ "$(agent_state)" != dead ]; then
+          refuse_blocking_prompt "$dialog"
+        fi
+      fi
+      ;;
+  esac
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     # A submit can return before any read sees the picker: a native busy
     # verdict needs no composer read, and a cleared composer can be read

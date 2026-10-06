@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { contextDirectory, createTurnEndLatch, promptSession, setupEventSubscription } from "./lib/fm-opencode2.js";
 
 // Supervision host: a home opted in with config/supervision-host
 // (docs/configuration.md "Supervision host" owns the gate, which
@@ -248,12 +249,7 @@ function observeArmOutput(hostMode, stdout, stderr, settleReadiness) {
 
 async function sendPrompt(paths, client, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text: encoded }],
-    },
-  });
+  await promptSession(client?.__ctx, client?.session ? client : null, sessionID, encoded);
 }
 
 function confirmHandlingDelivery(paths, recovery) {
@@ -558,4 +554,29 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       void ensureArm(paths, sessionID, client);
     },
   };
+};
+
+function installWatchArm(ctx) {
+  const anchor = contextDirectory(ctx);
+  const transport = { __ctx: ctx };
+  let pathsPromise = null;
+  const getPaths = () => (pathsPromise ??= resolveRoot(anchor).then(effectivePaths));
+  globalThis[COORDINATOR_KEY] = {
+    ensureArmed: async (sessionID, activeClient) => ensureArm(await getPaths(), sessionID, activeClient ?? transport),
+  };
+
+  const latch = createTurnEndLatch();
+  setupEventSubscription(ctx, async (event) => {
+    const sessionID = latch(event);
+    if (!sessionID) return;
+    void ensureArm(await getPaths(), sessionID, transport);
+  });
+}
+
+export default {
+  id: "fm.primary.watch-arm",
+  server: FmPrimaryWatchArm,
+  setup(ctx) {
+    installWatchArm(ctx);
+  },
 };

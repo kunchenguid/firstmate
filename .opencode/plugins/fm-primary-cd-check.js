@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { contextDirectory, setupToolExecuteBefore, toolCommand } from "./lib/fm-opencode2.js";
 
 // PreToolUse seatbelt for OpenCode: block a stray persistent top-level `cd` in
 // the primary firstmate checkout before the agent's bash tool relocates the
@@ -25,6 +26,14 @@ function runProcess(command, args) {
     child.on("error", () => resolvePromise({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolvePromise({ code: code ?? 0, stdout, stderr }));
   });
+}
+
+function resolvePath(anchor) {
+  try {
+    return realpathSync(anchor);
+  } catch {
+    return resolve(anchor);
+  }
 }
 
 async function resolveRoot(anchor) {
@@ -61,4 +70,30 @@ export const FmPrimaryCdCheck = async ({ directory, worktree }) => {
       throw new Error(reason);
     },
   };
+};
+
+function installCdCheck(ctx) {
+  const anchor = contextDirectory(ctx);
+  let rootPromise = null;
+  const getRoot = () => (rootPromise ??= resolveRoot(anchor));
+  setupToolExecuteBefore(ctx, async (input, output) => {
+    const root = await getRoot();
+    if (!root) return;
+    const command = toolCommand(input, output);
+    if (!command) return;
+
+    const result = await runProcess(`${root}/bin/fm-cd-pretool-check.sh`, ["--command", command]);
+    if (result.code !== 2) return;
+
+    const reason = result.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt";
+    throw new Error(reason);
+  });
+}
+
+export default {
+  id: "fm.primary.cd-check",
+  server: FmPrimaryCdCheck,
+  setup(ctx) {
+    installCdCheck(ctx);
+  },
 };
