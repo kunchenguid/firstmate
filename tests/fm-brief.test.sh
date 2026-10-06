@@ -330,10 +330,19 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     # its copy, so a pre-merge done could never report or roll back a failure.
     assert_grep "do not append a terminal \`done:\` line before merging" "$brief" \
       "$mode brief must forbid the terminal done before the merge"
-    assert_grep "done [at=<epoch>]: PR {url} verified on landed main" "$brief" \
-      "$mode brief must pin the post-verification terminal done shape"
-    assert_grep "done [at=<epoch>]: PR {url} rolled back: {one-line cause}" "$brief" \
-      "$mode brief must pin the post-rollback terminal done shape"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep "done [at=<epoch>]: PR {url} verified on landed main" "$brief" \
+        "$mode brief must pin the post-verification terminal done shape"
+    else
+      assert_grep "done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed main" "$brief" \
+        "$mode brief must keep the checks-green token on the post-verification terminal line so the named-head gate fires"
+    fi
+    assert_grep "blocked [key=merge-rolled-back] until {ISO8601Z}: PR {url} was merged then reverted after post-merge verification failed - the change is NOT landed; {one-line cause and the post-rollback head}" "$brief" \
+      "$mode brief must pin the non-terminal rollback report shape"
+    assert_no_grep "done [at=<epoch>]: PR {url} rolled back" "$brief" \
+      "$mode brief must not report a rollback as a done line"
+    assert_grep 'read as "delivered and landed"' "$brief" \
+      "$mode brief must explain why a rollback cannot be a done line"
     assert_grep "starts the landing poll" "$brief" \
       "$mode brief must state why the terminal done waits for verification"
     assert_no_grep "Then append \`done [at=<epoch>]: PR {url}" "$brief" \
