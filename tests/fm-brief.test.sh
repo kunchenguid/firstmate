@@ -324,6 +324,27 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     assert_no_grep "You are finished" "$brief" \
       "$mode brief must not blanket-stop an authorized worker before the merge checks"
     assert_no_grep "Never merge a PR" "$brief" "$mode brief must not forbid all worker merges"
+    # The terminal report must wait for the post-merge verification or the
+    # rollback to produce its result: the terminal done starts the landing poll,
+    # and the cleanup that follows landing terminates the worker and reclaims
+    # its copy, so a pre-merge done could never report or roll back a failure.
+    assert_grep "do not append a terminal \`done:\` line before merging" "$brief" \
+      "$mode brief must forbid the terminal done before the merge"
+    assert_grep "done [at=<epoch>]: PR {url} verified on landed main" "$brief" \
+      "$mode brief must pin the post-verification terminal done shape"
+    assert_grep "done [at=<epoch>]: PR {url} rolled back: {one-line cause}" "$brief" \
+      "$mode brief must pin the post-rollback terminal done shape"
+    assert_grep "starts the landing poll" "$brief" \
+      "$mode brief must state why the terminal done waits for verification"
+    assert_no_grep "Then append \`done [at=<epoch>]: PR {url}" "$brief" \
+      "$mode brief must not order the terminal done before the merge"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep "working [at=<epoch>]: PR {url} opened; merge authorized; post-merge verification in progress" "$brief" \
+        "$mode brief must render the pre-merge non-terminal report"
+    else
+      assert_grep "working [at=<epoch>]: PR {url} checks green; merge authorized; post-merge verification in progress" "$brief" \
+        "$mode brief must render the pre-merge non-terminal report"
+    fi
   done
 
   # A named PR base must be the branch the mandatory checks validate against, so
