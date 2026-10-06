@@ -45,6 +45,16 @@ Each adapter:
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
+### Pi captain inbox priority
+
+While attended, the Pi watcher uses `steer` for a wake with a pending, unanswered captain inbox note identified by an `inbox:<id>` check row and its matching durable note.
+This places the notification after the current assistant/tool batch and before the next model step, rather than waiting for the entire agent run to end.
+The priority prompt asks main to read and answer the inbox first, arrange larger requests, then resume supervision without cancelling workers or expanding authority.
+Other wakes retain `followUp` delivery, and the away posture retains its existing branch ownership.
+Notes already covered by an unconsumed priority wake are not added to another queued priority notification.
+The existing actionable handoff carries selected note IDs across session replacement, including when the wake row has already been drained; missing, handled or answered notes no longer justify priority.
+Delivery never consumes a note, adds another inbox row, or acknowledges work on the captain's behalf.
+
 ### Pi session replacement
 
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`:
