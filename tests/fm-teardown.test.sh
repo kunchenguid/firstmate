@@ -3026,7 +3026,17 @@ case "${1:-} ${2:-}" in
     if [ "${FM_FAKE_HERDR_CLOSE_FAIL:-0}" = 1 ]; then
       exit 1
     fi
+    if [ -n "${FM_FAKE_HERDR_SHELL_PID:-}" ]; then
+      {
+        if kill -0 "$FM_FAKE_HERDR_SHELL_PID" 2>/dev/null; then echo shell=alive; else echo shell=dead; fi
+        if kill -0 "${FM_FAKE_HERDR_HARNESS_PID:?}" 2>/dev/null; then echo harness=alive; else echo harness=dead; fi
+      } > "${FM_FAKE_HERDR_CLOSED:?}.procs"
+    fi
     : > "${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
+  "pane process-info")
+    [ -n "${FM_FAKE_HERDR_SHELL_PID:-}" ] || exit 1
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s}}}\n' "$FM_FAKE_HERDR_SHELL_PID"
     ;;
   "pane get")
     if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
@@ -3147,31 +3157,32 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
-test_herdr_projection_teardown_keeps_journal_when_pane_already_gone() {
+test_herdr_projection_teardown_sweeps_journal_when_pane_already_gone() {
   local case_dir log closed restored
   case_dir=$(make_case herdr-projection-already-gone)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
   # The exact pane and its token-bearing workspace were already gone before
-  # teardown started, so no confirmed close can correlate the journal.
+  # teardown started, so the close cannot correlate the journal and the orphan
+  # sweep retires it once the token-bearing workspace is confirmed gone.
   : > "$closed"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-already-gone: teardown failed: $(cat "$case_dir/stderr")"
-  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
-    || fail "herdr-projection-already-gone: a journal no confirmed close correlated was retired"
-  [ ! -e "$case_dir/state/task-x1.meta" ] \
-    || fail "herdr-projection-already-gone: teardown retained the metadata of a confirmed-gone endpoint"
-  assert_grep "remains quarantined" "$case_dir/stderr" \
-    "herdr-projection-already-gone: teardown did not explain why the journal was retained"
+  assert_grep "was not retired by its close" "$case_dir/stderr" \
+    "herdr-projection-already-gone: teardown did not report that the close left the journal"
+  assert_absent "$case_dir/state/task-x1.herdr-presentation" \
+    "herdr-projection-already-gone: the orphan sweep did not retire the journal of a gone workspace"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "herdr-projection-already-gone: teardown retained the metadata of a confirmed-gone endpoint"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "herdr-projection-already-gone: teardown must never call workspace close"
-  pass "herdr projection teardown keeps a journal quarantined when the exact pane was already gone before teardown"
+  pass "herdr projection teardown sweeps the journal when the exact pane was already gone before teardown"
 }
 
-test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pane_lives() {
+test_herdr_projection_teardown_sweeps_journal_when_token_workspace_is_gone_but_pane_lives() {
   local case_dir log closed restored
   case_dir=$(make_case herdr-projection-token-gone-pane-live)
   write_meta "$case_dir" local-only ship
@@ -3179,21 +3190,52 @@ test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pa
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   # No workspace carries the token while the recorded pane is still present:
-  # that is a renamed or relabelled workspace, not a removed one, so the
-  # ordinary close runs and the journal stays quarantined for inspection.
+  # the ordinary close removes the pane without retiring the journal, and the
+  # orphan sweep then retires it because its token-bearing workspace is gone.
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
     FM_FAKE_HERDR_WORKSPACE_GONE=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-token-gone-pane-live: teardown failed: $(cat "$case_dir/stderr")"
   [ -e "$closed" ] \
     || fail "herdr-projection-token-gone-pane-live: teardown did not close the still-present pane"
-  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
-    || fail "herdr-projection-token-gone-pane-live: a journal whose pane was still live was retired"
-  assert_grep "remains quarantined" "$case_dir/stderr" \
-    "herdr-projection-token-gone-pane-live: teardown did not explain why the journal was retained"
+  assert_grep "was not retired by its close" "$case_dir/stderr" \
+    "herdr-projection-token-gone-pane-live: teardown did not report that the close left the journal"
+  assert_absent "$case_dir/state/task-x1.herdr-presentation" \
+    "herdr-projection-token-gone-pane-live: the orphan sweep did not retire the journal of a gone workspace"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "herdr-projection-token-gone-pane-live: teardown must never call workspace close"
-  pass "herdr projection teardown keeps a journal quarantined when its token is gone but the exact pane still lives"
+  pass "herdr projection teardown sweeps the journal when its token is gone and the exact pane is closed"
+}
+
+test_herdr_teardown_stops_task_processes_but_spares_root_shell_before_close() {
+  local case_dir log closed restored shell_pid harness_pid
+  case_dir=$(make_case herdr-stop-harness-before-close)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  # The pane's root shell and the worker harness both sit in the leased slot.
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  shell_pid=$!
+  disown
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  harness_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$shell_pid" 2>/dev/null && kill -0 "$harness_pid" 2>/dev/null \
+    || fail "herdr-stop-harness-before-close: setup processes did not start"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_SHELL_PID="$shell_pid" FM_FAKE_HERDR_HARNESS_PID="$harness_pid" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || { kill -KILL "$shell_pid" "$harness_pid" 2>/dev/null || true
+         fail "herdr-stop-harness-before-close: teardown failed: $(cat "$case_dir/stderr")"; }
+  if kill -0 "$shell_pid" 2>/dev/null || kill -0 "$harness_pid" 2>/dev/null; then
+    kill -KILL "$shell_pid" "$harness_pid" 2>/dev/null || true
+    fail "herdr-stop-harness-before-close: a task process survived teardown"
+  fi
+  assert_equals "$(printf '%s\n' shell=alive harness=dead)" "$(cat "$closed.procs" 2>/dev/null)" \
+    "herdr-stop-harness-before-close: the close did not find the harness stopped and the root shell left alive"
+  pass "herdr teardown stops every task process except the pane's root shell before the exact-pane close"
 }
 
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup() {
@@ -4797,8 +4839,9 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_refuses_viewed_task_tab_before_touching_the_worktree
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
-test_herdr_projection_teardown_keeps_journal_when_pane_already_gone
-test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pane_lives
+test_herdr_projection_teardown_sweeps_journal_when_pane_already_gone
+test_herdr_projection_teardown_sweeps_journal_when_token_workspace_is_gone_but_pane_lives
+test_herdr_teardown_stops_task_processes_but_spares_root_shell_before_close
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane

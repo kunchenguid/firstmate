@@ -3614,6 +3614,25 @@ test_repo_parent_ensure_adopts_only_exact_parents_and_creates_otherwise() {
   assert_contains "$REPO_TREE_ERR" "found 2 workspaces labelled 'project'" "ambiguous repo parents did not warn"
   assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "ambiguous repo parents created a third"
 
+  # A same-label workspace whose group read fails or comes back without a
+  # source stays unjudged: nothing is chosen or created beside it.
+  dir="$base/group-read-failed"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wR","label":"project","focused":false}]}}' > "$resp/2.out"
+  echo 1 > "$resp/3.exit"
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 1 "$REPO_TREE_STATUS" "a failed group read of an existing same-label workspace"
+  [ -z "$out" ] || fail "a failed group read printed an id: $out"
+  assert_contains "$REPO_TREE_ERR" "could not read the worktree group of existing 'project' space wR" "a failed group read did not warn"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "a failed group read created a duplicate repo parent"
+  dir="$base/group-read-malformed"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wR","label":"project","focused":false}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"worktrees":[]}}' > "$resp/3.out"
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 1 "$REPO_TREE_STATUS" "a group read without a source"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "a group read without a source created a duplicate repo parent"
+
   # No candidate creates the parent with --no-focus under the focus snapshot,
   # and prints the exact id from the create response.
   dir="$base/create"; resp="$dir/responses"; mkdir -p "$resp"

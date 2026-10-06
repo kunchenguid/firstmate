@@ -3940,12 +3940,18 @@ else
             # workspace exists, so the parent is the oldest workspace Herdr
             # could elect as the repository's group source. Additive and
             # best effort: any refusal leaves the id empty and the task in
-            # its flat row, with the adapter's one warning as the only trace.
+            # its flat row with one warning, except that a client below the
+            # presentation floor or without worktree groups stays quiet.
             # The attach itself happens after the pane's root shell has
             # provably entered the leased task worktree, still under this lock.
             if fm_backend_herdr_worktree_group_capable "$HERDR_SES"; then
               HERDR_REPO_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_repo_parent_ensure \
                 "$HERDR_SES" "$PROJ_ABS" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID") || HERDR_REPO_PARENT_WORKSPACE_ID=""
+            else
+              case $? in
+                2) echo "warning: herdr repo grouping could not read the client protocol; leaving this task's space flat" >&2 ;;
+                4) echo "warning: herdr repo grouping could not read the API schema; leaving this task's space flat" >&2 ;;
+              esac
             fi
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")

@@ -312,7 +312,7 @@ The attach runs only after Herdr already reports the task worktree open in exact
 Treehouse never hands out a pool slot that another process occupies, so such a foreign workspace can reach a task's worktree only between the lease and the attach, and the pre-check refuses it there.
 
 Grouping is gated on the 0.8.0 presentation floor plus the client's API schema exposing `worktree.open` and `worktree.list`, which Herdr 0.9.1 (protocol 22) is the measured release for, and it rides on the existing `config/herdr-presentation-spaces` setting with no configuration of its own.
-Every gate refusal, parent ambiguity, foreign occupant, or unexpected Herdr answer warns once and leaves that task in the flat row it has today; Firstmate never renames, closes, moves, retries, or re-focuses anything on grouping's behalf, and a grouping refusal never fails the spawn.
+A client below the presentation floor or whose API schema lacks worktree groups skips grouping quietly, while an unreadable client protocol or API schema, a parent ambiguity, an unreadable existing parent's group, a foreign occupant, or any other unexpected Herdr answer warns once; every one of them leaves that task in the flat row it has today. Firstmate never renames, closes, moves, retries, or re-focuses anything on grouping's behalf, and a grouping refusal never fails the spawn.
 
 Repo parents persist: cleanup removes only the exact task pane, so an emptied child disappears through the same pane-death path while the parent row, which carries Herdr's own non-linked provenance after its first attach, stays for the next task and survives a server restart together with each child's linked-worktree provenance.
 Two Herdr UI actions on those rows need care because they act on the repository rather than on one task, and both are confirmation-gated in Herdr: the per-child "Delete worktree checkout..." menu item removes the task's git worktree from disk, which Firstmate would otherwise return to the Treehouse pool, and closing the parent row closes every task workspace of that repository in that home.
@@ -325,7 +325,8 @@ Packing an existing parent into its home block with `workspace.move_block`, drop
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
-Because a task pane's root shell sits inside its leased slot, cleanup closes that pane after it concludes the task's parked no-mistakes run and before it reaps the task's processes and returns the worktree, since either step would end the root shell and let Herdr remove the pane through its pane-death path with no close left to refuse.
+Because a task pane's root shell sits inside its leased slot, cleanup closes that pane after it concludes the task's parked no-mistakes run and before it reaps the root shell and returns the worktree, since either step would end the root shell and let Herdr remove the pane through its pane-death path with no close left to refuse.
+Just before that close it stops every other task process, the worker harness included, so the root shell is left as the lone idle shell the focus-safe removal below proves; when Herdr cannot report that shell's pid, the close runs with the worker still alive and takes the plain explicit close.
 A close that cannot be confirmed stops the cleanup there, leaving the pane, the isolated copy, its pool slot, and every record untouched for a rerun, so the active-tab refusal below still protects a workspace the captain is viewing.
 Cleanup retires the presentation journal once that close is confirmed.
 

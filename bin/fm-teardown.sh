@@ -2159,7 +2159,7 @@ task_pids_under_roots() {  # <dir>...
     pids="$pids
 $dir_pids"
   done
-  TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | grep -vxF "${TASK_REAP_SPARE_PID:-}" | sort -un || true)
 }
 
 reap_task_backend_process_group() {  # <label>
@@ -3562,11 +3562,13 @@ fi
 # A Herdr task pane's root shell sits inside its leased slot, so both the
 # process reap below and the worktree return after it end that shell, and Herdr
 # then removes the pane - and an emptied projected workspace - through its
-# pane-death path before any close could look at focus. Close the exact
-# recorded pane after the parked-run conclusion (which can still refuse while
-# the worker is alive) and before the reap, while the pane, the copy, the slot,
-# and every record are still intact, so the projected close keeps its
-# active-tab refusal and its emptying plan (bin/backends/herdr.sh). A close
+# pane-death path before any close could look at focus. After the parked-run
+# conclusion (which can still refuse while the worker is alive), reap every
+# task process except that root shell, so the shell is left idle, then close
+# the exact recorded pane before the full reap, while the pane, the copy, the
+# slot, and every record are still intact, so the projected close keeps its
+# active-tab refusal and its emptying plan, whose lone-idle-shell proof can
+# take the focus-preserving pane-death path (bin/backends/herdr.sh). A close
 # that cannot be confirmed returns non-zero and stops this teardown before
 # anything destructive runs, exactly as the same unconfirmed close did when it
 # ran later.
@@ -3664,7 +3666,20 @@ if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
 fi
 
+teardown_herdr_stop_harness() {
+  local shell_pid
+  command -v lsof >/dev/null 2>&1 || return 0
+  fm_backend_source herdr || return 0
+  shell_pid=$(fm_backend_herdr_pane_shell_pid "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE") || return 0
+  if teardown_owns_worktree; then
+    TASK_REAP_SPARE_PID=$shell_pid reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  else
+    TASK_REAP_SPARE_PID=$shell_pid reap_task_worktree_processes tasktmp "$TASK_TMP"
+  fi
+}
+
 if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
+  teardown_herdr_stop_harness || exit 1
   teardown_herdr_close_endpoint || exit 1
 fi
 

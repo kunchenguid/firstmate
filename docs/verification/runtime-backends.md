@@ -1638,7 +1638,7 @@ ok - real Herdr lab: an aborted respawn returns the slot it leased even though a
 On the macOS host that produced this record the full suite passed its first 26 cases and then stopped at the concurrent cross-home recovery case with `herdr presentation recovery could not acquire its session lock; refusing a concurrent resume`, because one uncontended same-identity resume there held the presentation session lock for about nine seconds at a load average between ten and fifteen, while a second concurrent resume waits five seconds before refusing.
 An unmodified `main` checkout run on the same host the same day stopped at that same case with the same refusal, and a run with only that case removed passed every remaining case, so the margin belongs to the recovery lock wait rather than to the grouping or the leased spawn shape; the required CI lane keeps running the unmodified suite.
 
-The unit suite's repo worktree group cases (`test_worktree_group_capable_gates_on_protocol_and_schema` through `test_live_binding_accepts_repo_parent_between_home_and_child`) passed in the same run, with the whole file reporting 228 `ok` lines and no `not ok` line, and `tests/fm-teardown.test.sh` reporting 94 `ok` lines and no `not ok` line for the exact-pane close that now runs ahead of the process reap and the worktree return, including its refusal on a tab a live viewer is watching.
+The unit suite's repo worktree group cases (`test_worktree_group_capable_gates_on_protocol_and_schema` through `test_live_binding_accepts_repo_parent_between_home_and_child`) passed in the same run, with the whole file reporting 228 `ok` lines and no `not ok` line.
 
 ### Composer and operational input
 

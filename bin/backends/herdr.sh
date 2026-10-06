@@ -1195,7 +1195,8 @@ fm_backend_herdr_workspace_move_capable() {  # <session>
 # presentation floor, which is also where worktree groups first render packed;
 # 4 unreadable API schema; 5 worktree.open or worktree.list, or the parameters
 # the attach passes, are absent from the schema. Every nonzero verdict makes the
-# caller skip grouping silently and leave the task in the flat row it has today.
+# caller skip grouping and leave the task in the flat row it has today; the
+# caller warns once for 2 and 4 and stays quiet for 3 and 5.
 fm_backend_herdr_worktree_group_capable() {  # <session>
   local session=$1 protocol schema
   protocol=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
@@ -1444,6 +1445,15 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
     [ "$attempt" -lt "$max_attempts" ] || return 1
     sleep 0.1
   done
+}
+
+# fm_backend_herdr_pane_shell_pid: print the root shell pid Herdr reports for
+# the exact <pane-id>, whether or not that shell is idle.
+fm_backend_herdr_pane_shell_pid() {  # <session> <pane-id>
+  fm_backend_herdr_cli "$1" pane process-info --pane "$2" 2>/dev/null | jq -er --arg pane "$2" '
+    select(.result.type == "pane_process_info" and .result.process_info.pane_id == $pane)
+    | .result.process_info.shell_pid | select(type == "number" and . > 1) | floor
+  ' 2>/dev/null
 }
 
 # fm_backend_herdr_pane_idle_shell_sample: one strict instantaneous
@@ -2881,9 +2891,12 @@ fm_backend_herdr_projection_repo_parent_ensure() {  # <session> <clone> <home-la
   ' 2>/dev/null)
   while IFS= read -r wsid; do
     [ -n "$wsid" ] || continue
-    group=$(fm_backend_herdr_cli "$session" worktree list --workspace "$wsid" 2>/dev/null) || continue
-    group_source=$(printf '%s' "$group" | jq -er '.result.source.source_workspace_id | select(type == "string" and length > 0)' 2>/dev/null) || continue
-    group_root=$(printf '%s' "$group" | jq -er '.result.source.source_checkout_path | select(type == "string" and length > 0)' 2>/dev/null) || continue
+    if ! group=$(fm_backend_herdr_cli "$session" worktree list --workspace "$wsid" 2>/dev/null) \
+      || ! group_source=$(printf '%s' "$group" | jq -er '.result.source.source_workspace_id | select(type == "string" and length > 0)' 2>/dev/null) \
+      || ! group_root=$(printf '%s' "$group" | jq -er '.result.source.source_checkout_path | select(type == "string" and length > 0)' 2>/dev/null); then
+      echo "warning: herdr repo grouping could not read the worktree group of existing '$label' space $wsid; leaving this task's space flat rather than creating another" >&2
+      return 1
+    fi
     [ "$group_source" = "$wsid" ] || continue
     group_root_real=$(cd "$group_root" 2>/dev/null && pwd -P) || group_root_real=$group_root
     [ "$group_root_real" = "$clone_real" ] || continue
