@@ -109,8 +109,15 @@
 #   adapter, and experimental zellij, orca, and cmux adapters. Orca owns both
 #   the task worktree and terminal, so ship/scout Orca spawns do not run
 #   treehouse get; cmux is a session provider only, exactly like herdr/zellij,
-#   so it does. Auto-detected herdr stays silent like tmux; auto-detected cmux
-#   prints a loud stderr notice; zellij and orca are never auto-detected.
+#   so it does. When treehouse get instead refuses because the pool is full
+#   ("all N worktrees are in use..."), the spawn detects that exact refusal
+#   during the worktree wait, holds the still-Queued item with a load-kind
+#   capacity hold whose reason names the pool (bin/fm-capacity-lib.sh owns the
+#   contract), prints one line naming the hold, and exits 2;
+#   bin/fm-teardown.sh releases the oldest hold for the same pool when a
+#   worktree returns to it. Auto-detected herdr stays silent like tmux;
+#   auto-detected cmux prints a loud stderr notice; zellij and orca are never
+#   auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux does not support --secondmate spawns yet.
@@ -507,6 +514,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$SCRIPT_DIR/fm-capacity-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
@@ -1534,6 +1543,14 @@ fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
 }
+# Attribute this task's Beads audit trail to the worker identity: the dispatch
+# claim below and every claim, hold, or close the worker drives record who did
+# it (bd reads $BEADS_ACTOR; tasks-axi's beads backend shells out to bd). The
+# task id IS the registered secondmate name for a --secondmate spawn, so one
+# value covers crewmates, scouts, and secondmates. An inherited value is
+# deliberately replaced: the worker's writes belong to the worker, not to
+# whatever session launched it.
+export BEADS_ACTOR="$ID"
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
   BRANCH="$BRANCH_PREFIX$ID"
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
@@ -3576,6 +3593,26 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
+HERDR_TASK_LABEL=$W
+if [ "$BACKEND" = herdr ]; then
+  HERDR_TASK_TITLE=${FM_BACKLOG_ROW_TITLE:-}
+  # The launch brief carries the worker-role contract preamble ahead of the
+  # task brief (bin/fm-spawn.sh writes it that way for every ship and scout),
+  # so the short title is read from the original source brief it was built
+  # from; only kinds that never enter that overlay fall back to $BRIEF.
+  TITLE_BRIEF=${SOURCE_BRIEF:-$BRIEF}
+  if [ -z "$HERDR_TASK_TITLE" ]; then
+    HERDR_TASK_TITLE=$(awk '
+      /^# Task[[:space:]]*$/ { in_task=1; next }
+      in_task && /^#/ { exit }
+      in_task && NF { print; exit }
+    ' "$TITLE_BRIEF")
+  fi
+  if [ -z "$HERDR_TASK_TITLE" ]; then
+    HERDR_TASK_TITLE=$(awk '!/^#/ && NF { print; exit }' "$TITLE_BRIEF")
+  fi
+  HERDR_TASK_LABEL=$(fm_backend_herdr_task_label "$HERDR_TASK_TITLE" "$ID")
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
@@ -3722,29 +3759,33 @@ else
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          fm_backend_herdr_projection_journal_snapshot \
+            "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+          HERDR_RECOVERY_TASK_LABEL=$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$HERDR_RECOVERY_TASK_LABEL" "$PROJ_ABS"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
-          0)
-            HERDR_PROJECTED=1
-            HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
-            HERDR_SEEDED_DEFAULT_TAB_ID=""
-            HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-            HERDR_PROJECTION_ABORT_CLEANUP=1
-            HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-            HERDR_PROJECTION_ABORT_SEEDED_PANE=""
-            ;;
-          2)
-            spawn_herdr_presentation_order_lock_release
-            ;;
-          *) exit 1 ;;
+            0)
+              HERDR_TASK_LABEL=$HERDR_RECOVERY_TASK_LABEL
+              HERDR_PROJECTED=1
+              HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
+              HERDR_SEEDED_DEFAULT_TAB_ID=""
+              HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+              HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+              HERDR_PROJECTION_ABORT_CLEANUP=1
+              HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+              HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+              HERDR_PROJECTION_ABORT_SEEDED_PANE=""
+              ;;
+            2)
+              spawn_herdr_presentation_order_lock_release
+              ;;
+            *) exit 1 ;;
           esac
         else
           spawn_herdr_presentation_order_lock_release
@@ -3783,7 +3824,7 @@ else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -3805,15 +3846,15 @@ else
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
-            if [ -n "$HERDR_HOME_ID" ] &&
-              fm_backend_herdr_projection_live_binding_matches \
-                "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
-                "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" &&
-              fm_backend_herdr_projection_journal_bind \
-                "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
-                "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
+            if [ -n "$HERDR_HOME_ID" ] \
+               && fm_backend_herdr_projection_live_binding_matches \
+                 "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
+                 "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
+                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL" \
+               && fm_backend_herdr_projection_journal_bind \
+                 "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
+                 "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL"; then
               :
             else
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
@@ -3836,7 +3877,9 @@ else
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_LABEL_HISTORY="$STATE/$ID.herdr-task-labels"
+      fm_backend_herdr_task_label_history_append "$HERDR_TASK_LABEL_HISTORY" "$HERDR_TASK_LABEL" || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$HERDR_TASK_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID" "$ID" "$HERDR_TASK_LABEL_HISTORY") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -3943,6 +3986,54 @@ spawn_send_key() { # <target> <key>
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
+}
+
+# treehouse get's terminal refusal when the pool has nothing to hand out:
+#   "all %d worktrees are in use or dirty (max_trees = %d). Run ..."
+# and its mixed-flavor sibling "all %d worktrees are in use, dirty, or hold
+# the other backend's worktrees (...)". Both share the leading count clause,
+# so one prefix match covers them. The message can wrap at the pane width, so
+# the capture is flattened (newlines and squeezed runs become single spaces)
+# before matching; that reconstructs the message regardless of where it wrapped.
+# Sets POOL_FULL_N and POOL_FULL_MAX for the capacity hold reason.
+POOL_FULL_N=
+POOL_FULL_MAX=
+spawn_treehouse_pool_refusal() {
+  local cap flat
+  cap=$(fm_backend_capture "$BACKEND" "$WT_TARGET" 60 "$W" 2>/dev/null || true)
+  [ -n "$cap" ] || return 1
+  flat=$(printf '%s\n' "$cap" | tr '\n' ' ' | tr -s ' ')
+  [[ "$flat" =~ all\ ([0-9]+)\ worktrees\ are\ in\ use ]] || return 1
+  POOL_FULL_N=${BASH_REMATCH[1]}
+  POOL_FULL_MAX=
+  [[ "$flat" =~ max_trees\ =\ ([0-9]+) ]] && POOL_FULL_MAX=${BASH_REMATCH[1]}
+  return 0
+}
+
+# A full pool is a recorded capacity hold, not a silent wait: detect the exact
+# refusal, hold the still-Queued item (bin/fm-capacity-lib.sh owns the reason
+# contract), print one line naming the hold, and leave the item queued - never
+# In flight - for redispatch once teardown releases the hold. Exit 2 is the
+# capacity signal; the created endpoint is left open in the project directory
+# and safe to close by hand. At this point no meta, busy record, or backlog
+# transition exists yet, so nothing else needs unwinding.
+spawn_capacity_refuse() {
+  local pool reason
+  pool=$(fm_capacity_pool_of_project "$PROJ_ABS_REAL" 2>/dev/null || true)
+  [ -n "$pool" ] || pool=$PROJ_ABS_REAL
+  reason=$(fm_capacity_reason "$pool" "$POOL_FULL_N" "$POOL_FULL_MAX")
+  if [ "$BACKLOG_TRANSITION" = 1 ]; then
+    if ! fm_capacity_hold "$DATA" "$ID" "$reason"; then
+      echo "error: treehouse refused the spawn: $reason, and recording the capacity hold on $ID failed; inspect window $T" >&2
+      exit 2
+    fi
+    printf 'held: %s - %s; item left queued for redispatch when a worktree frees; window %s left open in the project\n' "$ID" "$reason" "$T"
+  else
+    # A manual-backend home owns its backlog by hand, so no hold is invented;
+    # the refusal is still terminal for this dispatch either way.
+    printf 'refused: %s - %s; manual backlog home, record the hold by hand; window %s left open in the project\n' "$ID" "$reason" "$T"
+  fi
+  exit 2
 }
 
 # Enter the exact copy recorded for this task immediately before trust setup and
@@ -4345,6 +4436,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   last_seen=""
   last_reason="the pane reported no path"
   for _ in $(seq 1 60); do
+    # A pool-full refusal is terminal for treehouse get, so check it before
+    # each path poll: the pane never leaves the project on that path, and the
+    # refusal turns the wait into a recorded capacity hold instead of a
+    # 60-second silence. spawn_capacity_refuse never returns.
+    if spawn_treehouse_pool_refusal; then
+      spawn_capacity_refuse
+    fi
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -4984,6 +5082,11 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    # herdr_task_label is emitted only on a fresh spawn: a relaunch adopts the
+    # recorded tab without renaming it, so the prior meta's recorded label is
+    # still the tab's exact label and survives through preserve_relaunch_meta
+    # (not an owned key), while a recomputed label could diverge from it.
+    [ "$RELAUNCH" -eq 1 ] || echo "herdr_task_label=$HERDR_TASK_LABEL"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
@@ -5307,6 +5410,12 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Ship the worker's audit identity through the same pane channel: pane
+# processes do not inherit this launcher's environment, so the export must be
+# delivered before the launch command for the agent and its children to
+# inherit it. BEADS_ACTOR is already exported in this process for the dispatch
+# claim; this line extends it to the worker's own tasks-axi and bd writes.
+spawn_send_text_line "$T" "export BEADS_ACTOR=$(shell_quote "$ID")"
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.

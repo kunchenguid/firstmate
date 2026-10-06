@@ -95,6 +95,10 @@ MAIN_BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
+# Every mv/rm below is a firstmate-owned backlog state change, so the whole
+# script runs under this home's audit identity (fm_tasks_axi_export_actor).
+fm_tasks_axi_export_actor
+
 RECEIVER_WAKE_MESSAGE='New routed work is in your backlog. Run bin/fm-session-start.sh now, then act on the routed task.'
 
 ACTIVE_HANDOFF_LOCK=
