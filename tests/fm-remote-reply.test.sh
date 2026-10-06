@@ -122,6 +122,36 @@ sha256_file() {
   fi
 }
 
+# Drive the real delta-reader executable across its unchanged-file wait.
+# The recording sleep appends a complete line after the initial empty snapshot,
+# so the next snapshot must deliver it without consuming or modifying the log.
+delta_cadence_case() {
+  local label=$1 override=$2 expected=$3 dir log empty_hash
+  dir="$TMP_ROOT/delta-$label"
+  mkdir -p "$dir/bin" "$dir/home/state"
+  log="$dir/home/state/replies.status"
+  : > "$log"
+  empty_hash=$(sha256_file "$log")
+  cat > "$dir/bin/sleep" <<'SH'
+#!/bin/bash
+printf '%s\n' "$1" >> "$FM_DELTA_SLEEP_LOG"
+printf 'cadence-delivered\n' >> "$FM_DELTA_APPEND_LOG"
+exec /bin/sleep "$@"
+SH
+  chmod +x "$dir/bin/sleep"
+  FM_HOME="$dir/home" PATH="$dir/bin:$PATH" FM_REMOTE_DELTA_POLL_SECONDS="$override" \
+    FM_DELTA_SLEEP_LOG="$dir/sleeps" FM_DELTA_APPEND_LOG="$log" \
+    "$BASH" "$ROOT/bin/fm-remote-delta-read.sh" state/replies.status 0 "$empty_hash" 30 \
+    > "$dir/result" || fail "$label delta reader failed"
+  [ "$(cat "$dir/sleeps")" = "$expected" ] || fail "$label delta reader did not wait $expected seconds"
+  assert_grep 'status=delta' "$dir/result" "$label delta reader did not publish a delta"
+  assert_grep 'cadence-delivered' "$dir/result" "$label delta reader lost the appended complete line"
+  [ "$(cat "$log")" = cadence-delivered ] || fail "$label delta reader changed its source log"
+  pass "$label delta reader waits $expected seconds then delivers a non-destructive complete-line delta"
+}
+delta_cadence_case default '' 0.5
+delta_cadence_case override 0.07 0.07
+
 ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
@@ -627,6 +657,19 @@ assert_grep 'report=data/remote-secondmates/ios/data/reply/writefail.md' "$PAREN
 mirrored_cursor_is_current "the recovered delta did not advance the cursor"
 pass "a failed mirror write never drops status content or advances the cursor"
 
+# The whole-log recapture re-fetches every document the log offers, one remote
+# job at a time, so it needs far more than one await_reply_result budget on a
+# loaded runner. Each attempt is a full wait that re-checks ownership of the
+# source, so the recapture is bounded by RECAPTURE_WAIT_ATTEMPTS of them.
+RECAPTURE_WAIT_ATTEMPTS=3
+await_recapture_result() { # <result-path>
+  local attempt
+  for attempt in $(seq 1 "$RECAPTURE_WAIT_ATTEMPTS"); do
+    await_reply_result "$1" && return 0
+  done
+  return 1
+}
+
 # A source line remains the replay identity even when document availability
 # changes between a successful mirror append and a failed ingestion commit.
 REPLAY_LINE='needs-decision [key=replay-decision]: pick report=data/reply/replay.md'
@@ -673,7 +716,7 @@ assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" $'repl
 stop_reply_listener || fail "the reply listener did not stop before the cursor-loss recapture"
 rm -f "$PARENT/state/remote-replies/ios.cursor"
 GEN=$((GEN + 1))
-await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+await_recapture_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
   || fail "the replay-identity whole-log recapture was not captured"
 assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
   "the replay-identity whole-log recapture was not applied"
@@ -694,6 +737,9 @@ pass "source-line identity survives commit failure and cursor-loss recapture"
 # the reserved key over.
 # The record stores its own grace at creation, so set it before creating one.
 export FM_PENDING_REPLY_GRACE_SECS=0
+# Answer the mate's earlier decisions and blocker first: a recovery repost waits
+# while the mate has one of its own open (tests/fm-pending-reply.test.sh).
+printf 'resolved [key=%s]: answered\n' rough-cut-version ctl default >> "$PARENT/state/ios.status"
 ESCALATED_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios 'confirm the notarization')
 [ -n "$ESCALATED_CORR" ] || fail "could not create the pending-reply record to escalate"
 fm_pending_reply_mark_delivered "$PARENT/state" "$ESCALATED_CORR" \
@@ -934,7 +980,7 @@ mv "$PARENT/state/.wake-queue" "$TMP_ROOT/wake-queue-before-replay" 2>/dev/null 
 stop_reply_listener || fail "the reply listener did not stop before the whole-log recapture"
 rm -f "$PARENT/state/remote-replies/ios.cursor"
 GEN=$((GEN + 1))
-await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+await_recapture_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
   || fail "the cursor-loss recapture was not captured"
 assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
   "the whole-log recapture was not acknowledged by the adapter"
@@ -985,6 +1031,26 @@ if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
   grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status"
 fi
 pass "truncation is detected, escalated once, and not silently rebased"
+
+# The break does not advance the cursor, so a later read of the unchanged
+# remote log reports the same break. An operator resolve in between must not
+# make that repeat look like a new break.
+printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator accepted the break' \
+  >> "$PARENT/state/ios.status"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "operator resolve left the continuity decision open"
+rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
+set +e
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" > "$TMP_ROOT/handle-resolved.out" 2>&1
+handle_rc=$?
+set -e
+[ "$handle_rc" -eq 3 ] || fail "repeated continuity handling returned an unexpected status: $handle_rc"
+remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "a repeated continuity break appended again after the operator resolve"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "a repeated continuity break reopened the decision the operator resolved"
+pass "a repeated continuity break after an operator resolve appends nothing"
 
 rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then

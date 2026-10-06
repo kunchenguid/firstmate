@@ -280,7 +280,7 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
     "budget propagation did not enqueue the pointer to its exact reread generation"
   assert_contains "$(<"$log")" "Firstmate instruction waiting: list " \
     "budget propagation did not ring the durable inbox doorbell"
-  assert_contains "$(<"$log")" "/state/sm.inbox'/*.msg" \
+  assert_contains "$(<"$log")" "'sm.inbox' steering inbox" \
     "budget propagation doorbell did not identify the durable inbox"
 
   outside="$world/unsafe-budget"

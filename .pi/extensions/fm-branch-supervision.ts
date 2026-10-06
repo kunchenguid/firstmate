@@ -653,10 +653,16 @@ export default function (pi: ExtensionAPI) {
   // queued for the captain's next prompt. The durable truth is the store's
   // processed marker; this only paces re-presentation and resets with the
   // session generation.
-  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
+  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean; visibleFinals: Set<string> };
   let processing: ProcessingState | null = null;
   let queuedProcessingContent: string | null = null;
   let processingOpenedThisRun = false;
+  // Compare only replies to the same consumed sequence set. A retry can be
+  // the first real handling, so only an empty or exact-repeat final is hidden.
+  // Buffer retry streaming until message_end can make that decision; tool
+  // messages always keep their prose, and a user message ends this scope.
+  let activeProcessing: { request: ProcessingState; retry: boolean } | null = null;
+  let userMessageThisTurn = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -1095,7 +1101,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
-      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
+      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false, visibleFinals: new Set() };
     }
     // A presentation already sent is consumed by the run it joins or opens;
     // until that run settles, sending a widened or identical copy would hand
@@ -1677,7 +1683,6 @@ ${context.command}
     // duplicate suppression. Operational extension injections are not dialog.
     const prompt = event.prompt;
     processingOpenedThisRun = queuedProcessingContent !== null && prompt === queuedProcessingContent;
-    if (processingOpenedThisRun) queuedProcessingContent = null;
     const trimmed = prompt.trim();
     if (!trimmed || isOperationalUserText(trimmed)) return;
     const file = currentMainSession.getSessionFile() ?? "";
@@ -1691,6 +1696,48 @@ ${context.command}
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
+  });
+  pi.on?.("turn_start", () => {
+    userMessageThisTurn = false;
+  });
+  pi.on?.("message_start", (event) => {
+    if (event.message.role === "user") {
+      userMessageThisTurn = true;
+      activeProcessing = null;
+    } else if (
+      event.message.role === "custom" &&
+      isProcessingCustomMessage(event.message) &&
+      queuedProcessingContent !== null &&
+      event.message.content === queuedProcessingContent
+    ) {
+      // message_start covers both an idle custom prompt and a follow-up
+      // consumed inside an existing run; neither needs before_agent_start.
+      activeProcessing = !userMessageThisTurn && processing ? { request: processing, retry: processing.triggered > 1 } : null;
+      queuedProcessingContent = null;
+    }
+  });
+  pi.registerMarkdownTransformer?.((markdown, context) =>
+    activeProcessing?.retry && context.isStreaming && context.messageType !== "user" ? "" : markdown,
+  );
+  pi.on?.("message_end", (event) => {
+    if (!activeProcessing || event.message.role !== "assistant") return;
+    // message_end runs before tool execution. Keep the whole message when
+    // it carries a call, including prose alongside fm_branch_processed.
+    if (event.message.content.some((part) => part.type === "toolCall")) return;
+    const text = event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
+    const { request, retry } = activeProcessing;
+    if (!retry || (text && !request.visibleFinals.has(text))) {
+      if (text) request.visibleFinals.add(text);
+      return;
+    }
+    // Pi applies the replacement before persistence and transcript rendering.
+    // Preserve the message envelope, including provider usage accounting.
+    return {
+      message: {
+        ...event.message,
+        content: [],
+      },
+    };
   });
   pi.on?.("context", (event, ctx) => {
     if (!afkPostureRecordPresent(state)) return;
@@ -1714,6 +1761,7 @@ ${context.command}
     mainStreaming = false;
     queuedProcessingContent = null;
     processingOpenedThisRun = false;
+    activeProcessing = null;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
@@ -1773,6 +1821,8 @@ ${context.command}
     consecutiveProviderErrors = 0;
     providerRecovery = null;
     generation += 1;
+    activeProcessing = null;
+    userMessageThisTurn = false;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     mirrorCollection.stagedCaptain = null;
@@ -1821,6 +1871,9 @@ ${context.command}
     shuttingDown = true;
     generation += 1;
     processing = null;
+    queuedProcessingContent = null;
+    activeProcessing = null;
+    userMessageThisTurn = false;
     pendingMirror.length = 0;
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
@@ -2339,6 +2392,9 @@ ${context.command}
           };
         }
         const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
+        if (acknowledgedGeneration === generation && activeProcessing && through >= activeProcessing.request.through) {
+          activeProcessing = null;
+        }
         if (remaining !== null && remaining.length === 0) processing = null;
         const open = remaining === null
           ? "the remaining outcomes could not be read"

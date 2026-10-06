@@ -32,6 +32,8 @@
 #  17. Recovery and escalation grace are measured from the relevant turn's
 #      completion, never from delivery or send time, and each takes one fresh,
 #      uncached status read - accepting any verb - immediately before firing
+#  18. A same-kind escalation after an operator close appends again and reopens
+#      the decision; a retry while that decision is still open appends nothing
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -199,6 +201,75 @@ test_completed_turn_no_report_triggers_one_recovery() {
     *) fail "recovery message must ask for a repost"$'\n'"$(cat "$hook_log")" ;;
   esac
   pass "completed turn with no report triggers exactly one recovery"
+}
+
+# A mate waiting on its own open decision is never poked by the recovery; the
+# recovery stays unattempted and runs once the decision closes.
+test_recovery_waits_while_the_mate_has_an_open_decision() {
+  local home state corr hook_log
+  home=$(setup_parent decision-wait)
+  state="$home/state"
+  hook_log="$TMP_ROOT/decision-wait-hook.log"
+  : > "$hook_log"
+  export FM_PENDING_REPLY_NOW=2500
+  mkdir -p "$home/config"
+  : > "$home/config/wait-no-turns"
+  FM_CONFIG_OVERRIDE="$home/config"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  decision_wait_hook() {
+    printf '%s\n' "$1" >> "$hook_log"
+  }
+  export -f decision_wait_hook
+  export FM_PENDING_REPLY_SEND_HOOK=decision_wait_hook
+
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "status of phase 8")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  printf 'needs-decision [key=scope]: narrow or wide?\n' >> "$state/hibit.status"
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "recovery must wait while the mate waits on its own decision"
+  fi
+  [ ! -s "$hook_log" ] || fail "recovery poked a mate waiting on its decision"
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "a deferred recovery must stay unattempted, got $(phase_of "$state" "$corr")"
+
+  printf 'resolved [key=scope]: answered: narrow\n' >> "$state/hibit.status"
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery should send once the decision closes"
+  [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected exactly one recovery send"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  unset FM_CONFIG_OVERRIDE
+  pass "recovery never pokes a mate waiting on its own decision, and runs once it closes"
+}
+
+# Without the flag, an open decision does not hold the recovery.
+test_recovery_sends_during_an_open_decision_without_the_flag() {
+  local home state corr hook_log
+  home=$(setup_parent decision-wait-off)
+  state="$home/state"
+  hook_log="$TMP_ROOT/decision-wait-off-hook.log"
+  : > "$hook_log"
+  mkdir -p "$home/config"
+  FM_CONFIG_OVERRIDE="$home/config"
+  export FM_PENDING_REPLY_NOW=2500
+  # shellcheck disable=SC2329
+  decision_wait_off_hook() {
+    printf '%s\n' "$1" >> "$hook_log"
+  }
+  export -f decision_wait_off_hook
+  export FM_PENDING_REPLY_SEND_HOOK=decision_wait_off_hook
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "status of phase 8")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  printf 'needs-decision [key=scope]: narrow or wide?\n' >> "$state/hibit.status"
+  fm_pending_reply_send_recovery "$state" "$corr" \
+    || fail "recovery should send while a decision is open when the flag is absent"
+  [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected the recovery to send"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  unset FM_CONFIG_OVERRIDE
+  pass "recovery sends during an open decision when config/wait-no-turns is absent"
 }
 
 test_recovery_grace_measures_from_turn_completion() {
@@ -1923,10 +1994,86 @@ test_escalated_undelivered_correlation_stays_retryable() {
   pass "an escalated correlation stays retryable only while undelivered"
 }
 
+test_same_kind_escalation_reopens_after_operator_close() {
+  (
+    local dir fb log home state corr status blocked open
+    dir="$TMP_ROOT/same-kind-reescalation"
+    mkdir -p "$dir"
+    fb=$(make_stubs "$dir")
+    log="$dir/send.log"
+    home=$(setup_parent same-kind)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/mate.meta" "$home/sm" "sess:fm-mate"
+    export FM_PENDING_REPLY_NOW=10000
+    corr=$(fm_pending_reply_create "$home" "$state" mate "wake after lost transport")
+    status="$state/mate.status"
+    fm_pending_reply_prepare_delivery "$state" "$corr" \
+      || fail "prepare failed"
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "first tick failed"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "first loss should escalate"
+    blocked=$(grep -cF "blocked [key=pending-reply-$corr]" "$status")
+    [ "$blocked" = 1 ] \
+      || fail "first escalation should append one blocked line, got $blocked"
+    fm_pending_reply_reset_known_undelivered "$state" "$corr" \
+      || fail "reset before close failed"
+    fm_pending_reply_prepare_delivery "$state" "$corr" \
+      || fail "retry prepare failed"
+    export FM_PENDING_REPLY_NOW=15000
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "retry tick failed"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "retry should escalate the record again"
+    blocked=$(grep -cF "blocked [key=pending-reply-$corr]" "$status")
+    [ "$blocked" = 1 ] \
+      || fail "a retry while the decision is open must not append, got $blocked"
+    open=$(status_open_decisions "$status" | cut -f1)
+    [ "$open" = "pending-reply-$corr" ] \
+      || fail "the first decision must stay open, got '$open'"
+    run_send "$fb" "$home" "$log" mate --resolve-key "pending-reply-$corr" \
+      "dismiss the unknown-delivery hold" \
+      || fail "operator close failed"
+    open=$(status_open_decisions "$status")
+    [ -z "$open" ] || fail "operator close left the decision open: $open"
+    fm_pending_reply_reset_known_undelivered "$state" "$corr" \
+      || fail "reset after close failed"
+    fm_pending_reply_prepare_delivery "$state" "$corr" \
+      || fail "second-episode prepare failed"
+    export FM_PENDING_REPLY_NOW=20000
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "second episode tick failed"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "second loss should escalate"
+    blocked=$(grep -cF "blocked [key=pending-reply-$corr]" "$status")
+    [ "$blocked" = 2 ] \
+      || fail "a new escalation after the close should append, got $blocked"
+    open=$(status_open_decisions "$status" | cut -f1)
+    [ "$open" = "pending-reply-$corr" ] \
+      || fail "the second escalation should reopen the decision, got '$open'"
+    fm_pending_reply_reset_known_undelivered "$state" "$corr" \
+      || fail "reset of the reopened decision failed"
+    fm_pending_reply_prepare_delivery "$state" "$corr" \
+      || fail "reopened retry prepare failed"
+    export FM_PENDING_REPLY_NOW=25000
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "reopened retry tick failed"
+    blocked=$(grep -cF "blocked [key=pending-reply-$corr]" "$status")
+    [ "$blocked" = 2 ] \
+      || fail "a retry of the reopened decision must not append, got $blocked"
+    open=$(status_open_decisions "$status" | cut -f1)
+    [ "$open" = "pending-reply-$corr" ] \
+      || fail "the reopened decision must stay open across the retry, got '$open'"
+  ) || fail "same-kind re-escalation after an operator close failed"
+  pass "a same-kind escalation after an operator close opens the decision again"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
+test_recovery_waits_while_the_mate_has_an_open_decision
+test_recovery_sends_during_an_open_decision_without_the_flag
 test_recovery_grace_measures_from_turn_completion
 test_recovery_fresh_status_read_resolves_before_firing
 test_partial_resolve_write_blocks_firing
@@ -1969,5 +2116,6 @@ test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
+test_same_kind_escalation_reopens_after_operator_close
 
 printf 'ok - all pending-reply tests passed\n'
