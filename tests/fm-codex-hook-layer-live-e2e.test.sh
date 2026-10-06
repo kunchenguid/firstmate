@@ -10,11 +10,11 @@
 # outright (bin/fm-spawn.sh's launch template owns the flag).
 #
 # The guard replays the REAL launch flags fm-spawn builds - captured from a
-# spawn driven through a fake pane - against the installed codex and asks codex
-# itself whether hooks ended up disabled. If a codex release renames or drops
-# the feature, the flag becomes a hard "Unknown feature flag" error and this
-# guard fails naming the harness and version instead of letting the modal
-# silently come back.
+# spawn driven through a fake pane - against the installed codex and verifies
+# that the requested hook disablement remains a recognized flag. Managed
+# settings can re-enable hooks after launch, so this guard pins construction
+# and capability rather than falsely treating the effective setting as a
+# portable invariant.
 #
 # It spends no model tokens (`codex features list` resolves configuration only),
 # so it runs by default wherever codex is installed.
@@ -60,25 +60,34 @@ codex_global_flags() {
   printf '%s' "$flags"
 }
 
-test_installed_codex_disables_hooks_for_the_captured_crewmate_launch() {
-  local launch flags state
+test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch() {
+  local launch flags listing
   launch=$(capture_codex_launch ship --mode no-mistakes --yolo off)
   flags=$(codex_global_flags "$launch")
-
-  # The whole point: every flag firstmate will launch with, handed to the real
-  # codex, must leave the hook layer off. `features list` reports the effective
-  # state after those flags are applied and contacts no model.
-  state=$(eval "codex $flags features list" 2>&1) ||
-    fail "codex $CODEX_VERSION rejected firstmate's crewmate launch flags: $state"
-  case "$state" in
-    *"Unknown feature flag"*)
-      fail "codex $CODEX_VERSION no longer knows the hook feature firstmate disables: $state"
+  case " $flags " in
+    *' --approve-for-me '*) ;;
+    *) fail "codex $CODEX_VERSION captured launch omitted --approve-for-me" ;;
+  esac
+  case " $flags " in
+    *' --dangerously-bypass-approvals-and-sandbox '*)
+      fail "codex $CODEX_VERSION captured launch retained the complete-bypass posture"
       ;;
   esac
-  printf '%s\n' "$state" | awk '$1 == "hooks" { print $NF }' | grep -qx false ||
-    fail "codex $CODEX_VERSION left hooks enabled for firstmate's crewmate launch flags, so a fresh launch can park on the hook-trust modal"
 
-  printf 'ok - codex %s runs a firstmate crewmate launch with its hook layer disabled\n' "$CODEX_VERSION"
+  # The captured flags must remain accepted by the real Codex CLI. A managed
+  # setting can override hooks back on, so the effective feature value is not
+  # a portable assertion; an unknown feature remains a launch-breaking error.
+  listing=$(eval "codex $flags features list" 2>&1) ||
+    fail "codex $CODEX_VERSION rejected firstmate's crewmate launch flags: $listing"
+  case "$listing" in
+    *"Unknown feature flag"*)
+      fail "codex $CODEX_VERSION no longer knows the hook feature firstmate disables: $listing"
+      ;;
+  esac
+  printf '%s\n' "$listing" | awk '{ print $1 }' | grep -qx hooks ||
+    fail "codex $CODEX_VERSION omitted the hook feature from the captured crewmate launch"
+
+  printf 'ok - codex %s accepts the requested hook disablement for a firstmate crewmate launch\n' "$CODEX_VERSION"
 }
 
 test_installed_codex_still_reports_the_hook_feature() {
@@ -92,6 +101,6 @@ test_installed_codex_still_reports_the_hook_feature() {
 }
 
 test_installed_codex_still_reports_the_hook_feature
-test_installed_codex_disables_hooks_for_the_captured_crewmate_launch
+test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch
 
 echo "# all fm-codex-hook-layer-live-e2e tests passed"

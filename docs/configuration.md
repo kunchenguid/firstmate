@@ -1075,6 +1075,16 @@ Hook entries merge across settings files rather than replacing each other, so th
 The CLI reference documents the one file-or-JSON flag, the settings page documents session precedence, and the hooks page documents the hooks merge: <https://code.claude.com/docs/en/cli-reference>, <https://code.claude.com/docs/en/settings>, <https://code.claude.com/docs/en/hooks>.
 [`fm-spawn.sh`](../bin/fm-spawn.sh) owns the file and the flag.
 
+### Codex automatic approval review
+
+Codex crewmate, scout, and secondmate launches pass `--approve-for-me`.
+It routes approval requests through Codex automatic review in the workspace-write sandbox, which starts with network access disabled and reviews writes outside the working directory.
+This is the default because a managed policy can leave `--dangerously-bypass-approvals-and-sandbox` with user-reviewed approvals even when its sandbox bypass applies.
+Crew and scout launches still request hook disablement and retain their notification wiring, while secondmates retain their primary-session hooks.
+A managed policy can override the requested hook disablement, so it may still require an operator's hook review.
+Verification on 2026-10-06 with codex-cli 0.160.1 confirmed automatic review could append the authorized status channel, inspect the steering channel, query the no-mistakes service, run a dry-run push, and make a GitHub read after automatic review admitted network access.
+The same workspace-write boundary means external writes and network operations can require automatic review rather than being unrestricted.
+
 ## Claude permission mode (config/claude-permission-mode)
 
 The optional local, gitignored `config/claude-permission-mode` selects the permission flag for every Claude worker launch: crewmates, scouts, Claude secondmates, and control-plane relaunches.
@@ -1085,11 +1095,12 @@ The token is the file's whitespace-trimmed content.
 
 | Token | Launch permission flag |
 | --- | --- |
-| `bypass` | `claude --dangerously-skip-permissions` |
 | `auto` | `--permission-mode auto` |
+| `bypass` | `claude --dangerously-skip-permissions` |
 
-An absent file defaults to bypass, so an unconfigured home launches with the bypass permission flag.
-Auto is Claude Code's classifier-reviewed permission mode, for a captain who refuses to run workers in bypass mode.
+An absent file defaults to auto, so an unconfigured home launches with the managed-settings-safe permission flag.
+Auto is Claude Code's classifier-reviewed permission mode and avoids managed policies that block bypass-permission sessions.
+`bypass` remains available only as an explicit opt-in for a home that requires that legacy posture.
 Only the permission flag changes between the two modes.
 The environment prefix, session settings, model, effort flags, and the task-channel `--add-dir` grant below stay the same in both.
 
