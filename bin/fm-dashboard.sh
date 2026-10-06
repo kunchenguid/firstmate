@@ -12,6 +12,10 @@
 #   bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions
 #       --all-queued --all-landed   in flight, decisions, queued, landed
 #   data/metrics/prs.tsv            merged PRs (merged, first_pass, escaped, hours_to_merge)
+#   gh api search/issues            Merged today, live: one search over the owners of the
+#                                   second mate homes' project clones, cached 5 minutes in
+#                                   state/dashboard/.merged-today.json; on failure the
+#                                   prs.tsv count, marked "as of" its last write
 #   data/metrics/daily.tsv          per day and home counters (steers, stall_alarms, ...)
 #   data/metrics/skills.tsv         per day, home and skill read counts
 #   data/metrics/rings.tsv          leads the watcher woke itself
@@ -130,7 +134,7 @@ try: srv.serve_forever()
 except KeyboardInterrupt: pass
 PY
     ;;
-  -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) usage ;;
 esac
 
@@ -147,7 +151,7 @@ FM_HOME="$FM_HOME" FM_SNAPSHOT_SECONDMATE_QUEUED=500 FM_SNAPSHOT_SECONDMATE_DECI
 
 python3 - "$FM_HOME" "$snap" "$snap_err" "$page.$$.tmp" <<'PY' || { echo "fm-dashboard: page build failed" >&2; exit 1; }
 import html, json, math, os, re, subprocess, sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 HOME, SNAP, SNAP_ERR, OUT = sys.argv[1:5]
 NOW = datetime.now().astimezone()
@@ -240,6 +244,45 @@ try:
     for l in open(os.path.join(HOME, 'config/parked-homes'), encoding='utf-8', errors='replace'):
         if l.split('#', 1)[0].strip(): parked.add(l.split('#', 1)[0].strip())
 except OSError: pass  # no parked homes
+
+def merged_today_live():
+    """{home: PRs merged since local midnight} for every live second mate home, from ONE GitHub search,
+    cached for 5 minutes; None when the fleet has no GitHub clones or the search failed (with a note)."""
+    cache = os.path.join(HOME, 'state/dashboard/.merged-today.json')
+    try:
+        c = json.load(open(cache))
+        if c['day'] == TODAY.isoformat() and 0 <= NOW.timestamp() - c['at'] < 300: return c['homes']
+    except (OSError, ValueError, KeyError, TypeError): pass
+    repo_home = {}  # owner/name -> home: the home named like the repo, else the first home that clones it
+    for h, d in home_dir.items():
+        if h == 'main': continue
+        for pj in sorted(os.listdir(os.path.join(d, 'projects')) if os.path.isdir(os.path.join(d, 'projects')) else []):
+            u = subprocess.run(['git', '-C', os.path.join(d, 'projects', pj), 'remote', 'get-url', 'origin'],
+                               capture_output=True, text=True).stdout.strip()
+            r = re.sub(r'\.git$', '', re.sub(r'^.*github\.com[:/]', '', u))
+            if '/' in r and (r not in repo_home or r.split('/')[1] == h): repo_home[r] = h
+    if not repo_home: return None
+    since = datetime.combine(TODAY, datetime.min.time()).astimezone().astimezone(timezone.utc)
+    q = ' '.join(f'owner:{o}' for o in sorted({r.split('/')[0] for r in repo_home})) + \
+        f' is:pr is:merged merged:>={since:%Y-%m-%dT%H:%M:%SZ}'
+    try:
+        r = subprocess.run(['gh', 'api', '-X', 'GET', 'search/issues', '--paginate', '-f', f'q={q}', '-f', 'per_page=100',
+                            '--jq', '.items[].repository_url'], capture_output=True, text=True, timeout=30)
+        err = (r.stderr.strip().splitlines() or [f'exit {r.returncode}'])[-1] if r.returncode else ''
+    except (OSError, subprocess.TimeoutExpired) as e:
+        err = str(e)
+    if err:
+        notes.append(('GitHub merged-today search', err)); return None
+    homes = {h: 0 for h in set(repo_home.values()) - parked}
+    for u in r.stdout.split():
+        h = repo_home.get('/'.join(u.rstrip('/').split('/')[-2:]))
+        if h in homes: homes[h] += 1
+    try:
+        with open(cache + '.tmp', 'w') as f: json.dump(dict(day=TODAY.isoformat(), at=NOW.timestamp(), homes=homes), f)
+        os.replace(cache + '.tmp', cache)
+    except OSError: pass  # no cache only means the next build searches again
+    return homes
+live_merged = merged_today_live()
 
 # Finished, not landed: counted now from each live home's records by the check the pulse runs.
 fresh_done = {}
@@ -415,8 +458,11 @@ if any(v is not None for v, _ in dws):
     nl = sum(v for v, _ in dws if v is not None)
     old = min((at for _, at in dws if at), default=None)  # the oldest pulse row still in the total
     t.append(tile('Finished, not landed', fmt(nl), 'waiting to merge' + (f' · as of {esc(old[11:16])}' if old else ''), 'warn' if nl else ''))
-if prs is not None:
-    t.append(tile('Merged today', merged_live(TODAY), f'yesterday {merged_live(YDAY)} · measured homes'))
+if live_merged is not None:
+    t.append(tile('Merged today', sum(live_merged.values()), f'yesterday {fmt(merged_live(YDAY))} · live from GitHub'))
+elif prs is not None:
+    asof = datetime.fromtimestamp(os.path.getmtime(os.path.join(HOME, 'data/metrics/prs.tsv'))).strftime('%H:%M')
+    t.append(tile('Merged today', merged_live(TODAY), f'yesterday {merged_live(YDAY)} · as of {asof}'))
 if latest:
     t.append(tile('Queued and ready', fmt(pulse_sum('ready')), 'can start when a lane frees'))
 if snap is not None:
@@ -534,6 +580,7 @@ for h in sorted(homes, key=lambda x: (x != 'main', x)):
         kv('Ready to start', fmt(rd)) if rd is not None else '',
         kv('Finished, not landed', fmt(dw), 'warn' if dw else '') if dw is not None else '',
         kv('Oldest wait', f'{fmt(ow)} h' if ow is not None and ow >= 0 else 'none', 'warn' if (ow or 0) >= 2 else '') if ow is not None else '',
+        kv('Merged today', live_merged[h]) if live_merged is not None and h in live_merged else
         kv('Merged today', merged(TODAY, h)) if prs is not None and h in measured else '',
         kv('First-pass merges, 2 days', f'{fp}%', 'bad' if fp_t and misses(fp, *fp_t) else '') if fp is not None else '',
         kv('Stalls reached Main', stalls, 'bad' if stalls else '') if stalls is not None else '',
