@@ -11,7 +11,9 @@
 # intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
 # subsections feed; bin/fm-spawn.sh refuses leftover placeholders and a
 # `## Captain's intent` line opening with a Captain label or address. Secondmate
-# charters still use a single `{TASK}` charter fill. Firstmate may adjust other
+# charters still use a single `{TASK}` charter fill. A ship `# Task` also opens
+# with `Scope paths: {SCOPE_PATHS}`, the comma-separated globs bin/fm-pr-merge.sh
+# checks the PR's changed files against. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
@@ -546,16 +548,14 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
-IFS= read -r -d '' TASK_SECTION <<'EOF' || true
-# Task
-Scope paths:
+IFS= read -r -d '' TASK_SUBSECTIONS <<'EOF' || true
 ## Captain's intent
 {TASK}
 
 ## Firstmate spec
 {FIRSTMATE_SPEC}
 EOF
-TASK_SECTION=${TASK_SECTION%$'\n'}
+TASK_SUBSECTIONS=${TASK_SUBSECTIONS%$'\n'}
 
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.
@@ -603,7 +603,8 @@ fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-$TASK_SECTION
+# Task
+$TASK_SUBSECTIONS
 
 $HERDR_SECTION
 
@@ -674,7 +675,9 @@ DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-$TASK_SECTION
+# Task
+Scope paths: {SCOPE_PATHS}
+$TASK_SUBSECTIONS
 
 $HERDR_SECTION
 
@@ -725,7 +728,7 @@ $DOD
 EOF
 append_brief_include
 if [ "$FORGE" = none ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {SCOPE_PATHS}, {TASK}, and {FIRSTMATE_SPEC})"
 else
-  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {SCOPE_PATHS}, {TASK}, and {FIRSTMATE_SPEC})"
 fi

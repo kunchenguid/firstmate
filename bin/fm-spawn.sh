@@ -19,8 +19,8 @@
 #   yolo is inactive (bin/fm-project-mode.sh's header carries that decision). A
 #   registry entry the parser refuses stops the spawn rather than launching on a
 #   guessed posture. A
-#   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
-#   placeholders, an empty Task, an incomplete pair of Task subsections, or a
+#   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}` /
+#   `{SCOPE_PATHS}` placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
@@ -3078,7 +3078,7 @@ fi
 }
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if fm_brief_task_placeholders_present "$BRIEF"; then
-    echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
+    echo "error: $BRIEF still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}; fill ## Captain's intent, ## Firstmate spec, and the Scope paths line before spawn" >&2
     exit 1
   fi
   if ! fm_brief_task_content_valid "$BRIEF"; then

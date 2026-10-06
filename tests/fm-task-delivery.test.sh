@@ -57,6 +57,7 @@ fill_brief_subsections() {  # <file> <intent> <spec>
   content=$(cat "$file")
   content=${content//'{TASK}'/$intent}
   content=${content//'{FIRSTMATE_SPEC}'/$spec}
+  content=${content//'{SCOPE_PATHS}'/bin/*, tests/*}
   printf '%s\n' "$content" > "$file"
 }
 
@@ -571,7 +572,7 @@ EOF
 # public brief/spawn/promote path. Filling both subsections lets the spawn
 # delivery checks proceed (the fake tmux still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
-  local rec home proj fakebin out status id brief meta intent_body spec_body authorized
+  local rec home proj fakebin out status id brief meta intent_body spec_body authorized content
   rec=$(make_home subsections)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -583,11 +584,28 @@ EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn of an unfilled ship brief should exit non-zero"
-  assert_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+  assert_contains "$out" "still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}" \
     "unfilled ship spawn did not name the leftover placeholders"
   assert_contains "$out" "## Captain's intent" \
     "unfilled ship spawn did not name the intent subsection to fill"
   assert_absent "$home/state/$id.meta" "unfilled ship spawn wrote task metadata"
+
+  id=delivery-unfilled-scope-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "unfilled-scope ship brief should scaffold"
+  brief=$home/data/$id/brief.md
+  content=$(cat "$brief")
+  content=${content//'{TASK}'/Fix the merge scope check.}
+  content=${content//'{FIRSTMATE_SPEC}'/Touch only the merge script.}
+  printf '%s\n' "$content" > "$brief"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a ship brief with an unfilled Scope paths line should exit non-zero"
+  assert_contains "$out" "still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}" \
+    "unfilled-scope ship spawn did not name the leftover placeholder"
+  assert_contains "$out" "the Scope paths line" \
+    "unfilled-scope ship spawn did not name the Scope paths line to fill"
+  assert_absent "$home/state/$id.meta" "unfilled-scope ship spawn wrote task metadata"
 
   id=delivery-filled-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
@@ -596,7 +614,7 @@ EOF
     "Fix replacement of \`{TASK}\` in Herdr briefs." \
     "Keep literal \`{FIRSTMATE_SPEC}\` examples intact."
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
-  assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+  assert_not_contains "$out" "still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}" \
     "a filled ship brief mentioning placeholder tokens was refused as unfilled"
   assert_not_contains "$out" "must contain nonempty" \
     "a filled ship brief mentioning placeholder tokens failed content validation"
@@ -622,7 +640,7 @@ EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "must contain nonempty" \
     "fenced example headings made a filled legacy Task fail validation"
-  assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+  assert_not_contains "$out" "still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}" \
     "fenced example headings made a filled legacy Task look unfilled"
 
   id=delivery-legacy-no-mistakes
@@ -717,7 +735,7 @@ EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --scout)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn of an unfilled scout brief should exit non-zero"
-  assert_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+  assert_contains "$out" "still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}" \
     "unfilled scout spawn did not name the leftover placeholders"
   assert_absent "$home/state/$id.meta" "unfilled scout spawn wrote task metadata"
 
