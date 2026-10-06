@@ -937,20 +937,19 @@ test_idle_agent_is_not_interrupted() {
 }
 
 test_exit_drops_meta_busy_gen_with_the_sidecar() {
-  local dir out rc gen left
+  local dir out rc gen changed
   dir=$(new_case codex-retire)
   add_task "$dir" t1 codex
   alive_as "$dir" codex
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
   printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  grep -v '^busy_gen=' "$dir/home/state/t1.meta" > "$dir/expected.meta"
   out=$(run_control "$dir" t1 exit); rc=$?
   expect_code 0 "$rc" "exiting a codex agent should succeed"$'\n'"$out"
   [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
     || fail "exit should retire the busy sidecar and record"
-  left=$(grep '^busy_gen=' "$dir/home/state/t1.meta" || true)
-  [ -z "$left" ] || fail "exit should drop busy_gen from the task record, left: $left"
-  grep -q '^window=fmses:fm-t1$' "$dir/home/state/t1.meta" \
-    || fail "exit should leave the rest of the task record in place"
+  changed=$(diff "$dir/expected.meta" "$dir/home/state/t1.meta") \
+    || fail "exit should drop only busy_gen from the task record:"$'\n'"$changed"
   pass "fm-control exit: retiring a codex incarnation drops busy_gen with the sidecar"
 }
 
