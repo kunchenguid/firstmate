@@ -865,6 +865,29 @@ ok - opencode (1.18.33): the doorbell reached a real worker, which acted and ack
 OpenCode needed `FM_SEND_INBOX_LIVE_TIMEOUT=560` because its configured model was still mid-turn at the default 240 seconds.
 Pi 0.87.1 was installed but not verified: its configured model returned an account error (`The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account`) before it read the inbox.
 
+## Post-interrupt composer restore
+
+Whether a harness restores the cancelled prompt into its composer after the interrupt key decides `fm_control_interrupt_clear_key` in `bin/fm-control-lib.sh`.
+Audited 2026-10-06 against the live evidence on record, with no new token-spending probe: the portable regressions in `tests/fm-control.test.sh` (the per-harness clear-key decision), `tests/fm-control-relaunch.test.sh` (the pending refusal names `--key Enter`, plus `--key C-u` for muse), and `tests/fm-send-inbox.test.sh` (the ring-skip notice names `--key Enter`) pin the table and the refusal texts.
+
+```sh
+bin/fm-test-run.sh tests/fm-control.test.sh
+```
+
+| Harness | Post-interrupt composer | Evidence |
+| --- | --- | --- |
+| muse | restores the cancelled prompt as real bright text; `C-u` clears it | `tests/fm-muse-harness.test.sh` escape-alias and failed-clear tests |
+| cursor | returns to its placeholder; no clear key | [Cursor Agent CLI](#cursor-agent-cli) interrupt row plus the control-plane interrupt-then-exit end-to-end |
+| gemini | prints `Request cancelled.` with a placeholder-only composer; no clear key | [Gemini](#gemini) interrupt lines: `AfterAgent` closed the cancelled turn and `/quit` exited 0 |
+| agy | prints its Interrupted row with an idle composer; no clear key | `tests/fm-agy-signals-live-e2e.test.sh`: one Escape cancels, `/quit` stops the agent |
+| omp | composer reads `empty` after a single Escape; no clear key | [Oh My Pi (omp)](#oh-my-pi-omp) interrupt row: control-plane interrupt left the composer `empty` |
+| devin | cancelled turn leaves the composer empty; no clear key | `tests/fm-devin-signals-live-e2e.test.sh`: double Escape cancels, then control-plane exit succeeds through the composer check |
+| rovo | nothing restored; a raw `/exit` after `Agent cancelled` exits cleanly; no clear key | `tests/fm-rovo-signals-live-e2e.test.sh` mid-tool-call Escape |
+| claude, codex, opencode, pi, pi-signed, grok, kimi | no post-interrupt composer observation on record; table keeps none | n/a - unverified |
+
+For the unverified remainder the next submit still re-checks the composer before typing (the control plane's exit check, the steer plane's ring pre-check), so restored text surfaces as a refusal naming its recovery (`fm-send.sh <id> --key Enter`, plus the harness clear key where the table names one) rather than a garbled send.
+The per-harness signals guards above are the refresh commands after a harness upgrade; a harness observed to restore takes a clear key in the table plus a dated line here.
+
 ## Waiting-worker command ceilings
 
 The `# Waiting` section of the ship and scout briefs (`bin/fm-brief.sh`) has a worker hold every external wait inside one blocking shell command, bounded by what its harness lets one command run.

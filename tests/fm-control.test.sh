@@ -522,6 +522,22 @@ test_backend_key_capability_matrix() {
   pass "fm-control-lib: the backend key matrix matches each adapter's real send-key surface"
 }
 
+# The post-interrupt composer decision, pinned per harness: muse is the one
+# adapter verified to restore the cancelled prompt (Ctrl+U clears it), and
+# every other verified adapter leaves its composer empty on cancel.
+test_interrupt_clear_key_decision() {
+  local harness got
+  for harness in claude codex opencode pi pi-signed omp grok kimi cursor gemini rovo agy devin; do
+    got=$(fm_control_interrupt_clear_key "$harness")
+    [ -z "$got" ] || fail "$harness leaves its composer empty on cancel and must need no clear key, got '$got'"
+  done
+  got=$(fm_control_interrupt_clear_key muse)
+  [ "$got" = C-u ] || fail "muse restores the cancelled prompt and must clear with C-u, got '$got'"
+  fm_control_interrupt_clear_key someagent 2>/dev/null \
+    && fail "an unverified harness must return nonzero, not a clear key"
+  pass "fm-control-lib: only muse needs a post-interrupt composer clear key"
+}
+
 # A verified adapter is not automatically verified for every task kind, and the
 # check has to sit on the pre-stop side of a relaunch: muse has no primary
 # supervision protocol, so bin/fm-spawn.sh refuses it for a secondmate, and
@@ -1175,6 +1191,7 @@ test_harness_family_resolution
 test_relaunch_resume_flag_is_per_adapter_and_reference_owner
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
+test_interrupt_clear_key_decision
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs

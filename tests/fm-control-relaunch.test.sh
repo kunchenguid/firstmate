@@ -401,11 +401,34 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   expect_code 1 "$rc" "a relaunch must refuse before typing an exit command into pending composer text"
   assert_contains "$out" "composer visibly holds pending text" \
     "the refusal should name the pending composer text"
+  assert_contains "$out" "fm-send.sh rl43 --key Enter" \
+    "the refusal should name the data-plane recovery that submits the pending text"
   [ "$(cat "$dir/fake/command")" = claude ] \
     || fail "a pending composer refusal must leave the old agent running"
   assert_no_grep "/exit" "$dir/fake/literal" \
     "the exit command must not be concatenated onto pending composer text"
   pass "fm-control relaunch: pending composer text refuses before the exit command is typed"
+}
+
+test_relaunch_pending_refusal_names_the_harness_clear_key() {
+  local dir out rc
+  dir=$(new_case pending-clear rl45)
+  add_ship_task "$dir" rl45 muse
+  printf 'muse' > "$dir/fake/command"
+  printf 'i' > "$dir/fake/composer"
+
+  out=$(run_control "$dir" rl45 relaunch --note "preserve the pending draft"); rc=$?
+
+  expect_code 1 "$rc" "a relaunch must refuse before typing an exit command into pending composer text"
+  assert_contains "$out" "composer visibly holds pending text" \
+    "the refusal should name the pending composer text"
+  assert_contains "$out" "fm-send.sh rl45 --key C-u" \
+    "the refusal should name the harness clear key that discards the pending text"
+  [ "$(cat "$dir/fake/command")" = muse ] \
+    || fail "a pending composer refusal must leave the old agent running"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "the exit command must not be concatenated onto pending composer text"
+  pass "fm-control relaunch: the pending refusal names the harness clear key alongside the submit recovery"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
@@ -2388,6 +2411,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
+test_relaunch_pending_refusal_names_the_harness_clear_key
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata

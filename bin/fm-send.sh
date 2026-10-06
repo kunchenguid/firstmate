@@ -1101,7 +1101,7 @@ else
       esac
     fi
     case "$ring_rc" in
-    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
+    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and $ring_retry. To ring now, submit the pending text with 'fm-send.sh $INBOX_TASK_ID --key Enter' (or clear the composer); the next ring then lands." >&2 ;;
     2) echo "fm-send: doorbell did not reach $T${FM_TASK_INBOX_RING_REASON:+ ($FM_TASK_INBOX_RING_REASON)}; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac

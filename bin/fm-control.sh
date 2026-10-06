@@ -704,13 +704,26 @@ do_exit() {
   fi
   composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
     || composer_state=unknown
+  # The refusal names the working recovery so the next operator clears or
+  # submits the pending text instead of looping on interrupt: Enter submits it
+  # through the data plane, and the harness's clear key (when the capability
+  # table above names one) discards it.
+  clear_key=$(fm_control_interrupt_clear_key "$HARNESS" 2>/dev/null || true)
   case "$composer_state" in
     empty) ;;
     pending)
-      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+      if [ -n "$clear_key" ]; then
+        die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Submit it with 'fm-send.sh $ID --key Enter', or clear it with 'fm-send.sh $ID --key $clear_key', then retry '$VERB'."
+      else
+        die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Submit it with 'fm-send.sh $ID --key Enter', or clear the composer, then retry '$VERB'."
+      fi
       ;;
     *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      if [ -n "$clear_key" ]; then
+        die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer with 'fm-send.sh $ID --key $clear_key', then retry '$VERB'."
+      else
+        die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'."
+      fi
       ;;
   esac
   # The submit verdict is NOT the postcondition here: a successful exit command
