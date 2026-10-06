@@ -438,7 +438,7 @@ test_fresh_spawn_revive_clears_the_deliberate_stop_marker() {
   # record for a replacement worker and must clear the parked-task marker.
   : > "$dir/fake/windows"
   printf '%s\n' "$(date +%s)" > "$dir/home/state/rl9.deliberate-stop"
-  out=$(run_spawn "$dir" rl9 "$dir/proj" --mode no-mistakes --yolo off); rc=$?
+  out=$(run_spawn "$dir" rl9 "$dir/proj" --mode no-mistakes --yolo off --harness claude); rc=$?
   expect_code 0 "$rc" "a fresh spawn reviving an existing record should succeed"$'\n'"$out"
   [ ! -e "$dir/home/state/rl9.deliberate-stop" ] \
     || fail "a fresh spawn that republishes an existing record must clear the deliberate-stop marker"
@@ -456,7 +456,7 @@ test_fresh_spawn_retry_after_rollback_clears_the_deliberate_stop_marker() {
   # rollback removes that provisional record while the marker survives. The
   # documented retry then republishes a record for a brand-new incarnation.
   out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
-    run_spawn "$dir" rl10 "$dir/proj" --mode no-mistakes --yolo off) || rc=$?
+    run_spawn "$dir" rl10 "$dir/proj" --mode no-mistakes --yolo off --harness claude) || rc=$?
   expect_code 1 "$rc" "a launch transport failure should fail the fresh spawn"$'\n'"$out"
   [ ! -e "$dir/home/state/rl10.meta" ] \
     || fail "a failed fresh spawn should roll back its provisional record"
@@ -464,7 +464,7 @@ test_fresh_spawn_retry_after_rollback_clears_the_deliberate_stop_marker() {
   # model window destruction, so clear the inventory the way the backend would.
   : > "$dir/fake/windows"
 
-  out=$(run_spawn "$dir" rl10 "$dir/proj" --mode no-mistakes --yolo off); rc=$?
+  out=$(run_spawn "$dir" rl10 "$dir/proj" --mode no-mistakes --yolo off --harness claude); rc=$?
   expect_code 0 "$rc" "the retry after a rolled-back revive should succeed"$'\n'"$out"
   [ ! -e "$dir/home/state/rl10.deliberate-stop" ] \
     || fail "a retry after a rolled-back revive must clear the orphaned deliberate-stop marker"
