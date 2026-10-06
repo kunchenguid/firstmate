@@ -589,10 +589,10 @@ The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
 
 The failure appends one `blocked` line to the parent status stream, which opens a decision.
+The line records the reader position after the route and the reason: the cursor offset and the prefix hash.
 Reading the same break again, with the cursor where it was, appends nothing.
-A later break appends a new `blocked` line and opens the decision again when the cursor has moved since the last break or the reply adapter was retired since then.
-A later break is not reported when the cursor has not moved and the adapter was not retired.
-The first break a home meets after it gains this record is treated as the already reported one when its status stream already carries the continuity line.
+A later break at a different reader position appends a new `blocked` line and opens the decision again.
+A line written before that position was recorded does not match, so the next break appends the new line once.
 
 ### SSH exit 255 and unavailable homes
 
