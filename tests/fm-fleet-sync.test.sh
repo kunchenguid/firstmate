@@ -365,6 +365,43 @@ test_on_default_clean_behind_fast_forwards() {
   pass "on-default clean behind clone still fast-forwards"
 }
 
+test_power_loss_damage_is_reported_read_only() {
+  local home clone out obj before
+  home=$(new_home)
+  clone=$(build_pair "$home" dmgobj)
+  out=$(run_sync "$home" "$clone")
+  assert_not_contains "$out" "DAMAGED" "healthy clone prints no damage line"
+
+  obj=$(git -C "$clone" hash-object -w --stdin <<<"loose object" | sed -E 's#^(..)#\1/#')
+  obj="$clone/.git/objects/$obj"
+  chmod u+w "$obj"; : > "$obj"
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "dmgobj: DAMAGED: empty git object" "emptied object is reported"
+  assert_contains "$out" "git fsck --connectivity-only" "damage line names the repair"
+  [ ! -s "$obj" ] && [ -e "$obj" ] || fail "detection repaired or removed the empty object"
+
+  home=$(new_home)
+  clone=$(build_pair "$home" dmgfile)
+  : > "$clone/file.txt"
+  before=$(git -C "$clone" diff-files --name-only)
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "dmgfile: DAMAGED: 0-byte tracked file(s): file.txt" "truncated tracked file is reported"
+  [ ! -s "$clone/file.txt" ] || fail "detection restored the truncated file"
+  rm -rf "$home/projects/dmgobj" "$clone"
+  pass "power-loss damage is reported and never repaired ($before)"
+}
+
+test_power_loss_damage_whole_fleet_form() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" dmgfleet)
+  : > "$clone/file.txt"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" 2>/dev/null)
+  assert_contains "$out" "dmgfleet: DAMAGED:" "whole-fleet form reports damage"
+  rm -rf "$clone"
+  pass "whole-fleet sync reports damage"
+}
+
 test_already_current_unchanged() {
   local home clone out before
   home=$(new_home)
@@ -755,6 +792,8 @@ test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
+test_power_loss_damage_is_reported_read_only
+test_power_loss_damage_whole_fleet_form
 test_no_origin_skipped
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped

@@ -26,6 +26,10 @@
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# Before any fetch it also looks for power-loss damage, read-only: an empty file
+# under .git/objects, or a tracked file that is 0 bytes in the work tree but not
+# in HEAD. A damaged clone prints one "<repo>: DAMAGED: ..." line naming the
+# repair commands; nothing is ever repaired here. A healthy clone prints nothing.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
@@ -299,6 +303,21 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+report_power_loss_damage() {
+  local empties zeros path size
+  empties=$(find "$PROJ/.git/objects" -type f -empty 2>/dev/null | head -n 1)
+  zeros=""
+  while IFS= read -r -d '' path; do
+    [ -f "$PROJ/$path" ] && [ ! -s "$PROJ/$path" ] || continue
+    size=$(git -C "$PROJ" ls-tree -l HEAD -- "$path" 2>/dev/null | awk '{print $4; exit}')
+    [ -n "$size" ] && [ "$size" != "0" ] || continue
+    zeros="${zeros:+$zeros }$path"
+    [ "$(printf '%s\n' "$zeros" | wc -w)" -lt 3 ] || break
+  done < <(GIT_OPTIONAL_LOCKS=0 git -C "$PROJ" diff-files --name-only -z 2>/dev/null)
+  [ -n "$empties" ] || [ -n "$zeros" ] || return 0
+  echo "$label: DAMAGED: ${empties:+empty git object (e.g. ${empties#"$PROJ"/}) }${zeros:+0-byte tracked file(s): $zeros }- repair by hand: cd $PROJ && find .git/objects -type f -empty -delete && git fetch origin && git checkout HEAD -- <files> && git fsck --connectivity-only"
+}
+
 sync_project() {
   PROJ=$1
   label=$(project_label)
@@ -328,6 +347,7 @@ sync_project() {
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi
+  report_power_loss_damage || true
   if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null); then
     echo "$label: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh $label for the refusal)"
     return 0

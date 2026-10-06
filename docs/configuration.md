@@ -1306,7 +1306,7 @@ In a read-only session that did not get the fleet lock, the same line is advisor
 
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
 
-- It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
+- It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, `STUCK:` alarms, and `DAMAGED:` power-loss findings.
 - Normal completed runs keep local-only and no-origin skips silent.
 - If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
 
