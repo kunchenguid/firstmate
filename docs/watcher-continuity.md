@@ -222,7 +222,8 @@ The first recovery marks that generation announced, and later empty-queue arms l
 A non-successor watcher start checks the durable queue and recovery marker under their locks.
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
-The one exception is a Claude Stop auto-arm running the ordinary arm rather than the supervision host whose ledger proves that same generation was already delivered as a rewake to the same live session.
+The one exception is a Claude Stop auto-arm whose ledger proves that same generation was already delivered as a rewake to the same live session.
+The hook hands that generation to the ordinary arm or to the supervision host's park, whose watcher cycles inherit it.
 That re-arm keeps the generation announced and waits, so an acknowledgement the session cannot run produces one notice rather than a rewake on every Stop.
 
 ### Generation reuse
@@ -497,6 +498,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
 - Host-timeout HUP/TERM/INT translation into the same durable failure handoff.
+- The next Stop of the same session handing its delivered generation to the arm or the supervision host, and another session handing nothing on.
 
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
 [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.

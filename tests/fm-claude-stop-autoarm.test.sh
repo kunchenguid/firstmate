@@ -111,6 +111,7 @@ if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   exit 0
 fi
 echo "$$" >> "$FM_HOME/state/arm-ran"
+printf '%s\n' "${FM_WATCH_DELIVERED_RECOVERY:-}" >> "$FM_HOME/state/arm-delivered"
 SH
   case "$kind" in
     actionable)
@@ -1395,6 +1396,7 @@ write_host_fixture() {
   {
     printf '#!/usr/bin/env bash\n'
     printf 'echo "$$" >> "$FM_HOME/state/host-ran"\n'
+    printf 'printf "%%s\\n" "${FM_WATCH_DELIVERED_RECOVERY:-}" >> "$FM_HOME/state/host-delivered"\n'
     printf 'printf "gen=%%s owner=%%s primary=%%s mode=%%s\\n" "${FM_SUPERVISION_HOST_AUTOARM_GEN:-}" "${FM_SUPERVISION_HOST_OWNER_PID:-}" "${FM_SUPERVISION_HOST_PRIMARY:-}" "${1:-}" > "$FM_HOME/state/host-env"\n'
     case "$kind" in
       boundary)
@@ -1445,6 +1447,52 @@ SH
     printf 'exit 0\n'
   } > "$dir/bin/fm-supervision-host.sh"
   chmod +x "$dir/bin/fm-supervision-host.sh"
+}
+
+# Two Stops of one Claude session: the second reads back the generation the
+# first delivered as a rewake and hands it to the arm or host it starts, while a
+# Stop from another session hands nothing on (docs/watcher-continuity.md
+# "Announcement").
+assert_delivered_generation_round_trip() {  # <dir> <arm-delivered|host-delivered> <label>
+  local dir=$1 record=$2 label=$3 rcs
+  rcs=$(printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        payload=$(cat)
+        printf "%s\n" "$payload" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>&1; printf "%s " "$?"
+        printf "%s\n" "$payload" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>&1; printf "%s\n" "$?"
+      ')
+  [ "$rcs" = "2 2" ] || fail "$label: both Stops must rewake from the fixture, got exit codes: $rcs"
+  run_autoarm "$dir" >/dev/null 2>&1
+  [ "$(sed -n '1p' "$dir/state/$record")" = "" ] \
+    || fail "$label: the first Stop had no earlier delivery but handed on: $(cat "$dir/state/$record")"
+  [ "$(sed -n '2p' "$dir/state/$record")" = fixture-generation ] \
+    || fail "$label: the same session's next Stop did not hand on the delivered generation: $(cat "$dir/state/$record")"
+  [ "$(sed -n '3p' "$dir/state/$record")" = "" ] \
+    || fail "$label: another session's Stop handed on a generation it was never delivered: $(cat "$dir/state/$record")"
+  [ "$(wc -l < "$dir/state/$record" | tr -d ' ')" = 3 ] \
+    || fail "$label: expected exactly three recorded Stops: $(cat "$dir/state/$record")"
+}
+
+test_delivered_generation_round_trips_to_the_arm() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/delivered-round-trip-arm")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  assert_delivered_generation_round_trip "$dir" arm-delivered "arm round trip"
+  pass "auto-arm: the next Stop of the same session hands its delivered generation to the arm"
+}
+
+test_delivered_generation_round_trips_to_the_host() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/delivered-round-trip-host")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handed-back
+  assert_delivered_generation_round_trip "$dir" host-delivered "host round trip"
+  [ ! -e "$dir/state/arm-ran" ] || fail "host round trip: the host home ran the plain arm"
+  pass "auto-arm: the next Stop of the same session hands its delivered generation to the supervision host"
 }
 
 test_host_off_flag_keeps_the_arm() {
@@ -1752,6 +1800,8 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
+test_delivered_generation_round_trips_to_the_arm
+test_delivered_generation_round_trips_to_the_host
 test_host_off_flag_keeps_the_arm
 test_host_absent_flag_runs_the_host
 test_host_boundary_rewakes_with_the_host_line

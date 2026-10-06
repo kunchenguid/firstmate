@@ -1204,6 +1204,42 @@ test_claude_stop_hook_delivers_a_main_only_pass_through() {
   pass "host+hook: an attended main-only pass-through rewakes main and keeps its successor watcher"
 }
 
+# The rewake loop (2026-10-05): a main turn that cannot run its acknowledgement
+# ended, and every later Stop re-announced the same unacknowledged recovery
+# generation as a fresh rewake. The Stop hook now passes the generation it
+# already delivered to this session into the host's park, so after that one
+# delivery the next turn end parks quietly with the wake still queued.
+test_claude_stop_hook_host_does_not_rewake_a_delivered_unacked_recovery() {
+  local home delivered
+  home=$(make_primary_home hook-unacked-recovery)
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "unacked recovery: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "unacked recovery: the first close never reached main: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "unacked recovery"
+  delivered=$(cat "$home/state/.watcher-down")
+  assert_re '^announced:downtime:' "$home/state/.watcher-down" "fixture: the delivered close did not leave an announced downtime episode"
+  assert_grep "recovery_generation=${delivered##*:}" "$home/state/.claude-autoarm-epoch" \
+    "fixture: the rewake did not bind the delivered generation"
+
+  # Main's turn ends without running its acknowledgement.
+  turn_end "$home"
+  ! wait_until 150 hook_exited "$home" \
+    || fail "unacked recovery: the next turn end rewoke main with the same unacknowledged news: $(cat "$home/hook.err")"
+  watcher_live "$home" || fail "unacked recovery: the quiet park left no live watcher"
+  [ "$(cat "$home/state/.watcher-down")" = "$delivered" ] \
+    || fail "unacked recovery: the quiet park minted a new generation: $(cat "$home/state/.watcher-down")"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "unacked recovery: the unread wake left the queue"
+
+  # The quiet park is not blind: new work still reaches main.
+  append_status "$home" 'which delivery date?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "unacked recovery: new work never woke main from the quiet park: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "unacked recovery new work"
+  : > "$home/session.stop"
+  pass "host+hook: a turn end after a delivered unacknowledged recovery parks quietly and new work still wakes main"
+}
+
 # Close the confirmed handling watcher after the engine has acknowledged its
 # wake but before its captain outcome returns to the host.
 test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main() {
@@ -2921,6 +2957,7 @@ test_attended_close_with_unidentified_main_session_passes_to_main
 test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
 test_claude_stop_hook_delivers_a_main_only_pass_through
+test_claude_stop_hook_host_does_not_rewake_a_delivered_unacked_recovery
 test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
 test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn

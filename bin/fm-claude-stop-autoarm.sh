@@ -435,6 +435,7 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     HOST_RC=0
     FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
       FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
+      FM_WATCH_DELIVERED_RECOVERY="$DELIVERED_RECOVERY" \
       "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
   else
     run_arm "$OUT"
