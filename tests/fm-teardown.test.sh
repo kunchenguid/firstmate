@@ -759,14 +759,12 @@ make_path_without_lsof() {  # <case-dir>
 
 test_history_location_containment_matrix() {
   local scenario route case_dir merged local_head expected rc
-  local -a scenarios=(unlanded-delete landed-delete unlanded-replace same-file-restoration
-    literal-path ordinary-path successive-upstream one-upstream partial-two-file
-    whole-file-restoration missing-intermediate-tree complete-enumeration
-    large-rebased-upstream large-rebased-unlanded large-alignment-bound)
-  [ "$#" -eq 0 ] || scenarios=("$@")
   PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/containment-contract.py" \
     || fail "independent small-history containment oracle failed"
-  for scenario in "${scenarios[@]}"; do
+  for scenario in unlanded-delete landed-delete unlanded-replace same-file-restoration \
+    literal-path ordinary-path successive-upstream one-upstream partial-two-file \
+    whole-file-restoration missing-intermediate-tree complete-enumeration \
+    large-rebased-upstream large-rebased-unlanded large-alignment-bound; do
     for route in pr default; do
       case_dir=$(make_case "history-$scenario-$route")
       write_meta "$case_dir" no-mistakes ship
@@ -812,7 +810,7 @@ test_history_location_containment_matrix() {
       fi
     done
   done
-  pass "history/location containment passes the selected PR/default cases and independent oracles"
+  pass "history/location containment passes the combined 30-case matrix and independent oracles"
 }
 
 test_dirty_initialized_nested_submodule_refuses() {
