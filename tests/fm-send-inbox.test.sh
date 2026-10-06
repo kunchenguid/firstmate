@@ -226,6 +226,8 @@ test_pending_composer_skips_ring_advisorily() {
   [ ! -s "$dir/send.log" ] || fail "a visibly pending composer should skip the ring:"$'\n'"$(cat "$dir/send.log")"
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the skip notice should point at the re-ring"
+  assert_contains "$(cat "$err")" "fm-send.sh t1 --key Enter" \
+    "the skip notice should name the data-plane recovery that submits the pending text"
   pass "fm-send inbox: a visibly pending composer skips the ring, and the steer stays durably sent"
 }
 

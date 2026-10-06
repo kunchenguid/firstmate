@@ -191,16 +191,13 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 }
 
 # The key that must follow the interrupt key to leave the composer empty, or
-# nothing when the adapter needs none. muse is the one verified adapter that
-# RESTORES the cancelled prompt into its composer as real bright text, so an
-# interrupt is not complete until Ctrl+U has cleared it; leaving it there would
-# make the next submitted line - a steer, or this plane's own exit command -
-# concatenate onto it. cursor was checked for exactly that behaviour and does
-# NOT repollute: after a single Escape its composer shows only the `Add a
-# follow-up` placeholder, so it needs no clear key. gemini was checked the
-# same way and also does not repollute: after a single Escape it prints
-# `Request cancelled.` and its composer shows only the `Type your message
-# or @path/to/file` placeholder. Prints the key or nothing;
+# nothing when the adapter needs none.
+# muse is the one adapter verified to RESTORE the cancelled prompt into its composer as real bright text, so an interrupt is not complete until Ctrl+U has cleared it; leaving it there would make the next submitted line - a steer, or this plane's own exit command - concatenate onto it.
+# cursor was checked for exactly that behaviour and does NOT repollute: after a single Escape its composer shows only the `Add a follow-up` placeholder, so it needs no clear key.
+# gemini was checked the same way and also does not repollute: after a single Escape it prints `Request cancelled.` and its composer shows only the `Type your message or @path/to/file` placeholder.
+# agy prints its Interrupted row with an idle composer and no repollution, omp leaves its composer empty after its single Escape, devin's cancelled turn is followed by a control-plane exit that reads the composer empty, and rovo accepts a raw /exit after its `Agent cancelled` row with nothing restored; none of the six needs a clear key.
+# claude, codex, opencode, pi, pi-signed, grok, and kimi have no post-interrupt composer observation on record, so they keep none: the next submit re-checks the composer before typing (this plane's exit check, the steer plane's ring pre-check), so restored text surfaces as a refusal naming its recovery rather than a garbled send.
+# Prints the key or nothing;
 # a harness with no verified mechanics returns nonzero, matching the tables
 # above.
 fm_control_interrupt_clear_key() {  # <harness>
