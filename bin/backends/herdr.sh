@@ -2824,7 +2824,10 @@ fm_backend_herdr_projection_repo_parent_label() {  # <home-label> <repo-name>
 #      carries Herdr's non-linked provenance only after its first child
 #      attaches, so provenance alone cannot identify a fresh parent.)
 #   2. Otherwise `workspace create --cwd <clone> --label <label> --no-focus`
-#      under the focus snapshot and restore.
+#      under the focus snapshot and restore, but only when the guarded
+#      workspace move is available, because a fresh parent is no block member
+#      until its first attach and only the ordering move puts the task's child
+#      in the home block ahead of it.
 # When the label collides with a home label (a repository named like the home,
 # such as the firstmate repository in the primary home), only the launcher's
 # exact <home-workspace-id> may be adopted, and only when Herdr elects it as
@@ -2911,6 +2914,10 @@ EOF
   if [ "$matches" -eq 1 ]; then
     printf '%s' "$match"
     return 0
+  fi
+  if ! fm_backend_herdr_workspace_move_capable "$session"; then
+    echo "warning: herdr repo grouping would create '$label' only where the workspace move can order its first task ahead of it; leaving this task's space flat" >&2
+    return 1
   fi
   focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "warning: herdr repo grouping could not capture exact active workspace and tab before creating '$label'; leaving this task's space flat" >&2

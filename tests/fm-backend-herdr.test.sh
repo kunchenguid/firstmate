@@ -3548,7 +3548,8 @@ repo_tree_ensure() {  # <dir> <clone> <home-label> [<home-ws>]
   fb=$(make_herdr_fakebin "$dir")
   : > "$dir/log"
   REPO_TREE_OUT=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_ensure fmtest "$1" "$2" "$3"' "$ROOT" "$clone" "$home_label" "$home_ws" 2>"$dir/err") && REPO_TREE_STATUS=0 || REPO_TREE_STATUS=$?
+    REPO_TREE_MOVE_STATUS="${REPO_TREE_MOVE_STATUS:-0}" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_move_capable() { return "$REPO_TREE_MOVE_STATUS"; }; fm_backend_herdr_projection_repo_parent_ensure fmtest "$1" "$2" "$3"' "$ROOT" "$clone" "$home_label" "$home_ws" 2>"$dir/err") && REPO_TREE_STATUS=0 || REPO_TREE_STATUS=$?
   REPO_TREE_ERR=$(cat "$dir/err")
 }
 
@@ -3647,6 +3648,25 @@ test_repo_parent_ensure_adopts_only_exact_parents_and_creates_otherwise() {
   [ -z "$REPO_TREE_ERR" ] || fail "successful create warned: $REPO_TREE_ERR"
   assert_contains "$(cat "$dir/log")" $'workspace\x1fcreate\x1f--cwd\x1f'"$clone"$'\x1f--label\x1fproject\x1f--no-focus' "repo parent create did not pass the clone, the exact label, and --no-focus"
   assert_not_contains "$(cat "$dir/log")" $'tab\x1ffocus' "an unchanged focus was still re-focused"
+
+  # Without the guarded workspace move nothing could order the first child
+  # ahead of a fresh parent, so none is created; an existing exact parent is
+  # still adopted, because adoption moves nothing.
+  dir="$base/create-without-move"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"}]}}' > "$resp/2.out"
+  REPO_TREE_MOVE_STATUS=1 repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 1 "$REPO_TREE_STATUS" "creating a repo parent without the workspace move"
+  [ -z "$out" ] || fail "a repo parent was printed without the workspace move: $out"
+  assert_contains "$REPO_TREE_ERR" "only where the workspace move can order its first task ahead of it" "a move-incapable create did not warn"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "a repo parent was created without the workspace move"
+  dir="$base/adopt-without-move"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"wP","label":"project","focused":false}]}}' > "$resp/2.out"
+  group_of wP "$clone" > "$resp/3.out"
+  REPO_TREE_MOVE_STATUS=1 repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 0 "$REPO_TREE_STATUS" "adopting an exact repo parent without the workspace move"
+  [ "$out" = "wP" ] || fail "an exact repo parent was not adopted without the workspace move (got '$out'; stderr: $REPO_TREE_ERR)"
 
   # A secondmate home labels its own parent and never adopts the primary's.
   dir="$base/secondmate"; resp="$dir/responses"; mkdir -p "$resp"
