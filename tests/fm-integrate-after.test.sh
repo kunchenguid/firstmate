@@ -77,6 +77,10 @@ if ready_tick; then fail 'working consumer was notified'; fi
 [ ! -e "$TEST_HOME/state/.integrate-after-probed-consumer" ] || fail 'new work did not clear the probe marker'
 backlog 'done' provider >/dev/null
 tool check consumer | grep -q 'provider landing confirmed' || fail 'Done provider did not release integration'
+backlog prune --keep 0 >/dev/null
+if tool check consumer > "$TEST_HOME/check.out" 2>&1; then fail 'archived provider was silently accepted'; fi
+grep -q 'verify its landing and remove' "$TEST_HOME/check.out" \
+  || fail 'archived provider did not require explicit verification and removal'
 printf 'Preserve this note.\nintegrate-after:provider\n' > "$TEST_HOME/body"
 backlog update consumer --body-file "$TEST_HOME/body" >/dev/null
 if tool check consumer > "$TEST_HOME/check.out" 2>&1; then fail 'no-space relation was accepted'; fi

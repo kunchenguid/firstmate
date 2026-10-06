@@ -47,4 +47,8 @@ intake promote ship-one nm-run-security security 'Choose privacy policy' | grep 
 row=$(backlog show "$captain_id" --full)
 printf '%s\n' "$row" | grep -q 'hold_kind: captain' || fail 'promoted finding was not captain-held'
 if intake resolve ship-one nm-run-security >/dev/null 2>&1; then fail 'Firstmate closed a captain-owned finding'; fi
+intake answer ship-one nm-run-security 'Use the restricted policy' >/dev/null \
+  || fail 'answer did not close the promoted finding through captain authority'
+row=$(backlog show "$captain_id" --full)
+printf '%s\n' "$row" | grep -q 'state: done' || fail 'promoted finding remained open after answer'
 printf 'ok - ask-user intake is durable and idempotent\n'

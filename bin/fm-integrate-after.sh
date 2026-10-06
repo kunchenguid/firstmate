@@ -12,7 +12,7 @@
 #        fm-integrate-after.sh --help
 # `add` and `remove` preserve all unrelated body text and are idempotent.
 # A provider archived out of tasks-axi's visible Done list is not guessed to
-# have landed. This command also requires a readable provider row for remove.
+# have landed. An operator can remove its relation after verifying the landing.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +24,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() { awk 'NR == 1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"; }
 fail() { printf 'fm-integrate-after: %s\n' "$*" >&2; exit 2; }
@@ -48,6 +50,13 @@ if [ "$action" = check ]; then
   esac
 fi
 command -v tasks-axi >/dev/null 2>&1 || fail 'tasks-axi is not on PATH'
+
+if [ "$action" != check ]; then
+  fm_backlog_directory_present "$STATE" "state directory" || fail "$FM_BACKLOG_TRANSITION_ERROR"
+  control_lock="$STATE/.control-$consumer.lock"
+  trap 'fm_lock_release "$control_lock" || true' EXIT
+  fm_lock_acquire_wait "$control_lock"
+fi
 
 show_row() { fm_backlog_row_show "$DATA" "$1" --full; }
 provider_merge_confirmed() {  # <provider-id>
@@ -91,9 +100,9 @@ if [ "$action" = check ]; then
   exit 0
 fi
 
-provider_row=$(show_row "$provider") || fail "cannot read provider $provider: ${provider_row%%$'\n'*}"
-[ -n "$provider_row" ] || fail "provider $provider is unavailable"
 if [ "$action" = add ]; then
+  provider_row=$(show_row "$provider") || fail "cannot read provider $provider: ${provider_row%%$'\n'*}"
+  [ -n "$provider_row" ] || fail "provider $provider is unavailable"
   if printf '%s\n' "$relations" | grep -qxF "$provider"; then
     printf 'unchanged: %s integrates after %s\n' "$consumer" "$provider"
     exit 0

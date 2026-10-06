@@ -3,6 +3,7 @@
 # Usage: fm-ask-user-intake.sh ensure <origin-task> <decision-key> <snapshot-file>
 #        fm-ask-user-intake.sh promote <origin-task> <decision-key> <authority-class> <reason>
 #        fm-ask-user-intake.sh resolve <origin-task> <decision-key>
+#        fm-ask-user-intake.sh answer <origin-task> <decision-key> <answer>
 # `ensure` starts with a parked, Firstmate-owned hold: reviewer `ask-user` is
 # not itself proof that the captain owns the decision. Firstmate applies
 # ask-user-authority before `promote`, which accepts only captain classes.
@@ -17,8 +18,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 verb=${1:-}
 origin=${2:-}
 key=${3:-}
-case "$verb" in ensure) [ "$#" -eq 4 ] ;; promote) [ "$#" -eq 5 ] ;; resolve) [ "$#" -eq 3 ] ;; *) exit 2 ;; esac || {
-  printf 'Usage: fm-ask-user-intake.sh ensure <task> <key> <snapshot> | promote <task> <key> <class> <reason> | resolve <task> <key>\n' >&2
+case "$verb" in ensure) [ "$#" -eq 4 ] ;; promote) [ "$#" -eq 5 ] ;; resolve) [ "$#" -eq 3 ] ;; answer) [ "$#" -eq 4 ] ;; *) exit 2 ;; esac || {
+  printf 'Usage: fm-ask-user-intake.sh ensure <task> <key> <snapshot> | promote <task> <key> <class> <reason> | resolve <task> <key> | answer <task> <key> <answer>\n' >&2
   exit 2
 }
 case "$origin:$key" in *[!a-zA-Z0-9._:-]*|:*|*:) printf 'fm-ask-user-intake: invalid task or key\n' >&2; exit 2 ;; esac
@@ -67,6 +68,14 @@ elif [ "$verb" = promote ]; then
   [ -n "$show" ] || { printf 'fm-ask-user-intake: no intake row to promote\n' >&2; exit 2; }
   "$SCRIPT_DIR/fm-captain-hold.sh" hold "$id" --reason "$5" --authority-class "$4" >/dev/null
   printf 'held: %s owner=captain\n' "$id"
+elif [ "$verb" = answer ]; then
+  kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: *//p' | head -1)
+  if [ "$kind" = captain ]; then
+    printf '%s\t%s\t\n' "$id" "$4" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
+      --source "a firstmate answer sent to $origin" >/dev/null
+  else
+    "$0" resolve "$origin" "$key"
+  fi
 else
   [ -n "$show" ] || { printf 'absent: %s\n' "$id"; exit 0; }
   state=$(printf '%s\n' "$show" | sed -n 's/^  state: *//p' | head -1)
