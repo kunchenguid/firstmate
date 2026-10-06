@@ -33,6 +33,10 @@ def brute_anchors(left, right):
             and len({item[i] for item in alignments}) == 1}
 
 
+def linear_contained(base, history, local, merged):
+    return proof.text_contained(base, list(zip([base, *history], [*history, local])), local, merged)
+
+
 class ContainmentContract(unittest.TestCase):
     def test_all_optimal_alignment_ties_against_enumerated_subsequences(self):
         strings = [list(word) for n in range(5) for word in itertools.product((b"a", b"b"), repeat=n)]
@@ -62,8 +66,8 @@ class ContainmentContract(unittest.TestCase):
                 if upstream:
                     merged[2] = b"independent-upstream\n"
                 expected = all(states[-1][slot] == merged[slot] for slot in touched)
-                actual = proof.text_contained(render(base), [render(state) for state in states[1:]],
-                                              render(states[-1]), render(merged))
+                actual = linear_contained(render(base), [render(state) for state in states[1:]],
+                                          render(states[-1]), render(merged))
                 self.assertEqual(actual, expected, (first, second, landed_at, upstream))
                 cases += 1
         self.assertEqual(cases, 384)
@@ -72,31 +76,31 @@ class ContainmentContract(unittest.TestCase):
         base = b"A\nx\nB\nx\nC\n"
         local = b"A\ny\nB\nx\nC\n"
         wrong = b"A\nx\nB\ny\nC\n"
-        self.assertFalse(proof.text_contained(base, [local], local, wrong))
+        self.assertFalse(linear_contained(base, [local], local, wrong))
 
     def test_same_file_restoration_remains_an_obligation(self):
         base = b"zero\nanchor\nzero\n"
         submitted = b"one\nanchor\none\n"
         local = b"one\nanchor\nzero\n"
-        self.assertFalse(proof.text_contained(base, [submitted, local], local, submitted))
+        self.assertFalse(linear_contained(base, [submitted, local], local, submitted))
 
     def test_unlanded_deletion_and_file_boundaries(self):
         for before, after in ((b"keep\nremove\ntail\n", b"keep\ntail\n"),
                               (b"remove\ntail\n", b"tail\n"),
                               (b"keep\nremove\n", b"keep\n"),
                               (b"remove\n", b"")):
-            self.assertFalse(proof.text_contained(before, [after], after, before))
-            self.assertTrue(proof.text_contained(before, [after], after, after))
+            self.assertFalse(linear_contained(before, [after], after, before))
+            self.assertTrue(linear_contained(before, [after], after, after))
 
     def test_duplicate_line_ambiguity_never_chooses_convenient_location(self):
         before = b"same\nsame\n"
         local = b"same\n"
-        self.assertFalse(proof.text_contained(before, [local], local, before))
+        self.assertFalse(linear_contained(before, [local], local, before))
         self.assertEqual(proof.anchors(list(before.splitlines()), list(local.splitlines())), {})
 
     def test_raw_binary_changes_are_not_rendered_text(self):
-        self.assertFalse(proof.text_contained(b"text\0old", [b"text\0new"], b"text\0new", b"text\0old"))
-        self.assertTrue(proof.text_contained(b"text\0old", [b"text\0new"], b"text\0new", b"text\0new"))
+        self.assertFalse(linear_contained(b"text\0old", [b"text\0new"], b"text\0new", b"text\0old"))
+        self.assertTrue(linear_contained(b"text\0old", [b"text\0new"], b"text\0new", b"text\0new"))
 
     def test_large_repeated_region_keeps_every_optimal_tie(self):
         repeated = [b"same\n"] * 5000
@@ -109,11 +113,11 @@ class ContainmentContract(unittest.TestCase):
         base = [("line-%d\n" % n).encode() for n in range(5000)]
         local = [b"local\n", *base[1:]]
         merged = [*local[:-1], b"upstream\n"]
-        self.assertTrue(proof.text_contained(b"".join(base), [b"".join(local)],
-                                            b"".join(local), b"".join(merged)))
+        self.assertTrue(linear_contained(b"".join(base), [b"".join(local)],
+                                         b"".join(local), b"".join(merged)))
         later = [*local[:2500], b"unmerged\n", *local[2501:]]
-        self.assertFalse(proof.text_contained(b"".join(base), [b"".join(local), b"".join(later)],
-                                             b"".join(later), b"".join(merged)))
+        self.assertFalse(linear_contained(b"".join(base), [b"".join(local), b"".join(later)],
+                                          b"".join(later), b"".join(merged)))
 
     def test_resource_limit_is_unknown_not_contained(self):
         old = proof.MAX_ALIGNMENT_CELLS

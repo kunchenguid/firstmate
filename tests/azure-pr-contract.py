@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +30,7 @@ AUTHOR_EMAIL_POLICY = "77ed4bd3-b063-4689-934a-175e4d0a78d7"
 FILE_PATH_POLICY = "51c78909-e838-41a2-9496-c647091e3c61"
 
 FAKE = r'''#!/usr/bin/env python3
-import json,os,sys
+import json,os,sys,time
 from pathlib import Path
 root=Path(os.environ['AZ_FIXTURE'])
 a=sys.argv[1:]
@@ -37,6 +38,7 @@ with (root/'calls').open('a') as f: f.write(json.dumps(a)+'\n')
 assert a[:2] == ['devops','invoke']
 assert a[a.index('--detect')+1] == 'false'
 resource=a[a.index('--resource')+1]
+if (root/'slow').exists(): time.sleep(30)
 if (root/'fail').exists(): print('simulated auth/network failure', file=sys.stderr); sys.exit(1)
 if (root/'malformed').exists(): print('not json'); sys.exit(0)
 data=json.loads((root/(resource+'.json')).read_text())
@@ -126,6 +128,46 @@ class AzureContract(unittest.TestCase):
     def script(self, script, *args):
         return subprocess.run([str(ROOT / "bin" / script), *args], env=self.env,
                               text=True, capture_output=True, timeout=30)
+
+    def prepare_crew(self, outcome):
+        wt = self.dir / "wt"
+        wt.mkdir()
+        for args in (("init", "-q", "-b", "users/example/fix"),
+                     ("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                      "commit", "-qm", "base", "--allow-empty")):
+            subprocess.run(["git", "-C", str(wt), *args], env=self.env, check=True, capture_output=True)
+        head = subprocess.check_output(["git", "-C", str(wt), "rev-parse", "HEAD"], env=self.env, text=True).strip()
+        status = "completed" if outcome == "passed" else outcome
+        self.run_record = (f'run:\n  id: "01RUN"\n  branch: users/example/fix\n  status: {status}\n'
+                           f'  head: "{head}"\n  pr: "{URL}"\n  findings: none\noutcome: {outcome}\n')
+        if outcome != "passed":
+            self.run_record += "steps[9]{step,status,findings,duration_ms}:\n" + "".join(
+                f"  {step},{outcome if step == 'ci' else 'completed'},0,0\n"
+                for step in ("intent", "rebase", "review", "test", "document", "lint", "push", "pr", "ci"))
+        (self.dir / "run-record").write_text(self.run_record)
+        (self.dir / "ci-log").write_text("all CI checks passed - still monitoring until merged or closed\n")
+        (self.dir / "state/task.meta").write_text(
+            f"kind=ship\nmode=no-mistakes\nyolo=off\nworktree={wt}\nwindow=fm-task\npr={URL}\n")
+        (self.dir / "bin/no-mistakes").write_text('''#!/usr/bin/env python3
+import os,sys
+from pathlib import Path
+root=Path(os.environ['AZ_FIXTURE'])
+a=sys.argv[1:]
+if a[:2]==['axi','logs']:
+    print((root/'ci-log').read_text())
+elif a==['axi'] or a[:2]==['axi','status']:
+    print((root/'run-record').read_text())
+elif a==['daemon','status']:
+    print('daemon running')
+else:
+    sys.exit(1)
+''')
+        (self.dir / "bin/no-mistakes").chmod(0o700)
+        (self.dir / "bin/tmux").write_text("#!/bin/sh\nexit 1\n")
+        (self.dir / "bin/tmux").chmod(0o700)
+        self.env.update(NM_HOME=str(self.dir / "nm"), FM_CREW_STATE_NO_FORGE="0")
+        for name in ("FM_CREW_STATE_META_OVERRIDE", "FM_CREW_STATE_STATUS_OVERRIDE"):
+            self.env.pop(name, None)
 
     def calls(self):
         calls = self.dir / "calls"
@@ -404,6 +446,70 @@ class AzureContract(unittest.TestCase):
         self.save("pullRequests", dict(self.pr, status="completed", closedDate=None))
         self.assertEqual(self.run_helper("merged").stdout, "")
         self.assertEqual(self.script("fm-pr-poll.sh", "--validated", "azuredevops", URL, "evil.example", "example/Project/_git/repo", "7").stdout, "")
+
+    def test_crew_passed_disposition(self):
+        self.prepare_crew("passed")
+        cases = ((dict(status="active"), "open"),
+                 (dict(status="completed", closedDate="2026-01-01T00:00:00Z"), "merged"),
+                 (dict(status="abandoned"), "closed"),
+                 (dict(status="completed"), "state unknown (unreadable)"),
+                 (dict(status="completed", closedDate="2026-01-01T00:00:00Z", mergeStatus="queued"), "state unknown (unreadable)"),
+                 (dict(status="unknown"), "state unknown (unreadable)"))
+        for changes, expected in cases:
+            with self.subTest(changes=changes):
+                self.save("pullRequests", dict(self.pr, **changes))
+                p = self.script("fm-crew-state.sh", "task")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertIn("state: done", p.stdout)
+                self.assertIn("run passed: PR " + expected, p.stdout)
+        self.assertTrue(self.calls())
+        self.assertFalse((self.dir / "patch").exists())
+
+    def test_crew_green_monitor_disposition(self):
+        self.prepare_crew("failed")
+        self.save("pullRequests", dict(self.pr, reviewers=[dict(vote=0, isRequired=True)]))
+        for outcome in ("failed", "cancelled"):
+            (self.dir / "run-record").write_text(self.run_record.replace("failed", outcome))
+            for status, label in (("active", "held for merge"), ("completed", "merged"), ("abandoned", None)):
+                with self.subTest(outcome=outcome, status=status):
+                    self.save("pullRequests", dict(self.pr, status=status, closedDate="2026-01-01T00:00:00Z",
+                                                    reviewers=[dict(vote=0, isRequired=True)]))
+                    p = self.script("fm-crew-state.sh", "task")
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    if label:
+                        self.assertIn("state: done", p.stdout)
+                        self.assertIn("checks green: PR " + label + " (ci monitor ended)", p.stdout)
+                    else:
+                        self.assertIn("state: " + ("failed" if outcome == "failed" else "unknown"), p.stdout)
+                        self.assertNotIn("checks green", p.stdout)
+        self.assertFalse((self.dir / "patch").exists())
+
+    def test_crew_unreadable_and_skipped_disposition(self):
+        self.prepare_crew("failed")
+        for flag in ("fail", "malformed", "missing-continuation"):
+            with self.subTest(flag=flag):
+                (self.dir / flag).touch()
+                p = self.script("fm-crew-state.sh", "task")
+                self.assertIn("state: failed", p.stdout)
+                self.assertNotIn("checks green", p.stdout)
+                (self.dir / flag).unlink()
+        before = self.calls()
+        self.env["FM_CREW_STATE_NO_FORGE"] = "1"
+        p = self.script("fm-crew-state.sh", "task")
+        self.assertIn("state: failed", p.stdout)
+        self.assertEqual(self.calls(), before)
+        self.assertFalse((self.dir / "patch").exists())
+
+    def test_crew_disposition_read_is_bounded(self):
+        self.prepare_crew("passed")
+        (self.dir / "slow").touch()
+        start = time.monotonic()
+        p = self.script("fm-crew-state.sh", "task")
+        self.assertLess(time.monotonic() - start, 12)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("run passed: PR state unknown (unreadable)", p.stdout)
+        self.assertTrue(self.calls())
+        self.assertFalse((self.dir / "patch").exists())
 
     def test_registration_and_guarded_merge(self):
         p = self.script("fm-pr-check.sh", "task", URL)

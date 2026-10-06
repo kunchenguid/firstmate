@@ -747,7 +747,9 @@ test_history_location_containment_matrix() {
   for scenario in unlanded-delete landed-delete unlanded-replace same-file-restoration \
     literal-path ordinary-path successive-upstream one-upstream partial-two-file \
     whole-file-restoration missing-intermediate-tree complete-enumeration \
-    large-rebased-upstream large-rebased-unlanded large-alignment-bound; do
+    large-rebased-upstream large-rebased-unlanded large-alignment-bound \
+    merge-main-upstream merge-main-same-file merge-main-resolution \
+    merge-main-merge-restoration merge-main-local-restoration; do
     for route in pr default; do
       case_dir=$(make_case "history-$scenario-$route")
       write_meta "$case_dir" no-mistakes ship
@@ -757,8 +759,13 @@ test_history_location_containment_matrix() {
       merged=$(cat "$case_dir/merged-sha")
       local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
       case "$scenario" in
-        large-*)
-          [ "$(git -C "$case_dir/wt" rev-parse HEAD:shared.txt)" != "$(git -C "$case_dir/wt" rev-parse "$merged:shared.txt")" ] \
+        large-*|merge-main-*)
+          local proof_path=shared.txt
+          case "$scenario" in
+            merge-main-upstream|merge-main-resolution|merge-main-merge-restoration) proof_path=g.txt ;;
+            merge-main-local-restoration) proof_path=f.txt ;;
+          esac
+          [ "$(git -C "$case_dir/wt" rev-parse HEAD:"$proof_path")" != "$(git -C "$case_dir/wt" rev-parse "$merged:$proof_path")" ] \
             || fail "$scenario: fixture must require non-identical text alignment"
           if git -C "$case_dir/wt" merge-base --is-ancestor "$local_head" "$merged"; then
             fail "$scenario: fixture must require rewritten-history proof"
@@ -769,13 +776,13 @@ test_history_location_containment_matrix() {
         add_gh_pr_merged_for_head "$case_dir" "$merged" "$merged"
         append_pr_meta_url "$case_dir"
         case "$scenario" in
-          large-*) printf 'base_branch=unavailable-fallback\n' >> "$case_dir/state/task-x1.meta" ;;
+          large-*|merge-main-*) printf 'base_branch=unavailable-fallback\n' >> "$case_dir/state/task-x1.meta" ;;
         esac
       else
         add_gh_axi_error "$case_dir"
       fi
       case "$scenario" in
-        landed-delete|successive-upstream|one-upstream|large-rebased-upstream) expected=0 ;;
+        landed-delete|successive-upstream|one-upstream|large-rebased-upstream|merge-main-upstream|merge-main-same-file) expected=0 ;;
         *) expected=1 ;;
       esac
       rc=0
@@ -793,7 +800,7 @@ test_history_location_containment_matrix() {
       fi
     done
   done
-  pass "history/location containment passes the combined 30-case matrix and independent oracles"
+  pass "history/location containment passes the combined 40-case matrix and independent oracles"
 }
 
 test_dirty_initialized_nested_submodule_refuses() {

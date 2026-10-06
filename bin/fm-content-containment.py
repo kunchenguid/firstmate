@@ -6,9 +6,10 @@ Exit 0 means contained, 1 means a final obligation differs, and 2 means unknown.
 No Git refs, index, working files, configuration, or remote are changed.
 
 History is not reduced to its net patch. Every changed path and every text region
-that differed from the common base at any local revision remains an obligation,
-even after restoration. Only anchors unchanged throughout that history and
-unambiguously matched in the landed result may separate independent regions.
+changed by a local parent-to-child comparison remains an obligation, even after
+restoration. Merges with upstream parents compare against those parents; other
+commits compare against all parents. Only anchors shared throughout that history
+and unambiguously matched in the landed result may separate independent regions.
 Each obligated region's final bytes must match between those same anchors.
 This accepts independent upstream hunks, but never infers containment from patch
 applicability, a matching occurrence elsewhere, or a partial history enumeration.
@@ -106,17 +107,17 @@ def anchors(base, value):
             if i not in deleted and len(positions) == 1}
 
 
-def text_contained(base_bytes, history_bytes, local_bytes, merged_bytes):
+def text_contained(base_bytes, comparisons, local_bytes, merged_bytes):
     """Compare final obligations between history-stable, location-bound anchors.
 
-    A segment is an obligation if *any* local historical snapshot differs from
-    the base there. Compare its final local and merged bytes, not intermediate
-    values. Include the virtual file boundaries so empty/deleted regions and
-    insertions at either end cannot disappear from the proof.
+    A segment is an obligation if any local parent-to-child comparison changes
+    it. Compare its final local and merged bytes, not intermediate values.
+    Include virtual file boundaries so empty/deleted regions and insertions at
+    either end cannot disappear from the proof.
     """
     if local_bytes == merged_bytes:
         return True
-    versions = list(dict.fromkeys([*history_bytes, local_bytes]))
+    versions = list(dict.fromkeys([content for pair in comparisons for content in pair] + [local_bytes]))
     if any(b"\0" in content for content in [base_bytes, merged_bytes, *versions]):
         return False
     base = base_bytes.splitlines(keepends=True)
@@ -125,6 +126,8 @@ def text_contained(base_bytes, history_bytes, local_bytes, merged_bytes):
     merged = merged_bytes.splitlines(keepends=True)
     history_maps = [anchors(base, version) for version in history]
     local_map = history_maps[versions.index(local_bytes)]
+    version_indexes = {content: index for index, content in enumerate(versions)}
+    edges = [(version_indexes[before], version_indexes[after]) for before, after in comparisons]
     merged_map = anchors(base, merged)
     stable = set(merged_map)
     for mapping in history_maps:
@@ -139,11 +142,9 @@ def text_contained(base_bytes, history_bytes, local_bytes, merged_bytes):
         return mapping[index]
 
     for left, right in zip(boundaries, boundaries[1:]):
-        original = base[left + 1:right]
-        touched = any(
-            version[position(mapping, version, left) + 1:position(mapping, version, right)] != original
-            for version, mapping in zip(history, history_maps)
-        )
+        segments = [version[position(mapping, version, left) + 1:position(mapping, version, right)]
+                    for version, mapping in zip(history, history_maps)]
+        touched = any(segments[before] != segments[after] for before, after in edges)
         if touched:
             final_local = local[position(local_map, local, left) + 1:position(local_map, local, right)]
             final_merged = merged[position(merged_map, merged, left) + 1:position(merged_map, merged, right)]
@@ -251,14 +252,20 @@ class Repository:
         base_tree = self.tree(self.commit(base)[0])
         local_tree = self.tree(self.commit(local)[0])
         merged_tree = self.tree(self.commit(merged)[0])
-        histories, paths = [], set()
+        histories, comparisons, paths = [], [], set()
+        local_commits = set(commits)
         for oid in commits:
             root, parents = self.commit(oid)
             current = self.tree(root)
             if not parents:
                 raise Unknown("local history has an unbound root")
+            upstream_parents = [parent for parent in parents if parent not in local_commits]
             for parent in parents:
                 previous = self.tree(self.commit(parent)[0])
+                histories.append(previous)
+                if upstream_parents and parent not in upstream_parents:
+                    continue
+                comparisons.append((previous, current))
                 paths.update(path for path in current.keys() | previous.keys()
                              if current.get(path) != previous.get(path))
             histories.append(current)
@@ -280,7 +287,9 @@ class Repository:
                 # File creation/deletion/type transitions require exact final
                 # entries rather than an invented text-line correspondence.
                 return False
-            if not text_contained(self.contents(before), [self.contents(entry) for entry in versions],
+            if not text_contained(self.contents(before),
+                                  [(self.contents(previous.get(path)), self.contents(current.get(path)))
+                                   for previous, current in comparisons],
                                   self.contents(final), self.contents(landed)):
                 return False
         # Same immutable input must still be selected at the caller boundary.
