@@ -1287,6 +1287,24 @@ EOF
   pass "resolved findings and decision-like prose do not create captain-held tasks"
 }
 
+test_completion_keeps_an_armed_pr_identity_last() {
+  local home id url=https://github.com/example/sample/pull/7
+  home=$(make_home armed-pr-completion)
+  id=sample-armed-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review an armed sample change" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'pr=%s\n' "$url" >> "$home/state/$id.meta"
+  printf 'done: review complete\n' > "$home/state/$id.status"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "completion with an armed PR identity failed"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
+  bash -c '. "$1"; fm_pr_metadata_identity_parse "$2" && [ "$FM_PR_META_URL" = "$3" ]' _ \
+    "$ROOT/bin/fm-pr-lib.sh" "$home/state/$id.meta" "$url" \
+    || fail "completion broke the armed PR identity the merge poll authenticates:"$'\n'"$(cat "$home/state/$id.meta")"
+  pass "completion keeps an armed PR identity last in the task record"
+}
+
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   local home id open secondmate
   home=$(make_home stale-terminal-decision)
@@ -4962,6 +4980,7 @@ test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
+test_completion_keeps_an_armed_pr_identity_last
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers

@@ -537,11 +537,15 @@ test_traced_relaunch_keeps_an_armed_pr_poll_authenticated() {
   pass "fm-control relaunch: a traced replacement keeps an armed PR poll authenticated"
 }
 
-test_relaunch_keeps_an_armed_pr_poll_authenticated() {
-  local dir out rc state url=https://github.com/example/repo/pull/23
-  dir=$(new_case pr-poll rl23)
+relaunch_keeps_an_armed_pr_poll_authenticated() {  # <trace on|off>
+  local trace=$1 dir out rc state url=https://github.com/example/repo/pull/23
+  dir=$(new_case "pr-poll-trace-$trace" rl23)
   add_ship_task "$dir" rl23 claude
   state="$dir/home/state"
+  if [ "$trace" = on ]; then
+    printf '%s\n' "$$" > "$state/.lock"
+    printf '%s on\n' "$$" > "$state/.trace-context-effective"
+  fi
   printf 'pr=%s\n' "$url" >> "$state/rl23.meta"
   chmod 0600 "$state/rl23.meta"
   fm_pr_url_parse "$url" || fail "fixture PR URL did not parse"
@@ -555,9 +559,21 @@ test_relaunch_keeps_an_armed_pr_poll_authenticated() {
   expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
   [ -n "$(meta_field "$dir" rl23 control_relaunch_tx)" ] \
     || fail "the relaunch must record its transaction so the poll check is not vacuous"
+  if [ "$trace" = on ]; then
+    fm_trace_context_valid "$(meta_field "$dir" rl23 traceparent)" \
+      || fail "the traced relaunch must record its carrier so the poll check is not vacuous"
+  fi
   fm_pr_poll_artifacts_valid "$state" rl23 "$ROOT/bin/fm-pr-poll.sh" \
     || fail "a relaunch must leave an armed PR poll authenticated for the watcher"$'\n'"$(cat "$state/rl23.meta")"
-  pass "fm-control relaunch: an armed PR merge poll stays authenticated"
+  pass "fm-control relaunch: an armed PR merge poll stays authenticated (trace $trace)"
+}
+
+test_relaunch_keeps_an_armed_pr_poll_authenticated() {
+  relaunch_keeps_an_armed_pr_poll_authenticated off
+}
+
+test_traced_relaunch_keeps_an_armed_pr_poll_authenticated() {
+  relaunch_keeps_an_armed_pr_poll_authenticated on
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -3046,6 +3062,7 @@ test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_traced_relaunch_keeps_an_armed_pr_poll_authenticated
 test_relaunch_keeps_an_armed_pr_poll_authenticated
+test_traced_relaunch_keeps_an_armed_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
