@@ -54,7 +54,7 @@ EOF
 }
 
 in_home() {  # <command...>: run one real script against the case home
-  env -u FM_TRACE_CONTEXT FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  env -u FM_TRACE_CONTEXT TREEHOUSE_ROOT="${TREEHOUSE_ROOT:-${HOME_DIR%/*}/treehouse-root}" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     HOME="$HOME_DIR/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
