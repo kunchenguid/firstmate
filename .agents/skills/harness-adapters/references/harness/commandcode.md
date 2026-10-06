@@ -9,7 +9,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 
 | Fact | Value |
 |---|---|
-| Busy state | The tracked `../../../bin/fm-commandcode-mod.ts`, loaded per process with `--mod`: `run_start` opens, `run_end` closes (an Escape interrupt included, as stop reason `interrupted`), and session end closes; `../../../bin/fm-busy-lib.sh` owns trust. |
+| Busy state | The tracked `../../../bin/fm-commandcode-mod.ts`, loaded per process with `--mod`: `run_start` opens, `run_end` closes (an Escape interrupt included, as stop reason `interrupted`) and, for a completed turn, has the writer touch `state/<id>.turn-ended` under the same generation check, and session end closes; `../../../bin/fm-busy-lib.sh` owns trust. |
 | Exit command | `/quit` (`/exit` is an alias); prints `cmd --resume <session-id>`. |
 | Interrupt | One Esc cancels a running turn and prints `Interrupted · What should Command Code do instead?` with an empty composer. Two Escs within about half a second on an idle agent open the Rewind checkpoint picker, where Enter restores a checkpoint, so the control plane sends one press and closes a picker with one more Esc. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Command Code discovers user skills from `~/.agents/skills` and `~/.commandcode/skills`, and its slash popup lists them as `[skill]`. |
@@ -33,6 +33,7 @@ Command Code draws a bare `❯` composer between two rules, parks the terminal c
 Its `Ask your question...` placeholder is truecolor bright enough to survive the fleet ghost ceiling, so `../../../bin/fm-composer-lib.sh` reads a screen with a Command Code identity at a higher ceiling; typed text is the default foreground and stays pending.
 The launch clears `NO_COLOR` and pins `COLORTERM=truecolor`, because a 256-colour terminal renders the placeholder in an untested palette colour.
 `../../../bin/fm-tmux-lib.sh` supplies the `commandcode` identity on tmux, while Herdr's native detection reports `cmd`.
+Zellij, cmux, and orca supply no such identity, so the placeholder would read pending there and `../../../bin/fm-spawn.sh` refuses a Command Code launch on those backends.
 The delivery busy signals are `esc to interrupt` and the bullet-framed elapsed cell on the status row.
 
 ## Primary integration

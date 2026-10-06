@@ -126,6 +126,14 @@ else
   drive_mod run_end end_turn "$opts" >/dev/null
   [ "$(fm_busy_classify tmux fake:w commandcode worker "$state")" = 'busy fm-spawn' ] || fail 'stale run_end cleared replacement'
   assert_absent "$state/worker.turn-ended" 'stale run_end woke replacement'
+  # A relaunch can arm a replacement right after the old run_end's idle write
+  # passed its generation check; this writer accepts the write and then arms
+  # one, so a notification the mod raised on its own would wake the replacement.
+  racing="$TMP_ROOT/racing-writer"
+  printf '#!/bin/sh\n%s arm "$2" "$3" >/dev/null\n' "'$ROOT/bin/fm-busy-event.sh'" > "$racing"
+  chmod +x "$racing"
+  drive_mod run_end end_turn "$(jq -c --arg w "$racing" '.fmWriter = $w' <<<"$opts")" >/dev/null
+  assert_absent "$state/worker.turn-ended" 'the turn-end notification escaped the writer generation check'
   drive_mod run_end end_turn '{}' >/dev/null
   [ "$(fm_busy_classify tmux fake:w commandcode worker "$state")" = 'busy fm-spawn' ] || fail 'an unconfigured mod wrote a record'
   fm_busy_source_trusted commandcode commandcode-mod || fail 'commandcode must trust its mod'
@@ -171,3 +179,23 @@ if out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" cc-sm "$proj" --secondmate -
 then fail 'Command Code secondmate launch accepted'; fi
 assert_contains "$out" 'crewmate/scout adapter only' 'wrong secondmate refusal'
 pass "scout launch carries model, verified effort only, autonomy, typed brief, and the per-process mod"
+
+# Only tmux and Herdr supply the Command Code identity that lets its idle
+# placeholder read empty, so every other spawn-capable backend is refused
+# before any endpoint, worktree, or busy record exists.
+cat > "$fakebin/orca" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}'
+EOF
+chmod +x "$fakebin/orca"
+for backend in zellij cmux orca; do
+  fm_test_spawn_brief "$home" "cc-$backend"
+  if out=$(FM_FAKE_LAUNCH_LOG="$case_dir/cc-$backend.launch" fm_test_run_spawn "$home" "$wt" "$fakebin" "cc-$backend" "$proj" \
+    --scout --harness commandcode --backend "$backend" 2>&1)
+  then fail "Command Code launch accepted on backend=$backend"; fi
+  assert_contains "$out" "commandcode is verified on the tmux and herdr backends only; backend=$backend" "wrong refusal on $backend: $out"
+  assert_absent "$case_dir/cc-$backend.launch" "Command Code launched on $backend"
+  assert_absent "$home/state/cc-$backend.meta" "refused $backend spawn left a task record"
+  assert_absent "$home/state/cc-$backend.busy-gen" "refused $backend spawn armed busy state"
+done
+pass "Command Code launches are refused on zellij, cmux, and orca"

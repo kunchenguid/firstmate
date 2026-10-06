@@ -18,14 +18,14 @@
 //   run_start          one user turn began -> busy
 //   run_end            the turn finished, including an Escape interrupt
 //                      (stopReason `interrupted`) -> idle; a normal end also
-//                      touches state/<id>.turn-ended, the watcher notification
+//                      asks the writer to touch state/<id>.turn-ended, the
+//                      watcher notification, under the same generation check
 //   onSessionEnd       /quit or process shutdown -> idle
 // Writes are synchronous so two events of one incarnation can never reorder,
 // and a refused event (stale generation) is ignored: the writer is
 // generation-bound and the agent's own lifecycle must never break on it.
 
 import {spawnSync} from 'node:child_process';
-import {closeSync, openSync, utimesSync} from 'node:fs';
 
 const OPTIONS = ['fmWriter', 'fmState', 'fmId', 'fmGen'] as const;
 
@@ -39,18 +39,17 @@ export default function (cmd: any): void {
 		return typeof value === 'string' ? value : '';
 	};
 
-	const apply = (state: 'busy' | 'idle', event: string): boolean => {
+	const apply = (state: 'busy' | 'idle', event: string, extra: string[] = []): void => {
 		const writer = option('fmWriter');
 		const dir = option('fmState');
 		const id = option('fmId');
 		const gen = option('fmGen');
-		if (!writer || !dir || !id || !gen) return false;
-		const result = spawnSync(
+		if (!writer || !dir || !id || !gen) return;
+		spawnSync(
 			writer,
-			['apply', dir, id, state, '--gen', gen, '--source', 'commandcode-mod', '--event', event],
+			['apply', dir, id, state, '--gen', gen, '--source', 'commandcode-mod', '--event', event, ...extra],
 			{stdio: 'ignore', timeout: 10000},
 		);
-		return result.status === 0;
 	};
 
 	cmd.on('run_start', () => {
@@ -58,16 +57,7 @@ export default function (cmd: any): void {
 	});
 
 	cmd.on('run_end', (event: any) => {
-		if (!apply('idle', 'run-end')) return;
-		if (event?.result?.stopReason === 'interrupted') return;
-		const marker = `${option('fmState')}/${option('fmId')}.turn-ended`;
-		try {
-			closeSync(openSync(marker, 'a'));
-			const now = new Date();
-			utimesSync(marker, now, now);
-		} catch {
-			// The notification is best effort; the busy record already settled.
-		}
+		apply('idle', 'run-end', event?.result?.stopReason === 'interrupted' ? [] : ['--turn-ended']);
 	});
 
 	cmd.hooks({
