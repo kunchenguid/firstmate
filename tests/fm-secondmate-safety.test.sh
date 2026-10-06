@@ -1593,6 +1593,69 @@ EOF
   pass "secondmate teardown retires empty homes and releases routing"
 }
 
+backlog_held_flag() {  # <backlog-file> <id>
+  tasks-axi show "$2" --file "$1" 2>/dev/null | sed -n 's/^  held: *//p' | head -1
+}
+
+# A retired leased secondmate home frees its pool slot even though a
+# secondmate teardown never transitions a backlog item, and the capacity hold
+# is load-kind, so the release must fire on this return path too: the oldest
+# same-pool hold goes ready while a newer same-pool hold, a different-pool
+# hold, and a non-capacity hold all stay recorded.
+test_secondmate_teardown_releases_capacity_hold_for_returned_slot() {
+  local home subhome subhome_abs fakebin log lease fmroot pool backlog out
+  home="$TMP_ROOT/capacity-retire-home"
+  subhome="$TMP_ROOT/capacity-retire-pool/7/capacity-retire-subhome"
+  fmroot="$TMP_ROOT/capacity-retire-fmroot"
+  pool="$TMP_ROOT/capacity-retire-pool"
+  make_firstmate_git_root "$fmroot"
+  mkdir -p "$pool/7"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  backlog="$home/data/backlog.md"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' '' > "$backlog"
+  tasks-axi add cap-a "oldest held" --kind ship --file "$backlog" >/dev/null
+  tasks-axi add cap-b "newer held" --kind ship --file "$backlog" >/dev/null
+  tasks-axi add cap-c "other pool" --kind ship --file "$backlog" >/dev/null
+  tasks-axi add cap-d "external" --kind ship --file "$backlog" >/dev/null
+  tasks-axi hold cap-a --reason "pool $pool full 3/4" --kind load --file "$backlog" >/dev/null
+  tasks-axi hold cap-b --reason "pool $pool full 2/4" --kind load --file "$backlog" >/dev/null
+  tasks-axi hold cap-c --reason "pool /some/other-pool full 1/2" --kind load --file "$backlog" >/dev/null
+  tasks-axi hold cap-d --reason "awaiting captain" --kind external --file "$backlog" >/dev/null
+  fakebin=$(make_fake_tmux "$TMP_ROOT/capacity-retire-fake")
+  log="$TMP_ROOT/capacity-retire-fake/tmux.log"
+  lease="$TMP_ROOT/capacity-retire-fake/lease"
+  printf 'domain\n' > "$lease"
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/capacity-retire-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    "$ROOT/bin/fm-teardown.sh" domain 2>&1) \
+    || fail "teardown failed for leased secondmate home: $out"
+  grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null \
+    || fail "teardown did not release the secondmate home lease via treehouse return"
+  assert_contains "$out" "ready: cap-a - capacity hold released for pool $pool" \
+    "retiring the leased secondmate home must release the oldest hold for its freed pool"
+  [ "$(backlog_held_flag "$backlog" cap-a)" = no ] || fail "oldest same-pool hold was not released"
+  [ "$(backlog_held_flag "$backlog" cap-b)" = yes ] || fail "newer same-pool hold was wrongly released"
+  [ "$(backlog_held_flag "$backlog" cap-c)" = yes ] || fail "different-pool hold was wrongly released"
+  [ "$(backlog_held_flag "$backlog" cap-d)" = yes ] || fail "non-capacity hold was wrongly released"
+  pass "secondmate home retirement releases the capacity hold for its freed pool slot"
+}
+
 # A second mate's status log relays child outcomes, so a merged child PR there
 # must never let the supervision branch retire the mate itself.
 test_branch_actor_cannot_retire_secondmate() {
@@ -3070,6 +3133,7 @@ test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_releases_capacity_hold_for_returned_slot
 test_branch_actor_cannot_retire_secondmate
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
 test_secondmate_teardown_sweeps_process_events_before_removal
