@@ -14,7 +14,8 @@ def change(repo,files,msg):
  git(repo,'--literal-pathspecs','add','--all');git(repo,'commit','-qm',msg)
  return git(repo,'rev-parse','HEAD')
 def lines(first='zero',last='zero'):return '\n'.join([first]+[f'context-{n}' for n in range(2,100)]+[last])+'\n'
-base=change(project,{'f.txt':'keep\nremove\ntail\n','shared.txt':lines(),'feature.txt':'zero\n','g.txt':'zero\n','h.txt':'zero\n'},'baseline')
+initial_shared=''.join(f'line-{n}\n' for n in range(1,5001)) if scenario.startswith('large-') else lines()
+base=change(project,{'f.txt':'keep\nremove\ntail\n','shared.txt':initial_shared,'feature.txt':'zero\n','g.txt':'zero\n','h.txt':'zero\n'},'baseline')
 git(project,'push','-q','origin','main');git(wt,'merge','--ff-only','-q',base)
 missing=None
 if scenario in ('unlanded-delete','landed-delete','unlanded-replace'):
@@ -34,6 +35,24 @@ elif scenario in ('successive-upstream','one-upstream'):
  if scenario=='successive-upstream':change(wt,{'shared.txt':lines('two')},'superseding local edit');final='two'
  local=git(wt,'rev-parse','HEAD')
  change(project,{'shared.txt':lines(final,'upstream')},'rewritten merged task plus unrelated hunk')
+elif scenario in ('large-rebased-upstream','large-rebased-unlanded'):
+ local_lines=initial_shared.splitlines(keepends=True);local_lines[0]='local edit\n'
+ local=change(wt,{'shared.txt':''.join(local_lines)},'local line 1')
+ upstream_lines=initial_shared.splitlines(keepends=True);upstream_lines[-1]='upstream edit\n'
+ change(project,{'shared.txt':''.join(upstream_lines)},'upstream line 5000')
+ pipeline=c/'pipeline'
+ git(project,'worktree','add','--detach',str(pipeline),local)
+ git(pipeline,'rebase','main')
+ git(project,'merge','--squash',git(pipeline,'rev-parse','HEAD'))
+ git(project,'commit','-qm','squash rebased local edit')
+ if scenario=='large-rebased-unlanded':
+  local_lines[2499]='unmerged later edit\n'
+  local=change(wt,{'shared.txt':''.join(local_lines)},'unmerged line 2500')
+elif scenario=='large-alignment-bound':
+ local_lines=[f'rewrite-{n}\n' for n in range(1,4501)]+initial_shared.splitlines(keepends=True)[4500:]
+ local=change(wt,{'shared.txt':''.join(local_lines)},'large local rewrite')
+ merged_lines=list(local_lines);merged_lines[-1]='upstream edit\n'
+ change(project,{'shared.txt':''.join(merged_lines)},'landed rewrite with unrelated upstream hunk')
 elif scenario=='partial-two-file':
  local=change(wt,{'g.txt':'one\n','h.txt':'one\n'},'two local edits')
  change(project,{'g.txt':'one\n'},'only one edit landed')

@@ -98,6 +98,23 @@ class ContainmentContract(unittest.TestCase):
         self.assertFalse(proof.text_contained(b"text\0old", [b"text\0new"], b"text\0new", b"text\0old"))
         self.assertTrue(proof.text_contained(b"text\0old", [b"text\0new"], b"text\0new", b"text\0new"))
 
+    def test_large_repeated_region_keeps_every_optimal_tie(self):
+        repeated = [b"same\n"] * 5000
+        self.assertEqual(proof.anchors(repeated + [b"tail\n"], repeated[1:] + [b"tail\n"]),
+                         {5000: 4999})
+        self.assertEqual(proof.anchors([b"head\n"] + repeated, [b"head\n"] + repeated[1:]),
+                         {0: 0})
+
+    def test_large_sparse_edits_keep_location_bound_obligations(self):
+        base = [("line-%d\n" % n).encode() for n in range(5000)]
+        local = [b"local\n", *base[1:]]
+        merged = [*local[:-1], b"upstream\n"]
+        self.assertTrue(proof.text_contained(b"".join(base), [b"".join(local)],
+                                            b"".join(local), b"".join(merged)))
+        later = [*local[:2500], b"unmerged\n", *local[2501:]]
+        self.assertFalse(proof.text_contained(b"".join(base), [b"".join(local), b"".join(later)],
+                                             b"".join(later), b"".join(merged)))
+
     def test_resource_limit_is_unknown_not_contained(self):
         old = proof.MAX_ALIGNMENT_CELLS
         try:
