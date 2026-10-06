@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Azure DevOps Services PR identity, live verification and completion transport.
 
-Usage: fm-azure-pr.py parse|head|ready-head|merged|landed|complete <canonical-pr-url>
+Usage: fm-azure-pr.py parse|head|ready-head|disposition|merged|landed|complete <canonical-pr-url>
 `parse` prints host, repository path and number; `head` prints the live source
 SHA; `ready-head` first refuses a positively identified draft.
-`merged` prints only `merged` after proof; `landed` prints the completed
-source SHA. `complete` is called only by fm-pr-merge.sh under its authority
+`disposition` prints open, closed or merged; `merged` prints only `merged`
+after proof; `landed` prints the completed merge SHA.
+`complete` is called only by fm-pr-merge.sh under its authority
 locks and repeats verification immediately before PATCH.
 Requires python3 and az with azure-devops (1.0.5+). REST 7.1 via devops invoke
 retains continuation_token, unlike typed CLI views. Partial lists are refused.
@@ -146,13 +147,26 @@ class Azure:
         sha(pr.get("lastMergeSourceCommit", {}).get("commitId"))
         return pr
 
-    def landed(self):
-        pr = self.pr()
+    @staticmethod
+    def completed_commit(pr):
         require(pr.get("status") == "completed" and pr.get("mergeStatus") == "succeeded"
                 and isinstance(pr.get("closedDate"), str) and bool(pr["closedDate"]),
                 "Azure PR completion is not confirmed")
         sha(pr.get("lastMergeCommit", {}).get("commitId"))
         return sha(pr["lastMergeCommit"]["commitId"])
+
+    def landed(self):
+        return self.completed_commit(self.pr())
+
+    def disposition(self):
+        pr = self.pr()
+        status = pr.get("status")
+        if status == "active":
+            return "open"
+        if status == "abandoned":
+            return "closed"
+        self.completed_commit(pr)
+        return "merged"
 
     def latest_iteration(self):
         iterations = self.listing("pullRequestIterations")
@@ -308,7 +322,7 @@ class Azure:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("parse", "head", "ready-head", "merged", "landed", "complete"))
+    parser.add_argument("action", choices=("parse", "head", "ready-head", "disposition", "merged", "landed", "complete"))
     parser.add_argument("url")
     args = parser.parse_args()
     try:
@@ -319,6 +333,8 @@ def main():
         azure = Azure(identity)
         if args.action in ("head", "ready-head"):
             print(azure.source_head(reject_draft=args.action == "ready-head"))
+        elif args.action == "disposition":
+            print(azure.disposition())
         elif args.action == "merged":
             azure.landed()
             print("merged")

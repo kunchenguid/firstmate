@@ -15,7 +15,8 @@ def change(repo,files,msg):
  return git(repo,'rev-parse','HEAD')
 def lines(first='zero',last='zero'):return '\n'.join([first]+[f'context-{n}' for n in range(2,100)]+[last])+'\n'
 initial_shared=''.join(f'line-{n}\n' for n in range(1,5001)) if scenario.startswith('large-') else lines()
-base=change(project,{'f.txt':'keep\nremove\ntail\n','shared.txt':initial_shared,'feature.txt':'zero\n','g.txt':'zero\n','h.txt':'zero\n'},'baseline')
+initial_f='zero\n' if scenario.startswith('merge-main-') else 'keep\nremove\ntail\n'
+base=change(project,{'f.txt':initial_f,'shared.txt':initial_shared,'feature.txt':'zero\n','g.txt':'zero\n','h.txt':'zero\n'},'baseline')
 git(project,'push','-q','origin','main');git(wt,'merge','--ff-only','-q',base)
 missing=None
 if scenario in ('unlanded-delete','landed-delete','unlanded-replace'):
@@ -35,6 +36,28 @@ elif scenario in ('successive-upstream','one-upstream'):
  if scenario=='successive-upstream':change(wt,{'shared.txt':lines('two')},'superseding local edit');final='two'
  local=git(wt,'rev-parse','HEAD')
  change(project,{'shared.txt':lines(final,'upstream')},'rewritten merged task plus unrelated hunk')
+elif scenario.startswith('merge-main-'):
+ same_file=scenario=='merge-main-same-file'
+ change(wt,{'shared.txt':lines('one')} if same_file else {'f.txt':'one\n'},'C local f')
+ upstream=change(project,{'shared.txt':lines('zero','one')} if same_file else {'g.txt':'one\n'},'U upstream g')
+ git(wt,'merge','--no-ff','--no-commit',upstream)
+ if scenario=='merge-main-resolution':(wt/'g.txt').write_text('resolution\n')
+ if scenario=='merge-main-merge-restoration':(wt/'g.txt').write_text('zero\n')
+ git(wt,'add','--all');git(wt,'commit','-qm','M merge main')
+ local=git(wt,'rev-parse','HEAD')
+ assert git(wt,'merge-base',local,upstream)==upstream
+ change(project,{'shared.txt':lines('zero','two')} if same_file else {'g.txt':'two\n'},'later upstream g')
+ pipeline=c/'pipeline'
+ git(project,'worktree','add','--detach',str(pipeline),local)
+ git(pipeline,'rebase','main')
+ git(project,'merge','--squash',git(pipeline,'rev-parse','HEAD'))
+ git(project,'commit','-qm','squash rebased publication')
+ if scenario=='merge-main-local-restoration':local=change(wt,{'f.txt':'zero\n'},'restore local f')
+ if scenario=='merge-main-upstream':
+  assert git(wt,'show',local+':f.txt')=='one'
+  assert git(wt,'show',local+':g.txt')=='one'
+  assert git(project,'show','HEAD:f.txt')=='one'
+  assert git(project,'show','HEAD:g.txt')=='two'
 elif scenario in ('large-rebased-upstream','large-rebased-unlanded'):
  local_lines=initial_shared.splitlines(keepends=True);local_lines[0]='local edit\n'
  local=change(wt,{'shared.txt':''.join(local_lines)},'local line 1')
