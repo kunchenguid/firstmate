@@ -23,8 +23,8 @@
 # deliberately not asserted here.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
 
@@ -61,6 +61,7 @@ make_home() {  # <name> [task-id...]
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   fakebin=$(fm_fakebin "$case_dir")
+  fm_test_fake_systemd_run "$fakebin"
   mkdir -p "$home/state" "$home/config" "$home/data" "$home/projects"
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' claude > "$home/config/crew-harness"

@@ -1845,6 +1845,47 @@ test_memory_cap_survives_parallel_environment_cleanup() {
   pass "every streaming and capture path retains the spawning home's test cap"
 }
 
+test_unavailable_memory_scopes_follow_home_policy() {
+  local root repo home jobs bound policy out rc script
+  root=$(fm_test_tmproot fm-test-run-unboxed)
+  repo="$root/repo"
+  home="$root/home"
+  fm_test_install_runner "$repo"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/"
+  mkdir -p "$home/config"
+  for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh; do
+    printf 'printf "executed\\n" >> "%s"\n' "$root/executed" > "$repo/tests/$script"
+  done
+  for policy in unconfigured configured required override; do
+    rm -f "$home/config/memory-box" "$home/config/memory-box-required"
+    case "$policy" in
+      configured) printf 'test=2G\n' > "$home/config/memory-box" ;;
+      required) touch "$home/config/memory-box-required" ;;
+    esac
+    for jobs in 1 2; do
+      for bound in 0 5; do
+        rm -f "$root/executed"
+        rc=0
+        out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+          FM_MEM_BOX_CAP="$([ "$policy" = override ] && printf 2G)" FM_FAKE_SYSTEMD_FAIL=1 \
+          "$repo/bin/fm-test-run.sh" --jobs "$jobs" --per-script-timeout-secs "$bound" \
+          tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh 2>&1) || rc=$?
+        if [ "$policy" = unconfigured ]; then
+          [ "$rc" = 0 ] || fail "unconfigured host refused: $out"
+          [ "$(cat "$root/executed")" = "$(printf 'executed\nexecuted')" ] || fail "unboxed tests did not run"
+          [ "$(printf '%s\n' "$out" | awk '/UNBOXED tests:/ { n++ } END { print n+0 }')" = 1 ] \
+            || fail "missing or repeated unboxed notice: $out"
+        else
+          [ "$rc" != 0 ] || fail "$policy home accepted unboxed tests"
+          [ ! -e "$root/executed" ] || fail "$policy home executed tests unboxed"
+          case "$out" in *"memory box unavailable"*"systemd user manager"*) ;; *) fail "missing capability not named: $out" ;; esac
+        fi
+      done
+    done
+  done
+  pass "all runner paths permit unconfigured hosts and refuse configured or required boxing"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1887,3 +1928,5 @@ test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
 test_memory_cap_survives_parallel_environment_cleanup
+
+test_unavailable_memory_scopes_follow_home_policy

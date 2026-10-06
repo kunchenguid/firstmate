@@ -16,13 +16,13 @@ INSTALLER="$ROOT/bin/fm-mem-protection-install.sh"
 test_print_policy_semantics() {
   local root home
   root=$(fm_test_tmproot fm-mem-protection-install)
-  home="$root/home"
+  home="$root/home with spaces"
   mkdir -p "$home/bin"
   # shellcheck disable=SC2016 # $1 and FM_HOME expand when the generated stub runs.
   printf '#!/bin/sh\nprintf "%%s" "$1" > "$FM_HOME/called"\n' > "$home/bin/fm-mem-alert.sh"
   chmod +x "$home/bin/fm-mem-alert.sh"
-  "$INSTALLER" print --home "$home" > "$root/policy" || fail "print failed"
-  python3 - "$root/policy" "$home" <<'PYMODEL' || fail "generated policy semantics failed"
+  HOME="$root/user home" "$INSTALLER" print --home "$home" > "$root/policy" || fail "print failed"
+  python3 - "$root/policy" "$home" "$root/user home" <<'PYMODEL' || fail "generated policy semantics failed"
 import os
 import re
 import shlex
@@ -90,6 +90,7 @@ for value in service['Service', 'Environment']:
         key, val = assignment.split('=', 1)
         env[key] = val
 assert env['FM_HOME'] == sys.argv[2]
+assert env['PATH'] == sys.argv[3] + '/.local/bin:/usr/local/bin:/usr/bin:/bin'
 starts = service['Service', 'ExecStart']
 assert len(starts) == 1
 subprocess.run(shlex.split(starts[0]), env=env, check=True)

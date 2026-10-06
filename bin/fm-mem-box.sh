@@ -18,7 +18,7 @@
 # Usage:
 #   fm-mem-box.sh check
 #   fm-mem-box.sh cap <lane>
-#   fm-mem-box.sh exec <lane> -- <command> [args...]
+#   fm-mem-box.sh exec <lane> [--unit <name>] -- <command> [args...]
 #
 # `check`   reports the effective cgroup v2 delegation facts and every lane cap.
 # `cap`     prints the effective byte cap for <lane>.
@@ -241,6 +241,12 @@ cmd_exec() {
   [ "$#" -ge 3 ] || die "exec requires: <lane> -- <command> [args...]"
   local lane=$1
   shift
+  local -a unit_args=()
+  if [ "${1:-}" = --unit ]; then
+    [ "$#" -ge 4 ] && [ -n "$2" ] || die "--unit requires a name and command"
+    unit_args=("--unit=$2")
+    shift 2
+  fi
   [ "$1" = -- ] || die "exec requires -- before the command"
   shift
   [ "$#" -ge 1 ] || die "exec requires a command after --"
@@ -257,7 +263,7 @@ cmd_exec() {
   fi
 
   unset FM_MEM_BOX_CAP
-  exec systemd-run --user --scope --quiet --collect \
+  exec systemd-run --user --scope --quiet --collect "${unit_args[@]}" \
     -p "MemoryMax=$cap" -p MemorySwapMax=0 -- "$@"
 }
 

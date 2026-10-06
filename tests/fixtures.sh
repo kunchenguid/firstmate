@@ -294,6 +294,17 @@ fi
 exec "$@"
 SH
   chmod +x "$fakebin/systemd-run"
+  cat > "$fakebin/systemctl" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "$#" = 5 ] && [ "$1" = --user ] && [ "$2" = show ] &&
+  [ "$3" = --property=ActiveState ] && [ "$4" = --value ] || exit 1
+if [ -n "${FM_FAKE_SCOPE_LOG:-}" ]; then
+  printf '%s\n' "$5" >> "$FM_FAKE_SCOPE_LOG"
+fi
+printf '%s\n' "${FM_FAKE_SCOPE_STATE:-active}"
+SH
+  chmod +x "$fakebin/systemctl"
 }
 
 # --- spawn-world ------------------------------------------------------------

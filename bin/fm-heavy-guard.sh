@@ -131,12 +131,21 @@ fm_heavy_token_is_heavy() {
 }
 
 # fm_heavy_path_is_heavy <value>
+# Known heavy directory components classify their contained executables.
 # A file name is heavy when it carries a delimited acceptance/e2e/full-CI token,
 # so `foo-e2e.test.sh`, `acceptance.cjs`, and `run-full-ci.sh` classify heavy
 # while an unrelated name containing those letters does not.
 fm_heavy_path_is_heavy() {
-  local value base
+  local value base component
   value=$(fm_heavy_lower "$1")
+  # Inspect directory components as well as the executable basename.
+  local -a components=()
+  IFS=/ read -r -a components <<< "$value"
+  for component in "${components[@]}"; do
+    if [[ "$component" =~ (^|[^[:alnum:]])(acceptance|e2e|end[-_]?to[-_]?end|full[-_]?ci|playwright|cypress)([^[:alnum:]]|$) ]]; then
+      return 0
+    fi
+  done
   base=${value##*/}
   [ -n "$base" ] || return 1
   case "$base" in

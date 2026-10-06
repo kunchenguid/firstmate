@@ -5,7 +5,7 @@ This document owns the operator setup and safety boundaries for the four protect
 
 The four protections are independent:
 
-1. **Memory boxes.** Every worker launch and every test script runs inside its own cgroup v2 memory scope with a hard cap and zero swap growth.
+1. **Memory boxes.** Every worker launch and every test script on a protected home runs inside its own cgroup v2 memory scope with a hard cap and zero swap growth.
 2. **Host OOM policy.** earlyoom selects a victim by adjusted `oom_score` once available memory falls below 5 percent, preferring test-shaped work and excluding the fleet's own infrastructure.
 3. **Heavy-suite routing.** Acceptance, end-to-end, and full-regression runs are refused on a workstation whose config routes them off-host, and the campaign runner is named instead.
 4. **One-minute alert.** A systemd user timer queues one firstmate note naming the top memory consumer whenever memory passes the alert threshold.
@@ -16,11 +16,11 @@ Part 1 is enforced by `bin/fm-spawn.sh` and `bin/fm-test-run.sh`.
 ## Memory boxes
 
 `bin/fm-mem-box.sh` is the single owner of the box.
-Execution requires Linux with cgroup v2 memory control and a working systemd user manager able to create memory-limited scopes; worker spawning and runner execution refuse on macOS and other hosts without these capabilities.
-The spawn path probes this capability before creating a worker endpoint, and the wrapper checks again before executing its payload.
+Execution requires Linux with cgroup v2 memory control and a working systemd user manager able to create memory-limited scopes; worker spawning refuses on hosts without these capabilities.
+The spawn path probes this capability before creating a worker endpoint, the wrapper checks again before executing its payload, and spawn confirms the pane scope is active before sending launch commands.
 
 `bin/fm-spawn.sh` re-execs each worker's pane shell through the box before any launch work, so the agent and everything it spawns - builds, tests, a project's acceptance suite - share one bounded, swap-free scope.
-`bin/fm-test-run.sh` boxes each behavior-test script the same way, so scripts selected directly through the runner are bounded too.
+`bin/fm-test-run.sh` boxes each behavior-test script on protected homes the same way, so scripts selected directly through the runner are bounded too.
 
 - `fm-mem-box.sh exec <lane> -- <command>` runs the command inside `systemd-run --user --scope -p MemoryMax=<cap> -p MemorySwapMax=0`.
 - `fm-mem-box.sh check` reports cgroup v2 delegation, systemd-run availability, and every effective lane cap.
@@ -38,7 +38,8 @@ The test runner resolves its test cap before parallel-worker environment cleanup
 Lane names in use are `worker` (agent panes) and `test` (behavior-test scripts).
 A `heavy` lane is the declared entry point for a project's acceptance or E2E suite; it consults the heavy-suite guard before running.
 
-A host that cannot delegate a cgroup v2 memory scope refuses execution and names the missing cgroup v2 delegation or systemd user manager capability.
+The test runner refuses when scopes are unavailable and this home has `config/memory-box`, `config/memory-box-required`, or an explicit `FM_MEM_BOX_CAP`.
+On unconfigured hosts without scopes, including GitHub-hosted runners, it runs tests unboxed with a one-line notice naming the missing capability.
 
 Boxes are per-process-tree, not hierarchical per-lane: a boxed test runner that launches a worker gets a sibling scope for that worker, each with its own cap.
 The aggregate is therefore not bounded by any single box, which is why the alert and the host OOM policy exist alongside the boxes.
@@ -69,7 +70,7 @@ The installer's `print` command is the authoritative preview of generated defaul
 
 Heavy classes are:
 - the `--all` full-regression selection, the `live-harness-optin` and `real-herdr-gated` families, and any lane named `heavy`, `acceptance`, `e2e`, `end-to-end`, or `full-ci`;
-- a suite whose name carries an acceptance, `e2e`, end-to-end, full-CI, playwright, or cypress token.
+- a suite whose filename carries an acceptance, `e2e`, end-to-end, full-CI, playwright, or cypress token, or whose path has a directory named for one of those heavy suites.
 
 `bin/fm-test-run.sh` consults the guard after selection and before execution, so `--list` and the other inspection modes stay available for planning.
 A project's own acceptance or E2E suite is refused when it is launched through the `heavy` lane:

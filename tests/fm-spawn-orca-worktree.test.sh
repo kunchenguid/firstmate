@@ -37,6 +37,7 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-orca-worktree)
 make_orca_fakebin() {
   local dir=$1 fb
   fb=$(fm_fakebin "$dir")
+  fm_test_fake_systemd_run "$fb"
   cat > "$fb/orca" <<'SH'
 #!/usr/bin/env bash
 set -u

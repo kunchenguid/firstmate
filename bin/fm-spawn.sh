@@ -5310,8 +5310,22 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-if ! spawn_send_text_line "$T" "exec env FM_HOME=$(shell_quote "$FM_HOME") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") FM_MEM_BOX_CAP=$(shell_quote "$WORKER_MEMORY_CAP") $(shell_quote "$FM_ROOT/bin/fm-mem-box.sh") exec worker -- \"\${SHELL:-/bin/bash}\""; then
+WORKER_MEMORY_UNIT="fm-worker-$ID-${BASHPID:-$$}-$RANDOM.scope"
+if ! spawn_send_text_line "$T" "exec env FM_HOME=$(shell_quote "$FM_HOME") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") FM_MEM_BOX_CAP=$(shell_quote "$WORKER_MEMORY_CAP") $(shell_quote "$FM_ROOT/bin/fm-mem-box.sh") exec worker --unit $(shell_quote "$WORKER_MEMORY_UNIT") -- \"\${SHELL:-/bin/bash}\""; then
   echo "error: could not send the memory-box command into pane $W; refusing to launch unboxed" >&2
+  exit 1
+fi
+# Terminal delivery alone cannot confirm that the pane entered its scope.
+WORKER_MEMORY_STATE=
+for ((memory_attempt=0; memory_attempt<50; memory_attempt++)); do
+  WORKER_MEMORY_STATE=$(XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+    systemctl --user show --property=ActiveState --value "$WORKER_MEMORY_UNIT" 2>/dev/null) || WORKER_MEMORY_STATE=
+  [ "$WORKER_MEMORY_STATE" = active ] && break
+  [ "$WORKER_MEMORY_STATE" = failed ] && break
+  sleep 0.1
+done
+if [ "$WORKER_MEMORY_STATE" != active ]; then
+  echo "error: pane memory scope $WORKER_MEMORY_UNIT did not start; refusing to launch task $ID" >&2
   exit 1
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child

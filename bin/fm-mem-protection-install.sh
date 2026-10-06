@@ -73,7 +73,14 @@ EOF
 }
 
 service_content() {
-  local home=$1
+  local home=$1 path="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+  # systemd Environment= uses quoted assignments and C-style escapes.
+  home=${home//\\/\\\\}
+  home=${home//\"/\\\"}
+  home=${home//%/%%}
+  path=${path//\\/\\\\}
+  path=${path//\"/\\\"}
+  path=${path//%/%%}
   cat <<EOF
 [Unit]
 Description=Firstmate memory alert (one minute)
@@ -81,8 +88,8 @@ Documentation=man:fm-mem-alert.sh(1)
 
 [Service]
 Type=oneshot
-Environment=FM_HOME=$home
-Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment="FM_HOME=$home"
+Environment="PATH=$path"
 ExecStart=/bin/sh -c 'exec "\$FM_HOME/bin/fm-mem-alert.sh" check'
 EOF
 }

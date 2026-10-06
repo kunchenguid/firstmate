@@ -69,7 +69,7 @@ test_malformed_config_is_a_hard_error() {
 }
 
 test_box_applies_the_cgroup_limit() {
-  local root cfg out supported
+  local root cfg out supported unit
   root=$(fm_test_tmproot fm-mem-box)
   cfg="$root/config"
   mkdir -p "$cfg"
@@ -78,11 +78,12 @@ test_box_applies_the_cgroup_limit() {
     printf 'skip: memory box unsupported on this host (%s)\n' "$(uname -s)"
     return 0
   fi
+  unit="fm-mem-box-test-$$.scope"
   # shellcheck disable=SC2016 # the substitution expands inside the boxed bash.
-  out=$(FM_CONFIG_OVERRIDE="$cfg" FM_MEM_BOX_CAP=104857600 "$BOX" exec test -- \
-    bash -c 'cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"') \
+  out=$(FM_CONFIG_OVERRIDE="$cfg" FM_MEM_BOX_CAP=104857600 "$BOX" exec test --unit "$unit" -- \
+    bash -c 'cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"; systemctl --user show --property=ActiveState --value "$1"' _ "$unit") \
     || fail "boxed command exited non-zero"
-  [ "$out" = 104857600 ] || fail "expected memory.max 104857600 inside the box, got '$out'"
+  [ "$out" = "$(printf '104857600\nactive')" ] || fail "expected bounded named scope to be active, got '$out'"
   pass "boxed command runs under the configured cgroup memory limit"
 }
 
@@ -114,7 +115,18 @@ test_spawn_carries_the_home_and_cap_into_the_pane() {
   fm_git_worktree "$proj" "$wt" boxed-worker
   fakebin=$(fm_test_make_spawn_fakebin "$root/fake" codex)
   panelog="$root/pane.log"
-  FM_FAKE_PANE_LOG="$panelog" fm_test_run_spawn "$home" "$wt" "$fakebin" boxed-worker "$proj" --mode no-mistakes --yolo off \
+  mv "$fakebin/systemctl" "$fakebin/systemctl-ok"
+  cat > "$fakebin/systemctl" <<'SH'
+#!/bin/sh
+if [ ! -e "$SCOPE_PENDING" ]; then
+  touch "$SCOPE_PENDING"
+  printf 'inactive\n'
+  exit 0
+fi
+exec "${0%/*}/systemctl-ok" "$@"
+SH
+  chmod +x "$fakebin/systemctl"
+  SCOPE_PENDING="$root/scope.pending" FM_FAKE_PANE_LOG="$panelog" FM_FAKE_SCOPE_LOG="$root/observed-unit" fm_test_run_spawn "$home" "$wt" "$fakebin" boxed-worker "$proj" --mode no-mistakes --yolo off \
     || fail "spawn failed"
   command=$(grep '^exec env .*fm-mem-box.sh' "$panelog")
   [ -n "$command" ] || fail "pane received no box entry"
@@ -123,12 +135,21 @@ test_spawn_carries_the_home_and_cap_into_the_pane() {
 printf '%s\n' "$FM_HOME" "$FM_CONFIG_OVERRIDE" "${FM_MEM_BOX_CAP-unset}"
 exec "$BOX" exec test -- printf 'nested test ran\n'
 SH
+  mv "$fakebin/systemd-run" "$fakebin/systemd-run-ok"
+  cat > "$fakebin/systemd-run" <<'SH'
+#!/bin/sh
+for arg do
+  case "$arg" in --unit=*) printf '%s\n' "${arg#*=}" > "$UNIT_LOG" ;; esac
+done
+exec "${0%/*}/systemd-run-ok" "$@"
+SH
   chmod +x "$fakebin/systemd-run" "$fakebin/pane-shell"
   out=$(FM_HOME="$root/stale" FM_CONFIG_OVERRIDE="$root/stale/config" FM_MEM_BOX_CAP=8G \
-    BOX="$BOX" FM_FAKE_SYSTEMD_LOG="$root/scopes" \
+    BOX="$BOX" FM_FAKE_SYSTEMD_LOG="$root/scopes" UNIT_LOG="$root/started-unit" \
     SHELL="$fakebin/pane-shell" PATH="$fakebin:$PATH" bash -c "$command") || fail "pane entry failed"
   [ "$out" = "$(printf '%s\n' "$home" "$home/config" unset 'nested test ran')" ] || fail "pane used stale policy: $out"
   [ "$(cat "$root/scopes")" = "$(printf '%s\n' '2147483648 0' '1073741824 0')" ] || fail "nested test inherited worker cap"
+  cmp "$root/started-unit" "$root/observed-unit" || fail "spawn observed a different scope from its pane"
   pass "spawned pane consumes worker cap and nested tests use their own lane cap"
 }
 
@@ -152,7 +173,7 @@ test_heavy_lane_consults_the_guard() {
 test_spawn_refuses_box_and_delivery_failures() {
   local root mode home proj wt fakebin out rc
   root=$(fm_test_tmproot fm-mem-box)
-  for mode in unavailable export literal submit; do
+  for mode in unavailable scope export literal submit; do
     home="$root/$mode/home"
     proj="$root/$mode/project"
     wt="$root/$mode/wt"
@@ -178,6 +199,14 @@ SH
     if [ "$mode" = unavailable ]; then
       out=$(FM_FAKE_SYSTEMD_FAIL=1 fm_test_run_spawn "$home" "$wt" "$fakebin" failed-worker "$proj" --mode no-mistakes --yolo off) || rc=$?
       case "$out" in *"memory box unavailable"*) ;; *) fail "missing box not named: $out" ;; esac
+    elif [ "$mode" = scope ]; then
+      out=$(FM_FAKE_SCOPE_STATE=failed FM_FAKE_SCOPE_LOG="$root/scope.log" \
+        FM_FAKE_PANE_LOG="$root/pane.log" FM_FAKE_LAUNCH_LOG="$root/launch.log" \
+        fm_test_run_spawn "$home" "$wt" "$fakebin" failed-worker "$proj" --mode no-mistakes --yolo off) || rc=$?
+      case "$out" in *"pane memory scope"*"did not start"*) ;; *) fail "scope failure not named: $out" ;; esac
+      [ -s "$root/scope.log" ] || fail "scope state was not queried"
+      [ ! -s "$root/launch.log" ] || fail "harness launch sent after scope failure"
+      [ "$(awk '/^exec env .*fm-mem-box.sh/ { seen=1; next } seen { n++ } END { print n+0 }' "$root/pane.log")" = 0 ] || fail "launch environment sent after scope failure"
     else
       out=$(FM_FAIL_DELIVERY="$mode" fm_test_run_spawn "$home" "$wt" "$fakebin" failed-worker "$proj" --mode no-mistakes --yolo off) || rc=$?
       case "$out" in *"could not deliver"*|*"could not submit"*) ;; *) fail "delivery failure not named: $out" ;; esac

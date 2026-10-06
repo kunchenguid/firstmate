@@ -2477,6 +2477,18 @@ record_script_result() {
 # hung script must become a bounded failure rather than an unbounded suite,
 # because an unbounded suite is what silently outruns its caller's budget.
 TEST_MEMORY_CAP=$("$ROOT/bin/fm-mem-box.sh" cap test) || exit 1
+TEST_MEMORY_COMMAND=(env "FM_MEM_BOX_CAP=$TEST_MEMORY_CAP" "$ROOT/bin/fm-mem-box.sh" exec test -- bash)
+TEST_MEMORY_CONFIG=${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$ROOT}}/config}
+if ! "$ROOT/bin/fm-mem-box.sh" check | awk -F= '$1 == "supported" { supported=$2 } END { exit (supported != "yes") }'; then
+  if [ -e "$TEST_MEMORY_CONFIG/memory-box" ] || [ -L "$TEST_MEMORY_CONFIG/memory-box" ] ||
+    [ -e "$TEST_MEMORY_CONFIG/memory-box-required" ] || [ -L "$TEST_MEMORY_CONFIG/memory-box-required" ] ||
+    [ -n "${FM_MEM_BOX_CAP:-}" ]; then
+    log "memory box unavailable (cgroup v2 delegation / systemd user manager required); refusing configured test execution"
+    exit 1
+  fi
+  log "UNBOXED tests: cgroup v2 delegation / systemd user memory scopes unavailable; no memory box configured or required"
+  TEST_MEMORY_COMMAND=(bash)
+fi
 
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
@@ -2488,7 +2500,7 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
   : "$id"
-  local -a boxed=(env "FM_MEM_BOX_CAP=$TEST_MEMORY_CAP" "$ROOT/bin/fm-mem-box.sh" exec test -- bash)
+  local -a boxed=("${TEST_MEMORY_COMMAND[@]}")
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then

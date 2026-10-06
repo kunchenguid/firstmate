@@ -235,6 +235,7 @@ test_launch_exports_task_inbox() {
 make_relaunch_stub() {  # <case-dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
+  fm_test_fake_systemd_run "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u

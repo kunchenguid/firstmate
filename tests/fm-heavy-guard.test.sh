@@ -83,6 +83,31 @@ test_path_classification_is_delimited() {
   pass "path classification matches heavy suite names only"
 }
 
+test_heavy_directories_refuse_generic_executables() {
+  local root cfg path rc out
+  root=$(fm_test_tmproot fm-heavy-guard)
+  cfg="$root/config"
+  mkdir -p "$cfg"
+  printf 'remote-only\n' > "$cfg/heavy-suites"
+  for path in /work/acceptance/run.sh e2e/run.sh /work/.promotion/task-data/acceptance/run.cjs \
+    /work/acceptance/ /work/E2E/run.sh /work/full-ci/run.sh \
+    /work/promotion-acceptance/run.sh /work/foo-e2e/run.sh; do
+    rc=0
+    out=$(FM_CONFIG_OVERRIDE="$cfg" "$GUARD" check --path "$path" 2>&1) || rc=$?
+    [ "$rc" = 3 ] || fail "$path directory should refuse: $out"
+  done
+  for path in /work/preacceptance/run.sh /work/e2extras/run.sh /work/unit/run.sh; do
+    FM_CONFIG_OVERRIDE="$cfg" "$GUARD" check --path "$path" || fail "unrelated directory refused: $path"
+  done
+  mkdir -p "$root/acceptance"
+  printf 'touch "%s"\n' "$root/executed" > "$root/acceptance/run.sh"
+  rc=0
+  out=$(FM_CONFIG_OVERRIDE="$cfg" "$RUNNER" "$root/acceptance/run.sh" 2>&1) || rc=$?
+  [ "$rc" = 3 ] || fail "direct runner directory selection should refuse: $out"
+  [ ! -e "$root/executed" ] || fail "runner executed heavy directory payload"
+  pass "heavy directory components refuse generic executables through guard and runner"
+}
+
 test_runner_refuses_heavy_family_under_remote_posture() {
   local root cfg rc out
   root=$(fm_test_tmproot fm-heavy-guard)
@@ -169,3 +194,5 @@ test_runner_refuses_heavy_family_under_remote_posture
 test_runner_refuses_direct_heavy_scripts
 test_remote_alias_is_rejected
 test_runner_executes_light_work_in_a_box
+
+test_heavy_directories_refuse_generic_executables

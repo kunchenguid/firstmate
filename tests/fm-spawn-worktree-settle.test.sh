@@ -34,6 +34,7 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
 make_settle_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
+  fm_test_fake_systemd_run "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
