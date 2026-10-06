@@ -2123,6 +2123,23 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the done gate refused a summary listing a fixed step's findings: $out"
+  # The exact header alone carries neither 'no findings' nor an entry, and
+  # Gerrit's own "Patch Set 1:" line is not a step entry.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_NM_STEPS=$'review,completed,0,100\ntest,completed,0,100' \
+    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary for run RUNFIXTURE"}]' \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a summary header with no entry and no 'no findings' line"
+  case "$out" in
+    *"the line 'no findings' or a '<step>:' entry line"*) ;;
+    *) fail "the header-only refusal did not name the missing entry: $out" ;;
+  esac
 
   # Arming asks the gate about the task's own done: line, since only the worker
   # knows the summary's patch set; with none, or one without the suffix, it is
