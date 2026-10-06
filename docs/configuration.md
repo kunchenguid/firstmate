@@ -483,12 +483,12 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
 
-Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
+Otherwise the shared rule in [`bin/fm-task-id-rule.conf`](../bin/fm-task-id-rule.conf) decides the outcome: that file's header is the single contract source for the prefix strip, the candidate order, and the id-shape classes, and both readers (the bash loader `bin/fm-task-id-rule-lib.sh` and the Python loader in `bin/fm-jev-decisions.py`) parse it directly, so no second copy of the rule exists.
 A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
-These rules are the single owner of the task-selector vocabulary.
-Backend guides and other documents refer here instead of restating the resolution order.
+[`bin/fm-task-id-rule.conf`](../bin/fm-task-id-rule.conf) plus this section are the single owner of the task-selector vocabulary.
+Backend guides and other documents refer to the artifact instead of restating the resolution order.
 
 ### Teardown identity checks
 

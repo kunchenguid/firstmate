@@ -2425,7 +2425,7 @@ remote_fixture_prepare() {
   REMOTE_FIXTURE_ROOT=$(cd "$REMOTE_FIXTURE_ROOT" && pwd -P)
   mkdir -p "$TMP_ROOT/remote-jobs"
   REMOTE_FIXTURE_JOBS=$(cd "$TMP_ROOT/remote-jobs" && pwd -P)
-  cp "$ROOT"/bin/fm-*.sh "$REMOTE_FIXTURE_ROOT/bin/"
+  cp "$ROOT"/bin/fm-*.sh "$ROOT/bin/fm-task-id-rule.conf" "$REMOTE_FIXTURE_ROOT/bin/"
   cp "$ROOT"/bin/backends/*.sh "$REMOTE_FIXTURE_ROOT/bin/backends/"
   chmod +x "$REMOTE_FIXTURE_ROOT/bin"/*.sh
   printf 'fixture\n' > "$REMOTE_FIXTURE_ROOT/AGENTS.md"

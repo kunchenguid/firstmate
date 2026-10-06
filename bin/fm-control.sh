@@ -325,13 +325,15 @@ CONTROL_LOCK_HELD=1
 FM_COMPOSER_DIALOG_SINK=$STATE/$ID.composer-dialog
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
-  case "$RAW_ID" in
-    fm-*)
-      if [ -f "$STATE/${RAW_ID#fm-}.meta" ]; then
-        die "'$RAW_ID' is a window label, not a task id; pass the exact task id '${RAW_ID#fm-}'"
-      fi
-      ;;
-  esac
+  # The prefix decision comes from the shared rule
+  # (bin/fm-task-id-rule.conf, loaded through fm-backend.sh); this branch
+  # only renders the label-hint error that the rule's resolution produces.
+  if fm_task_id_rule_is_prefixed "$RAW_ID"; then
+    label_id=$(fm_task_id_rule_task_id "$RAW_ID" "$STATE" || true)
+    if [ -n "$label_id" ]; then
+      die "'$RAW_ID' is a window label, not a task id; pass the exact task id '$label_id'"
+    fi
+  fi
   die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
 fi
 
