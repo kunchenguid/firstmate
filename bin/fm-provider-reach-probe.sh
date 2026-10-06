@@ -180,8 +180,10 @@ fi
 
 case "$HOST_ARG" in
   *@*) die_input "--host must not contain userinfo" ;;
-  *://*) die_input "--host must be a host[:port][/path], not a URL" ;;
 esac
+if [[ "$HOST_ARG" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+  die_input "--host must be a host[:port][/path], not a URL"
+fi
 PROBE=host:$HOST_ARG
 BASE=https://$HOST_ARG
 
@@ -309,6 +311,11 @@ dns_probe() {
           printf 'ok %s\n' "$answer"
           return 0
         fi
+        if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -qiE 'status: NOERROR|status: NXDOMAIN|ANSWER: 0|no addresses'; then
+          saw_error=1
+          error_detail="rc=${rc}"
+          continue
+        fi
         ;;
       host)
         out=$(fm_run_timed "$TIMEOUT" "$tool" "$DNS_HOST" -t AAAA 2>/dev/null </dev/null) && rc=0 || rc=$?
@@ -330,6 +337,11 @@ dns_probe() {
         if [ -n "$answer" ]; then
           printf 'ok %s\n' "$answer"
           return 0
+        fi
+        if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -qiE 'not found|no .*records|has no'; then
+          saw_error=1
+          error_detail="rc=${rc}"
+          continue
         fi
         ;;
     esac
@@ -358,9 +370,13 @@ elif [ "$DNS_LITERAL" != 1 ]; then
 fi
 
 # ---- emit terminal DNS-only results ------------------------------------------
-if [ "$DNS" = nxdomain ] || [ "$DNS" = fail ]; then
+if [ "$DNS" = nxdomain ]; then
   printf 'probe=%s dns=%s http=none result=unreachable%s\n' "$PROBE" "$DNS" "$DETAIL"
   exit 20
+fi
+if [ "$DNS" = fail ]; then
+  DNS=unknown
+  DETAIL="${DETAIL/dns_detail=/dns_detail=}"
 fi
 
 # ---- phase 2: one unauthenticated HTTP request -------------------------------
@@ -377,27 +393,55 @@ command -v "$CURL_CMD" >/dev/null 2>&1 || {
   exit 64
 }
 
-# Curl honors proxy environment variables even with -q. Credential-free proxies
-# are allowed and disclosed; refuse credential-bearing URLs before curl can send
-# them. Never include the environment value in diagnostics.
+# Curl honors proxy environment variables even with -q. Select only the HTTPS
+# proxy applicable to this request, and account for curl's no-proxy bypass before
+# refusing credentials or describing the route.
+proxy_env_value() {
+  local upper=$1 lower=$2 value
+  eval 'value=${'"$lower"'-}'
+  if [ -n "$value" ]; then printf '%s' "$value"; return; fi
+  eval 'value=${'"$upper"'-}'
+  printf '%s' "$value"
+}
 PROXY_MODE=direct
-for proxy_name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
-  eval 'proxy_value=${'"$proxy_name"'-}'
-  [ -n "$proxy_value" ] || continue
-  PROXY_MODE=via-proxy
-  proxy_authority=${proxy_value#*://}
-  case "$proxy_authority" in
-    *@*)
-      proxy_userinfo=${proxy_authority%%@*}
-      case "$proxy_userinfo" in
-        *:*)
-          printf 'probe=%s dns=%s http=none result=invalid-input proxy URL carries credentials\n' "$PROBE" "$DNS"
-          exit 2
-          ;;
-      esac
-      ;;
+proxy_host=${AUTHORITY%%:*}
+case "$AUTHORITY" in
+  \[*\]*) proxy_host=${AUTHORITY#\[}; proxy_host=${proxy_host%%\]*} ;;
+esac
+no_proxy_list=$(proxy_env_value NO_PROXY no_proxy)
+no_proxy_bypass=0
+old_ifs=$IFS; IFS=,
+for no_proxy_entry in $no_proxy_list; do
+  no_proxy_entry=${no_proxy_entry//[[:space:]]/}
+  case "$no_proxy_entry" in
+    '*') no_proxy_bypass=1 ;;
+    *:*) no_proxy_entry=${no_proxy_entry%%:*} ;;
+  esac
+  [ -n "$no_proxy_entry" ] || continue
+  case "$proxy_host" in
+    "$no_proxy_entry"|*."${no_proxy_entry#.}") no_proxy_bypass=1 ;;
   esac
 done
+IFS=$old_ifs
+if [ "$no_proxy_bypass" = 0 ]; then
+  proxy_value=$(proxy_env_value HTTPS_PROXY https_proxy)
+  [ -n "$proxy_value" ] || proxy_value=$(proxy_env_value ALL_PROXY all_proxy)
+  if [ -n "$proxy_value" ]; then
+    PROXY_MODE=via-proxy
+    proxy_authority=${proxy_value#*://}
+    case "$proxy_authority" in
+      *@*)
+        proxy_userinfo=${proxy_authority%%@*}
+        case "$proxy_userinfo" in
+          *:*)
+            printf 'probe=%s dns=%s http=none result=invalid-input proxy URL carries credentials\\n' "$PROBE" "$DNS"
+            exit 2
+            ;;
+        esac
+        ;;
+    esac
+  fi
+fi
 DETAIL="${DETAIL} route=$PROXY_MODE"
 
 # The response body is irrelevant to the fact being collected and is discarded to
