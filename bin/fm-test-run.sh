@@ -1799,9 +1799,9 @@ select_changed() {
 }
 
 detect_gate_skip() {
-  # True when the first non-empty output line is a skip: gate message.
+  # True when the first test output line, after the box notice, is a skip.
   local file=$1 first
-  first=$(awk 'NF { print; exit }' "$file" 2>/dev/null || true)
+  first=$(awk '/^fm-mem-box: box=/ { next } NF { print; exit }' "$file" 2>/dev/null || true)
   case "$first" in
     skip:*) return 0 ;;
     *) return 1 ;;
@@ -1814,7 +1814,7 @@ detect_gate_skip() {
 # from. Callers only use this once detect_gate_skip has already said yes.
 gate_skip_reason() {
   local file=$1 first
-  first=$(awk 'NF { print; exit }' "$file" 2>/dev/null || true)
+  first=$(awk '/^fm-mem-box: box=/ { next } NF { print; exit }' "$file" 2>/dev/null || true)
   first=${first#skip:}
   printf '%s\n' "$first" | tr '\t' ' ' | sed -e 's/^ *//' -e 's/ *$//'
 }
@@ -2478,17 +2478,6 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 TEST_MEMORY_CAP=$("$ROOT/bin/fm-mem-box.sh" cap test) || exit 1
 TEST_MEMORY_COMMAND=(env "FM_MEM_BOX_CAP=$TEST_MEMORY_CAP" "$ROOT/bin/fm-mem-box.sh" exec test -- bash)
-TEST_MEMORY_CONFIG=${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$ROOT}}/config}
-if ! "$ROOT/bin/fm-mem-box.sh" check | awk -F= '$1 == "supported" { supported=$2 } END { exit (supported != "yes") }'; then
-  if [ -e "$TEST_MEMORY_CONFIG/memory-box" ] || [ -L "$TEST_MEMORY_CONFIG/memory-box" ] ||
-    [ -e "$TEST_MEMORY_CONFIG/memory-box-required" ] || [ -L "$TEST_MEMORY_CONFIG/memory-box-required" ] ||
-    [ -n "${FM_MEM_BOX_CAP:-}" ]; then
-    log "memory box unavailable (cgroup v2 delegation / systemd user manager required); refusing configured test execution"
-    exit 1
-  fi
-  log "UNBOXED tests: cgroup v2 delegation / systemd user memory scopes unavailable; no memory box configured or required"
-  TEST_MEMORY_COMMAND=(bash)
-fi
 
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4

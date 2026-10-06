@@ -96,11 +96,60 @@ test_unavailable_box_refuses_execution() {
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/systemd-run"
   chmod +x "$fakebin/systemd-run"
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$cfg" "$BOX" exec test -- touch "$root/executed" 2>&1) || rc=$?
+  out=$(PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$cfg" "$BOX" exec worker -- touch "$root/executed" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "unavailable box must refuse"
   [ ! -e "$root/executed" ] || fail "command ran outside a box"
   case "$out" in *"cgroup v2"*|*"systemd user manager"*) ;; *) fail "missing capability not named: $out" ;; esac
   pass "unavailable box refuses without executing the command"
+}
+
+test_portable_box_bounds_allocations_and_preserves_exit_status() {
+  local root fakebin out rc
+  root=$(fm_test_tmproot fm-mem-box-portable)
+  fakebin=$(fm_fakebin "$root")
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/systemd-run"
+  chmod +x "$fakebin/systemd-run"
+  # The allocation exceeds a small real limit, without risking host memory.
+  out=$(PATH="$fakebin:$PATH" FM_MEM_BOX_CAP=64M "$BOX" exec test -- python3 -c '
+import resource
+assert resource.getrlimit(resource.RLIMIT_AS) == (67108864, 67108864)
+assert resource.getrlimit(resource.RLIMIT_NPROC) == (16384, 16384)
+try:
+    bytearray(128 * 1024 * 1024)
+except MemoryError:
+    print("allocation refused")
+else:
+    raise AssertionError("allocation escaped memory cap")
+' 2>&1) || fail "portable allocation probe failed: $out"
+  case "$out" in *"box=process-limits"*"allocation refused"*) ;; *) fail "portable box not observed: $out" ;; esac
+  rc=0
+  PATH="$fakebin:$PATH" FM_MEM_BOX_CAP=64M "$BOX" exec test -- bash -c 'exit 23' >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 23 ] || fail "portable box lost command exit status: $rc"
+  pass "portable box applies real hard limits, denies excess allocation, and preserves exit status"
+}
+
+test_test_box_refuses_when_portable_limits_are_unavailable() {
+  local root fakebin limit out rc
+  root=$(fm_test_tmproot fm-mem-box-refusal)
+  fakebin=$(fm_fakebin "$root")
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/systemd-run"
+  chmod +x "$fakebin/systemd-run"
+  for limit in v u; do
+    # Model a shell lacking one limit capability, keeping the other real.
+    cat > "$root/bash-env" <<'SH'
+ulimit() {
+  [ "$1" != "-$UNAVAILABLE_LIMIT" ] || return 1
+  builtin ulimit "$@"
+}
+SH
+    rc=0
+    out=$(PATH="$fakebin:$PATH" BASH_ENV="$root/bash-env" UNAVAILABLE_LIMIT="$limit" \
+      FM_MEM_BOX_CAP=64M "$BOX" exec test -- touch "$root/executed" 2>&1) || rc=$?
+    [ "$rc" != 0 ] || fail "missing $limit limit accepted"
+    [ ! -e "$root/executed" ] || fail "payload executed without both portable limits"
+    case "$out" in *"portable address-space/process-count limits unavailable"*"refusing"*) ;; *) fail "refusal reason missing: $out" ;; esac
+  done
+  pass "test execution refuses if either portable limit cannot be applied"
 }
 
 test_spawn_carries_the_home_and_cap_into_the_pane() {
@@ -227,3 +276,6 @@ test_unavailable_box_refuses_execution
 test_spawn_carries_the_home_and_cap_into_the_pane
 test_heavy_lane_consults_the_guard
 test_spawn_refuses_box_and_delivery_failures
+
+test_portable_box_bounds_allocations_and_preserves_exit_status
+test_test_box_refuses_when_portable_limits_are_unavailable

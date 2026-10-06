@@ -5,7 +5,7 @@ This document owns the operator setup and safety boundaries for the four protect
 
 The four protections are independent:
 
-1. **Memory boxes.** Every worker launch and every test script on a protected home runs inside its own cgroup v2 memory scope with a hard cap and zero swap growth.
+1. **Memory boxes.** Every worker launch runs inside its own cgroup v2 memory scope with a hard cap and zero swap growth; every test script uses a scope or portable process limits.
 2. **Host OOM policy.** earlyoom selects a victim by adjusted `oom_score` once available memory falls below 5 percent, preferring test-shaped work and excluding the fleet's own infrastructure.
 3. **Heavy-suite routing.** Acceptance, end-to-end, and full-regression runs are refused on a workstation whose config routes them off-host, and the campaign runner is named instead.
 4. **One-minute alert.** A systemd user timer queues one firstmate note naming the top memory consumer whenever memory passes the alert threshold.
@@ -16,13 +16,13 @@ Part 1 is enforced by `bin/fm-spawn.sh` and `bin/fm-test-run.sh`.
 ## Memory boxes
 
 `bin/fm-mem-box.sh` is the single owner of the box.
-Execution requires Linux with cgroup v2 memory control and a working systemd user manager able to create memory-limited scopes; worker spawning refuses on hosts without these capabilities.
+Worker execution requires Linux with cgroup v2 memory control and a working systemd user manager able to create memory-limited scopes; worker spawning refuses on hosts without these capabilities.
 The spawn path probes this capability before creating a worker endpoint, the wrapper checks again before executing its payload, and spawn confirms the pane scope is active before sending launch commands.
 
 `bin/fm-spawn.sh` re-execs each worker's pane shell through the box before any launch work, so the agent and everything it spawns - builds, tests, a project's acceptance suite - share one bounded, swap-free scope.
-`bin/fm-test-run.sh` boxes each behavior-test script on protected homes the same way, so scripts selected directly through the runner are bounded too.
+`bin/fm-test-run.sh` boxes each behavior-test script, so scripts selected directly through the runner are bounded too.
 
-- `fm-mem-box.sh exec <lane> -- <command>` runs the command inside `systemd-run --user --scope -p MemoryMax=<cap> -p MemorySwapMax=0`.
+- `fm-mem-box.sh exec <lane> -- <command>` runs the command inside `systemd-run --user --scope -p MemoryMax=<cap> -p MemorySwapMax=0`, with portable limits available for the test lane.
 - `fm-mem-box.sh check` reports cgroup v2 delegation, systemd-run availability, and every effective lane cap.
 - `fm-mem-box.sh cap <lane>` prints one lane's effective cap in bytes.
 
@@ -38,10 +38,11 @@ The test runner resolves its test cap before parallel-worker environment cleanup
 Lane names in use are `worker` (agent panes) and `test` (behavior-test scripts).
 A `heavy` lane is the declared entry point for a project's acceptance or E2E suite; it consults the heavy-suite guard before running.
 
-The test runner refuses when scopes are unavailable and this home has `config/memory-box`, `config/memory-box-required`, or an explicit `FM_MEM_BOX_CAP`.
-On unconfigured hosts without scopes, including GitHub-hosted runners, it runs tests unboxed with a one-line notice naming the missing capability.
+When scopes are unavailable, including on GitHub-hosted runners, tests use hard per-process address-space and process-count limits with the same resolved memory budget; [`fm-mem-box.sh`'s header](../bin/fm-mem-box.sh) owns the limits.
+Each test reports its box type, and execution is refused if neither box can be applied.
+The portable box bounds each process's virtual address space and the user's process count, rather than aggregate tree memory, and does not enforce zero swap growth.
 
-Boxes are per-process-tree, not hierarchical per-lane: a boxed test runner that launches a worker gets a sibling scope for that worker, each with its own cap.
+Systemd boxes are per-process-tree, not hierarchical per-lane: a boxed test runner that launches a worker gets a sibling scope for that worker, each with its own cap.
 The aggregate is therefore not bounded by any single box, which is why the alert and the host OOM policy exist alongside the boxes.
 
 ## Host OOM policy

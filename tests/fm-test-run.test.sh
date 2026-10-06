@@ -1838,6 +1838,8 @@ test_memory_cap_survives_parallel_environment_cleanup() {
       out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_FAKE_SYSTEMD_LOG="$log" \
         "$repo/bin/fm-test-run.sh" --jobs "$jobs" --per-script-timeout-secs "$bound" \
         tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh 2>&1) || fail "configured cap run failed: $out"
+      [ "$(printf '%s\n' "$out" | awk '/box=systemd/ { n++ } END { print n+0 }')" = 2 ] \
+        || fail "missing systemd box notices: $out"
       [ "$(cat "$log")" = "$(printf '2147483648 0\n2147483648 0')" ] \
         || fail "jobs=$jobs bound=$bound lost the configured cap: $(cat "$log")"
     done
@@ -1845,16 +1847,18 @@ test_memory_cap_survives_parallel_environment_cleanup() {
   pass "every streaming and capture path retains the spawning home's test cap"
 }
 
-test_unavailable_memory_scopes_follow_home_policy() {
-  local root repo home jobs bound policy out rc script
-  root=$(fm_test_tmproot fm-test-run-unboxed)
+test_unavailable_memory_scopes_use_portable_box() {
+  local root repo home jobs bound policy out rc script expected
+  root=$(fm_test_tmproot fm-test-run-portable-box)
   repo="$root/repo"
   home="$root/home"
   fm_test_install_runner "$repo"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/"
   mkdir -p "$home/config"
   for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh; do
-    printf 'printf "executed\\n" >> "%s"\n' "$root/executed" > "$repo/tests/$script"
+    cat > "$repo/tests/$script" <<'SH'
+printf '%s %s %s %s\n' "$(ulimit -S -v)" "$(ulimit -H -v)" "$(ulimit -S -u)" "$(ulimit -H -u)" >> "$LIMIT_LOG"
+SH
   done
   for policy in unconfigured configured required override; do
     rm -f "$home/config/memory-box" "$home/config/memory-box-required"
@@ -1867,23 +1871,37 @@ test_unavailable_memory_scopes_follow_home_policy() {
         rm -f "$root/executed"
         rc=0
         out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
-          FM_MEM_BOX_CAP="$([ "$policy" = override ] && printf 2G)" FM_FAKE_SYSTEMD_FAIL=1 \
+          LIMIT_LOG="$root/executed" FM_MEM_BOX_CAP="$([ "$policy" = override ] && printf 2G)" FM_FAKE_SYSTEMD_FAIL=1 \
           "$repo/bin/fm-test-run.sh" --jobs "$jobs" --per-script-timeout-secs "$bound" \
           tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh 2>&1) || rc=$?
-        if [ "$policy" = unconfigured ]; then
-          [ "$rc" = 0 ] || fail "unconfigured host refused: $out"
-          [ "$(cat "$root/executed")" = "$(printf 'executed\nexecuted')" ] || fail "unboxed tests did not run"
-          [ "$(printf '%s\n' "$out" | awk '/UNBOXED tests:/ { n++ } END { print n+0 }')" = 1 ] \
-            || fail "missing or repeated unboxed notice: $out"
-        else
-          [ "$rc" != 0 ] || fail "$policy home accepted unboxed tests"
-          [ ! -e "$root/executed" ] || fail "$policy home executed tests unboxed"
-          case "$out" in *"memory box unavailable"*"systemd user manager"*) ;; *) fail "missing capability not named: $out" ;; esac
-        fi
+        [ "$rc" = 0 ] || fail "$policy host refused portable boxing: $out"
+        expected=2097152
+        [ "$policy" != unconfigured ] && [ "$policy" != required ] || expected=8388608
+        [ "$(cat "$root/executed")" = "$(printf '%s %s 16384 16384\n%s %s 16384 16384' "$expected" "$expected" "$expected" "$expected")" ] \
+          || fail "jobs=$jobs bound=$bound policy=$policy lost portable limits"
+        [ "$(printf '%s\n' "$out" | awk '/box=process-limits/ { n++ } END { print n+0 }')" = 2 ] \
+          || fail "missing portable box notices: $out"
       done
     done
   done
-  pass "all runner paths permit unconfigured hosts and refuse configured or required boxing"
+  pass "all runner paths retain memory and process limits without systemd scopes"
+  cat > "$root/bash-env" <<'SH'
+ulimit() { return 1; }
+SH
+  for jobs in 1 2; do
+    for bound in 0 5; do
+      rm -f "$root/executed"
+      rc=0
+      out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" LIMIT_LOG="$root/executed" \
+        BASH_ENV="$root/bash-env" FM_FAKE_SYSTEMD_FAIL=1 \
+        "$repo/bin/fm-test-run.sh" --jobs "$jobs" --per-script-timeout-secs "$bound" \
+        tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh 2>&1) || rc=$?
+      [ "$rc" != 0 ] || fail "runner accepted missing box capabilities"
+      [ ! -e "$root/executed" ] || fail "runner executed an unboxed test"
+      case "$out" in *"portable address-space/process-count limits unavailable"*) ;; *) fail "refusal not named: $out" ;; esac
+    done
+  done
+  pass "every runner execution path refuses when neither box can be applied"
 }
 
 test_list_all_exact_suite_coverage
@@ -1929,4 +1947,4 @@ test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
 test_memory_cap_survives_parallel_environment_cleanup
 
-test_unavailable_memory_scopes_follow_home_policy
+test_unavailable_memory_scopes_use_portable_box

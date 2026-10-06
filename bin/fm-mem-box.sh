@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# fm-mem-box.sh - run a command inside a bounded cgroup v2 memory box.
+# fm-mem-box.sh - run a command inside a bounded memory box.
 #
 # Every worker and test a firstmate home launches runs under a per-lane
 # memory cap, so a runaway leak dies inside its own box instead of taking the
 # whole host to the edge of swap. bin/fm-spawn.sh re-execs each worker's pane
 # shell through `exec`, so the agent and everything it spawns share one box, and
-# bin/fm-test-run.sh boxes each behavior-test script the same way. The box is a
+# bin/fm-test-run.sh boxes each behavior-test script. The preferred box is a
 # systemd user scope:
 #
 #   systemd-run --user --scope -p MemoryMax=<cap> -p MemorySwapMax=0 -- <cmd...>
@@ -36,7 +36,11 @@
 #   FM_CONFIG_OVERRIDE    config directory override (as elsewhere in bin/).
 #   FM_MEM_BOX_LANES      space-separated lane names for `check` (optional).
 #
-# A host that cannot delegate a cgroup v2 memory scope refuses execution.
+# The test lane falls back to hard per-process address-space (ulimit -v, KiB)
+# and process-count (ulimit -u, 16384 per user) limits when scopes are unavailable.
+# The memory budget is the same, rounded down to KiB. Both limits must apply;
+# otherwise execution is refused. The chosen test box type is reported.
+# Other lanes require a cgroup v2 memory scope.
 # A lane named `heavy` additionally consults bin/fm-heavy-guard.sh.
 set -u
 
@@ -259,9 +263,22 @@ cmd_exec() {
   cap=$FM_MEM_BOX_CAP_VALUE
 
   if ! fm_mem_box_supported; then
+    if [ "$lane" = test ]; then
+      # Apply in the payload's shell, before exec, so the limits are inherited
+      # and the hard limits cannot be raised by the test or its descendants.
+      if ! ulimit -v "$((cap / 1024))" 2>/dev/null || ! ulimit -u 16384 2>/dev/null; then
+        die "memory box unavailable ($(fm_mem_box_unsupported_reason)); portable address-space/process-count limits unavailable; refusing to run lane '$lane' unboxed"
+      fi
+      printf 'fm-mem-box: box=process-limits memory-bytes=%s processes=16384\n' "$((cap / 1024 * 1024))" >&2
+      unset FM_MEM_BOX_CAP
+      exec "$@"
+    fi
     die "memory box unavailable ($(fm_mem_box_unsupported_reason)); refusing to run lane '$lane' unboxed"
   fi
 
+  if [ "$lane" = test ]; then
+    printf 'fm-mem-box: box=systemd memory-bytes=%s\n' "$cap" >&2
+  fi
   unset FM_MEM_BOX_CAP
   exec systemd-run --user --scope --quiet --collect "${unit_args[@]}" \
     -p "MemoryMax=$cap" -p MemorySwapMax=0 -- "$@"
