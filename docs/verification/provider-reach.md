@@ -16,7 +16,7 @@ The classes below describe possible probe outcomes, not evidence of a provider's
 | Outcome | `result=` | Exit | Proven | Not proven |
 | --- | --- | --- | --- | --- |
 | DNS successfully reports NXDOMAIN, no answer, or an answer without an address record | `unreachable` with `dns=nxdomain` | 20 | the lookup found no usable address | anything about HTTP, because no request is sent |
-| DNS resolution tool errors or reports SERVFAIL, FORMERR, REFUSED, or timeout (carries `dns_detail=rc=<code>` when available) | `unreachable` with `dns=fail` | 20 | the lookup itself did not complete usefully | anything about HTTP, because no request is sent either - `rc=` names the resolver's own status, not an upstream verdict |
+| DNS resolution tool errors or reports SERVFAIL, FORMERR, REFUSED, or timeout (carries `dns_detail=rc=<code>` when available) | HTTP result with `dns=unknown` | per HTTP result | the lookup itself did not complete usefully; an HTTP request is still attempted | whether DNS resolved the name - `rc=` names the resolver's own status, not an upstream verdict |
 | connection fails, times out, or yields no code (`000`) | `unreachable` with `reason=no_connection` | 20 | no request could be completed | whether the service itself is healthy |
 | `401` / `403` | `routed-auth` | 10 | a request reached the endpoint and was answered with an authorization refusal | usability - no credential is sent, so this is routing evidence only |
 | `2xx` | `reachable` | 0 | the endpoint is routable and answering on the probed path | model availability, credential validity, or that a large or long-output request succeeds |
@@ -27,7 +27,7 @@ The classes below describe possible probe outcomes, not evidence of a provider's
 ## Resolver candidate behavior
 
 The default candidates are `/usr/bin/dig` and `/usr/bin/host`; `FM_PROVIDER_REACH_DNS_TOOL` can override them with one tool or a whitespace-separated preference list.
-Candidates that are not installed are skipped, and resolver errors (timeout, non-zero exit, SERVFAIL, FORMERR, or REFUSED) advance to the next installed candidate.
+Candidates that are not installed are skipped, and resolver errors (timeout, non-zero exit, SERVFAIL, FORMERR, or REFUSED) advance to the next installed candidate. If all installed candidates fail uncertainly, the probe reports `dns=unknown` and continues to HTTP; only a valid no-address answer terminates before HTTP.
 A valid no-address answer is terminal, so a later candidate cannot turn NXDOMAIN/NODATA into a positive result.
 The resolver receives only the host component of `--host`; a port is removed and a bracketed IPv6 literal is unwrapped, while IP literals skip DNS and proceed to HTTP.
 The deterministic regression cases for fallback, terminal no-address answers, and resolver output classification are in `tests/fm-provider-reach-probe.test.sh`.
