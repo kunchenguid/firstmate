@@ -230,7 +230,7 @@ DETAIL=''
 # A pre-gate over the combined string silently skipped the resolver that was
 # actually installed and reported a lookup that never ran as dns=skipped.
 dns_probe() {
-  local tool out rc first answer
+  local tool out rc first answer saw_error=0 error_detail=''
   local -a tools=()
   # The override is one tool or a whitespace-separated preference list; unset
   # means this host's own candidates in order. `read -ra` splits on IFS without
@@ -251,8 +251,9 @@ dns_probe() {
     # `dig` and `host` both reported as NXDOMAIN. It is therefore not a candidate.
     out=$(fm_run_timed "$TIMEOUT" "$tool" "$DNS_HOST" 2>/dev/null </dev/null) && rc=0 || rc=$?
     if [ "$rc" -eq 124 ]; then
-      printf 'fail timeout_after_%ss\n' "$TIMEOUT"
-      return 0
+      saw_error=1
+      error_detail="timeout_after_${TIMEOUT}s"
+      continue
     fi
     first=$(printf '%s\n' "$out" | head -n 1)
     # The resolver-error patterns are checked first because BIND `host` renders
@@ -260,8 +261,9 @@ dns_probe() {
     # `Host name not found: 2(SERVFAIL)`. Testing "not found" first would label a
     # resolver error as a successful no-address answer.
     if printf '%s\n' "$out" | grep -qiE 'SERVFAIL|FORMERR|REFUSED|timed out'; then
-      printf 'fail rc=%s\n' "$rc"
-      return 0
+      saw_error=1
+      error_detail="rc=${rc}"
+      continue
     fi
     # A successful answer naming no address is the same finding as NXDOMAIN for
     # routing purposes, so both classes are checked before exit status.
@@ -270,8 +272,9 @@ dns_probe() {
       return 0
     fi
     if [ "$rc" -ne 0 ]; then
-      printf 'fail rc=%s\n' "$rc"
-      return 0
+      saw_error=1
+      error_detail="rc=${rc}"
+      continue
     fi
     # Only actual answer records count. `dig` prints its banner, SERVER, and WHEN
     # metadata on `;`-prefixed comment lines, and those can look like an address:
@@ -286,6 +289,10 @@ dns_probe() {
     printf 'nxdomain no-address\n'
     return 0
   done
+  if [ "$saw_error" = 1 ]; then
+    printf 'fail %s\n' "$error_detail"
+    return 0
+  fi
   return 1
 }
 
