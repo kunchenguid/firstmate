@@ -286,6 +286,7 @@ Handle actionable wakes as follows:
    A `check: secondmate <id> auto-relaunched` wake records a recovery that already completed - reconcile the mate's current state rather than relaunching again, and treat a repeat or a paused-bound wake as the signal to investigate why the mate keeps exiting.
    When the note needs a durable answer the submitter can read, publish it with `bin/fm-inbox.sh reply <id>` (the script header owns the reply contract) rather than leaving the answer only in this transcript.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
+   Run the ready-work dispatch that section 10 requires before ending the turn.
 
 Load `bearings` on a contributions check wake or when filing work linked to an upstream issue; its contribution-follow-up section owns triage and exact signal acknowledgement.
 
@@ -373,7 +374,10 @@ A decision is simply a task held for the captain: create the task with `bin/fm-t
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it through that wrapper.
 Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
 When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
-Re-evaluate queued work after every teardown and heartbeat, and also after a recorded PR-ready handoff when `config/project-capacity` caps that project, dispatching items only when dependencies, time gates, and project capacity have cleared.
+Re-evaluate queued work after every teardown and heartbeat, and also after a recorded PR-ready handoff when `config/project-capacity` caps that project, and in that same turn dispatch every item whose dependencies, time gates, and project capacity have cleared.
+Started counts only when a live worker exists: a note, handoff, or comment with no worker behind it leaves the item queued, and this re-evaluation must launch it.
+Dispatch each ready unit on its own merits, so a sibling launches while another lane is paused, stuck, or waiting on review, and stopping one lane never freezes a unit whose dependency has already landed on the default branch.
+Whatever still waits on the captain keeps waiting - a merge, a design pick, a credential, or an explicit hold - a check that finds ready work and launches nothing is a miss, and silence is allowed only when nothing is ready.
 When `config/lane-capacity` exists, `bin/fm-capacity.sh` reports open lanes and host headroom for that re-evaluation.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
