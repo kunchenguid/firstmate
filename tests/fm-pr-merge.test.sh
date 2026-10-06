@@ -204,7 +204,20 @@ case "${1:-} ${2:-}" in
         cat "$FM_TEST_GH_VIEW_JSON"
         exit 0
         ;;
+      *headRefName,baseRefName*)
+        [ -f "${FM_TEST_GH_MERGED_REFS:-}" ] && cat "$FM_TEST_GH_MERGED_REFS"
+        exit 0
+        ;;
     esac
+    ;;
+  "pr list")
+    case " $* " in
+      *" --base "*)
+        want=$(printf '%s\n' "$@" | sed -n '/^--base$/{n;p;}')
+        [ -f "${FM_TEST_GH_STACKED_LIST:-}" ] && awk -v b="$want" '$1 == b { print $2, $3 }' "$FM_TEST_GH_STACKED_LIST"
+        ;;
+    esac
+    exit 0
     ;;
   "pr merge")
     if [ -n "${FM_TEST_META_AT_MERGE:-}" ] && [ -f "${FM_STATE_OVERRIDE:-}/task-x1.meta" ]; then
@@ -475,6 +488,8 @@ run_pr_merge() {
   FM_TEST_GH_HEAD="$case_dir/github-head" \
   FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
+  FM_TEST_GH_MERGED_REFS="$case_dir/github-merged-refs" \
+  FM_TEST_GH_STACKED_LIST="$case_dir/github-stacked-list" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
@@ -665,6 +680,53 @@ JSON
   assert_grep "not the repository's default branch main" "$case_dir/stderr" \
     "github-stacked-base-mismatch: a mismatched --stack-base silently bypassed the check"
   pass "fm-pr-merge's --stack-base only accepts the exact live base it names"
+}
+
+# Merging the lower PR of a stack retargets the open PR stacked on its branch to
+# the lower PR's base and steers that PR's task; an unrelated PR is untouched.
+test_merge_retargets_stacked_prs_and_steers_their_task() {
+  local case_dir rc inbox
+  case_dir=$(make_case github-retarget-stacked)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1010101010101010101010101010101010101010
+  : > "$case_dir/gh-axi.log"
+  printf '%s\n' '{"headRefName":"fm/lower","baseRefName":"main"}' > "$case_dir/github-merged-refs"
+  printf '%s\n' \
+    'fm/lower 717 https://github.com/example/repo/pull/717' > "$case_dir/github-stacked-list"
+  fm_write_meta "$case_dir/state/task-x2.meta" \
+    "window=fm-task-x2" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "pr=https://github.com/example/repo/pull/717"
+  fm_write_meta "$case_dir/state/task-x3.meta" \
+    "window=fm-task-x3" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "pr=https://github.com/example/repo/pull/718"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/716 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-retarget-stacked: the merge should succeed"
+  assert_grep "pr edit 717 --repo example/repo --base main" "$case_dir/gh.log" \
+    "github-retarget-stacked: the stacked PR was not retargeted to the merged PR's base"
+  assert_no_grep 'pr edit 718' "$case_dir/gh.log" \
+    "github-retarget-stacked: an unrelated PR was retargeted"
+  inbox=$(cat "$case_dir"/state/task-x2.inbox/*.msg 2>/dev/null || true)
+  case "$inbox" in
+    *"Merge origin/main into your branch"*) ;;
+    *) fail "github-retarget-stacked: the stacked PR's task was not steered: $inbox" ;;
+  esac
+  [ ! -d "$case_dir/state/task-x3.inbox" ] \
+    || fail "github-retarget-stacked: the unrelated task was steered"
+  pass "fm-pr-merge retargets a PR stacked on the merged branch and steers only its task"
 }
 
 test_github_merged_outcome_is_verified() {
@@ -2485,6 +2547,7 @@ test_github_without_gh_failed_read_keeps_bookkeeping
 test_github_non_default_base_refuses_without_declared_stack
 test_github_declared_stack_base_is_accepted
 test_github_declared_stack_base_must_match_live_base
+test_merge_retargets_stacked_prs_and_steers_their_task
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified

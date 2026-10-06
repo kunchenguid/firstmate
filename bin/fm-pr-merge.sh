@@ -144,6 +144,14 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
+# A GitHub PR merge that reads back as merged also retargets every open PR of
+# the same repository whose base is the merged PR's head branch, to the merged
+# PR's own base (the --stack-base branch when one was declared), through
+# gh pr edit --base. When such a PR is the recorded pr= of another live task
+# of this home, that task is steered through bin/fm-send.sh to merge the new
+# base in. Nothing is rebased, forced, or merged, and a failed retarget or
+# steer is reported as actionable without failing the landed merge.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--adopt-external] [--stack-base <branch>] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
@@ -1292,6 +1300,41 @@ record_merged_pr() {
   return 0
 }
 
+# After a proved GitHub merge, open PRs stacked on the merged PR's head branch
+# would keep a base that no longer carries the stack, so each one is retargeted
+# to the merged PR's own base and its task, when this home has one, is told to
+# merge that base in. Every failure is reported and none fails the merge.
+retarget_stacked_prs() {
+  local info head_ref base_ref target rows number url child meta task
+  info=$(gh pr view "$URL" --json headRefName,baseRefName 2>/dev/null) || return 0
+  head_ref=$(printf '%s' "$info" | jq -r '.headRefName // empty' 2>/dev/null) || return 0
+  base_ref=$(printf '%s' "$info" | jq -r '.baseRefName // empty' 2>/dev/null) || return 0
+  target=${STACK_BASE:-$base_ref}
+  [ -n "$head_ref" ] && [ -n "$target" ] && [ "$head_ref" != "$target" ] || return 0
+  rows=$(gh pr list --repo "$PR_OWNER/$PR_REPO" --state open --base "$head_ref" \
+    --json number,url --jq '.[] | "\(.number) \(.url)"' 2>/dev/null) || return 0
+  while read -r number url; do
+    [ -n "$number" ] || continue
+    if ! gh pr edit "$number" --repo "$PR_OWNER/$PR_REPO" --base "$target" >/dev/null 2>&1; then
+      printf 'actionable: could not retarget %s from %s to %s after merging %s\n' \
+        "$url" "$head_ref" "$target" "$URL" >&2
+      continue
+    fi
+    printf 'retargeted: %s now has base %s\n' "$url" "$target"
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      grep -qxF "pr=$url" "$meta" || continue
+      task=${meta##*/}
+      task=${task%.meta}
+      [ "$task" != "$ID" ] || continue
+      "$SCRIPT_DIR/fm-send.sh" "$task" \
+        "The base of your PR $url changed from $head_ref to $target because $URL merged. Merge origin/$target into your branch. Do not rebase or force-push." \
+        >/dev/null 2>&1 \
+        || printf 'actionable: could not tell task %s that the base of %s changed to %s\n' "$task" "$url" "$target" >&2
+    done
+  done <<< "$rows"
+}
+
 # While away, a merge proceeds only when the base branch's rules prove no
 # merge queue, because a queued merge can land after its away authority
 # lapses with the record's archive. A repository whose
@@ -1608,6 +1651,7 @@ case "$PROVIDER" in
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
       printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+      retarget_stacked_prs
     elif [ "$FM_PR_GITHUB_QUEUED" = true ]; then
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
