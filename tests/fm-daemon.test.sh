@@ -3372,3 +3372,71 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+
+# The Claude background-task exit picker names itself on the stale reason.
+# Away mode self-handles the first sight, so the name has to be saved and
+# then appear on the persistence line. A wedge reason that also carries
+# demand-deep-inspection must still escalate, with the name after that clause,
+# and a declared wait must still take the pause cadence.
+test_dialog_name_survives_away_self_handle() {
+  local dir state fakebin win pane key reason
+  dir=$(make_supercase dialog-name-persists)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-picker-ship"
+  pane="$dir/pane.txt"
+  printf 'idle on the picker\n' > "$pane"
+  fm_write_meta "$state/picker-ship.meta" "window=$win" "backend=tmux"
+  printf 'working: parked between turns\n' > "$state/picker-ship.status"
+  reason="stale: $win (blocked-on-prompt: Claude background-task exit picker)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  key=$(printf '%s' picker-ship | tr ':/.' '___')
+  [ "$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)" = 'Claude background-task exit picker' ] \
+    || fail "a self-handled dialog stale did not save the name: $(cat "$state/.subsuper-dialog-$key" 2>/dev/null)"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "a self-handled dialog stale did not record the persistence marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a first-sight dialog stale escalated instead of waiting: $(cat "$state/.subsuper-escalations")"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  grep -F 'stale persisted' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the persistence line was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'blocked-on-prompt: Claude background-task exit picker' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the persistence line dropped the dialog name: $(cat "$state/.subsuper-escalations")"
+  grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the persistence line dropped the wedge wording: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-dialog-$key" ] || fail "the saved dialog name outlived the persistence escalation"
+  pass "a dialog name on a first-sight stale reaches the away persistence line"
+}
+
+test_dialog_name_after_demand_deep_inspection_still_escalates() {
+  local dir state win reason i
+  dir=$(make_supercase dialog-name-combined)
+  state="$dir/state"
+  win="sess:fm-picker-ship"
+  fm_write_meta "$state/picker-ship.meta" "window=$win" "backend=tmux"
+  printf 'working: parked between turns\n' > "$state/picker-ship.status"
+  for i in 1 2; do
+    reason="stale: $win (idle 250s, possible wedge, escalation $i, demand-deep-inspection: same pane has wedge-escalated $i times in a row - do not re-absorb on the run-step/pane state alone, blocked-on-prompt: Claude background-task exit picker)"
+    : > "$dir/daemon.log"
+    LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+    grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+      || fail "escalation $i lost the combined dialog reason: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  done
+  [ "$(grep -c 'blocked-on-prompt: Claude background-task exit picker' "$state/.subsuper-escalations")" -eq 2 ] \
+    || fail "the ladder did not escalate both combined reasons: $(cat "$state/.subsuper-escalations")"
+  grep -F 'demand-deep-inspection:' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the combined reason dropped demand-deep-inspection"
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 2 times in a row - do not re-absorb on the run-step/pane state alone, blocked-on-prompt: Claude background-task exit picker)' \
+    "$state/.subsuper-escalations" >/dev/null \
+    || fail "the dialog name was not after demand-deep-inspection: $(cat "$state/.subsuper-escalations")"
+  printf 'paused: awaiting an external dependency\n' > "$state/picker-ship.status"
+  : > "$state/.subsuper-escalations"
+  reason="stale: $win (idle 250s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone, blocked-on-prompt: Claude background-task exit picker)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a declared wait with the dialog suffix escalated as a wedge: $(cat "$state/.subsuper-escalations")"
+  pass "a dialog name after demand-deep-inspection still escalates, and a declared wait still pauses"
+}
+
+test_dialog_name_survives_away_self_handle
+test_dialog_name_after_demand_deep_inspection_still_escalates
