@@ -13,6 +13,8 @@ def valid_record:
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
     and (.error == null or (.error | type == "string"))
     and (.checked_at == null or (.checked_at | fromdateiso8601 | type == "number"))
+    and (.retired == null or (.retired | (.actor == "captain")
+      and (.reason | type == "string" and length > 0) and (.at | fromdateiso8601 | type == "number")))
     and (.verdict == null or (.verdict | (.head | sha) and (.source | type == "string")
       and (.actor | IN("captain","fleet","maintainer","nobody")) and (.summary | type == "string")))
     and (.observation == null or (.kind as $kind | .observation |
@@ -31,7 +33,10 @@ def known($input; $saved):
    + [($input.backlog.records // [])[] | select(.structured == true) as $task
       | ($task.links // [])[] | select(canonical_url) | {task:$task.id,url:.}]
    + [$saved[] | .task as $task | .records[] | {task:$task,url}])
-  | unique_by([.task,.url]);
+  | unique_by([.task,.url])
+  # A retired record ends that task's ownership even while a backlog link remains.
+  | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
+  | map(select(. as $pair | any($retired[]; . == $pair) | not));
 # Pull-request movement between two observations of one URL: a replaced head,
 # leaving draft, and each newly requested reviewer. Without a comparable prior
 # field - a first observation, or one stored before review requests were

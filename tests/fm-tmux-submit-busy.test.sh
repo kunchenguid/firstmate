@@ -44,7 +44,14 @@ case "${1:-}" in
   send-keys)
     shift; is_enter=0
     while [ "$#" -gt 0 ]; do
-      case "$1" in -t) shift ;; -l) ;; Enter) is_enter=1 ;; esac; shift
+      case "$1" in
+        -t) shift ;;
+        -l) ;;
+        Enter) is_enter=1 ;;
+        -*) ;;
+        *) [ -z "${FM_FAKE_SENT:-}" ] || printf 'typed %s\n' "$1" >> "$FM_FAKE_SENT" ;;
+      esac
+      shift
     done
     if [ "$is_enter" = 1 ]; then
       [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
@@ -344,6 +351,67 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
+
+test_exit_picker_refuses_confirming_enter() {
+  local dir fakebin composer sent vfile enters
+  dir="$TMP_ROOT/exit-picker"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$composer"
+  : > "$sent"
+  touch "$dir/.swallow"
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 3 0 > "$vfile" 2>/dev/null
+  fm_composer_dialog_sink_release
+  [ "$(cat "$vfile")" = unknown ] || fail "exit picker should return unknown, got '$(cat "$vfile")'"
+  enters=$(grep -c '^Enter$' "$sent" || true)
+  [ "$enters" -eq 1 ] || fail "exit picker should get one Enter, got $enters"
+  pass "fm_tmux_submit_enter_core: the Claude background-task exit picker gets no confirming Enter"
+}
+
+test_exit_picker_refuses_confirming_enter
+
+test_typed_submit_on_open_exit_picker_types_nothing() {
+  local dir fakebin composer sent before rc=0 err
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  dir="$TMP_ROOT/typed-on-picker"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  err="$dir/err"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$composer"
+  before=$(cat "$composer")
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    fm_backend_send_text_submit tmux win 'please continue' 3 0 0 >"$dir/out" 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a typed submit onto an open picker should refuse"
+  [ ! -s "$sent" ] || fail "a typed submit onto an open picker sent input: $(cat "$sent")"
+  [ "$(cat "$composer")" = "$before" ] || fail "a typed submit onto an open picker changed the pane"
+  grep -F 'blocked on a prompt: Claude background-task exit picker' "$err" >/dev/null \
+    || fail "the refusal should name the picker, got '$(cat "$err")'"
+  pass "fm_backend_send_text_submit: a typed message to the exit picker types nothing and sends no Enter"
+}
+
+test_typed_submit_on_open_exit_picker_types_nothing
 test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try

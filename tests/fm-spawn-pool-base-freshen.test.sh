@@ -743,10 +743,145 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+publish_feature_branch() { # <branch>
+  git -C "$CASE_DIR/publisher" checkout --quiet -b "$1"
+  printf 'only on %s\n' "$1" > "$CASE_DIR/publisher/feature-only.txt"
+  git -C "$CASE_DIR/publisher" add feature-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm feature
+  git -C "$CASE_DIR/publisher" push --quiet origin "$1"
+}
+
+brief_with_base() { # <id> <base> [<intent>]
+  fm_test_spawn_brief "$HOME_DIR" "$1" ${3:+"$3"}
+  printf '\n# Setup\nYou are in a disposable git worktree of project, at a detached HEAD on a clean copy of its base branch.\nBase branch: %s\n' "$2" >> "$HOME_DIR/data/$1/brief.md"
+}
+
+test_named_base_branch_starts_from_that_branch() {
+  local rec id out status kind
+  for kind in ship scout; do
+    id="pool-named-base-$kind-r1"
+    rec=$(make_case "named-base-$kind" "$id")
+    read_case_record "$rec"
+    publish_feature_branch feature/hub
+    brief_with_base "$id" feature/hub
+    if [ "$kind" = ship ]; then
+      out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch feature/hub)
+    else
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+    fi
+    status=$?
+    expect_code 0 "$status" "a $kind spawn with a matching base branch should launch"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+      || fail "the $kind copy did not start from origin/feature/hub"
+    assert_grep 'only on feature/hub' "$POOL_DIR/feature-only.txt" \
+      "the $kind copy is missing the base branch content"
+    assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" \
+      "the $kind spawn did not record its base branch"
+  done
+
+  id='pool-named-base-missing-r1'
+  rec=$(make_case named-base-missing "$id")
+  read_case_record "$rec"
+  brief_with_base "$id" feature/missing
+  out=$(run_spawn "$id" --scout --base-branch feature/missing)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch origin lacks should refuse the spawn"
+  assert_contains "$out" "origin/feature/missing" "the refusal did not name the missing base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused base-branch spawn published task metadata"
+
+  id='pool-named-base-local-only-r1'
+  rec=$(make_case named-base-local-only "$id")
+  read_case_record "$rec"
+  brief_with_base "$id" feature/hub
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch feature/hub)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch on a local-only ship should refuse the spawn"
+  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
+  pass "--base-branch picks the copy's starting point and is recorded; a missing or local-only base refuses"
+}
+
+test_base_branch_must_agree_with_the_brief() {
+  local rec id out status case_name
+  for case_name in flag-only line-only task-decoy; do
+    id="pool-base-agree-$case_name-r1"
+    rec=$(make_case "base-agree-$case_name" "$id")
+    read_case_record "$rec"
+    publish_feature_branch feature/hub
+    case "$case_name" in
+    flag-only)
+      fm_test_spawn_brief "$HOME_DIR" "$id"
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+      ;;
+    line-only)
+      brief_with_base "$id" feature/hub
+      out=$(run_spawn "$id" --scout)
+      ;;
+    task-decoy)
+      brief_with_base "$id" feature/hub $'You are in a disposable git worktree of project, at a detached HEAD on a clean copy of its base branch.\nBase branch: decoy'
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+      ;;
+    esac
+    status=$?
+    [ "$status" -ne 0 ] || fail "a $case_name base-branch disagreement should refuse the spawn"
+    assert_contains "$out" "Base branch" "the $case_name refusal did not name the Base branch line"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused $case_name spawn published task metadata"
+  done
+  pass "a spawn refuses when --base-branch and the brief's Base branch lines disagree"
+}
+
+# A Base branch line quoted in the captain's intent is prose: it neither blocks
+# a spawn nor redirects it.
+test_prose_base_branch_line_is_ignored() {
+  local rec id out status
+  id='pool-base-prose-none-r1'
+  rec=$(make_case base-prose-none "$id")
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$id" $'Fix the release.\nBase branch: release/1.2'
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a no-base brief quoting a Base branch line should launch"$'\n'"$out"
+  assert_no_grep 'base_branch=' "$HOME_DIR/state/$id.meta" "prose recorded a base branch"
+
+  id='pool-base-prose-flag-r1'
+  rec=$(make_case base-prose-flag "$id")
+  read_case_record "$rec"
+  publish_feature_branch feature/hub
+  brief_with_base "$id" feature/hub $'Fix the release.\nBase branch: release/1.2'
+  out=$(run_spawn "$id" --scout --base-branch feature/hub)
+  status=$?
+  expect_code 0 "$status" "a flagged spawn whose intent names another branch should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+    || fail "the prose branch redirected the copy away from origin/feature/hub"
+  assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" "the flag's base was not recorded"
+  pass "a Base branch line in the captain's intent neither blocks nor redirects a spawn"
+}
+
+# A named base is validated against the project's registered forge for scouts
+# too, so a scout that promotion could never ship is refused at spawn.
+test_scout_base_branch_refused_on_gerrit_forge() {
+  local rec id out status
+  id='pool-base-gerrit-scout-r1'
+  rec=$(make_case base-gerrit-scout "$id")
+  read_case_record "$rec"
+  publish_feature_branch feature/hub
+  printf '%s\n' '- project [no-mistakes forge=gerrit] - fixture (added 2026-01-01)' > "$HOME_DIR/data/projects.md"
+  brief_with_base "$id" feature/hub
+  out=$(run_spawn "$id" --scout --base-branch feature/hub)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a based scout on a forge=gerrit project should refuse the spawn"
+  assert_contains "$out" "forge=gerrit" "the gerrit refusal did not explain itself"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused gerrit scout spawn published task metadata"
+  pass "a based scout on a forge=gerrit project is refused at spawn"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
+test_named_base_branch_starts_from_that_branch
+test_base_branch_must_agree_with_the_brief
+test_prose_base_branch_line_is_ignored
+test_scout_base_branch_refused_on_gerrit_forge
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
