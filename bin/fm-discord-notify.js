@@ -76,7 +76,20 @@ async function sendRecord(path, record, botId, recover) {
 	const sending = { ...record, state: "sending", attempted_at: Math.floor(Date.now() / 1000) };
 	saveRecord(path, sending);
 	const payload = {
-		content: `작업: ${record.task_id}\n왜 연락했나: ${localize(record.summary)}\n필요한 결정: ${decisionPrompt(record.trigger)}\n선택지: ${record.options.map(localize).join(" / ")}\n권장안: ${localize(record.recommendation || record.options[0])}\n답장으로 선택해 주세요.`,
+		content: [
+			`**결정 필요** - 작업: ${record.task_id}`,
+			"",
+			`왜 연락했나: ${localize(record.summary)}`,
+			"",
+			`**필요한 결정: ${decisionPrompt(record.trigger)}**`,
+			"",
+			"**선택지**",
+			...record.options.map(localize).map((option, index) => `${index + 1}. ${option}`),
+			"",
+			`**권장안: ${localize(record.recommendation || record.options[0])}**`,
+			"",
+			"↩️ 답장으로 선택해 주세요.",
+		].join("\n"),
 		allowed_mentions: { parse: [] },
 		nonce: record.nonce,
 		enforce_nonce: true,

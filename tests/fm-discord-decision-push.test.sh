@@ -223,7 +223,8 @@ test_failed_notification_retries_from_durable_outbox() {
   state=$(jq -r '.state' "$record")
   assert_equals "sent" "$state" "retry completes the retained notification"
   assert_equals "2" "$(wc -l < "$log" | tr -d ' ')" "one initial failed POST and one retry POST"
-  assert_contains "$(sed -n '2p' "$log" | jq -r '.payload.content')" "제안된 변경 사항 승인 / 현재 동작 유지" "legacy retry options are localized"
+  assert_contains "$(sed -n '2p' "$log" | jq -r '.payload.content')" "1. 제안된 변경 사항 승인" "legacy retry first option is localized and numbered"
+  assert_contains "$(sed -n '2p' "$log" | jq -r '.payload.content')" "2. 현재 동작 유지" "legacy retry second option is localized and numbered"
   assert_contains "$(sed -n '2p' "$log" | jq -r '.payload.content')" "제안된 변경 사항에 대한 결정이 필요합니다." "legacy retry summary is localized"
   pass "failed decision notifications retry after their source cursor advances"
 }
