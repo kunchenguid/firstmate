@@ -1133,6 +1133,72 @@ secondmate_liveness_tick() {
   [ "$failed" -eq 0 ]
 }
 
+# The remote reply mirror has its own progress evidence: the remote log size
+# and the committed local cursor. The adapter owns the episode marker, its one
+# ensure-listening repair, and wake publication. Remote size reads can take 15s
+# each, so run them outside the watcher's signal and inactive-outcome path.
+remote_reply_lag_tick() {
+  local meta id kind host
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" = secondmate ] || continue
+    host=$(fm_meta_get "$meta" remote_host)
+    [ -n "$host" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-procevent-remote-reply.sh" lag-check "$id" >/dev/null 2>&1 || true
+  done
+}
+
+remote_reply_lag_start() {
+  (
+    trap - EXIT HUP INT TERM
+    mkdir -p "$STATE/remote-replies" || exit 1
+    [ -d "$STATE/remote-replies" ] && [ ! -L "$STATE/remote-replies" ] || exit 1
+    fm_lock_try_acquire "$STATE/remote-replies/.lag-check.lock" || exit 0
+    trap 'fm_lock_release "$STATE/remote-replies/.lag-check.lock" || true' EXIT
+    remote_reply_lag_tick
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+remote_reply_lag_after_output() {
+  [ "$1" -eq 0 ] || return 0
+  rm -f -- "$REMOTE_REPLY_LAG_READY"
+}
+
+remote_reply_lag_surface() {
+  local ready reason id marker cursor marker_offset marker_since marker_alerted
+  local ready_offset ready_since cursor_offset
+  for ready in "$STATE/remote-replies"/*.lag-ready; do
+    [ -e "$ready" ] || continue
+    [ -f "$ready" ] && [ ! -L "$ready" ] || continue
+    id=${ready##*/}
+    id=${id%.lag-ready}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    marker="$STATE/remote-replies/$id.lag"
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    read -r marker_offset marker_since marker_alerted < "$marker" || continue
+    [ "$marker_alerted" = 1 ] || continue
+    read -r ready_offset ready_since < <(sed -n '2p' "$ready") || continue
+    [ "$ready_offset" = "$marker_offset" ] && [ "$ready_since" = "$marker_since" ] || continue
+    cursor="$STATE/remote-replies/$id.cursor"
+    cursor_offset=0
+    if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+      [ -f "$cursor" ] && [ ! -L "$cursor" ] || continue
+      cursor_offset=$(sed -n 's/^offset=//p' "$cursor")
+    fi
+    [ "$cursor_offset" = "$ready_offset" ] || continue
+    IFS= read -r reason < "$ready" || continue
+    case "$reason" in 'check: remote reply channel stalled: mate='*) ;; *) continue ;; esac
+    REMOTE_REPLY_LAG_READY=$ready
+    FM_WAKE_POST_OUTPUT_ACTION=remote_reply_lag_after_output
+    wake "$reason"
+  done
+}
+
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -2662,6 +2728,11 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # A completed background probe is already queued; surface it before other
+  # potentially slow per-cycle work, then start the next bounded probe.
+  remote_reply_lag_surface
+  remote_reply_lag_start
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.

@@ -5803,6 +5803,56 @@ procevent_watch_bg() {  # <dir> <out>
     FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
 }
 
+test_remote_reply_probe_keeps_signal_scan_live() {
+  local dir state probe_pid ready
+  dir=$(make_case remote-lag-nonblocking); state="$dir/state"
+  (
+    FM_HOME=$dir
+    FM_STATE_OVERRIDE=$state
+    # shellcheck source=/dev/null
+    . "$WATCH"
+    remote_reply_lag_tick() {
+      : > "$state/probe-started"
+      while [ ! -e "$state/probe-release" ]; do sleep 0.1; done
+    }
+    remote_reply_lag_start
+    probe_pid=$!
+    trap ': > "$state/probe-release"; wait "$probe_pid" 2>/dev/null || true' EXIT
+    for _ in $(seq 1 100); do
+      [ -e "$state/probe-started" ] && break
+      sleep 0.05
+    done
+    [ -e "$state/probe-started" ] || fail "the detached remote probe never started"
+    printf 'blocked [at=1700000000]: actionable\n' > "$state/crew.status"
+    scan_signals > "$dir/signals"
+    assert_grep "$state/crew.status" "$dir/signals" \
+      "a pending remote size read blocked the ordinary status scan"
+    : > "$state/probe-release"
+    wait "$probe_pid" || fail "the detached remote probe did not finish"
+
+    mkdir -p "$state/remote-replies"
+    ready="$state/remote-replies/slow.lag-ready"
+    printf '0 1700000000 1\n' > "$state/remote-replies/slow.lag"
+    printf 'check: remote reply channel stalled: mate=slow\n0 1700000000\n' > "$ready"
+    wake() {
+      printf '%s\n' "$1" > "$dir/lag-reason"
+      "$FM_WAKE_POST_OUTPUT_ACTION" 0
+    }
+    remote_reply_lag_surface
+    assert_grep 'check: remote reply channel stalled: mate=slow' "$dir/lag-reason" \
+      "a completed remote probe was not surfaced"
+    [ ! -e "$ready" ] || fail "a delivered lag receipt was not retired"
+    printf '0 1700000001 1\n' > "$state/remote-replies/slow.lag"
+    printf 'check: remote reply channel stalled: mate=slow\n0 1700000001\n' > "$ready"
+    printf 'schema=fm-remote-reply-cursor.v1\noffset=9\n' > "$state/remote-replies/slow.cursor"
+    rm -f "$dir/lag-reason"
+    remote_reply_lag_surface
+    [ ! -e "$dir/lag-reason" ] || fail "a progressed cursor surfaced an obsolete lag receipt"
+    trap - EXIT
+  )
+  pass "remote reply size probes cannot block ordinary signal scans and completed probes surface"
+}
+
 test_procevent_captured_result_surfaces_proactively() {
   local dir state out drain_out pid beacon_age
   dir=$(make_case procevent-delivery); state="$dir/state"
@@ -6729,6 +6779,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
+test_remote_reply_probe_keeps_signal_scan_live
 test_procevent_unacknowledged_result_redrains_until_handled
 test_procevent_marker_keys_are_injective
 test_procevent_headlines_classify_queue_keys

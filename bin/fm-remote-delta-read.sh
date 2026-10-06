@@ -3,12 +3,16 @@
 #
 # Usage:
 #   fm-remote-delta-read.sh <relative-log> <offset> <prefix-sha256> [wait-seconds]
+#   fm-remote-delta-read.sh size <relative-log>
+#   fm-remote-delta-read.sh verify-rebase <relative-log> <from-offset> <from-prefix-sha256> <retained-bytes> <retained-sha256>
 #
-# The reader validates continuity by hashing the exact prefix represented by the
-# caller's cursor. It then blocks until at least one complete appended line is
-# available, returns at most 65536 payload bytes, and never truncates or consumes
-# the source. A shortened or changed prefix returns a structured continuity-break
-# result instead of silently rebasing the cursor.
+# Normal delta mode validates continuity by hashing the exact prefix represented
+# by the caller's cursor. It then blocks until at least one complete appended
+# line is available, returns at most 65536 payload bytes, and never truncates or
+# consumes the source. A shortened or changed prefix returns a structured
+# continuity-break result instead of silently rebasing the cursor.
+# verify-rebase checks every retained byte of one bounded snapshot against the
+# already ingested tail and returns its last complete-line cursor.
 #
 # The log is sampled every FM_REMOTE_DELTA_POLL_SECONDS (default 0.5 seconds).
 # A complete line is visible on the next sample, and the window deadline can
@@ -142,6 +146,85 @@ emit_break() { # <reason> <size> <actual-prefix>
   printf 'payload_bytes=0\n'
   printf 'reason=%s\n\n' "$1"
 }
+
+# Verify one snapshot against the last ingested delta, including an incomplete
+# final line. Return only the last complete-line cursor. A size change between
+# the caller's size probe and this snapshot is a refusal, not a partial proof.
+if [ "${1:-}" = verify-rebase ]; then
+  [ "$#" -eq 6 ] || usage
+  REL=$2
+  OFFSET=$3
+  PREFIX=$4
+  RETAINED=$5
+  EXPECTED_TAIL_HASH=$6
+  for NUMBER in "$OFFSET" "$RETAINED"; do
+    case "$NUMBER" in ''|*[!0-9]*) die "rebase offsets must be nonnegative integers" ;; esac
+  done
+  [ "${#OFFSET}" -le 18 ] && [ "${#RETAINED}" -le 7 ] \
+    || die "rebase snapshot exceeds its size bound"
+  [ "$RETAINED" -le 1048576 ] || die "rebase tail exceeds its size bound"
+  for HASH in "$PREFIX" "$EXPECTED_TAIL_HASH"; do
+    case "$HASH" in *[!A-Fa-f0-9]*|'') die "rebase hash must be hexadecimal" ;; esac
+    [ "${#HASH}" -eq 64 ] || die "rebase hash has the wrong length"
+  done
+  PREFIX=$(printf '%s' "$PREFIX" | tr 'A-F' 'a-f')
+  EXPECTED_TAIL_HASH=$(printf '%s' "$EXPECTED_TAIL_HASH" | tr 'A-F' 'a-f')
+  LOG=$(resolve_log "$REL")
+  [ -e "$LOG" ] || die "rebase source log is missing"
+  TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-rebase.XXXXXX") \
+    || die "cannot stage remote rebase proof"
+  trap 'rm -rf -- "$TMP"' EXIT
+  MAX_BYTES=$RETAINED
+  snapshot_log "$LOG" "$TMP/source" "$TMP/size" \
+    || die "rebase source could not be captured safely"
+  IFS= read -r SIZE < "$TMP/size"
+  [ "$SIZE" -eq $((OFFSET + RETAINED)) ] \
+    || die "rebase source size changed before verification"
+  copy_prefix "$TMP/source" "$OFFSET" "$TMP/prefix"
+  [ "$(sha256_file "$TMP/prefix")" = "$PREFIX" ] \
+    || die "rebase source prefix differs from the ingested cursor"
+  tail -c "+$((OFFSET + 1))" "$TMP/source" > "$TMP/tail"
+  [ "$(LC_ALL=C wc -c < "$TMP/tail" | tr -d ' ')" = "$RETAINED" ] \
+    || die "rebase source tail size changed"
+  [ "$(sha256_file "$TMP/tail")" = "$EXPECTED_TAIL_HASH" ] \
+    || die "rebase source tail differs from the ingested bytes"
+  COMPLETE_BYTES=$(LC_ALL=C od -An -v -tu1 "$TMP/tail" | awk '
+    { for (i = 1; i <= NF; i++) { bytes++; if ($i == 10) complete=bytes } }
+    END { print complete + 0 }
+  ')
+  TO=$((OFFSET + COMPLETE_BYTES))
+  copy_prefix "$TMP/source" "$TO" "$TMP/to-prefix"
+  printf 'schema=fm-remote-rebase-verification.v1\n'
+  printf 'remote_bytes=%s\n' "$SIZE"
+  printf 'offset=%s\n' "$TO"
+  printf 'prefix_sha256=%s\n' "$(sha256_file "$TMP/to-prefix")"
+  exit 0
+fi
+
+if [ "${1:-}" = size ]; then
+  [ "$#" -eq 2 ] || usage
+  LOG=$(resolve_log "$2")
+  if [ ! -e "$LOG" ]; then
+    printf '0\n'
+    exit 0
+  fi
+  LOG_PARENT=$(dirname "$LOG")
+  LOG_BASE=$(basename "$LOG")
+  (
+    CDPATH='' cd -- "$LOG_PARENT" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$LOG_PARENT" ] || exit 1
+    perl -MFcntl=:DEFAULT -e '
+      use strict;
+      use warnings;
+      my $path = shift;
+      sysopen(my $in, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+      my @stat = stat $in or exit 1;
+      -f _ or exit 1;
+      print "$stat[7]\n";
+    ' "$LOG_BASE"
+  ) || die "log size could not be read safely: $2"
+  exit 0
+fi
 
 [ "$#" -ge 3 ] && [ "$#" -le 4 ] || usage
 REL=$1
