@@ -131,10 +131,10 @@ What a reclaim is not:
 
 The re-created endpoint is opened in the herdr session the record names, never in whichever session the recovering seat happens to sit in - relocating a task onto another herdr server would be an identity change published as a self-consistent but wrong record.
 A seat that *claims* a herdr launcher pane belonging to a different session is refused rather than allowed to place the endpoint somewhere else, so reclaim such a task from a seat in the recorded session.
-A seat with no herdr launcher pane at all - a plain ssh or cron shell, which is the ordinary way an operator reclaims - is not refused: placement falls back to the recorded session's labeled container, so the tab still lands in the session the record names.
+A seat with no herdr launcher pane at all - a plain ssh or cron shell, which is the ordinary way an operator reclaims - is not refused: placement falls back to the recorded session's labeled container, so the endpoint still lands in the session the record names.
 The reclaim pins the recorded **session** but not the **workspace**: placement follows the reclaiming seat, so the new endpoint never returns to the recorded `herdr_workspace_id`, even when the recorded workspace still exists and only the pane was destroyed.
-With [presentation spaces](herdr-backend.md#presentation-spaces) enabled, a ship or scout reclaim re-creates the endpoint in a fresh one-task presentation workspace beneath the reclaiming seat's own workspace, the same shape a fresh spawn takes, so the worker never lands as a foreign tab inside that seat's workspace; [`docs/herdr-backend.md`](herdr-backend.md#presentation-journal) owns when it degrades to the flat layout.
-Otherwise the reclaim places a flat tab in the reclaiming seat's workspace.
+With [presentation spaces](herdr-backend.md#presentation-spaces) enabled, a ship or scout reclaim re-creates the endpoint in a fresh one-task presentation workspace beneath the same parent workspace a fresh spawn from that seat would use, so the worker never lands as a foreign tab inside that parent; [`docs/herdr-backend.md`](herdr-backend.md#presentation-journal) owns when it degrades to the flat layout.
+Otherwise the reclaim places a flat tab in that parent workspace.
 The record is republished consistently and no work is lost, but the task's `herdr_workspace_id` moves with it.
 The pane id necessarily changes (the pane did not survive), and the record follows it.
 
