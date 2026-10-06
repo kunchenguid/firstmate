@@ -195,8 +195,7 @@ assert_contains "$out" "unreachable" "help names the unreachable verdict"
 assert_contains "$out" "renders no verdict" "help states the probe holds no routing judgment"
 assert_contains "$out" "--host" "help documents the explicit endpoint interface"
 assert_not_contains "$out" "Registered targets" "the probe advertises no built-in provider endpoint"
-assert_contains "$out" "--host xhyapi.com/v1/models" "help names the exact configured endpoint invocation"
-assert_not_contains "$out" "--host api.xhyapi.com" "help never advertises the false-outage host as the endpoint"
+assert_not_contains "$out" "xhyapi.com" "shared help contains no provider-specific target"
 
 # --- HTTP 200: routable and answering, and nothing more ---------------------
 tmp=$TMP_ROOT/ok; new_case "$tmp"
@@ -658,13 +657,23 @@ out=$(env "${proxy_env[@]}" HTTP_PROXY='http://private:secret@proxy.example:8080
 expect_code 0 "$rc" "HTTP proxy credentials do not affect an HTTPS request"
 assert_contains "$out" "route=direct" "an irrelevant HTTP proxy does not alter route reporting"
 
-# A matching no-proxy entry takes precedence over configured proxy credentials.
-tmp=$TMP_ROOT/no-proxy-bypass; new_case "$tmp"
+# NO_PROXY ports participate in curl's bypass decision: a different explicit
+# port must not bypass the configured proxy, while an exact port does.
+tmp=$TMP_ROOT/no-proxy-port-mismatch; new_case "$tmp"
 out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
-  NO_PROXY="$PROBE_HOST" PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
-  FM_FAKE_DIG_MODE=address FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 0 "$rc" "NO_PROXY bypasses proxy credential refusal"
-assert_contains "$out" "route=direct" "NO_PROXY route is direct"
+  NO_PROXY="$PROBE_HOST:443" PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_DIG_MODE=address FM_FAKE_CURL_LOG="$tmp/calls.log" \
+  "$SCRIPT" --host "$PROBE_HOST:8443" 2>&1); rc=$?
+expect_code 2 "$rc" "a mismatched NO_PROXY port does not bypass proxy credential refusal"
+assert_contains "$out" "proxy URL carries credentials" "the mismatched port retains effective proxy credentials"
+[ ! -s "$tmp/calls.log" ] || fail "a mismatched NO_PROXY port reached curl"
+
+tmp=$TMP_ROOT/no-proxy-port-match; new_case "$tmp"
+out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
+  NO_PROXY="$PROBE_HOST:8443" PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_DIG_MODE=address FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST:8443" 2>&1); rc=$?
+expect_code 0 "$rc" "an exact NO_PROXY port bypasses proxy credential refusal"
+assert_contains "$out" "route=direct" "an exact NO_PROXY port is labeled direct"
 
 # --- unknown and malformed input are refusals, never silent guesses ---------
 tmp=$TMP_ROOT/unknown-target; new_case "$tmp"

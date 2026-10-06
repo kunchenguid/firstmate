@@ -24,10 +24,7 @@
 #   fm-provider-reach-probe.sh --host <host[:port][/path]> [options]
 #
 # The caller names the endpoint explicitly; the probe ships no provider
-# endpoint of its own. This host's configured xhy endpoint is xhyapi.com (not
-# api.xhyapi.com), whose base is https://xhyapi.com/v1/models, so a local check
-# passes `--host xhyapi.com/v1/models`. Nothing here reads, needs, or transmits
-# a credential.
+# endpoint of its own. Nothing here reads, needs, or transmits a credential.
 #
 # Options:
 #   --timeout <seconds>   same bound as FM_PROVIDER_REACH_PROBE_TIMEOUT and
@@ -39,7 +36,7 @@
 # and only the HTTP status code is captured. The status code and DNS rcode are
 # protocol facts, not secrets.
 #
-#   probe=<target> dns=<ok|nxdomain|fail|skipped> http=<code|none> result=<verdict> <detail>
+#   probe=<target> dns=<ok|nxdomain|unknown|skipped> http=<code|none> result=<verdict> <detail>
 #
 # result is evidence, never eligibility. Each verdict carries its own exit status:
 #   reachable        0    HTTP 2xx: routable and answering, nothing more proven
@@ -47,8 +44,8 @@
 #                         refused, so routing works but usability is NOT proven
 #   server-error     11   HTTP 5xx or any other code: answered, unhealthy or unknown
 #   unreachable      20   connection failed, timeout, or no address: NXDOMAIN or any
-#                         other lookup failure prints dns=fail and exits 20 too,
-#                         because either way the endpoint could not be connected to
+#                         lookup errors print dns=unknown and HTTP is still
+#                         attempted, so a DNS-tool problem cannot suppress the probe
 #   invalid-target   2    --host cannot yield an authority for a request, e.g.
 #                         a value with no host part
 #   invalid-input    2    missing --host, an unexpected argument, a non-numeric,
@@ -96,9 +93,7 @@ Usage:
   fm-provider-reach-probe.sh --host <host[:port][/path]> [options]
 
 The endpoint is named explicitly with --host; the probe ships no provider
-endpoint of its own. This host's configured xhy endpoint is xhyapi.com (not
-api.xhyapi.com), whose base is https://xhyapi.com/v1/models, so probe it with
---host xhyapi.com/v1/models.
+endpoint of its own. Nothing here reads, needs, or transmits a credential.
 
 Options:
   --timeout <seconds>   hard per-phase bound (positive integer, default 10);
@@ -106,7 +101,7 @@ Options:
   -h, --help            show this help
 
 Prints exactly one line on stdout:
-  probe=<target> dns=<ok|nxdomain|fail|skipped> http=<code|none> result=<verdict> <detail>
+  probe=<target> dns=<ok|nxdomain|unknown|skipped> http=<code|none> result=<verdict> <detail>
 
 A 2xx proves routability only - never that a model, credential, or large request
 works - so it is recorded as reachable, not as "channel available".
@@ -119,7 +114,8 @@ Exit status (verdicts are not eligibility):
   10  routed-auth     HTTP 401/403
   11  server-error    HTTP 5xx or other code
   20  unreachable     connection failed, timed out, or no address (NXDOMAIN
-                      and other lookup failures also exit 20 with dns=fail)
+                      exits before HTTP; resolver errors report dns=unknown and
+                      continue to HTTP)
   2   invalid-target  --host yields no request authority
   2   invalid-input   missing/unknown --host, an unexpected argument, a bad or
                       repeated --timeout, or a missing value (stderr only)
@@ -404,22 +400,42 @@ proxy_env_value() {
   printf '%s' "$value"
 }
 PROXY_MODE=direct
-proxy_host=${AUTHORITY%%:*}
+proxy_host=$AUTHORITY
+proxy_port=443
 case "$AUTHORITY" in
-  \[*\]*) proxy_host=${AUTHORITY#\[}; proxy_host=${proxy_host%%\]*} ;;
+  \[*\]*)
+    proxy_host=${AUTHORITY#\[}; proxy_host=${proxy_host%%\]*}
+    authority_suffix=${AUTHORITY#*\]}
+    case "$authority_suffix" in :*) proxy_port=${authority_suffix#:} ;; esac
+    ;;
+  *:*) proxy_host=${AUTHORITY%:*}; proxy_port=${AUTHORITY##*:} ;;
 esac
 no_proxy_list=$(proxy_env_value NO_PROXY no_proxy)
 no_proxy_bypass=0
 old_ifs=$IFS; IFS=,
 for no_proxy_entry in $no_proxy_list; do
   no_proxy_entry=${no_proxy_entry//[[:space:]]/}
-  case "$no_proxy_entry" in
-    '*') no_proxy_bypass=1 ;;
-    *:*) no_proxy_entry=${no_proxy_entry%%:*} ;;
-  esac
   [ -n "$no_proxy_entry" ] || continue
+  if [ "$no_proxy_entry" = '*' ]; then no_proxy_bypass=1; continue; fi
+  entry_port=''
+  case "$no_proxy_entry" in
+    \[*\]*)
+      entry_host=${no_proxy_entry#\[}; entry_host=${entry_host%%\]*}
+      entry_suffix=${no_proxy_entry#*\]}
+      case "$entry_suffix" in :*) entry_port=${entry_suffix#:} ;; esac
+      ;;
+    *:*) entry_host=${no_proxy_entry%:*}; entry_port=${no_proxy_entry##*:} ;;
+    *) entry_host=$no_proxy_entry ;;
+  esac
+  if [ -n "$entry_port" ]; then
+    case "$entry_port" in *[!0-9]*) continue ;; esac
+    [ "$entry_port" = "$proxy_port" ] || continue
+  elif [ "${no_proxy_entry%:*}" != "$no_proxy_entry" ]; then
+    continue
+  fi
+  entry_host=${entry_host#.}
   case "$proxy_host" in
-    "$no_proxy_entry"|*."${no_proxy_entry#.}") no_proxy_bypass=1 ;;
+    "$entry_host"|*.$entry_host) no_proxy_bypass=1 ;;
   esac
 done
 IFS=$old_ifs
