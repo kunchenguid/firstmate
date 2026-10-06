@@ -1655,12 +1655,14 @@ handle_paused_stale() {  # <window> <task> <hash>
 # once off the previous stop's throttle. Uses its own .deliberate-stop-*-
 # throttle rather than the .paused-* flag, because the .paused-* machinery is
 # cleared whenever the last status line stops declaring a wait - a deliberately
-# stopped worker's last line is routinely `done:`, not a wait declaration.
+# stopped worker's last line is routinely `done:`, not a wait declaration. It
+# also clears the ordinary per-hash stale suppressor instead of advancing it:
+# when relaunch or cleanup removes this marker while the old pane render remains,
+# ordinary terminal-stale classification must surface that unchanged render.
 handle_deliberate_stop_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key marker age
   key=$(window_key "$win")
-  printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   marker=$(fm_control_deliberate_stop_marker "$STATE" "$task")
   age=$(age_of "$marker")

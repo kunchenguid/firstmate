@@ -2320,7 +2320,7 @@ test_deliberately_stopped_finished_task_is_parked_not_stale() {
   fi
   [ ! -s "$out" ] || fail "a deliberately parked finished task printed a wake during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "a deliberately parked finished task enqueued a wake during absorb"
-  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on deliberate-stop absorb"
+  [ ! -e "$state/.stale-$key" ] || fail "a deliberate-stop absorb must clear the ordinary stale suppressor"
   [ ! -e "$state/.stale-since-$key" ] || fail "a deliberate-stop absorb must not start the wedge timer"
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "a deliberate-stop absorb must not arm the wedge escalation counter"
   reap "$pid"
@@ -2433,6 +2433,49 @@ test_deliberate_stop_marker_cleared_resumes_terminal_stale_surfacing() {
   wait_for_exit "$pid" 100 || fail "watcher did not surface a marker-less finished task as terminal stale"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the terminal stale wake after the marker was cleared"
   pass "clearing the deliberate-stop marker returns the finished task to ordinary terminal-stale supervision"
+}
+
+# The parked absorb must not remember the pane hash as ordinary stale evidence.
+# A relaunch can remove the marker before the replacement has rendered, leaving
+# the finished worker's exact old pane on screen; that unchanged render must
+# surface immediately under normal terminal-stale supervision rather than stay
+# silent until some unrelated pane change.
+test_deliberate_stop_marker_removal_resurfaces_an_unchanged_pane() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case deliberate-stop-cleared-unchanged); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-unparked-unchanged"
+  printf 'finished, marker about to clear' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/unparked.meta"
+  printf 'done: investigation finished\n' > "$state/unparked.status"
+  sig=$(seen_sig "$state/unparked.status"); printf '%s' "$sig" > "$state/.seen-unparked_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text "finished, marker about to clear")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' "$(date +%s)" > "$state/unparked.deliberate-stop"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher did not absorb the deliberately parked finished task"
+  fi
+  [ ! -e "$state/.stale-$key" ] || fail "deliberate-stop absorb retained the ordinary stale suppressor"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the deliberate-stop absorb watcher stop"
+
+  rm -f "$state/unparked.deliberate-stop"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface the unchanged pane after the marker cleared"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "marker removal left the unchanged terminal pane silent"
+  pass "clearing a deliberate-stop marker resurfaces an unchanged terminal pane"
 }
 
 # --- deliberate stop + busy pane: the busy-turn bound must park, not wedge ---
@@ -6934,6 +6977,7 @@ test_terminal_stale_surfaced
 test_deliberately_stopped_finished_task_is_parked_not_stale
 test_restopped_deliberate_task_absorbs_before_the_recheck_cadence
 test_deliberate_stop_marker_cleared_resumes_terminal_stale_surfacing
+test_deliberate_stop_marker_removal_resurfaces_an_unchanged_pane
 test_busy_deliberate_stop_is_rechecked_not_wedge_escalated
 test_churning_deliberate_stop_still_rechecked
 test_stale_terminal_status_overridden_by_active_run
