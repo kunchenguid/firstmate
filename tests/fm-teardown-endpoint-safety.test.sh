@@ -929,11 +929,10 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
-  # The same reassignment on a CLEAN slot: a landed ship task torn down without
-  # --force, which is the shape of the real incident. A clean, fully landed copy
-  # passes every unlanded-work check, so only the ownership determination can
-  # keep this slot out of the pool; a guard keyed off dirtiness would return it
-  # and destroy the live task's copy.
+  # The same reassignment on a CLEAN slot: a ship task whose recorded PR is
+  # merged, torn down without --force. Merge proof (not cleanliness) is what
+  # lets the records-only cleanup proceed: a pushed branch with an open PR
+  # refuses here even when the copy is clean.
   dir=$(make_case slot-reassigned-clean)
   mark_case_as_treehouse_pool "$dir"
   rm -f "$dir/worktree/sentinel"
@@ -941,7 +940,9 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     || fail "clean-slot fixture is not clean: $(git -C "$dir/worktree" status --porcelain)"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "pr=https://github.com/example/repo/pull/7"
+  add_gh_merged_state_mock "$dir"
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   ( cd "$dir/worktree" && exec sleep 30 ) &
   worker=$!
@@ -1093,11 +1094,34 @@ SH
 # write_endpoint_close_meta: a task record whose worktree and project do not
 # exist, which keeps the cases below on the endpoint close itself - the pool
 # return and its own refusals are covered elsewhere in this file.
+# The recorded PR is MERGED (see add_gh_merged_state_mock): a no-mistakes ship
+# task with no copy left refuses without merge proof, so without it these
+# cases would never reach the close they exercise.
 write_endpoint_close_meta() {  # <case-dir> <id> <window>
   fm_write_meta "$1/home/state/$2.meta" \
     "window=$3" "endpoint_task_id=$2" \
     "worktree=$1/nonexistent-worktree" "project=$1/nonexistent-project" \
-    "kind=ship" "mode=no-mistakes"
+    "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/example/repo/pull/7"
+  add_gh_merged_state_mock "$1"
+}
+
+# A gh mock answering MERGED to a recorded-PR state query, for fixtures with
+# no copy left to inspect (their merge proof can only come from the forge).
+add_gh_merged_state_mock() {  # <case-dir>
+  cat > "$1/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *".state"*) printf '%s\n' 'MERGED' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$1/fakebin/gh"
 }
 
 test_failed_endpoint_close_refuses_before_removing_the_record() {

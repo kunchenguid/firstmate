@@ -42,12 +42,18 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
+# hard-resets/removes the worktree and kills its processes. For a ship task in
+# no-mistakes or direct-PR mode, work has landed only when a merged PR proves it
+# (GitHub reports MERGED and the PR head contains the current local work), or its
+# content is already present in the up-to-date default branch or in the merged PR's
+# own base branch (a bin/fm-pr-merge.sh --stack-base merge counts as landed).
+# A pushed branch with an open PR is not landed: reachability from a
+# remote-tracking branch proves only survival, never a merge, and teardown
+# applies this proof for every actor, not only the supervision branch.
+# local-only projects keep the reachability rule: work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# upstream-contribution PRs pushed to a fork satisfy this), or when it is merged
+# into the local default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
@@ -118,7 +124,10 @@
 # status, records, checks, backlog - while every step that would read or touch
 # that slot is skipped: no process kill under it, no dirty or landed-work
 # inspection of it, no branch or hook removal in it, no Treehouse return, and
-# never the other task's claim. Skipping the inspection discards nothing of this
+# never the other task's claim. The one exception to the skipped inspection is
+# a PR task (no-mistakes or direct-PR ship): its records-only cleanup still
+# refuses unless a recorded PR reports MERGED, so an unmerged reassignment
+# cannot close the backlog as done. Skipping the inspection discards nothing of this
 # task's: whatever unlanded work it had in that slot was already destroyed when
 # the pool handed the slot on. Refusing instead would strand the record, because
 # bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
@@ -1608,16 +1617,16 @@ pr_target_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# Is HEAD's content already present at the tip of <name>? Fetches
+# first, then 3-way merges that tip with HEAD: when HEAD introduces nothing
+# the tip does not already contain, the merged tree equals the tip's own tree.
+# This isolates branch-only changes, so
+# unrelated commits the tip gained past the merge-base do not count as
+# "added". Returns non-zero when inconclusive (no such ref, or a merge conflict),
 # so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+content_in_branch() {
+  local name=$1 ref tip_tree merged_tree
+  [ -n "$name" ] || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
@@ -1626,22 +1635,111 @@ content_in_default() {
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
+  tip_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$tip_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  [ "$merged_tree" = "$tip_tree" ]
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
+# Is the branch's content already present in the up-to-date default branch?
+# This is content_in_branch on the default branch (e.g. its change landed via
+# squash); see there for the inconclusive-refusal contract.
+content_in_default() {
+  local name
+  name=$(default_branch) || return 1
+  content_in_branch "$name"
+}
+
+# Candidate PR targets for <branch>: the recorded pr= when present, else the
+# PR number looked up by head branch, followed by every pr_merged= entry that
+# names a different PR. Shared by the merged-PR proof and the stack-base
+# content proof so both try the same targets in the same order.
+pr_targets_for_branch() {
+  local branch=$1 merged_url
+  if [ -n "$PR_URL" ]; then
+    printf '%s\n' "$PR_URL"
+  elif [ -d "${WT:-}" ]; then
+    pr_number_from_branch "$branch" || true
+  fi
+  while IFS= read -r merged_url; do
+    [ -n "$merged_url" ] && [ "$merged_url" != "$PR_URL" ] || continue
+    printf '%s\n' "$merged_url"
+  done <<MERGED
+$(grep '^pr_merged=' "$META" 2>/dev/null | cut -d= -f2- || true)
+MERGED
+}
+
+# Is HEAD's content already present on a candidate PR's own base branch?
+# Covers stack merges (bin/fm-pr-merge.sh --stack-base): the content lands on
+# the stack base, not the default branch, so content_in_default cannot see it.
+# A base that is the default branch is skipped (already tried); an unreadable
+# base refuses, so the caller falls through to its own refusal.
+content_in_pr_base() {
+  local branch=$1 target base default candidates
+  candidates=$(pr_targets_for_branch "$branch")
+  [ -n "$candidates" ] || return 1
+  default=$(default_branch) || default=
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    base=$(cd "$WT" && gh pr view "$target" --json baseRefName -q '.baseRefName' 2>/dev/null) || continue
+    [ -n "$base" ] || continue
+    [ "$base" != "$default" ] || continue
+    content_in_branch "$base" && return 0
+  done <<CANDIDATES
+$candidates
+CANDIDATES
+  return 1
+}
+
+# Has the worktree's committed work actually LANDED? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
+# default branch or in the merged PR's own stack base. The content fallbacks also
+# cover the no-PR and gh-error paths for default-branch content. False
 # only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
-  content_in_default
+  content_in_default && return 0
+  content_in_pr_base "$branch"
+}
+
+# Merge proof without a usable copy: every candidate recorded PR (pr=, then
+# each pr_merged=) is asked for its state from the project clone, and one
+# MERGED verdict proves it. There is no HEAD left to test containment against,
+# so this is only the recorded-PR-merged check: a missing worktree and a slot
+# reassigned to another task both refuse without it. Prints the refusal (which
+# names the --force discard path) and returns non-zero when nothing recorded
+# proves a merge.
+pr_record_proves_merged() {
+  local why=$1 target state candidates
+  candidates=$(pr_targets_for_branch "${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-HEAD}")
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    if [ -n "${PROJ:-}" ] && [ -d "$PROJ" ]; then
+      state=$(cd "$PROJ" && gh pr view "$target" --json state -q '.state' 2>/dev/null) || continue
+    else
+      state=$(gh pr view "$target" --json state -q '.state' 2>/dev/null) || continue
+    fi
+    case "$state" in
+      MERGED|merged) return 0 ;;
+    esac
+  done <<CANDIDATES
+$candidates
+CANDIDATES
+  echo "REFUSED: task $ID $why, and none of its recorded PRs reports MERGED." >&2
+  echo "Land its PR first, or get the captain's explicit OK to discard, then --force." >&2
+  return 1
+}
+
+# A PR task (no-mistakes or direct-PR ship) needs merge proof before cleanup,
+# for every actor. local-only lands on local main and keeps its reachability
+# rule; scouts own their report gate and secondmates their child gate.
+teardown_needs_merge_proof() {
+  case "$KIND" in
+    secondmate|scout) return 1 ;;
+  esac
+  [ "$MODE" != local-only ]
 }
 
 # The completion links this teardown already holds locally. A scout's
@@ -1931,7 +2029,15 @@ report_worktree_dirt() {
 
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
-  [ -d "$WT" ] || return 0
+  if [ ! -d "$WT" ]; then
+    # No copy left to inspect. A missing copy never proves the work landed, so
+    # a PR task still refuses without merge proof; local-only keeps its
+    # reachability rule and non-PR kinds keep their own gates.
+    if teardown_needs_merge_proof; then
+      pr_record_proves_merged "has no worktree left at ${WT:-<missing>} to inspect" || return 1
+    fi
+    return 0
+  fi
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
@@ -1957,22 +2063,29 @@ validate_worktree_teardown_safety() {
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
-  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
-        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+  if [ "$MODE" = local-only ]; then
+    if [ -n "$unpushed" ]; then
+      DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+      if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+        if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+          return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+        fi
+        echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+        echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
       fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
-      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && report_worktree_dirt "$dirty"
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+      if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+        echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
+        [ -n "$dirty" ] && report_worktree_dirt "$dirty"
+        [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+        echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      fi
+    elif [ -n "$dirty" ]; then
+      echo "REFUSED: worktree $WT has uncommitted changes." >&2
+      report_worktree_dirt "$dirty"
+      echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
@@ -1980,16 +2093,20 @@ validate_worktree_teardown_safety() {
     report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
-  elif [ -n "$unpushed" ]; then
+  else
+    # A PR task proves its merge for every actor: a pushed branch with an
+    # open PR refuses here, because reachability from a remote never proves a
+    # merge. work_is_landed accepts a merged PR containing the HEAD, content
+    # already on the default branch, or content on the merged PR's stack base.
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "REFUSED: worktree $WT has work with no merged PR containing its HEAD." >&2
+      [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      echo "Merge its PR (a merge into its stack base counts), or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
@@ -3404,6 +3521,13 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+# A slot reassigned to another task skips every slot step below, but a PR task
+# still refuses its records-only cleanup without merge proof: closing the
+# backlog as done for unmerged work is exactly the false cleanup this proof
+# exists to stop. The slot itself is never read here.
+if ! teardown_owns_worktree && [ "$FORCE" != "--force" ] && teardown_needs_merge_proof; then
+  pr_record_proves_merged "has no slot left to inspect (its recorded worktree was reassigned to task ${TEARDOWN_SLOT_REASSIGNED_TO:-unknown})" || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3513,17 +3637,23 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
-    :
-  else
-    safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
+if teardown_owns_worktree && [ "$FORCE" != "--force" ]; then
+  if [ -d "$WT" ]; then
+    if validate_worktree_teardown_safety; then
+      :
     else
-      exit 1
+      safety_rc=$?
+      if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+        cleanup_stale_lock_for_safety_check "$WT" || exit 1
+        validate_worktree_teardown_safety || exit 1
+      else
+        exit 1
+      fi
     fi
+  else
+    # No copy left to inspect: validate_worktree_teardown_safety refuses a PR
+    # task here without merge proof (a missing copy never proves landing).
+    validate_worktree_teardown_safety || exit 1
   fi
 fi
 

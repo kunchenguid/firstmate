@@ -2,10 +2,12 @@
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# treehouse return hard-resets the worktree. For a no-mistakes or direct-PR ship
+# task, "landed" is proved only by a merged PR whose head contains the current
+# local work, or by content already in the up-to-date default branch (or the
+# merged PR's own stack base). A pushed branch with an open PR refuses for every
+# actor: reachability from a remote proves survival, never a merge. local-only
+# keeps the reachability rule.
 #
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -24,7 +26,14 @@
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
+#   (d) no-mistakes + pushed real content + open PR        -> REFUSE (merge proof, both actors)
+#   (d2) no-mistakes/direct-PR + pushed + merged PR w/ HEAD  -> ALLOW  (merge proof)
+#   (d3) direct-PR + merged stack-base PR, stale PR head      -> ALLOW  (stack-base content proof)
+#   (d4) direct-PR + stack base content differs               -> REFUSE (control for d3)
+#   (d5) no-mistakes + missing worktree, no recorded PR      -> REFUSE (missing copy proves nothing)
+#   (d6) no-mistakes + missing worktree + recorded MERGED PR  -> ALLOW  (recorded proof)
+#   (d7) direct-PR + slot reassigned, no recorded PR         -> REFUSE (records-only still proves)
+#   (d8) direct-PR + slot reassigned + recorded MERGED PR     -> ALLOW  (records-only proceeds)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
@@ -893,25 +902,241 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
-test_no_mistakes_origin_remote_allows() {
-  local case_dir rc
-  case_dir=$(make_case nm-origin)
-  write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
-  # Push the task branch to origin and fetch so the worktree sees it.
+test_no_mistakes_pushed_branch_without_merge_refuses() {
+  local case_dir rc actor url head
+  # A pushed branch with an open PR refuses for every actor: reachability
+  # from a remote proves survival, never a merge (decision of 06/10, option A).
+  for actor in main branch; do
+    case_dir=$(make_case "pushed-open-pr-$actor")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "shippable work"
+    # Push the task branch to origin and fetch so the worktree sees it.
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+    url="https://github.com/example/repo/pull/42"
+    add_gh_pr_open_for_branch "$case_dir" fm/task-x1 "$url"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+    set +e
+    if [ "$actor" = branch ]; then
+      FM_SUPERVISION_ACTOR=branch run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    else
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    fi
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "pushed-open-pr/$actor: teardown should refuse a pushed branch with an open PR"
+    grep -q "no merged PR containing its HEAD" "$case_dir/stderr" \
+      || fail "pushed-open-pr/$actor: refusal did not cite the missing merged PR: $(cat "$case_dir/stderr")"
+    grep -q -- --force "$case_dir/stderr" \
+      || fail "pushed-open-pr/$actor: refusal did not name the --force discard path"
+    assert_refusal_retained_task_state "$case_dir" "pushed-open-pr/$actor" "$head"
+  done
+  pass "a pushed branch with an open PR refuses for the main and branch actors"
+}
+
+test_no_mistakes_pushed_merged_pr_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case pushed-merged)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
-  grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
-    || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+  expect_code 0 "$rc" "pushed-merged: teardown should succeed when a merged PR contains the pushed HEAD"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "pushed-merged: teardown printed a REFUSED line"
+  pass "a pushed branch with a merged PR containing its HEAD is torn down"
+}
+
+# Land <file>=<content> as a single commit on an arbitrary origin branch.
+# Args: case_dir branch file content
+land_on_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 tmp
+  tmp="$case_dir/_land"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q "$branch"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "land $file on $branch"
+  git -C "$tmp" push -q origin "HEAD:$branch"
+  rm -rf "$tmp"
+}
+
+# GitHub lookup shape for a stack PR: MERGED, but its head does NOT contain
+# the local work, and its base is the stack base rather than main.
+# Args: case_dir stale-head stack-base
+add_gh_stack_pr_merged() {
+  local case_dir=$1 stale_head=$2 base=$3
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$stale_head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"baseRefName"*) printf '%s\n' '$base' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$stale_head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# A merge into a stack base (bin/fm-pr-merge.sh --stack-base) counts as landed:
+# the content sits on the stack base, not the default branch, so neither the
+# merged-head proof nor the content-in-default fallback can see it. The control
+# case lands different content on the base and must still refuse, so the allow
+# case cannot pass without the stack-base content proof.
+test_stack_base_merge_counts_as_landed() {
+  local case_dir rc stale_head content
+  for content in hello other; do
+    case_dir=$(make_case "stack-base-$content")
+    write_meta "$case_dir" direct-PR ship
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+    git -C "$case_dir/project" push -q origin "main:refs/heads/feat/reforma-sistemas"
+    git -C "$case_dir/wt" fetch -q origin
+    git -C "$case_dir/wt" checkout -q -B fm/task-x1 origin/feat/reforma-sistemas
+    wt_commit_file "$case_dir" feature.txt hello "stacked work"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+    land_on_branch "$case_dir" feat/reforma-sistemas feature.txt "$content"
+    stale_head=$(git -C "$case_dir/project" rev-parse main)
+    add_gh_stack_pr_merged "$case_dir" "$stale_head" feat/reforma-sistemas
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    if [ "$content" = hello ]; then
+      expect_code 0 "$rc" "stack-base-allow: teardown should succeed when the stack base carries the work"
+      ! grep -q REFUSED "$case_dir/stderr" || fail "stack-base-allow: teardown printed a REFUSED line"
+    else
+      expect_code 1 "$rc" "stack-base-control: teardown should refuse when the stack base carries different content"
+      grep -q REFUSED "$case_dir/stderr" || fail "stack-base-control: no REFUSED line in stderr"
+    fi
+  done
+  pass "a merge into the PR's stack base counts as landed work"
+}
+
+# A bare MERGED/OPEN state answer for the recorded PR, for copies with no
+# worktree left to inspect (the full head query cannot run there).
+add_gh_pr_state() {  # <case-dir> <state>
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *".state"*) printf '%s\n' '$state' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+write_direct_meta() {  # <case-dir> <mode> <kind> <worktree>
+  local case_dir=$1 mode=$2 kind=$3 worktree=$4
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$worktree" \
+    "project=$case_dir/project" \
+    "kind=$kind" \
+    "mode=$mode" \
+    "spawn_gen=teardown-test-task-x1"
+}
+
+# A missing copy never proves the work landed: without a recorded merged PR
+# the cleanup refuses, and with one it proceeds.
+test_missing_worktree_needs_merge_proof() {
+  local case_dir rc
+  case_dir=$(make_case missing-wt-refuse)
+  write_direct_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  seed_backlog_in_flight "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "missing-wt-refuse: teardown should refuse a PR task with no copy and no recorded PR"
+  grep -q REFUSED "$case_dir/stderr" || fail "missing-wt-refuse: no REFUSED line in stderr"
+  grep -q -- --force "$case_dir/stderr" \
+    || fail "missing-wt-refuse: refusal did not name the --force discard path"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "missing-wt-refuse: the refusal erased the durable task record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "missing-wt-refuse: the refusal closed the backlog item anyway"
+
+  case_dir=$(make_case missing-wt-merged)
+  write_direct_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  add_gh_pr_state "$case_dir" MERGED
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "missing-wt-merged: teardown refused a recorded merged PR with no copy left"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "missing-wt-merged: teardown returned success with its backlog item still open"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "missing-wt-merged: teardown left the leftover record"
+  pass "a missing worktree refuses without merge proof and proceeds on a recorded merged PR"
+}
+
+# A slot reassigned to another task skips every slot step, but a PR task still
+# refuses its records-only cleanup without merge proof, and proceeds on it.
+test_reassigned_slot_needs_merge_proof() {
+  local case_dir rc slot marker
+  for proof in absent merged; do
+    case_dir=$(make_case "slot-reassigned-$proof")
+    mkdir -p "$case_dir/fakepool"
+    git -C "$case_dir/project" worktree move "$case_dir/wt" "$case_dir/fakepool/s1" >/dev/null
+    write_direct_meta "$case_dir" direct-PR ship "$case_dir/fakepool/s1"
+    seed_backlog_in_flight "$case_dir"
+    printf '%s\n' 'treehouse-state' > "$case_dir/treehouse-state.json"
+    slot=$(cd "$case_dir/fakepool/s1" && pwd -P)
+    marker="$(dirname "$slot")/.fm-slot-owner"
+    printf '%s\n' 'task=other-task' 'home=/elsewhere' > "$marker"
+    if [ "$proof" = merged ]; then
+      printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+      add_gh_pr_state "$case_dir" MERGED
+    fi
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    if [ "$proof" = merged ]; then
+      expect_code 0 "$rc" "slot-reassigned-merged: records-only cleanup should proceed on a recorded merged PR"
+      ! grep -q REFUSED "$case_dir/stderr" || fail "slot-reassigned-merged: teardown printed a REFUSED line"
+      [ -d "$case_dir/fakepool/s1" ] \
+        || fail "slot-reassigned-merged: records-only cleanup touched the reassigned slot"
+      assert_absent "$case_dir/state/task-x1.meta" \
+        "slot-reassigned-merged: teardown left the stale record"
+    else
+      expect_code 1 "$rc" "slot-reassigned-absent: teardown should refuse a reassigned slot with no merge proof"
+      grep -q REFUSED "$case_dir/stderr" || fail "slot-reassigned-absent: no REFUSED line in stderr"
+      [ -e "$case_dir/state/task-x1.meta" ] \
+        || fail "slot-reassigned-absent: the refusal erased the durable task record"
+    fi
+  done
+  pass "a reassigned slot refuses without merge proof and stays records-only on it"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -1504,40 +1729,45 @@ write_windowless_legacy_meta() {
     "harness=codex"
 }
 
-test_windowless_legacy_record_with_gone_worktree_tears_down() {
-  local case_dir out
+test_windowless_legacy_record_with_gone_worktree_refuses() {
+  local case_dir rc
   case_dir=$(make_case windowless-gone)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
   seed_backlog_in_flight "$case_dir"
 
-  out=$(run_teardown "$case_dir") \
-    || fail "windowless-gone: teardown refused a leftover with no window, no spawn_gen, and no worktree"
-  printf '%s\n' "$out" | grep -Fq 'legacy record accepted without spawn_gen: endpoint missing' \
-    || fail "windowless-gone: the teardown line did not log the missing-endpoint leftover: $out"
-  printf '%s\n' "$out" | grep -Fq 'window none' \
-    || fail "windowless-gone: the teardown line did not say there was no window: $out"
-  [ "$(backlog_row_state "$case_dir")" = "done" ] \
-    || fail "windowless-gone: teardown returned success with its backlog item still open"
-  assert_absent "$case_dir/state/task-x1.meta" \
-    "windowless-gone: teardown left the leftover record"
-  pass "a windowless leftover with no spawn_gen and no worktree tears down without --legacy-record"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "windowless-gone: teardown should refuse a PR task with no copy and no recorded PR"
+  grep -q REFUSED "$case_dir/stderr" || fail "windowless-gone: no REFUSED line in stderr"
+  grep -q -- --force "$case_dir/stderr" \
+    || fail "windowless-gone: refusal did not name the --force discard path"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "windowless-gone: the refusal erased the durable task record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "windowless-gone: the refusal closed the backlog item anyway"
+  pass "a windowless leftover with no copy and no recorded PR refuses"
 }
 
-test_windowless_legacy_record_tears_down_with_the_legacy_flag() {
+test_windowless_legacy_record_tears_down_with_recorded_merge() {
   local case_dir out
   case_dir=$(make_case windowless-flag)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  add_gh_pr_state "$case_dir" MERGED
 
   out=$(run_teardown "$case_dir" --legacy-record) \
-    || fail "windowless-flag: --legacy-record refused a leftover with no window and no spawn_gen"
+    || fail "windowless-merged: --legacy-record refused a leftover whose recorded PR is merged"
   printf '%s\n' "$out" | grep -Fq 'legacy record accepted without spawn_gen: endpoint missing' \
-    || fail "windowless-flag: the teardown line did not log the missing-endpoint leftover: $out"
+    || fail "windowless-merged: the teardown line did not log the missing-endpoint leftover: $out"
   assert_absent "$case_dir/state/task-x1.meta" \
-    "windowless-flag: teardown left the leftover record"
+    "windowless-merged: teardown left the leftover record"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
-    || fail "windowless-flag: teardown returned success with its backlog item still open"
-  pass "a windowless leftover with no spawn_gen also tears down when --legacy-record is passed"
+    || fail "windowless-merged: teardown returned success with its backlog item still open"
+  pass "a windowless leftover with a recorded merged PR tears down"
 }
 
 test_windowless_legacy_record_still_refuses_unlanded_work() {
@@ -1635,8 +1865,9 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   local case_dir rc out
   case_dir=$(make_case windowless-retry)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' 'pr=not-a-valid-url' 'pr_merged=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  add_gh_pr_state "$case_dir" MERGED
   add_failing_truncate_perl "$case_dir"
 
   set +e
@@ -3307,10 +3538,10 @@ assert_head_absent_from_worktree() {  # <worktree> <short-sha> <label>
     || fail "$3: fixture broke - the pipeline head resolved in the task copy"
 }
 
-# Land a shippable commit on the task branch and push it to origin, the same
-# "definitely landed, teardown must ALLOW" shape test_no_mistakes_origin_remote_allows
-# uses, so these new cases exercise the abort/reap steps on a real successful
-# teardown rather than a refusal path.
+# Land a shippable commit on the task branch and push it to origin. The commit
+# is empty, so its content is trivially already on the default branch and the
+# merge proof passes through the content fallback; these cases exercise the
+# abort/reap steps on a real successful teardown rather than a refusal path.
 land_shippable_commit() {
   local case_dir=$1
   wt_commit "$case_dir" "shippable work"
@@ -4504,7 +4735,11 @@ test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
+test_no_mistakes_pushed_branch_without_merge_refuses
+test_no_mistakes_pushed_merged_pr_allows
+test_stack_base_merge_counts_as_landed
+test_missing_worktree_needs_merge_proof
+test_reassigned_slot_needs_merge_proof
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
@@ -4546,8 +4781,8 @@ test_tracked_edit_refusal_diagnostic
 test_mixed_refusal_diagnostic
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
-test_windowless_legacy_record_with_gone_worktree_tears_down
-test_windowless_legacy_record_tears_down_with_the_legacy_flag
+test_windowless_legacy_record_with_gone_worktree_refuses
+test_windowless_legacy_record_tears_down_with_recorded_merge
 test_windowless_legacy_record_still_refuses_unlanded_work
 test_windowless_record_outside_the_leftover_class_still_refuses
 test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag
