@@ -1,7 +1,7 @@
 ---
 name: firstmate-execution-focus
 description: >-
-  Agent-only execution discipline for supervising an authorised gated, multi-phase programme without letting completed gates, empty phases, blocked items, or repair loops displace the substantive work.
+  Agent-only execution discipline for supervising an authorized gated, multi-phase programme without letting completed gates, empty phases, blocked items, or repair loops displace the substantive work.
   Load before supervising such a programme or slice and keep it loaded through its next genuine captain gate.
 user-invocable: false
 metadata:
@@ -10,7 +10,7 @@ metadata:
 
 # Firstmate execution focus
 
-Use this discipline to preserve forward progress inside the captain's authorised scope.
+Use this discipline to preserve forward progress inside the captain's authorized scope.
 It does not supply authority, weaken an existing gate, or expand permissions.
 
 ## Governing outcome
@@ -29,7 +29,7 @@ Do not commission process, governance, or design work unless a concrete defect p
 3. Keep blockers local.
    Record the exact stopping point, missing input, next action, and forcing event for a blocked item, then continue every independent item.
 4. Advance on existing authority.
-   After an authorised phase completes, enter the next phase automatically unless the programme places a genuine captain gate between them.
+   After an authorized phase completes, enter the next phase automatically unless the programme places a genuine captain gate between them.
    Do not ask again for permissions already granted for the same bounded scope.
 5. Preserve boundaries.
    Existing authority never licenses a new external effect, a wider population, a settled-work reopening, or an action the programme reserves to the captain.
@@ -50,4 +50,4 @@ Do not turn a single failed item or check into a new programme-wide review.
 Report progress against substantive work completed, items dispositioned, blockers isolated, and the distance to the next genuine gate.
 Call out administrative work separately so it cannot masquerade as delivery.
 Return to the captain only at the programme's named gate, for a genuinely new authority decision, or for a stop condition that cannot safely be recorded and carried forward.
-Otherwise continue through the authorised sequence.
+Otherwise continue through the authorized sequence.
