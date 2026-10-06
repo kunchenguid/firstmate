@@ -607,12 +607,33 @@ EOF
     "unfilled-scope ship spawn did not name the Scope paths line to fill"
   assert_absent "$home/state/$id.meta" "unfilled-scope ship spawn wrote task metadata"
 
+  id=delivery-empty-scope-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "empty-scope ship brief should scaffold"
+  brief=$home/data/$id/brief.md
+  content=$(cat "$brief")
+  content=${content//'{TASK}'/Fix the merge scope check.}
+  content=${content//'{FIRSTMATE_SPEC}'/Touch only the merge script.}
+  content=$(printf '%s\n' "$content" | sed 's/^Scope paths:.*$/Scope paths:/')
+  printf '%s\n' "$content" > "$brief"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a ship brief with an empty Scope paths field should exit non-zero"
+  assert_contains "$out" 'empty Scope paths line' "empty scope refusal did not identify its field"
+  assert_absent "$home/state/$id.meta" "empty-scope ship spawn wrote task metadata"
+
   id=delivery-filled-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "filled-ship brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" \
     "Fix replacement of \`{TASK}\` in Herdr briefs." \
     "Keep literal \`{FIRSTMATE_SPEC}\` examples intact."
+  cat >> "$home/data/$id/brief.md" <<'EOF'
+
+```text
+Scope paths: {SCOPE_PATHS}
+```
+EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}" \
     "a filled ship brief mentioning placeholder tokens was refused as unfilled"

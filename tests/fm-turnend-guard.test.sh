@@ -312,6 +312,10 @@ test_hook_blocks_on_completion_claim_without_evidence() {
   local dir home payload out rc
   dir=$(make_primary_dir "$TMP_ROOT/hook-unsupported-completion")
   home=$(cd "$dir" && pwd)
+  printf 'pr=https://github.com/acme/project/pull/42\n' > "$dir/state/task-42.meta"
+  printf 'pr=https://github.com/acme/other/pull/7\n' > "$dir/state/task-other.meta"
+  printf 'done: recorded task evidence\n' > "$dir/state/task-42.status"
+  printf 'done: recorded task evidence\n' > "$dir/state/task-other.status"
   claim_check() {  # <message> <stop_hook_active>; sets out and rc
     payload=$(jq -cn --arg message "$1" --argjson active "$2" '{last_assistant_message:$message,stop_hook_active:$active}')
     rc=0
@@ -322,15 +326,40 @@ test_hook_blocks_on_completion_claim_without_evidence() {
   assert_contains "$out" 'completion claim has no linked evidence' "block must carry the reason to the agent"
   claim_check 'I completed the implementation.' true
   expect_code 0 "$rc" "the claim block must not repeat once the turn was already continued"
-  claim_check 'I completed the implementation. https://github.com/acme/project/pull/42' false
-  expect_code 0 "$rc" "a linked PR URL is evidence"
+  claim_check 'task-42 completed the implementation. https://github.com/acme/project/pull/42' false
+  assert_not_contains "$out" 'completion claim has no linked evidence' "a PR recorded for the named task must satisfy the completion warning"
+  claim_check 'task-42 completed the implementation. https://github.com/acme/other/pull/7' false
+  expect_code 2 "$rc" "a PR recorded for a different task is not evidence"
+  assert_contains "$out" 'completion claim has no linked evidence' "an unrelated recorded PR must not satisfy the completion warning"
+  claim_check 'Done.' false
+  expect_code 2 "$rc" "Done. is a completion claim and must carry evidence"
+  assert_contains "$out" 'completion claim has no linked evidence' "Done. without evidence must carry the warning"
+  rm -f "$dir/state/task-42.meta" "$dir/state/task-other.meta"
   claim_check 'Validation passed and I completed the implementation.' false
   expect_code 0 "$rc" "a check result is evidence"
   claim_check 'I have not completed this change.' false
   expect_code 0 "$rc" "a negated statement is not a completion claim"
   claim_check 'This is not only fixed but shipped.' false
   expect_code 2 "$rc" "not only fixed is not a negated claim"
-  pass "fm-turnend-guard: blocks once when a completion claim lacks a PR URL or check result"
+  pass "fm-turnend-guard: warns for unsupported claims and accepts task-recorded PR or check evidence"
+}
+
+test_hook_completion_warning_owns_its_repeat_allowance_in_claude_mode() {
+  local dir home payload out rc
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-completion-repeat")
+  home=$(cd "$dir" && pwd)
+  claim_hook() {  # <stop_hook_active>; sets out and rc
+    payload=$(jq -cn --arg message 'Done.' --argjson active "$1" '{last_assistant_message:$message,stop_hook_active:$active,session_id:"completion-session"}')
+    rc=0
+    out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1) || rc=$?
+  }
+  claim_hook true
+  expect_code 2 "$rc" "an unrelated prior continuation must not bypass the completion warning"
+  claim_hook true
+  expect_code 0 "$rc" "the completion warning itself must permit one Claude continuation"
+  claim_hook true
+  expect_code 2 "$rc" "the completion warning repeat allowance must be consumed exactly once"
+  pass "fm-turnend-guard --claude: only its own completion warning allows one repeat"
 }
 
 test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
@@ -2233,6 +2262,7 @@ test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_on_completion_claim_without_evidence
+test_hook_completion_warning_owns_its_repeat_allowance_in_claude_mode
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon

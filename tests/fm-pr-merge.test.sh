@@ -251,6 +251,13 @@ case "${1:-} ${2:-}" in
         cat "$FM_TEST_PR_FILES" || exit 1
         exit 0
         ;;
+      *" repos/"*"/pulls/"*)
+        case "$*" in
+          *"--jq .changed_files"*) cat "$FM_TEST_GH_CHANGED_COUNT" ;;
+          *) printf '{"changed_files":%s}\n' "$(cat "$FM_TEST_GH_CHANGED_COUNT")" ;;
+        esac
+        exit 0
+        ;;
       *" repos/"*"/commits/"*"/check-runs"*)
         case "$*" in
           *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
@@ -351,6 +358,18 @@ add_glab_mock() {
 printf 'GITLAB_HOST=%s %s\n' "${GITLAB_HOST-<unset>}" "$*" >> "$FM_TEST_GLAB_LOG"
 case_dir=$(dirname "$FM_TEST_GLAB_JSON")
 case "${1:-} ${2:-}" in
+  api\ *)
+    case "$*" in
+      *"/merge_requests/"*"/diffs"*) cat "$FM_TEST_GLAB_DIFFS"; exit $? ;;
+      *"/merge_requests/"*)
+        case "$*" in
+          *"--jq .changes_count"*) cat "$FM_TEST_GLAB_CHANGED_COUNT" ;;
+          *) printf '{"changes_count":"%s"}\n' "$(cat "$FM_TEST_GLAB_CHANGED_COUNT")" ;;
+        esac
+        exit 0
+        ;;
+    esac
+    ;;
   "mr view")
     [ ! -e "$case_dir/glab-view-fails" ] || exit 1
     if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ]; then
@@ -470,6 +489,9 @@ run_pr_merge() {
   FM_TEST_SEAM="${FM_TEST_SEAM:-0}" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_PR_FILES="$case_dir/pr.files" \
+  FM_TEST_GH_CHANGED_COUNT="$case_dir/pr.changed-count" \
+  FM_TEST_GLAB_DIFFS="$case_dir/glab-diffs.json" \
+  FM_TEST_GLAB_CHANGED_COUNT="$case_dir/glab-changed-count" \
   FM_TEST_SCOPE_CHECK="${FM_TEST_SCOPE_CHECK:-0}" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
@@ -3848,11 +3870,17 @@ test_allow_missing_follows_the_allow_red_rules() {
 }
 
 run_scope_case() {  # <case-name> <brief-lines> <changed-files> [api-fails]; sets out and rc
-  local case_dir
+  local case_dir path record records=''
   case_dir=$(make_case "$1")
   add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   printf '%s\n' "$2" > "$case_dir/home/data/task-x1/brief.md"
-  printf '%s\n' "$3" > "$case_dir/pr.files"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    record=$(jq -cn --arg path "$path" '{filename:$path}')
+    records="${records:+$records,}$record"
+  done <<<"$3"
+  printf '[%s]\n' "$records" > "$case_dir/pr.files"
+  printf '%s\n' "$(jq -r 'length' "$case_dir/pr.files")" > "$case_dir/pr.changed-count"
   [ -z "${4:-}" ] || rm -f "$case_dir/pr.files"
   set +e
   out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/17 2>&1)
@@ -3873,23 +3901,78 @@ test_scope_check_refuses_file_outside_scope_paths() {
 
 test_scope_check_allows_files_inside_scope_paths() {
   local out rc
-  run_scope_case scope-inside $'# Task\nScope paths: bin/*.sh, README.md, tests/*' $'bin/a.sh\nREADME.md\ntests/new.test.sh'
+  run_scope_case scope-inside $'# Task\nScope paths: bin/*.sh, README.md, tests/*\n\n```text\nScope paths: {SCOPE_PATHS}\n```' $'bin/a.sh\nREADME.md\ntests/new.test.sh'
   assert_not_contains "$out" 'outside the brief Scope paths' "files matching the globs must be in scope"
   assert_not_contains "$out" 'scope check skipped' "an enforced scope must not report a skip"
   pass "fm-pr-merge: files matching Scope paths globs are in scope"
 }
 
-test_scope_check_skips_without_scope_paths_or_listing() {
+test_scope_check_preserves_legacy_brief_and_refuses_empty_or_incomplete_scope() {
   local out rc
   run_scope_case scope-nolines $'## Firstmate spec\nUpdate README.md.' "anything.txt"
   assert_contains "$out" 'merge scope check skipped: no Scope paths line' "missing line must warn and skip"
   assert_not_contains "$out" 'outside the brief Scope paths' "missing line must not refuse"
   run_scope_case scope-emptyline $'# Task\nScope paths:' "anything.txt"
-  assert_contains "$out" 'merge scope check skipped: no Scope paths line' "empty line must warn and skip"
+  expect_code 1 "$rc" "an explicitly empty scope must refuse the merge"
+  assert_contains "$out" 'empty or unfinished Scope paths line' "empty scope refusal must identify the field"
   run_scope_case scope-listing-error $'# Task\nScope paths: bin/*' "" api-fails
-  assert_contains "$out" 'merge scope check skipped: could not read changed files' "listing error must warn and skip"
-  assert_not_contains "$out" 'outside the brief Scope paths' "listing error must not refuse"
-  pass "fm-pr-merge: scope check warns and continues without a Scope paths line or file listing"
+  expect_code 1 "$rc" "an unreadable complete listing must refuse the merge"
+  assert_contains "$out" 'could not read changed files' "listing failure must identify the unavailable evidence"
+  assert_no_grep 'pr merge' "$SCOPE_CASE_DIR/gh.log" "incomplete scope evidence must stop before merge"
+  pass "fm-pr-merge: legacy missing scope warns, but empty or unavailable scope evidence refuses"
+}
+
+test_scope_check_counts_files_and_checks_both_rename_paths() {
+  local out rc case_dir
+  run_scope_case scope-count-mismatch $'# Task\nScope paths: bin/*' 'bin/a.sh'
+  printf '2\n' > "$SCOPE_CASE_DIR/pr.changed-count"
+  : > "$SCOPE_CASE_DIR/gh.log"
+  out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$SCOPE_CASE_DIR" task-x1 https://github.com/example/repo/pull/17 2>&1) || rc=$?
+  expect_code 1 "${rc:-0}" "a truncated listing must refuse the merge"
+  assert_contains "$out" 'forge reports 2 changed files but returned 1' "count mismatch must explain the missing evidence"
+  assert_no_grep 'pr merge' "$SCOPE_CASE_DIR/gh.log" "count mismatch must stop before merge"
+
+  case_dir=$(make_case scope-rename-old)
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf '%s\n' $'# Task\nScope paths: bin/*' > "$case_dir/home/data/task-x1/brief.md"
+  printf '%s\n' '[{"filename":"bin/new.sh","previous_filename":"secrets/old.sh"}]' > "$case_dir/pr.files"
+  printf '1\n' > "$case_dir/pr.changed-count"
+  set +e
+  out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/17 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a rename from outside the scope must refuse the merge"
+  assert_contains "$out" 'secrets/old.sh' "rename refusal must identify the old path"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "rename refusal must stop before merge"
+  pass "fm-pr-merge: counts the complete list and checks both GitHub rename paths"
+}
+
+test_gitlab_scope_checks_both_paths_and_count() {
+  local case_dir out rc
+  case_dir=$(make_gitlab_case gitlab-scope-rename)
+  printf '%s\n' $'# Task\nScope paths: bin/*' > "$case_dir/home/data/task-x1/brief.md"
+  printf '%s\n' '[{"new_path":"bin/new.sh","old_path":"secrets/old.sh"}]' > "$case_dir/glab-diffs.json"
+  printf '1\n' > "$case_dir/glab-changed-count"
+  set +e
+  out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$case_dir" task-x1 https://gitlab.example/group/repo/-/merge_requests/7 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a GitLab rename from outside scope must refuse the merge"
+  assert_contains "$out" 'secrets/old.sh' "GitLab rename refusal must name the old path"
+  assert_no_grep 'mr merge' "$case_dir/glab.log" "GitLab rename refusal must stop before merge"
+
+  case_dir=$(make_gitlab_case gitlab-scope-count)
+  printf '%s\n' $'# Task\nScope paths: bin/*' > "$case_dir/home/data/task-x1/brief.md"
+  printf '%s\n' '[{"new_path":"bin/a.sh","old_path":"bin/a.sh"}]' > "$case_dir/glab-diffs.json"
+  printf '2\n' > "$case_dir/glab-changed-count"
+  set +e
+  out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$case_dir" task-x1 https://gitlab.example/group/repo/-/merge_requests/7 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a truncated GitLab listing must refuse the merge"
+  assert_contains "$out" 'forge reports 2 changed files but returned 1' "GitLab count mismatch must explain the missing evidence"
+  assert_no_grep 'mr merge' "$case_dir/glab.log" "GitLab count mismatch must stop before merge"
+  pass "fm-pr-merge: checks GitLab rename paths and complete change counts"
 }
 
 test_gitlab_head_override_args_refuse_before_recording
@@ -3944,7 +4027,9 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 test_scope_check_refuses_file_outside_scope_paths
 test_scope_check_allows_files_inside_scope_paths
-test_scope_check_skips_without_scope_paths_or_listing
+test_scope_check_preserves_legacy_brief_and_refuses_empty_or_incomplete_scope
+test_scope_check_counts_files_and_checks_both_rename_paths
+test_gitlab_scope_checks_both_paths_and_count
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name

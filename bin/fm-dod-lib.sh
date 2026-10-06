@@ -215,16 +215,60 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   esac
 }
 
-# Return 0 when a Task subsection or the ship Scope paths line still consists
-# only of its scaffold placeholder. A missing file and legacy briefs carry no such placeholders.
-fm_brief_task_placeholders_present() {  # <file>
-  local file=$1 intent spec
+# Print the first un-fenced, non-indented Scope paths field. A missing field
+# returns 1; a present but blank field prints an empty value.
+fm_brief_scope_paths() {  # <file>
+  awk '
+    {
+      scan = $0
+      spaces = 0
+      while (spaces < 3 && substr(scan, 1, 1) == " ") {
+        scan = substr(scan, 2)
+        spaces++
+      }
+      marker = substr(scan, 1, 1)
+      marker_len = 0
+      if (marker == "`" || marker == "~") {
+        while (substr(scan, marker_len + 1, 1) == marker) marker_len++
+      }
+      if (marker_len >= 3) {
+        if (!fenced) {
+          fenced = 1
+          fence_marker = marker
+          fence_len = marker_len
+        } else if (marker == fence_marker && marker_len >= fence_len && substr(scan, marker_len + 1) ~ /^[[:space:]]*$/) {
+          fenced = 0
+        }
+        next
+      }
+      if (fenced || substr($0, 1, 1) == " " || substr($0, 1, 1) == "\t") next
+      if ($0 ~ /^Scope paths:/) {
+        value = substr($0, index($0, ":") + 1)
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        print value
+        found = 1
+        exit
+      }
+    }
+    END { if (!found) exit 1 }
+  ' "$1"
+}
+
+# Return 0 when a Task subsection or a new ship Scope paths field is unfinished.
+# A missing scope field remains valid for legacy briefs; scouts do not use it.
+fm_brief_task_placeholders_present() {  # <file> [ship]
+  local file=$1 kind=${2:-} intent spec scope
   [ -f "$file" ] || return 1
   intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
   spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
   [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
   [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
-  grep -q '^Scope paths:[[:space:]]*{SCOPE_PATHS}[[:space:]]*$' "$file" && return 0
+  if [ "$kind" = ship ] && scope=$(fm_brief_scope_paths "$file"); then
+    case "${scope//[[:space:],]/}" in
+      ''|*'{SCOPE_PATHS}'*) return 0 ;;
+    esac
+  fi
   return 1
 }
 

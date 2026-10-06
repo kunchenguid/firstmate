@@ -109,8 +109,8 @@
 #   repository's scripts/gates.py: `gates.py --root <project> dispatch --json
 #   [--unlanded N] [--workers N] [--token-budget N]`. Exit 0 passes. Exit 10
 #   refuses and prints JSON {verdict, reasons[], fix} on stdout. Any other exit,
-#   unparsable output, or an absent script is an infrastructure failure: one
-#   notice, and the spawn continues. --token-budget is passed only when the
+#   unparsable output, invalid pass output, or an absent script stops the spawn
+#   with an infrastructure error. --token-budget is passed only when the
 #   brief has a "Task token budget: N" line; otherwise the gate's default applies.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
 #   adapter, and experimental zellij, orca, and cmux adapters. Orca owns both
@@ -3077,8 +3077,8 @@ fi
   exit 1
 }
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  if fm_brief_task_placeholders_present "$BRIEF"; then
-    echo "error: $BRIEF still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}; fill ## Captain's intent, ## Firstmate spec, and the Scope paths line before spawn" >&2
+  if fm_brief_task_placeholders_present "$BRIEF" "$KIND"; then
+    echo "error: $BRIEF still contains {TASK}, {FIRSTMATE_SPEC}, or {SCOPE_PATHS}, or has an empty Scope paths line; fill ## Captain's intent, ## Firstmate spec, and the Scope paths line with a nonempty value before spawn" >&2
     exit 1
   fi
   if ! fm_brief_task_content_valid "$BRIEF"; then
@@ -3128,7 +3128,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       workflow_gates=$FM_WORKFLOW_GATES_SCRIPT
     fi
     if [ ! -f "$workflow_gates" ]; then
-      echo "notice: workflow dispatch gate unavailable at $workflow_gates; spawning without it" >&2
+      echo "error: workflow dispatch gate unavailable at $workflow_gates; restore the workflow checkout and retry the spawn" >&2
+      exit 1
     else
       unlanded=0
       workers=0
@@ -3167,7 +3168,16 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         printf 'error: adjust the reported limit and fix; workflow limits: %s/projects/workflow/registry/; budget-controlled limits: %s/projects/workflow/registry/budgets.md\n' "$FM_HOME" "$FM_HOME" >&2
         exit 1
       elif [ "$gate_rc" -ne 0 ]; then
-        echo "notice: workflow dispatch gate failed to run (exit $gate_rc); spawning without it" >&2
+        echo "error: workflow dispatch gate failed to run (exit $gate_rc); repair the workflow gate and retry the spawn" >&2
+        exit 1
+      elif ! gate_text=$(printf '%s' "$gate_out" | jq -er -s '
+        if length == 1 and (.[0] | type == "object" and .verdict == "pass")
+        then "pass"
+        else error("invalid pass contract")
+        end
+      ' 2>/dev/null); then
+        echo "error: workflow dispatch gate returned invalid pass output; repair scripts/gates.py to return {\"verdict\":\"pass\"} and retry" >&2
+        exit 1
       fi
     fi
   fi

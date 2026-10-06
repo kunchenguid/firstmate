@@ -164,24 +164,74 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 LAST_ASSISTANT_MESSAGE=$(printf '%s' "$PAYLOAD" | jq -r 'if type == "object" then (.last_assistant_message // "") else "" end' 2>/dev/null || true)
-CLAIM_WORDS='(completed|finished|implemented|fixed|shipped|merged|verified|passed)'
-if [ "$STOP_HOOK_ACTIVE" != "true" ] && [ -n "$LAST_ASSISTANT_MESSAGE" ]; then
+SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+CLAIM_WORDS='(done|completed|finished|implemented|fixed|shipped|merged|verified|passed)'
+COMPLETION_WARNING_FILE="$STATE/.turnend-completion-warning"
+COMPLETION_WARNING_LOCK="$STATE/.turnend-completion-warning.lock"
+completion_message_has_recorded_pr() {
+  local message=$1 url meta urls task_id
+  urls=$(printf '%s\n' "$message" | grep -Eo 'https://[^[:space:]<>]+/(pull|merge_requests)/[0-9]+' || true)
+  for url in $urls; do
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      grep -Fqx "pr=$url" "$meta" || continue
+      task_id=${meta##*/}
+      task_id=${task_id%.meta}
+      if printf '%s\n' "$message" | awk -v id="$task_id" '{ text=$0; while (match(text, /[[:alnum:]_.-]+/)) { if (substr(text, RSTART, RLENGTH) == id) found=1; text=substr(text, RSTART + RLENGTH) } } END { if (!found) exit 1 }'; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+if [ -n "$LAST_ASSISTANT_MESSAGE" ]; then
   CLAIM_TEXT=$(printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | sed -E 's/(^|[^[:alpha:]])not only([^[:alpha:]]|$)/\1\2/Ig')
   if printf '%s\n' "$CLAIM_TEXT" | grep -Eiq "(^|[^[:alpha:]])$CLAIM_WORDS([^[:alpha:]]|$)" \
     && ! printf '%s\n' "$CLAIM_TEXT" | grep -Eiq "(^|[^[:alpha:]])(not|never|haven.t|hasn.t|didn.t|won.t)[[:space:][:alnum:]]{0,16}$CLAIM_WORDS([^[:alpha:]]|$)" \
-    && ! printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq 'https://[^[:space:]]+/(pull|merge_requests)/[0-9]+|(^|[^[:alpha:]])(checks?|tests?|ci|validation).*(passed|green|success)([^[:alpha:]]|$)'; then
-    printf 'completion claim has no linked evidence; include a PR URL or a check result before ending the turn\n' >&2
-    exit 2
+    && ! printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq '(^|[^[:alpha:]])(checks?|tests?|ci|validation).*(passed|green|success)([^[:alpha:]]|$)' \
+    && ! completion_message_has_recorded_pr "$LAST_ASSISTANT_MESSAGE"; then
+    COMPLETION_WARNING_KEY=$(printf '%s\n%s' "$SESSION_ID" "$LAST_ASSISTANT_MESSAGE" | cksum | awk '{print $1 ":" $2}')
+    mkdir -p "$STATE" 2>/dev/null || true
+    if ! fm_lock_try_acquire "$COMPLETION_WARNING_LOCK"; then
+      printf 'completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn\n' >&2
+      exit 2
+    fi
+    if [ "$STOP_HOOK_ACTIVE" = "true" ] && [ -f "$COMPLETION_WARNING_FILE" ] \
+      && [ "$(cat "$COMPLETION_WARNING_FILE" 2>/dev/null || true)" = "$COMPLETION_WARNING_KEY" ]; then
+      rm -f -- "$COMPLETION_WARNING_FILE"
+      fm_lock_release "$COMPLETION_WARNING_LOCK"
+    else
+      COMPLETION_WARNING_TMP=$(mktemp "$STATE/.turnend-completion-warning.XXXXXX") || {
+        fm_lock_release "$COMPLETION_WARNING_LOCK"
+        printf 'completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn\n' >&2
+        exit 2
+      }
+      printf '%s\n' "$COMPLETION_WARNING_KEY" > "$COMPLETION_WARNING_TMP"
+      mv -f -- "$COMPLETION_WARNING_TMP" "$COMPLETION_WARNING_FILE" || {
+        rm -f -- "$COMPLETION_WARNING_TMP"
+        fm_lock_release "$COMPLETION_WARNING_LOCK"
+        printf 'completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn\n' >&2
+        exit 2
+      }
+      fm_lock_release "$COMPLETION_WARNING_LOCK"
+      printf 'completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn\n' >&2
+      exit 2
+    fi
+  else
+    rm -f -- "$COMPLETION_WARNING_FILE" 2>/dev/null || true
   fi
+else
+  rm -f -- "$COMPLETION_WARNING_FILE" 2>/dev/null || true
 fi
 if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
 # --- the actual predicate ----------------------------------------------------
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 if [ "$CLAUDE_MODE" -eq 1 ]; then
   # shellcheck source=bin/fm-session-lock-lib.sh
   . "$SCRIPT_DIR/fm-session-lock-lib.sh"
@@ -192,7 +242,6 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0

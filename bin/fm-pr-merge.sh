@@ -38,9 +38,10 @@
 # github_branch_rules_unavailable_on_plan owns the narrow plan-unavailable
 # exception; every other unreadable required source refuses.
 # Every failing condition is reported, not just the first.
-# When the task brief has a comma-separated "Scope paths:" glob line,
-# scope_check_pr refuses a PR whose complete forge file list leaves those
-# globs; a missing line or an unreadable file list warns and continues.
+# When the task brief has a populated "Scope paths:" glob line,
+# scope_check_pr refuses a PR if any old or new path is outside those globs or
+# the forge's changed-file count disagrees with its complete file listing. A
+# missing line in a legacy brief warns and continues.
 # The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
@@ -155,6 +156,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
@@ -407,25 +410,79 @@ merge_control_cleanup() {
 }
 
 scope_check_pr() {
-  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" globs files encoded outside path glob
-  globs=$(sed -n 's/^Scope paths:[[:space:]]*//p' "$brief" 2>/dev/null | head -1)
-  if [ -z "${globs//[[:space:],]/}" ]; then
+  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" globs files_json raw expected actual encoded outside path glob
+  if ! globs=$(fm_brief_scope_paths "$brief" 2>/dev/null); then
     echo "warning: merge scope check skipped: no Scope paths line in the task brief" >&2
     return 0
   fi
+  if [ -z "${globs//[[:space:],]/}" ] || [[ "$globs" == *'{SCOPE_PATHS}'* ]]; then
+    echo "error: merge refused; the task brief has an empty or unfinished Scope paths line" >&2
+    echo "fix: fill the Scope paths line with the task's allowed file globs" >&2
+    return 1
+  fi
   case "$PROVIDER" in
-    github) files=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/files?per_page=100" --jq '.[].filename' 2>&1) || {
-      echo "warning: merge scope check skipped: could not read changed files for $URL: $files" >&2
-      return 0
-    } ;;
+    github)
+      raw=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/files?per_page=100" 2>&1) || {
+        echo "error: merge refused; could not read changed files for $URL: $raw" >&2
+        echo "fix: restore GitHub API access and retry the merge" >&2
+        return 1
+      }
+      files_json=$(printf '%s' "$raw" | jq -s -e 'if length > 0 and all(.[]; type == "array") then add else error("invalid changed-file listing") end' 2>/dev/null) || {
+        echo "error: merge refused; GitHub returned an invalid changed-file listing for $URL" >&2
+        echo "fix: restore a complete GitHub pull request files response and retry" >&2
+        return 1
+      }
+      expected=$(gh api "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq '.changed_files' 2>&1) || {
+        echo "error: merge refused; could not read GitHub changed_files for $URL: $expected" >&2
+        echo "fix: restore GitHub API access and retry the merge" >&2
+        return 1
+      }
+      case "$expected" in ''|*[!0-9]*)
+        echo "error: merge refused; GitHub returned an invalid changed_files count for $URL: $expected" >&2
+        return 1
+        ;;
+      esac
+      actual=$(printf '%s' "$files_json" | jq -er 'if type == "array" and all(.[]; (.filename | type == "string") and ((.previous_filename == null) or (.previous_filename | type == "string"))) then length else error("invalid changed-file records") end' 2>/dev/null) || {
+        echo "error: merge refused; GitHub returned invalid changed-file records for $URL" >&2
+        return 1
+      }
+      files=$(printf '%s' "$files_json" | jq -r '.[] | .filename, (.previous_filename // empty)')
+      ;;
     gitlab)
       encoded=$(jq -rn --arg p "$FM_PR_PATH" '$p|@uri')
-      files=$(set -o pipefail; GITLAB_HOST="$PR_HOST" glab api --paginate "projects/$encoded/merge_requests/$PR_NUMBER/diffs?per_page=100" 2>&1 | jq -r '.[].new_path' 2>&1) || {
-        echo "warning: merge scope check skipped: could not read changed files for $URL: $files" >&2
-        return 0
-      } ;;
+      raw=$(GITLAB_HOST="$PR_HOST" glab api --paginate "projects/$encoded/merge_requests/$PR_NUMBER/diffs?per_page=100" 2>&1) || {
+        echo "error: merge refused; could not read changed files for $URL: $raw" >&2
+        echo "fix: restore GitLab API access and retry the merge" >&2
+        return 1
+      }
+      files_json=$(printf '%s' "$raw" | jq -s -e 'if length > 0 and all(.[]; type == "array") then add else error("invalid changed-file listing") end' 2>/dev/null) || {
+        echo "error: merge refused; GitLab returned an invalid changed-file listing for $URL" >&2
+        echo "fix: restore a complete GitLab merge request diff response and retry" >&2
+        return 1
+      }
+      expected=$(GITLAB_HOST="$PR_HOST" glab api "projects/$encoded/merge_requests/$PR_NUMBER" --jq '.changes_count' 2>&1) || {
+        echo "error: merge refused; could not read GitLab changes_count for $URL: $expected" >&2
+        echo "fix: restore GitLab API access and retry the merge" >&2
+        return 1
+      }
+      case "$expected" in ''|*[!0-9]*)
+        echo "error: merge refused; GitLab returned an invalid changes_count for $URL: $expected" >&2
+        return 1
+        ;;
+      esac
+      actual=$(printf '%s' "$files_json" | jq -er 'if type == "array" and all(.[]; (.new_path | type == "string") and (.old_path | type == "string")) then length else error("invalid changed-file records") end' 2>/dev/null) || {
+        echo "error: merge refused; GitLab returned invalid changed-file records for $URL" >&2
+        return 1
+      }
+      files=$(printf '%s' "$files_json" | jq -r '.[] | .new_path, .old_path')
+      ;;
     *) return 0 ;;
   esac
+  if [ "$actual" -ne "$expected" ]; then
+    echo "error: merge refused; forge reports $expected changed files but returned $actual for $URL" >&2
+    echo "fix: retry after the forge returns a complete changed-file listing" >&2
+    return 1
+  fi
   outside=
   while IFS= read -r path; do
     [ -n "$path" ] || continue

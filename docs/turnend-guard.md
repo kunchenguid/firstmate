@@ -52,8 +52,9 @@ A live identity-matched daemon with a fresh beacon then satisfies that boundary 
 The guard remains a backstop.
 [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
-Independently of watcher health, a primary-scope stop whose `last_assistant_message` claims completion without linked evidence (a PR URL or a check result) is blocked once with exit status 2.
-The check is a keyword heuristic bounded to one block per turn by `stop_hook_active`; `bin/fm-turnend-guard.sh` and `tests/fm-turnend-guard.test.sh` own the exact words and exemptions.
+Independently of watcher health, a primary-scope stop whose `last_assistant_message` claims completion without a check result or a PR recorded for the named task is blocked with exit status 2.
+The warning records its own one-continuation allowance, so an unrelated hook continuation cannot suppress it and the warning cannot repeat forever.
+`bin/fm-turnend-guard.sh` and `tests/fm-turnend-guard.test.sh` own the exact completion words and evidence checks.
 
 ## Guard predicates
 

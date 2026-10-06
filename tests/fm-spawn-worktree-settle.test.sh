@@ -189,15 +189,19 @@ test_workflow_dispatch_gate_exit_contract() {
   expect_code 0 "$status" "exit 0 must pass"$'\n'"$out"
   grep -q -- 'dispatch --json' "$GATE.args" || fail "gate must be invoked as dispatch --json"
   run_gate_case gate-other 1 'whatever'
-  expect_code 0 "$status" "any other exit is an infrastructure failure"$'\n'"$out"
-  assert_contains "$out" 'workflow dispatch gate failed to run (exit 1)' "infrastructure failure must print one notice"
+  expect_code 1 "$status" "any other exit is an infrastructure failure that stops dispatch"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate failed to run (exit 1)' "infrastructure failure must explain why dispatch stopped"
   run_gate_case gate-unparsable 10 'not json'
-  expect_code 0 "$status" "an unparsable refusal is an infrastructure failure"$'\n'"$out"
-  assert_contains "$out" 'workflow dispatch gate failed to run' "unparsable output must print a notice"
+  expect_code 1 "$status" "an unparsable refusal must stop dispatch"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate failed to run' "unparsable output must explain why dispatch stopped"
   run_gate_case gate-invalid-contract 10 '{}'
-  expect_code 0 "$status" "an incomplete refusal is an infrastructure failure"$'\n'"$out"
-  assert_contains "$out" 'workflow dispatch gate failed to run' "an incomplete refusal must print a notice"
-  pass "fm-spawn honours the gate contract: 0 pass, 10 refuse, anything else continues with a notice"
+  expect_code 1 "$status" "an incomplete refusal must stop dispatch"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate failed to run' "an incomplete refusal must explain why dispatch stopped"
+  run_gate_case gate-invalid-pass 0 '{}'
+  expect_code 1 "$status" "exit 0 without a valid pass must stop dispatch"$'\n'"$out"
+  assert_contains "$out" 'returned invalid pass output' "invalid pass output must name the contract failure"
+  [ ! -e "$HOME_DIR/state/$GATE_ID.meta" ] || fail "invalid gate output published task metadata"
+  pass "fm-spawn proceeds only on a valid gate pass and refuses malformed or failed results"
 }
 
 test_workflow_gate_refusal_cannot_be_overridden() {
@@ -244,16 +248,17 @@ test_workflow_dispatch_gate_budget_only_when_briefed() {
   pass "fm-spawn passes --token-budget only when the brief states one"
 }
 
-test_workflow_dispatch_gate_missing_script_degrades() {
+test_workflow_dispatch_gate_missing_script_refuses() {
   local rec id out status
   id=settle-workflow-missing-z4
   rec=$(make_settle_case settle-workflow-missing "$id" 0)
   read_settle_record "$rec"
   out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$HOME_DIR/absent-gates.py" run_settle_spawn "$id")
   status=$?
-  expect_code 0 "$status" "a missing workflow gate must not refuse the spawn"$'\n'"$out"
-  assert_contains "$out" 'workflow dispatch gate unavailable' "missing gate must print one notice"
-  pass "fm-spawn degrades without the workflow gate script"
+  expect_code 1 "$status" "a missing workflow gate must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate unavailable' "missing gate refusal must name the missing gate"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "missing workflow gate published task metadata"
+  pass "fm-spawn refuses to dispatch when the workflow gate is missing"
 }
 
 test_unlanded_counts_only_live_ship_tasks() {
@@ -356,7 +361,7 @@ test_already_settled_pane_costs_one_confirm_read
 test_workflow_dispatch_gate_exit_contract
 test_workflow_gate_refusal_cannot_be_overridden
 test_workflow_dispatch_gate_budget_only_when_briefed
-test_workflow_dispatch_gate_missing_script_degrades
+test_workflow_dispatch_gate_missing_script_refuses
 test_unlanded_counts_only_live_ship_tasks
 test_captain_reminder_failure_does_not_block_spawn
 test_transient_primary_checkout_is_not_accepted
