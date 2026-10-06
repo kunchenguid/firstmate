@@ -66,14 +66,14 @@ Pi same-process session replacement follows the generation-owner contract in `.p
 
 A state-scoped replacement handoff carries every actionable close whose delivery overlapped `session_shutdown`, including:
 
-- A main follow-up Pi accepted but had not yet consumed.
+- A main wake (steering or follow-up) Pi accepted but had not yet consumed.
 - Branch handling.
 - A retiring child that reports after the successor claim.
 
 A handoff marker never satisfies the extension-ownership tolerance.
 So a running Pi process whose replacement did not load this extension is reported as missing, rather than borrowing stale load evidence from its predecessor.
 
-A main follow-up counts as delivered once Pi accepts it, never once the model reads it.
+A main wake, steering or follow-up, counts as delivered once Pi accepts it, never once the model reads it.
 The reason is that a follow-up queued while main is streaming joins the running run without a `before_agent_start`.
 The extension header owns how consumption is observed and why it only decides what a replacement replays.
 
