@@ -1961,6 +1961,7 @@ EOF
       tmp=$(mktemp "$STATE/.$origin.meta.XXXXXX") \
         || fail "cannot stage the completion record for $origin"
       if ! awk -v keys="$keys" '
+          /^(decisions_reviewed|decision_keys)=/ { next }
           /^pr=/ && !done { print "decisions_reviewed=1"; print "decision_keys=" keys; done = 1 }
           { print }
           END { if (!done) { print "decisions_reviewed=1"; print "decision_keys=" keys } }
