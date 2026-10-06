@@ -19,6 +19,8 @@
 #   data/metrics/daily.tsv          per day and home counters (steers, stall_alarms, ...)
 #   data/metrics/skills.tsv         per day, home and skill read counts
 #   data/metrics/rings.tsv          leads the watcher woke itself
+#   data/metrics/lanes.tsv          harness and model per home, task and PR (written by
+#                                   config/fm-lane-record.sh); joined to prs.tsv by PR URL
 #   data/fleet-pulse.tsv            per home flow rows (open, ready, donewait, oldestwait_h)
 #   config/metrics-targets.tsv      metric, op (>= or <=), target
 #   config/lane-target              open-lane target per home (default 4)
@@ -605,6 +607,43 @@ for h in sorted(homes, key=lambda x: (x != 'main', x)):
 if hc:
     S.append(f'<section><h2>Homes</h2><p class="small muted">Lane boxes show open lanes against the target of {lane_target}.</p><div class="homes">{"".join(hc)}</div></section>')
 
+# 3b. Who does the work: harness and model per lane, from the lane record
+lrel = 'data/metrics/lanes.tsv'
+lp = os.path.join(HOME, lrel)
+lanes_rec = None
+if os.path.isfile(lp) and os.path.getsize(lp) == 0: notes.append((lrel, 'empty'))
+else: lanes_rec = tsv(lrel, ('home', 'task', 'kind', 'harness', 'model'))
+if lanes_rec == []: notes.append((lrel, 'no rows yet')); lanes_rec = None
+if lanes_rec is None:
+    S.append('<section><h2>Who does the work</h2><div class="card"><p class="small muted">No record yet.</p></div></section>')
+else:
+    last = {}  # (home, task) -> its latest row; a row per model change or PR
+    for r in lanes_rec:
+        if r['kind'] != 'secondmate' and r['home'] not in parked: last[(r['home'], r['task'])] = r
+    pr_lane = {r['pr']: r for r in lanes_rec if r.get('pr') and r['kind'] != 'secondmate' and r['home'] not in parked}
+    by_url = {f"https://github.com/{p['repo']}/pull/{p['pr']}": p for p in prs or [] if p.get('repo') and p.get('pr')}
+    groups = {}
+    def grp(r): return groups.setdefault(f"{r['harness']} · {r['model']}", {'run': 0, 'merged': 0, 'fp': 0})
+    for (h, tk), r in last.items():
+        g = grp(r)
+        if h in home_dir and os.path.isfile(os.path.join(home_dir[h], 'state', f'{tk}.meta')): g['run'] += 1
+    for url, r in pr_lane.items():
+        p = by_url.get(url)
+        if p and local_day(p['merged']) in WEEK:
+            g = grp(r); g['merged'] += 1; g['fp'] += p['first_pass'] == '1'
+    def wrow(label, a, b, c, cls='wr'): return f'<div class="{cls}"><span>{label}</span><b>{a}</b><b>{b}</b><b>{c}</b></div>'
+    rs = [wrow(esc(k), g['run'], g['merged'], f"{100 * g['fp'] // g['merged']}%" if g['merged'] else '–')
+          for k, g in sorted(groups.items(), key=lambda kv: (-kv[1]['run'], -kv[1]['merged'], kv[0]))]
+    more = f'<details class="more"><summary>show all {len(rs)}</summary>{"".join(rs[5:])}</details>' if len(rs) > 5 else ''
+    leads_ = {}
+    for r in lanes_rec:
+        if r['kind'] == 'secondmate' and r['task'] not in parked: leads_[r['task']] = r
+    ll = ''.join(f'<li>{esc(h)}: {esc(r["harness"])} · {esc(r["model"])}</li>' for h, r in sorted(leads_.items()))
+    ll = f'<details class="more"><summary>Lead models, {len(leads_)} home{"s" if len(leads_) != 1 else ""}</summary><ul class="mini">{ll}</ul></details>' if ll else ''
+    since = min(r.get('first_seen', '') or '9' for r in lanes_rec)[:10]
+    S.append(f'''<section><h2>Who does the work</h2><div class="card">{wrow("Harness · model", "Running", "Merged, 7 days", "First pass", "wr wh")}
+{"".join(rs[:5]) or '<p class="small muted">No worker lanes recorded.</p>'}{more}{ll}<p class="small muted">Recorded since {esc(since)}; older work has no record.</p></div></section>''')
+
 # 4. Trends
 tr = []
 if prs is not None:
@@ -715,6 +754,9 @@ summary{cursor:pointer;list-style:none;display:flex;justify-content:space-betwee
 summary::-webkit-details-marker{display:none}summary::before{content:"›";display:inline-block;margin-right:10px;color:var(--faint);transition:transform .15s}
 details[open] summary::before{transform:rotate(90deg)}summary span:first-child{flex:1}
 .more{border:0;border-radius:0;margin:0;background:none}.more summary{font-weight:500;color:var(--faint);padding:10px 18px}
+.card .more summary{padding:8px 0;justify-content:flex-start}
+.wr{display:grid;grid-template-columns:minmax(0,1fr) repeat(3,4.6em);gap:10px;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}
+.wr span{overflow-wrap:anywhere}.wr b{text-align:right;font-weight:600}.wh{font-size:12px;color:var(--faint)}.wh b{font-weight:500}
 .cnt{font-size:13px;font-weight:600;color:var(--soft);background:var(--bg);border-radius:999px;padding:1px 10px}
 .list{border-top:1px solid var(--line)}
 .row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,9em) auto;gap:4px 14px;align-items:center;padding:10px 18px;border-bottom:1px solid var(--line);font-size:14px}
@@ -724,7 +766,8 @@ a{color:inherit;text-decoration-color:var(--bar);text-underline-offset:3px}a:hov
 .note{font-size:13px;color:var(--faint);margin:6px 0 0}.empty{padding:12px 18px;margin:0;color:var(--faint);font-size:14px}
 code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 @media (max-width:620px){main{padding:18px 14px 40px}.tv{font-size:36px}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.tile:last-child:nth-child(odd){grid-column:1/-1}
-.row{grid-template-columns:minmax(0,1fr);padding:10px 14px}.rr{text-align:left}.rr .chip{margin:2px 4px 2px 0}.rr:empty{display:none}}
+.row{grid-template-columns:minmax(0,1fr);padding:10px 14px}.rr{text-align:left}.rr .chip{margin:2px 4px 2px 0}.rr:empty{display:none}
+.wr{grid-template-columns:minmax(0,1fr) repeat(3,3.4em);gap:8px}}
 '''
 stamp = NOW.strftime('%a %d %b %Y, %H:%M')
 doc = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
