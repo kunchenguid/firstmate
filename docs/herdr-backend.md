@@ -720,7 +720,7 @@ A registration alone never proves an agent.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
 That nested shell is the shape an interactive `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
-A Herdr spawn now enters its slot with a root-shell `cd` rather than that subshell, so a nested shell under a task pane's top shell is one the worker or a human opened, and the process-level proof below applies either way.
+A Herdr spawn enters its slot with a root-shell `cd` rather than that subshell ([Treehouse slot entry](#treehouse-slot-entry)), so a nested shell under a task pane's top shell is one the worker or a human opened, and the process-level proof below applies either way.
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
 It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:

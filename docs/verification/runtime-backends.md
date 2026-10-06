@@ -1638,7 +1638,7 @@ ok - real Herdr lab: an aborted respawn returns the slot it leased even though a
 On the macOS host that produced this record the full suite passed its first 26 cases and then stopped at the concurrent cross-home recovery case with `herdr presentation recovery could not acquire its session lock; refusing a concurrent resume`, because one uncontended same-identity resume there held the presentation session lock for about nine seconds at a load average between ten and fifteen, while a second concurrent resume waits five seconds before refusing.
 An unmodified `main` checkout run on the same host the same day stopped at that same case with the same refusal, and a run with only that case removed passed every remaining case, so the margin belongs to the recovery lock wait rather than to the grouping or the leased spawn shape; the required CI lane keeps running the unmodified suite.
 
-The unit suite's repo worktree group cases (`test_worktree_group_capable_gates_on_protocol_and_schema` through `test_live_binding_accepts_repo_parent_between_home_and_child`) passed in the same run, with the whole file reporting 228 `ok` lines and no `not ok` line.
+The unit suite's repo worktree group cases (`test_worktree_group_capable_gates_on_protocol_and_schema` through `test_live_binding_accepts_repo_parent_between_home_and_child`) passed in a 2026-10-06 run on macOS, with the whole file reporting 237 `ok` lines and no `not ok` line.
 
 ### Composer and operational input
 
@@ -1772,7 +1772,7 @@ The Herdr refusal when a shell accepts the command but does not move is not exer
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) and Pi 0.85.1 in an isolated `fm-lab-` session (upstream issue #4115, duplicates #3639, #3487, #2908, #3545).
 
-Herdr keeps a Pi registration after the Pi process has exited to a shell when a nested interactive shell sits under the pane's top shell, which is the crew shape `treehouse get` leaves behind; a plain `/quit` directly under the top shell, and a `kill -9` of Pi, both released it on this version.
+Herdr keeps a Pi registration after the Pi process has exited to a shell when a nested interactive shell sits under the pane's top shell, which is the shape an interactive `treehouse get` leaves behind; a plain `/quit` directly under the top shell, and a `kill -9` of Pi, both released it on this version.
 Reproduced in the lab with a nested `zsh` under the pane shell, then `pi` with no prompt, then `/quit`:
 
 ```sh
