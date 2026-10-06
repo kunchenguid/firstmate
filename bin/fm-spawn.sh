@@ -4001,12 +4001,14 @@ else
               # pane close and never a workspace close, and the task stays in
               # the flat row the ordering warning already announced. An
               # adopted or pre-existing parent is never touched; a refused
-              # removal leaves the parent as it was, with its own warning
-              # (docs/herdr-backend.md "Presentation spaces").
+              # removal only leaves the parent standing, with its own warning
+              # (docs/herdr-backend.md "Presentation spaces"). The parent id
+              # is cleared on every not-placed outcome, removed or refused,
+              # so the later attach is skipped and the task stays flat.
               if fm_backend_herdr_projection_repo_parent_close_fresh "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED"; then
                 echo "warning: herdr repo grouping closed the repo parent $HERDR_REPO_PARENT_CREATED it created for this task because the task could not be placed ahead of it; leaving this task's space flat" >&2
-                HERDR_REPO_PARENT_WORKSPACE_ID=""
               fi
+              HERDR_REPO_PARENT_WORKSPACE_ID=""
               HERDR_REPO_PARENT_CREATED=""
             fi
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)

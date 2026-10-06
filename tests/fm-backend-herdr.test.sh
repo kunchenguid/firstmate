@@ -4044,6 +4044,9 @@ SH
   assert_not_contains "$(cat "$log")" $'close' "a parent with an extra tab was closed"
 
   # A pane close Herdr refuses is reported and never forced or retried.
+  # Caller contract: status 1 after exactly one attempt and no workspace close.
+  # The spawn clears the parent id on every not-placed outcome, so a refused
+  # removal leaves the parent standing but the task never attaches to it.
   dir="$TMP_ROOT/repo-fresh-close-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' "$wt_one" > "$resp/1.out"
   printf '%s\n' "$tabs_one" > "$resp/2.out"
