@@ -2066,7 +2066,13 @@ case "${1:-} ${2:-}" in
     exit 0 ;;
   'pane list')
     case "$(arg_after --workspace "$@")" in
-      wsproj) printf '{"result":{"panes":[{"pane_id":"%%9","tab_id":"tabnew"}]}}\n' ;;
+      wsproj)
+        if [ -f "$D/herdr-projection-stray-pane" ]; then
+          # The fresh space never converges to its one task pane.
+          printf '{"result":{"panes":[{"pane_id":"%%9","tab_id":"tabnew"},{"pane_id":"%%10","tab_id":"tabnew"}]}}\n'
+        else
+          printf '{"result":{"panes":[{"pane_id":"%%9","tab_id":"tabnew"}]}}\n'
+        fi ;;
       *) printf '{"result":{"panes":[]}}\n' ;;
     esac
     exit 0 ;;
@@ -2075,6 +2081,10 @@ case "${1:-} ${2:-}" in
       "$(arg_after --session "$@")" "$D"
     exit 0 ;;
   'tab create')
+    if [ -f "$D/herdr-tab-create-fails" ]; then
+      echo 'error: tab create failed' >&2
+      exit 1
+    fi
     # The re-created endpoint. Recording it lets a case prove the pane the
     # record ends up naming is the one this call minted.
     printf '%s\n' "$*" >> "$D/herdr-created-tabs"
@@ -2511,6 +2521,53 @@ test_herdr_rebind_keeps_a_journal_whose_space_is_still_present() {
   pass "reclaim: a herdr rebind keeps a journal whose space survives and stays flat"
 }
 
+# A projected create that fails after the old journal was retired keeps the
+# fresh journal quarantined for recovery and never falls back to a flat tab.
+# Abort cleanup gets authority only when both creates returned exact IDs: then
+# the exit path targets exactly the minted task and seeded panes (%9, %8);
+# otherwise it touches no pane at all.
+test_herdr_rebind_projection_failure_quarantines_its_journal() {
+  local fault id dir out rc log token cleanup
+  for fault in workspace-create-fails tab-create-fails projection-stray-pane; do
+    case "$fault" in
+      workspace-create-fails) id=rl81 cleanup=0 ;;
+      tab-create-fails) id=rl82 cleanup=0 ;;
+      projection-stray-pane) id=rl83 cleanup=1 ;;
+    esac
+    herdr_case_or_skip "gone-herdr-projection-$fault" "$id" fmlab '%none' || {
+      echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+      return 0
+    }
+    dir=$HERDR_CASE_DIR
+    stage_herdr_presentation "$dir" "$id" on
+    : > "$dir/fake/herdr-$fault"
+
+    rc=0
+    out=$(run_spawn "$dir" "$id" --relaunch --harness claude) || rc=$?
+    log=$(cat "$dir/fake/herdr-log")
+    expect_code 1 "$rc" "a failed projected rebind ($fault) must refuse"$'\n'"$out"$'\n'"$log"
+    assert_contains "$log" "workspace create" "the rebind ($fault) should have attempted the projection"
+    token=$(presentation_field "$dir" "$id" projection_id)
+    [ -n "$token" ] && [ "$token" != "$OLD_PROJECTION_TOKEN" ] \
+      || fail "the retired journal should be replaced by a fresh one ($fault), got token '$token'"
+    [ "$(presentation_field "$dir" "$id" version)" = 1 ] \
+      || fail "a failed create must leave its journal unbound and quarantined ($fault): $(cat "$dir/home/state/$id.herdr-presentation")"
+    assert_not_contains "$(cat "$dir/fake/herdr-created-tabs" 2>/dev/null)" "--workspace wsparent" \
+      "a failed projection must not fall back to a flat tab in the launcher's workspace ($fault)"
+    assert_not_contains "$log" "workspace close" "abort cleanup never closes a workspace ($fault)"
+    if [ "$cleanup" = 1 ]; then
+      assert_contains "$log" "pane get %9 --session fmlab" \
+        "exact abort cleanup should target the minted task pane ($fault)"
+      assert_contains "$log" "pane get %8 --session fmlab" \
+        "exact abort cleanup should target the seeded pane ($fault)"
+    else
+      assert_not_contains "$log" "pane get %9" "an ambiguous create grants no abort cleanup ($fault)"
+      assert_not_contains "$log" "pane get %8" "an ambiguous create grants no abort cleanup ($fault)"
+    fi
+  done
+  pass "reclaim: a failed projected rebind quarantines its fresh journal and cleans up only exact panes"
+}
+
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -2678,5 +2735,6 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_herdr_rebind_recreates_a_presentation_space
 test_herdr_rebind_stays_flat_when_presentation_is_off
 test_herdr_rebind_keeps_a_journal_whose_space_is_still_present
+test_herdr_rebind_projection_failure_quarantines_its_journal
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
