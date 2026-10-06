@@ -195,6 +195,74 @@ These discriminator strings are un-owned vendor UI text.
 `bin/fm-vendor-auth-probe.sh` pins the verified version, reports `versionVerified=no` when the running CLI differs, and classifies any unrecognized first line as `indeterminate` rather than authenticated.
 Re-run the two commands above and update this section and the pinned version together when the vendor CLI changes.
 
+## Claude and Codex subscription workers
+
+Verified 2026-10-05 with Claude Code 2.1.289, codex-cli 0.160.0, and two Firstmate-launched ship workers on tmux.
+The [operator setup](../configuration.md#use-claude-and-codex-together) owns the supported mixed-worker arrangement; this section records the bounded evidence for it.
+No login, credential file, account pin, or sibling worktree was changed during these checks.
+
+```sh
+claude --version
+codex --version
+bash bin/fm-harness.sh
+claude auth status --json | jq '{loggedIn,authMethod,apiProvider}'
+codex login status
+```
+
+```text
+2.1.289 (Claude Code)
+codex-cli 0.160.0
+codex
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty"
+}
+Logged in using ChatGPT
+```
+
+The harness detection ran inside the Codex task worker.
+The `codex login status` line was then repeated with the exact environment of the registered Codex worker's native `codex` process, the descendant of that task's recorded tmux pane whose working directory is the recorded worktree, and returned `Logged in using ChatGPT` with exit status `0`.
+That environment had no `CODEX_HOME`, `OPENAI_API_KEY`, or `CODEX_API_KEY`, so Codex used its default store under that process's `HOME`; the login method is the CLI's own output, not inferred.
+The Claude status check was also repeated with the authentication environment selected by the exact recorded Claude pane's native process and returned the same filtered result.
+Both native processes had no `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or `OPENAI_API_KEY` in their environment.
+Only variable presence was reported; credential values and account identity were omitted.
+
+For the record and endpoint check, set `FM_HOME` to the supervising home and `FM_CODEX_TASK` and `FM_CLAUDE_TASK` to the two known task ids, then run this read-only command.
+The actual home, task ids, endpoints, process ids, and worktree paths remain in private task records rather than this record.
+
+```sh
+python3 - <<'PY'
+import os, subprocess
+from pathlib import Path
+records = []
+for key in ('FM_CODEX_TASK', 'FM_CLAUDE_TASK'):
+    path = Path(os.environ['FM_HOME']) / 'state' / (os.environ[key] + '.meta')
+    meta = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
+    records.append(meta)
+    print('harness=' + meta['harness'] + ' kind=' + meta['kind'])
+    print(subprocess.check_output(['tmux', 'list-panes', '-t', meta['window'],
+                                  '-F', '#{pane_dead} #{pane_current_command}'], text=True).strip())
+print('distinct worktrees:', records[0]['worktree'] != records[1]['worktree'])
+print('distinct endpoints:', records[0]['window'] != records[1]['window'])
+PY
+```
+
+```text
+harness=codex kind=ship
+0 node
+harness=claude kind=ship
+0 claude
+distinct worktrees: True
+distinct endpoints: True
+```
+
+The Codex pane's `node` launcher was corroborated by a native `codex` descendant; the Claude pane had a native `claude` process.
+Brief processing was observed from the Codex worker's tool execution and the Claude worker's implementation status.
+These observations establish two concurrent task workers and their selected subscription authentication methods, not additional quota, verified invoicing, two Codex accounts, or successful delivery of both tasks.
+An API key remains a separate billing path according to [OpenAI authentication](https://learn.chatgpt.com/docs/auth) and [Claude authentication](https://code.claude.com/docs/en/authentication).
+Fresh launches do not prove recovery of old missing tmux endpoints; [transactional relaunch](../agent-control.md#transactional-relaunch) owns that independent limit.
+
 ## Regression coverage
 
 `tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.

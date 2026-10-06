@@ -9,6 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
+| Claude and Codex with two subscriptions | [Use Claude and Codex together](#use-claude-and-codex-together) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
@@ -799,6 +800,63 @@ The inherited-local-material contract is owned by [`secondmate-provisioning`](..
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+
+### Use Claude and Codex together
+
+One Firstmate can coordinate a Claude worker and a Codex worker concurrently, each in its own task worktree and endpoint.
+The primary session's harness does not need to match either worker.
+Choose the worker per task using the [per-launch override](#per-launch-overrides-and-inherited-defaults), or ask Firstmate to maintain [dispatch profiles](#crew-dispatch-profiles-configcrew-dispatchjson) for recurring choices.
+
+| Arrangement | Meaning |
+| --- | --- |
+| Two workers | Two task agents; each authenticates through its selected harness and has its own isolated task worktree. |
+| Two subscriptions | For this setup, one Claude subscription login and one ChatGPT subscription login with Codex access; worker count does not create additional subscription quota. |
+| Two accounts for the same harness | A separate account-selection problem; the [worker account pin](#worker-account-pin-configclaude-account-configpi-account) supports Claude and Pi, with no native Codex account-pin setting. |
+| Two supervisors | Separate operational homes and coordinated scope; see [secondmate routes](#secondmate-routes-datasecondmatesmd) rather than starting competing supervisors in one home. |
+| API credentials | A separate authentication and billing path, not proof that a worker uses a subscription. |
+
+Before requesting workers, install both CLIs using [toolchain setup](#toolchain), then sign in interactively on the worker host with `claude auth login --claudeai` and `codex login` if their intended stores are not already signed in.
+Complete each provider's login and any required trust review yourself.
+Check the selected authentication method without copying credential files:
+
+```sh
+claude --version
+codex --version
+claude auth status --json | jq '{loggedIn,authMethod,apiProvider}'
+codex login status
+```
+
+For direct subscription access, Claude should report `loggedIn: true`, `authMethod: "claude.ai"`, and `apiProvider: "firstParty"`; Codex should report `Logged in using ChatGPT`.
+[Claude authentication](https://code.claude.com/docs/en/authentication) and [OpenAI authentication](https://learn.chatgpt.com/docs/auth) own available sign-in methods, credential precedence, and billing behavior.
+Run these checks against the account store and environment selected for the worker; an unrelated shell's successful login does not establish the worker's authentication.
+[Worker account pins](#worker-account-pin-configclaude-account-configpi-account) and the [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) own that selection, including custom stores and daemon-environment limits.
+
+A request to Firstmate can be as simple as: "Run task A with Claude and task B with Codex, in separate worktrees, using the existing subscription logins; keep the project's delivery mode and ask before merging."
+For repeatable routing, a minimal local `config/crew-dispatch.json` example uses one concrete profile for each choice:
+
+```json
+{
+  "rules": [
+    {
+      "when": "The task explicitly requests a Claude worker.",
+      "use": { "harness": "claude" }
+    },
+    {
+      "when": "The task explicitly requests a Codex worker.",
+      "use": { "harness": "codex" }
+    }
+  ],
+  "default": { "harness": "claude" }
+}
+```
+
+This example leaves model selection to each harness's current default and selects one worker per task; a profile array represents alternatives, not a command to launch both.
+The [dispatch schema](#crew-dispatch-profiles-configcrew-dispatchjson) owns resolution and precedence; a profile chooses a harness, not a login or credential.
+
+Have Firstmate confirm the recorded `harness`, distinct worktrees, live endpoints, and that both workers are processing their briefs; [tmux viewing](tmux-backend.md#watching-the-crew) describes optional operator inspection.
+[Mixed-worker verification](verification/dispatch-auth.md#claude-and-codex-subscription-workers) records the checked launch and authentication evidence, with limits on what that evidence proves.
+If a login, trust gate, or recovery refuses, report its diagnostic to Firstmate and preserve the existing work; [lifecycle control](agent-control.md) and the selected [backend guide](#runtime-backend-configbackend--fm_backend) own recovery.
+Per-worker Codex account pins, cross-user credential isolation, and a shared subscription quota pool are not provided by this setup.
 
 ### Installed hooks and launch details
 
