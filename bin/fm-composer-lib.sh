@@ -1249,6 +1249,15 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row> [harness]
   _fm_composer_bare_row_strip_furniture_var plain
   state=$(fm_composer_classify_content 0 "$content" \
     "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled" "$harness")
+  if [ "$harness" = kiro-cli ] && [ "$state" != empty ]; then
+    local wrap_last
+    wrap_last=$(_fm_composer_kiro_wrap_last_row "$(printf '%s\n' "$screen" | fm_composer_strip_ansi)" "$row")
+    if [ "$wrap_last" -gt "$row" ] \
+       && _fm_composer_kiro_wrapped_idle "$screen" "$styled" "$row" "$wrap_last"; then
+      printf 'empty'
+      return 0
+    fi
+  fi
   if [ "$styled" != 1 ] && [ "$state" = pending ]; then
     printf 'unknown'
     return 0
@@ -1329,14 +1338,53 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row> [harn
   return 0
 }
 
+# _fm_composer_kiro_wrapped_idle: 0 when the bare rows <first>..<last>, glyph
+# stripped and joined with single spaces, are exactly kiro's placeholder. A
+# narrow pane wraps the placeholder onto a second row, so no single row matches
+# FM_COMPOSER_KIRO_IDLE_RE_DEFAULT. Only the caller's harness=kiro-cli identity
+# reaches this; typed text that differs from the placeholder never joins into it.
+_fm_composer_kiro_wrapped_idle() {  # <screen> <styled> <first> <last>
+  local screen=$1 styled=$2 first=$3 last=$4 row raw content glyph='' joined=''
+  row=$first
+  while [ "$row" -le "$last" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    content=$(_fm_composer_row_content "$raw" "$styled")
+    fm_composer_normalize_trim_var content
+    if [ "$row" -eq "$first" ] && fm_composer_leading_agent_glyph_var glyph "$content"; then
+      content=${content#*"$glyph"}
+      fm_composer_normalize_trim_var content
+    fi
+    [ -z "$content" ] || joined="${joined}${joined:+ }$content"
+    row=$((row + 1))
+  done
+  fm_composer_idle_matches "$joined" \
+    "${FM_COMPOSER_KIRO_IDLE_RE:-$FM_COMPOSER_KIRO_IDLE_RE_DEFAULT}" sensitive
+}
+
+# _fm_composer_kiro_wrap_last_row: prints the last row of the wrap region that
+# starts below bare glyph row <first>, bounded by the same furniture rules as
+# the cursor-mode wrap check; prints <first> when nothing wraps.
+_fm_composer_kiro_wrap_last_row() {  # <plain> <first>
+  local plain=$1 first=$2 next
+  next=$((first + 1))
+  while _fm_composer_wrap_region_ok "$plain" "$first" "$next" kiro-cli; do
+    next=$((next + 1))
+  done
+  printf '%s' "$((next - 1))"
+}
+
 # _fm_composer_classify_bare_wrap: the bare composer plus its wrap region.
 # Content is the glyph row (glyph stripped) plus every continuation row down
 # to the cursor. Ghost-stripped-to-nothing rows are an empty composer whose
 # suggestion happened to wrap; any surviving text is pending when styling can
 # prove it real and unknown otherwise (the same styled=0 degradation as the
 # glyph row itself).
-_fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row>
-  local screen=$1 styled=$2 g=$3 cy=$4 row raw content glyph='' text_seen=0
+_fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row> [harness]
+  local screen=$1 styled=$2 g=$3 cy=$4 harness=${5:-} row raw content glyph='' text_seen=0
+  if [ "$harness" = kiro-cli ] && _fm_composer_kiro_wrapped_idle "$screen" "$styled" "$g" "$cy"; then
+    printf 'empty'
+    return 0
+  fi
   row=$g
   while [ "$row" -le "$cy" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1765,7 +1813,7 @@ EOF
     # and earns its retry.
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -gt "$FM_COMPOSER_SCAN_BARE_ROW" ] \
        && _fm_composer_wrap_region_ok "$plain" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy" "$harness"; then
-      _fm_composer_classify_bare_wrap "$screen" "$styled" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy"
+      _fm_composer_classify_bare_wrap "$screen" "$styled" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy" "$harness"
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
@@ -1801,7 +1849,7 @@ EOF
     bare)
       if [ "$FM_COMPOSER_SELECTED_LAST" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
         _fm_composer_classify_bare_wrap "$screen" "$styled" \
-          "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
+          "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST" "$harness"
       elif [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
          && [ "$FM_COMPOSER_SELECTED_FIRST" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$FM_COMPOSER_SELECTED_FIRST" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then

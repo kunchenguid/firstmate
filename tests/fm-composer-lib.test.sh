@@ -439,6 +439,32 @@ test_matrix_kiro_bright_placeholder_is_harness_scoped() {
   pass "matrix: Kiro's exact bright placeholder is empty only under its harness identity"
 }
 
+test_matrix_kiro_wrapped_placeholder_on_narrow_pane() {
+  # Captured shape of a 34-column Herdr client: Kiro wraps its bright
+  # placeholder onto a second row, with the V3 helper footer below it.
+  local idle typed foot plain_idle v3 wrapped_typed wrapped_other
+  foot=$'\n                            /copy to clipboard'
+  idle=$'transcript line\n'"${ESC}[38;2;158;158;158m› ask a question or describe a${ESC}[0m"$'\n'"${ESC}[38;2;158;158;158m  task ↵${ESC}[0m"
+  plain_idle=$'transcript line\n› ask a question or describe a\n  task ↵'
+  v3="$idle$foot"
+  typed=$'transcript line\n'"${ESC}[38;2;230;230;230m› please run the failing test and${ESC}[0m"$'\n'"${ESC}[38;2;230;230;230m  report what you find${ESC}[0m"
+  wrapped_typed=$'transcript line\n'"${ESC}[38;2;230;230;230m› ask a question or describe a${ESC}[0m"$'\n'"${ESC}[38;2;230;230;230m  task and then fix it${ESC}[0m"
+  wrapped_other=$'transcript line\n'"${ESC}[38;2;158;158;158m› ask a question or describe a${ESC}[0m"$'\n'"${ESC}[38;2;158;158;158m  task now${ESC}[0m"
+
+  assert_screen "wrapped placeholder, cursor on glyph row" empty "$CAPS_TMUX" "$idle" 1 '' kiro-cli
+  assert_screen "wrapped placeholder, cursor on continuation row" empty "$CAPS_TMUX" "$idle" 2 '' kiro-cli
+  assert_screen "wrapped placeholder plus footer, cursorless styled" empty "$CAPS_STYLED_NOID" "$v3" '' '' kiro-cli
+  assert_screen "wrapped placeholder plus footer, cursorless plain" empty "$CAPS_PLAIN" "$plain_idle$foot" '' '' kiro-cli
+  assert_screen "wrapped typed message, cursor on glyph row" pending "$CAPS_TMUX" "$typed" 1 '' kiro-cli
+  assert_screen "wrapped typed message, cursor on continuation row" pending "$CAPS_TMUX" "$typed" 2 '' kiro-cli
+  assert_screen "wrapped typed message, cursorless styled" pending "$CAPS_STYLED_NOID" "$typed" '' '' kiro-cli
+  assert_screen "typed text that starts like the placeholder stays pending" pending "$CAPS_TMUX" "$wrapped_typed" 2 '' kiro-cli
+  assert_screen "placeholder plus extra words stays pending" pending "$CAPS_TMUX" "$wrapped_other" 2 '' kiro-cli
+  assert_screen "wrapped placeholder bytes without Kiro identity stay pending" pending "$CAPS_TMUX" "$idle" 2
+  assert_screen "wrapped placeholder bytes under another harness stay pending" pending "$CAPS_TMUX" "$idle" 2 '' codex
+  pass "matrix: Kiro's wrapped placeholder on a narrow pane reads empty; wrapped typed text reads pending"
+}
+
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   # Herdr draws a composer's rules with half-block glyphs (▄ above, ▀ below)
   # rather than the box-drawing family. Without treating those as edges, a bare
@@ -1069,6 +1095,7 @@ test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_kiro_bright_placeholder_is_harness_scoped
+test_matrix_kiro_wrapped_placeholder_on_narrow_pane
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
