@@ -13,13 +13,13 @@ case "${1:-}" in
   sequencing|retry|tie-break|monitor-retirement|worker-routing|model-routing)
     [ "$#" -eq 1 ] || exit 2
     printf 'owner=firstmate guard=none\n' ;;
-  generated-file-cleanup|empty-commit-discard)
+  generated-file-cleanup)
     [ "$#" -eq 1 ] || exit 2
     printf 'owner=firstmate guard=landed-clean-proof\n' ;;
   engineering)
     [ "$#" -eq 1 ] || exit 2
     printf 'owner=firstmate guard=none\n' ;;
-  product|security|destructive|irreversible|credential|merge)
+  product|security|destructive|irreversible|credential|merge|empty-commit-discard)
     [ "$#" -eq 1 ] || exit 2
     printf 'owner=captain guard=captain-word\n' ;;
   --help|-h)
