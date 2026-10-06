@@ -1061,29 +1061,6 @@ remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
   || fail "a repeated continuity break reopened the decision the operator resolved"
 pass "a repeated continuity break after an operator resolve appends nothing"
 
-# The published line recorded the full prefix and no retirement count. The
-# same unchanged break, on a route that has never been retired, must stay closed.
-cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-canonical-break"
-awk -v full="$first_hash" '
-  /blocked \[key=remote-reply-continuity-ios\]/ {
-    sub(/ prefix [0-9a-f]{12} retirements 0$/, " prefix " full)
-  }
-  { print }
-' "$PARENT/state/ios.status" > "$TMP_ROOT/ios-status-no-count"
-mv "$TMP_ROOT/ios-status-no-count" "$PARENT/state/ios.status"
-rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
-set +e
-remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" > "$TMP_ROOT/handle-no-count.out" 2>&1
-handle_rc=$?
-set -e
-[ "$handle_rc" -eq 3 ] || fail "a continuity break after a line with no retirement count returned an unexpected status: $handle_rc"
-[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
-  || fail "a line with no retirement count reopened an unchanged break"
-[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
-  || fail "a line with no retirement count reopened the decision the operator resolved"
-mv "$TMP_ROOT/ios-status-canonical-break" "$PARENT/state/ios.status"
-pass "an unchanged break recorded without a retirement count stays closed"
-
 rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"

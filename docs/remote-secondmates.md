@@ -593,7 +593,6 @@ The line records the reader position, the retirement count, and the reason: the 
 Reading the same break again, with the cursor where it was and the count unchanged, appends nothing.
 A later break at a different reader position, or after another retirement, appends a new `blocked` line and opens the decision again.
 A line written before that position was recorded does not match, so the next break appends the new line once.
-A line that already recorded the offset and the full prefix hash, with no retirement count, still matches an unchanged break when the route has never been retired.
 
 ### SSH exit 255 and unavailable homes
 

@@ -585,15 +585,10 @@ cmd_ingest() {
     # The same offset, prefix, and retirement count build the same line, so a
     # retry appends nothing. Retirement bumps that count before it drops the
     # cursor, so a later break is a new line even when the restored bytes match.
-    # A recorded line with this offset and the full prefix, and no count, is
-    # this same break when the route has never been retired.
     read_retirement_count "$id"
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason) at offset ${CURSOR_OFFSET} prefix $(continuity_prefix) retirements ${RETIREMENT_COUNT}"
     append_rc=0
     if status_event_recorded "$status_file" "$line"; then
-      append_rc=1
-    elif [ "$RETIREMENT_COUNT" -eq 0 ] && status_event_recorded "$status_file" \
-      "blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason) at offset ${CURSOR_OFFSET} prefix ${CURSOR_HASH}"; then
       append_rc=1
     else
       append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
