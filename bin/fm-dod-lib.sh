@@ -488,7 +488,7 @@ Your ready report is refused while the run still holds your branch, while its ou
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override and step 3 holds, publish.
 The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; a change-level message on the change is how they reach the reviewer, and your report is how they reach the captain.
-Compose the summary that message carries without writing it to any file: the same content a GitHub pull request's pipeline section carries, one entry per pipeline step that reported findings, naming each finding and the fix the run made or that it was left unfixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); when the run reported no findings, the summary says \`no findings\`.
+Compose the summary that message carries without writing it to any file: the same content a GitHub pull request's pipeline section carries, one entry per pipeline step that reported findings, naming each finding and the fix the run made or that it was left unfixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); when the run reported no findings, the summary says \`no findings\`. A step whose findings the run fixed still gets its entry, though \`axi status\` shows it with none left.
 Its first line is exactly \`$FM_DOD_GERRIT_SUMMARY_MARKER for run <run id>\`, with the run's \`id\` from \`no-mistakes axi status\`, and each step's entry is a line starting with that step's name and a colon (\`review: ...\`); the \`no findings\` summary is that line alone.
 Your ready report is refused unless the message carries that first line and an entry for every step the run's \`steps\` table reports findings on.
 After posting that message and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
@@ -694,7 +694,7 @@ fm_dod_gerrit_summary_posted() {  # <url> <patch_set> <posted> <note> <first> <s
     if [ -n "$steps" ]; then
       entries="an entry line for each step that reported findings: $(printf '%s' "$steps" | tr '\n' ' ' | sed 's/ *$//; s/ /, /g')"
     else
-      entries="the line 'no findings'"
+      entries="the line 'no findings' or a '<step>:' entry line"
     fi
     printf '%s\n' "no pipeline summary message is on patch set $ps of $url: no change message on the current patch set carries the first line '$first' and $entries"
     return 1

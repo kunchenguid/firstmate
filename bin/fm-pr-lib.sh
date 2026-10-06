@@ -1125,7 +1125,8 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
 # The current patch set of one Gerrit change, its revision, and whether a
 # change message on that patch set carries a run's summary - the line <first>,
 # plus a line starting "<step>:" for each step in the newline-separated <steps>
-# or, when <steps> is empty, the line "no findings" - all from one live read
+# or, when <steps> is empty, the line "no findings" or any "<step>:" entry
+# line (a step whose findings were all fixed reports none left) - all from one live read
 # with every cover message whole (--full; without it gerrit-axi cuts a body to
 # its first 1000 characters, dropping a long summary's later step lines), so
 # the tree and the summary are checked against the same patch set. Gerrit names a message's patch set in its own first line
@@ -1167,7 +1168,7 @@ fm_pr_gerrit_read_summary() {  # <host> <number> <first> <steps>
         and (.message | split("\n") as $lines
           | ($lines | index([$first])) != null
           and if ($required | length) == 0
-            then ($lines | index(["no findings"])) != null
+            then ($lines | index(["no findings"])) != null or any($lines[]; test("^[a-z0-9_-]+:"))
             else all($required[]; . as $step | any($lines[]; startswith($step + ":")))
             end))] as $posted
     | "\($ps) \(($posted | length) > 0) \($revision)"' 2>/dev/null) || return 1

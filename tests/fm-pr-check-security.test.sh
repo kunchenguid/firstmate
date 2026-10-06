@@ -2110,6 +2110,19 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the done gate refused a summary whose step line lies past the 1000-character preview: $out"
+  # A step whose findings were all fixed shows none left in axi status, so its
+  # entry stands in for 'no findings'.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_NM_STEPS=$'review,completed,0,100\ntest,completed,0,100' \
+    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary for run RUNFIXTURE\n\nreview: stale value - corrected"}]' \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the done gate refused a summary listing a fixed step's findings: $out"
 
   # Arming asks the gate about the task's own done: line, since only the worker
   # knows the summary's patch set; with none, or one without the suffix, it is
