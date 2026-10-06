@@ -200,12 +200,14 @@ control_cleanup() {
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
   fi
+  # Remove the dialog file while the lock is still held: once it is released,
+  # the next lifecycle command for this task writes the same path.
+  if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    rm -f "$FM_COMPOSER_DIALOG_SINK"
+  fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
-  fi
-  if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
-    rm -f "$FM_COMPOSER_DIALOG_SINK"
   fi
   if declare -F fm_lease_guard_release >/dev/null 2>&1; then
     fm_lease_guard_release || true
