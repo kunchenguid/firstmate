@@ -251,8 +251,9 @@ test_workflow_dispatch_gate_budget_defaults_to_the_registry_limit() {
 # Integration proof against the real workflow gate. Prerequisite:
 # FM_TEST_WORKFLOW_ROOT names a workflow clone holding scripts/gates.py,
 # scripts/check.py, and registry/budgets.md. Portable CI does not set it, so CI
-# does not cover this proof; once it is set, a missing or unreadable gate input
-# fails the test. The gate and its budget owner are copied into the case home so
+# does not cover this proof; the no-mistakes Test instructions in
+# .no-mistakes.yaml own resolving the registered clone and running it. Once it is
+# set, a missing or unreadable gate input fails the test. The gate and its budget owner are copied into the case home so
 # the real gates.py decides; quota and machine load are pinned for determinism.
 install_real_workflow_gate() {  # <home>
   local src=$FM_TEST_WORKFLOW_ROOT dst="$1/projects/workflow"
