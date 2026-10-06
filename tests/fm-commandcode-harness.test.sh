@@ -130,6 +130,7 @@ else
   # passed its generation check; this writer accepts the write and then arms
   # one, so a notification the mod raised on its own would wake the replacement.
   racing="$TMP_ROOT/racing-writer"
+  # shellcheck disable=SC2016 # positional params expand in the generated writer.
   printf '#!/bin/sh\n%s arm "$2" "$3" >/dev/null\n' "'$ROOT/bin/fm-busy-event.sh'" > "$racing"
   chmod +x "$racing"
   drive_mod run_end end_turn "$(jq -c --arg w "$racing" '.fmWriter = $w' <<<"$opts")" >/dev/null
