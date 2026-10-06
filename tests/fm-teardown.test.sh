@@ -3221,8 +3221,9 @@ test_herdr_teardown_stops_task_processes_but_spares_root_shell_before_close() {
   harness_pid=$!
   disown
   sleep 0.3
-  kill -0 "$shell_pid" 2>/dev/null && kill -0 "$harness_pid" 2>/dev/null \
-    || fail "herdr-stop-harness-before-close: setup processes did not start"
+  if ! kill -0 "$shell_pid" 2>/dev/null || ! kill -0 "$harness_pid" 2>/dev/null; then
+    fail "herdr-stop-harness-before-close: setup processes did not start"
+  fi
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
     FM_FAKE_HERDR_SHELL_PID="$shell_pid" FM_FAKE_HERDR_HARNESS_PID="$harness_pid" \
