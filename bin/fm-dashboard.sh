@@ -44,12 +44,14 @@
 # build (the default) writes $FM_HOME/state/dashboard/index.html and prints its
 # path. serve runs a small read-only web server (python3 stdlib, IPv4) that
 # answers GET or HEAD for / and /index.html only; every other path is 404. It
-# answers at once with the last built page, marked "updated N s ago", and starts
-# one background rebuild when that page is older than 60 seconds; only the very
-# first load, with no page yet, waits for a build. It prints
+# answers at once with the last built page, marked "updated N s ago", and keeps
+# that page fresh itself: a side thread starts each rebuild early enough, by
+# the last build's length, for the new page to land as the old one turns 60
+# seconds old, whether or not anyone is looking, and the page reloads itself every 60
+# seconds; only the very first load, with no page yet, waits for a build. It prints
 # `serving http://ADDR:PORT/` once listening. ADDR defaults to 127.0.0.1 and
 # PORT to 8787; port 0 picks a free port. There is no authentication: reach is
-# whatever the bind address exposes. Nothing here schedules a refresh.
+# whatever the bind address exposes.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,13 +82,16 @@ SCRIPT, HOME, PAGE, BIND, PORT = sys.argv[1:6]
 MAX_AGE = 60
 building = threading.Lock()
 last_error = b''
+last_took = 30.0  # seconds the last build took; a fleet snapshot alone can take 45 s under load
 
 def build():  # call holding `building`; the build replaces the page in one rename
-    global last_error
+    global last_error, last_took
+    start = time.time()
     try:
         r = subprocess.run(['bash', SCRIPT, 'build'], env=dict(os.environ, FM_HOME=HOME),
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         last_error = r.stderr if r.returncode else b''
+        last_took = time.time() - start
     finally:
         building.release()
 
@@ -118,8 +123,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             a = age()
             if a is None:
                 return self.send(500, b'dashboard build failed: ' + last_error, 'text/plain; charset=utf-8')
-        elif a >= MAX_AGE and building.acquire(blocking=False):
-            threading.Thread(target=build, daemon=True).start()
         note = f' · updated {int(a)} s ago' + (' · refreshing' if building.locked() else '')
         if last_error: note += ' · last refresh failed, showing the last good page'
         with open(PAGE, 'rb') as f:
@@ -128,6 +131,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     do_HEAD = do_GET
 
 # ponytail: one request at a time; rebuilds run on a side thread, one at a time.
+def refresh():  # rebuild on age, not on requests, so an idle phone never opens a minutes-old page
+    while True:
+        a = age()  # start early by the last build's length, so the new page lands as this one turns MAX_AGE
+        if (a is None or a + last_took >= MAX_AGE) and building.acquire(blocking=False):
+            build()
+            if last_error: time.sleep(MAX_AGE)  # a failing build retries once a minute
+        time.sleep(5)
+
+threading.Thread(target=refresh, daemon=True).start()
 srv = http.server.HTTPServer((BIND, int(PORT)), Handler)
 print(f'serving http://{BIND}:{srv.server_address[1]}/', flush=True)
 try: srv.serve_forever()
@@ -715,7 +727,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 .row{grid-template-columns:minmax(0,1fr);padding:10px 14px}.rr{text-align:left}.rr .chip{margin:2px 4px 2px 0}.rr:empty{display:none}}
 '''
 stamp = NOW.strftime('%a %d %b %Y, %H:%M')
-doc = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+doc = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
 <title>Fleet dashboard</title><style>{CSS}</style></head><body><main>
 <header><h1>Fleet dashboard</h1><span class="muted small">Built {esc(stamp)}<!--age--></span></header>
 {"".join(S)}</main></body></html>

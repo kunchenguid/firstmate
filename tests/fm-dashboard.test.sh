@@ -228,11 +228,11 @@ PY
   printf '<p>old page<!--age--></p>\n' > "$home/state/dashboard/index.html"
   touch -d '-5 minutes' "$home/state/dashboard/index.html"
   got=$(python3 -c 'import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1], timeout=5).read().decode())' "$url")
-  case "$got" in *"old page · updated 3"[0-9][0-9]" s ago · refreshing"*) ;; *) fail "an old page was not answered at once: $got" ;; esac
+  case "$got" in *"old page · updated 3"[0-9][0-9]" s ago"*) ;; *) fail "an old page was not answered at once: $got" ;; esac
   for _ in $(seq 1 600); do grep -q 'old page' "$home/state/dashboard/index.html" || break; sleep 0.1; done
   grep -q 'Fleet dashboard' "$home/state/dashboard/index.html" || fail "the background rebuild did not replace the old page"
   kill "$SERVE_PID" 2>/dev/null; SERVE_PID=
-  pass "serve returns the page with 200 at once, rebuilds an old one behind it, and 404s every other path"
+  pass "serve returns the page with 200 at once, rebuilds an old one by itself, and 404s every other path"
 }
 
 test_missing_or_malformed_sources_hide_only_their_part() {
