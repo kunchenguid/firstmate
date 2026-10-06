@@ -588,6 +588,12 @@ The [process-to-event operating contract](configuration.md#process-to-event-sour
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
 
+The failure appends one `blocked` line to the parent status stream, which opens a decision.
+Reading the same break again, with the cursor where it was, appends nothing.
+A later break appends a new `blocked` line and opens the decision again when the cursor has moved since the last break or the reply adapter was retired since then.
+A later break is not reported when the cursor has not moved and the adapter was not retired.
+The first break a home meets after it gains this record is treated as the already reported one when its status stream already carries the continuity line.
+
 ### SSH exit 255 and unavailable homes
 
 An SSH exit status of 255 always means transport failure or unknown remote completion.
