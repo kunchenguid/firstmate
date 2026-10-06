@@ -1070,8 +1070,8 @@ pass "remote reply retirement quiesces and refuses unhandled captured results"
 
 # Empty the remote log under the committed cursor and handle the break the
 # next blocking source reports. Sets RESULT_BREAK.
-break_repaired_route() { # <label>
-  local label=$1 runner handle_rc
+break_repaired_route() { # <label> [expected-handle-status]
+  local label=$1 expected=${2:-3} runner handle_rc
   stop_reply_listener || fail "the reply listener did not stop before the $label continuity break"
   : > "$REMOTE/state/parent-replies.status"
   GEN=$((GEN + 1))
@@ -1086,7 +1086,7 @@ break_repaired_route() { # <label>
   remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_BREAK" > "$TMP_ROOT/handle-$label-break.out" 2>&1
   handle_rc=$?
   set -e
-  [ "$handle_rc" -eq 3 ] || fail "the $label continuity break returned an unexpected status: $handle_rc"
+  [ "$handle_rc" -eq "$expected" ] || fail "the $label continuity break returned an unexpected status: $handle_rc"
 }
 
 # Close the open continuity decision, put back the log the cursor was committed
@@ -1126,8 +1126,38 @@ assert_grep "offset=$restored_bytes" "$PARENT/state/remote-replies/ios.cursor" \
   || fail "repairing the route appended a continuity break"
 [ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
   || fail "repairing the route reopened the continuity decision"
-break_repaired_route "second"
+# The episode is stored before the line. The adapter restores the mode of its
+# cursor directory on every write, so the directory is made unwritable for the
+# episode at its temporary file. The break then appends nothing, and the retry
+# once the directory can be written again appends the one line and not a second.
+EPISODE_FAIL_BIN="$TMP_ROOT/episode-fail-bin"
+mkdir -p "$EPISODE_FAIL_BIN"
+{
+  cat <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */state/remote-replies/.continuity.XXXXXX) exit 73 ;;
+esac
+SH
+  printf 'exec %q "$@"\n' "$REAL_MKTEMP"
+} > "$EPISODE_FAIL_BIN/mktemp"
+chmod +x "$EPISODE_FAIL_BIN/mktemp"
+PATH_BEFORE_EPISODE_FAIL=$PATH
+PATH="$EPISODE_FAIL_BIN:$PATH"
+break_repaired_route "second" 1
+PATH=$PATH_BEFORE_EPISODE_FAIL
 RESULT_SECOND=$RESULT_BREAK
+assert_grep 'cannot record continuity episode' "$TMP_ROOT/handle-second-break.out" \
+  "a break whose episode could not be stored did not say so"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "a continuity break appended its line before its episode was stored"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "a continuity break opened the decision before its episode was stored"
+set +e
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_SECOND" > "$TMP_ROOT/handle-second-retry.out" 2>&1
+handle_rc=$?
+set -e
+[ "$handle_rc" -eq 3 ] || fail "the retried second continuity break returned an unexpected status: $handle_rc"
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
   || fail "a later continuity break after repair appended nothing"
 assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
@@ -1146,8 +1176,19 @@ pass "a later continuity break after repair and re-advance opens the decision ag
 LOG_ONE=$'working: route restored and readable again\n'
 LOG_TWO=$LOG_ONE$'working: route extended without retirement\n'
 resolve_and_extend_route "second" "$LOG_TWO"
-break_repaired_route "third"
+# The episode is already stored when the append fails. It must not stay
+# stored, or the retry would read as the unchanged repeat and append nothing.
+chmod 444 "$PARENT/state/ios.status"
+break_repaired_route "third" 1
 RESULT_THIRD=$RESULT_BREAK
+chmod 644 "$PARENT/state/ios.status"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "a continuity break whose append failed changed the status log"
+set +e
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_THIRD" > "$TMP_ROOT/handle-third-retry.out" 2>&1
+handle_rc=$?
+set -e
+[ "$handle_rc" -eq 3 ] || fail "the retried third continuity break returned an unexpected status: $handle_rc"
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 3 ] \
   || fail "a later continuity break after the cursor moved without retirement appended nothing"
 assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \

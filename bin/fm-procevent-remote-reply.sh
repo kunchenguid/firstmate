@@ -564,7 +564,7 @@ stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-a
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc appended=0 cursor_already=0 lock status_file source_record tmp
-  local fetch_rc append_rc new_episode=0 offered='' delivered_map='' mirrored='' status_additions='' source_additions='' undelivered=''
+  local fetch_rc append_rc new_episode=0 prior_present prior_offset prior_hash prior_retired offered='' delivered_map='' mirrored='' status_additions='' source_additions='' undelivered=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -636,17 +636,36 @@ cmd_ingest() {
     new_episode=0
     if continuity_break_is_new_episode "$id" "$CURSOR_OFFSET" "$CURSOR_HASH"; then
       new_episode=1
-    fi
-    if [ "$new_episode" -eq 1 ]; then
-      printf '%s\n' "$(status_stamp_line "$line")" >> "$status_file" || append_rc=2
     elif status_event_recorded "$status_file" "$line"; then
       append_rc=1
-    else
-      append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
     fi
-    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
+    prior_present=$EPISODE_PRESENT
+    prior_offset=$EPISODE_OFFSET
+    prior_hash=$EPISODE_HASH
+    prior_retired=$EPISODE_RETIRED
+    # The episode is stored before the line it describes. A line appended
+    # ahead of a failed store would leave the old episode in place, and the
+    # retry of this same break would then append a second line.
     write_continuity_episode "$id" "$CURSOR_OFFSET" "$CURSOR_HASH" 0 \
       || { fm_lock_release "$lock"; die "cannot record continuity episode"; }
+    if [ "$append_rc" -eq 0 ]; then
+      if [ "$new_episode" -eq 1 ]; then
+        printf '%s\n' "$(status_stamp_line "$line")" >> "$status_file" || append_rc=2
+      else
+        append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
+      fi
+    fi
+    if [ "$append_rc" -eq 2 ]; then
+      # The stored episode would make the retry read as the unchanged repeat
+      # of a line that never reached the log, so put the earlier one back.
+      if [ "$prior_present" -eq 1 ]; then
+        write_continuity_episode "$id" "$prior_offset" "$prior_hash" "$prior_retired" || true
+      else
+        rm -f -- "$(continuity_episode_path "$id")"
+      fi
+      fm_lock_release "$lock"
+      die "cannot append continuity escalation"
+    fi
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
