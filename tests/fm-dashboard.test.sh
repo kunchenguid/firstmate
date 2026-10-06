@@ -150,6 +150,51 @@ EOF
   pass "totals leave out parked homes and self-merged PRs, and count finished lanes now"
 }
 
+test_merged_today_is_live_from_one_github_search() {
+  local home page text out want r clone
+  home=$(make_home ghlive)
+  # zephyrine clones two repos and a parked home a third; the search also returns a repo no home clones.
+  printf -- '- parkedmate - fixture domain (home: %s; scope: fixture; projects: held; added 2026-07-11)\n' \
+    "$home/mates/parkedmate" >> "$home/data/secondmates.md"
+  printf 'parkedmate\n' > "$home/config/parked-homes"
+  for r in zephyrine/quillwork=https://github.com/acme/quillwork.git zephyrine/shared=git@github.com:acme/shared.git \
+    parkedmate/held=https://github.com/acme/held; do
+    clone="$home/mates/${r%%/*}/projects/$(basename "${r%%=*}")"
+    git init -q "$clone" && git -C "$clone" remote add origin "${r#*=}"
+  done
+  mkdir -p "$home/bin"
+  cat > "$home/bin/gh" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$home/gh.calls"
+[ -e "$home/gh.fail" ] && { echo 'HTTP 403: API rate limit exceeded' >&2; exit 1; }
+for r in quillwork quillwork shared held other; do echo "https://api.github.com/repos/acme/\$r"; done
+EOF
+  chmod +x "$home/bin/gh"
+  page="$home/state/dashboard/index.html"
+  out=$(PATH="$home/bin:$PATH" FM_HOME="$home" "$DASH" build) || fail "build failed: $out"
+  text=$(page_text "$page")
+  for want in "Merged today 3 yesterday 1 · live from GitHub" "zephyrine Records need tidy-up Working now 0 Merged today 3 "; do
+    case "$text" in *"$want"*) ;; *) fail "page text lacks '$want': $text" ;; esac
+  done
+  [ "$(wc -l < "$home/gh.calls")" -eq 1 ] || fail "not one search call: $(cat "$home/gh.calls")"
+  grep -q 'q=owner:acme is:pr is:merged merged:>=20[0-9-]*T[0-9:]*Z' "$home/gh.calls" || fail "unexpected search: $(cat "$home/gh.calls")"
+  # A rebuild inside 5 minutes reuses the count and does not search, even when GitHub would fail.
+  touch "$home/gh.fail"
+  PATH="$home/bin:$PATH" FM_HOME="$home" "$DASH" build >/dev/null || fail "cached build failed"
+  [ "$(wc -l < "$home/gh.calls")" -eq 1 ] || fail "a rebuild inside 5 minutes searched again"
+  case "$(page_text "$page")" in *"Merged today 3 yesterday 1 · live from GitHub"*) ;; *) fail "the cached count was not shown" ;; esac
+  # After 5 minutes a failed search falls back to prs.tsv, says how old that count is, and shows why.
+  python3 -c 'import json,sys; p=sys.argv[1]; c=json.load(open(p)); c["at"]-=301; json.dump(c,open(p,"w"))' \
+    "$home/state/dashboard/.merged-today.json"
+  touch -d "$(date +%F) 00:01" "$home/data/metrics/prs.tsv"
+  PATH="$home/bin:$PATH" FM_HOME="$home" "$DASH" build >/dev/null || fail "fallback build failed"
+  text=$(page_text "$page")
+  for want in "Merged today 3 yesterday 1 · as of 00:01" "GitHub merged-today search : HTTP 403: API rate limit exceeded"; do
+    case "$text" in *"$want"*) ;; *) fail "page text lacks '$want': $text" ;; esac
+  done
+  pass "Merged today counts live from one cached GitHub search and falls back to prs.tsv as of its time"
+}
+
 SERVE_PID=
 trap '[ -z "$SERVE_PID" ] || kill "$SERVE_PID" 2>/dev/null; fm_test_cleanup' EXIT
 
@@ -211,4 +256,5 @@ test_missing_or_malformed_sources_hide_only_their_part() {
 test_the_page_answers_the_questions_with_the_fixture_numbers
 test_totals_count_only_work_that_waits
 test_missing_or_malformed_sources_hide_only_their_part
+test_merged_today_is_live_from_one_github_search
 test_serve_answers_the_page_and_nothing_else
