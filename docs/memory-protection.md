@@ -52,6 +52,8 @@ The aggregate is therefore not bounded by any single box, which is why the alert
 
 `bin/fm-mem-protection-install.sh install` writes `/etc/default/earlyoom` and enables the `earlyoom` service:
 
+The installer requires an installed earlyoom version supporting `--ignore` and refuses incompatible versions before changing host configuration or services.
+
 ```
 EARLYOOM_ARGS="-m 5 -s 100 -r 60 --prefer '^(node|nodejs|MainThread|pytest|vitest|acceptance|playwright|cypress|npm|npx)' --ignore '^(omp|sshd|dockerd|containerd|herdr|clickhouse|systemd|dbus-daemon|Xorg|gnome-shell|tmux|earlyoom)'"
 ```

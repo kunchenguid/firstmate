@@ -112,6 +112,41 @@ test_install_refuses_a_missing_alert_executable() {
   pass "installation refuses before host changes when the alert executable is absent"
 }
 
+test_install_refuses_incompatible_earlyoom_before_host_changes() {
+  local root home fakebin rc out
+  root=$(fm_test_tmproot fm-mem-protection-install)
+  home="$root/home"
+  mkdir -p "$home/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$home/bin/fm-mem-alert.sh"
+  chmod +x "$home/bin/fm-mem-alert.sh"
+  fakebin=$(fm_fakebin "$root")
+  cat > "$fakebin/earlyoom" <<'SH'
+#!/bin/sh
+for arg do
+  if [ "$arg" = --ignore ]; then
+    printf "earlyoom: unrecognized option '--ignore'\n" >&2
+    exit 13
+  fi
+done
+exit 0
+SH
+  cat > "$fakebin/sudo" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$HOST_CHANGES"
+SH
+  cp "$fakebin/sudo" "$fakebin/systemctl"
+  chmod +x "$fakebin/earlyoom" "$fakebin/sudo" "$fakebin/systemctl"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" HOST_CHANGES="$root/host-changes" \
+    XDG_CONFIG_HOME="$root/units" "$INSTALLER" install --home "$home" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installation accepted earlyoom without absolute exclusions"
+  case "$out" in *"earlyoom"*"--ignore"*) ;; *) fail "missing earlyoom capability not named: $out" ;; esac
+  [ ! -e "$root/host-changes" ] || fail "touched host services before compatibility check"
+  [ ! -e "$root/units" ] || fail "wrote units for incompatible earlyoom"
+  [ ! -e "$home/config" ] || fail "wrote config for incompatible earlyoom"
+  pass "incompatible earlyoom is refused before host changes"
+}
+
 test_config_install_is_idempotent() {
   local root home out
   root=$(fm_test_tmproot fm-mem-protection-install)
@@ -227,6 +262,7 @@ SH
 
 test_print_policy_semantics
 test_install_refuses_a_missing_alert_executable
+test_install_refuses_incompatible_earlyoom_before_host_changes
 test_config_install_is_idempotent
 test_config_write_refuses_a_captain_edit
 test_status_runs_on_a_bare_home

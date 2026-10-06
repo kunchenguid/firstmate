@@ -19,6 +19,7 @@
 # `status`  reports the current state of every part without changing anything.
 # `print`   prints every generated file and every command the installer would run.
 # `install` applies all parts. It is idempotent and requires sudo for part 1.
+# Install an earlyoom version supporting --ignore before running `install`.
 #
 # Environment:
 #   FM_HOME   firstmate home whose config/ receives the heavy-suite posture and
@@ -120,7 +121,7 @@ cmd_print() {
   say "$FM_MP_RUNNER_DEFAULT"
   say ""
   say "=== commands ==="
-  say "sudo apt-get install -y earlyoom"
+  say "# prerequisite: installed earlyoom supporting --ignore"
   say "sudo install -m 0644 <defaults> $FM_MP_EARLYOOM_DEFAULTS"
   say "sudo systemctl enable --now earlyoom && sudo systemctl restart earlyoom"
   say "systemctl --user daemon-reload"
@@ -204,6 +205,10 @@ write_config_noclobber() {
 
 install_earlyoom() {
   local prior_enabled=no prior_active=no
+  command -v earlyoom >/dev/null 2>&1 \
+    || die "install a compatible earlyoom version supporting --ignore before installation"
+  earlyoom --ignore "$FM_MP_EARLYOOM_IGNORE" --dryrun --help >/dev/null 2>&1 \
+    || die "installed earlyoom does not support required --ignore exclusions; install a compatible version before installation"
   systemctl is-enabled earlyoom >/dev/null 2>&1 && prior_enabled=yes
   systemctl is-active earlyoom >/dev/null 2>&1 && prior_active=yes
   say "host-change record: earlyoom prior enabled=$prior_enabled active=$prior_active"
@@ -219,10 +224,6 @@ install_earlyoom() {
     say "manual revert: sudo systemctl stop earlyoom"
   fi
   say "manual revert: systemctl --user disable --now $FM_MP_TIMER"
-  if ! command -v earlyoom >/dev/null 2>&1; then
-    say "install: installing earlyoom"
-    sudo apt-get install -y earlyoom || die "could not install earlyoom"
-  fi
   if [ -f "$FM_MP_EARLYOOM_DEFAULTS" ] \
     && [ ! -f "$FM_MP_EARLYOOM_BACKUP" ] \
     && ! cmp -s <(earlyoom_defaults_content) "$FM_MP_EARLYOOM_DEFAULTS"; then
