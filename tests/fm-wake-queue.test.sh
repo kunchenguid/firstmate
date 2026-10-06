@@ -2649,7 +2649,11 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     "$DRAIN" > "$queue_out" 2> "$queue_err" \
     || { kill "$queue_holder" 2>/dev/null || true; fail "bounded queue presentation drain failed"; }
   elapsed=$(( $(date +%s) - start ))
-  [ "$elapsed" -le 4 ] \
+  # The budget only has to prove the 1s override was honored instead of the
+  # 10s default (a default-bound drain cannot finish under ~11s). The drain's
+  # shell startup, the watchdog's kill grace, and its tail work add seconds on
+  # a loaded host, so keep headroom over the 1s bound itself.
+  [ "$elapsed" -le 8 ] \
     || { kill "$queue_holder" 2>/dev/null || true; fail "queue lock delayed the drain for ${elapsed}s"; }
   advisory_count=$(grep -Fc \
     "WAKE DRAIN SKIPPED: queue lock remains held by live pid $queue_holder" \
@@ -2689,7 +2693,9 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     "$DRAIN" > "$first_out" 2> "$first_err" \
     || { kill "$presentation_holder" 2>/dev/null || true; fail "bounded presentation drain failed"; }
   elapsed=$(( $(date +%s) - start ))
-  [ "$elapsed" -le 4 ] \
+  # Same budget arithmetic as the queue-lock row above: prove the 1s override
+  # beat the 10s default while tolerating loaded-host overhead around the bound.
+  [ "$elapsed" -le 8 ] \
     || { kill "$presentation_holder" 2>/dev/null || true; fail "presentation lock delayed the drain for ${elapsed}s"; }
   advisory_count=$(grep -Fc \
     "STATUS PRESENTATION SKIPPED: lock remains held by live pid $presentation_holder" \

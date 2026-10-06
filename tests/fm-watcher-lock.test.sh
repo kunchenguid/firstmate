@@ -15,10 +15,10 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 # An arm only reports its typed failure after wait_for_healthy_successor has
 # spent the whole confirmation budget, so cases that wait for that failure must
-# outlast the largest production default (30s on MSYS, 10s elsewhere - see
+# outlast the largest production default (30s on every platform - see
 # ARM_CONFIRM_DEFAULT in bin/fm-watch-arm.sh). This is a ceiling spent only when
 # an arm genuinely fails to exit; a passing case returns as soon as it does.
-ARM_FAIL_EXIT_POLLS=400
+ARM_FAIL_EXIT_POLLS=800
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
@@ -340,7 +340,11 @@ test_lock_single_winner_under_concurrency() {
         printf "%s\n" "$$" >> "$3"
         # Stay alive so the held lock names a live pid for the whole window;
         # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
+        # The hold must outlast the slowest contender arrival: sourcing this
+        # library under 40-way fork contention spread attempts by ~5s on a busy
+        # macOS host, and a 1s hold let a post-exit contender steal the lock and
+        # flake this suite with two winners.
+        sleep 10
       fi
     ' _ "$LIB" "$lockdir" "$marker" &
     pids="$pids $!"
@@ -394,6 +398,185 @@ leave_dead_link_locks() {  # <state> <lock>...
   [ -s "$last/pid" ] || fail "dead link-lock owner did not publish its pid"
   kill -KILL "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
+}
+
+# A steal mutex whose symlink names an owner directory that no longer exists,
+# with no tombstone anywhere, is a provably-dead holder: no reaper can be mid-
+# election (its mv would have left a tombstone), so the link itself must be
+# removable. Before this rule such a dangling steal mutex - left behind when
+# leaked owner records were cleaned up underneath their links - blocked every
+# later steal of the primary lock, which is how a home wedged all watcher
+# startups with zero output on 2026-09-29.
+test_lock_reaps_dangling_steal_link_with_gone_owner() {
+  local dir state lockdir rc
+  dir=$(make_case lock-dangling-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  ln -s "$state/.contend.lock.steal.owner.GONE01" "$lockdir.steal"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_reap_dead_link "$2.steal" || exit 7
+    [ ! -e "$2.steal" ] && [ ! -L "$2.steal" ] || exit 8
+    fm_lock_try_acquire "$2" || exit 9
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "dangling steal mutex blocked lock reclamation (rc=$rc)"
+  pass "dangling steal mutex whose owner is gone is reaped and the lock reclaimed"
+}
+
+# The watcher's startup-critical recovery transitions (reopen-announced,
+# arm-check, and the steal-path downtime publication) must wait only their
+# bounded budget on the recovery marker and queue locks. Unbounded, a lock that
+# cannot be stolen turned the watcher child into a silent infinite retry loop
+# that the arm's confirmation timeout then TERMed with no cleanup trap running.
+test_recovery_marker_waits_are_bounded_on_startup_path() {
+  local dir state marker holder rc started elapsed i
+  dir=$(make_case recovery-bound)
+  state="$dir/state"
+  marker="$state/.watcher-down"
+  printf 'acked:handling:1.1700000000.abcDEF\n' > "$marker"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.lock" || exit 7
+    exec sleep 30
+  ' _ "$LIB" "$marker" >/dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$marker.lock" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$marker.lock" ] || fail "live marker-lock holder never published the lock"
+  rc=0
+  started=$SECONDS
+  FM_STATE_OVERRIDE="$state" FM_RECOVERY_LOCK_BOUND=1 bash -c '
+    . "$1"
+    fm_recovery_marker_reopen_announced "$2" 1 && exit 5
+    fm_recovery_marker_arm_check "$2" 1 && exit 6
+    exit 0
+  ' _ "$LIB" "$marker" || rc=$?
+  elapsed=$((SECONDS - started))
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "bounded recovery transitions returned failure (rc=$rc)"
+  [ "$elapsed" -le 10 ] || fail "bounded recovery transition ran ${elapsed}s past a 1s budget"
+  pass "startup recovery transitions refuse within their bounded wait instead of looping"
+}
+
+# The startup sweep collects a lock family's leaked records only when they
+# provably name no live process: dead owner directories and dead-reaper
+# tombstones go, a live contender's owner directory and the lock's own symlink
+# target stay.
+test_sweep_collects_dead_owner_records_only() {
+  local dir state lockdir live_owner dead_pid rc
+  dir=$(make_case sweep-dead-owners)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead_pid=$(dead_pid)
+  mkdir "$state/.contend.lock.owner.DEADAA" "$state/.contend.lock.owner.DEADBB.reaped.$dead_pid" \
+    "$state/.contend.lock.steal.owner.DEADCC"
+  printf '%s\n' "$dead_pid" > "$state/.contend.lock.owner.DEADAA/pid"
+  printf '%s\n' "$dead_pid" > "$state/.contend.lock.steal.owner.DEADCC/pid"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    live_holder=
+    fm_current_pid live_holder
+    mkdir "$3/.contend.lock.owner.LIVE01" "$3/.contend.lock.owner.CURRENT"
+    printf "%s\n" "$live_holder" > "$3/.contend.lock.owner.LIVE01/pid"
+    printf "%s\n" "$live_holder" > "$3/.contend.lock.owner.CURRENT/pid"
+    ln -sfn "$3/.contend.lock.owner.CURRENT" "$2"
+    fm_lock_sweep_dead_owners "$2"
+    [ -d "$3/.contend.lock.owner.LIVE01" ] || exit 8
+    [ -d "$3/.contend.lock.owner.CURRENT" ] || exit 9
+    [ ! -d "$3/.contend.lock.owner.DEADAA" ] || exit 10
+    [ ! -d "$3/.contend.lock.owner.DEADBB.reaped.$4" ] || exit 11
+    [ ! -d "$3/.contend.lock.steal.owner.DEADCC" ] || exit 12
+    exit 0
+  ' _ "$LIB" "$lockdir" "$state" "$dead_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "startup sweep misclassified owner records (rc=$rc)"
+  pass "startup sweep collects only provably-dead leaked owner records"
+}
+
+# The marker-scratch sweep must actually collect the quarantine directories it
+# promises to reclaim: a failed arm-check repair moves the unreadable marker
+# into ${marker}.invalid.*/marker, so the sweep has to drop that file before
+# its conservative directory discard, or every quarantine dir survives forever
+# and keeps bloating state/. Scratch younger than FM_RECOVERY_TMP_STALE_AFTER,
+# and a directory holding content the repair never writes, must stay.
+test_marker_sweep_collects_abandoned_scratch_only() {
+  local dir state marker rc
+  dir=$(make_case marker-sweep-stale)
+  state="$dir/state"
+  marker="$state/.watcher-down"
+  mkdir "$marker.invalid.AGED01" "$marker.invalid.FRESH1" "$marker.invalid.KEEPER"
+  printf 'announced:downtime:1.1700000000.abcDEF\n' > "$marker.invalid.AGED01/marker"
+  printf 'announced:downtime:1.1700000000.abcDEF\n' > "$marker.invalid.FRESH1/marker"
+  printf 'announced:downtime:1.1700000000.abcDEF\n' > "$marker.invalid.KEEPER/marker"
+  : > "$marker.tmp.AGED02"
+  : > "$marker.tmp.FRESH2"
+  : > "$marker.invalid.KEEPER/foreign"
+  touch -t 200001010000 "$marker.invalid.AGED01" "$marker.invalid.KEEPER" "$marker.tmp.AGED02"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_sweep_stale "$2"
+    [ ! -e "$2.invalid.AGED01" ] || exit 8
+    [ ! -e "$2.tmp.AGED02" ] || exit 9
+    [ -d "$3/.watcher-down.invalid.FRESH1" ] || exit 10
+    [ -e "$3/.watcher-down.tmp.FRESH2" ] || exit 11
+    [ -d "$3/.watcher-down.invalid.KEEPER" ] || exit 12
+    exit 0
+  ' _ "$LIB" "$marker" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "marker scratch sweep misclassified abandoned scratch (rc=$rc)"
+  pass "marker scratch sweep collects aged quarantine dirs and tmp files only"
+}
+
+# A recovery writer holds ${marker}.lock across its whole mint-to-rename
+# window. One frozen between mktemp and the atomic rename for longer than
+# FM_RECOVERY_TMP_STALE_AFTER is stopped, not dead, so the sweep must spare
+# its in-flight scratch; once the writer is provably gone, the same aged
+# scratch is collected.
+test_marker_sweep_spares_live_writer_scratch() {
+  local dir state marker holder rc i
+  dir=$(make_case marker-sweep-inflight)
+  state="$dir/state"
+  marker="$state/.watcher-down"
+  : > "$marker.tmp.FROZEN1"
+  touch -t 200001010000 "$marker.tmp.FROZEN1"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.lock" || exit 7
+    exec sleep 30
+  ' _ "$LIB" "$marker" >/dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$marker.lock" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$marker.lock" ] || fail "frozen writer never took the marker lock"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_sweep_stale "$2"
+    [ -e "$2.tmp.FROZEN1" ] || exit 8
+    exit 0
+  ' _ "$LIB" "$marker" || rc=$?
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "marker scratch sweep deleted a live writer's in-flight scratch (rc=$rc)"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_sweep_stale "$2"
+    [ ! -e "$2.tmp.FROZEN1" ] || exit 9
+    exit 0
+  ' _ "$LIB" "$marker" || fail "marker scratch sweep kept aged scratch after its writer died"
+  pass "marker scratch sweep spares a live writer's scratch and collects it once dead"
 }
 
 test_lock_reclaims_dead_steal_owner_without_nested_markers() {
@@ -559,6 +742,62 @@ SH
     *) fail "competing reaper did not report an outcome" ;;
   esac
   pass "a competing reaper cannot remove the successor's steal mutex"
+}
+
+test_lock_dangling_reap_cannot_remove_successor() {
+  # Two reapers verify the same dangling steal mutex. The competitor runs to
+  # completion exactly when the first one is about to remove the link; the
+  # first reaper must not delete the competitor's fresh live mutex link.
+  local dir state steal fakebin out rc
+  dir=$(make_case lock-dangling-reap-race)
+  state="$dir/state"
+  steal="$state/.contend.lock.steal"
+  fakebin="$dir/fakebin"
+  out="$dir/competitor"
+  ln -s "$steal.owner.GONE01" "$steal"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg do last=$arg; done
+if [ "$last" = "$FM_TEST_RACE_PATH" ] && mkdir "$FM_TEST_RACE_ONCE" 2>/dev/null; then
+  bash -c '
+    . "$1"
+    if fm_lock_try_acquire_steal_mutex "$2"; then
+      printf "won %s\n" "${BASHPID:-$$}" > "$3"
+      exec sleep 30
+    fi
+    printf "lost\n" > "$3"
+  ' _ "$FM_TEST_LIB" "$last" "$FM_TEST_RACE_OUT" >/dev/null 2>&1 &
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$FM_TEST_RACE_OUT" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+fi
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/rm"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LIB="$LIB" FM_TEST_RACE_PATH="$steal" \
+    FM_TEST_RACE_ONCE="$dir/race-once" FM_TEST_RACE_OUT="$out" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire_steal_mutex "$2" || exit 1
+      [ "$(cat "$2/pid" 2>/dev/null)" = "${BASHPID:-$$}" ] || exit 2
+    ' _ "$LIB" "$steal" || rc=$?
+  [ -d "$dir/race-once" ] || fail "dangling reap race hook never fired"
+  case "$(cat "$out" 2>/dev/null || true)" in
+    won\ *)
+      kill -KILL "$(sed 's/^won //' "$out")" 2>/dev/null || true
+      [ "$rc" -ne 0 ] || fail "competing reapers both hold the steal mutex"
+      ;;
+    lost)
+      [ "$rc" -eq 0 ] || fail "no reaper acquired the dangling steal mutex (rc=$rc)"
+      ;;
+    *) fail "competing reaper did not report an outcome" ;;
+  esac
+  pass "a competing reaper cannot remove the successor of a dangling reap"
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
@@ -1110,6 +1349,62 @@ test_arm_starts_and_self_heals() {
   pass "arm starts cleanly and resurfaces recovery after a dead-pid lock"
 }
 
+test_arm_starts_from_wedged_startup_state() {
+  # The 2026-09-29 wedge shape: a stale .watch.lock naming a dead pid under a
+  # pid-only owner record, a dangling .watch.lock.steal mutex whose owner
+  # directory is gone, stale .watcher-down.lock and .wake-queue.lock symlinks
+  # naming dead owners, an acked:handling recovery marker, and months of leaked
+  # owner records in the state directory. An arm forked into this shape must
+  # confirm a started watcher with a fresh beacon, not TERM a silent child at
+  # the confirmation deadline.
+  local dir state fakebin armout armpid i lock_pid dead
+  dir=$(make_case arm-wedged-startup)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  dead=$(dead_pid)
+  mkdir "$state/.watch.lock.owner.WEDG01"
+  printf '%s\n' "$dead" > "$state/.watch.lock.owner.WEDG01/pid"
+  ln -s "$state/.watch.lock.owner.WEDG01" "$state/.watch.lock"
+  ln -s "$state/.watch.lock.steal.owner.GONE01" "$state/.watch.lock.steal"
+  mkdir "$state/.watcher-down.lock.owner.WEDG02" "$state/.wake-queue.lock.owner.WEDG03"
+  printf '%s\n' "$dead" > "$state/.watcher-down.lock.owner.WEDG02/pid"
+  printf '%s\n' "$dead" > "$state/.wake-queue.lock.owner.WEDG03/pid"
+  ln -s "$state/.watcher-down.lock.owner.WEDG02" "$state/.watcher-down.lock"
+  ln -s "$state/.wake-queue.lock.owner.WEDG03" "$state/.wake-queue.lock"
+  printf 'acked:handling:1.1700000000.abcDEF\n' > "$state/.watcher-down"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    is_live_non_zombie "$armpid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" \
+    || fail "arm did not confirm a started watcher from the wedged state: $(cat "$armout")"
+  # The recovering watcher resurfaces on its first cycle (check: rearm-resurface)
+  # and may exit and release the lock moments after the arm confirms it, like
+  # the dead-pid row of test_arm_starts_and_self_heals - so the pid comes from
+  # the started line (which prints only after the pid-strict healthy check read
+  # it from the lock) and never from a lock the exited cycle may already have
+  # released.
+  lock_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | head -n 1)
+  [ -n "$lock_pid" ] || fail "wedged-state started line named no pid: $(cat "$armout")"
+  [ ! -e "$state/.watch.lock.steal" ] && [ ! -L "$state/.watch.lock.steal" ] \
+    || fail "dangling steal mutex survived startup"
+  [ ! -d "$state/.watch.lock.owner.WEDG01" ] \
+    || fail "stale pid-only watch-lock owner record survived startup"
+  [ ! -d "$state/.watcher-down.lock.owner.WEDG02" ] \
+    || fail "stale marker-lock owner record survived startup"
+  [ ! -d "$state/.wake-queue.lock.owner.WEDG03" ] \
+    || fail "stale queue-lock owner record survived startup"
+  kill "$armpid" "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm confirms a started watcher from the wedged startup state and reclaims its records"
+}
+
 test_arm_hup_cleans_child_and_temp_output() {
   local dir state fakebin armout i armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
@@ -1559,10 +1854,16 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_reaps_dangling_steal_link_with_gone_owner
+test_recovery_marker_waits_are_bounded_on_startup_path
+test_sweep_collects_dead_owner_records_only
+test_marker_sweep_collects_abandoned_scratch_only
+test_marker_sweep_spares_live_writer_scratch
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
 test_lock_steal_reap_cannot_remove_successor
+test_lock_dangling_reap_cannot_remove_successor
 test_lock_reclaims_self_held_steal_mutex
 test_lock_resumes_own_interrupted_steal_reap
 test_lock_live_steal_mutex_is_not_reclaimed
@@ -1577,6 +1878,7 @@ test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
+test_arm_starts_from_wedged_startup_state
 test_arm_hup_cleans_child_and_temp_output
 test_arm_term_during_steal_waits_for_watcher_cleanup_trap
 test_arm_term_bounds_wait_for_stalled_startup
