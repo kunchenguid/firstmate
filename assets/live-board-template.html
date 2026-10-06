@@ -122,6 +122,7 @@ h1 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 2px; colo
       <span class="pill v-info" id="verdict">waiting</span>
       <span class="note" id="verdict-note">reading the run's own output files</span>
     </div>
+    <div class="sub mono trunc" id="source">no target sampled yet</div>
     <div class="sub mono" id="updated">no sample yet</div>
   </div>
 
@@ -231,9 +232,29 @@ h1 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 2px; colo
   }
   function verdictClass(v) {
     if (v === "progressing" || v === "finished-ok") { return "v-ok"; }
-    if (v === "slow" || v === "unknown-cadence" || v === "unwatched") { return "v-warn"; }
-    if (v === "finished-failed" || v === "stalled" || v === "errors" || v === "gone") { return "v-bad"; }
+    if (v === "slow" || v === "unknown-cadence" || v === "unwatched" || v === "between-phases") { return "v-warn"; }
+    if (v === "finished-failed" || v === "stalled" || v === "errors" || v === "gone" || v === "unreachable") { return "v-bad"; }
     return "v-info";
+  }
+
+  // The banner is the one place that says out loud what the reader can and
+  // cannot conclude. A host that cannot be reached is the case that matters
+  // most: silence from a machine says nothing about its run, so it must never
+  // be phrased like a stalled or finished one.
+  function banner(kind, message) {
+    var box = el("stale");
+    box.classList.remove("hidden");
+    box.className = kind === "ended" ? "stale ended" : "stale";
+    box.textContent = message;
+  }
+
+  function unreachable(ageS, d) {
+    var src = d.source || {};
+    banner("alarm", "CANNOT SEE THE RUN at " + (src.target || src.host || "the host") + ": " +
+      (src.error || "no contact") + ". Showing nothing from it; read across for what could still be read, " +
+      dur(ageS) + " ago. This is not a finding about the run.");
+    text("watchhint", "No contact with " + (src.target || src.host || "the host") +
+      ", so the numbers here are frozen and incomplete rather than reassuring.");
   }
   function spark(svg, values, color) {
     if (!svg) { return; }
@@ -261,35 +282,45 @@ h1 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 2px; colo
     el("verdict").className = "pill " + verdictClass(d.verdict);
     text("verdict-note", d.verdict_note || "");
 
+    var src = d.source || {};
+    text("source", "watching " + (src.host || "this machine") + ":" + (src.run_dir || "?") +
+      (src.kind === "ssh" ? "  (remote, over ssh)" : "  (this machine)"));
+
     var p = d.progress || {};
     var pr = d.process || {};
     var h = d.health || {};
+    var blind = src.reachable === false;
 
-    text("gap", p.gap_s === undefined ? "-" : p.gap_s);
-    text("cadence", p.cadence_known
-      ? "longest gap between progress lines so far: " + dur(p.max_gap_s)
-      : "no second progress timestamp yet, so there is no cadence to compare against");
+    text("gap", blind ? "?" : (p.gap_s === undefined ? "-" : p.gap_s));
+    text("cadence", blind
+      ? "no contact with " + (src.target || src.host || "the host") + ", so there is no progress reading to compare"
+      : (p.cadence_known
+        ? "longest gap between progress lines so far: " + dur(p.max_gap_s)
+        : "no second progress timestamp yet, so there is no cadence to compare against"));
 
     var total = p.sources_total || 0;
     var done = p.sources_done || 0;
     var pct = total ? (done / total) * 100 : 0;
     setBar("bar", pct, d.verdict === "stalled" ? "stalled" : (d.verdict === "slow" ? "slow" : ""));
-    text("sources", total ? done + " of " + total + " sources copied" : "source count not in the log yet");
+    var unitLabel = p.unit === "tables" ? "tables verified" : "sources copied";
+    text("sources", total ? done + " of " + total + " " + unitLabel : "source count not in the log yet");
     text("phase", "phase: " + (p.phase || "-"));
-    text("current", p.current_source
-      ? p.current_source + (p.current_beads ? " (" + p.current_beads + " beads)" : "")
-      : "-");
+    text("current", blind
+      ? "unknown - no contact"
+      : (p.current_source ? p.current_source + (p.current_beads ? " (" + p.current_beads + " beads)" : "") : "-"));
     text("lastline", p.last_line || "-");
     el("lastline").title = p.last_line || "";
 
-    text("pid", pr.alive ? "pid " + pr.pid : "not running");
-    el("pid").className = "v " + (pr.alive ? "ok" : "bad");
-    text("elapsed", pr.etime ? dur(pr.elapsed_s) + "  (" + pr.etime + ")" : "-");
-    text("cpu", (pr.cpu_s || 0) + "s");
-    text("cpurate", pr.cpu_delta_s > 0
-      ? "+" + pr.cpu_delta_s + "s over the last " + dur(pr.window_s)
-      : "no CPU accrued over the last " + dur(pr.window_s));
-    el("cpurate").className = "v " + (pr.cpu_delta_s > 0 ? "ok" : "warn");
+    text("pid", blind ? "unknown - no contact" : (pr.alive ? "pid " + pr.pid : "not running"));
+    el("pid").className = "v " + (blind ? "warn" : (pr.alive ? "ok" : "bad"));
+    text("elapsed", blind ? "-" : (pr.etime ? dur(pr.elapsed_s) + "  (" + pr.etime + ")" : "-"));
+    text("cpu", blind ? "-" : (pr.cpu_s || 0) + "s");
+    text("cpurate", blind
+      ? "-"
+      : (pr.cpu_delta_s > 0
+        ? "+" + pr.cpu_delta_s + "s over the last " + dur(pr.window_s)
+        : "no CPU accrued over the last " + dur(pr.window_s)));
+    el("cpurate").className = "v " + (blind ? "warn" : (pr.cpu_delta_s > 0 ? "ok" : "warn"));
     text("rss", mb(pr.rss_mb || 0));
     text("procs", pr.count || 0);
 
@@ -364,7 +395,12 @@ h1 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 2px; colo
     text("interval", mon.stopped ? "watch ended" : "every " + (mon.interval_s || 3) + "s");
     text("watchhint", mon.stopped
       ? "The watch stopped because " + (mon.reason || "the run reached a final state") + ". The numbers above are its last reading."
-      : "This page refreshes itself; it does not need reloading.");
+      : (blind
+        ? "No contact with " + (src.target || src.host || "the host") + ", so nothing above is a statement about the run."
+        : "This page refreshes itself; it does not need reloading."));
+    if (blind) {
+      unreachable(sampleAge(), d);
+    }
 
     if (last && p.sources_done !== undefined && p.sources_done !== last.progress.sources_done) {
       lastChange = "source progress at " + new Date().toLocaleTimeString();
@@ -381,14 +417,11 @@ h1 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 2px; colo
   }
 
   function stale(reason, ageS) {
-    var box = el("stale");
     var stopped = last && last.monitor && last.monitor.stopped;
-    box.classList.remove("hidden");
-    box.className = stopped ? "stale ended" : "stale";
-    box.textContent = stopped
+    banner(stopped ? "ended" : "alarm", stopped
       ? "The watch ended because " + (last.monitor.reason || "the run reached a final state") +
         ". Showing the last reading, " + dur(ageS) + " old."
-      : "NO LIVE DATA - no sample for " + dur(ageS) + " (" + reason + "). The page is showing the last reading it has.";
+      : "NO LIVE DATA - the newest sample is " + dur(ageS) + " old (" + reason + "). The numbers below are the last ones received.");
     if (last) {
       text("watchhint", stopped
         ? "The watch has finished; this page will not refresh further unless a watch is started again."
@@ -398,45 +431,63 @@ h1 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 2px; colo
     }
   }
 
+  function sampleAge() {
+    if (!last || !last.sampled_at) { return 0; }
+    return Math.max(0, Math.floor(Date.now() / 1000) - last.sampled_at);
+  }
+
   function tick() {
     fetch(dataUrl + "?t=" + Date.now(), { cache: "no-store" })
       .then(function (r) { if (!r.ok) { throw new Error("HTTP " + r.status); } return r.json(); })
       .then(function (d) {
         lastAt = Date.now();
+        last = d;
         el("stale").classList.add("hidden");
         render(d);
       })
       .catch(function (err) {
-        var ageS = lastAt ? (Date.now() - lastAt) / 1000 : 0;
-        if (last) {
-          var staleAfter = (last.monitor && last.monitor.stale_after_s) || 12;
-          if (ageS > staleAfter) { stale(String(err.message || err), ageS); }
-        } else {
+        if (!last) {
           text("verdict", "waiting for the first sample");
           text("verdict-note", "no sample file readable yet at " + dataUrl);
+          return;
+        }
+        var mon = last.monitor || {};
+        var src = last.source || {};
+        var ageS = sampleAge();
+        var staleAfter = mon.stale_after_s || 12;
+        // A page that cannot read its own sample file is a different fault from
+        // a host that cannot be reached, and the banner must not overwrite the
+        // louder, more specific one.
+        if (src.reachable !== false && !mon.stopped && ageS > staleAfter) {
+          stale("this page could not read the sample file: " + (err.message || err), ageS);
         }
       });
   }
 
   function ageTick() {
     if (!last) { return; }
-    var ageS = (Date.now() - lastAt) / 1000;
-    if (!lastAt) { return; }
-    var staleAfter = (last.monitor && last.monitor.stale_after_s) || 12;
     var mon = last.monitor || {};
-    text("updated", "sampled " + new Date(lastAt).toLocaleTimeString() +
-      " - updated " + dur(ageS) + " ago" + (mon.stopped ? " - watch ended" : ""));
+    var src = last.source || {};
+    var ageS = sampleAge();
+    var staleAfter = mon.stale_after_s || 12;
+    text("updated", "sampled " + new Date(last.sampled_at * 1000).toLocaleTimeString() +
+      " - " + dur(ageS) + " ago" + (mon.stopped ? " - watch ended" : ""));
+    if (src.reachable === false) {
+      unreachable(ageS, last);
+      return;
+    }
     if (mon.stopped) {
       if (ageS > 2) { stale("watch ended", ageS); }
-    } else if (ageS > staleAfter) {
+      return;
+    }
+    if (ageS > staleAfter) {
       stale("no fresh sample", ageS);
+      return;
     }
     // The headline number ticks between samples so a frozen page is visually
     // obvious even while nothing else on it changes.
-    if (!mon.stopped && ageS < staleAfter) {
-      var p = last.progress || {};
-      text("gap", p.gap_s === undefined ? "-" : (p.gap_s + Math.round((Date.now() - lastAt) / 1000)));
-    }
+    var p = last.progress || {};
+    text("gap", p.gap_s === undefined ? "-" : (p.gap_s + ageS));
   }
 
   tick();

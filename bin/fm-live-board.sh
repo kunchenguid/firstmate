@@ -6,10 +6,30 @@
 # so the page's own refresh is a no-store fetch rather than a page reload.
 #
 # Usage:
-#   fm-live-board.sh sample --run-dir DIR --out FILE [options]
+#   fm-live-board.sh sample --run-dir DIR --out FILE [--ssh HOST] [options]
 #   fm-live-board.sh page   --out FILE [--template FILE] [--label TEXT]
-#   fm-live-board.sh watch  --run-dir DIR --out HTML [options]
+#   fm-live-board.sh watch  --run-dir DIR --out HTML [--ssh HOST] [options]
 #   fm-live-board.sh open   --out HTML [--reopen]
+#
+# --ssh HOST samples a run that is NOT on this machine: HOST is an ssh target
+# (a configured host alias, or user@host) and --run-dir is that host's path.
+# A long build migrates to whichever host is least loaded, so a view that can
+# only see this box goes blind exactly when the answer has moved. Both paths
+# run the SAME producer script and the SAME parser, so local is not a second
+# implementation free to drift from remote.
+#
+# WHAT THE PRODUCER MAY DO. It reads only: ps, file sizes and mtimes, the tail
+# of the run's own logs, and the host's swap, core count, and load average. It
+# never signals, restarts, kills, or writes anything on the host it samples,
+# and a test asserts the producer script it sends carries no such verb.
+#
+# AN UNREACHABLE RUN IS NEVER DRAWN AS AN IDLE ONE. When the host cannot be
+# reached the sample is marked source.reachable=false with the reason, its
+# verdict is `unreachable`, and its process state is unknown rather than gone -
+# "I cannot see it" and "it is not running" are different facts, and a board
+# that renders the first as the second is worse than no board. Every sample
+# also names the host and run directory it sampled, and the page prints them,
+# so a page showing little at least says where it was looking.
 #
 # RUN IDENTITY IS THE RUN DIRECTORY. A process belongs to this run when its
 # command line names the run directory, because whatever the run spawned
@@ -33,6 +53,10 @@
 #          Terminal states are: the run script logged "all phases done", a
 #          phase exit file says the run is over and cannot continue, the run
 #          directory disappeared, or --max-seconds elapsed.
+#          --follow keeps sampling through a final result instead of stopping,
+#          because a failed run is usually retried and a page that went quiet
+#          at the first attempt would miss the second; it still ends at
+#          --max-seconds.
 # open     Establish the Lavish session on the page (the same visual surface
 #          the fleet board uses) and print its URL.
 #
@@ -258,10 +282,12 @@ parse_log() {  # <log> <err-file> <tail-file>
         if (last_t >= 0 && t - last_t > max_gap) max_gap = t - last_t
         last_t = t
       }
-      last_line = strip($0)
       body = strip($0)
+      # Only a line with content counts as the last thing the run said: the
+      # bundle framing normalizes every mirrored log to end in a newline, and a
+      # blank line would otherwise be reported as the newest progress.
+      if (length(body) > 0) last_line = body
       if (body ~ /^participating sources: /) {
-        v = body
         sub(/^participating sources: */, "", body)
         sources_total = body + 0
       }
@@ -336,8 +362,220 @@ parse_log() {  # <log> <err-file> <tail-file>
   ' "$1"
 }
 
+# shell_squote <value>: a single-quoted POSIX shell word, safe to prepend to a
+# script that runs under sh on this machine or on a remote host.
+shell_squote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# bundle_producer: the read-only POSIX sh script that collects one sample. It
+# runs through `sh` locally or through `ssh HOST sh`, so the local and remote
+# paths cannot drift apart. It reads RUN_DIR and WANT_DU from the assignments
+# prefixed to it by fetch_bundle, and emits a sectioned text bundle.
+#
+# Section framing: `##LOG <name>` ... `##ENDLOG` bodies are mirrored back into
+# a local logs directory verbatim, and every other section is a `KEY<TAB>value`
+# record. Log bodies are normalized to end in exactly one newline so the
+# framing can never be confused by a file whose last line lacks one.
+#
+# Reads only. There is deliberately no kill, pkill, signal, restart, tee, or
+# redirection onto any file under RUN_DIR anywhere in this script.
+bundle_producer() {
+  cat <<'PRODUCER'
+set -u
+RUN_DIR=${RUN_DIR:-}
+RUN_DIR_ALT=${RUN_DIR_ALT:-}
+WANT_DU=${WANT_DU:-0}
+RUNNER_PATTERN=${RUNNER_PATTERN:-run-unify\.sh}
+printf '##FF v1\n'
+if [ -z "$RUN_DIR" ]; then
+  printf '##FATAL\nno run directory was given\n'
+  exit 3
+fi
+printf '##NOW\n%s\n' "$(date +%s)"
+printf '##HOST\n%s\n' "$(hostname 2>/dev/null || echo unknown)"
+if [ ! -d "$RUN_DIR" ]; then
+  printf '##FATAL\nrun directory not found on this host: %s\n' "$RUN_DIR"
+  exit 4
+fi
+for f in "$RUN_DIR"/logs/*.log "$RUN_DIR"/logs/*.exit "$RUN_DIR"/logs/mem.csv; do
+  [ -f "$f" ] || continue
+  name=$(basename "$f")
+  printf '##STAT\n%s\t%s\t%s\n' "$name" \
+    "$(wc -c <"$f" 2>/dev/null | tr -d ' ')" \
+    "$(date -r "$f" +%s 2>/dev/null || echo 0)"
+  printf '##LOG %s\n' "$name"
+  if [ "$name" = mem.csv ]; then
+    body=$(tail -n 200 "$f" 2>/dev/null; printf x)
+  else
+    body=$(head -c 400000 "$f" 2>/dev/null; printf x)
+  fi
+  printf '%s\n' "${body%x}"
+  printf '##ENDLOG\n'
+done
+# Membership is the run's OWN process tree, anchored on the runner script. A run
+# directory can hold more than one unify process - a source server, or a repro
+# of a failure in a neighbouring scratch directory - and each of them carries
+# the run directory in its path. Reporting one of those as the run would show
+# hours of somebody else's CPU and gigabytes of their memory as this run's
+# liveness, for a run that had already ended. So a process belongs to the run
+# when the run's runner script is one of its ancestors (or it IS the runner),
+# and the working directory is taken from that set. A layout with no recognisable
+# runner falls back to the command-shape rule: a process under the run directory
+# whose arguments name `unify` as a word of their own.
+ps_section=$(ps -axo pid=,ppid=,etime=,time=,rss=,state=,args= 2>/dev/null | awk -v run="$RUN_DIR" -v alt="$RUN_DIR_ALT" -v runner="$RUNNER_PATTERN" '
+  {
+    pid = $1; ppid = $2; etime = $3; ctime = $4; rss = $5; state = $6
+    args = $7
+    for (i = 8; i <= NF; i++) args = args " " $i
+    # The sampler itself carries the runner pattern on its own command line, and
+    # its helpers carry the run directory, so neither may be mistaken for the
+    # run runner or counted as a member of the run.
+    if (args ~ /fm-live-board\.sh/ || args ~ /-v runner=/) next
+    n++
+    PIDS[n] = pid
+    PARENT[pid] = ppid; ARGS[pid] = args; ETM[pid] = etime; CTM[pid] = ctime
+    RSSM[pid] = rss; STATEM[pid] = state
+    if (args ~ runner) { nrunners++; ISRUN[pid] = 1 }
+  }
+  END {
+    # A directory can be reachable by more than one path - a symlinked /tmp is
+    # the everyday case - so both the resolved and the as-given form count.
+    needle = run "/"
+    needle_alt = (alt == "" ? "" : alt "/")
+    if (nrunners > 0) {
+      for (i = 1; i <= n; i++) {
+        p = PIDS[i]; hops = 0
+        while (p != 0 && p != 1 && hops < 12) {
+          if (ISRUN[p]) { INRUN[PIDS[i]] = 1; break }
+          p = PARENT[p]; hops++
+        }
+      }
+      for (i = 1; i <= n; i++) if (ISRUN[PIDS[i]]) INRUN[PIDS[i]] = 1
+      for (i = 1; i <= n; i++) {
+        p = PIDS[i]
+        if (work != "" || !INRUN[p] || ARGS[p] !~ /unify/) continue
+        m = split(ARGS[p], a, " ")
+        for (j = 1; j <= m; j++) {
+          if (a[j] ~ /^--data-dir=/) { w = a[j]; sub(/^--data-dir=/, "", w); work = w; break }
+          if (a[j] == "--data-dir") { work = a[j + 1]; break }
+        }
+      }
+    } else {
+      # No runner in sight: the run is identified by command shape, and the
+      # working directory it names then brings in its own workers, which do not
+      # name the run command themselves.
+      for (i = 1; i <= n; i++) {
+        p = PIDS[i]
+        hit = index(ARGS[p], needle) > 0
+        if (!hit && needle_alt != "") hit = index(ARGS[p], needle_alt) > 0
+        if (!hit) continue
+        m = split(ARGS[p], a, " ")
+        found = 0
+        for (j = 1; j <= m; j++) if (a[j] == "unify") { found = 1; break }
+        if (!found) continue
+        CAND[p] = 1
+        if (work != "") continue
+        for (j = 1; j <= m; j++) {
+          if (a[j] ~ /^--data-dir=/) { w = a[j]; sub(/^--data-dir=/, "", w); work = w; break }
+          if (a[j] == "--data-dir") { work = a[j + 1]; break }
+        }
+      }
+      if (work != "") {
+        for (i = 1; i <= n; i++) {
+          p = PIDS[i]
+          q = index(ARGS[p], work)
+          if (q == 0) continue
+          after = substr(ARGS[p], q + length(work), 1)
+          if (after != "" && after != "/") continue
+          INRUN[p] = 1
+        }
+      }
+      for (i = 1; i <= n; i++) if (CAND[PIDS[i]]) INRUN[PIDS[i]] = 1
+    }
+    printf "##WORKDIR\n%s\n##PS\n", work
+    for (i = 1; i <= n; i++) {
+      p = PIDS[i]
+      if (!INRUN[p]) continue
+      printf "%s\t%s\t%s\t%s\t%s\t%s\n", p, ETM[p], CTM[p], RSSM[p], STATEM[p], ARGS[p]
+    }
+  }')
+# The working directory is named inside the same pass, so it is lifted back out
+# here for the size measurement below, and the section is re-emitted verbatim.
+work=$(printf '%s\n' "$ps_section" | sed -n '/^##WORKDIR$/{n;p;}' | head -1)
+printf '%s\n' "$ps_section"
+printf '##SYSCTL\n'
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  raw=$(sysctl -n vm.swapusage 2>/dev/null || true)
+  printf 'swap_total_mb\t%s\n' "$(printf '%s' "$raw" | sed -nE 's/.*total = ([0-9.]+)M.*/\1/p')"
+  printf 'swap_used_mb\t%s\n' "$(printf '%s' "$raw" | sed -nE 's/.*used = ([0-9.]+)M.*/\1/p')"
+  printf 'cores\t%s\n' "$(sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+  printf 'load_1m\t%s\n' "$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
+else
+  printf 'swap_total_mb\t%s\n' "$(awk '/SwapTotal/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null)"
+  printf 'swap_used_mb\t%s\n' "$(awk 'BEGIN{t=0;f=0} /SwapTotal/ {t=$2} /SwapFree/ {f=$2} END {print int((t - f) / 1024)}' /proc/meminfo 2>/dev/null)"
+  printf 'cores\t%s\n' "$(nproc 2>/dev/null || echo 1)"
+  printf 'load_1m\t%s\n' "$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)"
+fi
+if [ "$WANT_DU" = 1 ] && [ -n "$work" ] && [ -d "$work" ]; then
+  printf '##DU\n%s\n' "$(du -sk "$work" 2>/dev/null | awk '{print $1}')"
+fi
+PRODUCER
+}
+
+# fetch_bundle <bundle-out> <err-out> <run-dir> <ssh-target> <want-du> <runner> <alt-run-dir>
+# Runs the producer through ssh when a target is given, otherwise through a
+# local sh. Returns non-zero only when no usable bundle came back.
+fetch_bundle() {
+  local bundle=$1 errfile=$2 run_dir=$3 ssh_target=$4 want_du=$5 runner=$6 alt=$7
+  local input="$bundle.in"
+  {
+    printf 'RUN_DIR=%s\n' "$(shell_squote "$run_dir")"
+    printf 'WANT_DU=%s\n' "$want_du"
+    printf 'RUNNER_PATTERN=%s\n' "$(shell_squote "$runner")"
+    printf 'RUN_DIR_ALT=%s\n' "$(shell_squote "$alt")"
+    bundle_producer
+  } >"$input"
+  : >"$errfile"
+  local rc=0
+  if [ -n "$ssh_target" ]; then
+    # BatchMode: never prompt, so an unreachable or unauthenticated host fails
+    # as a fact instead of hanging the page behind an interactive login.
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$ssh_target" sh <"$input" >"$bundle" 2>>"$errfile"; then
+      rc=1
+    fi
+  else
+    if ! sh <"$input" >"$bundle" 2>>"$errfile"; then
+      rc=1
+    fi
+  fi
+  rm -f "$input"
+  if [ "$rc" -ne 0 ] && ! grep -q '^##NOW$' "$bundle" 2>/dev/null; then
+    return 1
+  fi
+  grep -q '^##NOW$' "$bundle" 2>/dev/null || return 1
+  return 0
+}
+
+# parse_bundle <bundle> <mirror-logs-dir>: mirrors every ##LOG section into
+# <mirror-logs-dir> and prints every other section as a `SECTION<TAB>row`
+# record for the caller's case loop.
+parse_bundle() {
+  awk -v dir="$2" '
+    function shut() { if (open) { close(out); open = 0 } }
+    /^##LOG / { shut(); out = dir "/" substr($0, 7); open = 1; next }
+    /^##ENDLOG$/ { shut(); next }
+    /^##/ { shut(); sec = substr($0, 3); next }
+    {
+      if (open) { print > out } else if (sec != "") { print sec "\t" $0 }
+    }
+    END { shut() }
+  ' "$1"
+}
+
 sample_run() {  # writes one fm-live-board.v1 sample
-  local run_dir='' out='' state='' label='' match_re=''
+  local run_dir='' out='' state='' label='' match_re='' ssh_target=''
+  local runner_re='run-unify\.sh'
   local interval=3 monitor_pid='' stopped_reason=''
   while [ $# -gt 0 ]; do
     case $1 in
@@ -346,6 +584,8 @@ sample_run() {  # writes one fm-live-board.v1 sample
       --state) state=${2:?--state needs a value}; shift 2 ;;
       --label) label=${2-}; shift 2 ;;
       --match) match_re=${2-}; shift 2 ;;
+      --ssh) ssh_target=${2:?--ssh needs a value}; shift 2 ;;
+      --runner) runner_re=${2:?--runner needs a value}; shift 2 ;;
       --interval) interval=${2:?--interval needs a value}; shift 2 ;;
       --monitor-pid) monitor_pid=${2-}; shift 2 ;;
       --stopped) stopped_reason=${2:?--stopped needs a reason}; shift 2 ;;
@@ -354,10 +594,18 @@ sample_run() {  # writes one fm-live-board.v1 sample
   done
   [ -n "$run_dir" ] || die 'sample: --run-dir is required'
   [ -n "$out" ] || die 'sample: --out is required'
-  [ -d "$run_dir" ] || die "sample: run directory not found: $run_dir"
   command -v jq >/dev/null 2>&1 || die 'sample: jq is required to write the sample'
-
-  run_dir=$(cd "$run_dir" && pwd -P)
+  # A remote run directory is that host's path: it is checked by the producer,
+  # which is the only thing that can actually see it.
+  # The resolved path is used for display and for the producer, but the path as
+  # given is kept too: the run's processes may name it in the other form.
+  local run_dir_alt=''
+  if [ -z "$ssh_target" ]; then
+    [ -d "$run_dir" ] || die "sample: run directory not found: $run_dir"
+    local run_dir_arg="$run_dir"
+    run_dir=$(cd "$run_dir" && pwd -P)
+    [ "$run_dir_arg" = "$run_dir" ] || run_dir_alt=$run_dir_arg
+  fi
   [ -n "$state" ] || state="$out.state"
   mkdir -p "$(dirname "$out")"
   local now interval_i
@@ -365,9 +613,72 @@ sample_run() {  # writes one fm-live-board.v1 sample
   interval_i=$(as_int "$interval")
   [ "$interval_i" -gt 0 ] || interval_i=3
 
-  local logs="$run_dir/logs"
-  local phase='' phase_log=''
-  local run_log="$logs/run.log"
+  # --- one read-only sample, locally or over ssh -------------------------
+  # The logs are mirrored into a local directory so every parser below works on
+  # real files, identically for a local and a remote run.
+  local mirror="$out.mirror"
+  local bundle="$mirror/bundle" ssh_err="$mirror/ssh.err"
+  rm -rf "$mirror"
+  mkdir -p "$mirror/logs"
+  local want_du=1
+  if [ -f "$state.du" ]; then
+    local du_age
+    du_age=$(( now - $(as_int "$(cut -d' ' -f1 "$state.du" 2>/dev/null)") ))
+    [ "$du_age" -ge "$SCRATCH_CACHE_S" ] || want_du=0
+  fi
+  local reachable=true ssh_error=''
+  if ! fetch_bundle "$bundle" "$ssh_err" "$run_dir" "$ssh_target" "$want_du" "$runner_re" "$run_dir_alt"; then
+    reachable=false
+    ssh_error=$(head -1 "$ssh_err" 2>/dev/null)
+    [ -n "$ssh_error" ] || ssh_error="no sample came back from ${ssh_target:-this host}"
+  fi
+  local now_ref="$now" host_name='' work_dir='' du_kb_remote=0
+  local ps_lines='' stat_lines='' fatal_note=''
+  local swap_used_mb=0 swap_total_mb=0 cores=1 load_1m=0
+  if [ "$reachable" = true ]; then
+    local k v sub val
+    while IFS=$'\t' read -r k v; do
+      case $k in
+        NOW) now_ref=$(as_int "$v") ;;
+        HOST) host_name=$v ;;
+        WORKDIR) work_dir=$v ;;
+        DU) du_kb_remote=$(as_int "$v") ;;
+        FATAL) fatal_note=$v ;;
+        PS)
+          ps_lines="$ps_lines$v
+"
+          ;;
+        STAT)
+          stat_lines="$stat_lines$v
+"
+          ;;
+        SYSCTL)
+          sub=${v%%$'\t'*}
+          val=${v#*$'\t'}
+          case $sub in
+            swap_used_mb) swap_used_mb=$(as_int "${val%.*}") ;;
+            swap_total_mb) swap_total_mb=$(as_int "${val%.*}") ;;
+            cores) cores=$(as_int "$val") ;;
+            load_1m) load_1m=$(as_int "${val%.*}") ;;
+          esac
+          ;;
+      esac
+    done <<EOF
+$(parse_bundle "$bundle" "$mirror/logs")
+EOF
+    if [ -n "$fatal_note" ]; then
+      reachable=false
+      ssh_error=$fatal_note
+    fi
+  fi
+  # An unreachable host must leave every downstream fact visibly empty rather
+  # than zeroed into a plausible-looking idle run.
+  if [ "$reachable" != true ] && [ -z "$host_name" ]; then
+    host_name=${ssh_target:-$(hostname 2>/dev/null || echo local)}
+  fi
+
+  local logs="$mirror/logs"
+  local phase='' phase_log='' run_log="$logs/run.log"
   # The phase is whatever the run script last announced, so the sampler follows
   # the build into verification without being told.
   if [ -f "$run_log" ]; then
@@ -378,16 +689,15 @@ sample_run() {  # writes one fm-live-board.v1 sample
   [ -f "$phase_log" ] || phase_log="$logs/build.log"
 
   # --- process facts -----------------------------------------------------
-  local members primary_pid='' primary_args='' primary_etime='' primary_cpu_txt=''
-  local dir_members cmd_members
-  dir_members=$(ps_members "$run_dir" '')
-  if [ -n "$dir_members" ]; then
-    members=$dir_members
-  else
-    cmd_members=$(ps_members '' "$match_re")
-    members=$cmd_members
+  local members="$ps_lines"
+  if [ "$reachable" = true ] && [ -z "$members" ] && [ -n "$match_re" ]; then
+    # The explicit opt-in fallback: only meaningful when the caller named the
+    # command, and only consulted when the host answered and no process named
+    # the run directory.
+    members=$(ps_members '' "$match_re")
   fi
   local max_etime_s=0 primary_best_s=-1
+  local primary_pid='' primary_args='' primary_etime='' primary_cpu_txt=''
   local cpu_s=0 rss_kb=0 member_count=0 member_json='[]'
   while IFS=$'\t' read -r pid etime ctime rss st args; do
     [ -n "${pid:-}" ] || continue
@@ -468,47 +778,58 @@ EOF
   fi
 
   # Gap since the log last grew is the honest "quiet" measure: the run flushes
-  # every line, so the phase log's mtime moves with progress.
+  # every line, so the phase log's mtime moves with progress. The size and mtime
+  # come from the producer, which measured them on the host that owns the file,
+  # and the gap is measured against that host's own clock so clock skew between
+  # the two machines cannot be mistaken for a run that has stopped working.
   local log_bytes=0 log_epoch=0 gap_s=0
-  if [ -f "$phase_log" ]; then
-    log_bytes=$(wc -c <"$phase_log" | tr -d ' ')
-    log_epoch=$(stat -f %m "$phase_log" 2>/dev/null || stat -c %Y "$phase_log" 2>/dev/null || echo 0)
-  fi
-  log_epoch=$(as_int "$log_epoch")
+  local stat_name stat_bytes stat_epoch
+  while IFS=$'\t' read -r stat_name stat_bytes stat_epoch; do
+    [ "$stat_name" = "$(basename "$phase_log")" ] || continue
+    log_bytes=$(as_int "$stat_bytes")
+    log_epoch=$(as_int "$stat_epoch")
+  done <<EOF
+$stat_lines
+EOF
   if [ "$log_epoch" -gt 0 ]; then
-    gap_s=$((now - log_epoch))
+    gap_s=$((now_ref - log_epoch))
     [ "$gap_s" -ge 0 ] || gap_s=0
   fi
   local cadence_known=false
   [ "$max_gap" -gt 0 ] && cadence_known=true
 
+  # --- verification progress --------------------------------------------
+  # Verification imports nothing, so the build's source counter would show an
+  # empty bar through the whole phase. It works table by table instead, and the
+  # build log already recorded every table it created, which supplies the
+  # denominator; the verify log supplies the ones already checked.
+  local progress_unit=sources
+  if [ "$phase" != build ] && [ -f "$logs/build.log" ] && [ -s "$phase_log" ]; then
+    local tables_total tables_done last_table
+    tables_total=$(grep -cE '\] +created [a-z_0-9]+ +scope=' "$logs/build.log" 2>/dev/null || true)
+    tables_done=$(grep -cE 'unified +[a-z_0-9]+ +[0-9]+ group\(s\)$' "$phase_log" 2>/dev/null || true)
+    if [ "$(as_int "$tables_total")" -gt 0 ]; then
+      sources_total=$(as_int "$tables_total")
+      sources_done=$(as_int "$tables_done")
+      progress_unit=tables
+      last_table=$(grep -E '\] +table +[a-z_0-9]+ +scope=' "$phase_log" 2>/dev/null | tail -1 |
+        awk '{ for (i = 1; i <= NF; i++) if ($i == "table") { print $(i + 1); exit } }')
+      [ -z "$last_table" ] || cur_source=$last_table
+    fi
+  fi
+
   # --- host memory / load ----------------------------------------------
-  local swap_used_mb=0 swap_total_mb=0 cores=1 load_1m=0 dolt_rss_mb=0
+  # Swap, cores, and load all belong to the host the run is on, so they come
+  # from the producer rather than from whichever machine is drawing the page.
+  local dolt_rss_mb=0
   local mem_csv="$logs/mem.csv"
   if [ -f "$mem_csv" ]; then
+    # The last row with content, because the bundle framing can leave a blank
+    # line after the mirrored body and the header row is not a sample.
     local lastrow
-    lastrow=$(tail -1 "$mem_csv" 2>/dev/null)
-    swap_used_mb=$(printf '%s' "$lastrow" | cut -d, -f2)
+    lastrow=$(grep -v '^[[:space:]]*$' "$mem_csv" 2>/dev/null | tail -1)
     dolt_rss_mb=$(printf '%s' "$lastrow" | cut -d, -f3)
   fi
-  if command -v sysctl >/dev/null 2>&1; then
-    local swapout
-    swapout=$(sysctl -n vm.swapusage 2>/dev/null || true)
-    if [ -n "$swapout" ]; then
-      swap_used_mb=$(printf '%s' "$swapout" | sed -nE 's/.*used = ([0-9.]+)M.*/\1/p')
-      swap_total_mb=$(printf '%s' "$swapout" | sed -nE 's/.*total = ([0-9.]+)M.*/\1/p')
-    fi
-    cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
-    load_1m=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
-  elif [ -r /proc/loadavg ]; then
-    load_1m=$(cut -d' ' -f1 /proc/loadavg)
-    cores=$(nproc 2>/dev/null || echo 1)
-    swap_used_mb=$(awk '/SwapTotal|SwapFree/ {print $2}' /proc/meminfo 2>/dev/null | paste -sd' ' - |
-      awk '{print ($1 - $2) / 1024}')
-    swap_total_mb=$(awk '/SwapTotal/ {print $2 / 1024}' /proc/meminfo 2>/dev/null)
-  fi
-  swap_used_mb=$(as_int "${swap_used_mb%.*}")
-  swap_total_mb=$(as_int "${swap_total_mb%.*}")
   dolt_rss_mb=$(as_int "$dolt_rss_mb")
   cores=$(as_int "$cores")
   [ "$cores" -gt 0 ] || cores=1
@@ -529,33 +850,23 @@ EOF
 
   # --- output growth ----------------------------------------------------
   # The output directory is measured at most once per SCRATCH_CACHE_S because
-  # walking a Dolt data directory is not free. A cached reading reports no
-  # delta rather than inventing one, and the page shows when it was measured.
-  local work_dir='' scratch_mb=0 scratch_delta_mb=0 scratch_measured_s=0
-  if [ -n "$primary_args" ]; then
-    work_dir=$(printf '%s' "$primary_args" | tr ' ' '\n' |
-      awk '/^--data-dir=/{sub(/^--data-dir=/,""); print; exit} /^--data-dir$/{getline; print; exit}')
-  fi
-  [ -n "$work_dir" ] || [ ! -d "$run_dir/scratch/unified" ] || work_dir="$run_dir/scratch/unified"
-  if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
-    local du_epoch=0 du_kb=0
+  # walking a Dolt data directory is not free; the client asks the producer for
+  # a fresh reading only when its cache is stale, and a cached reading reports
+  # no delta rather than inventing one.
+  local scratch_mb=0 scratch_delta_mb=0 scratch_measured_s=0
+  if [ "$reachable" = true ] && [ "$want_du" = 1 ] && [ "$du_kb_remote" -gt 0 ]; then
+    local du_kb=0
     if [ -f "$state.du" ]; then
-      du_epoch=$(as_int "$(cut -d' ' -f1 "$state.du" 2>/dev/null)")
       du_kb=$(as_int "$(cut -d' ' -f2 "$state.du" 2>/dev/null)")
     fi
-    if [ "$((now - du_epoch))" -ge "$SCRATCH_CACHE_S" ]; then
-      local fresh_kb
-      fresh_kb=$(du -sk "$work_dir" 2>/dev/null | awk '{print $1}')
-      fresh_kb=$(as_int "$fresh_kb")
-      if [ "$fresh_kb" -gt 0 ]; then
-        [ "$du_kb" -eq 0 ] || scratch_delta_mb=$(((fresh_kb - du_kb) / 1024))
-        du_kb=$fresh_kb
-        du_epoch=$now
-        printf '%s %s\n' "$du_epoch" "$du_kb" >"$state.du"
-      fi
-    fi
-    scratch_mb=$((du_kb / 1024))
-    [ "$du_epoch" -gt 0 ] && scratch_measured_s=$((now - du_epoch))
+    [ "$du_kb" -eq 0 ] || scratch_delta_mb=$(((du_kb_remote - du_kb) / 1024))
+    printf '%s %s\n' "$now" "$du_kb_remote" >"$state.du"
+    scratch_mb=$((du_kb_remote / 1024))
+  elif [ -f "$state.du" ]; then
+    local cached_kb
+    cached_kb=$(as_int "$(cut -d' ' -f2 "$state.du" 2>/dev/null)")
+    scratch_mb=$((cached_kb / 1024))
+    scratch_measured_s=$((now - $(as_int "$(cut -d' ' -f1 "$state.du" 2>/dev/null)") ))
   fi
 
   # --- phase exit / outcome --------------------------------------------
@@ -633,7 +944,14 @@ EOF
 
   # --- verdict: the single classification both the page and a reader use --
   local verdict note
-  if [ "$finished" = true ]; then
+  if [ "$reachable" != true ]; then
+    # First, because nothing below can be established without contact: a host
+    # that cannot be reached says nothing about whether its run is alive, and
+    # reporting its silence as a stopped process would be a fabrication.
+    verdict=unreachable
+    note="cannot reach ${ssh_target:-the host} to sample ${host_name}:${run_dir} - ${ssh_error}"
+    finished=false
+  elif [ "$finished" = true ]; then
     if [ "$o_ok" = true ]; then
       verdict='finished-ok'
       note='run complete and verified'
@@ -644,6 +962,12 @@ EOF
   elif [ "$error_count" -gt 0 ]; then
     verdict=errors
     note="$error_count error-class line(s) in the current phase log"
+  elif [ "$build_exit" = 'EXIT=0' ] && [ -z "$verify_exit" ] && [ "$alive" != true ] && [ ! -s "$phase_log" ]; then
+    # The hand-off between phases: the build reported a clean exit and the next
+    # phase has not written a line yet. Calling this "gone" would read as a
+    # failure at the one moment nothing is wrong.
+    verdict='between-phases'
+    note='the build reported a clean exit; the next phase has not written anything yet'
   elif [ "$alive" != true ]; then
     verdict=gone
     note='the watched process is no longer running and the run has not reported a result'
@@ -670,7 +994,7 @@ EOF
     verdict=progressing
     note="last progress line ${gap_s}s ago, within this run's ${max_gap}s cadence"
   fi
-  if [ -n "$stopped_reason" ] && [ "$finished" != true ]; then
+  if [ -n "$stopped_reason" ] && [ "$finished" != true ] && [ "$reachable" = true ]; then
     verdict=unwatched
     note="watch stopped: $stopped_reason"
   fi
@@ -688,6 +1012,11 @@ EOF
     --arg schema "$SCHEMA" \
     --arg label "${label:-$run_dir}" \
     --arg run_dir "$run_dir" \
+    --arg source_kind "$([ -n "$ssh_target" ] && echo ssh || echo local)" \
+    --arg source_target "$ssh_target" \
+    --arg source_host "$host_name" \
+    --argjson source_reachable "$reachable" \
+    --arg source_error "$ssh_error" \
     --argjson sampled_at "$now" \
     --arg sampled_iso "$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" \
     --argjson interval_s "$interval_i" \
@@ -722,6 +1051,7 @@ EOF
     --argjson gap_s "$gap_s" \
     --argjson max_gap_s "$(as_int "$max_gap")" \
     --argjson cadence_known "$cadence_known" \
+    --arg progress_unit "$progress_unit" \
     --argjson log_bytes "$(as_int "$log_bytes")" \
     --argjson error_count "$(as_int "$error_count")" \
     --argjson errors "$err_json" \
@@ -760,7 +1090,9 @@ EOF
                 elapsed_s: $elapsed_s, run_elapsed_s: $run_elapsed_s, cpu_s: $cpu_s,
                 cpu_delta_s: $cpu_delta_s, window_s: $window_s, rss_mb: $rss_mb,
                 count: $process_count, members: $members},
-      progress: {phase: $phase, sources_total: $sources_total, sources_done: $sources_done,
+      source: {kind: $source_kind, target: $source_target, host: $source_host,
+               run_dir: $run_dir, reachable: $source_reachable, error: $source_error},
+      progress: {phase: $phase, unit: $progress_unit, sources_total: $sources_total, sources_done: $sources_done,
                  current_source: $current_source, current_db: $current_db,
                  current_beads: $current_beads, current_table: $current_table,
                  last_line: $last_line, lines_total: $lines_total,
@@ -812,7 +1144,8 @@ page_write() {
 }
 
 watch_run() {
-  local run_dir='' out='' label='' match_re=''
+  local run_dir='' out='' label='' match_re='' ssh_target='' follow=false
+  local runner_re='run-unify\.sh'
   local interval=3 max_seconds=32400 state=''
   while [ $# -gt 0 ]; do
     case $1 in
@@ -820,6 +1153,9 @@ watch_run() {
       --out) out=${2:?--out needs a value}; shift 2 ;;
       --label) label=${2-}; shift 2 ;;
       --match) match_re=${2-}; shift 2 ;;
+      --ssh) ssh_target=${2:?--ssh needs a value}; shift 2 ;;
+      --runner) runner_re=${2:?--runner needs a value}; shift 2 ;;
+      --follow) follow=true; shift ;;
       --interval) interval=${2:?--interval needs a value}; shift 2 ;;
       --max-seconds) max_seconds=${2:?--max-seconds needs a value}; shift 2 ;;
       *) die "watch: unknown argument $1" ;;
@@ -827,6 +1163,10 @@ watch_run() {
   done
   [ -n "$run_dir" ] || die 'watch: --run-dir is required'
   [ -n "$out" ] || die 'watch: --out is required (the page path)'
+  # A remote run's directory is only checkable on its own host, so only the
+  # local case may treat a missing directory as the end of the watch.
+  local check_dir=true
+  [ -z "$ssh_target" ] || check_dir=false
   local json="${out%.html}.json"
   state="$json.state"
   local start now reason=''
@@ -834,24 +1174,34 @@ watch_run() {
   while :; do
     now=$(date +%s)
     reason=''
-    if [ ! -d "$run_dir" ]; then
+    if [ "$check_dir" = true ] && [ ! -d "$run_dir" ]; then
       reason='run directory removed'
     elif [ "$((now - start))" -ge "$max_seconds" ]; then
       reason="watch time limit (${max_seconds}s) reached"
     fi
     if [ -z "$reason" ]; then
+      # shellcheck disable=SC2086
       sample_run --run-dir "$run_dir" --out "$json" --state "$state" \
-        --label "$label" --match "$match_re" --interval "$interval" --monitor-pid "$$"
+        --label "$label" --match "$match_re" --interval "$interval" \
+        --monitor-pid "$$" ${ssh_target:+--ssh "$ssh_target"} --runner "$runner_re"
       if jq -e '.finished == true' "$json" >/dev/null 2>&1; then
         reason='run reached its final result'
+        # A retried run is a normal shape here, and a page that silently stops
+        # when the first attempt ends would go quiet exactly when the next one
+        # starts. --follow keeps sampling through the retry; without it the
+        # watch ends and says so, which is the cheaper default.
+        if [ "$follow" = true ]; then
+          reason=''
+        fi
       fi
     fi
     if [ -n "$reason" ]; then
       # One final sample carrying the reason, so a page that stops refreshing
       # reports that the watch ENDED instead of looking like a dead monitor.
+      # shellcheck disable=SC2086
       sample_run --run-dir "$run_dir" --out "$json" --state "$state" \
         --label "$label" --match "$match_re" --interval "$interval" \
-        --monitor-pid "$$" --stopped "$reason"
+        --monitor-pid "$$" ${ssh_target:+--ssh "$ssh_target"} --runner "$runner_re" --stopped "$reason"
       printf 'watch: ended: %s\n' "$reason"
       break
     fi
@@ -886,6 +1236,10 @@ case $cmd in
   page) page_write "$@" ;;
   watch) watch_run "$@" ;;
   open) open_board "$@" ;;
+  # Expose the read-only producer so its syntax can be checked for the shell it
+  # will actually run under, and so its freedom from state-changing verbs is
+  # inspectable rather than a claim in a comment.
+  producer) bundle_producer ;;
   help | --help | -h) usage ;;
   *) die "unknown subcommand: $cmd" ;;
 esac
