@@ -382,6 +382,48 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# A scout spawned on a named base keeps that base through promotion: the ship
+# instructions start from it and the PR targets it; local-only cannot carry it.
+test_promotion_keeps_the_recorded_base_branch() {
+  local home id meta out status mode
+  home="$TMP_ROOT/promote-base-home"
+  for mode in direct-PR local-only; do
+    id="promote-base-$mode"
+    meta="$home/state/$id.meta"
+    mkdir -p "$home/state" "$home/data/$id"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=feature/hub\n' "$id" > "$meta"
+    cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the hub bug.
+
+## Firstmate spec
+Reproduce it first.
+
+# Setup
+You are in a disposable git worktree of proj, at a detached HEAD on a clean copy of its base branch.
+Base branch: feature/hub
+EOF
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" "$id" --mode "$mode" --yolo off 2>&1)
+    status=$?
+    if [ "$mode" = direct-PR ]; then
+      expect_code 0 "$status" "promoting a scout with a recorded base should succeed"$'\n'"$out"
+      # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+      assert_grep 'Return to a clean copy of the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not start the ship from the recorded base"
+      # shellcheck disable=SC2016
+      assert_grep 'against the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not target the PR at the recorded base"
+      assert_grep 'base_branch=feature/hub' "$meta" "promotion dropped the recorded base"
+    else
+      [ "$status" -ne 0 ] || fail "promoting a based scout to local-only should be refused"
+      assert_contains "$out" "mode=local-only" "the local-only promotion refusal did not explain itself"
+      assert_grep 'kind=scout' "$meta" "a refused promotion changed the task record"
+    fi
+  done
+  pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -400,5 +442,27 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_promotion_keeps_the_recorded_base_branch
+
+# The launch role is the generated text a worker receives. It must keep the
+# skill name, so a session that registers the skill loads it by name, and must
+# name the skill file as the fallback for a session where the name does not
+# resolve.
+test_worker_role_names_skill_and_fallback_file() {
+  local role_file path
+  role_file="$TMP_ROOT/worker-role.txt"
+  path="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
+  [ -f "$path" ] || fail "Firstmate skill file is missing at $path"
+  fm_brief_worker_role "$TMP_ROOT/state" upstream-4751 "$ROOT" >"$role_file"
+  assert_grep "\`CONTRIBUTING.md\` and \`firstmate-coding-guidelines\` for Firstmate changes" "$role_file" \
+    "worker role did not name the skill"
+  assert_grep "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`$path\` instead." "$role_file" \
+    "worker role did not name the skill file as the fallback"
+  assert_no_grep "Skill tool cannot resolve" "$role_file" \
+    "worker role claims the Skill tool never resolves the skill"
+  pass "worker role names the skill and its fallback skill file"
+}
+
+test_worker_role_names_skill_and_fallback_file
 
 echo "all fm-dod-lib tests passed"
