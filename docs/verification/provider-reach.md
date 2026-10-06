@@ -12,9 +12,11 @@ The probe collects a fact and renders no verdict. It reads no dispatch configura
 ## What each observed HTTP class does and does not prove
 
 Verified against local stand-ins in `tests/fm-provider-reach-probe.test.sh`, which pins every expected value to a fake resolver and a fake curl rather than to live traffic.
-Read the process exit code as the primary verdict: 0 means reachable only, 10 means routed-auth, 11 means server-error, 20 means unreachable, 2 means invalid input or target configuration, and 64 means curl is unavailable.
+The curl-configuration isolation is proven separately with the host's real curl and a loopback listener, so no third-party traffic and no credential value is ever needed.
+Read the process exit code as the primary verdict: 0 means reachable only, 10 means routed-auth, 11 means server-error, 20 means unreachable, 2 means invalid input or host configuration, and 64 means curl is unavailable.
 The `dns=` and `http=` fields refine the reason; in particular `dns=fail` means the resolver errored, while `dns=nxdomain` means a successful lookup found no address.
-The classes below are the shapes this home has actually recorded from the registered endpoint.
+The HTTP phase captures only the status code: the response body is discarded to `/dev/null`, no temp file is created, and a valid status survives curl's non-zero exit (for example a truncated body after a 2xx header), with only an absent or malformed code mapped to `000`.
+The classes below are the shapes this home has actually recorded from the endpoint.
 
 | Observed | `result=` | Exit | Proven | Not proven |
 | --- | --- | --- | --- | --- |
@@ -30,29 +32,31 @@ The classes below are the shapes this home has actually recorded from the regist
 ## Resolver candidates and one recorded misclassification
 
 The default candidate list is `/usr/bin/dig` then `/usr/bin/host`; `FM_PROVIDER_REACH_DNS_TOOL` overrides it with one tool or a whitespace-separated preference list, which is also what keeps the suite deterministic on every host.
+The resolver receives only the host component of `--host`: a `:port` suffix and bracketed IPv6 syntax are stripped, and an IP-literal host skips the lookup entirely (`dns=skipped dns_detail=dns_literal`) because it is already an address, so the HTTP phase still runs.
+The value is split on whitespace only, with pathname expansion disabled for that split, so a glob character in the value stays a literal token and cannot expand into an unrelated executable.
 Availability is decided **per entry**, in order, by the resolution phase itself: an entry that is not an installed executable is skipped without being run, and the lookup stops at the first entry that answers.
 A build here instead tested the entire configured value as a single executable before ever calling a resolver, so `FM_PROVIDER_REACH_DNS_TOOL="dig host"` matched nothing, the installed `dig` was never consulted, and the line reported `dns=skipped dns_tool_missing=dig host` for a name that resolves. The class of the finding (exit 20, HTTP still attempted from the fallthrough) hid it.
 
 It previously led with macOS's `/usr/bin/dscacheutil`, called as `-q host -a <name>`.
 That is not one of its directory-service categories, so it answered **every** name with its usage block and exit 64, and because those calls come first in the list they set the DNS phase: an NXDOMAIN endpoint was recorded as `dns=fail dns_detail=rc=64` - "the resolver errored" - rather than "the name resolves to nothing".
 The exit verdict stayed 20 by fallthrough, so the class was right and the shape was wrong.
-Reproduced first-hand on this host: `dscacheutil -q host -a api.xhyapi.com` prints usage and exits 64 while `dig` reports `status: NXDOMAIN` and `host` reports `not found: 3(NXDOMAIN)` for the same name.
+Reproduced first-hand on this host: `dscacheutil -q host -a api.example.invalid` prints usage and exits 64 while `dig` reports `status: NXDOMAIN` and `host` reports `not found: 3(NXDOMAIN)` for the same name.
 A reader must therefore treat `dns=fail rc=<code>` from any build before this correction as an unusable lookup, not as evidence about the endpoint.
-`tests/fm-provider-reach-probe.test.sh` proves both shapes behaviorally, with local stand-ins only: a preference list whose usable entry is not first still reports `dns=ok`, and the default resolution path never reports a `dscacheutil`-style usage block (`Usage:` plus exit 64) as a lookup failure or as an answer.
+The default list names no such tool, and `tests/fm-provider-reach-probe.test.sh` proves the classification behaviorally, with local stand-ins only: a preference list whose usable entry is not first still reports `dns=ok`, BIND `host`'s `not found: 2(SERVFAIL)` and `not found: 5(REFUSED)` wording is reported as `dns=fail`, and a dscacheutil-style usage block with exit 64 is likewise `dns=fail` rather than a successful no-address answer.
 
 Two asymmetries are load-bearing and are the reason the verdicts are not collapsed into exit-success:
 
 - A `401`/`403` shares no meaning with a `000`. The first is a live endpoint refusing an unauthenticated request; the second is the signature of an unreachable provider. Recording either as "down", or the first as "up", would misroute the next dispatch decision.
 - A `2xx` is deliberately worded `reachable`, never `available`. This home has recorded an outage where small requests returned `200` while long-output requests hung for 60 seconds, so a successful probe is not evidence that a heavy pipeline run will finish.
 
-## Registered target
+## Endpoint selection
 
-| Target | Base URL probed | Notes |
-| --- | --- | --- |
-| `xhy` | `https://api.xhyapi.com/v1/models` | Unauthenticated `GET`. The path answers `401` when the route is live, which is what makes the `routed-auth` class distinguishable from an outage. |
+The probe ships no provider endpoint and takes no positional target: the caller names the endpoint explicitly with `--host <host[:port][/path]>`.
+This host's configured xhy endpoint is `xhyapi.com` (not `api.xhyapi.com`) and its base is `https://xhyapi.com/v1/models`, so a local check passes `--host xhyapi.com/v1/models`.
+Nothing in the probe reads or transmits a credential.
 
-Any added target requires its discriminator behavior to be verified first-hand and recorded here before registration.
-The registered-target path is reachable through the CLI, so its configuration contract is guarded too: a base URL that yields no request authority is its own verdict, `result=invalid-target` with exit 2, printed as the probe's single line before any resolver or request runs. Since every currently recorded URL carries an authority, the suite reaches this through the documented `FM_PROVIDER_REACH_TARGET_BASE` seam (armed only by `FM_TEST_SEAM=1`), which replaces the recorded base URL of an already registered target and registers nothing - an unregistered target stays an `invalid-input` refusal, and a leaked seam value alone changes nothing outside a suite.
+A `--host` value that yields no request authority is its own verdict, `result=invalid-target` with exit 2, printed as the probe's single line before any resolver or request runs.
+The suite reaches it with `--host '/not-a-host'`, which leaves the constructed base URL with no host part, and asserts that neither a resolver nor curl was run.
 
 ## Why the dispatch configuration cannot carry a health predicate
 

@@ -21,12 +21,13 @@
 # hung. Never record a 2xx as "channel available".
 #
 # Usage:
-#   fm-provider-reach-probe.sh <target> [options]
-#   fm-provider-reach-probe.sh --host <authority> [options]
+#   fm-provider-reach-probe.sh --host <host[:port][/path]> [options]
 #
-# Targets are registered endpoints whose discriminator behavior was verified
-# first-hand and recorded in docs/verification/provider-reach.md:
-#   xhy      https://api.xhyapi.com/v1/models
+# The caller names the endpoint explicitly; the probe ships no provider
+# endpoint of its own. This host's configured xhy endpoint is xhyapi.com (not
+# api.xhyapi.com), whose base is https://xhyapi.com/v1/models, so a local check
+# passes `--host xhyapi.com/v1/models`. Nothing here reads, needs, or transmits
+# a credential.
 #
 # Options:
 #   --timeout <seconds>   same bound as FM_PROVIDER_REACH_PROBE_TIMEOUT and
@@ -34,7 +35,9 @@
 #   -h, --help            print this usage and exit 0
 #
 # Output: exactly one line on stdout. No token, key, header, or response body is
-# ever printed; the HTTP status code and DNS rcode are protocol facts, not secrets.
+# ever printed or written to disk: the response body is discarded to /dev/null
+# and only the HTTP status code is captured. The status code and DNS rcode are
+# protocol facts, not secrets.
 #
 #   probe=<target> dns=<ok|nxdomain|fail|skipped> http=<code|none> result=<verdict> <detail>
 #
@@ -46,14 +49,14 @@
 #   unreachable      20   connection failed, timeout, or no address: NXDOMAIN or any
 #                         other lookup failure prints dns=fail and exits 20 too,
 #                         because either way the endpoint could not be connected to
-#   invalid-target   2    the registered target cannot yield an authority for a
-#                         request, e.g. its base URL has no host part
-#   invalid-input    2    unknown target or host, a non-numeric, zero, or negative
-#                         --timeout value, duplicate options, a missing option
-#                         value, or an unexpected extra argument
+#   invalid-target   2    --host cannot yield an authority for a request, e.g.
+#                         a value with no host part
+#   invalid-input    2    missing --host, an unexpected argument, a non-numeric,
+#                         zero, or negative --timeout value, duplicate options,
+#                         or a missing option value
 #   tool-missing     64   curl is not installed: nothing was probed and the line
 #                         says so rather than silently reporting another outcome
-# Exit 2 is reserved for usage and target-configuration errors. A running probe
+# Exit 2 is reserved for usage and host-configuration errors. A running probe
 # always prints exactly one line on stdout, including tool-missing and
 # invalid-target; invalid-input is the one error path that prints only on stderr.
 #
@@ -67,17 +70,10 @@
 #                                     preference list tried in order until one that
 #                                     is installed answers (default: /usr/bin/dig,
 #                                     then /usr/bin/host). Each entry takes the
-#                                     bare authority and no other argument, so a
+#                                     bare hostname and no other argument, so a
 #                                     tool needs its own entry - and a token that
 #                                     is not an installed tool is skipped, never
 #                                     run. Tests use it to keep DNS deterministic.
-#   FM_PROVIDER_REACH_TARGET_BASE     test seam for the registered-target table:
-#                                     when FM_TEST_SEAM is 1, this replaces the
-#                                     recorded base URL of the named registered
-#                                     target. It registers nothing, so an
-#                                     unregistered target stays a refusal and an
-#                                     unset value keeps the recorded URL.
-#                                     Unset outside a test suite.
 #   FM_TEST_SEAM                      when 1, allow FM_PROVIDER_REACH_CURL_CMD to
 #                                     name the curl executable, so a suite can
 #                                     prove the curl-absent branch on a host whose
@@ -87,7 +83,6 @@
 set -u
 
 DEFAULT_TIMEOUT=10
-XHY_BASE=https://api.xhyapi.com/v1/models
 DNS_DEFAULT_CANDIDATES='/usr/bin/dig /usr/bin/host'
 
 usage() {
@@ -98,11 +93,12 @@ It collects a fact and renders no verdict: it reads no dispatch configuration,
 holds no provider table, and never decides dispatch eligibility or routing.
 
 Usage:
-  fm-provider-reach-probe.sh <target> [options]
-  fm-provider-reach-probe.sh --host <authority> [options]
+  fm-provider-reach-probe.sh --host <host[:port][/path]> [options]
 
-Registered targets:
-  xhy      https://api.xhyapi.com/v1/models
+The endpoint is named explicitly with --host; the probe ships no provider
+endpoint of its own. This host's configured xhy endpoint is xhyapi.com (not
+api.xhyapi.com), whose base is https://xhyapi.com/v1/models, so probe it with
+--host xhyapi.com/v1/models.
 
 Options:
   --timeout <seconds>   hard per-phase bound (positive integer, default 10);
@@ -116,6 +112,7 @@ A 2xx proves routability only - never that a model, credential, or large request
 works - so it is recorded as reachable, not as "channel available".
 A 401 or 403 means a request reached the endpoint and was refused: routing works,
 usability is not proven.
+Only the HTTP status code is read; the response body is discarded to /dev/null.
 
 Exit status (verdicts are not eligibility):
   0   reachable       HTTP 2xx
@@ -123,9 +120,9 @@ Exit status (verdicts are not eligibility):
   11  server-error    HTTP 5xx or other code
   20  unreachable     connection failed, timed out, or no address (NXDOMAIN
                       and other lookup failures also exit 20 with dns=fail)
-  2   invalid-target  registered target yields no request authority
-  2   invalid-input   unknown target/host, bad or repeated --timeout, missing
-                      value, or extra argument (stderr only)
+  2   invalid-target  --host yields no request authority
+  2   invalid-input   missing/unknown --host, an unexpected argument, a bad or
+                      repeated --timeout, or a missing value (stderr only)
   64  tool-missing    curl absent: nothing probed, one line on stdout
 EOF
 }
@@ -137,7 +134,6 @@ die_input() {
   exit 2
 }
 
-TARGET=''
 HOST_ARG=''
 TIMEOUT_ARG=''
 while [ $# -gt 0 ]; do
@@ -152,15 +148,10 @@ while [ $# -gt 0 ]; do
       [ -z "$TIMEOUT_ARG" ] || die_input "only one --timeout may be given"
       TIMEOUT_ARG=$2; shift 2 ;;
     -*) die_input "unknown option: $1" ;;
-    *)
-      [ -z "$TARGET" ] || die_input "only one target may be probed at a time"
-      TARGET=$1; shift ;;
+    *) die_input "unexpected argument: $1" ;;
   esac
 done
-[ -n "$TARGET" ] || [ -n "$HOST_ARG" ] || die_input "a target or --host is required"
-if [ -n "$TARGET" ] && [ -n "$HOST_ARG" ]; then
-  die_input "give either a registered target or --host, not both"
-fi
+[ -n "$HOST_ARG" ] || die_input "--host <host[:port][/path]> is required"
 
 # Positive integer or the default: `timeout 0` and the Perl fallback's `alarm 0`
 # both disable the deadline, so a hung endpoint would otherwise run unbounded.
@@ -187,34 +178,41 @@ fi
 # shellcheck disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
 
-PROBE=$TARGET
-BASE=''
-if [ -n "$HOST_ARG" ]; then
-  case "$HOST_ARG" in
-    *@*) die_input "--host must not contain userinfo" ;;
-  esac
-  PROBE=host:$HOST_ARG
-  BASE=https://$HOST_ARG
-elif [ "$TARGET" = xhy ]; then
-  PROBE=xhy
-  BASE=$XHY_BASE
-else
-  die_input "no probe is registered for target '$TARGET'"
-fi
+case "$HOST_ARG" in
+  *@*) die_input "--host must not contain userinfo" ;;
+esac
+PROBE=host:$HOST_ARG
+BASE=https://$HOST_ARG
 
-# A recorded base URL with no host part cannot yield a request authority: that is a
-# registration defect, never a healthy probe, so it gets its own verdict before any
-# resolver or request runs instead of letting curl invent a connection failure. The
-# seam below is the only way to stand such a registration up under test; outside an
-# armed suite every target probes the URL recorded above it.
-if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_PROVIDER_REACH_TARGET_BASE:-}" ]; then
-  BASE=$FM_PROVIDER_REACH_TARGET_BASE
-fi
+# A --host value with no host part cannot yield a request authority: that is a
+# caller error, never a healthy probe, so it gets its own verdict before any
+# resolver or request runs instead of letting curl invent a connection failure.
 AUTHORITY=$(printf '%s\n' "$BASE" | sed -nE 's|^https?://([^/?#]+).*|\1|p')
-if [ -z "$AUTHORITY" ]; then
+
+# The resolver takes a bare DNS name, never a URL authority: a `:port` suffix and
+# the brackets around an IPv6 literal are URL syntax, not part of the name to look
+# up. Passing the authority verbatim asked the resolver for `host:port`, which it
+# treats as a query name, so a perfectly reachable endpoint was recorded as
+# NXDOMAIN before any request ran. The port survives in BASE for the request.
+DNS_HOST=$AUTHORITY
+case "$DNS_HOST" in
+  \[*\]*) DNS_HOST=${DNS_HOST#\[}; DNS_HOST=${DNS_HOST%%\]*} ;;
+  *:*) DNS_HOST=${DNS_HOST%:*} ;;
+esac
+if [ -z "$DNS_HOST" ]; then
   printf 'probe=%s dns=skipped http=none result=invalid-target base_url_has_no_authority\n' "$PROBE"
   exit 2
 fi
+
+# An IP literal is already an address: resolving it is a DNS query that cannot
+# answer usefully (a PTR record is not the A/AAAA shape the classifier reads), so
+# the lookup is skipped and the HTTP phase still runs.
+case "$DNS_HOST" in
+  *:*) DNS_LITERAL=1 ;;
+  *[!0-9.]*|'') DNS_LITERAL=0 ;;
+  *.*.*.*) DNS_LITERAL=1 ;;
+  *) DNS_LITERAL=0 ;;
+esac
 
 DNS=skipped
 HTTP=none
@@ -232,42 +230,57 @@ DETAIL=''
 # A pre-gate over the combined string silently skipped the resolver that was
 # actually installed and reported a lookup that never ran as dns=skipped.
 dns_probe() {
-  local tool out rc first
+  local tool out rc first answer
+  local -a tools=()
   # The override is one tool or a whitespace-separated preference list; unset
-  # means this host's own candidates in order.
-  for tool in ${FM_PROVIDER_REACH_DNS_TOOL:-$DNS_DEFAULT_CANDIDATES}; do
+  # means this host's own candidates in order. `read -ra` splits on IFS without
+  # pathname expansion, so a glob character in the list stays a literal token
+  # instead of being expanded into unrelated filenames in the caller's cwd.
+  read -ra tools <<< "${FM_PROVIDER_REACH_DNS_TOOL:-$DNS_DEFAULT_CANDIDATES}"
+  [ "${#tools[@]}" -gt 0 ] || return 1
+  for tool in "${tools[@]}"; do
     [ -n "$tool" ] || continue
     case "$tool" in
       /*) [ -x "$tool" ] || continue ;;
       *) command -v "$tool" >/dev/null 2>&1 || continue ;;
     esac
-    # Both candidates take the bare authority and no category argument. macOS
+    # Both candidates take the bare hostname and no category argument. macOS
     # ships /usr/bin/dscacheutil, whose `-q` requires a valid directory-service
     # category (`host` is not one), so it answers any name with its usage block
     # and exit 64; calling it here recorded "the resolver errored" for names that
     # `dig` and `host` both reported as NXDOMAIN. It is therefore not a candidate.
-    out=$(fm_run_timed "$TIMEOUT" "$tool" "$AUTHORITY" 2>/dev/null </dev/null) && rc=0 || rc=$?
+    out=$(fm_run_timed "$TIMEOUT" "$tool" "$DNS_HOST" 2>/dev/null </dev/null) && rc=0 || rc=$?
     if [ "$rc" -eq 124 ]; then
       printf 'fail timeout_after_%ss\n' "$TIMEOUT"
       return 0
     fi
     first=$(printf '%s\n' "$out" | head -n 1)
+    # The resolver-error patterns are checked first because BIND `host` renders
+    # every non-NXDOMAIN rcode with the same "not found" wording, e.g.
+    # `Host name not found: 2(SERVFAIL)`. Testing "not found" first would label a
+    # resolver error as a successful no-address answer.
+    if printf '%s\n' "$out" | grep -qiE 'SERVFAIL|FORMERR|REFUSED|timed out'; then
+      printf 'fail rc=%s\n' "$rc"
+      return 0
+    fi
     # A successful answer naming no address is the same finding as NXDOMAIN for
     # routing purposes, so both classes are checked before exit status.
     if printf '%s\n' "$out" | grep -qiE 'NXDOMAIN|no answer|not found'; then
       printf 'nxdomain %s\n' "${first:-no-address}"
       return 0
     fi
-    if printf '%s\n' "$out" | grep -qiE 'SERVFAIL|FORMERR|REFUSED|timed out'; then
-      printf 'fail rc=%s\n' "$rc"
-      return 0
-    fi
     if [ "$rc" -ne 0 ]; then
       printf 'fail rc=%s\n' "$rc"
       return 0
     fi
-    if printf '%s\n' "$out" | grep -qE '(^|[[:space:]])([0-9]{1,3}\.){3}[0-9]{1,3}([[:space:]]|$)|(^|[[:space:]])[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)'; then
-      printf 'ok %s\n' "${first:-address}"
+    # Only actual answer records count. `dig` prints its banner, SERVER, and WHEN
+    # metadata on `;`-prefixed comment lines, and those can look like an address:
+    # an IPv4 in `;; SERVER:` or a colon run in `;; WHEN:`. Matching them turned a
+    # NODATA reply (status NOERROR, zero answers) into a false dns=ok and an
+    # unnecessary request. Report the matched record, not the banner, as detail.
+    answer=$(printf '%s\n' "$out" | grep -v '^;' | grep -E '(^|[[:space:]])([0-9]{1,3}\.){3}[0-9]{1,3}([[:space:]]|$)|(^|[[:space:]])[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)' | head -n 1)
+    if [ -n "$answer" ]; then
+      printf 'ok %s\n' "$answer"
       return 0
     fi
     printf 'nxdomain no-address\n'
@@ -276,11 +289,16 @@ dns_probe() {
   return 1
 }
 
-DNS_RESULT=$(dns_probe)
+DNS_RESULT=''
+if [ "$DNS_LITERAL" = 1 ]; then
+  DETAIL="${DETAIL} dns_detail=dns_literal"
+else
+  DNS_RESULT=$(dns_probe)
+fi
 if [ -n "$DNS_RESULT" ]; then
   DNS=${DNS_RESULT%% *}
   DETAIL="${DETAIL} dns_detail=${DNS_RESULT#* }"
-else
+elif [ "$DNS_LITERAL" != 1 ]; then
   DNS=skipped
   DETAIL="${DETAIL} dns_tool_missing"
 fi
@@ -305,10 +323,14 @@ command -v "$CURL_CMD" >/dev/null 2>&1 || {
   exit 64
 }
 
-http_output=$(mktemp 2>/dev/null) || http_output=/tmp/fm-provider-reach-probe.$$
-trap 'rm -f "$http_output"' EXIT
-HTTP_CODE=$(fm_run_timed "$TIMEOUT" "$CURL_CMD" -q -sS -o "$http_output" -w '%{http_code}' \
-  --max-time "$TIMEOUT" "$BASE" </dev/null 2>/dev/null) || HTTP_CODE=000
+# The response body is irrelevant to the fact being collected and is discarded to
+# /dev/null; only the status code is captured. No temp file is created, so a
+# streaming endpoint cannot consume disk and there is no predictable path for a
+# local attacker to redirect. A valid code survives curl's non-zero exit (for
+# example a truncated body after a 2xx header); only an absent or malformed code
+# becomes 000.
+HTTP_CODE=$(fm_run_timed "$TIMEOUT" "$CURL_CMD" -q -sS -o /dev/null -w '%{http_code}' \
+  --max-time "$TIMEOUT" "$BASE" </dev/null 2>/dev/null)
 case "$HTTP_CODE" in
   ''|*[!0-9]*) HTTP_CODE=000 ;;
 esac
