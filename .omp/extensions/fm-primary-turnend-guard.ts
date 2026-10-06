@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
+  firstmateShellInvocation,
 } from "../../.pi/extensions/lib/fm-operational-input.ts";
 
 // The omp extension API surface this file uses, declared locally: omp ships no
@@ -258,6 +259,21 @@ function stopSessionstartGeneration(generation: SessionstartGeneration): Promise
   return generation.stopPromise;
 }
 
+// Native Windows cannot exec a .sh directly: uv_spawn fails with EFTYPE
+// before the child is even created, so the synchronous throw escapes any
+// handler attached afterwards. Every Bash helper therefore routes through
+// bash on win32 via the shared firstmateShellInvocation (one owner in
+// .pi/extensions/lib/fm-operational-input.ts), and the throw is caught at
+// each spawn site. Git for Windows' MSYS bash is the supported runtime and
+// requires script paths in POSIX form (/d/newP/...), while import.meta.url
+// roots are native form (D:\newP\...), so convert before invoking. Paths
+// that are not drive-letter absolute (already-POSIX roots, UNC) pass through.
+function firstmateMsysPath(path: string): string {
+  const windows = /^([A-Za-z]):[\\/]+(.*)$/.exec(path);
+  if (!windows) return path;
+  return `/${windows[1].toLowerCase()}/${windows[2].replace(/\\/g, "/")}`;
+}
+
 function runSessionstartHook(generation: SessionstartGeneration): Promise<SessionstartResult> {
   return new Promise((resolveResult) => {
     let settled = false;
@@ -271,19 +287,26 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
     const runner = `${root}/bin/fm-sessionstart-run.sh`;
     // The internal --pi-prerequisite mode is shared: it is the wrapper's
     // "silent exit 3 on an intentional stand-down" contract, not a Pi-only path.
+    const invocation = supervised
+      ? {
+          command: "node",
+          args: [
+            `${root}/.pi/extensions/lib/fm-sessionstart-supervisor.mjs`,
+            runner,
+            "--source",
+            generation.source,
+            "--pi-prerequisite",
+          ],
+        }
+      : firstmateShellInvocation(
+          firstmateMsysPath(runner),
+          ["--source", generation.source, "--pi-prerequisite"],
+        );
     let child: ChildProcess;
     try {
       child = spawn(
-        supervised ? "node" : runner,
-        supervised
-          ? [
-              `${root}/.pi/extensions/lib/fm-sessionstart-supervisor.mjs`,
-              runner,
-              "--source",
-              generation.source,
-              "--pi-prerequisite",
-            ]
-          : ["--source", generation.source, "--pi-prerequisite"],
+        invocation.command,
+        invocation.args,
         {
           detached: supervised,
           stdio: supervised
@@ -462,15 +485,26 @@ async function claimSessionstartMessage(
 // forced continuation per turn.
 function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
-      stdio: ["pipe", "ignore", "pipe"],
-    });
+    const invocation = firstmateShellInvocation(
+      firstmateMsysPath(`${root}/bin/fm-turnend-guard.sh`),
+      [],
+    );
+    let child: ChildProcess;
+    try {
+      child = spawn(invocation.command, invocation.args, {
+        stdio: ["pipe", "ignore", "pipe"],
+      });
+    } catch {
+      resolveResult({ code: 0, stderr: "" });
+      return;
+    }
     let stderr = "";
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
     child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+    child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify({ stop_hook_active: stopHookActive }));
   });
 }
@@ -484,9 +518,19 @@ function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: stri
 // decision and is inert outside the real primary checkout.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/${script}`, ["--command", command], {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
+    const invocation = firstmateShellInvocation(
+      firstmateMsysPath(`${root}/bin/${script}`),
+      ["--command", command],
+    );
+    let child: ChildProcess;
+    try {
+      child = spawn(invocation.command, invocation.args, {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch {
+      resolveResult({ code: 0, stderr: "" });
+      return;
+    }
     let stderr = "";
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
