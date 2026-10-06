@@ -340,7 +340,8 @@ While the home runs the host, main's lease-checked commands also take the per-ta
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
-The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Each home's own gitignored `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Bootstrap copies the tracked `.tasks.toml.example` into a home that has none, so a fresh clone gets those defaults, and it never reads or rewrites a `.tasks.toml` the home already has.
 A home may instead select another tasks-axi adapter such as Beads through its own `.tasks.toml` or `TASKS_AXI_BACKEND`; firstmate still uses only tasks-axi verbs for routine backlog reads and mutations, and the adapter maps `start` and evidence-bearing `done` transitions to its native statuses and evidence fields.
 
 ### Captain holds on Beads
@@ -362,11 +363,14 @@ The wrapper still passes through the documented direct transition `tasks-axi sta
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
 
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
+Every tasks-axi call a caller makes while holding that lock is bounded by `FM_TASKS_AXI_TIMEOUT`, so an unresponsive tasks-axi cannot hold the lock open and a bound that expires is reported as the timeout it was.
 
 ### Which backlog receives a transition
 
 Automatic transitions run from the configured data directory's parent, letting that home's effective tasks-axi configuration address its selected adapter while keeping relative scout-report links rooted there.
-A markdown backlog is additionally addressed by an explicit `--file` at `<data>/backlog.md`, so the change lands in the home that owns the task regardless of the caller's working directory.
+That explicit markdown file belongs to the markdown backend only: a markdown home always receives `--file` at its resolved markdown path, so a relocated data directory keeps addressing its own backlog rather than the default path, while a home whose resolved backend is non-markdown never receives a markdown file override and requires no markdown backlog file.
+Selecting markdown through a `.tasks.toml` does not waive that file, because the selector says which backend is in use, not where its store lives.
+A `[markdown] path` in that config names the backlog while the data directory sits at its default `<root>/data`; a home that relocated its data directory carries its backlog with it, so the relocated `<data>/backlog.md` wins over the stock path the config ships with.
 
 Any other configured adapter is addressed by that root alone, because `--file` would override the adapter's own workspace path.
 
@@ -398,10 +402,12 @@ A `manual` home owns its backlog file outright: the lifecycle transitions above 
 
 Absent or `tasks-axi` selects the tasks-axi path.
 On the default markdown adapter, tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+On a `beads` backend, every claim, hold, and close in the shared Beads graph is attributed to `BEADS_ACTOR` (bd's audit-trail actor, which otherwise falls back to git identity and collapses a fleet into one name), exported at two boundaries: [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) sets it to the task id - the registered secondmate name for a secondmate - so the dispatch claim, the worker's pane, and every state change the worker drives record who did it, while every firstmate-owned mutation (`bin/fm-teardown.sh`, `bin/fm-captain-hold.sh`, handoffs, and the rest through the resolver in [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh)) records `firstmate@<basename of FM_HOME>` when the variable is unset, never overriding an explicitly exported one.
+Read attribution in a home with a beads backlog with `tail -100 .beads/interactions.jsonl | jq -r .actor | sort | uniq -c`.
 
 ### Using a separate operational home
 
-The tracked `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`, so a bare `tasks-axi` run from the code root addresses the code root's `data/` whenever the home lives elsewhere.
+A `.tasks.toml` in the code root resolves against the directory tasks-axi runs in, not `FM_HOME`, so a bare `tasks-axi` run from the code root addresses the code root's `data/` whenever the home lives elsewhere; the tracked template is `.tasks.toml.example`, so the code root carries no live config until an operator links one there.
 tasks-axi replaces its target by renaming a temporary file over it.
 If the target is a symlink, the write replaces it with a regular file.
 Linking the code-root copy into the home therefore forks the queue on the first write instead of keeping the copies in sync.
@@ -471,7 +477,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 - Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
 
-- A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+- A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, `herdr_pane_id=`, and `herdr_task_label=`.
 
 - A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 - An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
@@ -1289,6 +1295,7 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 **Checkout diagnostics**
 
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
+Bootstrap also reports one `NO_MISTAKES_MIRROR:` line per no-mistakes-posture project clone, and for the home's own firstmate checkout, whose `no-mistakes` gate remote is absent or outside the data root the installed CLI resolves (`NM_HOME` when set non-empty, else `~/.no-mistakes`); the printed `no-mistakes init` fix inside the affected clone is the operator's to run, never bootstrap's.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 
 **Project refresh at startup**
@@ -1451,6 +1458,29 @@ A fail-closed poll that already queued a wake, and a timeout, always print so th
 
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
 `bin/fm-mail-check.sh disarm` removes the standing check.
+
+## Stale-claim sweep (bin/fm-stale-sweep.sh)
+
+The Beads graph a beads-backed home's `.tasks.toml` points at never reclaims an in_progress claim on its own, so a task whose worker endpoint died stays claimed forever and dispatch capacity silently shrinks.
+[`bin/fm-stale-sweep.sh`](../bin/fm-stale-sweep.sh) makes those stale claims reclaim themselves.
+A dry run prints a table (id, home, age, verdict, action, plus the row's own claim-actor and provenance evidence on no-home rows) and a summary with the count it would reclaim; `--apply` performs the reclaims, and `--older-than <hours>` overrides the default 24-hour threshold measured from the row's `updated_at` (the last recorded graph activity).
+For every stale row the sweep resolves the owning home (the registered home holding `state/<id>.meta`, else the row's provenance line), asks that home with `fm-crew-state.sh`, and reclaims only on positive death evidence - a missing or dead endpoint, or a remote dead/missing verdict.
+Anything merely unproven (an unreadable pane, an unreachable remote) is kept.
+A held or dependency-blocked row is never a candidate: the scan itself excludes held in_progress rows and in_progress rows blocked by a row that is neither closed nor pinned before endpoint classification, so check and dry-run output cannot present a row the reclaim would refuse as reclaimable.
+A row no local home owns is listed and kept too; `--apply-orphans` additionally reclaims such an orphan row only when it is older than 48 hours, carries no claim actor, and has no landing URL in its description.
+The reclaim appends `reclaimed <date>: endpoint dead, previous claim by <actor>` to the row's body and reopens it through the owning home's tasks-axi, only after re-proving the row is still in flight, unheld, and unblocked.
+The sweep never touches a row whose endpoint is live and never removes a meta, worktree, or pane, so stuck-crewmate recovery can still inspect what died.
+A home whose backlog is not beads-backed has no graph to sweep and the script says so instead of guessing.
+
+Register the daily check with `bin/fm-stale-sweep.sh arm`.
+That writes `state/stale-sweep.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal `FM_CHECK_INTERVAL` cadence and turns its one line into a `check:` wake; no separate schedule is involved.
+The check runs the sweep dry at most once per `FM_STALE_SWEEP_INTERVAL` (default 86400 seconds, `0` disables the gate, otherwise 900 to 604800), stays silent when nothing is reclaimable, and reports one line when dead-endpoint rows are reclaimable so firstmate decides whether to run `--apply`; if `FM_STALE_SWEEP_BUDGET_SECS` was cut to fit `FM_CHECK_TIMEOUT`, that cut is reported on the report line even on polls where nothing is reclaimable, and so is a budget that stopped the sweep before every candidate was probed.
+`FM_STALE_SWEEP_BUDGET_SECS` (default 25, 1 to 3600) bounds one probe and is cut down to what `FM_CHECK_TIMEOUT` allows, exactly like the tool-update check's budget.
+`FM_STALE_SWEEP_STATE_TIMEOUT` (default 90) bounds one home's `fm-crew-state.sh` call, capped to the remaining budget in check mode.
+`FM_STALE_SWEEP_BD_TIMEOUT` (default 120) bounds the `bd list` graph read, also capped to the remaining budget in check mode so a slow graph read fails visibly inside the probe instead of being killed silently.
+`bin/fm-stale-sweep.sh disarm` removes the shim, its trust binding, and the report record.
+
+A full treehouse pool is the sibling condition: [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) detects treehouse's exact `all N worktrees are in use` refusal during the worktree wait, records a load-kind capacity hold whose reason names the pool (`bin/fm-capacity-lib.sh` owns the reason contract), and exits 2 with the item left queued, and [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) releases the oldest capacity hold recorded for the same pool once a worktree is returned to it, printing which item became ready. When the worktree-derived pool scan matches nothing, teardown also scans the project-root fallback identity a spawn may have had to record when treehouse could not answer it, so such a hold is still released instead of stranded.
 
 ## Relay (.env)
 

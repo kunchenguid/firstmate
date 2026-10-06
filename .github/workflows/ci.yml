@@ -208,11 +208,33 @@ jobs:
             exit 1
           }
           tmux -V
-      - name: Install tasks-axi for backlog-handoff delegation
+      # The stale-sweep and beads-actor suites need a tasks-axi that operates the
+      # Beads backend; published tasks-axi is markdown-only. Build the
+      # beads-backend fork (upstream PR #53's lineage) at a pinned commit.
+      - name: Install beads-capable tasks-axi for backlog-handoff delegation
+        env:
+          TASKS_AXI_REPO: https://github.com/RooseveltAdvisors/tasks-axi.git
+          TASKS_AXI_SHA: 8c6f96eb58924fd094053eb1a57dd57c64655bbd
         run: |
           set -eu
-          npm install -g tasks-axi
+          src="$RUNNER_TEMP/tasks-axi-src"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 "$TASKS_AXI_REPO" "$TASKS_AXI_SHA"
+          git -C "$src" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$src" rev-parse HEAD)" = "$TASKS_AXI_SHA"
+          (cd "$src" && npm install --ignore-scripts --no-audit --no-fund && npm pack)
+          npm install -g "$src"/tasks-axi-*.tgz
           tasks-axi --version
+      # The stale-sweep suite drives a real scratch Beads graph through the
+      # real bd 1.2.x CLI; without bd every fixture row fails to create and
+      # the suite fails fast, so the binary is a required serial-lane tool.
+      # @beads/bd's postinstall skips the binary download whenever CI is set,
+      # so unset it for the install (GitHub Actions always exports CI=true).
+      - name: Install beads (bd) for the stale-sweep suite
+        run: |
+          set -eu
+          env -u CI npm install -g @beads/bd
+          bd version
       # The Pi extension tests read the installed Pi package's own types and
       # runtime, so without it they gate-skip and pass silently. It is a public
       # npm package and needs no credential, so CI can hold the real thing.
@@ -446,8 +468,8 @@ jobs:
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 18 ] || {
-            echo "::error::expected 18 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq 19 ] || {
+            echo "::error::expected 19 snapshot/fleet-view tests, got $snapshot_count"
             exit 1
           }
 
@@ -524,7 +546,7 @@ jobs:
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
-          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          tracked=$(git ls-files -- data state config projects .no-mistakes .tasks.toml)
           if [ -n "$tracked" ]; then
             echo "::error::Personal fleet paths are tracked in git:"
             printf '%s\n' "$tracked"
