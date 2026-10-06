@@ -18,6 +18,7 @@ test_print_policy_semantics() {
   root=$(fm_test_tmproot fm-mem-protection-install)
   home="$root/home"
   mkdir -p "$home/bin"
+  # shellcheck disable=SC2016 # $1 and FM_HOME expand when the generated stub runs.
   printf '#!/bin/sh\nprintf "%%s" "$1" > "$FM_HOME/called"\n' > "$home/bin/fm-mem-alert.sh"
   chmod +x "$home/bin/fm-mem-alert.sh"
   "$INSTALLER" print --home "$home" > "$root/policy" || fail "print failed"
