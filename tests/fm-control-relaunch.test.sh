@@ -1080,6 +1080,24 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# A relaunch is a successful spawn of the same task, so it ends the park exactly
+# as a first spawn does (bin/fm-park.sh); a task that comes back cannot stay hidden.
+test_spawn_relaunch_clears_the_park_marker() {
+  local dir out
+  dir=$(new_case parkclear rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'paused: waiting for firstmate\n' > "$dir/home/state/rl43.status"
+  printf 'parked [at=1700000000]: queued behind the one-worker rule\n' > "$dir/home/state/rl43.parked"
+  chmod 0700 "$dir/home/state/rl43.parked"
+  out=$(run_spawn "$dir" rl43 --relaunch)
+  assert_contains "$out" "spawned rl43" "the relaunch should complete"
+  [ ! -e "$dir/home/state/rl43.parked" ] || fail "a successful relaunch left the park marker"
+  [ "$(cat "$dir/home/state/rl43.status")" = 'paused: waiting for firstmate' ] \
+    || fail "the relaunch rewrote the worker's status file through the park path"
+  pass "fm-spawn --relaunch: a successful relaunch clears the park marker and leaves the status file alone"
+}
+
 # A promoted scout records kind=ship and a custom ship branch in its meta, but
 # its brief is the scout scaffold: it never gained a Ship branch line, and a
 # relaunch cannot regenerate the brief (--branch-prefix is refused there). The
@@ -2468,6 +2486,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_clears_the_park_marker
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired

@@ -427,8 +427,16 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state> [<span-record> <span-status>]
-  local win=$1 state=$2 record=${3-} rc=${4-} task last declared event rest
+  local win=$1 state=$2 record=${3-} rc=${4-} task last declared event rest park_rc=0
   task=$(window_to_task "$win" "$state")
+  # A park marker (bin/fm-park.sh) is firstmate's own decision: a valid one means
+  # nothing to age or recheck, and an unreadable one is escalated by name, never
+  # read as absent.
+  fm_park_status "$state" "$task" || park_rc=$?
+  case "$park_rc" in
+    0) printf 'self|parked by firstmate, never rechecked: %s' "$win"; return ;;
+    2) printf 'escalate|park marker unreadable, not treated as absent: %s' "$FM_PARK_ERR"; return ;;
+  esac
   if [ -z "$rc" ]; then
     record=$(status_span_first_actionable_record "$state/$task.status" \
       "$(status_seen_offset "$state" "$task")")
@@ -1669,7 +1677,9 @@ handle_wake() {  # <reason> <state>
         # Nonterminal progress verbs keep possible-wedge markers even if free text
         # once looked captain-relevant or was written into a seen marker.
         _clear_wedge=0
-        if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+        if fm_park_status "$state" "$task"; then
+          _clear_wedge=1
+        elif [ -n "$last" ] && status_is_captain_relevant "$last"; then
           if status_is_terminal_verb "$last"; then
             _clear_wedge=1
           else

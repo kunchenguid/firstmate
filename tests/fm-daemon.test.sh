@@ -1342,6 +1342,44 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
   pass "housekeeping matures a busy pane's declared-wait window into exactly one recheck per window"
 }
 
+# A task firstmate parked (bin/fm-park.sh) is never aged or rechecked by the away
+# daemon: housekeeping drops its wedge and pause markers without an escalation,
+# classify_stale self-handles it, and an unreadable marker is escalated by name
+# rather than read as absent. A task without the marker is untouched.
+test_parked_task_is_never_aged_or_rechecked_by_the_daemon() {
+  local dir state fakebin task win pane key now out
+  dir=$(make_supercase parked-daemon)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task='parked-d1'; win="sess:fm-$task"; pane="$dir/pane.txt"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  now=$(date +%s)
+  printf 'paused: waiting for firstmate\n' > "$state/$task.status"
+  printf 'parked [at=%s]: queued behind the one-worker rule\n' "$now" > "$state/$task.parked"
+  chmod 0700 "$state/$task.parked"
+  echo $((now - 99999)) > "$state/.subsuper-paused-$key"
+  echo $((now - 99999)) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=1 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a parked task was escalated: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "a parked task kept its declared-wait recheck marker"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a parked task kept its possible-wedge marker"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in self\|*) ;; *) fail "a parked task did not classify as self-handled: $out" ;; esac
+
+  printf 'not a marker\n' > "$state/$task.parked"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in escalate\|*"park marker unreadable"*) ;; *) fail "an unreadable park marker was not escalated by name: $out" ;; esac
+
+  rm -f "$state/$task.parked"
+  echo $((now - 300)) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "without the marker the declared wait was no longer rechecked"
+  pass "the daemon never ages or rechecks a parked task, escalates an unreadable marker, and leaves unparked waits unchanged"
+}
+
 test_housekeeping_declared_time_controls_pause_recheck() {
   local dir state fakebin task win pane key now future distant past escalations
   dir=$(make_supercase pause-until-cadence)
@@ -3259,6 +3297,7 @@ test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_declared_time_controls_pause_recheck
+test_parked_task_is_never_aged_or_rechecked_by_the_daemon
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
 test_housekeeping_stale_marker_transitions_to_pause

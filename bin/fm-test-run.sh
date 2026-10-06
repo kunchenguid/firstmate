@@ -295,7 +295,7 @@ family_for_basename() {
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-devin-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
-    fm-operational-input.test.sh|fm-park.test.sh|fm-pi-primary-types.test.sh|\
+    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-calm-claude-mod.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -386,7 +386,7 @@ family_for_basename() {
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
-    fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
+    fm-send-inbox.test.sh|fm-spawn-batch.test.sh|fm-park.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-worker-account.test.sh|\
     fm-git-strip-ai-trailers.test.sh|\
