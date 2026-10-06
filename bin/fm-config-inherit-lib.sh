@@ -91,6 +91,24 @@ FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-neve
 # already frozen for its current session (bin/fm-trace-context-lib.sh).
 FM_SESSION_SCOPED_INHERITABLE_CONFIG="trace-context"
 
+# A secondmate home that must run its own workers on a different runtime than
+# the primary (for example a host where only one agent tool is logged in) keeps
+# an empty config/runtime-pin file. While it exists, the items below are the
+# home's own and inheritance neither overwrites nor removes them. The pin file
+# itself is never inherited.
+FM_RUNTIME_PIN_FILE="runtime-pin"
+FM_RUNTIME_PINNED_CONFIG="crew-harness crew-dispatch.json"
+
+# True when <config-dir> carries the runtime pin and <item> is a pinned item.
+fm_config_inherit_item_runtime_pinned() {  # <config-dir> <item>
+  local dest_config=$1 item=$2 candidate
+  [ -f "$dest_config/$FM_RUNTIME_PIN_FILE" ] || return 1
+  for candidate in $FM_RUNTIME_PINNED_CONFIG; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
+
 # True when <item> is session-scoped in the sense above.
 fm_config_inherit_item_session_scoped() {  # <item>
   local item=$1 candidate
@@ -569,6 +587,10 @@ propagate_inheritable_config() {
     esac
     if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ] && fm_config_inherit_item_session_scoped "$item"; then
       record_inheritable_config_result "$item" unchanged "session-scoped"
+      continue
+    fi
+    if fm_config_inherit_item_runtime_pinned "$dest_config" "$item"; then
+      record_inheritable_config_result "$item" unchanged "runtime-pinned"
       continue
     fi
     src="$src_config/$item"

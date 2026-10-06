@@ -72,6 +72,12 @@ if [ -e "$DEST" ]; then
   [ "$(file_link_count "$DEST")" = 1 ] || die "inherited destination is hardlinked"
 fi
 
+if case "$REL" in config/*) fm_config_inherit_item_runtime_pinned "$HOME_REAL/config" "${REL#config/}" ;; *) false ;; esac; then
+  head -c "$((MAX_BYTES + 1))" > /dev/null || true
+  printf 'unchanged: %s\n' "$REL"
+  exit 0
+fi
+
 BASE=$(basename "$REL")
 LOCK="$PARENT_REAL/.fm-inherit-$BASE.lock"
 GENERATION_FILE="$PARENT_REAL/.fm-inherit-$BASE.generation"
