@@ -2510,6 +2510,7 @@ crew_is_paused() {  # <id>
 # owns the derivation: the findings table's `action` column, read by position);
 # crew_gate_awaits_human_decision below is its only consumer.
 FM_GATE_HUMAN_DECISION='ask-user: authority decision'
+# shellcheck disable=SC2034 # Read by sourcing callers (fm-discord-notify-status.sh, fm-crew-state.sh).
 FM_PR_AWAITS_MERGE_DECISION='pr: awaiting merge decision'
 
 # 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer

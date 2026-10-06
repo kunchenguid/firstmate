@@ -93,11 +93,12 @@ test_status_override_alone_cannot_post_with_ambient_home_credentials() {
 # there rather than in whichever suite happened to leak first.
 test_library_scrubs_public_credentials() {
   local out
-  out=$(FM_DISCORD_BOT_TOKEN=leaked FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+  out=$(FM_DISCORD_BOT_TOKEN=leaked FM_DISCORD_TOKEN=leaked FM_DISCORD_CHANNEL_ID=1000000000000000001 \
     FMX_PAIRING_TOKEN=leaked FMX_ENV_FILE=/leaked/.env FMX_DRY_RUN=1 \
-    bash -c '. "$1"; for v in FM_DISCORD_BOT_TOKEN FM_DISCORD_CHANNEL_ID FMX_PAIRING_TOKEN FMX_ENV_FILE FMX_DRY_RUN; do printf "%s=%s\n" "$v" "${!v-<unset>}"; done' \
+    bash -c '. "$1"; for v in FM_DISCORD_BOT_TOKEN FM_DISCORD_TOKEN FM_DISCORD_CHANNEL_ID FMX_PAIRING_TOKEN FMX_ENV_FILE FMX_DRY_RUN; do printf "%s=%s\n" "$v" "${!v-<unset>}"; done' \
     _ "$ROOT/tests/lib.sh")
   assert_contains "$out" "FM_DISCORD_BOT_TOKEN=<unset>" "the library must clear the Discord token"
+  assert_contains "$out" "FM_DISCORD_TOKEN=<unset>" "the library must clear the Discord token alias"
   assert_contains "$out" "FM_DISCORD_CHANNEL_ID=<unset>" "the library must clear the Discord channel"
   assert_contains "$out" "FMX_PAIRING_TOKEN=<unset>" "the library must clear the Relay pairing token"
   assert_contains "$out" "FMX_ENV_FILE=<unset>" "the library must clear an env-file redirect"

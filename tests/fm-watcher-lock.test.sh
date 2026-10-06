@@ -5,6 +5,9 @@
 # e2e), so they stay as focused real-process units.
 set -u
 
+# Keep host-level home overrides from leaking user configuration into fixtures.
+unset FM_HOME
+
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
@@ -40,15 +43,39 @@ grep -q 'refusing to arm from a disposable validation checkout' "$TMP_ROOT/lab-g
 pass "disposable watcher refuses inherited state outside its marked lab"
 
 drain_and_ack() {  # <state>
-  local state=$1 err sequence generation
+  local state=$1 err ack_err sequence generation
   err="$state/.test-drain.err"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
+  ack_err="$state/.test-ack.err"
+  if ! FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err"; then
+    cat "$err" >&2
+    printf 'wake queue at failed drain: ' >&2
+    cat "$state/.wake-queue" >&2 2>/dev/null || true
+    return 1
+  fi
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation"
+  if [ -z "$sequence" ] || [ -z "$generation" ]; then
+    if [ ! -s "$state/.wake-queue" ]; then
+      rm -f "$err" "$ack_err"
+      return 0
+    fi
+    cat "$err" >&2
+    echo "missing acknowledgement token with queued rows (sequence=${sequence:-empty}, generation=${generation:-empty})" >&2
+    printf 'wake queue: ' >&2
+    cat "$state/.wake-queue" >&2 2>/dev/null || true
+    return 1
+  fi
+  if ! FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" 2> "$ack_err"; then
+    cat "$ack_err" >&2
+    echo "failed ack token: sequence=$sequence generation=$generation" >&2
+    printf 'wake queue after failed ack: ' >&2
+    cat "$state/.wake-queue" >&2 2>/dev/null || true
+    printf 'recovery marker: ' >&2
+    cat "$state/.wake-recovery" >&2 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$err" "$ack_err"
 }
 
 test_wait_deadline_reaps_a_stopped_child() {
@@ -272,7 +299,7 @@ test_guard_warnings() {
   printf 'project=x\n' > "$state/task.meta"
   printf 'project=y\n' > "$state/task2.meta"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
-  PATH="$blind:$PATH" CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  PATH="$blind:$PATH" CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
   case "$first" in
     '●'*) ;;
@@ -298,7 +325,7 @@ test_guard_warnings() {
   mkdir -p "$dir/config"
   printf 'project=x\n' > "$state/task.meta"
   : > "$dir/config/x-mode.env"
-  PATH="$blind:$PATH" CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  PATH="$blind:$PATH" CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
 
   # (2) live watcher plus fresh beacon, empty queue -> silence.
@@ -317,7 +344,7 @@ test_guard_warnings() {
   touch "$state/.last-watcher-beat"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
-  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   [ ! -s "$err" ] || fail "guard warned with a live watcher and fresh beacon: $(cat "$err")"

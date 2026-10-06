@@ -2183,13 +2183,17 @@ SH
 }
 
 test_interruption_before_and_after_raw_commit() {
-  local dir state before_out after_out replay_out empty_out pid rc count i sequence generation
+  local dir state before_out after_out after_err replay_out empty_out replay_err precommit_ack_err pid rc count i sequence generation marker
   dir=$(make_case interruption)
   state="$dir/state"
+  marker="$state/.watcher-down"
   before_out="$dir/before.out"
   after_out="$dir/after.out"
+  after_err="$dir/after.err"
   replay_out="$dir/replay.out"
   empty_out="$dir/empty.out"
+  replay_err="$dir/replay.err"
+  precommit_ack_err="$dir/precommit-ack.err"
   printf 'done: interruption fixture\n' > "$state/task.status"
   append_wake "$state" signal task.status "signal: task" || fail "pre-commit interruption wake append failed"
 
@@ -2198,32 +2202,55 @@ test_interruption_before_and_after_raw_commit() {
   i=0
   while [ "$i" -lt 100 ]; do
     if [ "$(cat "$state/.wake-queue.lock/pid" 2>/dev/null || true)" = "$pid" ] \
-      && grep -Eq '^(pending|announced):handling:' "$state/.watcher-down" 2>/dev/null; then
+      && grep -Eq '^(pending|announced):handling:[A-Za-z0-9._-]+$' "$marker" 2>/dev/null; then
       break
     fi
     sleep 0.05
     i=$((i + 1))
   done
-  [ "$i" -lt 100 ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
+  if [ "$(cat "$state/.wake-queue.lock/pid" 2>/dev/null || true)" != "$pid" ] \
+    || ! grep -Eq '^(pending|announced):handling:[A-Za-z0-9._-]+$' "$marker" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    fail "pre-commit drain never entered its recoverable read boundary"
+  fi
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
   set +e
   wait "$pid"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$dir/replay.err" || fail "restored pre-commit wake did not drain"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$replay_err" || fail "restored pre-commit wake did not drain"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
   [ "$count" -eq 1 ] || fail "pre-commit interruption lost or duplicated the durable row"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replay.err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay.err")
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
-    || fail "pre-commit replay acknowledgement failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
+  if [ -z "$sequence" ] || [ -z "$generation" ]; then
+    printf 'missing replay ack token: sequence=%s generation=%s\n' "${sequence:-empty}" "${generation:-empty}" >&2
+    cat "$replay_err" >&2
+    printf 'queue after replay: ' >&2
+    cat "$state/.wake-queue" >&2 2>/dev/null || true
+    printf 'recovery marker after replay: ' >&2
+    cat "$state/.wake-recovery" >&2 2>/dev/null || true
+    fail "pre-commit replay acknowledgement token missing"
+  fi
+  if ! FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" 2> "$precommit_ack_err"; then
+    printf 'pre-commit replay ack failed: sequence=%s generation=%s\n' "$sequence" "$generation" >&2
+    cat "$precommit_ack_err" >&2
+    printf 'queue after failed ack: ' >&2
+    cat "$state/.wake-queue" >&2 2>/dev/null || true
+    printf 'recovery marker after failed ack: ' >&2
+    cat "$state/.wake-recovery" >&2 2>/dev/null || true
+    fail "pre-commit replay acknowledgement failed"
+  fi
 
   append_wake "$state" signal task.status "signal: task after commit" || fail "post-commit interruption wake append failed"
-  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=5 "$DRAIN" > "$after_out" &
+  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=5 "$DRAIN" > "$after_out" 2> "$after_err" &
   pid=$!
   wait_for_file_text "$after_out" "$(printf '\tsignal\ttask.status\t')" \
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not print its raw row"; }
+  wait_for_file_text "$after_err" 'WAKE_ACK_REQUIRED:' \
+    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not publish its acknowledgement boundary"; }
   [ -s "$state/.wake-queue" ] \
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its raw row before handling acknowledgement"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw presentation"
@@ -2517,25 +2544,143 @@ test_stale_steal_chain_recovers_without_unbounded_suffixes() {
   state="$dir/state"
   rc=0
   mkdir -p "$state"
-  dir="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+  FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     lock="$2/.fixture.lock"
     dead=999999
-    mkdir -p "$dir/primary" && echo "$dead" > "$dir/primary/pid"
-    ln -s "$dir/primary" "$lock"
+    mkdir -p "$3/primary" && echo "$dead" > "$3/primary/pid"
+    ln -s "$3/primary" "$lock"
     for suffix in ".steal" ".steal.steal"; do
-      mkdir -p "$lock$suffix-owner" && echo "$dead" > "$lock$suffix-owner/pid"
-      ln -s "$lock$suffix-owner" "$lock$suffix"
-      touch -t 202001010000 "$lock$suffix" "$lock$suffix-owner"
+      mkdir -p "$3/owner$suffix" && echo "$dead" > "$3/owner$suffix/pid"
+      ln -s "$3/owner$suffix" "$lock$suffix"
+      touch -t 202001010000 "$lock$suffix" "$3/owner$suffix"
     done
-    touch -t 202001010000 "$dir/primary" "$lock"
+    touch -t 202001010000 "$3/primary" "$lock"
     fm_lock_try_acquire "$lock" || exit 20
     [ -L "$lock" ] || exit 21
     [ ! -e "$lock.steal.steal.steal" ] && [ ! -L "$lock.steal.steal.steal" ] || exit 22
     fm_lock_release "$lock" || exit 23
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$dir" || rc=$?
   [ "${rc:-0}" -eq 0 ] || fail "stale .steal chain was not recovered (rc=$rc)"
   pass "stale .steal chain recovers without growing .steal suffixes"
+}
+
+# Two recoverers can both pass a stale recheck; the second must not remove the
+# first's live replacement. Simulated deterministically by swapping the lock's
+# owner to a live one inside a stubbed recheck: with the compare-and-remove
+# guard, the acquisition fails and the live lock survives untouched.
+test_recheck_to_remove_swap_preserves_live_replacement() {
+  local dir state
+  dir=$(make_case recheck-swap)
+  state="$dir/state"
+  mkdir -p "$state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture.lock"
+    dead=999999
+    mkdir -p "$3/stale-owner" && echo "$dead" > "$3/stale-owner/pid"
+    ln -s "$3/stale-owner" "$lock"
+    touch -t 202001010000 "$lock" "$3/stale-owner"
+    fm_lock_recheck_stale_owner() {
+      liveparent=$(dirname "$1")
+      mkdir -p "$liveparent/live-owner"; echo "$PPID" > "$liveparent/live-owner/pid"
+      ln -sfn "$liveparent/live-owner" "$1"
+      return 0
+    }
+    fm_lock_try_acquire "$lock" no
+    rc=$?
+    [ "$rc" -ne 0 ] || exit 30
+    liveparent=$(dirname "$lock")
+    [ "$(readlink "$lock")" = "$liveparent/live-owner" ] || exit 31
+    [ -f "$liveparent/live-owner/pid" ] && [ "$(cat "$liveparent/live-owner/pid")" = "$PPID" ] || exit 32
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$dir" || fail "a live replacement lock was removed during recheck-to-remove (rc=$?)"
+  pass "compare-and-remove preserves a live replacement swapped in during recheck"
+}
+
+test_stale_recovery_preserves_caller_descriptors() {
+  local dir state
+  dir=$(make_case reclaim-descriptors)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    exec 8>"$3/caller8" 9>"$3/caller9" 10>"$3/caller10"
+    for mode in yes no; do
+      lock="$2/$mode.lock"
+      mkdir -p "$lock" "$lock.steal" "$lock.steal.steal"
+      for suffix in "" .steal .steal.steal; do
+        echo 999999 > "$lock$suffix/pid"
+      done
+      fm_lock_try_acquire "$lock" "$mode" || exit 20
+      printf "%s\n" "$mode" >&8
+      printf "%s\n" "$mode" >&9
+      printf "%s\n" "$mode" >&10
+      fm_lock_release "$lock" || exit 21
+    done
+    _fm_lock_reclaim_guard "$2/contention" 8 || exit 22
+    (
+      _fm_lock_reclaim_guard_fd8=
+      _fm_lock_reclaim_guard "$2/contention" 8 && exit 23
+      printf "contention\n" >&8
+      printf "contention\n" >&9
+      printf "contention\n" >&10
+    ) || exit 24
+    _fm_lock_reclaim_guard_release 8
+    _fm_lock_reclaim_guard_release 9
+    printf "released\n" >&8
+    printf "released\n" >&9
+    printf "released\n" >&10
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$dir" || fail "reclaim clobbered caller descriptors"
+  local fd
+  for fd in 8 9 10; do
+    assert_equals "$(printf "yes\nno\ncontention\nreleased")" "$(cat "$dir/caller$fd")" "caller FD $fd survives reclaim and contention"
+  done
+  pass "direct and nested stale recovery preserve caller descriptors on success and contention"
+}
+
+# Concurrent recoverers of the same stale lock: exactly one owns the lock
+# afterward, the loser reports contention, and no .steal chain or stray
+# replacement survives.
+test_concurrent_stale_lock_recovery_yields_one_owner() {
+  local dir state
+  dir=$(make_case concurrent-stale-recovery)
+  state="$dir/state"
+  mkdir -p "$state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture.lock"
+    dead=999999
+    mkdir -p "$3/stale-owner" && echo "$dead" > "$3/stale-owner/pid"
+    ln -s "$3/stale-owner" "$lock"
+    touch -t 202001010000 "$lock" "$3/stale-owner"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$dir" || fail "could not seed stale lock"
+  local worker pid_a pid_b i ready=no
+  # shellcheck disable=SC2016 # Expand worker variables in the bash -c subprocess.
+  worker='
+    . "$1"
+    fm_lock_try_acquire "$2/.fixture.lock"
+    rc=$?
+    printf "rc%s=%s\n" "$4" "$rc" > "$3/out$4"
+    if [ "$rc" -eq 0 ]; then
+      while [ ! -e "$3/release" ]; do sleep 0.05; done
+      fm_lock_release "$2/.fixture.lock" || exit 10
+    fi
+  '
+  FM_STATE_OVERRIDE="$state" bash -c "$worker" _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$dir" A &
+  pid_a=$!
+  FM_STATE_OVERRIDE="$state" bash -c "$worker" _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$dir" B &
+  pid_b=$!
+  for i in {1..200}; do
+    if [ -s "$dir/outA" ] && [ -s "$dir/outB" ]; then ready=yes; break; fi
+    sleep 0.05
+  done
+  touch "$dir/release"
+  wait "$pid_a" || fail "worker A failed to release its lock"
+  wait "$pid_b" || fail "worker B failed to release its lock"
+  [ "$ready" = yes ] || fail "concurrent acquisition attempts did not finish before release"
+  grep -h '^rc[AB]=0' "$dir/outA" "$dir/outB" | grep -c . | grep -q '^1$' \
+    || fail "expected exactly one concurrent winner, got: $(cat "$dir/outA" "$dir/outB")"
+  [ ! -e "$state/.fixture.lock.steal.steal.steal" ] || fail "steal suffixes grew under concurrency"
+  pass "concurrent stale-lock recovery yields exactly one owner and no suffix growth"
 }
 
 test_subshell_lock_ownership_without_bashpid() {
@@ -2778,7 +2923,10 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     || fail "drain after the interrupted acknowledgement failed"
   grep "$(printf '\tsignal\t')" "$replay_out" >/dev/null \
     || fail "the held acknowledgement lock allowed a partial consume"
-  ack_drain_err "$state" "$replay_err" \
+  # Replay confirms the row survived the interrupted acknowledgement. Reuse
+  # the acknowledgement token already presented by the preceding drain; a
+  # replay of an intact row does not necessarily emit a new token.
+  ack_drain_err "$state" "$second_err" \
     || fail "the intact wake could not be acknowledged after contention cleared"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledged presentation fixture remained queued"
   pass "presentation lock waits are bounded and retriable without weakening acknowledgement atomicity"
@@ -3454,6 +3602,9 @@ SH
 
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_stale_steal_chain_recovers_without_unbounded_suffixes
+test_recheck_to_remove_swap_preserves_live_replacement
+test_stale_recovery_preserves_caller_descriptors
+test_concurrent_stale_lock_recovery_yields_one_owner
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack

@@ -185,10 +185,10 @@ test_turnend_guard_stands_down_on_cursor_payload() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-turnend")
   : > "$dir/state/task1.meta"
-  out=$(printf '%s' "$CURSOR_PAYLOAD" | bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '%s' "$CURSOR_PAYLOAD" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 0 "$status" "a Cursor-delivered Stop payload must not block through the Claude-settings duplicate"
   [ -z "$out" ] || fail "duplicate entry produced output: $out"
-  out=$(printf '%s' "$CURSOR_PAYLOAD" | bash "$dir/bin/fm-turnend-guard.sh" --cursor 2>&1); status=$?
+  out=$(printf '%s' "$CURSOR_PAYLOAD" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" --cursor 2>&1); status=$?
   expect_code 2 "$status" "--cursor must let Cursor's own adapter reach the shared block decision"
   case "$out" in *'TURN WOULD END BLIND'*) ;; *) fail "expected the shared banner, got: $out" ;; esac
   pass "fm-turnend-guard: Cursor payload is inert without --cursor and blocks with it"
@@ -198,7 +198,7 @@ test_turnend_guard_still_blocks_for_claude_payload() {
   local dir status
   dir=$(make_primary_dir "$TMP_ROOT/host-claude")
   : > "$dir/state/task1.meta"
-  printf '%s' "$CLAUDE_STOP_PAYLOAD" | bash "$dir/bin/fm-turnend-guard.sh" >/dev/null 2>&1
+  printf '%s' "$CLAUDE_STOP_PAYLOAD" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" >/dev/null 2>&1
   status=$?
   expect_code 2 "$status" "the host guard must not disturb a genuine Claude Stop payload"
   pass "fm-turnend-guard: a non-Cursor payload keeps blocking"

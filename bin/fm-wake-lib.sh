@@ -633,6 +633,58 @@ fm_lock_mid_acquire_is_fresh() {
   return 1
 }
 
+# Crash-safe serialization for the stale-reclaim critical section: a stable
+# advisory lock file whose exclusive flock is inherited by this process via a
+# perl helper. The kernel releases it when every open file description is
+# closed, i.e. on normal return AND process death, so the guard itself can
+# never be left behind stale. The guard file is persistent and never
+# unlinkable/renamed away.
+_fm_lock_reclaim_guard_fd8=
+_fm_lock_reclaim_guard_fd9=
+_fm_lock_reclaim_guard_path8=
+_fm_lock_reclaim_guard_path9=
+_fm_lock_reclaim_guard() { # <entry> <slot 8|9>
+  local entry=$1 slot=$2 held='' guard_fd=10
+  case "$slot" in
+    8) held=$_fm_lock_reclaim_guard_fd8 ;;
+    9) held=$_fm_lock_reclaim_guard_fd9 ;;
+    *) return 1 ;;
+  esac
+  if [ -n "$held" ]; then
+    # Reuse only a guard already held for THIS entry; a same-slot guard on a
+    # different entry must not serialize this critical section.
+    case "$slot" in
+      8) [ "$_fm_lock_reclaim_guard_path8" = "${entry}.reclaim-guard" ] && return 0 ;;
+      9) [ "$_fm_lock_reclaim_guard_path9" = "${entry}.reclaim-guard" ] && return 0 ;;
+    esac
+    return 1
+  fi
+  while ( : >&"$guard_fd" ) 2>/dev/null; do
+    guard_fd=$((guard_fd + 1))
+    [ "$guard_fd" -le 255 ] || return 1
+  done
+  eval 'exec '"$guard_fd"'>>"${entry}.reclaim-guard"' || return 1
+  if perl -e 'use Fcntl qw(LOCK_EX LOCK_NB); flock(STDIN, LOCK_EX | LOCK_NB) or exit 3;' <&"$guard_fd"; then
+    case "$slot" in
+      8) _fm_lock_reclaim_guard_fd8=$guard_fd; _fm_lock_reclaim_guard_path8=${entry}.reclaim-guard ;;
+      9) _fm_lock_reclaim_guard_fd9=$guard_fd; _fm_lock_reclaim_guard_path9=${entry}.reclaim-guard ;;
+    esac
+    return 0
+  fi
+  eval 'exec '"$guard_fd"'>&-'
+  return 1
+}
+
+_fm_lock_reclaim_guard_release() { # <slot 8|9>
+  local guard_fd=
+  case "$1" in
+    8) guard_fd=$_fm_lock_reclaim_guard_fd8; _fm_lock_reclaim_guard_fd8=; _fm_lock_reclaim_guard_path8= ;;
+    9) guard_fd=$_fm_lock_reclaim_guard_fd9; _fm_lock_reclaim_guard_fd9=; _fm_lock_reclaim_guard_path9= ;;
+  esac
+  [ -z "$guard_fd" ] || eval 'exec '"$guard_fd"'>&-'
+  return 0
+}
+
 fm_lock_recheck_stale_owner() {
   local lockdir=$1 expected_owner=$2 expected_pid=$3 actual_pid
   if [ -n "$expected_owner" ]; then
@@ -1162,7 +1214,7 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 allow_steal=${2:-yes} pid steal cur rc steal_owner primary_owner current sblock_pid
+  local lockdir=$1 allow_steal=${2:-yes} pid steal cur rc steal_owner primary_owner current slot owned sblock_pid
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -1252,25 +1304,68 @@ fm_lock_try_acquire() {
     return 1
   fi
   if [ "$allow_steal" = no ]; then
-    # One bounded level only: a stale serialization mutex left behind by an
-    # interrupted or long-dead recovery is reclaimed here directly, after the
-    # same dead-owner and mid-acquire-freshness checks, and we never recurse
-    # into its own steal lock.
-    if [ -e "$steal" ] || [ -L "$steal" ]; then
-      sblock_pid=$(cat "$steal/pid" 2>/dev/null || true)
-      if ! fm_pid_alive "$sblock_pid" \
-        && ! fm_lock_mid_acquire_is_fresh "$steal" "$sblock_pid"; then
-        fm_lock_remove_path "$steal" || true
-      fi
+    # No further steal-mutex acquisition: no-mode reclaim uses its own kernel
+    # guard below, including when called directly. Slots 8 and 9 identify the
+    # two guard roles, not fixed descriptors; no-mode never recurses.
+    steal_owner=
+  fi
+  slot=8
+  [ "$allow_steal" = yes ] && slot=9
+  # Serialize the stale-reclaim critical section: remove_path+try_create is
+  # protected by a kernel flock on a persistent advisory file, so a later
+  # recoverer can never delete the first's live replacement.
+  if ! _fm_lock_reclaim_guard "$lockdir" "$slot"; then
+    [ -n "$steal_owner" ] && fm_lock_release "$steal"
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+  if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur"; then
+    _fm_lock_reclaim_guard_release "$slot"
+    [ -n "$steal_owner" ] && fm_lock_release "$steal"
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+  if [ -n "$primary_owner" ]; then
+    if ! fm_lock_points_to_owner "$lockdir" "$primary_owner" \
+      || [ "$(cat "$lockdir/pid" 2>/dev/null || true)" != "$cur" ]; then
+      _fm_lock_reclaim_guard_release "$slot"
+      [ -n "$steal_owner" ] && fm_lock_release "$steal"
+      FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
+  elif [ "$(cat "$lockdir/pid" 2>/dev/null || true)" != "$cur" ]; then
+    _fm_lock_reclaim_guard_release "$slot"
+    [ -n "$steal_owner" ] && fm_lock_release "$steal"
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+  if [ "$allow_steal" = no ] && { [ -e "$steal" ] || [ -L "$steal" ]; }; then
+    # One bounded level of stale-suffix cleanup so a leftover .steal.steal
+    # entry from the recursion bug cannot keep the new try_create blocked.
+    # Serialized by the same kernel guard; never recurses.
+    sblock_pid=$(cat "$steal/pid" 2>/dev/null || true)
+    if ! fm_pid_alive "$sblock_pid" \
+      && ! fm_lock_mid_acquire_is_fresh "$steal" "$sblock_pid"; then
+      fm_lock_remove_path "$steal" || true
     fi
   fi
   fm_lock_remove_path "$lockdir" || true
   rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
-    rc=0
-    # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
-    FM_LOCK_RECOVERED_PID=$cur
+    owned=${FM_LOCK_OWNER_DIR:-}
+    if [ -n "$owned" ] && fm_lock_points_to_owner "$lockdir" "$owned"; then
+      rc=0
+      # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
+      FM_LOCK_RECOVERED_PID=$cur
+    else
+      FM_LOCK_OWNER_DIR=
+    fi
   fi
+  _fm_lock_reclaim_guard_release "$slot"
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
