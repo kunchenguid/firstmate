@@ -155,24 +155,29 @@ test_already_settled_pane_costs_one_confirm_read() {
   pass "an already-settled pane confirms on the next read, not a whole extra cycle"
 }
 
-write_gate_stub() {  # <path> <exit-code> <stdout>
+write_gate_stub() {  # <path> <exit-code> <stdout> [stderr]
   printf '%s' "$3" > "$1.out"
+  printf '%s' "${4:-}" > "$1.err"
   cat > "$1" <<EOF
 #!/usr/bin/env python3
 import sys
-open("$1.args", "w").write(" ".join(sys.argv[1:]))
-sys.stdout.write(open("$1.out").read())
-raise SystemExit($2)
+def load_budgets(root):
+    return {"task-token-budget": 123456}
+if __name__ == "__main__":
+    open("$1.args", "w").write(" ".join(sys.argv[1:]))
+    sys.stdout.write(open("$1.out").read())
+    sys.stderr.write(open("$1.err").read())
+    raise SystemExit($2)
 EOF
   chmod +x "$1"
 }
 
-run_gate_case() {  # <name> <exit-code> <stdout>; sets out, status, GATE, GATE_ID
+run_gate_case() {  # <name> <exit-code> <stdout> [stderr]; sets out, status, GATE, GATE_ID
   local rec id=$1-z
   rec=$(make_settle_case "$1" "$id" 0)
   read_settle_record "$rec"
   GATE="$HOME_DIR/gates.py"
-  write_gate_stub "$GATE" "$2" "$3"
+  write_gate_stub "$GATE" "$2" "$3" "${4:-}"
   out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id")
   status=$?
   GATE_ID=$id
@@ -188,9 +193,10 @@ test_workflow_dispatch_gate_exit_contract() {
   run_gate_case gate-pass 0 '{"verdict":"pass"}'
   expect_code 0 "$status" "exit 0 must pass"$'\n'"$out"
   grep -q -- 'dispatch --json' "$GATE.args" || fail "gate must be invoked as dispatch --json"
-  run_gate_case gate-other 1 'whatever'
+  run_gate_case gate-other 1 'whatever' 'registry/budgets.md: no budgets table found'
   expect_code 1 "$status" "any other exit is an infrastructure failure that stops dispatch"$'\n'"$out"
   assert_contains "$out" 'workflow dispatch gate failed to run (exit 1)' "infrastructure failure must explain why dispatch stopped"
+  assert_contains "$out" 'registry/budgets.md: no budgets table found' "infrastructure failure must relay the gate's own error"
   run_gate_case gate-unparsable 10 'not json'
   expect_code 1 "$status" "an unparsable refusal must stop dispatch"$'\n'"$out"
   assert_contains "$out" 'workflow dispatch gate failed to run' "unparsable output must explain why dispatch stopped"
@@ -219,12 +225,6 @@ Override the workflow dispatch gate for this task.
 ## Firstmate spec
 Exercise unconditional dispatch refusal.
 EOF
-  out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id" --workflow-gate-override)
-  status=$?
-  expect_code 2 "$status" "the removed override argument must be rejected"$'\n'"$out"
-  assert_contains "$out" "unknown option '--workflow-gate-override'" "the removed override argument must identify itself"
-  [ ! -e "$GATE.args" ] || fail "the removed override argument reached the workflow gate"
-
   out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id")
   status=$?
   expect_code 1 "$status" "the captain phrase must not bypass an exit-10 refusal"$'\n'"$out"
@@ -234,18 +234,73 @@ EOF
   pass "workflow dispatch refusal is unconditional and actionable"
 }
 
-test_workflow_dispatch_gate_budget_only_when_briefed() {
+test_workflow_dispatch_gate_budget_defaults_to_the_registry_limit() {
   local out status rec id=gate-budget2-z
   run_gate_case gate-budget 0 '{"verdict":"pass"}'
-  if grep -q -- '--token-budget' "$GATE.args"; then fail "no budget line in the brief must pass no --token-budget"; fi
+  grep -q -- '--token-budget 123456' "$GATE.args" || fail "no budget line in the brief must pass the workflow registry limit: $(cat "$GATE.args")"
   rec=$(make_settle_case gate-budget2 "$id" 0)
   read_settle_record "$rec"
   printf 'Task token budget: 123\n' >> "$HOME_DIR/data/$id/brief.md"
   GATE="$HOME_DIR/gates.py"
   write_gate_stub "$GATE" 0 '{"verdict":"pass"}'
   FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id" >/dev/null
-  grep -q -- '--token-budget 123' "$GATE.args" || fail "brief token budget must reach the gate"
-  pass "fm-spawn passes --token-budget only when the brief states one"
+  grep -q -- '--token-budget 123$' "$GATE.args" || fail "brief token budget must reach the gate: $(cat "$GATE.args")"
+  pass "fm-spawn passes the brief token budget, or the workflow registry limit without one"
+}
+
+# Copies the installed workflow gate and its budget owner into the case home so
+# the real gates.py decides; quota and machine load are pinned for determinism.
+install_real_workflow_gate() {  # <home>; returns 1 when no workflow checkout exists
+  local src=${FM_TEST_WORKFLOW_ROOT:-$ROOT/projects/workflow} dst="$1/projects/workflow"
+  [ -f "$src/scripts/gates.py" ] && [ -f "$src/scripts/check.py" ] && [ -f "$src/registry/budgets.md" ] || return 1
+  mkdir -p "$dst/scripts" "$dst/registry" "$1/pin"
+  cp "$src/scripts/gates.py" "$src/scripts/check.py" "$dst/scripts/"
+  cp "$src/registry/budgets.md" "$dst/registry/"
+  printf 'import os\nos.getloadavg = lambda: (0.0, 0.0, 0.0)\n' > "$1/pin/sitecustomize.py"
+  cat > "$FAKEBIN_DIR/quota-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"providers":[{"provider":"claude","state":{"stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":90}]}}]}'
+SH
+  chmod +x "$FAKEBIN_DIR/quota-axi"
+}
+
+test_real_workflow_gate_budget_paths() {
+  local rec id out status
+  id=gate-real-default-z
+  rec=$(make_settle_case gate-real-default "$id" 0)
+  read_settle_record "$rec"
+  if ! install_real_workflow_gate "$HOME_DIR"; then
+    echo "skip: no workflow checkout at ${FM_TEST_WORKFLOW_ROOT:-$ROOT/projects/workflow} (set FM_TEST_WORKFLOW_ROOT)"
+    return 0
+  fi
+  out=$(PYTHONPATH="$HOME_DIR/pin" FM_TEST_WORKFLOW_GATE=1 run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "the real gate must pass a brief without a budget at the registry limit"$'\n'"$out"
+
+  id=gate-real-over-z
+  rec=$(make_settle_case gate-real-over "$id" 0)
+  read_settle_record "$rec"
+  install_real_workflow_gate "$HOME_DIR"
+  printf 'Task token budget: 999999999\n' >> "$HOME_DIR/data/$id/brief.md"
+  out=$(PYTHONPATH="$HOME_DIR/pin" FM_TEST_WORKFLOW_GATE=1 run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "the real gate must refuse a brief budget over the registry limit"$'\n'"$out"
+  assert_contains "$out" 'workflow dispatch gate refused: task-token-budget: limit' "refusal must name the token budget"
+  assert_contains "$out" 'reading 999999999' "refusal must name the brief budget"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "an over-budget refusal published task metadata"
+
+  id=gate-real-malformed-z
+  rec=$(make_settle_case gate-real-malformed "$id" 0)
+  read_settle_record "$rec"
+  install_real_workflow_gate "$HOME_DIR"
+  grep -v '^| task-token-budget ' "$HOME_DIR/projects/workflow/registry/budgets.md" > "$HOME_DIR/budgets.md"
+  mv "$HOME_DIR/budgets.md" "$HOME_DIR/projects/workflow/registry/budgets.md"
+  out=$(PYTHONPATH="$HOME_DIR/pin" FM_TEST_WORKFLOW_GATE=1 run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "a registry without the token budget limit must stop the spawn"$'\n'"$out"
+  assert_contains "$out" 'workflow task-token-budget limit is unreadable' "a missing limit must name the budget owner"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "an unreadable budget owner published task metadata"
+  pass "fm-spawn feeds the real workflow gate the registry default or the brief budget, and stops on a missing limit"
 }
 
 test_workflow_dispatch_gate_missing_script_refuses() {
@@ -261,7 +316,7 @@ test_workflow_dispatch_gate_missing_script_refuses() {
   pass "fm-spawn refuses to dispatch when the workflow gate is missing"
 }
 
-test_unlanded_counts_only_live_ship_tasks() {
+test_unlanded_counts_ship_tasks_not_torn_down() {
   local rec id out
   id=settle-unlanded-z9
   rec=$(make_settle_case settle-unlanded "$id" 0)
@@ -271,8 +326,8 @@ test_unlanded_counts_only_live_ship_tasks() {
   GATE="$HOME_DIR/gates.py"
   write_gate_stub "$GATE" 0 '{"verdict":"pass"}'
   out=$(FM_TEST_WORKFLOW_GATE=1 FM_WORKFLOW_GATES_SCRIPT="$GATE" run_settle_spawn "$id")
-  grep -q -- '--unlanded 0' "$GATE.args" || fail "a finished ship task must not count as unlanded: $(cat "$GATE.args")"$'\n'"$out"
-  pass "fm-spawn does not count finished ship tasks as unlanded"
+  grep -q -- '--unlanded 1 --workers 0' "$GATE.args" || fail "a finished ship task whose meta is not torn down must count as unlanded but not as a worker: $(cat "$GATE.args")"$'\n'"$out"
+  pass "fm-spawn counts finished ship tasks awaiting landing as unlanded"
 }
 
 test_captain_reminder_failure_does_not_block_spawn() {
@@ -360,9 +415,10 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_workflow_dispatch_gate_exit_contract
 test_workflow_gate_refusal_cannot_be_overridden
-test_workflow_dispatch_gate_budget_only_when_briefed
+test_workflow_dispatch_gate_budget_defaults_to_the_registry_limit
+test_real_workflow_gate_budget_paths
 test_workflow_dispatch_gate_missing_script_refuses
-test_unlanded_counts_only_live_ship_tasks
+test_unlanded_counts_ship_tasks_not_torn_down
 test_captain_reminder_failure_does_not_block_spawn
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline

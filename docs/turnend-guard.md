@@ -53,7 +53,9 @@ The guard remains a backstop.
 [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
 Independently of watcher health, a primary-scope stop whose `last_assistant_message` claims completion without a check result or a PR recorded for the named task is blocked with exit status 2.
-The warning records its own one-continuation allowance, so an unrelated hook continuation cannot suppress it and the warning cannot repeat forever.
+A PR counts when the task's live `state/<task>.meta` or its Done row in `data/backlog.md` records that URL, so a report after teardown still carries its evidence.
+Negated, future, and conditional mentions such as "I will report when it is done" are not claims.
+The warning blocks at most once per turn: it records the session it blocked, so a reworded continuation is allowed, an unrelated hook continuation cannot suppress it, and the next fresh turn can warn again.
 `bin/fm-turnend-guard.sh` and `tests/fm-turnend-guard.test.sh` own the exact completion words and evidence checks.
 
 ## Guard predicates

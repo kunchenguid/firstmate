@@ -252,10 +252,8 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *" repos/"*"/pulls/"*)
-        case "$*" in
-          *"--jq .changed_files"*) cat "$FM_TEST_GH_CHANGED_COUNT" ;;
-          *) printf '{"changed_files":%s}\n' "$(cat "$FM_TEST_GH_CHANGED_COUNT")" ;;
-        esac
+        scope_head=$(cat "$FM_TEST_GH_SCOPE_HEAD" 2>/dev/null || cat "$FM_TEST_GH_HEAD")
+        printf '{"changed_files":%s,"head":{"sha":"%s"}}\n' "$(cat "$FM_TEST_GH_CHANGED_COUNT")" "$scope_head"
         exit 0
         ;;
       *" repos/"*"/commits/"*"/check-runs"*)
@@ -362,10 +360,7 @@ case "${1:-} ${2:-}" in
     case "$*" in
       *"/merge_requests/"*"/diffs"*) cat "$FM_TEST_GLAB_DIFFS"; exit $? ;;
       *"/merge_requests/"*)
-        case "$*" in
-          *"--jq .changes_count"*) cat "$FM_TEST_GLAB_CHANGED_COUNT" ;;
-          *) printf '{"changes_count":"%s"}\n' "$(cat "$FM_TEST_GLAB_CHANGED_COUNT")" ;;
-        esac
+        printf '{"changes_count":"%s","sha":"%s"}\n' "$(cat "$FM_TEST_GLAB_CHANGED_COUNT")" "$(jq -r .sha "$FM_TEST_GLAB_JSON")"
         exit 0
         ;;
     esac
@@ -490,6 +485,7 @@ run_pr_merge() {
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_PR_FILES="$case_dir/pr.files" \
   FM_TEST_GH_CHANGED_COUNT="$case_dir/pr.changed-count" \
+  FM_TEST_GH_SCOPE_HEAD="$case_dir/pr.scope-head" \
   FM_TEST_GLAB_DIFFS="$case_dir/glab-diffs.json" \
   FM_TEST_GLAB_CHANGED_COUNT="$case_dir/glab-changed-count" \
   FM_TEST_SCOPE_CHECK="${FM_TEST_SCOPE_CHECK:-0}" \
@@ -3882,6 +3878,7 @@ run_scope_case() {  # <case-name> <brief-lines> <changed-files> [api-fails]; set
   printf '[%s]\n' "$records" > "$case_dir/pr.files"
   printf '%s\n' "$(jq -r 'length' "$case_dir/pr.files")" > "$case_dir/pr.changed-count"
   [ -z "${4:-}" ] || rm -f "$case_dir/pr.files"
+  [ -z "${SCOPE_HEAD:-}" ] || printf '%s\n' "$SCOPE_HEAD" > "$case_dir/pr.scope-head"
   set +e
   out=$(FM_TEST_SCOPE_CHECK=1 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/17 2>&1)
   rc=$?
@@ -3945,6 +3942,17 @@ test_scope_check_counts_files_and_checks_both_rename_paths() {
   assert_contains "$out" 'secrets/old.sh' "rename refusal must identify the old path"
   assert_no_grep 'pr merge' "$case_dir/gh.log" "rename refusal must stop before merge"
   pass "fm-pr-merge: counts the complete list and checks both GitHub rename paths"
+}
+
+test_scope_check_is_bound_to_the_merged_head() {
+  local out rc
+  run_scope_case scope-head-same $'# Task\nScope paths: bin/*' 'bin/a.sh'
+  expect_code 0 "$rc" "a scope check at the verified head must allow the merge"$'\n'"$out"
+  SCOPE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb run_scope_case scope-head-moved $'# Task\nScope paths: bin/*' 'bin/a.sh'
+  expect_code 1 "$rc" "a scope check at a different head than the merged head must refuse"
+  assert_contains "$out" 'the scope check listed files at head bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb but the verified head' "head mismatch must name both heads"
+  assert_no_grep 'pr merge' "$SCOPE_CASE_DIR/gh.log" "head mismatch must stop before merge"
+  pass "fm-pr-merge: the scope check is bound to the head that gets merged"
 }
 
 test_gitlab_scope_checks_both_paths_and_count() {
@@ -4029,6 +4037,7 @@ test_scope_check_refuses_file_outside_scope_paths
 test_scope_check_allows_files_inside_scope_paths
 test_scope_check_preserves_legacy_brief_and_refuses_empty_or_incomplete_scope
 test_scope_check_counts_files_and_checks_both_rename_paths
+test_scope_check_is_bound_to_the_merged_head
 test_gitlab_scope_checks_both_paths_and_count
 
 test_required_producer_identity

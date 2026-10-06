@@ -96,6 +96,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
@@ -169,17 +170,22 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 LAST_ASSISTANT_MESSAGE=$(printf '%s' "$PAYLOAD" | jq -r 'if type == "object" then (.last_assistant_message // "") else "" end' 2>/dev/null || true)
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 CLAIM_WORDS='(done|completed|finished|implemented|fixed|shipped|merged|verified|passed)'
+NOT_YET_WORDS='(not|never|haven.t|hasn.t|didn.t|won.t|will|shall|going to|when|once|until|if)'
+COMPLETION_WARNING='completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn'
 COMPLETION_WARNING_FILE="$STATE/.turnend-completion-warning"
 COMPLETION_WARNING_LOCK="$STATE/.turnend-completion-warning.lock"
+# A PR URL is evidence only for a task the message names whose live meta or
+# backlog Done row records that exact URL; teardown removes the meta, so the
+# backlog completion record carries the evidence after landing.
 completion_message_has_recorded_pr() {
-  local message=$1 url meta urls task_id
+  local message=$1 url urls task_ids task_id
   urls=$(printf '%s\n' "$message" | grep -Eo 'https://[^[:space:]<>]+/(pull|merge_requests)/[0-9]+' || true)
   for url in $urls; do
-    for meta in "$STATE"/*.meta; do
-      [ -f "$meta" ] || continue
-      grep -Fqx "pr=$url" "$meta" || continue
-      task_id=${meta##*/}
-      task_id=${task_id%.meta}
+    task_ids=$(
+      grep -lFx "pr=$url" "$STATE"/*.meta 2>/dev/null | sed 's#.*/##; s/\.meta$//'
+      awk -v url="$url" '$1 == "-" && $2 == "[x]" { for (i = 4; i <= NF; i++) if ($i == url) { print $3; next } }' "$DATA/backlog.md" 2>/dev/null
+    )
+    for task_id in $task_ids; do
       if printf '%s\n' "$message" | awk -v id="$task_id" '{ text=$0; while (match(text, /[[:alnum:]_.-]+/)) { if (substr(text, RSTART, RLENGTH) == id) found=1; text=substr(text, RSTART + RLENGTH) } } END { if (!found) exit 1 }'; then
         return 0
       fi
@@ -188,43 +194,41 @@ completion_message_has_recorded_pr() {
   return 1
 }
 
-if [ -n "$LAST_ASSISTANT_MESSAGE" ]; then
-  CLAIM_TEXT=$(printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | sed -E 's/(^|[^[:alpha:]])not only([^[:alpha:]]|$)/\1\2/Ig')
-  if printf '%s\n' "$CLAIM_TEXT" | grep -Eiq "(^|[^[:alpha:]])$CLAIM_WORDS([^[:alpha:]]|$)" \
-    && ! printf '%s\n' "$CLAIM_TEXT" | grep -Eiq "(^|[^[:alpha:]])(not|never|haven.t|hasn.t|didn.t|won.t)[[:space:][:alnum:]]{0,16}$CLAIM_WORDS([^[:alpha:]]|$)" \
+# Negated, future, and conditional mentions are not completed outcomes, so they
+# are removed before the remaining text is read as a claim.
+completion_claim_unsupported() {
+  local claim_text
+  claim_text=$(printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | sed -E \
+    -e 's/(^|[^[:alpha:]])not only([^[:alpha:]]|$)/\1\2/Ig' \
+    -e "s/(^|[^[:alpha:]])${NOT_YET_WORDS}[[:space:][:alnum:]]{0,16}$CLAIM_WORDS([^[:alpha:]]|\$)/\1\4/Ig")
+  printf '%s\n' "$claim_text" | grep -Eiq "(^|[^[:alpha:]])$CLAIM_WORDS([^[:alpha:]]|$)" \
     && ! printf '%s\n' "$LAST_ASSISTANT_MESSAGE" | grep -Eiq '(^|[^[:alpha:]])(checks?|tests?|ci|validation).*(passed|green|success)([^[:alpha:]]|$)' \
-    && ! completion_message_has_recorded_pr "$LAST_ASSISTANT_MESSAGE"; then
-    COMPLETION_WARNING_KEY=$(printf '%s\n%s' "$SESSION_ID" "$LAST_ASSISTANT_MESSAGE" | cksum | awk '{print $1 ":" $2}')
-    mkdir -p "$STATE" 2>/dev/null || true
-    if ! fm_lock_try_acquire "$COMPLETION_WARNING_LOCK"; then
-      printf 'completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn\n' >&2
-      exit 2
-    fi
-    if [ "$STOP_HOOK_ACTIVE" = "true" ] && [ -f "$COMPLETION_WARNING_FILE" ] \
-      && [ "$(cat "$COMPLETION_WARNING_FILE" 2>/dev/null || true)" = "$COMPLETION_WARNING_KEY" ]; then
-      rm -f -- "$COMPLETION_WARNING_FILE"
-      fm_lock_release "$COMPLETION_WARNING_LOCK"
-    else
-      COMPLETION_WARNING_TMP=$(mktemp "$STATE/.turnend-completion-warning.XXXXXX") || {
-        fm_lock_release "$COMPLETION_WARNING_LOCK"
-        printf 'completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn\n' >&2
-        exit 2
-      }
-      printf '%s\n' "$COMPLETION_WARNING_KEY" > "$COMPLETION_WARNING_TMP"
-      mv -f -- "$COMPLETION_WARNING_TMP" "$COMPLETION_WARNING_FILE" || {
-        rm -f -- "$COMPLETION_WARNING_TMP"
-        fm_lock_release "$COMPLETION_WARNING_LOCK"
-        printf 'completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn\n' >&2
-        exit 2
-      }
-      fm_lock_release "$COMPLETION_WARNING_LOCK"
-      printf 'completion claim has no linked evidence; include a PR URL recorded for this task or a check result before ending the turn\n' >&2
-      exit 2
-    fi
-  else
-    rm -f -- "$COMPLETION_WARNING_FILE" 2>/dev/null || true
+    && ! completion_message_has_recorded_pr "$LAST_ASSISTANT_MESSAGE"
+}
+
+# The warning blocks at most once per turn: its marker holds the session it
+# blocked, and any stop of that session that follows a block is allowed, even
+# when the continuation rewords the claim. A fresh turn clears the marker.
+if [ -n "$LAST_ASSISTANT_MESSAGE" ] && completion_claim_unsupported; then
+  mkdir -p "$STATE" 2>/dev/null || true
+  if ! fm_lock_try_acquire "$COMPLETION_WARNING_LOCK"; then
+    printf '%s\n' "$COMPLETION_WARNING" >&2
+    exit 2
   fi
-else
+  if [ "$STOP_HOOK_ACTIVE" = "true" ] \
+    && [ "$(cat "$COMPLETION_WARNING_FILE" 2>/dev/null || true)" = "$SESSION_ID" ]; then
+    fm_lock_release "$COMPLETION_WARNING_LOCK"
+  else
+    if COMPLETION_WARNING_TMP=$(mktemp "$STATE/.turnend-completion-warning.XXXXXX"); then
+      { printf '%s\n' "$SESSION_ID" > "$COMPLETION_WARNING_TMP" \
+        && mv -f -- "$COMPLETION_WARNING_TMP" "$COMPLETION_WARNING_FILE"; } \
+        || rm -f -- "$COMPLETION_WARNING_TMP"
+    fi
+    fm_lock_release "$COMPLETION_WARNING_LOCK"
+    printf '%s\n' "$COMPLETION_WARNING" >&2
+    exit 2
+  fi
+elif [ "$STOP_HOOK_ACTIVE" != "true" ]; then
   rm -f -- "$COMPLETION_WARNING_FILE" 2>/dev/null || true
 fi
 if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then

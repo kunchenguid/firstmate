@@ -39,9 +39,10 @@
 # exception; every other unreadable required source refuses.
 # Every failing condition is reported, not just the first.
 # When the task brief has a populated "Scope paths:" glob line,
-# scope_check_pr refuses a PR if any old or new path is outside those globs or
-# the forge's changed-file count disagrees with its complete file listing. A
-# missing line in a legacy brief warns and continues.
+# scope_check_pr refuses a PR if any old or new path is outside those globs,
+# the forge's changed-file count disagrees with its complete file listing, the
+# head moves during the listing, or the listed head is not the verified merge
+# head. A missing line in a legacy brief warns and continues.
 # The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
@@ -409,8 +410,25 @@ merge_control_cleanup() {
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
 }
 
+# Prints "<head> <changed-file count>" from one live pull or merge request read.
+scope_pr_view() {
+  local view
+  case "$PROVIDER" in
+    github) view=$(gh api "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" 2>&1) || { printf '%s\n' "$view"; return 1; } ;;
+    gitlab) view=$(GITLAB_HOST="$PR_HOST" glab api "projects/$(jq -rn --arg p "$FM_PR_PATH" '$p|@uri')/merge_requests/$PR_NUMBER" 2>&1) || { printf '%s\n' "$view"; return 1; } ;;
+  esac
+  printf '%s' "$view" | jq -er --arg provider "$PROVIDER" '
+    (if $provider == "github" then [.head.sha, .changed_files] else [.sha, .changes_count] end) as [$head, $count]
+    | if ($head | type == "string" and test("^[0-9a-f]{7,64}$")) and ($count | tostring | test("^[0-9]+$"))
+      then "\($head) \($count)"
+      else error("invalid head or changed-file count")
+      end
+  ' 2>/dev/null || { printf 'invalid head or changed-file count in: %s\n' "$view"; return 1; }
+}
+
+SCOPE_CHECK_HEAD=
 scope_check_pr() {
-  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" globs files_json raw expected actual encoded outside path glob
+  local brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/brief.md" globs files_json raw view after expected actual encoded outside path glob head
   if ! globs=$(fm_brief_scope_paths "$brief" 2>/dev/null); then
     echo "warning: merge scope check skipped: no Scope paths line in the task brief" >&2
     return 0
@@ -420,6 +438,13 @@ scope_check_pr() {
     echo "fix: fill the Scope paths line with the task's allowed file globs" >&2
     return 1
   fi
+  case "$PROVIDER" in github|gitlab) ;; *) return 0 ;; esac
+  view=$(scope_pr_view) || {
+    echo "error: merge refused; could not read the head and changed-file count for $URL: $view" >&2
+    echo "fix: restore forge API access and retry the merge" >&2
+    return 1
+  }
+  read -r head expected <<<"$view"
   case "$PROVIDER" in
     github)
       raw=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/files?per_page=100" 2>&1) || {
@@ -432,16 +457,6 @@ scope_check_pr() {
         echo "fix: restore a complete GitHub pull request files response and retry" >&2
         return 1
       }
-      expected=$(gh api "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq '.changed_files' 2>&1) || {
-        echo "error: merge refused; could not read GitHub changed_files for $URL: $expected" >&2
-        echo "fix: restore GitHub API access and retry the merge" >&2
-        return 1
-      }
-      case "$expected" in ''|*[!0-9]*)
-        echo "error: merge refused; GitHub returned an invalid changed_files count for $URL: $expected" >&2
-        return 1
-        ;;
-      esac
       actual=$(printf '%s' "$files_json" | jq -er 'if type == "array" and all(.[]; (.filename | type == "string") and ((.previous_filename == null) or (.previous_filename | type == "string"))) then length else error("invalid changed-file records") end' 2>/dev/null) || {
         echo "error: merge refused; GitHub returned invalid changed-file records for $URL" >&2
         return 1
@@ -460,24 +475,23 @@ scope_check_pr() {
         echo "fix: restore a complete GitLab merge request diff response and retry" >&2
         return 1
       }
-      expected=$(GITLAB_HOST="$PR_HOST" glab api "projects/$encoded/merge_requests/$PR_NUMBER" --jq '.changes_count' 2>&1) || {
-        echo "error: merge refused; could not read GitLab changes_count for $URL: $expected" >&2
-        echo "fix: restore GitLab API access and retry the merge" >&2
-        return 1
-      }
-      case "$expected" in ''|*[!0-9]*)
-        echo "error: merge refused; GitLab returned an invalid changes_count for $URL: $expected" >&2
-        return 1
-        ;;
-      esac
       actual=$(printf '%s' "$files_json" | jq -er 'if type == "array" and all(.[]; (.new_path | type == "string") and (.old_path | type == "string")) then length else error("invalid changed-file records") end' 2>/dev/null) || {
         echo "error: merge refused; GitLab returned invalid changed-file records for $URL" >&2
         return 1
       }
       files=$(printf '%s' "$files_json" | jq -r '.[] | .new_path, .old_path')
       ;;
-    *) return 0 ;;
   esac
+  after=$(scope_pr_view) || {
+    echo "error: merge refused; could not re-read the head for $URL after listing its changed files: $after" >&2
+    echo "fix: restore forge API access and retry the merge" >&2
+    return 1
+  }
+  if [ "${after%% *}" != "$head" ]; then
+    echo "error: merge refused; the head of $URL moved from $head to ${after%% *} while its changed files were listed" >&2
+    echo "fix: retry the merge so the scope check lists one stable head" >&2
+    return 1
+  fi
   if [ "$actual" -ne "$expected" ]; then
     echo "error: merge refused; forge reports $expected changed files but returned $actual for $URL" >&2
     echo "fix: retry after the forge returns a complete changed-file listing" >&2
@@ -501,6 +515,18 @@ scope_check_pr() {
     echo "fix: remove those changes or widen the Scope paths line in the task brief" >&2
     return 1
   fi
+  SCOPE_CHECK_HEAD=$head
+}
+
+# The merge is pinned to FM_PR_MERGE_HEAD, so the scope check must have listed
+# exactly that head.
+scope_head_matches_merge_head() {
+  if [ -z "$SCOPE_CHECK_HEAD" ] || [ "$SCOPE_CHECK_HEAD" = "$FM_PR_MERGE_HEAD" ]; then
+    return 0
+  fi
+  echo "error: merge refused; the scope check listed files at head $SCOPE_CHECK_HEAD but the verified head of $URL is $FM_PR_MERGE_HEAD" >&2
+  echo "fix: retry the merge so the scope check lists the head being merged" >&2
+  return 1
 }
 
 trap merge_control_cleanup EXIT
@@ -1482,6 +1508,7 @@ case "$PROVIDER" in
       fi
       exit 1
     fi
+    scope_head_matches_merge_head || exit 1
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1
@@ -1533,6 +1560,7 @@ case "$PROVIDER" in
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
+    scope_head_matches_merge_head || exit 1
     # --sha binds the merge to the head this run verified, so a push that lands
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;

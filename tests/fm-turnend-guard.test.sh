@@ -341,6 +341,20 @@ test_hook_blocks_on_completion_claim_without_evidence() {
   expect_code 0 "$rc" "a negated statement is not a completion claim"
   claim_check 'This is not only fixed but shipped.' false
   expect_code 2 "$rc" "not only fixed is not a negated claim"
+  claim_check 'Understood - the change is finished.' true
+  expect_code 0 "$rc" "a reworded continuation after the warning must be allowed in the same turn"
+  claim_check 'Fixed it, really.' true
+  expect_code 0 "$rc" "the warning must not block twice in the same turn"
+  claim_check 'Dispatched task-x; I will report when it is done.' false
+  expect_code 0 "$rc" "a future completion promise is not a completion claim"
+  claim_check 'Merged https://github.com/acme/project/pull/5 for task-x' false
+  expect_code 2 "$rc" "a PR recorded nowhere is not evidence"
+  mkdir -p "$dir/data"
+  printf '%s\n' '## Done' '- [x] task-x - Land the change https://github.com/acme/project/pull/5 (kind: ship) (merged 2026-10-06)' > "$dir/data/backlog.md"
+  claim_check 'Merged https://github.com/acme/project/pull/5 for task-x' false
+  expect_code 0 "$rc" "the backlog completion record must remain evidence after teardown removed the meta"
+  claim_check 'Merged https://github.com/acme/project/pull/5 for task-y' false
+  expect_code 2 "$rc" "a backlog PR recorded for a different task is not evidence"
   pass "fm-turnend-guard: warns for unsupported claims and accepts task-recorded PR or check evidence"
 }
 
@@ -348,18 +362,20 @@ test_hook_completion_warning_owns_its_repeat_allowance_in_claude_mode() {
   local dir home payload out rc
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-completion-repeat")
   home=$(cd "$dir" && pwd)
-  claim_hook() {  # <stop_hook_active>; sets out and rc
-    payload=$(jq -cn --arg message 'Done.' --argjson active "$1" '{last_assistant_message:$message,stop_hook_active:$active,session_id:"completion-session"}')
+  claim_hook() {  # <message> <stop_hook_active>; sets out and rc
+    payload=$(jq -cn --arg message "$1" --argjson active "$2" '{last_assistant_message:$message,stop_hook_active:$active,session_id:"completion-session"}')
     rc=0
     out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1) || rc=$?
   }
-  claim_hook true
+  claim_hook 'Done.' true
   expect_code 2 "$rc" "an unrelated prior continuation must not bypass the completion warning"
-  claim_hook true
-  expect_code 0 "$rc" "the completion warning itself must permit one Claude continuation"
-  claim_hook true
-  expect_code 2 "$rc" "the completion warning repeat allowance must be consumed exactly once"
-  pass "fm-turnend-guard --claude: only its own completion warning allows one repeat"
+  claim_hook 'Understood - the change is finished.' true
+  expect_code 0 "$rc" "the completion warning itself must permit a reworded Claude continuation"
+  claim_hook 'Done.' true
+  expect_code 0 "$rc" "the completion warning must not block twice in the same turn"
+  claim_hook 'Done.' false
+  expect_code 2 "$rc" "a fresh turn must warn again"
+  pass "fm-turnend-guard --claude: only its own completion warning allows the rest of the turn"
 }
 
 test_hook_blocks_when_fresh_beacon_has_no_live_lock() {

@@ -110,8 +110,13 @@
 #   [--unlanded N] [--workers N] [--token-budget N]`. Exit 0 passes. Exit 10
 #   refuses and prints JSON {verdict, reasons[], fix} on stdout. Any other exit,
 #   unparsable output, invalid pass output, or an absent script stops the spawn
-#   with an infrastructure error. --token-budget is passed only when the
-#   brief has a "Task token budget: N" line; otherwise the gate's default applies.
+#   with an infrastructure error, quoting the gate's stderr. --token-budget is
+#   the brief's "Task token budget: N" line when present; otherwise it is the
+#   task-token-budget limit read through gates.py's own load_budgets from the
+#   workflow registry/budgets.md, and an unreadable limit stops the spawn.
+#   --unlanded counts every ship meta not yet torn down unless its crew state
+#   is failed or closed, because a done ship keeps its meta until its PR lands
+#   and teardown runs; --workers counts working, parked, blocked, and paused.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
 #   adapter, and experimental zellij, orca, and cmux adapters. Orca owns both
 #   the task worktree and terminal, so ship/scout Orca spawns do not run
@@ -792,10 +797,6 @@ for a in "$@"; do
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
-    ;;
-  --*)
-    echo "error: unknown option '$a'" >&2
-    exit 2
     ;;
   *) POS+=("$a") ;;
   esac
@@ -3141,20 +3142,38 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         [ "$meta_kind" != secondmate ] || continue
         crew_state=$(FM_CREW_STATE_NO_FORGE=1 "$FM_ROOT/bin/fm-crew-state.sh" "$meta_id" 2>/dev/null | sed -n 's/^state: \([^ ]*\).*/\1/p')
         case "$crew_state" in
-          working|parked|blocked|paused)
-            workers=$((workers + 1))
-            [ "$meta_kind" != ship ] || unlanded=$((unlanded + 1))
-            ;;
+          working|parked|blocked|paused) workers=$((workers + 1)) ;;
           done|failed|closed) ;;
-          *) echo "notice: workflow dispatch gate could not read state for $meta_id; not counting it" >&2 ;;
+          *) echo "notice: workflow dispatch gate could not read state for $meta_id; not counting it as a worker" >&2 ;;
+        esac
+        case "$crew_state" in
+          failed|closed) ;;
+          *) [ "$meta_kind" != ship ] || unlanded=$((unlanded + 1)) ;;
         esac
       done
+      workflow_root=${workflow_gates%/scripts/gates.py}
+      gate_err=$(mktemp "$DATA/$ID/.workflow-gate-err.XXXXXX") || {
+        echo "error: could not create a workflow dispatch gate log in $DATA/$ID; fix that directory and retry the spawn" >&2
+        exit 1
+      }
       token_budget=$(sed -n 's/^Task token budget: \([0-9][0-9]*\)$/\1/p' "$BRIEF" | head -1)
-      gate_args=(--unlanded "$unlanded" --workers "$workers")
-      [ -z "$token_budget" ] || gate_args+=(--token-budget "$token_budget")
+      if [ -z "$token_budget" ] && ! token_budget=$(uv run --no-project python -B -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+import gates
+print(gates.load_budgets(Path(sys.argv[2]))["task-token-budget"])
+' "$workflow_gates" "$workflow_root" 2>"$gate_err"); then
+        echo "error: workflow task-token-budget limit is unreadable from $workflow_root/registry/budgets.md: $(tail -n 3 "$gate_err" | tr '\n' ' ')" >&2
+        echo "fix: repair the task-token-budget row in the workflow budget registry, or state Task token budget: N in the brief, and retry the spawn" >&2
+        rm -f -- "$gate_err"
+        exit 1
+      fi
       gate_rc=0
-      gate_out=$(uv run --no-project "$workflow_gates" --root "${workflow_gates%/scripts/gates.py}" dispatch --json \
-        "${gate_args[@]}" 2>/dev/null) || gate_rc=$?
+      gate_out=$(uv run --no-project "$workflow_gates" --root "$workflow_root" dispatch --json \
+        --unlanded "$unlanded" --workers "$workers" --token-budget "$token_budget" 2>"$gate_err") || gate_rc=$?
+      gate_stderr=$(tail -n 5 "$gate_err" | tr '\n' ' ')
+      rm -f -- "$gate_err"
       if [ "$gate_rc" -eq 10 ] && gate_text=$(printf '%s' "$gate_out" | jq -er -s '
         if length == 1 and (.[0] | type == "object"
           and .verdict == "refuse"
@@ -3168,7 +3187,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         printf 'error: adjust the reported limit and fix; workflow limits: %s/projects/workflow/registry/; budget-controlled limits: %s/projects/workflow/registry/budgets.md\n' "$FM_HOME" "$FM_HOME" >&2
         exit 1
       elif [ "$gate_rc" -ne 0 ]; then
-        echo "error: workflow dispatch gate failed to run (exit $gate_rc); repair the workflow gate and retry the spawn" >&2
+        echo "error: workflow dispatch gate failed to run (exit $gate_rc)${gate_stderr:+: $gate_stderr}; repair the workflow gate and retry the spawn" >&2
         exit 1
       elif ! gate_text=$(printf '%s' "$gate_out" | jq -er -s '
         if length == 1 and (.[0] | type == "object" and .verdict == "pass")
