@@ -357,7 +357,7 @@ test_remote_inheritance_failure_names_its_own_error_not_an_unchanged_item() {
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$dir/alpha.origin.git"
 
-  printf '{}\n' > "$home/config/crew-dispatch.json"
+  printf 'never-send-value\n' > "$home/config/dispatch-never-send"
   printf 'codex\n' > "$home/config/crew-harness"
   # Header omits "must not be edited there" so the local check fails before
   # any ssh call for this item, after the two config items above already
@@ -379,7 +379,7 @@ EOF
     FM_FAKE_SSH_LOG="$log" \
     FM_FAKE_SSH_SLEEP=0 \
     FM_FAKE_GIT_FETCH_SLEEP=0 \
-    FM_INHERITABLE_CONFIG='crew-dispatch.json crew-harness' \
+    FM_INHERITABLE_CONFIG='dispatch-never-send crew-harness' \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
   )

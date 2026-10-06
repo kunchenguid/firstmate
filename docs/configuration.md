@@ -795,10 +795,11 @@ An explicit `--model` or `--effort` overrides the matching token from `config/se
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 
-The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
-Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
+The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's static harness value.
+That inherited value is a default only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+`config/crew-dispatch.json` is not inherited either; see "Crew dispatch profiles" below.
 
 ### Installed hooks and launch details
 
@@ -1108,9 +1109,10 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 - Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 - While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 
-**Inheritance**
+**Not inherited**
 
-Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+This file is local to each home and is not part of secondmate inherited configuration, because its rules are written for that home's own project domain.
+Propagation never writes, replaces, or removes a secondmate home's copy, so each secondmate keeps its own dispatch profile or none.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
@@ -1144,7 +1146,7 @@ The scaffold's standard setup, rules, and definition-of-done text is the same in
 
 The optional local, gitignored `config/dispatch-never-send` keeps values you name from ever leaving the machine in a resolver request.
 It has no default entries, and an absent file changes nothing.
-Like `config/crew-dispatch.json`, it is inherited into secondmate homes, so a secondmate's resolver withholds the same values.
+It is inherited into secondmate homes, so a secondmate's resolver withholds the same values even though each home keeps its own `config/crew-dispatch.json`.
 
 Each non-blank line not beginning with `#` is one literal value, matched case-insensitively.
 Every entry is trimmed of surrounding whitespace, and any run of whitespace, in the entry or in the checked text, counts as one space, so a value the brief wraps across lines still matches.

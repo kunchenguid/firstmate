@@ -1036,7 +1036,7 @@ phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 pass "marked send and routed reply complete through the existing parent correlation owner"
 rm -f "$PARENT/state/.wake-queue"
 
-printf '{"revision":2}\n' > "$PARENT/config/crew-dispatch.json"
+printf 'revision-2\n' > "$PARENT/config/dispatch-never-send"
 printf 'grok\n' > "$PARENT/config/crew-harness"
 set +e
 FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-config-push.sh" \
@@ -1044,7 +1044,7 @@ FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-config-push.sh" \
 config_partial_rc=$?
 set -e
 [ "$config_partial_rc" -ne 0 ] || fail "partial remote inheritance claimed complete convergence"
-assert_grep '"revision":2' "$REMOTE_HOME/config/crew-dispatch.json" "partial inheritance did not apply its first file"
+assert_grep 'revision-2' "$REMOTE_HOME/config/dispatch-never-send" "partial inheritance did not apply its first file"
 [ "$(cat "$REMOTE_HOME/config/crew-harness")" != grok ] \
   || fail "partial inheritance unexpectedly applied the failed file"
 NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
