@@ -888,10 +888,19 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # launch). Any absence of proof (no window, a failed capture, an idle or unknown
 # verdict, a queue frozen past the bound) is NOT an active turn, so a frozen
 # queue still escalates.
-secondmate_in_active_turn() {  # <window> <idle>
-  local w=$1 idle=$2 tail40
-  [ -n "$w" ] || return 1
+# A mate with a supervision branch also works its queue in that branch's turns,
+# which the busy record (main's turns only) never sees: the frozen row <seq>
+# sitting in the branch's live grant (fm_wake_branch_grant_live) is that turn in
+# progress, and the mate's main conversation cannot drain a granted row, so a
+# ring there could not move it.
+secondmate_in_active_turn() {  # <window> <idle> <home> <seq>
+  local w=$1 idle=$2 grant="$3/state/.branch-eligible-rows" seq=$4 tail40
   [ "$idle" -lt "$BUSY_TURN_MAX_SECS" ] || return 1
+  if [ ! -L "$grant" ] && grep -Fqx -- "$seq" "$grant" 2>/dev/null \
+    && fm_wake_branch_grant_live "$grant" "$3/state/.branch-eligible-owner"; then
+    return 0
+  fi
+  [ -n "$w" ] || return 1
   tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
   window_is_busy "$w" "$tail40"
 }
@@ -936,16 +945,19 @@ secondmate_idle_ring_safe() {  # <window>
 # for a secondmate (marker, then delivery=<16-hex-id>, then the text), so the
 # mate reads it as a parent request that expects no reply, never as captain
 # intervention. The worker's ordinary wake-handling turn drains its own home's
-# wake queue; this parent never rewrites that foreign queue. 0 iff the ring
+# wake queue; this parent never rewrites that foreign queue. The text names the
+# frozen row and the acknowledgement, because a drained row leaves the queue only
+# on its WAKE_ACK_REQUIRED command, and a mate told only to drain has presented
+# the row, cut that line off its output, and left the row queued. 0 iff the ring
 # call returned 0.
-secondmate_ring_to_drain() {  # <task> <window>
-  local task=$1 w=$2 rec backend delivery_id
+secondmate_ring_to_drain() {  # <task> <window> <seq>
+  local task=$1 w=$2 seq=$3 rec backend delivery_id
   backend=$(window_backend "$w")
   delivery_id=$(LC_ALL=C od -An -v -tx1 -N 8 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
   case "$delivery_id" in ''|*[!0-9a-f]*) return 1 ;; esac
   [ "${#delivery_id}" -eq 16 ] || return 1
   rec=$(fm_task_inbox_write "$STATE" "$task" \
-    "${FM_FROMFIRST_MARK}delivery=${delivery_id} Drain pending rows in this home's wake queue, then resume idle supervision." \
+    "${FM_FROMFIRST_MARK}delivery=${delivery_id} Wake row $seq is still queued in this home. Run bin/fm-wake-drain.sh and read its whole output, handle what it presents, then run the exact WAKE_ACK_REQUIRED command it prints, which is what removes the row. Then resume idle supervision." \
     fire-and-forget) || return 1
   fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")"
 }
@@ -1033,14 +1045,14 @@ EOF
     idle=$((now - observed_at))
     [ "$idle" -ge "$threshold" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
-    ! secondmate_in_active_turn "$w" "$idle" || continue
+    ! secondmate_in_active_turn "$w" "$idle" "$home" "$seq" || continue
     already_rung=0
     if [ -e "$ring_marker" ] || [ -L "$ring_marker" ]; then
       [ -f "$ring_marker" ] && [ ! -L "$ring_marker" ] || return 1
       [ "$(cat "$ring_marker" 2>/dev/null || true)" = "$row_key" ] && already_rung=1
     fi
     if [ "$already_rung" -eq 0 ] && secondmate_idle_ring_safe "$w"; then
-      if secondmate_ring_to_drain "$task" "$w"; then
+      if secondmate_ring_to_drain "$task" "$w" "$seq"; then
         fm_wake_secondmate_ring_marker_write "$task" "$row_key" || return 1
         fm_wake_secondmate_progress_marker_write "$task" "$now" "$row_key" || return 1
         continue
