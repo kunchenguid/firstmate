@@ -568,8 +568,9 @@ do_interrupt() {
 # Drop busy_gen from the task record when it still names <gen>.
 # fm-busy-event.sh owns the sidecar and the record; fm_backlog_atomic_transition
 # publish owns the task record. Clearing the line inside the busy writer would
-# take the task-record lock that teardown and spawn already hold, and a second
-# acquire by this process is treated as an abandoned hold.
+# take the task-record lock that teardown and spawn already hold; the busy
+# writer is their child process, so it would wait on a live holder that is
+# itself waiting on the child, and neither would ever proceed.
 clear_retired_meta_busy_gen() {  # <gen>
   local gen=$1 meta="$STATE/$ID.meta" lock tmp current line
   [ -n "$gen" ] || return 0
