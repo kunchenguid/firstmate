@@ -43,7 +43,7 @@ When a gate output has a narrow repairable defect, name the smallest affected po
 Use one bounded repair pass and one fresh independent verification unless the programme explicitly sets a different bound.
 The verifier receives the changed artifact or immutable diff, acceptance criteria, and controlling evidence, not the builder's conclusions.
 If the bounded pass still fails, record the exact residual defect and return it at the next applicable gate.
-Do not turn a failed cell, citation, or check into a new programme-wide review.
+Do not turn a single failed item or check into a new programme-wide review.
 
 ## Reporting and stopping
 
