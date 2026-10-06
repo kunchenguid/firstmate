@@ -445,6 +445,32 @@ test_fresh_spawn_revive_clears_the_deliberate_stop_marker() {
   pass "fm-spawn fresh spawn: reviving an existing task record clears the deliberate-stop marker"
 }
 
+test_fresh_spawn_retry_after_rollback_clears_the_deliberate_stop_marker() {
+  local dir out rc=0
+  dir=$(new_case fresh-revive-rollback rl10)
+  add_ship_task "$dir" rl10 claude
+  : > "$dir/fake/windows"
+  printf '%s\n' "$(date +%s)" > "$dir/home/state/rl10.deliberate-stop"
+
+  # The revive publishes its record, then fails during launch delivery, so the
+  # rollback removes that provisional record while the marker survives. The
+  # documented retry then republishes a record for a brand-new incarnation.
+  out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_spawn "$dir" rl10 "$dir/proj" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 1 "$rc" "a launch transport failure should fail the fresh spawn"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl10.meta" ] \
+    || fail "a failed fresh spawn should roll back its provisional record"
+  # The endpoint the failed attempt created is gone too; the tmux stub does not
+  # model window destruction, so clear the inventory the way the backend would.
+  : > "$dir/fake/windows"
+
+  out=$(run_spawn "$dir" rl10 "$dir/proj" --mode no-mistakes --yolo off); rc=$?
+  expect_code 0 "$rc" "the retry after a rolled-back revive should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl10.deliberate-stop" ] \
+    || fail "a retry after a rolled-back revive must clear the orphaned deliberate-stop marker"
+  pass "fm-spawn fresh spawn: a retry after a rolled-back revive clears the orphaned deliberate-stop marker"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -2501,6 +2527,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_clears_the_deliberate_stop_marker
 test_relaunch_clears_the_deliberate_stop_marker_when_the_backlog_commit_fails
 test_fresh_spawn_revive_clears_the_deliberate_stop_marker
+test_fresh_spawn_retry_after_rollback_clears_the_deliberate_stop_marker
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

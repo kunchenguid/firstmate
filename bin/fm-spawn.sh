@@ -1229,7 +1229,6 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
-SPAWN_REUSED_TASK_RECORD=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
@@ -1708,9 +1707,6 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
-if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
-  SPAWN_REUSED_TASK_RECORD=1
-fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -5504,18 +5500,15 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
 fi
 
 # This is the commit point: all endpoint and harness delivery that can reject
-# the spawn has succeeded. Re-read and transition while holding the same
-# per-task lock as metadata publication, then and only then report success.
-if [ "$RELAUNCH" -eq 1 ] || [ "$SPAWN_REUSED_TASK_RECORD" -eq 1 ]; then
-  # All launch delivery and record publication now succeeded, so the
-  # replacement supersedes the deliberately stopped incarnation. Clear its
-  # parked-task marker only at this commit point: an earlier launch failure
-  # leaves the stopped task parked rather than reviving the stale/wedge ladder.
-  fm_control_deliberate_stop_clear "$STATE_REAL" "$ID" || {
-    echo "error: replacement for $ID was launched, but its deliberate-stop marker could not be cleared" >&2
-    exit 1
-  }
-fi
+# the spawn has succeeded, so this worker supersedes any deliberately stopped
+# incarnation of the task. Clear the parked-task marker only here: an earlier
+# launch failure leaves the stopped task parked rather than reviving the
+# stale/wedge ladder. Re-read and transition while holding the same per-task
+# lock as metadata publication, then and only then report success.
+fm_control_deliberate_stop_clear "$STATE_REAL" "$ID" || {
+  echo "error: task $ID's worker was launched, but its deliberate-stop marker could not be cleared" >&2
+  exit 1
+}
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
