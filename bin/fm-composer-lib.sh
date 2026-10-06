@@ -761,8 +761,9 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # identity result was supplied, and the verdict depends on it. Adapters answer
 # `need-identity` by running their identity probe once and re-calling with
 # either its result or `probe-absent`; the sentinel never escapes an adapter.
-# Identity stays a lazy second pass so the common non-pi read never pays for
-# the probe.
+# Identity stays a lazy second pass: an adapter probes only on `need-identity`
+# or, on tmux, to recheck an `unknown` read for Command Code, so a definite
+# non-pi read never pays for the probe.
 #
 # Consumers that can overwrite input or confirm delivery must accept only the
 # exact positive proof they require (`empty`), so unrecognized future verdicts

@@ -2744,12 +2744,11 @@ effort_flag_for_harness() {
     ;;
   commandcode)
     # Command Code's --effort set is model-scoped and an unknown value exits
-    # the launch (verified, 1.74.1). Both DeepSeek V4.1 Flash models accept
+    # the launch (verified, 1.74.1). DeepSeek V4.1 Flash accepts
     # off|low|high|max, so medium and xhigh are omitted there, and every other
     # model, whose set is unverified, keeps its own default (record-and-omit).
     case "$model:$effort" in
-    deepseek/deepseek-v4.1-flash:low | deepseek/deepseek-v4.1-flash:high | deepseek/deepseek-v4.1-flash:max | \
-      deepseek/deepseek-v4.1-flash-fast:low | deepseek/deepseek-v4.1-flash-fast:high | deepseek/deepseek-v4.1-flash-fast:max)
+    deepseek/deepseek-v4.1-flash:low | deepseek/deepseek-v4.1-flash:high | deepseek/deepseek-v4.1-flash:max)
       printf -- '--effort %s ' "$(shell_quote "$effort")"
       ;;
     esac

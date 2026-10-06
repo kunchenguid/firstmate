@@ -145,8 +145,9 @@ EOF
 # pending-unproven | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on
-# it (a pi separator pair under the cursor), so the common read never pays
-# for the process probe.
+# it (a pi separator pair under the cursor) or the cursor-anchored read is
+# `unknown` (the Command Code check below), so an `unknown` read pays one
+# process probe and a definite read never does.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy pane verdict identity
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }

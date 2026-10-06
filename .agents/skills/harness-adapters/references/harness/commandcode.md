@@ -15,7 +15,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Command Code discovers user skills from `~/.agents/skills` and `~/.commandcode/skills`, and its slash popup lists them as `[skill]`. |
 | Resume | `commandcode --resume <session-id>` (also `--session <id-prefix>`) reopens the conversation but ignores a message passed beside it, so the next prompt is typed after the composer reads empty; `--model` applies to the resumed session. |
 | Model flag | `--model <model-id>`; `commandcode --list-models` is the authoritative listing, and an unlisted id exits the launch. |
-| Effort flag | `--effort <level>`, model-scoped; both DeepSeek V4.1 Flash models accept `off`, `low`, `high`, and `max`, and an unaccepted value exits the launch, so `../../../bin/fm-spawn.sh` passes only verified pairs. |
+| Effort flag | `--effort <level>`, model-scoped; `deepseek/deepseek-v4.1-flash` accepts `off`, `low`, `high`, and `max`, and an unaccepted value exits the launch, so `../../../bin/fm-spawn.sh` passes only verified pairs. |
 | Model discovery | `commandcode --list-models`; authentication preflight is `commandcode status`. |
 | Marker | None; the process title is the anchored name `command-code`, which identifies the adapter and outranks foreign inherited markers. |
 | Trust dialogs | `--trust` skips the fresh-worktree folder-trust prompt and `--yolo` bypasses permission prompts. |
