@@ -123,7 +123,7 @@ else
   ')
 fi
 tmp=$(mktemp "${TMPDIR:-/tmp}/fm-integrate-after.XXXXXX") || fail 'cannot stage task body'
-trap 'rm -f "$tmp"' EXIT
+trap 'rm -f "$tmp"; fm_lock_release "$control_lock" || true' EXIT
 printf '%s' "$new_body" > "$tmp"
 FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" update "$consumer" --body-file "$tmp" >/dev/null \
   || fail "could not update consumer $consumer"

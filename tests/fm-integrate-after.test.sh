@@ -28,6 +28,7 @@ tool --help | grep -qi 'integration-only' || fail 'public integration help is mi
 tool check legacy-task | grep -q 'legacy task has no backlog row' || fail 'pre-backlog task was gated'
 tool check consumer | grep -q 'no integration-only dependencies' || fail 'legacy task was gated'
 tool add consumer provider >/dev/null
+[ ! -e "$TEST_HOME/state/.control-consumer.lock" ] || fail 'add left the consumer control lock held'
 tool add consumer provider | grep -q '^unchanged:' || fail 'add was not idempotent'
 body=$(backlog show consumer --full)
 printf '%s\n' "$body" | grep -q 'Preserve this note' || fail 'existing body was lost'
@@ -88,6 +89,7 @@ grep -q 'malformed integrate-after relation' "$TEST_HOME/check.out" || fail 'no-
 printf 'Preserve this note.\nintegrate-after: provider\n' > "$TEST_HOME/body"
 backlog update consumer --body-file "$TEST_HOME/body" >/dev/null
 tool remove consumer provider >/dev/null
+[ ! -e "$TEST_HOME/state/.control-consumer.lock" ] || fail 'remove left the consumer control lock held'
 tool remove consumer provider | grep -q '^unchanged:' || fail 'remove was not idempotent'
 tool check consumer | grep -q 'no integration-only dependencies' || fail 'relation was not removed'
 printf 'paused: integrate-after: provider, waiting for landing\n' > "$TEST_HOME/state/consumer.status"
