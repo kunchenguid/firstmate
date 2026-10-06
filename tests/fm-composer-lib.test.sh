@@ -230,9 +230,12 @@ test_matrix_claude_titled_upper_separator() {
   # and every steer sat unread while `herdr agent prompt` still delivered.
   # A titled rule that opens with a full 8-column run and closes with the rule
   # glyph is still a separator, and the pair over the `❯` row proves the composer.
+  # The fixture keeps the titled top at exactly the closing rule's width: a
+  # width mismatch proves nothing (see the mismatched-width case), it is not
+  # tolerance for ragged rules.
   local run top bottom pair footer screen typed out claude_idle
   claude_idle=$(printf 'claude\tidle')
-  run='────────────────────────────────────────'
+  run='──────────────────────────────────────'
   top="$run ultracode ─"
   bottom='──────────────────────────────────────────────────'
   pair=$(printf 'transcript line\n%s\n❯%s\n%s' "$top" "$NBSP" "$bottom")

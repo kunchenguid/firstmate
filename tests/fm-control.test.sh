@@ -1246,15 +1246,23 @@ test_submitted_claude_exit_confirmation() {
     out=$(run_control "$dir" t1 exit); rc=$?
     [ "$(cat "$dir/fake/literal")" = /exit ] || fail "new exit should type its command exactly once"
     if [ "$selection" = stop ]; then
-      [ "$rc" = 0 ] || fail "new exact stop dialog should complete: $out"
-      [ "$(cat "$dir/fake/keys")" = $'Enter\nEnter' ] || fail "new stop dialog needs exactly submit and confirm"
+      # The submitted Enter opened the exit picker: the confirming Enter is
+      # refused and the picker is named, so the operator clears or submits
+      # through the data plane instead of looping on Enter.
+      [ "$rc" != 0 ] || fail "new exact stop dialog must refuse the confirming Enter: $out"
+      case "$out" in
+        *"blocked on a prompt: Claude background-task exit picker"*) ;;
+        *) fail "new stop dialog refusal must name the picker: $out" ;;
+      esac
+      [ "$(cat "$dir/fake/keys")" = Enter ] || fail "new stop dialog must not receive a confirming Enter"
+      [ "$(cat "$dir/fake/command")" = claude ] || fail "refused stop dialog must leave the agent alive"
     else
       [ "$rc" != 0 ] || fail "new detach selection must refuse: $out"
       [ "$(cat "$dir/fake/keys")" = Enter ] || fail "new detach dialog must not receive a confirmation"
       [ "$(cat "$dir/fake/command")" = claude ] || fail "refused detach must leave the agent alive"
     fi
   done
-  pass "submitted Claude exit confirms stop once and refuses detach without generic Enter retries"
+  pass "submitted Claude exit types once and refuses the confirming Enter without generic retries"
 }
 
 test_existing_claude_exit_confirmation

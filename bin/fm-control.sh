@@ -589,7 +589,10 @@ complete_exit_confirmation() {
   confirmation=$(fm_control_exit_confirmation "$HARNESS" "$screen")
   case "$confirmation" in
     none) return 1 ;;
-    refuse) die "task $ID shows an unsupported or ambiguous exit confirmation; refusing lifecycle input" ;;
+    # Ambiguous: not an exit confirmation this verb may complete. Fall through
+    # to the ordinary composer-plane checks below, which refuse a pending,
+    # picker, or unproven composer before anything is typed.
+    refuse) return 1 ;;
     stop)
       fm_backend_validate_task_endpoint "$META" "$ID" || return 2
       [ "$(agent_state)" = alive ] || die "task $ID no longer proves a live agent; refusing exit confirmation"

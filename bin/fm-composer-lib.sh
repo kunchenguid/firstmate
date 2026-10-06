@@ -885,7 +885,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH=
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max pi_sep pi_titled
-  local probe row_glyph row_glyph_row
+  local probe row_glyph row_glyph_row pi_open_trimmed='' pi_open_titled=0
   local box_glyph_row=-1 box_glyph='' pi_glyph_row=-1 pi_glyph=''
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -949,10 +949,26 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         else
           FM_COMPOSER_SCAN_PI_PAIR_VALID=0
         fi
+        # A titled edge proves a composer edge only at proven width: a titled
+        # rule narrower than its partner is not that composer's top edge, so
+        # the pair is not recorded and the closing rule stays an unmatched
+        # separator for the sandwich check, which proves width the same way.
+        # Pi's own titled turn frame keeps its own identity path and is never
+        # subject to this composer-rule gate.
+        if { [ "$pi_open_titled" = 0 ] && [ -n "${pi_open_trimmed//─/}" ]; } || { [ "$pi_titled" = 0 ] && [ -n "${trimmed//─/}" ]; }; then
+          if [ -n "${pi_open_trimmed//─/}" ] && [ "$pi_open_titled" = 0 ]; then
+            _fm_composer_titled_rule_row "$pi_open_trimmed" "${trimmed//─/ }" || FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
+          else
+            _fm_composer_titled_rule_row "$trimmed" "${pi_open_trimmed//─/ }" || FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
+          fi
+          [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] || FM_COMPOSER_SCAN_PI_PAIR_VALID=0
+        fi
         FM_COMPOSER_SCAN_PI_GLYPH_ROW=$pi_glyph_row
         FM_COMPOSER_SCAN_PI_GLYPH=$pi_glyph
       fi
       pi_open=$row
+      pi_open_trimmed=$trimmed
+      pi_open_titled=$pi_titled
       pi_lines=0
       pi_glyph_row=-1
       pi_glyph=''
