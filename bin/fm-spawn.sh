@@ -4449,14 +4449,13 @@ else
                 "$SCRIPT_DIR/fm-herdr-groups.sh" order-key "$ID" "$PROJ_ABS" 2>/dev/null) || HERDR_GROUP_ORDER_KEY=
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" \
-              "$HERDR_GROUP_ORDER_KEY" "$HERDR_REPO_PARENT_WORKSPACE_ID"
+              "$HERDR_GROUP_ORDER_KEY"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
             if [ -n "$HERDR_HOME_ID" ] &&
               fm_backend_herdr_projection_live_binding_matches \
                 "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
                 "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
-                "$HERDR_REPO_PARENT_WORKSPACE_ID" &&
+                "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" &&
               fm_backend_herdr_projection_journal_bind \
                 "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
                 "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
