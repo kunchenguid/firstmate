@@ -1025,8 +1025,11 @@ test_no_mistakes_truly_unpushed_refuses() {
 }
 
 test_azure_requires_completed_pr_and_local_containment() {
-  local case_dir state head rc expected api_state
-  for state in active abandoned completed unreadable dirty later unregistered-https unregistered-https-port unregistered-https-mixed unregistered-https-gitcase unregistered-new-ssh unregistered-legacy unregistered-legacy-ssh; do
+  local case_dir state head local_head rc expected api_state
+  for state in active abandoned completed unreadable dirty later \
+    unregistered-https unregistered-https-port unregistered-https-mixed unregistered-https-gitcase \
+    unregistered-new-ssh unregistered-new-ssh-no-user unregistered-new-ssh-url unregistered-new-ssh-url-no-user \
+    unregistered-legacy unregistered-legacy-no-user unregistered-legacy-ssh; do
     case_dir=$(make_case "azure-$state")
     write_meta "$case_dir" no-mistakes ship
     wt_commit_file "$case_dir" feature.txt hello
@@ -1070,21 +1073,41 @@ SH
       unregistered-new-ssh)
         git -C "$case_dir/wt" remote set-url origin 'git@ssh.dev.azure.com:v3/example/Project/repo'
         ;;
+      unregistered-new-ssh-no-user)
+        git -C "$case_dir/wt" remote set-url origin 'ssh.dev.azure.com:v3/example/Project/repo'
+        ;;
+      unregistered-new-ssh-url)
+        git -C "$case_dir/wt" remote set-url origin 'ssh://git@ssh.dev.azure.com:22/v3/example/Project/repo'
+        ;;
+      unregistered-new-ssh-url-no-user)
+        git -C "$case_dir/wt" remote set-url origin 'ssh://ssh.dev.azure.com/v3/example/Project/repo'
+        ;;
       unregistered-legacy)
         git -C "$case_dir/wt" remote set-url origin 'example@vs-ssh.visualstudio.com:v3/example/Project/repo'
+        ;;
+      unregistered-legacy-no-user)
+        git -C "$case_dir/wt" remote set-url origin 'vs-ssh.visualstudio.com:v3/example/Project/repo'
         ;;
       unregistered-legacy-ssh)
         git -C "$case_dir/wt" remote set-url origin 'ssh://example@vs-ssh.visualstudio.com:22/Project/_ssh/repo'
         ;;
     esac
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    [ "$(git -C "$case_dir/wt" rev-list --count HEAD --not --remotes --)" = 0 ] \
+      || fail "Azure $state fixture has unpushed commits"
     expected=1
     [ "$state" != completed ] || expected=0
     rc=0
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
     expect_code "$expected" "$rc" "Azure $state teardown"
     if [ "$expected" = 1 ]; then
-      [ -f "$case_dir/state/task-x1.meta" ] || fail "Azure $state lost task record"
-      [ -d "$case_dir/wt" ] || fail "Azure $state lost local work"
+      assert_refusal_retained_task_state "$case_dir" "Azure $state" "$local_head"
+      if [[ "$state" = unregistered-* ]]; then
+        assert_grep 'Azure task has no registered PR URL' "$case_dir/stderr" \
+          "Azure $state bypassed the completion guard"
+      fi
+    else
+      [ ! -e "$case_dir/state/task-x1.meta" ] || fail "Azure $state did not retire task record"
     fi
   done
   pass "Azure cleanup requires completed PR and contained clean local work, even after push"

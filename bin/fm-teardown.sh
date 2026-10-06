@@ -1487,11 +1487,10 @@ import sys
 from urllib.parse import urlsplit
 
 url = sys.argv[1]
+scp = re.fullmatch(r"((?:[^@/:]+@)?[^@/:]+):(?!//)(.*)", url)
+if scp:
+    url = f"ssh://{scp[1]}/{scp[2]}"
 parsed = urlsplit(url)
-normalized = url.lower()
-if not parsed.scheme and re.fullmatch(r"[^@/:]+@[^/:]+:.*", normalized):
-    normalized = "ssh://" + normalized
-    parsed = urlsplit(normalized)
 host = (parsed.hostname or "").lower()
 kind = "non-azure"
 if parsed.scheme in ("http", "https") and host == "dev.azure.com":
