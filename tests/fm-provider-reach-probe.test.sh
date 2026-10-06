@@ -112,6 +112,7 @@ case "\${FM_FAKE_DIG_MODE:-address}" in
     'nodata.example.invalid. 300 IN A 1.2.3.4' ; exit 0 ;;
   ipv6) printf '2001:db8::1\n'; exit 0 ;;
   a-noanswer) if [ "\${2:-}" = AAAA ]; then printf '2001:db8::1\n'; else printf ';; no A records\n'; fi; exit 0 ;;
+  a-aaaa-error) if [ "\${2:-}" = AAAA ]; then printf 'unrecognized resolver failure\n'; exit 9; else printf ';; no A records\n'; exit 0; fi ;;
   fail) printf 'connection failed\n'; exit 9 ;;
   hang) sleep 30; printf 'ok\n'; exit 0 ;;
   *) printf '1.2.3.4\n'; exit 0 ;;
@@ -304,16 +305,18 @@ assert_contains "$out" "dns=nxdomain" "an addressless answer is the no-address c
 tmp=$TMP_ROOT/dns-fail; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=fail FM_PROVIDER_REACH_DNS_TOOL=dig \
   FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 20 "$rc" "a failed lookup exits 20"
-assert_contains "$out" "dns=fail" "a failed lookup is its own dns class"
-assert_contains "$out" "result=unreachable" "a failed lookup wording is unreachable"
+expect_code 0 "$rc" "a failed lookup still allows HTTP probing"
+assert_contains "$out" "dns=unknown" "a failed lookup without no-record proof is unknown"
+assert_contains "$out" "result=reachable" "a failed lookup does not prevent a successful HTTP response"
+assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "HTTP follows an uncertain DNS result"
 
 # --- resolver errors and successful no-address answers are distinct ----------
 tmp=$TMP_ROOT/dns-servfail; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=servfail FM_PROVIDER_REACH_DNS_TOOL=dig \
   "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 20 "$rc" "SERVFAIL exits 20"
-assert_contains "$out" "dns=fail" "SERVFAIL is a resolver error"
+expect_code 0 "$rc" "SERVFAIL still allows HTTP probing"
+assert_contains "$out" "dns=unknown" "SERVFAIL is uncertain, not proof of no records"
+assert_contains "$out" "result=reachable" "HTTP follows SERVFAIL"
 
 # BIND `host` renders every non-NXDOMAIN rcode with the same "not found" wording,
 # so a classification that tests "not found" before the rcode would mislabel
@@ -321,15 +324,15 @@ assert_contains "$out" "dns=fail" "SERVFAIL is a resolver error"
 tmp=$TMP_ROOT/host-servfail; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=host-servfail FM_PROVIDER_REACH_DNS_TOOL=dig \
   "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 20 "$rc" "host-shaped SERVFAIL exits 20"
-assert_contains "$out" "dns=fail" "host's 'not found: 2(SERVFAIL)' is a resolver error, not no-address"
+expect_code 0 "$rc" "host-shaped SERVFAIL still allows HTTP probing"
+assert_contains "$out" "dns=unknown" "host's 'not found: 2(SERVFAIL)' is uncertain, not no-address"
 assert_not_contains "$out" "dns=nxdomain" "a SERVFAIL is never classified as a successful no-address answer"
 
 tmp=$TMP_ROOT/host-refused; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=host-refused FM_PROVIDER_REACH_DNS_TOOL=dig \
   "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 20 "$rc" "host-shaped REFUSED exits 20"
-assert_contains "$out" "dns=fail" "host's 'not found: 5(REFUSED)' is a resolver error, not no-address"
+expect_code 0 "$rc" "host-shaped REFUSED still allows HTTP probing"
+assert_contains "$out" "dns=unknown" "host's 'not found: 5(REFUSED)' is uncertain, not no-address"
 assert_not_contains "$out" "dns=nxdomain" "a REFUSED is never classified as a successful no-address answer"
 
 # A resolver that rejects the call shape (macOS dscacheutil's usage block and
@@ -338,16 +341,16 @@ assert_not_contains "$out" "dns=nxdomain" "a REFUSED is never classified as a su
 tmp=$TMP_ROOT/usage-resolver; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=usage FM_PROVIDER_REACH_DNS_TOOL=dig \
   "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 20 "$rc" "a usage-block resolver exits 20"
-assert_contains "$out" "dns=fail" "a resolver that rejects the call shape is a resolver error"
+expect_code 0 "$rc" "a usage-block resolver still allows HTTP probing"
+assert_contains "$out" "dns=unknown" "a resolver that rejects the call shape is uncertain"
 assert_not_contains "$out" "dns=nxdomain" "a usage block is never classified as a successful no-address answer"
 assert_not_contains "$out" "Usage:" "the probe line never carries a tool's usage text"
 
 tmp=$TMP_ROOT/timestamp-not-address; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=timestamp FM_PROVIDER_REACH_DNS_TOOL=dig \
   "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 20 "$rc" "timestamp-only answer exits 20"
-assert_contains "$out" "dns=nxdomain" "timestamp digits are not classified as an IP address"
+expect_code 0 "$rc" "timestamp-only output still allows HTTP probing"
+assert_contains "$out" "dns=unknown" "timestamp digits are not classified as an IP address or no-record proof"
 
 # dig's SERVER and WHEN metadata live on `;` comment lines and must never be read
 # as an answer address: the SERVER IPv4 and the WHEN colon-run both look like one.
@@ -356,9 +359,9 @@ assert_contains "$out" "dns=nxdomain" "timestamp digits are not classified as an
 tmp=$TMP_ROOT/server-diagnostics-only; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=server-only FM_PROVIDER_REACH_DNS_TOOL=dig \
   FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 20 "$rc" "a resolver answering only diagnostics exits 20"
-assert_contains "$out" "dns=nxdomain" "the SERVER IPv4 and WHEN colon-run are not answers"
-assert_contains "$out" "http=none" "diagnostic-only output issues no request"
+expect_code 0 "$rc" "diagnostic-only resolver output still allows HTTP probing"
+assert_contains "$out" "dns=unknown" "the SERVER IPv4 and WHEN colon-run are not answers or no-record proof"
+assert_contains "$out" "result=reachable" "HTTP follows uncertain diagnostic-only output"
 
 tmp=$TMP_ROOT/nodata; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=nodata FM_PROVIDER_REACH_DNS_TOOL=dig \
@@ -375,6 +378,14 @@ out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=answer-diagnostics FM_PROVIDER_REA
 expect_code 0 "$rc" "a real answer among diagnostics proceeds to HTTP"
 assert_contains "$out" "dns=ok" "a real address record is still recognized"
 assert_contains "$out" "dns_detail=nodata.example.invalid. 300 IN A 1.2.3.4" "the reported detail is the answer record, not the banner"
+
+tmp=$TMP_ROOT/aaaa-unrecognized-failure; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=a-aaaa-error FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "an unrecognized failed AAAA query proceeds to HTTP"
+assert_contains "$out" "dns=unknown" "an uncertain AAAA lookup is never called NXDOMAIN"
+assert_not_contains "$out" "dns=nxdomain" "a failed AAAA query is not proof of no records"
+assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "HTTP follows the failed AAAA query"
 
 tmp=$TMP_ROOT/ipv6-address; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=a-noanswer FM_PROVIDER_REACH_DNS_TOOL=dig \
@@ -548,8 +559,9 @@ assert_contains "$out" "result=unreachable" "a hanging endpoint wording is unrea
 tmp=$TMP_ROOT/hang-dns; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=hang FM_PROVIDER_REACH_DNS_TOOL=dig \
   FM_PROVIDER_REACH_PROBE_TIMEOUT=1 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
-expect_code 20 "$rc" "a hanging resolver is bounded"
-assert_contains "$out" "dns=fail" "a hanging resolver reports a lookup failure"
+expect_code 0 "$rc" "a hanging resolver is bounded and HTTP proceeds"
+assert_contains "$out" "dns=unknown" "a hanging resolver is uncertain, not proof of no records"
+assert_contains "$out" "result=reachable" "HTTP follows a bounded resolver timeout"
 
 # --- unauthenticated, single request, no credential surface -----------------
 tmp=$TMP_ROOT/unauth; new_case "$tmp"
@@ -615,7 +627,7 @@ assert_contains "$out" "http=000" "the probe completed its own request without t
 
 # --- proxy environment is explicit, credential-safe, and reported ------------
 proxy_env=(-u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy)
-for proxy_name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
+for proxy_name in HTTPS_PROXY https_proxy ALL_PROXY all_proxy; do
   tmp=$TMP_ROOT/proxy-credential-$proxy_name; new_case "$tmp"
   out=$(env "${proxy_env[@]}" "$proxy_name=http://private:secret@proxy.example:8080" \
     PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
@@ -638,6 +650,21 @@ out=$(env "${proxy_env[@]}" PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=di
   FM_FAKE_DIG_MODE=address FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
 expect_code 0 "$rc" "proxy-free direct request completes"
 assert_contains "$out" "route=direct" "direct result is labeled"
+
+tmp=$TMP_ROOT/irrelevant-http-proxy; new_case "$tmp"
+out=$(env "${proxy_env[@]}" HTTP_PROXY='http://private:secret@proxy.example:8080' \
+  PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
+  FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "HTTP proxy credentials do not affect an HTTPS request"
+assert_contains "$out" "route=direct" "an irrelevant HTTP proxy does not alter route reporting"
+
+# A matching no-proxy entry takes precedence over configured proxy credentials.
+tmp=$TMP_ROOT/no-proxy-bypass; new_case "$tmp"
+out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
+  NO_PROXY="$PROBE_HOST" PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_DIG_MODE=address FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "NO_PROXY bypasses proxy credential refusal"
+assert_contains "$out" "route=direct" "NO_PROXY route is direct"
 
 # --- unknown and malformed input are refusals, never silent guesses ---------
 tmp=$TMP_ROOT/unknown-target; new_case "$tmp"
@@ -680,6 +707,16 @@ expect_code 2 "$rc" "a full URL is refused"
 assert_contains "$out" "must be a host[:port][/path], not a URL" "full URL refusal explains the expected form"
 [ ! -s "$tmp/dig.log" ] || fail "a full URL reached the resolver"
 [ ! -s "$tmp/urls.log" ] || fail "a full URL reached curl"
+
+for valid_host in 'example.invalid/path/https://resource' 'example.invalid/path?q=https://resource'; do
+  tmp=$TMP_ROOT/embedded-url-$RANDOM; new_case "$tmp"
+  out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
+    FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+    "$SCRIPT" --host "$valid_host" 2>&1); rc=$?
+  expect_code 0 "$rc" "an embedded :// after the authority is accepted"
+  assert_contains "$out" "result=reachable" "the host/path target is probed"
+  assert_contains "$(cat "$tmp/urls.log")" "https://$valid_host" "the full path/query reaches curl"
+done
 
 tmp=$TMP_ROOT/host-no-authority; new_case "$tmp"
 make_fake_dig "$tmp" "$tmp/dig.log"
