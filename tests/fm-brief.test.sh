@@ -303,11 +303,17 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode brief scaffold failed"
     brief="$home/data/$id/brief.md"
-    assert_grep "Whether you may merge a PR is determined by this task's merge posture" "$brief" \
-      "$mode brief must retain task merge-posture authority"
-    assert_grep "full test suite on the merged tree" "$brief" "$mode brief must test the merged tree"
-    assert_grep "end-to-end test and recalculate the feature" "$brief" "$mode brief must verify functionality after merge"
-    assert_grep "revert to the state before the merge and report the failure" "$brief" \
+    assert_grep "You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly say you may merge; (b) the captain or firstmate gave you the word to merge in this conversation." "$brief" \
+      "$mode brief must grant a worker merge only under explicit authorization"
+    assert_grep "If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first." "$brief" \
+      "$mode brief must require asking, not guessing, when merge authority is unclear"
+    assert_grep "(i) verify in a disposable copy that the branch merges into the latest default branch without conflicts" "$brief" \
+      "$mode brief must require the conflict-free merge check"
+    assert_grep "(ii) run the full test suite on the merged tree and confirm zero failures beyond the default-branch baseline" "$brief" \
+      "$mode brief must test the merged tree against the default-branch baseline"
+    assert_grep "(iii) end-to-end test and recalculate the target feature on the merged tree" "$brief" \
+      "$mode brief must verify functionality after merge"
+    assert_grep "(iv) if step (iii) fails, revert to the state before the merge and report the failure" "$brief" \
       "$mode brief must require rollback and reporting on failure"
     assert_no_grep "Never merge a PR" "$brief" "$mode brief must not forbid all worker merges"
   done
@@ -341,7 +347,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-direct-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "When it does not authorize you to merge, the configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
+  assert_grep "otherwise the configured merge authority decides and firstmate relays the outcome" "$brief" \
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
