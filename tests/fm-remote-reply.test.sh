@@ -1068,6 +1068,49 @@ assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "adapter retirement left a caught-up watermark a later route could inherit"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
 
+# Empty the remote log under the committed cursor and handle the break the
+# next blocking source reports. Sets RESULT_BREAK.
+break_repaired_route() { # <label>
+  local label=$1 runner handle_rc
+  stop_reply_listener || fail "the reply listener did not stop before the $label continuity break"
+  : > "$REMOTE/state/parent-replies.status"
+  GEN=$((GEN + 1))
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-$label-break.out" 2>&1 &
+  runner=$!
+  wait "$runner" || fail "the $label continuity break was not captured"
+  RESULT_BREAK=$(find "$PARENT/state/procevent-inbox" -name "$SID.$GEN.result" -print -quit)
+  [ -n "$RESULT_BREAK" ] || fail "the $label continuity break produced no durable result"
+  [ "$(remote_env "$ADAPTER" classify "$RESULT_BREAK")" = continuity-broken ] \
+    || fail "the $label truncation was not classified as a continuity break"
+  set +e
+  remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_BREAK" > "$TMP_ROOT/handle-$label-break.out" 2>&1
+  handle_rc=$?
+  set -e
+  [ "$handle_rc" -eq 3 ] || fail "the $label continuity break returned an unexpected status: $handle_rc"
+}
+
+# Close the open continuity decision, put back the log the cursor was committed
+# against with one more line, and let the reader advance over that line. The
+# route is not retired, so the cursor moves only because new bytes were read.
+resolve_and_extend_route() { # <label> <log-content>
+  local label=$1 content=$2 bytes blocked_before
+  blocked_before=$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")
+  printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator accepted the break' \
+    >> "$PARENT/state/ios.status"
+  printf '%s' "$content" > "$REMOTE/state/parent-replies.status"
+  bytes=$(wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+  remote_env "$ADAPTER" arm ios >/dev/null
+  GEN=$((GEN + 1))
+  await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+    || fail "the route extended after the $label break was not read"
+  assert_grep "offset=$bytes" "$PARENT/state/remote-replies/ios.cursor" \
+    "the route extended after the $label break did not advance the cursor"
+  [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq "$blocked_before" ] \
+    || fail "extending the route after the $label break appended a continuity break"
+  [ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+    || fail "extending the route after the $label break reopened the continuity decision"
+}
+
 # The resolved break above stays closed through an unchanged re-read. Repair
 # the log, let the reader advance, and truncate again: that later break is a
 # different episode and must open the same decision again.
@@ -1083,21 +1126,8 @@ assert_grep "offset=$restored_bytes" "$PARENT/state/remote-replies/ios.cursor" \
   || fail "repairing the route appended a continuity break"
 [ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
   || fail "repairing the route reopened the continuity decision"
-stop_reply_listener || fail "the reply listener did not stop before the second continuity break"
-: > "$REMOTE/state/parent-replies.status"
-GEN=$((GEN + 1))
-remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-second-break.out" 2>&1 &
-RUNNER=$!
-wait "$RUNNER" || fail "the second continuity break was not captured"
-RESULT_SECOND=$(find "$PARENT/state/procevent-inbox" -name "$SID.$GEN.result" -print -quit)
-[ -n "$RESULT_SECOND" ] || fail "the second continuity break produced no durable result"
-[ "$(remote_env "$ADAPTER" classify "$RESULT_SECOND")" = continuity-broken ] \
-  || fail "the repaired route's truncation was not classified as a continuity break"
-set +e
-remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_SECOND" > "$TMP_ROOT/handle-second-break.out" 2>&1
-handle_rc=$?
-set -e
-[ "$handle_rc" -eq 3 ] || [ "$handle_rc" -eq 0 ] || fail "the second continuity break returned an unexpected status: $handle_rc"
+break_repaired_route "second"
+RESULT_SECOND=$RESULT_BREAK
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
   || fail "a later continuity break after repair appended nothing"
 assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
@@ -1110,5 +1140,35 @@ assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
   $'remote-reply-continuity-ios\t' \
   "a repeated read of the later continuity break closed the decision"
 pass "a later continuity break after repair and re-advance opens the decision again"
+
+# No retirement this time: the cursor leaves the escalated offset only because
+# the reader consumed new bytes, and that alone makes the next break new.
+LOG_ONE=$'working: route restored and readable again\n'
+LOG_TWO=$LOG_ONE$'working: route extended without retirement\n'
+resolve_and_extend_route "second" "$LOG_TWO"
+break_repaired_route "third"
+RESULT_THIRD=$RESULT_BREAK
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 3 ] \
+  || fail "a later continuity break after the cursor moved without retirement appended nothing"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a later continuity break after the cursor moved without retirement did not reopen the decision"
+pass "a later continuity break after the cursor moves without retirement opens the decision again"
+
+# A home whose status log already carried the continuity line before episodes
+# were recorded has the line and no episode. The unchanged re-read there stays
+# silent, and the break after the cursor moves still opens the decision.
+rm -f "$PARENT/state/remote-replies/ios.continuity"
+remote_env "$ADAPTER" ingest ios "$RESULT_THIRD" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 3 ] \
+  || fail "an unchanged re-read with no recorded episode appended again"
+resolve_and_extend_route "third" "$LOG_TWO"$'working: route extended after the upgrade\n'
+break_repaired_route "fourth"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 4 ] \
+  || fail "a later continuity break on a status log that predates episodes appended nothing"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a later continuity break on a status log that predates episodes did not reopen the decision"
+pass "a status log that predates continuity episodes still opens a later break"
 
 echo "ALL TESTS PASSED"

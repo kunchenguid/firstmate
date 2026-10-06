@@ -644,11 +644,9 @@ cmd_ingest() {
     else
       append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
     fi
-    if [ "$append_rc" -eq 0 ]; then
-      write_continuity_episode "$id" "$CURSOR_OFFSET" "$CURSOR_HASH" 0 \
-        || { fm_lock_release "$lock"; die "cannot record continuity episode"; }
-    fi
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
+    write_continuity_episode "$id" "$CURSOR_OFFSET" "$CURSOR_HASH" 0 \
+      || { fm_lock_release "$lock"; die "cannot record continuity episode"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
