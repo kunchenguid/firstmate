@@ -317,7 +317,9 @@ fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
 # do_exit runs in a command substitution. That subshell does not run this
-# EXIT trap, so the parent has to hold the path the trap removes.
+# EXIT trap, so the parent has to hold the path the trap removes. Set it
+# only once the lock is held: a process that loses the lock runs the same
+# trap, and would remove the file the lock holder is reading.
 FM_COMPOSER_DIALOG_SINK=$STATE/$ID.composer-dialog
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
