@@ -180,6 +180,7 @@ fi
 
 case "$HOST_ARG" in
   *@*) die_input "--host must not contain userinfo" ;;
+  *://*) die_input "--host must be a host[:port][/path], not a URL" ;;
 esac
 PROBE=host:$HOST_ARG
 BASE=https://$HOST_ARG
@@ -265,9 +266,9 @@ dns_probe() {
       error_detail="rc=${rc}"
       continue
     fi
-    # A successful answer naming no address is the same finding as NXDOMAIN for
-    # routing purposes, so both classes are checked before exit status.
-    if printf '%s\n' "$out" | grep -qiE 'NXDOMAIN|no answer|not found'; then
+    # NXDOMAIN is terminal. An A-query with no answer is not: the hostname may
+    # be IPv6-only, so ask dig for AAAA before deciding whether DNS found nothing.
+    if printf '%s\n' "$out" | grep -qi 'NXDOMAIN'; then
       printf 'nxdomain %s\n' "${first:-no-address}"
       return 0
     fi
@@ -286,6 +287,52 @@ dns_probe() {
       printf 'ok %s\n' "$answer"
       return 0
     fi
+    case "${tool##*/}" in
+      dig)
+        out=$(fm_run_timed "$TIMEOUT" "$tool" "$DNS_HOST" AAAA 2>/dev/null </dev/null) && rc=0 || rc=$?
+        if [ "$rc" -eq 124 ]; then
+          saw_error=1
+          error_detail="timeout_after_${TIMEOUT}s"
+          continue
+        fi
+        if printf '%s\n' "$out" | grep -qiE 'SERVFAIL|FORMERR|REFUSED|timed out'; then
+          saw_error=1
+          error_detail="rc=${rc}"
+          continue
+        fi
+        if printf '%s\n' "$out" | grep -qi 'NXDOMAIN'; then
+          printf 'nxdomain %s\n' "${first:-no-address}"
+          return 0
+        fi
+        answer=$(printf '%s\n' "$out" | grep -v '^;' | grep -E '(^|[[:space:]])[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)' | head -n 1)
+        if [ -n "$answer" ]; then
+          printf 'ok %s\n' "$answer"
+          return 0
+        fi
+        ;;
+      host)
+        out=$(fm_run_timed "$TIMEOUT" "$tool" "$DNS_HOST" -t AAAA 2>/dev/null </dev/null) && rc=0 || rc=$?
+        if [ "$rc" -eq 124 ]; then
+          saw_error=1
+          error_detail="timeout_after_${TIMEOUT}s"
+          continue
+        fi
+        if printf '%s\n' "$out" | grep -qiE 'SERVFAIL|FORMERR|REFUSED|timed out'; then
+          saw_error=1
+          error_detail="rc=${rc}"
+          continue
+        fi
+        if printf '%s\n' "$out" | grep -qi 'NXDOMAIN'; then
+          printf 'nxdomain %s\n' "${first:-no-address}"
+          return 0
+        fi
+        answer=$(printf '%s\n' "$out" | grep -E 'has address|IPv6 address' | grep -E '[0-9a-fA-F]*:[0-9a-fA-F:]+' | head -n 1)
+        if [ -n "$answer" ]; then
+          printf 'ok %s\n' "$answer"
+          return 0
+        fi
+        ;;
+    esac
     printf 'nxdomain no-address\n'
     return 0
   done
@@ -329,6 +376,29 @@ command -v "$CURL_CMD" >/dev/null 2>&1 || {
   printf 'probe=%s dns=%s http=none result=tool-missing curl_not_installed%s\n' "$PROBE" "$DNS" "$DETAIL"
   exit 64
 }
+
+# Curl honors proxy environment variables even with -q. Credential-free proxies
+# are allowed and disclosed; refuse credential-bearing URLs before curl can send
+# them. Never include the environment value in diagnostics.
+PROXY_MODE=direct
+for proxy_name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
+  eval 'proxy_value=${'"$proxy_name"'-}'
+  [ -n "$proxy_value" ] || continue
+  PROXY_MODE=via-proxy
+  proxy_authority=${proxy_value#*://}
+  case "$proxy_authority" in
+    *@*)
+      proxy_userinfo=${proxy_authority%%@*}
+      case "$proxy_userinfo" in
+        *:*)
+          printf 'probe=%s dns=%s http=none result=invalid-input proxy URL carries credentials\n' "$PROBE" "$DNS"
+          exit 2
+          ;;
+      esac
+      ;;
+  esac
+done
+DETAIL="${DETAIL} route=$PROXY_MODE"
 
 # The response body is irrelevant to the fact being collected and is discarded to
 # /dev/null; only the status code is captured. No temp file is created, so a
