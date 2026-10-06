@@ -46,6 +46,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=/dev/null
@@ -484,8 +486,9 @@ make_seeded_home() {
 # spawn_secondmate <world> <id> <home> [explicit-harness]
 # Runs fm-spawn.sh in secondmate mode. FM_ROOT is the real repo (so fm-harness.sh
 # resolves), the primary config dir is <world>/home/config, and CLAUDECODE over a
-# blinded ancestry walk pins detect_own. stderr is discarded (the local-HEAD ff sync harmlessly skips a
-# non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
+# blinded ancestry walk pins detect_own. stdout is discarded and stderr is saved
+# in <world>/<id>.spawn.err; the function returns fm-spawn's own exit status so a
+# case can assert a refusal. Inspect <world>/home/state/<id>.meta and <home>/config after.
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
@@ -500,10 +503,201 @@ spawn_secondmate() {
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1 || true
+    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>"$world/$id.spawn.err"
 }
 
 meta_harness() { grep '^harness=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
+
+# config/worker-sandbox must reach a secondmate home: inheritance is
+# primary-authoritative, and a child home that failed to receive the opt-in
+# would launch its own workers unsandboxed. A failed copy must refuse the launch
+# instead of continuing with the sandbox silently off.
+test_spawn_refuses_when_sandbox_inheritance_fails() {
+  local w sm rc fakebin stderr
+  w="$TMP_ROOT/spawn-sandbox-fail"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  : > "$w/home/config/worker-sandbox"
+  printf '%s\n' '{"filesystem":{"denyRead":[],"allowRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$w/home/config/worker-sandbox-settings.json"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux-sm")
+  fm_test_fake_srt "$fakebin"
+  mkdir -p "$sm/config"
+  chmod 0555 "$sm/config"
+  if [ -w "$sm/config" ]; then
+    chmod 0755 "$sm/config"
+    printf 'ok - failed sandbox inheritance permission test # SKIP directory permissions are bypassed by this user\n'
+    return
+  fi
+  spawn_secondmate "$w" sm "$sm"
+  rc=$?
+  chmod 0755 "$sm/config"
+  stderr=$(cat "$w/sm.spawn.err")
+  assert_contains "$stderr" "inheritance failed" \
+    "the unwritable config directory must cause propagation failure"
+  assert_contains "$stderr" "sandbox configuration does not match the primary (config/worker-sandbox, config/worker-sandbox-settings.json)" \
+    "failed propagation must reach the sandbox postcondition guard"
+  [ "$rc" -ne 0 ] \
+    || fail "a secondmate spawn whose config/worker-sandbox inheritance failed must refuse while the primary has the sandbox enabled"
+  [ ! -f "$w/home/state/sm.meta" ] \
+    || fail "a refused sandbox-inheritance spawn must not publish secondmate metadata"
+  [ ! -e "$sm/config/worker-sandbox" ] \
+    || fail "the child home must not hold a sandbox flag after a failed copy"
+  pass "A5 spawn: a failed config/worker-sandbox inheritance refuses the launch, so no descendant worker can start unsandboxed"
+}
+
+# The successful path still launches, and the child home ends up holding both
+# files the primary is authoritative for.
+test_spawn_inherits_sandbox_flag_and_settings() {
+  local w sm fakebin
+  w="$TMP_ROOT/spawn-sandbox-ok"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  : > "$w/home/config/worker-sandbox"
+  printf '%s\n' '{"filesystem":{"denyRead":[],"allowRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$w/home/config/worker-sandbox-settings.json"
+  make_seeded_home "$sm" sm
+  # An enabled sandbox wraps the secondmate agent's own launch, so the fixture
+  # needs a runtime the wrapped launch can pass its readiness probe with.
+  fakebin=$(make_noop_tmux "$w/tmux-sm")
+  fm_test_fake_srt "$fakebin"
+
+  spawn_secondmate "$w" sm "$sm" \
+    || fail "a secondmate spawn with a working sandbox inheritance must succeed"
+  [ -f "$w/home/state/sm.meta" ] || fail "the successful spawn must publish secondmate metadata"
+  cmp -s "$w/home/config/worker-sandbox" "$sm/config/worker-sandbox" \
+    || fail "the child home must inherit the exact config/worker-sandbox bytes"
+  cmp -s "$w/home/config/worker-sandbox-settings.json" "$sm/config/worker-sandbox-settings.json" \
+    || fail "the child home must inherit the exact sandbox settings bytes"
+  pass "A5 spawn: a working inheritance carries config/worker-sandbox and its settings into the secondmate home"
+}
+
+test_spawn_refuses_stale_sandbox_after_failed_update() {
+  local w sm fakebin rc
+  w="$TMP_ROOT/spawn-sandbox-stale"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  : > "$w/home/config/worker-sandbox"
+  printf '%s\n' '{"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$w/home/config/worker-sandbox-settings.json"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux-sm")
+  fm_test_fake_srt "$fakebin"
+  propagate_secondmate_inheritance "$w/home" "$sm" "$w/home/config" "$w/home/data" \
+    || fail "initial sandbox inheritance must succeed"
+  cp "$sm/config/worker-sandbox-settings.json" "$w/previous-settings.json"
+  printf '%s\n' '{"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":["/previously-allowed"]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$w/home/config/worker-sandbox-settings.json"
+  chmod 0555 "$sm/config"
+  if [ -w "$sm/config" ]; then
+    chmod 0755 "$sm/config"
+    printf 'ok - stale sandbox update permission test # SKIP directory permissions are bypassed by this user\n'
+    return
+  fi
+  spawn_secondmate "$w" sm "$sm"
+  rc=$?
+  chmod 0755 "$sm/config"
+  cmp -s "$w/previous-settings.json" "$sm/config/worker-sandbox-settings.json" \
+    || fail "failed propagation must leave the previous child settings in place"
+  assert_contains "$(cat "$w/sm.spawn.err")" "inheritance failed" \
+    "the unwritable config directory must cause propagation failure"
+  assert_contains "$(cat "$w/sm.spawn.err")" "sandbox configuration does not match the primary" \
+    "stale child settings must reach the sandbox postcondition guard"
+  [ "$rc" -ne 0 ] || fail "stale sandbox settings after failed propagation must refuse launch"
+  [ ! -f "$w/home/state/sm.meta" ] || fail "stale sandbox refusal must not publish metadata"
+  pass "A5 spawn: failed sandbox update refuses launch with stale child settings"
+}
+
+test_spawn_checks_sandbox_bytes_when_inheritance_skipped() {
+  local w sm fakebin item rc
+  for item in worker-sandbox worker-sandbox-settings.json; do
+    w="$TMP_ROOT/spawn-sandbox-skipped-$item"
+    sm="$w/sm"
+    mkdir -p "$w/home/config"
+    : > "$w/home/config/worker-sandbox"
+    printf '%s\n' '{"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+      > "$w/home/config/worker-sandbox-settings.json"
+    make_seeded_home "$sm" sm
+    fakebin=$(make_noop_tmux "$w/tmux-sm")
+    fm_test_fake_srt "$fakebin"
+    propagate_secondmate_inheritance "$w/home" "$sm" "$w/home/config" "$w/home/data" \
+      || fail "initial sandbox inheritance must succeed"
+    printf '\n' >> "$sm/config/$item"
+    FM_SKIP_SECONDMATE_INHERIT=1 spawn_secondmate "$w" sm "$sm"
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "skipped propagation must refuse differing $item bytes"
+    assert_contains "$(cat "$w/sm.spawn.err")" "sandbox configuration does not match the primary" \
+      "skipped propagation must reach the sandbox postcondition guard for $item"
+    [ ! -f "$w/home/state/sm.meta" ] || fail "skipped stale sandbox must not publish metadata"
+    cp "$w/home/config/$item" "$sm/config/$item"
+    FM_SKIP_SECONDMATE_INHERIT=1 spawn_secondmate "$w" sm "$sm" \
+      || fail "skipped propagation with matching sandbox bytes must launch"
+    [ -f "$w/home/state/sm.meta" ] || fail "matching skipped sandbox must publish metadata"
+  done
+  pass "A5 spawn: skipped inheritance requires exact sandbox flag and settings bytes"
+}
+
+test_spawn_preserves_alternate_sandbox_settings() {
+  local w sm fakebin launchlog settings selection expected mode rc
+  for mode in absolute relative allowlist skipped; do
+    w="$TMP_ROOT/spawn-sandbox-alternate-$mode"
+    sm="$w/sm"
+    settings="$w/alternate settings.json"
+    launchlog="$w/launch.log"
+    mkdir -p "$w/home/config"
+    : > "$w/home/config/worker-sandbox"
+    printf '%s\n' '{"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' > "$settings"
+    make_seeded_home "$sm" sm
+    fakebin=$(make_launch_capturing_tmux "$w/tmux-sm")
+    fm_test_fake_srt "$fakebin"
+    selection=$settings
+    expected=$settings
+    if [ "$mode" = relative ]; then
+      selection='./alternate settings.json'
+      expected="$w/$selection"
+    elif [ "$mode" = allowlist ]; then
+      : > "$w/home/config/launch-env-allowlist"
+    elif [ "$mode" = skipped ]; then
+      FM_SANDBOX_SETTINGS="$selection" FM_SKIP_SECONDMATE_INHERIT=1 \
+        spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness pi \
+        > "$w/spawn.out" 2> "$w/sm.spawn.err"
+      rc=$?
+      [ "$rc" -ne 0 ] || fail "alternate settings must not bypass a missing inherited flag"
+      assert_contains "$(cat "$w/sm.spawn.err")" "sandbox configuration does not match the primary" \
+        "skipped alternate settings must reach the flag postcondition"
+      [ ! -f "$w/home/state/sm.meta" ] || fail "missing flag refusal must not publish metadata"
+      mkdir -p "$sm/config"
+      cp "$w/home/config/worker-sandbox" "$sm/config/worker-sandbox"
+    fi
+    (cd "$w" &&
+      FM_SANDBOX_SETTINGS="$selection" FM_SKIP_SECONDMATE_INHERIT="$([ "$mode" = skipped ] && printf 1 || printf 0)" \
+        spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness pi) \
+        > "$w/spawn.out" 2> "$w/sm.spawn.err" \
+      || fail "alternate settings must launch without a default file ($mode): $(cat "$w/sm.spawn.err")"
+    [ -f "$w/home/state/sm.meta" ] || fail "alternate settings spawn must publish metadata"
+    [ -f "$sm/config/worker-sandbox" ] || fail "alternate settings must retain the inherited flag"
+    [ ! -e "$sm/config/worker-sandbox-settings.json" ] || fail "the absent default must stay absent"
+    # Execute the emitted launch interface with a fixture agent that asks the
+    # child's sandbox consumer to resolve and use its settings for a descendant.
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'consumer=%q\nresult=%q\n' "$ROOT/bin/fm-sandbox.sh" "$w/child-settings"
+      cat <<'SH'
+set -e
+cd "$FM_HOME"
+"$consumer" exec -- /bin/sh -c 'printf "%s\n" "$FM_SANDBOX_SETTINGS"' > "$result"
+SH
+    } > "$fakebin/pi"
+    chmod +x "$fakebin/pi"
+    PATH="$fakebin:$BASE_PATH" HOME="$w/home/user-home" \
+      bash "$launchlog" > "$w/launch.out" 2> "$w/launch.err" \
+      || fail "the child must resolve alternate settings through its sandbox consumer ($mode): $(cat "$w/launch.err")"
+    [ "$(cat "$w/child-settings")" = "$expected" ] \
+      || fail "the descendant must receive the absolute preflight-selected settings ($mode)"
+  done
+  pass "A5 spawn: alternate settings survive the child-home, backend, and environment boundaries"
+}
 
 # Split active: crew-harness=claude + secondmate-harness=codex. The secondmate
 # AGENT launches on codex; its own crewmates inherit claude; secondmate-harness
@@ -2725,6 +2919,11 @@ test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit
+test_spawn_refuses_when_sandbox_inheritance_fails
+test_spawn_inherits_sandbox_flag_and_settings
+test_spawn_refuses_stale_sandbox_after_failed_update
+test_spawn_checks_sandbox_bytes_when_inheritance_skipped
+test_spawn_preserves_alternate_sandbox_settings
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins

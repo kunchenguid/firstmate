@@ -1007,6 +1007,7 @@ do_relaunch() {
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  "$SCRIPT_DIR/fm-sandbox.sh" prefix >/dev/null || exit 1
 
   case "$KIND" in
     ship|scout)

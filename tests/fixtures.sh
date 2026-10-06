@@ -107,6 +107,7 @@ fm_test_fake_tmux_spawn() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -261,6 +262,61 @@ printf '%s\n' "${1:-}" >> "${FM_SLEEP_LOG:-/dev/null}"
 exit 0
 SH
   chmod +x "$fakebin/sleep"
+}
+
+# --- fake srt (worker sandbox) ----------------------------------------------
+
+# fm_test_fake_srt <fakebin> [version]
+# Canned Anthropic sandbox-runtime CLI for the worker-sandbox suites. Reports
+# FM_FAKE_SRT_VERSION (default <version>, itself defaulting to the pinned
+# 0.0.78) for --version, emulates denyRead/denyWrite enforcement by refusing a
+# wrapped command that names a denied path, and otherwise runs the wrapped
+# command with /bin/bash. It enforces nothing real, so a suite must never read
+# it as a sandbox; it exists to drive the wrapper's own refusal and
+# construction logic. When FM_FAKE_SRT_LOG is set, each invocation's argv is
+# appended one per line.
+fm_test_fake_srt() {
+  local fakebin=$1 version=${2:-0.0.78}
+  cat > "$fakebin/srt" <<SH
+#!/usr/bin/env bash
+set -u
+[ -z "\${FM_FAKE_SRT_LOG:-}" ] || printf '%s\n' "\$*" >> "\$FM_FAKE_SRT_LOG"
+if [ "\${1:-}" = --version ]; then printf '%s\n' "\${FM_FAKE_SRT_VERSION:-$version}"; exit 0; fi
+settings=
+cmd=
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --settings|-s) settings=\${2:-}; shift 2; continue ;;
+    -c) cmd=\${2:-}; shift 2; continue ;;
+  esac
+  shift
+done
+if [ -n "\$settings" ] && [ -n "\$cmd" ] && [ -f "\$settings" ] && command -v jq >/dev/null 2>&1; then
+  jq -e '
+    (.network.allowedDomains | type == "array") and
+    (.network.deniedDomains | type == "array") and
+    (.filesystem.denyRead | type == "array") and
+    (.filesystem.allowWrite | type == "array") and
+    (.filesystem.denyWrite | type == "array") and
+    (.network.allowLocalBinding == null or (.network.allowLocalBinding | type == "boolean"))
+  ' "\$settings" >/dev/null || exit 1
+  while IFS= read -r deny; do
+    [ -n "\$deny" ] || continue
+    case "\$cmd" in
+      *"\$deny"*) exit "\${FM_FAKE_SRT_DENY_READ_EXIT:-0}" ;;
+    esac
+  done < <(jq -r '.filesystem.denyRead[]?' "\$settings" 2>/dev/null)
+  while IFS= read -r deny; do
+    [ -n "\$deny" ] || continue
+    case "\$cmd" in
+      *"\$deny"*) printf 'fake srt: blocked by settings\n' >&2; exit 1 ;;
+    esac
+  done < <(jq -r '.filesystem.denyWrite[]?' "\$settings" 2>/dev/null)
+fi
+[ -n "\$cmd" ] || exit 0
+exec /bin/bash -c "\$cmd"
+SH
+  chmod +x "$fakebin/srt"
 }
 
 # --- spawn-world ------------------------------------------------------------

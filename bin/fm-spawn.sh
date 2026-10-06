@@ -322,6 +322,16 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Worker command sandbox (config/worker-sandbox):
+#   Opt-in and off by default. While the flag file is absent every launch is
+#   byte-for-byte unchanged. When present, fm-sandbox.sh validates the pinned
+#   runtime and the home's settings and prefixes the launch command so the
+#   agent - ship, scout, local secondmate, raw command, and relaunch alike -
+#   runs inside the sandbox. A missing runtime, a runtime that is not the pinned
+#   version, an unusable settings file, or a failed capability probe refuses the
+#   spawn before any endpoint, worktree, or record exists, and never falls back
+#   to an unsandboxed launch. bin/fm-sandbox.sh and docs/configuration.md own
+#   the wrapper mechanics and the contract.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -558,6 +568,27 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     else error("expected environment names only") end
   ' "$CONFIG/launch-env-allowlist" 2>/dev/null); then
     echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
+    exit 1
+  fi
+fi
+# config/worker-sandbox (header above): opt-in worker command sandbox. The flag
+# is read once per spawn or relaunch, before any mutation, so an unusable
+# runtime or settings refuses before the pane, worktree, or record exists.
+if ! WORKER_SANDBOX_ENABLED=$(fm_config_source_present "$CONFIG/worker-sandbox"); then
+  exit 1
+fi
+SANDBOX_PREFIX=
+if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+  SANDBOX_SETTINGS=${FM_SANDBOX_SETTINGS:-$CONFIG/worker-sandbox-settings.json}
+  case "$SANDBOX_SETTINGS" in
+    /*) ;;
+    *) SANDBOX_SETTINGS="$(pwd -P)/$SANDBOX_SETTINGS" ;;
+  esac
+  if ! SANDBOX_PREFIX=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" FM_SANDBOX_SETTINGS="$SANDBOX_SETTINGS" "$SCRIPT_DIR/fm-sandbox.sh" prefix); then
+    exit 1
+  fi
+  if [ -z "$SANDBOX_PREFIX" ]; then
+    echo "error: config/worker-sandbox is enabled but no sandbox prefix was produced" >&2
     exit 1
   fi
 fi
@@ -3036,9 +3067,30 @@ if [ "$KIND" = secondmate ]; then
     CONFIG_INHERIT_LOCK_HELD=1
     # Inheritance propagation: push the primary-authoritative live-safe local inheritance
     # surface into this secondmate home (fm-config-inherit-lib.sh).
-    FM_CONFIG_INHERIT_LIVE=1 \
-      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" ||
+    if ! FM_CONFIG_INHERIT_LIVE=1 \
+      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA"; then
       echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+    fi
+  fi
+  # config/worker-sandbox is a fail-closed safety posture and inheritance is
+  # primary-authoritative, so a secondmate home that did not end up with the
+  # primary's opt-in and its settings would launch its OWN workers unsandboxed -
+  # the escape this opt-in exists to prevent. Verify the postcondition however
+  # inheritance returned, and however it was skipped, and refuse the launch
+  # rather than continue with the sandbox silently off.
+  if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+    SECONDMATE_SANDBOX_SETTINGS="$PROJ_ABS/config/worker-sandbox-settings.json"
+    # An explicit settings override is shared by absolute path on this host;
+    # carry it in the agent command so a backend daemon or env allowlist cannot
+    # drop it, and descendants resolve the same file after changing homes.
+    if [ -n "${FM_SANDBOX_SETTINGS:-}" ]; then
+      SECONDMATE_SANDBOX_SETTINGS=$SANDBOX_SETTINGS
+    fi
+    if ! cmp -s "$CONFIG/worker-sandbox" "$PROJ_ABS/config/worker-sandbox" ||
+      ! cmp -s "$SANDBOX_SETTINGS" "$SECONDMATE_SANDBOX_SETTINGS"; then
+      echo "error: secondmate $ID sandbox configuration does not match the primary (config/worker-sandbox, config/worker-sandbox-settings.json) for $PROJ_ABS; refusing to launch with missing or stale inherited settings" >&2
+      exit 1
+    fi
   fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
@@ -5230,6 +5282,9 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
+  if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+    LAUNCH="FM_SANDBOX_SETTINGS=$(shell_quote "$SECONDMATE_SANDBOX_SETTINGS") $LAUNCH"
+  fi
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # Pane-scoped override: git in this worker reads our commit-msg strip without
@@ -5338,6 +5393,9 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
+fi
+if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+  LAUNCH="$SANDBOX_PREFIX $(shell_quote "$LAUNCH")"
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
