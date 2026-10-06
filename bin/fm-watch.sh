@@ -369,11 +369,11 @@ SECONDMATE_LIVENESS_WINDOW_SECS=${FM_SECONDMATE_LIVENESS_WINDOW_SECS:-}
 case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WINDOW_SECS=3600 ;; esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent surfaces on first sight
-# and is then held to that same cadence; a secondmate earns the cadence on its
-# declaration alone, because its endpoint liveness is deliberately never read
-# (pause_state_class owns that split).
+# A standing paused: or captain-held declaration keeps that bounded cadence
+# whatever the agent's liveness, and only a provably working crew outranks it
+# (pause_state_class). An ordinary crew's idle pane still surfaces once on first
+# sight before the cadence holds it (surface_nonterminal_stale); a secondmate
+# takes the cadence from its first sight.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten wait cannot rot
 # invisibly - except an item held for the captain while the away-posture record
@@ -1570,7 +1570,7 @@ busy_turn_over_age() {  # <task>
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
+# captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
@@ -1923,8 +1923,8 @@ surface_nonterminal_stale() {  # <window> <hash>
     # A backlog hold is NOT a declared pause, and must not be dressed up as one:
     # the loop-top reconciliation and pause_state_class both read the status LINE,
     # so a .paused-* flag this line does not support would be cleared on the next
-    # poll - taking the throttle with it - and would hand the mate and dead-agent
-    # cadences a declaration they were never given. Only the shared re-surface
+    # poll - taking the throttle with it - and would hand the declared-wait
+    # cadence a declaration it was never given. Only the shared re-surface
     # marker is kept, which is the whole of what this bound needs.
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
   else
