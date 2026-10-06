@@ -68,10 +68,16 @@ class AzureContract(unittest.TestCase):
         (self.dir / "data").mkdir()
         (self.dir / "config").mkdir()
         (self.dir / "config/backlog-backend").write_text("manual\n")
+        # Match the other forge-boundary fixtures: the advisory supervisor guard
+        # is not an Azure check. Its host/harness discovery adds unrelated,
+        # variable work to registration's subprocess budget.
+        # Keep the real merge, registration, locks, and Azure policy checks.
+        (self.dir / "bin/fm-guard.sh").write_text("#!/bin/sh\nexit 0\n")
+        (self.dir / "bin/fm-guard.sh").chmod(0o700)
         (self.dir / "bin/az").write_text(FAKE)
         (self.dir / "bin/az").chmod(0o700)
         self.env = dict(os.environ, AZ_FIXTURE=str(self.dir), FM_HOME=str(self.dir),
-                        FM_STATE_OVERRIDE=str(self.dir / "state"), FM_ROOT_OVERRIDE=str(ROOT),
+                        FM_STATE_OVERRIDE=str(self.dir / "state"), FM_ROOT_OVERRIDE=str(self.dir),
                         FM_CONFIG_OVERRIDE=str(self.dir / "config"), FM_DATA_OVERRIDE=str(self.dir / "data"),
                         PATH=str(self.dir / "bin") + os.pathsep + os.environ['PATH'],
                         GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", FM_BACKLOG_AUTOTRANSITION="0")
@@ -411,7 +417,7 @@ class AzureContract(unittest.TestCase):
         self.assertTrue((self.dir / "state/task.merge-authority").exists())
 
     def test_no_waivers_or_async_success(self):
-        for args in (("--allow-red", "ci"), ("--", "--bypass-policy"), ("--attended-override", "--", "--auto")):
+        for args in (("--allow-red", "ci"), ("--allow-missing", "ci"), ("--", "--bypass-policy"), ("--attended-override", "--", "--auto")):
             p = self.script("fm-pr-merge.sh", "task", URL, *args)
             self.assertNotEqual(p.returncode, 0)
             self.assertFalse((self.dir / "patch").exists())

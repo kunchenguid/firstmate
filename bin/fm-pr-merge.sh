@@ -245,8 +245,8 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   exit 2
 fi
 
-if [ "$PROVIDER" = azuredevops ] && { [ "$#" -ne 0 ] || [ "${#ALLOW_RED[@]}" -gt 0 ]; }; then
-  echo "error: Azure completion accepts no extra merge flags or --allow-red; repository policies cannot be bypassed" >&2
+if [ "$PROVIDER" = azuredevops ] && { [ "$#" -ne 0 ] || [ "${#ALLOW_RED[@]}" -gt 0 ] || [ "${#ALLOW_MISSING[@]}" -gt 0 ]; }; then
+  echo "error: Azure completion accepts no extra merge flags, --allow-red, or --allow-missing; repository policies cannot be bypassed" >&2
   exit 2
 fi
 

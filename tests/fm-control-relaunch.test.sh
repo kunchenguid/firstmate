@@ -1129,8 +1129,8 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     branch_prefix=
     branch="fm/$id"
     if [ "$mode" != local-only ]; then
-      branch_prefix='users/example'
-      branch="$branch_prefix/$id"
+      branch_prefix='users/example/'
+      branch="$branch_prefix$id"
       out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
         "$PROMOTE" "$id" --mode "$mode" --yolo off --branch-prefix "$branch_prefix" 2>&1) \
         || fail "$mode: scout promotion should succeed: $out"

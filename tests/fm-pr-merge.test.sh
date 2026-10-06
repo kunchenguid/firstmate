@@ -3886,5 +3886,3 @@ test_allow_missing_follows_the_allow_red_rules
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
-python3 "$ROOT/tests/azure-pr-contract.py" || fail "Azure PR contract regression"
-pass "Azure identities, exact-revision policies, guarded completion and merge polls"

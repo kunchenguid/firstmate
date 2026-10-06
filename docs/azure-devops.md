@@ -16,7 +16,8 @@ Initialize no-mistakes for the Azure repository using its current provider docum
 Firstmate's merge support does not change no-mistakes publication support, select an account for its shared daemon, waive review, or grant merge authority.
 Keep colleague approvals and required checks in Azure branch policies; Firstmate reads those policies instead of imposing a fixed approval count.
 
-For a repository requiring `users/<username>/...`, select that prefix explicitly at task intake using the branch-prefix option owned by `bin/fm-brief.sh` and `bin/fm-promote.sh`.
+For a repository requiring `users/<username>/...`, pass `--branch-prefix users/<username>/` at task intake using the branch-prefix option owned by `bin/fm-brief.sh` and `bin/fm-promote.sh`.
+The existing `branch=<prefix>` registry annotation can retain that project's preference; `bin/fm-project-mode.sh` owns its format.
 No username is inferred from Azure login, GitHub login or Git author configuration.
 Existing tasks still default to `fm/...`.
 This is a per-task selection, not a global naming change or a reason to change the project's review or merge posture.

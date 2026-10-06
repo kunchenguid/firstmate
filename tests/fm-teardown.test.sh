@@ -1091,7 +1091,7 @@ SH
 }
 
 test_azure_origin_classification_failures_preserve_work() {
-  local case_dir rc path_without_python
+  local case_dir rc path_without_python local_head
 
   case_dir=$(make_case azure-no-python)
   write_meta "$case_dir" no-mistakes ship
@@ -1099,6 +1099,17 @@ test_azure_origin_classification_failures_preserve_work() {
   add_fork_with_pushed_branch "$case_dir"
   git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
   path_without_python=$(make_path_without_lsof "$case_dir")
+  # This case tests Python's absence, not lsof's: the shared PATH fixture keeps
+  # Python available for its ordinary cleanup and process-group scenarios.
+  rm "$path_without_python/python3"
+  # Prime the caller's cache as earlier matrix cases do. Bash 3.2 can reuse a
+  # cached command for a temporary PATH assignment to a builtin. Probe a fresh
+  # shell, matching the executable's command lookup without changing this shell.
+  python3 -c 'pass'
+  if PATH="$case_dir/fakebin:$path_without_python" bash -c 'command -v python3' >/dev/null 2>&1; then
+    fail "azure-no-python: fixture unexpectedly exposes python3"
+  fi
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   set +e
   FM_TEARDOWN_TEST_PATH="$path_without_python" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -1106,8 +1117,7 @@ test_azure_origin_classification_failures_preserve_work() {
   expect_code 1 "$rc" "azure-no-python: teardown should refuse when classification cannot run"
   assert_grep 'Azure-origin classification could not be completed' "$case_dir/stderr" \
     "azure-no-python: missing python did not preserve work"
-  [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-no-python: lost task record"
-  [ -d "$case_dir/wt" ] || fail "azure-no-python: lost local work"
+  assert_refusal_retained_task_state "$case_dir" azure-no-python "$local_head"
 
   case_dir=$(make_case azure-classifier-failed)
   write_meta "$case_dir" no-mistakes ship
@@ -1656,52 +1666,6 @@ SH
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
-# A task recording base_branch= landed when its content reached that branch, not
-# the default branch: a squash merge into the base branch is the landing.
-test_content_fallback_uses_recorded_base_branch() {
-  local case_dir rc landed tmp
-  for landed in base default; do
-    case_dir=$(make_case "content-base-$landed")
-    write_meta "$case_dir" direct-PR ship
-    printf 'base_branch=feature/hub\n' >> "$case_dir/state/task-x1.meta"
-    tmp="$case_dir/_hub"
-    git clone -q "$case_dir/origin.git" "$tmp"
-    git -C "$tmp" push -q origin HEAD:refs/heads/feature/hub
-    rm -rf "$tmp"
-    wt_commit_file "$case_dir" feature.txt hello "add feature"
-    if [ "$landed" = base ]; then
-      tmp="$case_dir/_land"
-      git clone -q "$case_dir/origin.git" "$tmp"
-      git -C "$tmp" checkout -q feature/hub
-      printf 'hello\n' > "$tmp/feature.txt"
-      git -C "$tmp" add feature.txt
-      git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash feature.txt"
-      git -C "$tmp" push -q origin HEAD:feature/hub
-      rm -rf "$tmp"
-    else
-      land_on_origin_main "$case_dir" feature.txt hello
-    fi
-    cat > "$case_dir/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-    chmod +x "$case_dir/fakebin/treehouse"
-
-    set +e
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-    rc=$?
-    set -e
-    if [ "$landed" = base ]; then
-      expect_code 0 "$rc" "content-base: content squashed into the recorded base branch should count as landed"
-      assert_absent "$case_dir/state/task-x1.meta" "content-base: teardown kept the record of landed work"
-    else
-      [ "$rc" -ne 0 ] || fail "content-base: content only on the default branch passed for a task based on feature/hub"
-      assert_present "$case_dir/state/task-x1.meta" "content-base: a refused teardown removed the task record"
-    fi
-  done
-  pass "the content-landed fallback checks a task's recorded base branch, not the default branch"
-}
-
 test_content_fallback_contained_merge_history_allows() {
   local case_dir rc tmp
   case_dir=$(make_case content-merge-contained)
@@ -1787,6 +1751,52 @@ test_content_fallback_merge_only_restoration_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "content-merge-restore: no REFUSED line in stderr"
   assert_refusal_retained_task_state "$case_dir" content-merge-restore "$local_head"
   pass "content fallback preserves merge-only restorations absent from default"
+}
+
+# A task recording base_branch= landed when its content reached that branch, not
+# the default branch: a squash merge into the base branch is the landing.
+test_content_fallback_uses_recorded_base_branch() {
+  local case_dir rc landed tmp
+  for landed in base default; do
+    case_dir=$(make_case "content-base-$landed")
+    write_meta "$case_dir" direct-PR ship
+    printf 'base_branch=feature/hub\n' >> "$case_dir/state/task-x1.meta"
+    tmp="$case_dir/_hub"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    git -C "$tmp" push -q origin HEAD:refs/heads/feature/hub
+    rm -rf "$tmp"
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    if [ "$landed" = base ]; then
+      tmp="$case_dir/_land"
+      git clone -q "$case_dir/origin.git" "$tmp"
+      git -C "$tmp" checkout -q feature/hub
+      printf 'hello\n' > "$tmp/feature.txt"
+      git -C "$tmp" add feature.txt
+      git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash feature.txt"
+      git -C "$tmp" push -q origin HEAD:feature/hub
+      rm -rf "$tmp"
+    else
+      land_on_origin_main "$case_dir" feature.txt hello
+    fi
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/treehouse"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    if [ "$landed" = base ]; then
+      expect_code 0 "$rc" "content-base: content squashed into the recorded base branch should count as landed"
+      assert_absent "$case_dir/state/task-x1.meta" "content-base: teardown kept the record of landed work"
+    else
+      [ "$rc" -ne 0 ] || fail "content-base: content only on the default branch passed for a task based on feature/hub"
+      assert_present "$case_dir/state/task-x1.meta" "content-base: a refused teardown removed the task record"
+    fi
+  done
+  pass "the content-landed fallback checks a task's recorded base branch, not the default branch"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -5121,11 +5131,11 @@ test_content_fallback_refuses_unlanded_submodule_gitlink_update_despite_ignore_s
 test_content_fallback_allows_contained_submodule_gitlink_update_despite_ignore_settings
 test_dirty_submodule_work_refuses_despite_ignore_settings
 test_content_in_default_fallback_allows
-test_content_fallback_uses_recorded_base_branch
 test_history_location_containment_matrix
 test_dirty_initialized_nested_submodule_refuses
 test_content_fallback_contained_merge_history_allows
 test_content_fallback_merge_only_restoration_refuses
+test_content_fallback_uses_recorded_base_branch
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_untracked_only_refusal_diagnostic

@@ -138,7 +138,7 @@ fi
 if [ "$PROVIDER" = azuredevops ]; then
   AZURE_HEAD_ACTION=ready-head
   if [ "${FM_PR_CHECK_MERGE:-}" = 1 ]; then
-    AZURE_HEAD_ACTION=head
+    AZURE_HEAD_ACTION='head'
   fi
   PR_HEAD=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" "$AZURE_HEAD_ACTION" "$URL") || {
     echo "error: Azure PR identity/head unavailable; registration refused" >&2
