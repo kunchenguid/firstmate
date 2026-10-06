@@ -1,6 +1,6 @@
 # Primary turn-end supervision guard
 
-This doc explains the check that stops a primary Firstmate session from ending a turn while its work has no live supervision, and how each harness enforces that check at its turn boundary.
+This doc explains the primary turn-end guard, which blocks unsupported completion claims and stops turns when work has no live supervision, and how each harness enforces it at the turn boundary.
 It is for operators working out why a turn end was blocked or followed up, and for anyone changing a harness turn-end hook.
 
 This is the authoritative current contract for the "no turn ends blind" primary backstop referenced from AGENTS.md section 8.
@@ -17,6 +17,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | Question | Start here |
 | --- | --- |
 | What the guard enforces | [Current invariant](#current-invariant) |
+| How completion claims are checked | [Completion evidence](#completion-evidence) |
 | Which sessions are in scope and what counts as supervision need | [Primary scope](#primary-scope) and [supervision need](#supervision-need) |
 | How the turn-end check and the mid-turn pull warning judge watcher health | [Strict watcher check at the turn boundary](#strict-watcher-check-at-the-turn-boundary) and [pull-warning verdict by supervision model](#pull-warning-verdict-by-supervision-model) |
 | Away and quiet mode | [Away and quiet mode daemon ownership](#away-and-quiet-mode-daemon-ownership) |
@@ -52,15 +53,17 @@ A live identity-matched daemon with a fresh beacon then satisfies that boundary 
 The guard remains a backstop.
 [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
-Independently of watcher health, a primary-scope stop whose `last_assistant_message` claims completion without a check result or a PR recorded for the named task is blocked with exit status 2.
-A PR counts when the task's live `state/<task>.meta` or its Done row in `data/backlog.md` records that URL, so a report after teardown still carries its evidence.
+### Completion evidence
+
+Independently of watcher health, a primary-scope stop whose `last_assistant_message` claims completion without a recognized passing check result or a PR recorded for the named task produces exit status 2.
+A PR counts when the task's live `state/<task>.meta` or its Done row in `data/backlog.md` records that URL, so a report after cleanup still carries its evidence.
 Negated, future, and conditional mentions such as "I will report when it is done" are not claims.
 The warning blocks at most once per turn: it records the session it blocked, so a reworded continuation is allowed, an unrelated hook continuation cannot suppress it, and the next fresh turn can warn again.
 `bin/fm-turnend-guard.sh` and `tests/fm-turnend-guard.test.sh` own the exact completion words and evidence checks.
 
 ## Guard predicates
 
-The turn-end guard checks primary scope first, then supervision need, then watcher health.
+After confirming primary scope, the guard checks unsupported completion claims, then supervision need, then watcher health.
 The mid-turn pull warning in `bin/fm-guard.sh` judges watcher health differently, as described under [pull-warning verdict by supervision model](#pull-warning-verdict-by-supervision-model).
 
 ### Primary scope

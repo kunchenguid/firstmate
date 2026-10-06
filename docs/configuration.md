@@ -78,6 +78,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
 - Learnings, backlog, briefs, scout reports, and the optional per-task no-mistakes pipeline-spend ledger.
+- Repeated captain ship-instruction signals in `data/captain-reminders.jsonl`, read by the workflow repository's captain-message miner (`bin/fm-captain-reminder.sh`).
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
@@ -355,6 +356,10 @@ Do not register a Beads `types.custom` `captain` type for this: captain is a hol
 When the automatic transition gate applies, dispatch and completion each move the work item in the same run that creates or removes its task record.
 The ordinary successful path therefore keeps the backlog and live task set in sync ([`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh)).
 Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight item in this home; a missing, Done, held, or dependency-blocked item is refused before any endpoint or local copy is created.
+
+A fresh ship spawn also runs the registered workflow's dispatch gate against the current unlanded ship and worker counts and the task token budget.
+When the brief omits `Task token budget: N`, the gate uses the workflow budget registry; an unavailable gate or budget, a refusal, or an invalid response stops the spawn before launch.
+`bin/fm-spawn.sh` owns exact failure messages and remediation.
 
 [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) refuses `add --start` and its `create --start` alias.
 Either would place a row In flight without a task record, status file, or inbox, counting it as live work that nobody is doing.
