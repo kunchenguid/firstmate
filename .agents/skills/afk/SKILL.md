@@ -175,6 +175,8 @@ Classify each wake this way, applying the steering-inbox exception before status
 - `signal` whose newly classified status span contains captain-relevant events -> escalate every event in source order.
   A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
   Other signals with no captain-relevant event in the span -> self-handle.
+- `stale` for a task with a valid park marker (`bin/fm-park.sh`) -> self-handle, with no declared-wait recheck and no possible-wedge aging; an unreadable marker escalates by name and is never read as absent.
+  [`bin/fm-park-lib.sh`](../../../bin/fm-park-lib.sh) owns the marker contract.
 - `signal` or `stale` whose latest status declares a wait, either a `paused:` external wait or a verified `captain-held` transfer, tracks the pause rather than a wedge whether its pane reads idle or busy.
   An unreported captain-relevant event in the newly classified span still escalates immediately while the current declaration independently keeps the pause cadence.
   With no unreported actionable event, the wake self-handles, and the current declaration outranks an enriched possible-wedge reason so it never escalates on the `FM_STALE_ESCALATE_SECS` cadence.
