@@ -253,8 +253,51 @@ test_missing_or_malformed_sources_hide_only_their_part() {
   pass "missing or malformed sources hide only their own part and never fail the build"
 }
 
+test_who_does_the_work_groups_lanes_by_harness_and_model() {
+  local home page text out want tab now_ts old_ts
+  tab=$(printf '\t')
+  home=$(make_home who)
+  read -r now_ts _ < <(when 0)
+  read -r old_ts _ < <(when 240)
+  printf 'beta\n' > "$home/config/parked-homes"
+  # alpha-fix runs in main (its record exists); zephyrine's lanes ended, two of their PRs merged this week.
+  sed "s/|/$tab/g" > "$home/data/metrics/prs.tsv" <<EOF
+home|repo|pr|merged|first_pass
+zephyrine|acme/quillwork|5|$now_ts|1
+zephyrine|acme/quillwork|6|$now_ts|0
+zephyrine|acme/quillwork|7|$old_ts|1
+EOF
+  sed "s/|/$tab/g" > "$home/data/metrics/lanes.tsv" <<EOF
+first_seen|home|task|kind|project|harness|model|effort|mode|pr
+2026-10-06T09:35|main|zephyrine|secondmate|-|pi|lead-model-z|medium|secondmate|
+2026-10-06T09:35|main|beta|secondmate|-|pi|parked-lead|medium|secondmate|
+2026-10-06T09:35|main|alpha-fix|ship|alpha|claude|model-a|medium|no-mistakes|
+2026-10-06T09:35|zephyrine|qw-1|ship|quillwork|pi|model-b|medium|direct-PR|https://github.com/acme/quillwork/pull/5
+2026-10-06T09:35|zephyrine|qw-2|ship|quillwork|pi|model-b|medium|direct-PR|https://github.com/acme/quillwork/pull/6
+2026-10-06T09:35|zephyrine|qw-3|ship|quillwork|pi|model-b|medium|direct-PR|https://github.com/acme/quillwork/pull/7
+2026-10-06T09:35|beta|b-1|ship|b|codex|parked-model|medium|direct-PR|
+EOF
+  out=$(FM_HOME="$home" "$DASH" build) || fail "build failed: $out"
+  page="$home/state/dashboard/index.html"
+  text=$(page_text "$page")
+  for want in "Who does the work Harness · model Running Merged, 7 days First pass" \
+    "claude · model-a 1 0 –" "pi · model-b 0 2 50%" "zephyrine: pi · lead-model-z" "Recorded since 2026-10-06"; do
+    case "$text" in *"$want"*) ;; *) fail "page text lacks '$want': $text" ;; esac
+  done
+  case "$text" in *parked-model*|*parked-lead*) fail "a parked home shows in Who does the work: $text" ;; esac
+  # No lane record yet: the section says so and Missing data names the file.
+  : > "$home/data/metrics/lanes.tsv"
+  FM_HOME="$home" "$DASH" build >/dev/null || fail "build with an empty lane record failed"
+  text=$(page_text "$page")
+  for want in "Who does the work No record yet." "data/metrics/lanes.tsv : empty"; do
+    case "$text" in *"$want"*) ;; *) fail "page text lacks '$want': $text" ;; esac
+  done
+  pass "Who does the work groups lanes by harness and model, joins merges by PR URL, and leaves out parked homes"
+}
+
 test_the_page_answers_the_questions_with_the_fixture_numbers
 test_totals_count_only_work_that_waits
 test_missing_or_malformed_sources_hide_only_their_part
+test_who_does_the_work_groups_lanes_by_harness_and_model
 test_merged_today_is_live_from_one_github_search
 test_serve_answers_the_page_and_nothing_else
