@@ -2,7 +2,7 @@
 # fm-mem-protection-install.sh - install this host's memory-protection policy.
 #
 # The policy has three host-side parts, all reproducible from this tracked script:
-#   1. earlyoom, configured to kill the largest process once available memory
+#   1. earlyoom, configured to select by adjusted oom_score once available memory
 #      falls below 5 percent, preferring node/pytest/acceptance/vitest work and
 #      excluding omp, sshd, dockerd, herdr, or clickhouse-server.
 #   2. a systemd user timer running bin/fm-mem-alert.sh once a minute from the

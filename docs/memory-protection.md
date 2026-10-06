@@ -1,21 +1,23 @@
 # Memory protection
 
 A runaway worker or test can allocate tens of gigabytes, drive the host into swap, and freeze every other lane on the machine.
-This document owns the four protections a firstmate home installs against that, and the exact commands to inspect, prove, and revert them.
+This document owns the operator setup and safety boundaries for the four protections; each script's header and help own its exact interface, and the installer generates host configuration.
 
 The four protections are independent:
 
 1. **Memory boxes.** Every worker launch and every test script runs inside its own cgroup v2 memory scope with a hard cap and zero swap growth.
-2. **Kernel-side OOM policy.** earlyoom kills the largest process once available memory falls below 5 percent, preferring test-shaped work and excluding the fleet's own infrastructure.
+2. **Host OOM policy.** earlyoom selects a victim by adjusted `oom_score` once available memory falls below 5 percent, preferring test-shaped work and excluding the fleet's own infrastructure.
 3. **Heavy-suite routing.** Acceptance, end-to-end, and full-regression runs are refused on a workstation whose config routes them off-host, and the campaign runner is named instead.
 4. **One-minute alert.** A systemd user timer queues one firstmate note naming the top memory consumer whenever memory passes the alert threshold.
 
 `bin/fm-mem-protection-install.sh` installs parts 2, 3, and 4.
-Part 1 is always installed by `bin/fm-spawn.sh` and `bin/fm-test-run.sh`; it needs no host change beyond a working systemd user manager.
+Part 1 is enforced by `bin/fm-spawn.sh` and `bin/fm-test-run.sh`.
 
 ## Memory boxes
 
 `bin/fm-mem-box.sh` is the single owner of the box.
+Execution requires Linux with cgroup v2 memory control and a working systemd user manager able to create memory-limited scopes; worker spawning and runner execution refuse on macOS and other hosts without these capabilities.
+The spawn path probes this capability before creating a worker endpoint, and the wrapper checks again before executing its payload.
 
 `bin/fm-spawn.sh` re-execs each worker's pane shell through the box before any launch work, so the agent and everything it spawns - builds, tests, a project's acceptance suite - share one bounded, swap-free scope.
 `bin/fm-test-run.sh` boxes each behavior-test script the same way, so scripts selected directly through the runner are bounded too.
@@ -27,18 +29,11 @@ Part 1 is always installed by `bin/fm-spawn.sh` and `bin/fm-test-run.sh`; it nee
 The default cap is 8 GiB.
 `MemorySwapMax=0` keeps a boxed process out of swap, so an over-limit allocation is killed at the box boundary instead of thrashing the host.
 
-Per-lane caps are configured in the home's gitignored `config/memory-box`, one `key=value` per line:
-
-```
-default=8G
-worker=8G
-test=8G
-heavy=8G
-```
-
-`<size>` is a positive decimal byte count with an optional `K`/`M`/`G`/`T` suffix (1024-based).
+Per-lane caps are configured in the home's gitignored `config/memory-box`; [`fm-mem-box.sh`'s header](../bin/fm-mem-box.sh) owns the format and size syntax.
 A malformed value is a hard error, never an inferred default.
-`FM_MEM_BOX_CAP` overrides every configured cap for one invocation.
+`FM_MEM_BOX_CAP` overrides the configured cap for one invocation and is removed from the payload's environment so descendants resolve their own lane caps.
+Worker panes receive the spawning home's resolved home, configuration directory, and worker cap explicitly rather than inheriting policy from the pane daemon.
+The test runner resolves its test cap before parallel-worker environment cleanup and passes it to each box, so serial and concurrent runs use the same cap.
 
 Lane names in use are `worker` (agent panes) and `test` (behavior-test scripts).
 A `heavy` lane is the declared entry point for a project's acceptance or E2E suite; it consults the heavy-suite guard before running.
@@ -46,25 +41,17 @@ A `heavy` lane is the declared entry point for a project's acceptance or E2E sui
 A host that cannot delegate a cgroup v2 memory scope refuses execution and names the missing cgroup v2 delegation or systemd user manager capability.
 
 Boxes are per-process-tree, not hierarchical per-lane: a boxed test runner that launches a worker gets a sibling scope for that worker, each with its own cap.
-The aggregate is therefore not bounded by any single box, which is why the alert and the kernel-side OOM policy exist alongside the boxes.
+The aggregate is therefore not bounded by any single box, which is why the alert and the host OOM policy exist alongside the boxes.
 
-## Kernel-side OOM policy
+## Host OOM policy
 
-`bin/fm-mem-protection-install.sh install` writes `/etc/default/earlyoom` and enables the `earlyoom` service:
+`bin/fm-mem-protection-install.sh install` writes `/etc/default/earlyoom` and enables the userspace `earlyoom` service.
 
 The installer requires an installed earlyoom version supporting `--ignore` and refuses incompatible versions before changing host configuration or services.
 
-```
-EARLYOOM_ARGS="-m 5 -s 100 -r 60 --prefer '^(node|nodejs|MainThread|pytest|vitest|acceptance|playwright|cypress|npm|npx)' --ignore '^(omp|sshd|dockerd|containerd|herdr|clickhouse|systemd|dbus-daemon|Xorg|gnome-shell|tmux|earlyoom)'"
-```
-
-- `-m 5` acts once available memory falls below 5 percent of total; earlyoom then kills the process with the highest `oom_score`, which tracks resident memory.
-- `-s 100` effectively ignores swap usage, so available RAM below 5 percent alone triggers action.
-- `--prefer` adds 300 to `oom_score` for test-shaped work.
-- `--ignore` excludes omp, sshd, dockerd, herdr, clickhouse-server, the system daemons, and tmux from victim selection.
-
-The match is against the basename in `/proc/PID/comm`, which the kernel truncates to 15 bytes, so the longer entries are matched by prefix.
-Node.js renames its main thread to `MainThread`, so that name is in the prefer list; without it `node`, `vitest`, and `acceptance.cjs` runs would never match.
+Available RAM below 5 percent alone triggers action: the generated `-s 100` setting effectively ignores swap usage.
+Victim selection prefers node, pytest, acceptance, and vitest work, with absolute `--ignore` exclusions for omp, sshd, dockerd, herdr, clickhouse-server, the system daemons, and tmux.
+The installer's `print` command is the authoritative preview of generated defaults, including the exact preference and exclusion expressions; its [source comments](../bin/fm-mem-protection-install.sh) explain process-name matching constraints.
 
 `fm-mem-protection-install.sh status` reports the installed version, the enabled and active state, and the effective `EARLYOOM_ARGS`.
 
@@ -101,10 +88,12 @@ The required promotion-acceptance re-run is performed as a separate campaign tas
 ## One-minute alert
 
 `bin/fm-mem-alert.sh` samples `/proc/meminfo` once a minute.
-When used memory passes the threshold it queues one firstmate note naming the top process by resident set size.
+When used memory reaches the threshold it queues one firstmate note naming the top process by resident set size.
 
 The alert threshold is fixed at 85 percent.
 The check fires once per upward crossing and re-arms when memory drops below 85 percent.
+Used memory is the integer percentage computed from `MemTotal` minus `MemAvailable`.
+Alert emission and armed/fired state persistence failures return an error rather than reporting a successful crossing or re-arm.
 `fm-mem-alert.sh check --print` shows the alert body for the current host without emitting or changing state; `fm-mem-alert.sh status` reports the threshold, current sample, and armed/fired state.
 
 `bin/fm-mem-protection-install.sh install` writes `fm-mem-alert.service` and `fm-mem-alert.timer` into the systemd user unit directory and enables the timer with `OnUnitActiveSec=1min`.
@@ -118,13 +107,13 @@ bin/fm-mem-protection-install.sh install    # apply parts 2, 3, and 4 (sudo for 
 bin/fm-mem-protection-install.sh status     # current state of every part
 ```
 
-`install` is idempotent.
+`install` is idempotent and reports configuration or unit-write failures before announcing success for that part; it does not roll back parts already applied.
 It backs up an existing `/etc/default/earlyoom` to `/etc/default/earlyoom.fm-backup` before replacing it.
 The installer emits a host-change record with the prior earlyoom enabled/active state and exact manual reversal commands; save that output with the host-change evidence.
 To reverse manually, restore the defaults if a backup exists and disable the alert timer:
 
 ```sh
-sudo cp -p /etc/default/earlyoom.fm-backup /etc/default/earlyoom
+[ ! -f /etc/default/earlyoom.fm-backup ] || sudo cp -p /etc/default/earlyoom.fm-backup /etc/default/earlyoom
 systemctl --user disable --now fm-mem-alert.timer
 ```
 
@@ -145,4 +134,5 @@ bin/fm-mem-alert.sh status
 bin/fm-mem-protection-install.sh status
 ```
 
-A quick end-to-end proof of the box is an allocation above the cap that dies inside the box while the host stays responsive: `bin/fm-mem-box.sh exec test -- node -e 'const a=[];while(1)a.push(Buffer.alloc(1<<20))'` with `FM_MEM_BOX_CAP` set below the host's free memory.
+A quick end-to-end proof of the box is an allocation above the cap that dies inside the box while the host stays responsive: `bin/fm-mem-box.sh exec test -- node -e 'const a=[];while(1)a.push(Buffer.alloc(1<<20,1))'` with `FM_MEM_BOX_CAP` set below the host's free memory.
+The nonzero fill touches every allocated page so the proof exercises resident memory rather than untouched virtual allocations.

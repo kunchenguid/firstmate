@@ -64,6 +64,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 The first mate detects and offers to install supported missing tools after you approve.
 Backend-specific setup is linked in [Documentation](#documentation).
+Worker and test execution also requires the host capabilities described under [Toolchain](docs/configuration.md#toolchain).
 
 ### Recommended harnesses
 

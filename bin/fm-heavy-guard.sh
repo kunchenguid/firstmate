@@ -4,7 +4,8 @@
 # Heavy suites (acceptance, end-to-end, and full-CI walks) are the ones that
 # leak tens of gigabytes and thrash a workstation. When a home routes them to a
 # remote campaign VM, this guard refuses them locally and names where to run
-# them, so a worker cannot start one by accident.
+# them at guarded launch boundaries. Arbitrary commands inside a worker shell
+# remain bounded by that worker's memory box (docs/memory-protection.md).
 #
 # Usage:
 #   fm-heavy-guard.sh status

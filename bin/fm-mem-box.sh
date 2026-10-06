@@ -32,7 +32,7 @@
 #                                with an optional K/M/G/T suffix (1024-based).
 #
 # Environment:
-#   FM_MEM_BOX_CAP        explicit byte cap; wins over every configured cap.
+#   FM_MEM_BOX_CAP        one-invocation size override; wins over configured caps.
 #   FM_CONFIG_OVERRIDE    config directory override (as elsewhere in bin/).
 #   FM_MEM_BOX_LANES      space-separated lane names for `check` (optional).
 #
