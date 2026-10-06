@@ -1144,11 +1144,11 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       "$mode: the replacement launch left the stale scout prohibition readable at face value"
     case "$mode" in
       direct-PR)
-        rule="1. Never push to the default branch (push only your \`fm/$id\` branch). You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly say you may merge; (b) the captain or firstmate gave you the word to merge in this conversation." ;;
+        rule="1. Never push to the default branch (push only your \`fm/$id\` branch). You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly state the captain has authorized you to merge; (b) the captain gave you the word to merge in this conversation. Firstmate's own word is not authorization and never justifies a merge." ;;
       local-only)
         rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`." ;;
       *)
-        rule="1. Never push to the default branch. You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly say you may merge; (b) the captain or firstmate gave you the word to merge in this conversation." ;;
+        rule="1. Never push to the default branch. You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly state the captain has authorized you to merge; (b) the captain gave you the word to merge in this conversation. Firstmate's own word is not authorization and never justifies a merge." ;;
     esac
     assert_grep "$rule" "$launch" \
       "$mode: the replacement launch did not receive the current ship push and merge safety rule"

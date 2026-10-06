@@ -295,7 +295,7 @@ ROWS
 }
 
 test_worker_briefs_include_post_merge_verification_and_decision_context() {
-  local home id brief
+  local home id brief base_brief
   home="$TMP_ROOT/post-merge-rules-home"
   mkdir -p "$home/data"
   for mode in no-mistakes direct-PR; do
@@ -303,19 +303,40 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode brief scaffold failed"
     brief="$home/data/$id/brief.md"
-    assert_grep "You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly say you may merge; (b) the captain or firstmate gave you the word to merge in this conversation." "$brief" \
-      "$mode brief must grant a worker merge only under explicit authorization"
+    assert_grep "You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly state the captain has authorized you to merge; (b) the captain gave you the word to merge in this conversation." "$brief" \
+      "$mode brief must grant a worker merge only under the captain's explicit authorization"
+    assert_grep "Firstmate's own word is not authorization and never justifies a merge." "$brief" \
+      "$mode brief must state that firstmate's word is not merge authorization"
     assert_grep "If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first." "$brief" \
       "$mode brief must require asking, not guessing, when merge authority is unclear"
-    assert_grep "(i) verify in a disposable copy that the branch merges into the latest default branch without conflicts" "$brief" \
-      "$mode brief must require the conflict-free merge check"
-    assert_grep "(ii) run the full test suite on the merged tree and confirm zero failures beyond the default-branch baseline" "$brief" \
-      "$mode brief must test the merged tree against the default-branch baseline"
+    assert_grep "(i) verify in a disposable copy that the branch merges without conflicts into the default branch" "$brief" \
+      "$mode brief must require the conflict-free merge check against the PR target"
+    assert_grep "(ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of the default branch" "$brief" \
+      "$mode brief must test the merged tree against the target's baseline"
     assert_grep "(iii) end-to-end test and recalculate the target feature on the merged tree" "$brief" \
       "$mode brief must verify functionality after merge"
-    assert_grep "(iv) if step (iii) fails, revert to the state before the merge and report the failure" "$brief" \
-      "$mode brief must require rollback and reporting on failure"
+    assert_grep "(iv) if any of the mandatory post-merge steps fails after the merge, revert to the state before the merge and report the failure" "$brief" \
+      "$mode brief must require rollback and reporting on any post-merge verification failure"
+    assert_no_grep "if step (iii) fails" "$brief" \
+      "$mode brief must not limit rollback to step (iii) alone"
+    assert_grep "report the PR and stop there, awaiting authorization" "$brief" \
+      "$mode brief must default to reporting the PR and awaiting authorization"
+    assert_no_grep "You are finished" "$brief" \
+      "$mode brief must not blanket-stop an authorized worker before the merge checks"
     assert_no_grep "Never merge a PR" "$brief" "$mode brief must not forbid all worker merges"
+  done
+
+  # A named PR base must be the branch the mandatory checks validate against, so
+  # a release/x PR is tested against release/x rather than the repository default.
+  for mode in no-mistakes direct-PR; do
+    id="brief-base-branch-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" --base-branch release/x >/dev/null 2>&1 \
+      || fail "$mode base-branch brief scaffold failed"
+    base_brief="$home/data/$id/brief.md"
+    assert_grep "(i) verify in a disposable copy that the branch merges without conflicts into the branch this PR targets (its base branch \`release/x\`)" "$base_brief" \
+      "$mode brief must merge-check against the PR's base branch"
+    assert_grep "(ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of that same base branch" "$base_brief" \
+      "$mode brief must baseline against the PR's base branch"
   done
 
   for kind in scout secondmate; do

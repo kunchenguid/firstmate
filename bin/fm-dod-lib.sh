@@ -190,23 +190,23 @@ fm_brief_base_branches() {  # <brief>
 
 fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-}
-  local branch=${3:-fm/$id} target='the default branch'
+  local branch=${3:-fm/$id} target='the default branch' merge_target='the default branch' baseline_target='the default branch'
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_ship_rule_one || return 1
-  [ -z "$base" ] || target="the base branch \`$base\` or the default branch"
+  [ -z "$base" ] || { target="the base branch \`$base\` or the default branch"; merge_target="the branch this PR targets (its base branch \`$base\`)"; baseline_target="that same base branch"; }
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
     return 0
   fi
   case "$mode" in
     direct-PR)
-      printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly say you may merge; (b) the captain or firstmate gave you the word to merge in this conversation. If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first. Once you are authorized to merge, these four steps are mandatory: (i) verify in a disposable copy that the branch merges into the latest default branch without conflicts; (ii) run the full test suite on the merged tree and confirm zero failures beyond the default-branch baseline; (iii) end-to-end test and recalculate the target feature on the merged tree; (iv) if step (iii) fails, revert to the state before the merge and report the failure."
+      printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly state the captain has authorized you to merge; (b) the captain gave you the word to merge in this conversation. Firstmate's own word is not authorization and never justifies a merge. If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first. Once you are authorized to merge, these four steps are mandatory: (i) verify in a disposable copy that the branch merges without conflicts into $merge_target; (ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of $baseline_target; (iii) end-to-end test and recalculate the target feature on the merged tree; (iv) if any of the mandatory post-merge steps fails after the merge, revert to the state before the merge and report the failure."
       ;;
     local-only)
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
       ;;
     no-mistakes)
-      printf '%s\n' "1. Never push to $target. You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly say you may merge; (b) the captain or firstmate gave you the word to merge in this conversation. If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first. Once you are authorized to merge, these four steps are mandatory: (i) verify in a disposable copy that the branch merges into the latest default branch without conflicts; (ii) run the full test suite on the merged tree and confirm zero failures beyond the default-branch baseline; (iii) end-to-end test and recalculate the target feature on the merged tree; (iv) if step (iii) fails, revert to the state before the merge and report the failure."
+      printf '%s\n' "1. Never push to $target. You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly state the captain has authorized you to merge; (b) the captain gave you the word to merge in this conversation. Firstmate's own word is not authorization and never justifies a merge. If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first. Once you are authorized to merge, these four steps are mandatory: (i) verify in a disposable copy that the branch merges without conflicts into $merge_target; (ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of $baseline_target; (iii) end-to-end test and recalculate the target feature on the merged tree; (iv) if any of the mandatory post-merge steps fails after the merge, revert to the state before the merge and report the failure."
       ;;
     *)
       echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
@@ -469,10 +469,9 @@ The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft$pr_base.
 Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
+Then append \`done [at=<epoch>]: PR {url}\` to the status file. You may merge the PR only when this task's instructions explicitly state the captain has authorized you to merge or the captain gave you the word to merge in this conversation; firstmate's own word is not authorization. When that authorization holds, continue to perform Rule 1's mandatory post-merge verification, merge the PR, and report the merge; otherwise the configured merge authority decides and firstmate relays the outcome, and you report the PR and stop there, awaiting authorization. If you cannot tell whether you are authorized, do not guess, do not merge, and append a needs-decision asking first.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
-You may merge the PR only when this task's instructions say you may or the captain or firstmate gave you the word in this conversation; otherwise the configured merge authority decides and firstmate relays the outcome. When you are authorized to merge, follow Rule 1's complete post-merge verification and rollback requirements.
 Do NOT run /no-mistakes.
 EOF
       ;;
@@ -505,10 +504,9 @@ EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
+Then append \`done [at=<epoch>]: PR {url} checks green\` to the status file. You may merge the PR only when this task's instructions explicitly state the captain has authorized you to merge or the captain gave you the word to merge in this conversation; firstmate's own word is not authorization. When that authorization holds, continue to perform Rule 1's mandatory post-merge verification, merge the PR, and report the merge; otherwise the configured merge authority decides and firstmate relays the outcome, and you report the PR and stop there, awaiting authorization. If you cannot tell whether you are authorized, do not guess, do not merge, and append a needs-decision asking first.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
-You may merge the PR only when this task's instructions say you may or the captain or firstmate gave you the word in this conversation; otherwise the configured merge authority decides and firstmate relays the outcome. When you are authorized to merge, follow Rule 1's complete post-merge verification and rollback requirements.
 EOF
       ;;
     *)
