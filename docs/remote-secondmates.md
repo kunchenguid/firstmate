@@ -589,7 +589,7 @@ The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
 
 The failure appends one `blocked` line to the parent status stream, which opens a decision.
-The line records the reader position, the retirement count, and the reason: the cursor offset, the first 12 characters of the prefix hash, and how many times the route has been retired.
+The line records the reason, the reader position (the cursor offset and the first 12 characters of the prefix hash), and the retirement count (how many times the route has been retired).
 Reading the same break again, with the cursor where it was and the count unchanged, appends nothing.
 A later break at a different reader position, or after another retirement, appends a new `blocked` line and opens the decision again.
 A line written before that position was recorded does not match, so the next break appends the new line once.
