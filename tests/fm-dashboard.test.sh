@@ -100,6 +100,7 @@ test_the_page_answers_the_questions_with_the_fixture_numbers() {
     "Projects: quillwork" "Main" "Projects: alpha"; do
     case "$text" in *"$want"*) ;; *) fail "page text lacks '$want': $text" ;; esac
   done
+  ! grep -q '<details open' "$page" || fail "a work list starts open"
   grep -q '<h3>zephyrine</h3>' "$page" || fail "a registered home with no metrics rows has no card"
   grep -q 'class="q bad"><span>First-pass merges' "$page" || fail "a missed first-pass target is not marked as a miss"
   pass "the page answers the questions with the fixture's numbers"
@@ -134,8 +135,15 @@ for path in ('state/', 'index.html/..', '../data/metrics/prs.tsv', 'data/metrics
 PY
 )
   [ "$got" = "$(printf '200 True\n404\n404\n404\n404')" ] || fail "serve answers were not page-then-404s: $got"
+  # An old page is answered at once, as it is, while a rebuild runs behind it.
+  printf '<p>old page<!--age--></p>\n' > "$home/state/dashboard/index.html"
+  touch -d '-5 minutes' "$home/state/dashboard/index.html"
+  got=$(python3 -c 'import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1], timeout=5).read().decode())' "$url")
+  case "$got" in *"old page · updated 3"[0-9][0-9]" s ago · refreshing"*) ;; *) fail "an old page was not answered at once: $got" ;; esac
+  for _ in $(seq 1 600); do grep -q 'old page' "$home/state/dashboard/index.html" || break; sleep 0.1; done
+  grep -q 'Fleet dashboard' "$home/state/dashboard/index.html" || fail "the background rebuild did not replace the old page"
   kill "$SERVE_PID" 2>/dev/null; SERVE_PID=
-  pass "serve returns the built page with 200 and 404 for every other path"
+  pass "serve returns the page with 200 at once, rebuilds an old one behind it, and 404s every other path"
 }
 
 test_missing_or_malformed_sources_hide_only_their_part() {

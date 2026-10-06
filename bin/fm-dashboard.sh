@@ -32,9 +32,10 @@
 #   fm-dashboard.sh serve [--bind ADDR] [--port N]
 # build (the default) writes $FM_HOME/state/dashboard/index.html and prints its
 # path. serve runs a small read-only web server (python3 stdlib, IPv4) that
-# answers GET or HEAD for / and /index.html only, rebuilding the page when the
-# last build is older than 60 seconds; every other path is 404. It serves one
-# request at a time, so concurrent visitors share one rebuild. It prints
+# answers GET or HEAD for / and /index.html only; every other path is 404. It
+# answers at once with the last built page, marked "updated N s ago", and starts
+# one background rebuild when that page is older than 60 seconds; only the very
+# first load, with no page yet, waits for a build. It prints
 # `serving http://ADDR:PORT/` once listening. ADDR defaults to 127.0.0.1 and
 # PORT to 8787; port 0 picks a free port. There is no authentication: reach is
 # whatever the bind address exposes. Nothing here schedules a refresh.
@@ -63,9 +64,24 @@ case "$cmd" in
     done
     case "$port" in ''|*[!0-9]*) usage ;; esac
     exec python3 - "$0" "$FM_HOME" "$page" "$bind" "$port" <<'PY'
-import http.server, os, subprocess, sys, time
+import http.server, os, subprocess, sys, threading, time
 SCRIPT, HOME, PAGE, BIND, PORT = sys.argv[1:6]
 MAX_AGE = 60
+building = threading.Lock()
+last_error = b''
+
+def build():  # call holding `building`; the build replaces the page in one rename
+    global last_error
+    try:
+        r = subprocess.run(['bash', SCRIPT, 'build'], env=dict(os.environ, FM_HOME=HOME),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        last_error = r.stderr if r.returncode else b''
+    finally:
+        building.release()
+
+def age():
+    try: return time.time() - os.path.getmtime(PAGE)
+    except OSError: return None
 
 class Handler(http.server.BaseHTTPRequestHandler):
     timeout = 10  # an idle preconnect must not hold the one-at-a-time server
@@ -83,24 +99,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.split('?', 1)[0] not in ('/', '/index.html'):
             return self.send(404, b'not found\n', 'text/plain; charset=utf-8')
-        try: fresh = time.time() - os.path.getmtime(PAGE) < MAX_AGE
-        except OSError: fresh = False
-        if not fresh:
-            r = subprocess.run(['bash', SCRIPT, 'build'], env=dict(os.environ, FM_HOME=HOME),
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            if r.returncode != 0:
-                return self.send(500, b'dashboard build failed: ' + r.stderr, 'text/plain; charset=utf-8')
-        with open(PAGE, 'rb') as f: self.send(200, f.read(), 'text/html; charset=utf-8')
+        a = age()
+        if a is None:  # the first load ever waits for the first page
+            with building: pass  # a build already under way finishes first
+            if age() is None:
+                building.acquire(); build()
+            a = age()
+            if a is None:
+                return self.send(500, b'dashboard build failed: ' + last_error, 'text/plain; charset=utf-8')
+        elif a >= MAX_AGE and building.acquire(blocking=False):
+            threading.Thread(target=build, daemon=True).start()
+        note = f' · updated {int(a)} s ago' + (' · refreshing' if building.locked() else '')
+        if last_error: note += ' · last refresh failed, showing the last good page'
+        with open(PAGE, 'rb') as f:
+            body = f.read().replace(b'<!--age-->', note.encode(), 1)
+        self.send(200, body, 'text/html; charset=utf-8')
     do_HEAD = do_GET
 
-# ponytail: one request at a time; a threaded server needs a build lock first.
+# ponytail: one request at a time; rebuilds run on a side thread, one at a time.
 srv = http.server.HTTPServer((BIND, int(PORT)), Handler)
 print(f'serving http://{BIND}:{srv.server_address[1]}/', flush=True)
 try: srv.serve_forever()
 except KeyboardInterrupt: pass
 PY
     ;;
-  -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) usage ;;
 esac
 
@@ -327,8 +350,8 @@ def row(main, meta='', right=''):
 STATE_WORDS = {'working': ('Working', 'ok'), 'paused': ('Waiting', 'warn'), 'blocked': ('Blocked', 'bad'),
                'needs-decision': ('Needs a decision', 'bad'), 'done': ('Finished', 'ok'), 'failed': ('Failed', 'bad'),
                'unknown': ('Status unclear', 'warn')}
-LEAD_WORDS = {'captain_decision': ('Waiting on you', 'warn'), 'externally_held': ('Waiting on outside', 'warn'),
-              'unknown': ('Records disagree', 'bad'), 'working': ('Working', 'ok'), 'idle': ('Idle', ''),
+LEAD_WORDS = {'captain_decision': ('Waiting on you', 'warn'), 'externally_held': ('Waiting on someone else', 'warn'),
+              'unknown': ('Records need tidy-up', 'bad'), 'working': ('Working', 'ok'), 'idle': ('Idle', ''),
               'stale': ('Not responding', 'bad'), 'dead': ('Stopped', 'bad')}
 
 # --- page ----------------------------------------------------------------
@@ -500,10 +523,12 @@ if snap is not None:
         h = home_of_task(i.get('id', ''))
         rs.append(row(f'{esc(i.get("name") or i.get("id"))}{why}', esc('Main' if h == 'main' else h), chip(sw, stone) + extra))
     rs.insert(0, '<p class="empty">Second mate work shows here while it is working; paused or blocked lanes count only in the open lanes on each home card.</p>')
-    L.append(details('Working now', len(in_flight), ''.join(rs), True))
+    L.append(details('Working now', len(in_flight), ''.join(rs)))
     rs = [row(link(m.get('task') or m.get('url'), m.get('url')), esc(owner_home(m.get('owner'))), chip('Merge approval', 'warn')) for m in merge_asks]
     rs += [row(esc(d.get('summary') or d.get('id')), esc('Main' if owner_home(d.get('owner')) == 'main' else d.get('owner')), chip('Decision', 'warn')) for d in decisions]
-    L.append(details('Waiting on you', len(rs), ''.join(rs), bool(rs)))
+    # The snapshot carries no ask time; record order lists the oldest first.
+    more = f'<details class="more"><summary>show all {len(rs)}</summary>{"".join(rs[5:])}</details>' if len(rs) > 5 else ''
+    L.append(details('Waiting on you', len(rs), ''.join(rs[:5]) + more))
     rs = []
     real = lambda v: v not in (None, '', '-')
     for g in gates:
@@ -578,6 +603,7 @@ details{background:var(--card);border:1px solid var(--line);border-radius:14px;m
 summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 18px;font-weight:600}
 summary::-webkit-details-marker{display:none}summary::before{content:"›";display:inline-block;margin-right:10px;color:var(--faint);transition:transform .15s}
 details[open] summary::before{transform:rotate(90deg)}summary span:first-child{flex:1}
+.more{border:0;border-radius:0;margin:0;background:none}.more summary{font-weight:500;color:var(--faint);padding:10px 18px}
 .cnt{font-size:13px;font-weight:600;color:var(--soft);background:var(--bg);border-radius:999px;padding:1px 10px}
 .list{border-top:1px solid var(--line)}
 .row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,9em) auto;gap:4px 14px;align-items:center;padding:10px 18px;border-bottom:1px solid var(--line);font-size:14px}
@@ -592,7 +618,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 stamp = NOW.strftime('%a %d %b %Y, %H:%M')
 doc = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet dashboard</title><style>{CSS}</style></head><body><main>
-<header><h1>Fleet dashboard</h1><span class="muted small">Built {esc(stamp)}</span></header>
+<header><h1>Fleet dashboard</h1><span class="muted small">Built {esc(stamp)}<!--age--></span></header>
 {"".join(S)}</main></body></html>
 '''
 with open(OUT, 'w', encoding='utf-8') as f: f.write(doc)
