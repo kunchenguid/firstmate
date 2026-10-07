@@ -13,6 +13,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| Which optional features this home uses (lite or normal) | [Feature switches](#feature-switches-configfeatures) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -127,6 +128,30 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md).
 Edit it like any prompt when the fleet is empty.
 While tasks are in flight, dispatch shared-repo edits to a crewmate.
+
+## Feature switches (config/features)
+
+The optional local, gitignored `config/features` turns whole optional features off for one home, so a smaller team fleet loads and runs only what it uses.
+Each line is `<name>=on` or `<name>=off`; a missing file or a missing line means `on`, so a home that never declared switches keeps every feature.
+`on` never activates a feature by itself: a feature with its own opt-in, such as a Relay pairing token, `config/trace-context`, `config/voice-*`, or a registered secondmate, still needs that opt-in, while `off` overrides it.
+
+| Switch | What `off` turns off |
+| --- | --- |
+| `secondmate` | Spawning secondmate homes, local or remote, and the `data/secondmates.md` section of the session-start digest. |
+| `relay` | Relay public mentions on X and Discord, even with a pairing token in `.env`; bootstrap removes the generated Relay artifacts. |
+| `voice-ide` | The spoken relay, `fm-inbox.sh say` and `ask`, and IDE extension bindings (`bin/fm-extension.sh`). |
+| `no-mistakes` | The `no-mistakes` delivery mode in briefs, spawns, and promotions, and the bootstrap requirement for the no-mistakes tool; a project registered for it ships `direct-PR`. |
+| `local-only` | The `local-only` delivery mode and scout-to-ship promotion. |
+| `contributions` | Published-contribution observation armed at session start. |
+| `process-events` | Condition-action watches and trusted extension adapters; the built-in Lavish board, quota, and reply sources stay available. |
+| `trace` | W3C trace-context propagation, even with `config/trace-context` present. |
+
+Two tracked presets live in [`docs/examples/team/`](examples/team/): `features-lite` switches every row above off and `features-normal` switches every row on.
+`bin/fm-features.sh preset lite|normal` writes one into `config/features`, `bin/fm-features.sh set <name> on|off` changes one switch, and `bin/fm-features.sh show` prints the effective values.
+A brand-new home - no `data/`, no other `config/` entry, and not a secondmate home - starts on the lite preset at its first session start; every other home is left as it is.
+When any switch is off, the session-start context digest lists the switched-off features so the first mate leaves their skills and commands alone.
+A task already in flight keeps its recorded delivery mode when a switch changes; relaunch is never refused.
+`bin/fm-features-lib.sh` owns the names, format, and verdict.
 
 ## Calm preference (config/calm)
 

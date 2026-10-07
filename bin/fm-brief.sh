@@ -120,6 +120,8 @@
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
 # Ship tasks route new durable project memory through fm-ensure-agents-md.sh.
+# Ship briefs carry a short engineering-discipline section (adapted from the
+# pstack principles) whose last item points the worker at the comment-audit skill.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -157,6 +159,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-features-lib.sh
+. "$SCRIPT_DIR/fm-features-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -277,6 +281,7 @@ if [ "$KIND" = ship ]; then
       exit 1 ;;
     *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
   esac
+  fm_feature_mode_allowed "$MODE" fm-brief.sh || exit 1
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
@@ -792,6 +797,14 @@ $ASK_USER_BLOCK
 $SHARED_INFRA_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
+
+# Engineering discipline
+- Read the code paths your change touches before editing them, and settle the data shape and design before implementing anything that crosses a function boundary.
+- Make the smallest change that solves the task; delete dead code and needless layers before adding new ones.
+- Reproduce a defect first and fix its root cause, not the symptom.
+- Split multi-step work into small units that each end in a check, and pass each check before starting the next.
+- Prove behavior with the real artifact - the running command, page, or test output - never "it compiles"; the acceptance-evidence section below owns what the done line carries.
+- Before treating the work as review-ready, run the comment-audit pass in \`$FM_ROOT/.agents/skills/comment-audit/SKILL.md\` over your diff.
 
 # Project memory
 Only if this task produced new durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

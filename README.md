@@ -140,6 +140,20 @@ Pi's `/supervision-model` command pins a cheaper model and a shallower reasoning
 > alright merge it
 ```
 
+### Team machines (lite)
+
+This fork ships a team setup for teammates who run their own first mate on their own machine and quota.
+Hand [INSTALL.md](INSTALL.md) to the teammate's agent; it installs Firstmate with Codex as the first mate, Pi workers on the teammate's Codex quota, and the team crew-dispatch profiles.
+
+A new home starts on the **lite** preset, which keeps the core fleet - dispatch, supervision, recovery, isolated worktrees, the backlog, direct pull requests, away and quiet supervision, bearings and boards, quota-aware dispatch, and project management - and switches off secondmates, Relay, voice and IDE extensions, the no-mistakes pipeline, local-only delivery and scout promotion, contribution tracking, process-event sources, and trace propagation.
+A switched-off feature's procedures and rules are never loaded into the first mate's working context.
+`bin/fm-features.sh` turns any one back on, and `bin/fm-features.sh preset normal` turns them all on; an existing home keeps every feature.
+[Feature switches](docs/configuration.md#feature-switches-configfeatures) owns the details, [`docs/examples/team/`](docs/examples/team/) holds the presets, dispatch profiles, and project work principles, and [CONTEXT.md](CONTEXT.md) defines the terms.
+
+The team crew-dispatch profiles replace the earlier dispatch-axi resolver: `config/crew-dispatch.json` is the one dispatch policy, resolved per task against current quota.
+
+Every ship brief also hands its worker a short engineering discipline adapted from the pstack principles - read first, design before crossing a boundary, smallest change, root causes, verifiable units, real-artifact proof - plus a comment-audit pass before review.
+
 ### More backends
 
 Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
@@ -213,6 +227,8 @@ Firstmate's skills live in two separate places with different audiences:
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
+- [INSTALL.md](INSTALL.md) - agent-executable install for a team machine on the lite preset.
+- [CONTEXT.md](CONTEXT.md) - glossary of the team-setup terms: feature switch, preset, lite, normal, team machine.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, trusted external process-event adapter setup, the files you set, and harness support.
 - [docs/extension-bindings.md](docs/extension-bindings.md) - maintainer architecture for the narrow trusted external `process-event-adapter/1` package, binding, handshake, and evidence boundary.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.

@@ -24,6 +24,7 @@
     "operator-example"
   ],
   "readmeSetupTargets": [
+    "INSTALL.md",
     "docs/configuration.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
@@ -579,6 +580,46 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/comment-audit/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/project-verification/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-operations/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "CONTEXT.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "INSTALL.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/examples/team/crew-dispatch.claude.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/team/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/team/features-lite",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/team/features-normal",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/team/project-principles.md",
+      "audience": "operator-example"
     }
   ]
 }

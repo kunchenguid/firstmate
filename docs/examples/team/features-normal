@@ -1,0 +1,11 @@
+# Firstmate normal preset: every feature available.
+# A feature that has its own opt-in (a Relay token, config/trace-context,
+# config/voice-*, a registered secondmate) still needs that opt-in.
+secondmate=on
+relay=on
+voice-ide=on
+no-mistakes=on
+local-only=on
+contributions=on
+process-events=on
+trace=on

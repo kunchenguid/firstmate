@@ -679,6 +679,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-features-lib.sh
+. "$SCRIPT_DIR/fm-features-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -920,6 +922,10 @@ else
   # firstmate's per-task decision, so they are required and closed-set validated
   # here rather than resolved from the project registry. Scouts deliver a report
   # and record no delivery posture; secondmate spawns hardcode theirs.
+  if [ "$KIND" = secondmate ] && ! fm_feature_enabled secondmate; then
+    echo "error: secondmate homes are switched off in this home (config/features); turn them on with bin/fm-features.sh set secondmate on" >&2
+    exit 1
+  fi
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
       echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
@@ -940,6 +946,7 @@ else
       exit 1
       ;;
     esac
+    fm_feature_mode_allowed "$MODE" fm-spawn.sh || exit 1
     case "$YOLO" in
     on | off) ;;
     *)

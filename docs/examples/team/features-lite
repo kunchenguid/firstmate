@@ -1,0 +1,10 @@
+# Firstmate lite preset: the core fleet only.
+# Turn one feature back on with: bin/fm-features.sh set <name> on
+secondmate=off
+relay=off
+voice-ide=off
+no-mistakes=off
+local-only=off
+contributions=off
+process-events=off
+trace=off

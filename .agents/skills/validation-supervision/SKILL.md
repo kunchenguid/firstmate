@@ -1,12 +1,14 @@
 ---
 name: validation-supervision
-description: Load when a ship starts or already has an active no-mistakes validation run, including a mid-run requirement change or finding, and before deciding or answering any ask-user finding.
+description: Load at intake on a no-mistakes-prod-only project, when a ship starts or already has an active no-mistakes validation run, including a mid-run requirement change or finding, and before deciding or answering any ask-user finding.
 user-invocable: false
 metadata:
   internal: true
 ---
 
 # Validation supervision
+
+On a `no-mistakes-prod-only` project, classify each task's surface at intake: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
 
 For a no-mistakes ship, the brief authorizes the same worker to start validation after its implementation commit without waiting for a steer; `bin/fm-dod-lib.sh` owns that contract and `harness-adapters` owns the invocation.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.

@@ -1136,6 +1136,15 @@ cmd_drain() {
 # ---------------------------------------------------------------- dispatch
 
 case "${1:-}" in
+  say | ask)
+    # shellcheck source=bin/fm-features-lib.sh
+    . "$FM_ROOT/bin/fm-features-lib.sh"
+    fm_feature_enabled_in "$CONFIG" voice-ide || {
+      echo "error: fm-inbox.sh $1 is switched off in this home (config/features voice-ide=off)" >&2
+      exit 1
+    } ;;
+esac
+case "${1:-}" in
   note)     shift; cmd_note "$@" ;;
   announce) shift; cmd_announce "$@" ;;
   reply)    shift; cmd_reply "$@" ;;

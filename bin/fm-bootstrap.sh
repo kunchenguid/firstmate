@@ -175,6 +175,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-features-lib.sh
+. "$SCRIPT_DIR/fm-features-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
@@ -832,6 +834,8 @@ missing_tool_diagnostic() {
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi"
+# A home with the no-mistakes feature switched off never needs the tool.
+fm_feature_enabled_in "$CONFIG" no-mistakes || COMMON_TOOLS=${COMMON_TOOLS/ no-mistakes/}
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -965,7 +969,9 @@ x_mode_setup() {
   cadence="$CONFIG/x-mode.env"
 
   token=
-  [ -f "$env_file" ] && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
+  # A relay=off feature switch reads as no token, so leftover artifacts are removed.
+  [ -f "$env_file" ] && fm_feature_enabled_in "$CONFIG" relay \
+    && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
 
   x_mode_remove_artifacts() {
     local failed=0
@@ -1422,7 +1428,8 @@ detect_local_tools() {
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
   fi
-  if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
+  if fm_feature_enabled_in "$CONFIG" no-mistakes \
+    && command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
@@ -1607,7 +1614,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # Adopt existing durable contribution links without making a network call.
   # Detection-only startup must never publish a check registration.
   if local_phase && command -v jq >/dev/null 2>&1 \
-    && [ -d "$DATA" ] && [ -x "$SCRIPT_DIR/fm-contributions.sh" ]; then
+    && [ -d "$DATA" ] && [ -x "$SCRIPT_DIR/fm-contributions.sh" ] \
+    && fm_feature_enabled_in "$CONFIG" contributions; then
     "$SCRIPT_DIR/fm-contributions.sh" arm --if-owned >/dev/null \
       || echo "MISSING: contribution observation could not be armed; coverage is unconfirmed"
   fi

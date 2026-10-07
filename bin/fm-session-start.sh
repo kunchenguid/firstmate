@@ -367,6 +367,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-features-lib.sh
+. "$SCRIPT_DIR/fm-features-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
@@ -706,6 +708,8 @@ print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 if [ "$READ_ONLY" -eq 0 ]; then
   if [ "$REEMIT" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
+    # A brand-new home starts on the lite feature preset; any other home is untouched.
+    "$SCRIPT_DIR/fm-features.sh" seed 2>&1 || true
   fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
   # A full locked start publishes this home's current structured summary.
@@ -1012,8 +1016,18 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
+FEATURES_OFF=
+for feature in $FM_FEATURE_NAMES; do
+  fm_feature_enabled_in "$CONFIG" "$feature" || FEATURES_OFF="$FEATURES_OFF $feature"
+done
+if [ -n "$FEATURES_OFF" ]; then
+  subsection "Feature switches (config/features)"
+  printf 'off:%s\n' "$FEATURES_OFF"
+  printf 'Do not load the skills or use the commands of a switched-off feature; bin/fm-features.sh owns the switches.\n'
+fi
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+fm_feature_enabled_in "$CONFIG" secondmate \
+  && print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"

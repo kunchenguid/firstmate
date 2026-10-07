@@ -22,7 +22,7 @@ Keep each registry description useful for identifying the project, but keep deli
 Do not turn the registry into project documentation.
 
 Before adding, cloning, creating, or registering any project in the main home, inspect the authoritative `data/secondmates.md` routing table and judge every existing natural-language `scope:` against the proposed project or domain.
-Apply `AGENTS.md` section 7's authoritative secondmate routing rules; if an existing scope owns that domain, route the new-project operation or work there instead of creating or registering a duplicate main-home clone.
+Apply the authoritative secondmate routing rules in `secondmate-operations`; if an existing scope owns that domain, route the new-project operation or work there instead of creating or registering a duplicate main-home clone.
 Absence from the main `data/projects.md` registry is never evidence that no second mate owns the domain.
 If the owning second mate cannot accept the route, report that concrete blocker or obtain an explicit captain redirection rather than silently duplicating the project in the main home.
 
@@ -44,7 +44,7 @@ Choose that posture when adding or creating the project:
 `direct-PR` is the default for a newly added or created remote-backed project when the captain specifies nothing, and a project with no remote defaults to `local-only`.
 State that resolved default while confirming the source, local name, and posture instead of asking the captain to choose from scratch, and record a flat mode instead whenever they ask for one.
 Explicit registry postures are never migrated or reinterpreted; an unannotated entry resolves to the fleet's `direct-PR` default (`bin/fm-project-mode.sh`).
-Registering a conditional policy is a one-time choice and never requires classifying any change; the per-task surface classification happens at each task's intake, and internal-only is never inferred from file location or project name.
+Registering a conditional policy is a one-time choice and never requires classifying any change; the per-task surface classification happens at each task's intake under `validation-supervision`, and internal-only is never inferred from file location or project name.
 
 The optional `+yolo` posture changes merge authority only and does not change the delivery mode.
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
@@ -87,6 +87,8 @@ Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.
+
+When the project's committed `AGENTS.md` lacks the team work-principles section in [`docs/examples/team/project-principles.md`](../../../docs/examples/team/project-principles.md), have the first ship on that project add it verbatim through `bin/fm-ensure-agents-md.sh`; firstmate never writes it into the project itself.
 
 ## Remove
 

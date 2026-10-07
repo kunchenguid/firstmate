@@ -1229,8 +1229,27 @@ def resolve_settings(options):
     return options
 
 
+def voice_switched_off(home):
+    """True when this home's voice-ide feature switch is off.
+
+    bin/fm-features-lib.sh owns the switch, so ask its command rather than
+    parse config/features a second time.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "fm-features.sh")
+    env = dict(os.environ, FM_HOME=home)
+    result = subprocess.run([script, "enabled", "voice-ide"], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            check=False)
+    return result.returncode == 1
+
+
 def main(argv):
     options = parse_args(argv)
+    if voice_switched_off(options.home or records.default_home()):
+        sys.stderr.write("fm-voice-relay: switched off in this home "
+                         "(config/features voice-ide=off)\n")
+        return 2
     try:
         resolve_settings(options)
         if options.self_test:

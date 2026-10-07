@@ -2547,6 +2547,16 @@ unset FM_PROCEVENT_CAPTURE_PINNED_INBOX FM_PROCEVENT_CAPTURE_ABSOLUTE_INBOX \
 { exec 8<&-; } 2>/dev/null || true
 { exec 9<&-; } 2>/dev/null || true
 
+# A process-events=off feature switch keeps the Lavish board, quota, and reply
+# sources but refuses condition-action watches and extension adapters.
+# shellcheck source=bin/fm-features-lib.sh
+. "$SCRIPT_DIR/fm-features-lib.sh"
+case "${1-}:${2-}" in
+  register:when | register-extension:*)
+    fm_feature_enabled process-events \
+      || die "process-event sources are switched off in this home (config/features); turn them on with bin/fm-features.sh set process-events on" ;;
+esac
+
 case "${1-}" in
   register)           shift; cmd_register "$@" ;;
   register-task)      shift; cmd_register_task "$@" ;;

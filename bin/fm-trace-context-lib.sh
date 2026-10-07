@@ -97,6 +97,9 @@
 # Strict W3C traceparent validator: version 00, 32-hex trace id, 16-hex span id,
 # 2-hex flags, with neither id all-zero. The regex lives in a variable because
 # bash 3.2 only honors an unquoted right-hand side for =~.
+# shellcheck source=bin/fm-features-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-features-lib.sh"
+
 fm_trace_context_valid() {  # <traceparent>
   local tp=$1
   local re='^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
@@ -134,7 +137,7 @@ fm_trace_context_enabled() {  # <config-dir>
       *) return 1 ;;
     esac
   fi
-  [ -f "$config_dir/trace-context" ]
+  [ -f "$config_dir/trace-context" ] && fm_feature_enabled_in "$config_dir" trace
 }
 
 # Echo the lock pid that owns the effective-state file's home, or fail when the

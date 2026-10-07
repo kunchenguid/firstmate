@@ -41,7 +41,7 @@
 #   local-only             local branch, no remote/PR, guarded local merge
 #   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate
 #                          classifies each task's surface at intake (the
-#                          project-management skill owns that classification).
+#                          validation-supervision skill owns that classification).
 #                          Mechanical output maps it to its most rigorous leg,
 #                          no-mistakes, so sync, seeding, and init treat such a
 #                          project as the remote-backed pipeline project it is.

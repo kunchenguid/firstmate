@@ -49,6 +49,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-features-lib.sh
+. "$SCRIPT_DIR/fm-features-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -112,6 +114,11 @@ case "$MODE" in
     exit 1 ;;
   *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
 esac
+fm_feature_enabled local-only || {
+  echo "error: fm-promote.sh: scout promotion is switched off in this home (config/features local-only=off); dispatch a fresh ship from the scout's report instead" >&2
+  exit 1
+}
+fm_feature_mode_allowed "$MODE" fm-promote.sh || exit 1
 case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;

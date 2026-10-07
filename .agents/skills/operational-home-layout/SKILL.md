@@ -19,7 +19,7 @@ README.md            public overview and development notes
 .claude/mods/        Claude Code mods (function-hooks plugins), committed; Calm's module may load through CLAUDE_CODE_ENABLE_FUNCTION_HOOKS or tengu_plugin_hooks_modules, but activates only when CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is exactly "1" and is otherwise a complete no-op (docs/calm.md)
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
-.env                 optional Relay pairing token (presence-gates section 14), mail-plane credentials (schema: docs/configuration.md "Mail plane"), and typed dispatch resolution key TYPESAFE_API_KEY (presence-gates bin/fm-dispatch-resolve.sh; docs/configuration.md "Typed dispatch resolution"); LOCAL, gitignored
+.env                 optional Relay pairing token (presence-gates Relay; `fmx-respond`), mail-plane credentials (schema: docs/configuration.md "Mail plane"), and typed dispatch resolution key TYPESAFE_API_KEY (presence-gates bin/fm-dispatch-resolve.sh; docs/configuration.md "Typed dispatch resolution"); LOCAL, gitignored
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/claude-permission-mode  optional one-token permission posture for every Claude worker launch: absent or "bypass" keeps --dangerously-skip-permissions, "auto" launches with --permission-mode auto; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Claude permission mode"
 config/claude-account config/pi-account  optional per-home worker account pin for Claude and Pi launches; LOCAL, gitignored, not inherited; absent keeps today's ambient account; present refuses a launch unless the pinned account resolves and is signed in (section 4 owns the refusal rule); see docs/configuration.md "Worker account pin"
@@ -88,7 +88,7 @@ state/               runtime records and signals; gitignored
   .branch-eligible-rows .branch-eligible-owner .main-eligible-rows  per-actor wake-row claims and branch-owner evidence; docs/watcher-continuity.md owns the acknowledgement contract
   .supervision-host*  supervision host process record, engine conversation, current turn scope and report receipts, and bounded ledger of every close and engine turn; bin/fm-supervision-host.sh owns them; never touch
   .lease-<task>        per-task supervision lease naming which actor (main or branch) may change that task; bin/fm-lease-lib.sh owns the contract the guarded scripts enforce
-  x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
+  x-watch.check.sh   generated Relay poll shim; present only when opted in (`fmx-respond`)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
   mail.check.sh      generated received-mail poll shim and its .check-trust binding; present only after bin/fm-mail-check.sh arm; report record .mail-check (mail schema: docs/configuration.md "Mail plane")
   .mail-seen .mail-woken .mail-retry .mail-retry-pos .mail-turn .mail-seen.lock  mail-plane poll cursor, emission journal, transient-fetch retry set, retry-scan position, contended-slot turn flag, and overlapping-poll lock; written only by bin/fm-mail.sh (mail schema: docs/configuration.md "Mail plane")
@@ -100,10 +100,10 @@ state/               runtime records and signals; gitignored
   reconcile-requests/ private open obligations to re-check a captain call whose board selection was `reconcile`; written only by bin/fm-captain-hold.sh, retired by its verify-then-decide outcomes or a normal answer that settles the call (`process-event-sources` and `captain-hold-lifecycle` skills; docs/captain-hold-lifecycle.md)
   when/              private condition->action watch specs, their trust bindings, and single-fire markers; written only by bin/fm-procevent-when.sh (`process-event-sources` skill)
   inbox/             captain notes captured out of band by bin/fm-inbox.sh, including the voice handover's queued requests; each note appends one `check` wake and stays pending until acknowledged with `bin/fm-inbox.sh drain --ack <id>`, which moves it to inbox/handled/; request-id reservations, announcement markers, and primary replies live beside the notes (bin/fm-inbox.sh; docs/voice-relay.md)
-  x-inbox/           generated Relay pending mention payloads; fmx-respond drains it (section 14)
-  x-context/         generated Relay durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
-  x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
-  public-followup/   generated private transport for promised public replies: retained open-loop registrations, typed terminal-result inbox, results staged for an owning home on another machine, accepted/rejected ledgers, and retirement receipts (section 14; bin/fm-public-followup.sh)
+  x-inbox/           generated Relay pending mention payloads; fmx-respond drains it
+  x-context/         generated Relay durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (`fmx-respond`; bin/fm-x-lib.sh)
+  x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (`fmx-respond`)
+  public-followup/   generated private transport for promised public replies: retained open-loop registrations, typed terminal-result inbox, results staged for an owning home on another machine, accepted/rejected ledgers, and retirement receipts (`fmx-respond`; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated Relay and offer-claim diagnostic dedupe markers
   .startup-network.*  status, report, per-step elapsed timings, inline-print claim, and lock for the deferred startup stage that runs network checks and the inactive-outcome scan off the digest's blocking path; bin/fm-startup-network.sh
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
