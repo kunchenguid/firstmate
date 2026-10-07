@@ -415,6 +415,13 @@
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __POLYTOKENBIN__ resolved, polytoken-verified executable for a polytoken launch
+#     __POLYTOKENCONFIG__ firstmate-owned per-task polytoken config dir (mirrored
+#                  operator config with the unattended permission posture enforced)
+#     __POLYTOKENSESSIONS__ firstmate-owned per-task sessions root (the daemon
+#                  writes the versioned `<root>-v1` sibling beside it)
+#     __POLYTOKENFACETS__ the worktree's `.polytoken/facets` dir carrying the
+#                  generated firstmate-worker facet (the project facet layer)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -463,6 +470,24 @@
 # seen and firstmate cannot answer it. That helper's header owns the structural
 # scope test for both shapes and every refusal; a failed registration stops this
 # spawn rather than launching a worker that would wedge on the dialog.
+# polytoken (the captain-approved TUI-pane-plus-REST hybrid) is the one harness
+# whose worker's unattended permission posture cannot ride a launch flag: a
+# per-task config dir is generated under state/ mirroring the operator's global
+# config with `default_permission_matcher` enforced to `bypass` (a project
+# config.yaml fully replaces the global config and no `new` flag reaches the
+# permission matcher, verified live). Its brief rides `--prompt` (auto-submitted
+# after the TUI attaches), its busy wiring is the worktree `.polytoken/hooks.json`
+# binding the verified pre_user_prompt / pre_model_turn (open) and stop (close)
+# events to a generated no-argv writer (handlers receive no argv, verified live),
+# and its control verbs ride the daemon REST API with the session id, port, and
+# credential recorded into task metadata after launch through
+# `polytoken sessions --format json`. The license dialog is a BLOCKER by captain
+# decision (2026-10-07): `--accept-license-terms` is never passed, and the
+# readiness gate fails loudly on any first-start dialog the launch cannot get
+# past. bin/fm-polytoken-lib.sh owns every generated artifact and the verified
+# facts; .agents/skills/harness-adapters/references/harness/polytoken.md owns the
+# knowledge record. polytoken is crewmate/scout only and is refused for
+# --secondmate, like agy and devin.
 # Unless config/keep-ai-trailers is present, every claude launch carries the
 # attribution-off policy in its per-launch --settings JSON, so a spawned worker
 # never writes a Co-Authored-By trailer, Claude-Session link, or generated-with
@@ -667,6 +692,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-polytoken-lib.sh
+. "$SCRIPT_DIR/fm-polytoken-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -1518,6 +1545,12 @@ clear_relaunch_harness_wiring() {
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -rf -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_dirs "$harness" "$state" "$id")
+EOF
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -1923,7 +1956,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | polytoken)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2247,6 +2280,36 @@ launch_template() {
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
   devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # polytoken (Polytoken CLI): a pane-attached TUI worker whose control verbs
+  # ride the daemon REST API (the captain-approved hybrid). The launch runs in
+  # the task worktree so the worktree's `.polytoken/` is the project hook and
+  # facet discovery layer (verified live: cwd-project hooks fire while hooks
+  # placed in the root --config-dir do not load). `--config-dir` names a
+  # firstmate-generated per-task config dir whose config.yaml mirrors the
+  # operator's global config with the unattended permission posture enforced,
+  # because a project config.yaml fully replaces the global config and the
+  # global layer never reaches the daemon (verified live) - no launch flag
+  # reaches the permission matcher at all. `--sessions-dir` isolates the
+  # per-task session tree so `polytoken sessions` can bind the pane's session
+  # id, port, and credential into task metadata after launch. `--facet` +
+  # `--facets-dir` carry the worker role contract (a facet IS the system
+  # prompt, and the generated one pins no model so `--model` stays
+  # authoritative); `--prompt` submits the brief after the TUI attaches, so no
+  # keyplane typing starts the work. `--accept-license-terms` is deliberately
+  # NEVER passed (captain decision 2026-10-07): the license dialog is a blocker
+  # that the readiness gate below fails loudly on, never something a fleet
+  # spawn answers. The leading shell loop clears every foreign ORCA_*/FM_*
+  # marker the pane actually carries at launch time (verified live: ORCA_*
+  # values from the launching session's environment reach worker tool
+  # subprocesses through the pane), keeping the three launch-owned names
+  # (FM_TASK_ID, FM_TASK_INBOX, FM_ZELLIJ_SESSION) so the doorbell and backend
+  # plumbing keep working; the fixed `env -u` set clears every harness-identity
+  # marker, because polytoken publishes none of its own and does not clear
+  # inherited ones. There is no `__EFFORTFLAG__`: polytoken encodes reasoning
+  # effort inside the model reference as `<model>(<effort>)`, so the effort
+  # axis rides `__MODELFLAG__` (the record-and-omit contract drops an effort
+  # the model's selectable set does not name).
+  polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ --sessions-dir __POLYTOKENSESSIONS__ new --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2357,7 +2420,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, devin, and polytoken are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2371,7 +2434,11 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+# polytoken has none either: Phase 1 verified only the crewmate/scout adapter
+# (launch, busy state, REST control verbs, tmux liveness), and
+# docs/supervision-protocols/ carries no polytoken wake protocol (polytoken
+# 0.8.19).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = polytoken ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2456,6 +2523,12 @@ agy)
     exit 1
   }
   ;;
+polytoken)
+  POLYTOKEN_BIN=$(fm_polytoken_binary) || {
+    echo "error: polytoken executable not found; install Polytoken CLI or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
 esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -2493,6 +2566,15 @@ if [ "$HARNESS" = omp ]; then
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+fi
+# polytoken's model validation composes firstmate's model and effort axes into
+# the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
+# base model must be a listed selectable reference, and the effort rides the
+# reference as `<model>(<effort>)` only when that form is listed. Resolved
+# before the busy wiring arms, so the generated launch command carries the
+# composed reference and task metadata keeps the separate axes.
+if [ "$HARNESS" = polytoken ]; then
+  POLYTOKEN_MODEL_REF=$(fm_polytoken_model_ref "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
@@ -2678,6 +2760,13 @@ model_flag_for_harness() {
   case "$harness" in
   claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     printf -- '--model %s ' "$(shell_quote "$model")"
+    ;;
+  # polytoken encodes reasoning effort inside the model reference, so the
+  # flag carries the composed reference fm_polytoken_model_ref validated
+  # above (base, or base(effort) when the model's selectable set names it),
+  # never the bare axis value.
+  polytoken)
+    printf -- '--model %s ' "$(shell_quote "${POLYTOKEN_MODEL_REF:-$model}")"
     ;;
   esac
 }
@@ -4381,6 +4470,100 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# polytoken's launch-then-confirm gate, in the same shape as agy's: the brief
+# rides the launch command (--prompt submits it after the TUI attaches), so
+# readiness is positive proof the brief is being processed rather than proof a
+# key was typed. The proof is semantic, not a screen scrape: the busy record
+# must advance past the fm-spawn seed to a polytoken-hook event (pre_user_prompt
+# fires the moment the brief turn is submitted, verified live), which is exactly
+# the verdict the supervisor reads. A pane parked on a first-start dialog the
+# launch cannot get past - the license dialog, which the captain's decision
+# (2026-10-07) makes a blocker that fleet spawns never auto-accept - never posts
+# the first hook event, so the gate fails loudly there. Session discovery is
+# folded into the same poll: `polytoken sessions --format json` scoped to this
+# task's config and sessions roots binds the pane's session id, port, and
+# credential file (a TUI-attached launch never prints them on the spawning
+# side, verified live).
+POLYTOKEN_SESSION_ID=
+POLYTOKEN_SESSION_PORT=
+POLYTOKEN_SESSION_CREDENTIAL=
+
+polytoken_wait_for_ready() {
+  local discovered record i=0 max=${FM_POLYTOKEN_READY_POLLS:-120} interval=${FM_POLYTOKEN_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    if [ -z "$POLYTOKEN_SESSION_ID" ]; then
+      discovered=$(fm_polytoken_session_for_project "$POLYTOKEN_BIN" \
+        "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
+        "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")" \
+        "$WT") || discovered=
+      if [ -n "$discovered" ]; then
+        IFS=$'\t' read -r POLYTOKEN_SESSION_ID POLYTOKEN_SESSION_PORT POLYTOKEN_SESSION_CREDENTIAL <<EOF
+$discovered
+EOF
+      fi
+    fi
+    if [ -n "$POLYTOKEN_SESSION_ID" ]; then
+      record=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null) || record=
+      case "$record" in
+        *" polytoken-hook "*) return 0 ;;
+      esac
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+# Bind the discovered session into task metadata (the control verbs' durable
+# address), in the same locked-filter-and-publish shape spawn_record_traceparent
+# uses: an idempotent rewrite that drops any prior polytoken_* binding before
+# appending the fresh one.
+spawn_record_polytoken_session() {
+  local meta="$STATE/$ID.meta" status=0 acquired=0
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+    acquired=1
+  fi
+  SPAWN_META_TMP="$STATE/.$ID.meta.polytoken.${BASHPID:-$$}"
+  if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
+    ! awk -F= '$1 != "polytoken_session" && $1 != "polytoken_port" && $1 != "polytoken_credential" && $1 != "polytoken_config_dir" && $1 != "polytoken_sessions_root"' "$meta" >"$SPAWN_META_TMP" ||
+    ! {
+      echo "polytoken_session=$POLYTOKEN_SESSION_ID"
+      echo "polytoken_port=$POLYTOKEN_SESSION_PORT"
+      echo "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL"
+      echo "polytoken_config_dir=$(fm_polytoken_config_dir "$STATE_REAL" "$ID")"
+      echo "polytoken_sessions_root=$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")"
+    } >>"$SPAWN_META_TMP" ||
+    ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+    status=1
+    rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  fi
+  SPAWN_META_TMP=
+  if [ "$acquired" = 1 ]; then
+    fm_lock_release "$SPAWN_META_LOCK" || status=1
+    SPAWN_META_LOCK_HELD=0
+  fi
+  return "$status"
+}
+
+polytoken_spawn_fail() {  # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  # A failed gate leaves nothing running or recorded: reap this launch's exact
+  # session daemon (scoped to this task's sessions root), retire the per-task
+  # wiring (the sessions roots, config dir, worktree hook layer, facet, and
+  # busy writer), then close the endpoint exactly like the agy gate.
+  if [ -n "$POLYTOKEN_SESSION_ID" ]; then
+    "$POLYTOKEN_BIN" --config-dir "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
+      reap "$POLYTOKEN_SESSION_ID" --force \
+      --sessions-dir "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")" >/dev/null 2>&1 || true
+  fi
+  clear_relaunch_harness_wiring polytoken "$WT" "$STATE_REAL" "$ID" || true
+  rovo_endpoint_cleanup
+}
+
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -4616,7 +4799,8 @@ if [ "$KIND" != secondmate ]; then
   # rendered-tail fallbacks and standalone Kimi stays unknown until
   # fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
   # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
-  # open-close pair.
+  # open-close pair. polytoken is armed too: its pre_user_prompt / pre_model_turn
+  # (open) and stop (close) hooks are a verified open-close pair.
   BUSY_GEN=
   case "$HARNESS" in
   codex*)
@@ -4634,7 +4818,7 @@ if [ "$KIND" != secondmate ]; then
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin)
+  gemini | devin | polytoken)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4994,6 +5178,35 @@ EOF
     printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-kimi-turnend"
     exclude_path '.fm-kimi-turnend'
     ;;
+  polytoken)
+    # Semantic busy-state wiring (bin/fm-busy-lib.sh; bin/fm-polytoken-lib.sh
+    # owns every generated artifact's content). Four pieces, all verified live:
+    # the per-task config dir (mirrored operator config with the unattended
+    # permission posture enforced - the one launch-time autonomy surface), the
+    # worker role-contract facet in the worktree's `.polytoken/facets/` (the
+    # project facet discovery layer), the generated no-argv busy writer in
+    # state/ (hook handlers receive no argv, verified live), and the worktree
+    # `.polytoken/hooks.json` binding the three busy events to that writer.
+    # post_model_turn is deliberately NOT wired as a close: it fires per model
+    # response - verified mid-turn, between tool phases - so closing on it
+    # would flap the record idle while a long tool call still runs. The
+    # worktree files stay out of git's view so they never block teardown's
+    # dirty check or leak into a commit; an existing `.polytoken/hooks.json`
+    # refuses the arm rather than clobbering a project's own hook layer.
+    # Gated on the canonical template like gemini and devin, because a raw
+    # launch command never carries this wiring's flags or cwd contract.
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      if ! fm_polytoken_write_config "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
+        || ! fm_polytoken_write_facet "$WT" "$STATE_REAL/$ID.inbox" \
+        || ! fm_polytoken_write_busy_script "$FM_ROOT" "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" \
+        || ! fm_polytoken_write_hooks "$WT" "$(fm_polytoken_busy_script "$STATE_REAL" "$ID")"; then
+        echo "error: could not arm the polytoken busy-state wiring for $ID" >&2
+        exit 1
+      fi
+      exclude_path '.polytoken/hooks.json'
+      exclude_path '.polytoken/facets/firstmate-worker.md'
+    fi
+    ;;
   esac
 fi
 
@@ -5077,7 +5290,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential polytoken_config_dir polytoken_sessions_root", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5281,6 +5494,12 @@ devin)
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+polytoken)
+  LAUNCH=${LAUNCH//__POLYTOKENBIN__/"$(shell_quote "$POLYTOKEN_BIN")"}
+  LAUNCH=${LAUNCH//__POLYTOKENCONFIG__/"$(shell_quote "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")")"}
+  LAUNCH=${LAUNCH//__POLYTOKENSESSIONS__/"$(shell_quote "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")")"}
+  LAUNCH=${LAUNCH//__POLYTOKENFACETS__/"$(shell_quote "$WT/.polytoken/facets")"}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # A record-backed launch brief is published into the state dir of the pane
@@ -5614,6 +5833,21 @@ if [ "$HARNESS" = agy ]; then
     else
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
     fi
+    exit 1
+  fi
+fi
+# polytoken's gate is semantic and scoped to the canonical template: a raw
+# launch command never carries the generated wiring's flags, so it is gated
+# off exactly like the arm above. The failure detail names the one known
+# first-start blocker (the license dialog) so a supervisor can tell a
+# blocked launch from a wedged one.
+if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! polytoken_wait_for_ready; then
+    polytoken_spawn_fail "polytoken did not start processing its brief in window $T (a first-start license dialog is the one known blocker; it is never auto-accepted)"
+    exit 1
+  fi
+  if ! spawn_record_polytoken_session; then
+    polytoken_spawn_fail "polytoken session binding could not be recorded for $ID"
     exit 1
   fi
 fi
