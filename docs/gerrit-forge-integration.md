@@ -201,7 +201,7 @@ The refusal reads as reasonable only because of the name.
 
 The permission is not merely useless, which is worth being plain about, because an inert annotation in a brief is not inert at landing.
 `local-only`'s configured landing is a guarded fast-forward of the project's local default branch.
-On a project whose changes are supposed to reach a review server, that landing advances the recorded local branch with content the server has never seen, and the annotation that was supposed to record "this is a Gerrit project" is the one thing in the posture that does not get consulted.
+On a project whose changes are supposed to reach a review server, that landing advances the project's local default branch with content the server has never seen, and the annotation that was supposed to record "this is a Gerrit project" is the one thing in the posture that does not get consulted.
 
 ## 4. What Gerrit makes structurally impossible
 
