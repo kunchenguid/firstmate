@@ -6,6 +6,55 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-ready-queue)
 
+test_ready_queue_addressing() {
+  local form=$1 dir result rc
+  dir=$(make_case "addressing-$form")
+  mkdir -p "$dir/data" "$dir/home/.tasks-axi"
+  printf 'backend = "beads"\n' > "$dir/.tasks.toml"
+  printf 'backend = "markdown"\n' > "$dir/home/.tasks-axi/config.toml"
+  cat > "$dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = ready ] || exit 2
+[ "$PWD" = "$FM_TEST_BACKLOG_ROOT" ] || exit 2
+[ -z "${TASKS_AXI_FILE:-}" ] || exit 2
+printf '%s\n' "$PWD" >> "$FM_TEST_READY_LOG"
+case "$FM_TEST_READY_RESULT" in
+  ready) printf 'count: 1\n' ;;
+  empty) printf 'count: 0\n' ;;
+  failed) exit 2 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  for result in ready empty failed; do
+    : > "$dir/ready.log"
+    (
+      cd "$dir" || exit 2
+      export FM_HOME="$dir" HOME="$dir/home" PATH="$dir/fakebin:$PATH"
+      export FM_TEST_BACKLOG_ROOT="$dir" FM_TEST_READY_LOG="$dir/ready.log"
+      export FM_TEST_READY_RESULT="$result"
+      unset TASKS_AXI_BACKEND FM_DATA_OVERRIDE
+      case "$form" in
+        absolute) export FM_DATA_OVERRIDE="$dir/data" ;;
+        relative) export FM_DATA_OVERRIDE=data ;;
+        trailing-slash) export FM_DATA_OVERRIDE="$dir/data/" ;;
+        relative-home) export FM_HOME=. ;;
+        trailing-slash-home) export FM_HOME="$dir/" ;;
+      esac
+      # shellcheck source=bin/fm-ready-queue-lib.sh
+      . "$ROOT/bin/fm-ready-queue-lib.sh"
+      fm_ready_queue_needs_review
+    )
+    rc=$?
+    if [ "$result" = empty ]; then
+      [ "$rc" = 1 ] || fail "$form empty queue required review"
+    else
+      [ "$rc" = 0 ] || fail "$form $result queue was silently suppressed"
+    fi
+    [ "$(cat "$dir/ready.log")" = "$dir" ] || fail "$form did not query the selected backlog root"
+  done
+  pass "$form backlog addressing preserves ready, empty, and unavailable verdicts"
+}
+
 test_ready_heartbeat() {
   local mode=${1:-ready} dir pid out
   dir=$(make_case "$mode-heartbeat")
@@ -150,6 +199,11 @@ test_daemon_heartbeat() {
   pass "daemon $mode heartbeat respects readiness before skip=$skip and acknowledgement"
 }
 
+test_ready_queue_addressing absolute
+test_ready_queue_addressing relative
+test_ready_queue_addressing trailing-slash
+test_ready_queue_addressing relative-home
+test_ready_queue_addressing trailing-slash-home
 test_ready_heartbeat
 test_ready_heartbeat unreadable
 test_not_ready_heartbeat empty
