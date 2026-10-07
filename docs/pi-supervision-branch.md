@@ -598,7 +598,7 @@ A leftover `state/.afk` flag declines nothing.
 It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, readable, live away record (`mode` is not quiet).
 An archived, incomplete, invalid, or quiet record restores the attended refusal byte for byte.
 
-`bin/fm-branch-prompt.sh` owns the branch's ready-work check and "Postures" execution rules, including the distinction between already-queued dispatch and new filing under the captain's away words.
+`bin/fm-branch-prompt.sh` owns the branch's ready-work check and "Postures" execution rules, including the rule that away dispatch reaches only work the captain's words name or a standing grant covers, while every other ready unit waits for MAIN with its reason recorded.
 
 Each relocated script keeps its own gate, enforcing exactly what a script can check without reading words:
 
