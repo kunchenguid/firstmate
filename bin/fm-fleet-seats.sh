@@ -107,7 +107,8 @@
 #   - under the remote's own lock, serve refuses an epoch lower than its
 #     highest applied one and replays a same-epoch response only when both the
 #     policy digest and effective pool allowances match, without granting
-#     anything, stores the delivered policy, rejects stale
+#     anything; a conflicting replay refuses. It stores the delivered policy,
+#     rejects stale
 #     requests, grants waiting requests in arrival order within the allowance
 #     (a request from a holder already counted in that pool is one slot),
 #     creating the granted holder record, and prints one JSON certificate
