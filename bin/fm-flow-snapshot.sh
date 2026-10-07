@@ -370,7 +370,7 @@ ci_json() {  # <pr-url>
     | to_entries
     | map(.value + {seq: .key})
     | group_by([.kind, .workflow, .name])
-    | map(max_by([.started, .seq]))
+    | map(max_by([(.status != "COMPLETED"), .started, .seq]))
     | sort_by(.seq)
     | map(del(.seq))
     | map(. + {verdict:

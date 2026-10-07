@@ -62,6 +62,7 @@ write_task ship-wide   ship no-mistakes fm:9
 write_task ship-readfail ship no-mistakes fm:11
 write_task ship-captured ship no-mistakes fm:12
 write_task ship-ansi     ship no-mistakes fm:13
+write_task ship-rerun    ship no-mistakes fm:16 https://github.com/example/project/pull/29
 # A project can register its own ship-branch prefix, so this task's branch is
 # not fm/<id>. bin/fm-spawn.sh records the branch it actually built and
 # bin/fm-fleet-snapshot.sh publishes it; run attribution is keyed on it.
@@ -86,6 +87,14 @@ fm_write_meta "$HOME_DIR/state/no-endpoint.meta" \
   "endpoint_task_id=no-endpoint" "worktree=$TMP_ROOT/wt/no-endpoint" \
   "project=$PROJECT" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
 mkdir -p "$TMP_ROOT/wt/no-endpoint"
+# `default` is what bin/fm-spawn.sh records when the harness chose the model and
+# effort itself, which is not the name of either.
+fm_write_meta "$HOME_DIR/state/ship-default.meta" \
+  "window=fm:17" "endpoint_task_id=ship-default" \
+  "worktree=$TMP_ROOT/wt/ship-default" \
+  "project=$PROJECT" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+  "model=default" "effort=default"
+mkdir -p "$TMP_ROOT/wt/ship-default"
 write_task gone-one    ship no-mistakes fm:99
 
 # --- the pipeline runs the fake CLI reports ---------------------------------
@@ -273,6 +282,15 @@ cat > "$ROLLUP_DIR/28.json" <<'JSON'
 {"headRefOid":"deadbeef","state":"CLOSED","statusCheckRollup":[]}
 JSON
 
+# A re-run check: GitHub has created the new attempt but not started it, so it
+# carries a null startedAt while the finished earlier attempt carries a real one.
+cat > "$ROLLUP_DIR/29.json" <<'JSON'
+{"headRefOid":"77ee88ff","state":"OPEN","statusCheckRollup":[
+{"__typename":"CheckRun","name":"Lint","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"CI","startedAt":"2026-09-24T06:10:00Z"},
+{"__typename":"CheckRun","name":"Lint","status":"QUEUED","conclusion":null,"workflowName":"CI","startedAt":null}
+]}
+JSON
+
 # Every invocation is recorded, so a flag that claims the snapshot is local can
 # be checked against what was actually called rather than against its own help.
 cat > "$FAKEBIN/gh" <<SH
@@ -306,7 +324,7 @@ case "${1:-}" in
     printf 'fm:5 fm-ship-closed\nfm:6 fm-ship-gitlab\nfm:7 fm-ship-badrun\nfm:8 fm-ship-odd\n'
     printf 'fm:9 fm-ship-wide\nfm:10 fm-scout-one\nfm:11 fm-ship-readfail\n'
     printf 'fm:12 fm-ship-captured\nfm:13 fm-ship-ansi\nfm:14 fm-ship-prefixed\n'
-    printf 'fm:15 fm-ship-nocopy\n'
+    printf 'fm:15 fm-ship-nocopy\nfm:16 fm-ship-rerun\nfm:17 fm-ship-default\n'
     ;;
   list-panes)
     printf '%s\n' "${target##*:}"
@@ -386,6 +404,23 @@ assert_equals "true" "$(agent ship-run '.endpoint_alive | tojson')" \
 assert_equals "true" \
   "$(printf '%s' "$DOC" | jq -r '[.agents[].pipeline] == ([.agents[].pipeline] | sort | reverse)')" \
   "pipeline agents are emitted first, so the wire order is the draw order"
+
+# --- the worker behind the agent --------------------------------------------
+
+assert_equals "claude" "$(agent ship-run '.worker.harness')" \
+  "the agent states the harness its worker runs on"
+assert_equals "opus-5" "$(agent ship-run '.worker.model')" \
+  "and the model the dispatcher recorded for it"
+assert_equals "high" "$(agent ship-run '.worker.effort')" \
+  "and that worker's effort"
+# `default` means the harness picked, which is not the name of a model, so it is
+# emitted as absent rather than as the word.
+assert_equals "null" "$(agent ship-default '.worker.model | tojson')" \
+  "a model recorded as default arrives as absent, not as the string default"
+assert_equals "null" "$(agent ship-default '.worker.effort | tojson')" \
+  "and so does an effort recorded as default"
+assert_equals "claude" "$(agent ship-default '.worker.harness')" \
+  "while the harness it actually ran on is still stated"
 
 # --- a worker with no pipeline carries a state and no steps -----------------
 
@@ -600,6 +635,19 @@ assert_equals "SUCCESS" \
   "the latest attempt of a check is the one kept"
 assert_equals "bb73f233" "$(agent ship-run '.ci.head')" \
   "the commit these checks describe is carried beside them"
+
+# A check cannot be both finished and in flight, so the in-flight attempt is the
+# newer one however it reports its start. Reading the finished attempt instead
+# makes the row green while CI is re-running.
+assert_equals "1" "$(agent ship-rerun '.ci.total')" \
+  "a re-run check is still one check, not two"
+assert_equals "1" "$(agent ship-rerun '.ci.pending')" \
+  "a check whose new attempt has not started yet reads as pending"
+assert_equals "0" "$(agent ship-rerun '.ci.passed')" \
+  "rather than as the pass its superseded earlier attempt measured"
+assert_equals "QUEUED" \
+  "$(agent ship-rerun '[.ci.checks[] | select(.name == "Lint")][0].status')" \
+  "and checks[] carries the queued attempt, so a renderer can see it"
 
 assert_equals "4" "$(agent ship-direct '.ci.total')" \
   "a commit status is counted alongside check runs rather than dropped"
