@@ -8,6 +8,8 @@
 # if absent, reports the switch, interrupts the refused turn, and relaunches
 # through fm-control. It never answers an approval or edits vendor settings.
 # Only an unconfigured, canonical bypass launch recorded by fm-spawn is eligible.
+# Capture only in the first 120 seconds of its timestamped spawn_gen: a defeated
+# bypass appears at the first command or model request, not throughout healthy work.
 # Unknown legacy metadata, remote endpoints, explicit settings (including broken
 # symlinks), unrelated errors and unreadable screens are not evidence.
 # Codex requires its approval question AND the selected approval option; Claude
@@ -53,7 +55,11 @@ CONFIG=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || exit 1
 BINDING=$(cksum < "$META")
-[ -n "$(fm_meta_get "$META" spawn_gen)" ] || exit 1
+GEN=$(fm_meta_get "$META" spawn_gen)
+case "$GEN" in s*.*.*) ;; *) exit 1 ;; esac
+LAUNCHED=${GEN#s}
+LAUNCHED=${LAUNCHED%%.*}
+case "$LAUNCHED" in ''|*[!0-9]*) exit 1 ;; esac
 HARNESS=$(fm_meta_get "$META" harness)
 [ "$(fm_meta_get "$META" approval_mode)" = bypass ] || exit 1
 [ "$(fm_meta_get "$META" approval_configured)" = 0 ] || exit 1
@@ -65,8 +71,17 @@ case "$HARNESS" in
 esac
 # Do not use test -e alone: a dangling symlink is an explicit setting too.
 [ ! -e "$CONFIG/$SETTING" ] && [ ! -L "$CONFIG/$SETTING" ] || exit 1
+if [ "$VERB" = apply ]; then
+  # shellcheck source=bin/fm-lease-lib.sh
+  . "$SCRIPT_DIR/fm-lease-lib.sh"
+  TMP=
+  trap 'rm -f "$TMP"; fm_lease_guard_release' EXIT
+  fm_lease_guard "$ID" "managed approval failover"
+fi
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND TARGET=$FM_BACKEND_VALIDATED_TARGET
+AGE=$(( $(date +%s) - LAUNCHED ))
+[ "$AGE" -ge 0 ] && [ "$AGE" -lt 120 ] || exit 1
 SCREEN=$(fm_backend_visible_capture "$BACKEND" "$TARGET" "fm-$ID") || exit 1
 EVIDENCE=$(printf '%s\n' "$SCREEN" | classify "$HARNESS") || exit 1
 [ "$(cksum < "$META")" = "$BINDING" ] || {
@@ -85,7 +100,6 @@ esac
 # explicit setting wins, even when empty or a symlink; no partial file is seen.
 mkdir -p "$CONFIG"
 TMP=$(mktemp "$CONFIG/.approval-failover.XXXXXX")
-trap 'rm -f "$TMP"' EXIT
 printf '%s\n' "$FALLBACK" > "$TMP"
 if ! ln "$TMP" "$CONFIG/$SETTING" 2>/dev/null; then
   echo "error: config/$SETTING appeared during failover; nothing overwritten" >&2
@@ -93,7 +107,9 @@ if ! ln "$TMP" "$CONFIG/$SETTING" 2>/dev/null; then
 fi
 stamp=$(date +%s)
 printf 'working [at=%s]: managed approval failover selected %s=%s after %s\n' "$stamp" "$SETTING" "$FALLBACK" "$EVIDENCE" >> "$STATE/$ID.status"
+fm_lease_guard_release
 if ! "$SCRIPT_DIR/fm-control.sh" "$ID" interrupt || ! "$SCRIPT_DIR/fm-control.sh" "$ID" relaunch --note "Managed approval failover: $EVIDENCE; config/$SETTING now selects $FALLBACK. Preserve all work and continue the assigned task."; then
+  fm_lease_guard "$ID" "managed approval recovery failure reporting"
   stamp=$(date +%s)
   printf 'blocked [at=%s]: managed approval fallback persisted, but worker recovery failed; preserve work and use fm-control to reconcile\n' "$stamp" >> "$STATE/$ID.status"
   exit 1

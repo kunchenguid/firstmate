@@ -100,6 +100,7 @@ Because these paths are gitignored, that propagation is a separate, primary-auth
 Propagation failures warn without blocking a local secondmate launch or session-start continuation; a remote prelaunch transfer failure refuses that launch.
 The destination keeps whatever safely validated state the helper left behind.
 For inherited config files, local propagation and the remote sender preserve the destination item on source inspection errors and mirror only proven absence; [`fm-config-inherit-lib.sh`](../../../bin/fm-config-inherit-lib.sh) owns this boundary.
+For `codex-approval-mode` and `claude-permission-mode` only, proven primary absence leaves existing home-local settings in place, preserving durable managed-policy fallbacks without provenance markers; an explicit primary value still wins byte-exact on both local and remote routes.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 Inherited `config/backend` becomes that secondmate home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
 A present primary value always converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
