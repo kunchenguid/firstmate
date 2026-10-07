@@ -46,7 +46,7 @@ The `projects:` field is a non-exclusive clone list, not ownership.
 Scaffold a secondmate charter with:
 
 ```sh
-bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
+bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects|--source-repo <absolute-path>}
 ```
 
 The scaffold writes a charter brief instead of a task brief.
@@ -64,7 +64,7 @@ Preserve the generated charter sections unless the domain genuinely needs a hard
 Provision a local persistent home and registry entry after the charter is filled:
 
 ```sh
-bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects|--source-repo <absolute-path>}
 ```
 
 Provision a whole remote home through its configured SSH host with:
