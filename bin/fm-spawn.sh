@@ -3047,6 +3047,29 @@ if [ "$KIND" = secondmate ]; then
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  if [ -e "$DATA/external-source" ] || [ -L "$DATA/external-source" ]; then
+    source_record="$DATA/external-source"
+    [ -f "$source_record" ] && [ ! -L "$source_record" ] || {
+      echo "error: external source record must be a regular file: $source_record" >&2
+      exit 1
+    }
+    source_path=$(sed -n 's/^path=//p' "$source_record")
+    source_gitdir=$(sed -n 's/^gitdir=//p' "$source_record")
+    if [ -z "$source_path" ] || [ -z "$source_gitdir" ] || [ "$(wc -l < "$source_record")" -ne 2 ]; then
+      echo "error: invalid external source record: $source_record" >&2
+      exit 1
+    fi
+    project_physical=$(cd "$PROJ_ABS" && pwd -P)
+    project_gitdir=$(git -C "$PROJ_ABS" rev-parse --absolute-git-dir 2>/dev/null) || {
+      echo "error: external source is no longer a Git checkout: $PROJ_ABS" >&2
+      exit 1
+    }
+    project_gitdir=$(cd "$project_gitdir" && pwd -P)
+    if [ "$project_physical" != "$source_path" ] || [ "$project_gitdir" != "$source_gitdir" ]; then
+      echo "error: project directory does not match this home's external source identity: $source_record" >&2
+      exit 1
+    fi
+  fi
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi

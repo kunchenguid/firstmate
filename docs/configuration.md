@@ -717,7 +717,7 @@ The main first mate routes by reading those scopes with judgment; the project li
 
 ### Provision a local home
 
-Use `fm-home-seed.sh <id> - {<project>...|--no-projects}` to lease a fresh local firstmate worktree for the secondmate home.
+Use `fm-home-seed.sh <id> - {<project>...|--no-projects|--source-repo <absolute-path>}` to lease a fresh local firstmate worktree for the secondmate home.
 For remote provisioning, including supplied project origins, follow [Remote second mates](remote-secondmates.md#provision-a-route).
 
 Use the deliberate `--no-projects` signal only for a firstmate-repo domain that needs no separate project clones.
@@ -726,12 +726,17 @@ It cannot be combined with a project list, and omitting both still fails loudly.
 A project-less seed requires no existing project clones or `data/projects.md` entries in the home, so it refuses a populated-home conversion without changing that home.
 A preexisting project-bearing charter is also refused until it is re-scaffolded with `--no-projects` or removed.
 
+For an existing external Git checkout, seed with `FM_SECONDMATE_CHARTER='<charter>' FM_SECONDMATE_SCOPE='<scope>' bin/fm-home-seed.sh <id> - --source-repo <absolute-primary-checkout>`.
+The external-source mode accepts only the canonical primary Git checkout, keeps `projects/` empty, and records the source identity in the home; child tasks use its absolute path with `fm-spawn.sh`, whose Treehouse worktrees appear in that source repository's `git worktree list`.
+The source checkout is not changed during provisioning, and an existing home's different source binding is refused.
+
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
 
 ### Project modes and backlog handoff
 
-Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
+Clone-backed secondmate routes cover `no-mistakes` and `direct-PR` projects; an explicitly source-backed secondmate also receives `local-only` work within its registered scope.
+For a local-only task targeting a feature branch, `fm-brief.sh --base-branch` refuses before spawn, and `fm-merge-local.sh` refuses to move a source checkout that is not on its default branch; the task branch remains available for review.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it refuses In flight, Done, or non-secondmate homes, and its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and retries.

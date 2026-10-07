@@ -2,7 +2,7 @@
 # Provision and route persistent secondmate homes.
 #
 # Usage:
-#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects|--source-repo <absolute-path>}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
@@ -14,8 +14,14 @@
 #       subject is the firstmate repo itself; it is mutually exclusive with a
 #       project list, and omitting both still fails loudly. A project-less seed
 #       refuses a home with project clones or project-registry entries, so it
-#       never converts populated homes in place. The charter brief
-#       is copied to data/charter.md, newly cloned no-mistakes projects are
+#       never converts populated homes in place.
+#       --source-repo instead binds a no-clone home to an existing external Git
+#       primary checkout. data/external-source records its canonical path and
+#       Git common directory; reseeding refuses a different source identity.
+#       Child briefs use its project name, and fm-spawn.sh receives the recorded
+#       absolute source path as its project directory, so Treehouse allocates
+#       linked worktrees from that repository. Provisioning never writes there.
+#       The charter brief is copied to data/charter.md, newly cloned no-mistakes projects are
 #       initialized, an ignored .fm-secondmate-parent binding is published before
 #       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
@@ -51,7 +57,7 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
+  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects|--source-repo <absolute-path>}" >&2
   echo "       fm-home-seed.sh validate" >&2
 }
 
@@ -287,7 +293,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "data/external-source" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -515,6 +521,57 @@ EOF
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }
 
+validate_external_source() { # <absolute-primary-checkout>
+  local requested=$1 top gitdir common
+  case "$requested" in
+    /*) ;;
+    *) echo "error: --source-repo requires an absolute path: $requested" >&2; return 1 ;;
+  esac
+  [ -d "$requested" ] || { echo "error: source repository is not a directory: $requested" >&2; return 1; }
+  SOURCE_PATH=$(cd "$requested" && pwd -P) || return 1
+  case "$SOURCE_PATH" in
+    *$'\n'*) echo "error: source repository path contains a newline" >&2; return 1 ;;
+  esac
+  top=$(git -C "$SOURCE_PATH" rev-parse --show-toplevel 2>/dev/null) || {
+    echo "error: source repository is not a Git checkout: $SOURCE_PATH" >&2
+    return 1
+  }
+  [ "$(cd "$top" && pwd -P)" = "$SOURCE_PATH" ] || {
+    echo "error: source repository must name its Git checkout root: $SOURCE_PATH" >&2
+    return 1
+  }
+  gitdir=$(git -C "$SOURCE_PATH" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  common=$(git -C "$SOURCE_PATH" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  SOURCE_GITDIR=$(cd "$gitdir" && pwd -P) || return 1
+  case "$SOURCE_GITDIR" in
+    *$'\n'*) echo "error: source Git directory path contains a newline" >&2; return 1 ;;
+  esac
+  common=$(cd "$common" && pwd -P) || return 1
+  [ "$SOURCE_GITDIR" = "$common" ] || {
+    echo "error: source repository must be the primary checkout, not a linked worktree: $SOURCE_PATH" >&2
+    return 1
+  }
+  SOURCE_PROJECT=$(basename "$SOURCE_PATH")
+}
+
+validate_external_source_home() { # <home>
+  local home=$1 record="$1/data/external-source" expected
+  expected=$(printf 'path=%s\ngitdir=%s' "$SOURCE_PATH" "$SOURCE_GITDIR")
+  if [ -f "$record" ]; then
+    [ "$(cat "$record")" = "$expected" ] || {
+      echo "error: existing secondmate home has a different external source identity: $record" >&2
+      return 1
+    }
+  elif [ -f "$home/$SUB_HOME_MARKER" ] || [ -f "$home/data/charter.md" ]; then
+    echo "error: existing secondmate home has no external source identity: $record" >&2
+    return 1
+  fi
+  if [ -d "$home/projects" ] && [ -e "$home/projects/$SOURCE_PROJECT" ]; then
+    echo "error: external source home must not contain a project clone: $home/projects/$SOURCE_PROJECT" >&2
+    return 1
+  fi
+}
+
 SEED_ROLLBACK_ACTIVE=0
 SEED_COMMITTED=0
 SEED_REGISTRY_LOCK=
@@ -543,6 +600,7 @@ SEED_PARENT_BRIEF_CREATED=0
 SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
+SEED_SOURCE_EXISTED=0
 SEED_MARKER_EXISTED=0
 SEED_PARENT_MARKER_EXISTED=0
 
@@ -666,6 +724,7 @@ seed_rollback() {
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
+        restore_seed_file "$SEED_SOURCE_EXISTED" "$SEED_BACKUP_DIR/external-source" "$SEED_HOME/data/external-source"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
     fi
@@ -718,7 +777,11 @@ sync_project_registry() {
   for project in "$@"; do
     line=$(registry_line_for_project "$project" || true)
     if [ -z "$line" ]; then
-      line="- $project - cloned project (added $today)"
+      if [ "${SOURCE_MODE:-0}" -eq 1 ]; then
+        line="- $project - external source repository (added $today)"
+      else
+        line="- $project - cloned project (added $today)"
+      fi
     fi
     printf '%s\n' "$line" >> "$tmp"
   done
@@ -764,7 +827,7 @@ write_registry() {
 }
 
 refuse_populated_projectless_home() {
-  local home=$1 project_path project registry_entries
+  local home=$1 mode=${2:---no-projects} project_path project registry_entries
   local clones=()
   local registry_projects=()
   if [ -L "$home/projects" ]; then
@@ -789,19 +852,22 @@ refuse_populated_projectless_home() {
       return 1
     }
     while IFS= read -r project; do
+      if [ "$mode" = --source-repo ] && [ "$project" = "$SOURCE_PROJECT" ] && [ -f "$home/data/external-source" ]; then
+        continue
+      fi
       [ -n "$project" ] && registry_projects+=("$project")
     done <<< "$registry_entries"
   fi
   [ "${#clones[@]}" -eq 0 ] && [ "${#registry_projects[@]}" -eq 0 ] && return 0
 
-  echo "error: cannot seed project-less secondmate home $home because it contains project data" >&2
+  echo "error: cannot seed $mode secondmate home $home because it contains project data" >&2
   if [ "${#clones[@]}" -gt 0 ]; then
     printf 'error: projects/ entries: %s\n' "$(join_projects "${clones[@]}")" >&2
   fi
   if [ "${#registry_projects[@]}" -gt 0 ]; then
     printf 'error: data/projects.md entries: %s\n' "$(join_projects "${registry_projects[@]}")" >&2
   fi
-  echo "error: retire or clean this home first before seeding with --no-projects" >&2
+  echo "error: retire or clean this home first before seeding with $mode" >&2
   return 1
 }
 
@@ -819,27 +885,40 @@ refuse_projectful_projectless_charter() {
 
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
-  local no_projects=0 arg
+  local no_projects=0 source_mode=0 source_arg='' arg
   local filtered=()
   shift 2
-  # A deliberate --no-projects signal (anywhere in the project position) seeds a
-  # project-less home; an accidental omission with no signal still fails loudly.
-  for arg in "$@"; do
-    if [ "$arg" = "--no-projects" ]; then
-      no_projects=1
-    else
-      filtered+=("$arg")
-    fi
+  while [ $# -gt 0 ]; do
+    arg=$1
+    shift
+    case "$arg" in
+      --no-projects) no_projects=1 ;;
+      --source-repo)
+        [ $# -gt 0 ] || { echo "error: --source-repo requires a path" >&2; return 1; }
+        source_mode=1
+        source_arg=$1
+        shift
+        ;;
+      --source-repo=*) source_mode=1; source_arg=${arg#--source-repo=} ;;
+      *) filtered+=("$arg") ;;
+    esac
   done
   if [ "${#filtered[@]}" -gt 0 ]; then
     set -- "${filtered[@]}"
   else
     set --
   fi
-  if [ "$no_projects" -eq 1 ]; then
-    [ $# -eq 0 ] || { echo "error: --no-projects cannot be combined with a project list" >&2; return 1; }
+  SOURCE_MODE=0
+  if [ "$no_projects" -eq 1 ] || [ "$source_mode" -eq 1 ]; then
+    [ $# -eq 0 ] || { echo "error: no-clone modes cannot be combined with a project list" >&2; return 1; }
+    [ "$no_projects" -eq 0 ] || [ "$source_mode" -eq 0 ] || { echo "error: --source-repo cannot be combined with --no-projects" >&2; return 1; }
+    if [ "$source_mode" -eq 1 ]; then
+      [ -n "$source_arg" ] || { echo "error: --source-repo requires a path" >&2; return 1; }
+      SOURCE_MODE=1
+      validate_external_source "$source_arg" || return 1
+    fi
   else
-    [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
+    [ $# -gt 0 ] || { echo "error: secondmate needs a project, --no-projects, or --source-repo" >&2; return 1; }
   fi
 
   mkdir -p "$STATE" || return 1
@@ -869,6 +948,7 @@ seed_home() {
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
+  SEED_SOURCE_EXISTED=0
   SEED_MARKER_EXISTED=0
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
@@ -882,6 +962,10 @@ seed_home() {
     home=$(verify_firstmate_home "$home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")
+    if [ "$SOURCE_MODE" -eq 1 ] && { [ "$requested_abs" = "$SOURCE_PATH" ] || path_is_ancestor_of "$SOURCE_PATH" "$requested_abs" || path_is_ancestor_of "$requested_abs" "$SOURCE_PATH"; }; then
+      echo "error: secondmate home must not overlap external source repository: $requested_abs" >&2
+      return 1
+    fi
     refuse_active_home_path "$requested_abs" || return 1
     validate_home_assignment "$id" "$requested_abs" || return 1
     SEED_HOME="$requested_abs"
@@ -889,16 +973,36 @@ seed_home() {
     home=$(ensure_home "$id" "$requested_abs")
   fi
   SEED_HOME="$home"
+  if [ "$SOURCE_MODE" -eq 1 ] && { [ "$home" = "$SOURCE_PATH" ] || path_is_ancestor_of "$SOURCE_PATH" "$home" || path_is_ancestor_of "$home" "$SOURCE_PATH"; }; then
+    echo "error: secondmate home must not overlap external source repository: $home" >&2
+    return 1
+  fi
   validate_registry_home_text "$home" || return 1
   validate_home_assignment "$id" "$home"
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
   validate_existing_parent_binding "$home" || return 1
-  if [ "$no_projects" -eq 1 ]; then
-    refuse_populated_projectless_home "$home" || return 1
-    if [ -f "$SEED_PARENT_BRIEF" ]; then
-      refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
+  if [ "$no_projects" -eq 1 ] || [ "$SOURCE_MODE" -eq 1 ]; then
+    if [ "$SOURCE_MODE" -eq 1 ]; then
+      validate_external_source_home "$home" || return 1
+      refuse_populated_projectless_home "$home" --source-repo || return 1
+    else
+      [ ! -e "$home/data/external-source" ] || { echo "error: home is bound to an external source; cannot seed with --no-projects" >&2; return 1; }
+      refuse_populated_projectless_home "$home" || return 1
     fi
+    if [ -f "$SEED_PARENT_BRIEF" ]; then
+      if [ "$SOURCE_MODE" -eq 1 ]; then
+        [ "$(brief_section_text "$SEED_PARENT_BRIEF" "Project clones")" = "None. External source repository: $SOURCE_PATH" ] || {
+          echo "error: existing charter brief conflicts with --source-repo $SOURCE_PATH; re-scaffold it" >&2
+          return 1
+        }
+      else
+        refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
+      fi
+    fi
+  elif [ -e "$home/data/external-source" ]; then
+    echo "error: home is bound to an external source; cannot seed project clones" >&2
+    return 1
   fi
   mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
@@ -908,6 +1012,10 @@ seed_home() {
   if [ -f "$home/data/charter.md" ]; then
     SEED_CHARTER_EXISTED=1
     cp "$home/data/charter.md" "$SEED_BACKUP_DIR/charter.md"
+  fi
+  if [ -f "$home/data/external-source" ]; then
+    SEED_SOURCE_EXISTED=1
+    cp "$home/data/external-source" "$SEED_BACKUP_DIR/external-source"
   fi
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     SEED_MARKER_EXISTED=1
@@ -925,7 +1033,9 @@ seed_home() {
       return 1
     }
     [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
-    if [ "$no_projects" -eq 1 ]; then
+    if [ "$SOURCE_MODE" -eq 1 ]; then
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --source-repo "$SOURCE_PATH"
+    elif [ "$no_projects" -eq 1 ]; then
       "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
     else
       "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
@@ -952,7 +1062,11 @@ seed_home() {
     [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
     clone_project "$project" "$home"
   done
-  sync_project_registry "$home" "$@"
+  if [ "$SOURCE_MODE" -eq 1 ]; then
+    sync_project_registry "$home" "$SOURCE_PROJECT"
+  else
+    sync_project_registry "$home" "$@"
+  fi
   for project in "$@"; do
     project_dst=$(validate_project_destination "$home" "$project") || return 1
     if seed_project_was_created "$project_dst"; then
@@ -963,6 +1077,10 @@ seed_home() {
   done
 
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
+  if [ "$SOURCE_MODE" -eq 1 ]; then
+    printf 'path=%s\ngitdir=%s\n' "$SOURCE_PATH" "$SOURCE_GITDIR" > "$home/data/external-source.tmp.$$"
+    mv "$home/data/external-source.tmp.$$" "$home/data/external-source"
+  fi
 
   projects_csv=$(join_projects "$@")
   # Durable record of this home's route to its parent, written once here next

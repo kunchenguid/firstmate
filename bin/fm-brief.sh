@@ -16,7 +16,7 @@
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
-#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects|--source-repo <absolute-path>}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -30,6 +30,8 @@
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
 #   omitting both still fails loudly so an accidental omission is never silent.
+#   --source-repo writes a no-clone charter for an existing external Git primary
+#   checkout. fm-home-seed.sh owns validation and the durable source record.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
@@ -191,6 +193,7 @@ case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+SOURCE_REPO=
 MODE=
 MODE_SET=0
 BRANCH_PREFIX=fm/
@@ -214,6 +217,7 @@ for a in "$@"; do
       base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
+      source-repo) SOURCE_REPO=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -224,6 +228,8 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --source-repo) want_value=source-repo ;;
+    --source-repo=*) SOURCE_REPO=${a#--source-repo=} ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --branch-prefix) want_value="branch-prefix" ;;
@@ -315,6 +321,10 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+if [ -n "$SOURCE_REPO" ] && [ "$KIND" != secondmate ]; then
+  echo "error: --source-repo applies only to --secondmate charters" >&2
   exit 1
 fi
 
@@ -417,14 +427,19 @@ while [ "$idx" -lt "${#POS[@]}" ]; do
   SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+ }${POS[$idx]}"
   idx=$((idx + 1))
 done
-if [ "$NO_PROJECTS" -eq 1 ]; then
+if [ "$NO_PROJECTS" -eq 1 ] || [ -n "$SOURCE_REPO" ]; then
   [ -z "$SECONDMATE_PROJECTS" ] || { echo "error: --no-projects cannot be combined with a project list" >&2; exit 1; }
+  [ "$NO_PROJECTS" -eq 0 ] || [ -z "$SOURCE_REPO" ] || { echo "error: --source-repo cannot be combined with --no-projects" >&2; exit 1; }
 else
-  [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2; exit 1; }
+  [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires a project, --no-projects, or --source-repo" >&2; exit 1; }
 fi
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
-if [ "$NO_PROJECTS" -eq 1 ]; then
+if [ -n "$SOURCE_REPO" ]; then
+  [ "${SOURCE_REPO#/}" != "$SOURCE_REPO" ] || { echo "error: --source-repo requires an absolute path" >&2; exit 1; }
+  PROJECT_CLONES_BODY="None. External source repository: $SOURCE_REPO"
+  PROJECT_CLONES_NOTE="The source repository is recorded in \`data/external-source\`. For each task, pass its recorded path as the project directory to \`bin/fm-spawn.sh\`; that command acquires a linked Treehouse worktree from the source repository. Never work in the source checkout."
+elif [ "$NO_PROJECTS" -eq 1 ]; then
   PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crews take pooled worktrees of that firstmate repo."
   PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crews take pooled worktrees of that repo."
 else
