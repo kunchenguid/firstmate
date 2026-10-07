@@ -347,15 +347,22 @@
 #   See docs/configuration.md for provider/Git setup and supported limits.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
-#   secondmate, and relaunch) carries. Absent or `auto` selects
-#   `--permission-mode auto`; `bypass` selects `--dangerously-skip-permissions`
-#   only when a captain explicitly opts into that posture. Auto is the
-#   managed-settings-safe default. Every other part of the claude launch
+#   secondmate, and relaunch) carries. Absent or `bypass` selects
+#   `--dangerously-skip-permissions`; `auto` selects `--permission-mode auto`,
+#   the model-reviewed remedy for managed machines. Every other part of the claude launch
 #   is unchanged. The token is the file's whitespace-trimmed content; any other
 #   value, or an unreadable file, refuses the spawn before any endpoint,
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Codex approval mode (config/codex-approval-mode):
+#   One whitespace-trimmed token: absent or `bypass` selects
+#   --dangerously-bypass-approvals-and-sandbox; `approve-for-me` selects
+#   --approve-for-me, with model-reviewed approvals in workspace-write.
+#   Any other value or unreadable file refuses before mutation, like the Claude
+#   file. Both files apply to ships, scouts, secondmates, and relaunches.
+#   bin/fm-approval-failover.sh owns evidence-based durable failover when an
+#   unconfigured bypass launch meets an approval prompt or a policy refusal.
 # Worker tool exclusions:
 #   docs/configuration.md "Worker tool exclusions" owns config/crew-exclude-tools
 #   and its operator contract. Resolve it with bin/fm-exclude-tools-lib.sh
@@ -599,7 +606,7 @@ fi
 if ! CLAUDE_PERM_PRESENT=$(fm_config_source_present "$CONFIG/claude-permission-mode"); then
   exit 1
 fi
-CLAUDE_PERMISSION_MODE=auto
+CLAUDE_PERMISSION_MODE=bypass
 if [ "$CLAUDE_PERM_PRESENT" = 1 ]; then
   if [ ! -f "$CONFIG/claude-permission-mode" ] || [ ! -r "$CONFIG/claude-permission-mode" ]; then
     echo "error: config/claude-permission-mode must be a readable regular file holding one of: bypass, auto" >&2
@@ -609,7 +616,7 @@ if [ "$CLAUDE_PERM_PRESENT" = 1 ]; then
   case "$CLAUDE_PERMISSION_MODE" in
   bypass | auto) ;;
   *)
-    echo "error: config/claude-permission-mode holds '$CLAUDE_PERMISSION_MODE'; accepted values are: auto (--permission-mode auto, the default when the file is absent), bypass (--dangerously-skip-permissions)" >&2
+    echo "error: config/claude-permission-mode holds '$CLAUDE_PERMISSION_MODE'; accepted values are: bypass (--dangerously-skip-permissions, the default when the file is absent), auto (--permission-mode auto)" >&2
     exit 1
     ;;
   esac
@@ -617,6 +624,28 @@ fi
 case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
+esac
+if ! CODEX_APPROVAL_PRESENT=$(fm_config_source_present "$CONFIG/codex-approval-mode"); then
+  exit 1
+fi
+CODEX_APPROVAL_MODE=bypass
+if [ "$CODEX_APPROVAL_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/codex-approval-mode" ] || [ ! -r "$CONFIG/codex-approval-mode" ]; then
+    echo "error: config/codex-approval-mode must be a readable regular file holding one of: bypass, approve-for-me" >&2
+    exit 1
+  fi
+  CODEX_APPROVAL_MODE=$(tr -d '[:space:]' <"$CONFIG/codex-approval-mode" || true)
+  case "$CODEX_APPROVAL_MODE" in
+    bypass | approve-for-me) ;;
+    *)
+      echo "error: config/codex-approval-mode holds '$CODEX_APPROVAL_MODE'; accepted values are: bypass (the default), approve-for-me" >&2
+      exit 1
+      ;;
+  esac
+fi
+case "$CODEX_APPROVAL_MODE" in
+  approve-for-me) CODEX_APPROVAL_FLAG='--approve-for-me' ;;
+  *) CODEX_APPROVAL_FLAG='--dangerously-bypass-approvals-and-sandbox' ;;
 esac
 # config/lavish-axi-host is the primary-owned per-machine address for the
 # shared Lavish server. Read it once per launch and refuse malformed values so
@@ -2078,9 +2107,8 @@ launch_template() {
   # otherwise run with attribution back on; carrying it per launch keeps the
   # policy in force regardless of which settings scopes end up loaded.
   # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
-  # selects (header above): --permission-mode auto by default, or
-  # --dangerously-skip-permissions only when the captain explicitly selects
-  # bypass mode.
+  # selects (header above): --dangerously-skip-permissions by default, or
+  # --permission-mode auto when configured.
   # __CLAUDEADDDIRS__ is the task-channel directory grant
   # claude_add_dirs_flag below builds: Claude path-checks Read/Glob/Grep (and
   # an Edit's mandatory prior Read) against cwd plus --add-dir, and since
@@ -2137,9 +2165,9 @@ launch_template() {
   # secondmate launch deliberately keeps hooks on but shares this approval posture.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--approve-for-me "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--approve-for-me --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -5085,7 +5113,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen approval_mode approval_configured traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5097,6 +5125,12 @@ preserve_relaunch_meta() {
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  if [ "$RAW_LAUNCH" = 0 ]; then
+    case "$HARNESS" in
+      claude) echo "approval_mode=$CLAUDE_PERMISSION_MODE"; echo "approval_configured=$CLAUDE_PERM_PRESENT" ;;
+      codex) echo "approval_mode=$CODEX_APPROVAL_MODE"; echo "approval_configured=$CODEX_APPROVAL_PRESENT" ;;
+    esac
+  fi
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -5259,6 +5293,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
+LAUNCH=${LAUNCH//__CODEXAPPROVALFLAG__/$CODEX_APPROVAL_FLAG}
 if [ "$KEEP_AI_TRAILERS" = 1 ]; then
   LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/}
 else

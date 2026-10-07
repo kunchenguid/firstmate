@@ -707,7 +707,13 @@ A real worker in that posture appended its authorized Firstmate status channel, 
 The networked operations initially required automatic review because the workspace-write sandbox begins with network access disabled, then completed after that review.
 This confirms unattended progress through the reviewer, not unrestricted network or external-write access.
 
-`tests/fm-spawn-dispatch-profile.test.sh` pins `--approve-for-me` for Codex crewmate, scout, and secondmate launch construction.
+`tests/fm-spawn-dispatch-profile.test.sh` pins unchanged bypass defaults and explicit `approve-for-me` launches for ships and scouts, plus hook and secondmate launch wiring.
+`tests/fm-approval-failover.test.sh` exercises positive and negative evidence, atomic persistence, explicit-setting protection, and the guarded recovery invocation with substituted backend/control collaborators.
+These behavior tests are not a live vendor-refusal or actual lifecycle verification.
+The opt-in `FM_MANAGED_APPROVAL_LIVE=1 tests/fm-managed-approval-live-e2e.test.sh` requires real current-CLI refusals to match the classifier.
+Its 2026-10-07 Codex 0.160.1 attempt stopped at the managed `Hooks need review` dialog even with `--disable hooks`; no operator trust was manufactured, so live managed-policy failover remains unverified.
+The prior live automatic-review probe verifies the fallback's capabilities, not the new detector and relaunch path.
+Claude's specific policy 403 is required alongside the blocked-connection text; a UI that exposes only a generic login error does not justify changing permission posture.
 
 ## Composer classification matrix
 

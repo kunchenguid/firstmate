@@ -3,7 +3,7 @@ name: stuck-crewmate-recovery
 description: >-
   Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
   Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
-  Also use on the inverse case: a live crewmate reporting the no-mistakes pipeline dead, unreachable, or timed out.
+  Also use on a managed-approval check wake and on the inverse case: a live crewmate reporting the no-mistakes pipeline dead, unreachable, or timed out.
   Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
 user-invocable: false
 metadata:
@@ -21,6 +21,13 @@ Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> inte
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
+
+## Managed approval failover
+
+For a `check: managed-approval <id>` notification, load `harness-adapters`, then run `FM_HOME=<owning-home> bin/fm-approval-failover.sh apply <id>`.
+That script owns evidence rechecking, explicit-setting preservation, durable configuration, and recovery through `fm-control`; never implement those steps by editing vendor settings or answering the prompt.
+Report a successful switch as the runtime's managed-machine remedy now being remembered for later launches, including that approvals use a model reviewer.
+On a refusal, preserve the setting and work, read the exact failure, and reconcile through the ordinary recovery path rather than repeating a bypass launch.
 
 ## Session-start reconciliation for a dead ordinary direct report
 

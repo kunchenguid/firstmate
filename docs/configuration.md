@@ -838,9 +838,12 @@ For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-disco
 
 ### Codex automatic approval review
 
-Codex crewmate, scout, and secondmate launches pass `--approve-for-me`.
-It routes approval requests through Codex automatic review in the workspace-write sandbox, which starts with network access disabled and reviews writes outside the working directory.
-This is the default because a managed policy can leave `--dangerously-bypass-approvals-and-sandbox` with user-reviewed approvals even when its sandbox bypass applies.
+Codex crewmate, scout, and secondmate launches default to `--dangerously-bypass-approvals-and-sandbox`.
+The local, gitignored `config/codex-approval-mode` accepts one whitespace-trimmed token: absent or `bypass` retains that default; `approve-for-me` selects `--approve-for-me`.
+Malformed values and unreadable files refuse before spawn mutation, and the setting applies to relaunches and is inherited into secondmate homes.
+The fallback uses a model reviewer in the workspace-write sandbox, which starts with network access disabled and reviews writes outside the working directory.
+It remedies a managed policy that leaves bypass launches with user-reviewed approvals even when its sandbox bypass applies.
+Firstmate targets current CLIs rather than detecting versions or emulating older approval flags.
 Crew and scout launches still request hook disablement and retain their notification wiring, while secondmates retain their primary-session hooks.
 A managed policy can override the requested hook disablement, so it may still require an operator's hook review.
 Verification on 2026-10-06 with codex-cli 0.160.1 confirmed automatic review could append the authorized status channel, inspect the steering channel, query the no-mistakes service, run a dry-run push, and make a GitHub read after automatic review admitted network access.
@@ -859,9 +862,9 @@ The token is the file's whitespace-trimmed content.
 | `auto` | `--permission-mode auto` |
 | `bypass` | `claude --dangerously-skip-permissions` |
 
-An absent file defaults to auto, so an unconfigured home launches with the managed-settings-safe permission flag.
-Auto is Claude Code's classifier-reviewed permission mode and avoids managed policies that block bypass-permission sessions.
-`bypass` remains available only as an explicit opt-in for a home that requires that legacy posture.
+An absent file defaults to bypass, preserving `--dangerously-skip-permissions` for unconfigured homes.
+Auto uses a model reviewer and avoids managed policies that block bypass-permission sessions.
+It is selected by an explicit setting or the evidence-based failover below.
 Only the permission flag changes between the two modes.
 The environment prefix, inline settings, model, effort flags, and the task-channel `--add-dir` grant below stay the same in both.
 
@@ -879,6 +882,20 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
+
+## Persistent managed-policy failover
+
+`bin/fm-approval-failover.sh` owns the positive evidence check and durable failover for both runtimes.
+For a recorded, unconfigured bypass launch, a visible Codex command-approval modal, or Claude's HTTP 403 containing the specific managed-policy blocked-connection refusal, is actionable evidence.
+Generic login failures, unrelated 403s, unsupported launch metadata, and remote endpoints are not evidence.
+The watcher reports the result to firstmate's ordinary recovery path, which rechecks the live viewport, atomically creates the owning home's absent mode file, and interrupts and relaunches the affected worker through the existing control plane.
+Claude selects `auto`; Codex selects `approve-for-me`.
+The switch is reported and future launches use that saved mode directly, without repeating the bypass trial.
+Explicit values are never overwritten, even when empty, invalid, or a dangling symlink; a concurrent explicit write wins too.
+A lifecycle failure is reported with the fallback still persisted and the work preserved, rather than claiming successful recovery.
+Only tmux and herdr currently support verified lifecycle recovery; other backends require operator reconciliation before the setting changes.
+Both fallback modes use a model reviewer, not unrestricted execution.
+Managed hook review remains a separate operator decision, not grounds for this failover.
 
 ## Worker tool exclusions (config/crew-exclude-tools)
 
