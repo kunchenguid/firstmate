@@ -42,6 +42,7 @@ capture_codex_launch() {
   id="codex-hook-layer-$name"
   fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" codex
+  printf 'approve-for-me\n' > "$home/config/codex-approval-mode"
   fm_test_spawn_brief "$home" "$id"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   : > "$launchlog"
