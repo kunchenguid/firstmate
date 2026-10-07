@@ -746,19 +746,23 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
 
 test_codex_approval_mode_contract() {
   local value kind rec id out launch status
-  for value in absent bypass approve-for-me invalid; do
+  for value in absent bypass approve-for-me invalid split; do
     for kind in ship scout; do
       id="approval-$value-$kind"
       rec=$(make_spawn_case "$id" codex "$id")
       read_case_record "$rec"
-      [ "$value" = absent ] || printf '%s\n' "$value" > "$HOME_DIR/config/codex-approval-mode"
+      case "$value" in
+        absent) ;;
+        split) printf 'approve -for-me\n' > "$HOME_DIR/config/codex-approval-mode" ;;
+        *) printf '%s\n' "$value" > "$HOME_DIR/config/codex-approval-mode" ;;
+      esac
       if [ "$kind" = ship ]; then
         out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
       else
         out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout 2>&1)
       fi
       status=$?
-      if [ "$value" = invalid ]; then
+      if [ "$value" = invalid ] || [ "$value" = split ]; then
         expect_code 1 "$status" "invalid Codex approval setting must refuse"
         assert_contains "$out" 'config/codex-approval-mode' 'refusal must name setting'
         assert_absent "$HOME_DIR/state/$id.meta" 'invalid setting published metadata'
