@@ -2,7 +2,9 @@
 fm_ready_queue_needs_review() (
   local script_dir data backend ready count
   script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$script_dir/fm-tasks-axi-lib.sh"
+  # shellcheck source=bin/fm-timeout-lib.sh
   . "$script_dir/fm-timeout-lib.sh"
   data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
   backend=$(fm_tasks_axi_backend "${data%/*}" 2>/dev/null) || return 0
