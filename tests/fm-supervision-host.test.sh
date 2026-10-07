@@ -917,7 +917,11 @@ test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
   assert_grep 'MAIN processes it from its next drain' "$home/engine-report.log" "an attended captain report must say main processes it"
   assert_no_grep 'demo.status' "$home/state/.wake-queue" "the handled wake must stay acknowledged"
   assert_no_grep 'supervision-host-return' "$home/state/.wake-queue" "an attended captain report must queue no return wake"
-  watcher_live "$home" && fail "the host left its successor cycle running when it woke main"
+  watcher_live "$home" || fail "the host stopped its successor cycle when it woke main: $(cat "$home/state/.supervision-host.log")"
+  [ "$(marker_kind "$home")" = downtime ] \
+    || fail "the hand-back left no downtime episode, so main's re-arm owner would not deliver it: $(cat "$home/state/.watcher-down")"
+  [ "$(cut -f1 "$home/state/.supervision-host-left" 2>/dev/null)" = "$(parent_of "$(cat "$home/state/.watch.lock/pid")")" ] \
+    || fail "the host must record the successor arm it left for the next park's take-over: $(cat "$home/state/.supervision-host-left" 2>/dev/null)"
 
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
   assert_contains "$drained" "BRANCH OUTCOMES (captain outcomes the supervision session recorded for you" "main's drain must present the captain outcome"
@@ -1449,6 +1453,108 @@ test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end() {
   assert_contains "$drained" 'which region?' "the successor's close must reach main's drain"
   watcher_live "$home" || fail "successor close: the next turn end left no watcher"
   pass "host+hook: a successor close that lands during main's turn is delivered at the next turn end"
+}
+
+# The live gap (2026-10-05): an attended captain outcome handed back to main
+# stopped the host's successor cycle, so while main stayed busy in long turns
+# no watcher beat and a new worker event raised no wake until main's next turn
+# end. The hand-back now leaves that cycle watching for main, as a pass-through
+# does: the beacon stays fresh while main is busy, a later event queues durably
+# and reaches main at its next turn end, the handed-back outcome is not
+# delivered again, and the park after that owns the only cycle.
+test_branch_outcome_hand_back_keeps_watching_while_main_is_busy() {
+  local home watcher drained
+  home=$(make_primary_home hook-outcome-keeps-watching)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  printf 'project=demo\nwindow=fm-other\nharness=claude\n' > "$home/state/other.meta"
+  echo captain > "$home/stub-mode"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "outcome keeps watching: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'ready for review'
+  wait_until 250 hook_exited "$home" || fail "outcome keeps watching: the captain outcome never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_re '^supervision-host: branch-outcome: .*\(store rows 1\)' "$home/hook.err" "fixture: the host did not hand its captain outcome to main"
+  assert_rewoke_main "$home" "outcome keeps watching"
+
+  # Main is busy: no drain and no turn end yet.
+  watcher_live "$home" || fail "outcome keeps watching: the hand-back left no watcher while main is busy: $(cat "$home/state/.supervision-host.log")"
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  sleep 3
+  kill -0 "$watcher" 2>/dev/null || fail "outcome keeps watching: the watcher left for main exited while main was busy (pid $watcher)"
+  [ "$home/state/.last-watcher-beat" -nt "$home/hook.rc" ] \
+    || fail "outcome keeps watching: no watcher beat after the hand-back while main was busy"
+  [ "$(home_arms "$home" | grep -c .)" -eq 1 ] \
+    || fail "outcome keeps watching: the hand-back left more than one cycle:"$'\n'"$(home_arms "$home")"
+
+  # Main's rewoken turn drains the outcome; another worker's event lands before
+  # that turn acknowledges and ends.
+  main_drain "$home" > "$home/main-drain.out"
+  drained=$(cat "$home/main-drain.out")
+  assert_contains "$drained" " ago] demo: stub escalated: " "main's drain must present the handed-back captain outcome"
+  printf 'working [at=%s]: other step\n' "$(date +%s)" >> "$home/state/other.status"
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" \
+    || fail "outcome keeps watching: the watcher left for main did not wake on the other worker's event"
+  assert_grep 'other.status' "$home/state/.wake-queue" "the other worker's event must queue durably while main is busy"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 >/dev/null \
+    || fail "outcome keeps watching: main's outcome acknowledgement was refused"
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "outcome keeps watching: main's acknowledgement failed: $MAIN_ACK"
+
+  turn_end "$home"
+  wait_until 250 hook_exited "$home" || fail "outcome keeps watching: the next turn end never delivered the other event: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "outcome keeps watching (next turn end)"
+  main_drain "$home" > "$home/main-drain.out"
+  drained=$(cat "$home/main-drain.out")
+  assert_contains "$drained" 'other.status' "the other worker's event must reach main's drain at its next turn end"
+  assert_not_contains "$drained" "BRANCH OUTCOMES" "the handed-back outcome must not be delivered again"
+  [ "$(engine_calls "$home")" -eq 1 ] || fail "outcome keeps watching: the engine ran again for an event that was main's"
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "outcome keeps watching: main's second acknowledgement failed: $MAIN_ACK"
+  turn_end "$home"
+  wait_until 150 host_owns_the_only_cycle "$home" \
+    || fail "outcome keeps watching: the next park did not own the home's only watcher cycle:"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  sleep 2
+  ! hook_exited "$home" || fail "outcome keeps watching: the park after main's handling woke main again: $(cat "$home/hook.err")"
+  pass "host+hook: a captain outcome handed back to main keeps the fleet watched while main is busy"
+}
+
+# The cycle a captain-outcome hand-back leaves for main is taken over by the
+# park at main's next turn end once main has handled the outcome: one arm, the
+# host's own child, owns the watcher, and nothing reaches main again.
+test_next_park_takes_over_the_cycle_a_branch_outcome_left_for_main() {
+  local home left_watcher left_arm
+  home=$(make_primary_home hook-outcome-takeover)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo captain > "$home/stub-mode"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "outcome takeover: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'ready for review'
+  wait_until 250 hook_exited "$home" || fail "outcome takeover: the captain outcome never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_re '^supervision-host: branch-outcome: ' "$home/hook.err" "fixture: the host did not hand its captain outcome to main"
+  assert_rewoke_main "$home" "outcome takeover"
+  left_watcher=$(cat "$home/state/.watch.lock/pid")
+  left_arm=$(parent_of "$left_watcher")
+  [ "$(cut -f1 "$home/state/.supervision-host-left" 2>/dev/null)" = "$left_arm" ] \
+    || fail "outcome takeover: the host did not record the arm it left for main: $(cat "$home/state/.supervision-host-left" 2>/dev/null)"
+  main_drain "$home" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 >/dev/null \
+    || fail "outcome takeover: main's outcome acknowledgement was refused"
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "outcome takeover: main's acknowledgement failed: $MAIN_ACK"
+  turn_end "$home"
+  wait_until 150 host_owns_the_only_cycle "$home" \
+    || fail "outcome takeover: the next park did not own the home's only watcher cycle (left arm $left_arm):"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  ! kill -0 "$left_arm" 2>/dev/null || fail "outcome takeover: the arm the hand-back left still runs (pid $left_arm)"
+  sleep 2
+  ! hook_exited "$home" || fail "outcome takeover: the take-over woke main again: $(cat "$home/hook.err")"
+  assert_re '^acked:' "$home/state/.watcher-down" "outcome takeover: the take-over opened a downtime episode"
+  assert_no_re 'rearm-resurface' "$home/state/.supervision-host.log" "outcome takeover: the take-over resurfaced a recovery to main"
+  [ "$(engine_calls "$home")" -eq 1 ] || fail "outcome takeover: the engine ran again after the take-over"
+  pass "host+hook: the next park takes over the cycle a captain-outcome hand-back left, and nothing reaches main again"
 }
 
 # The arm processes running from <home>'s bin, one "<pid> <ppid>" per line.
@@ -2926,6 +3032,8 @@ test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
+test_branch_outcome_hand_back_keeps_watching_while_main_is_busy
+test_next_park_takes_over_the_cycle_a_branch_outcome_left_for_main
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_unrecorded_successor_is_stopped_rather_than_left_for_main

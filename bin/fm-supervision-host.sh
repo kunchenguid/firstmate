@@ -80,7 +80,9 @@
 # main, and neither does any handled wake while away: captain outcomes wait in
 # the outcome store for the return drain's BRANCH OUTCOMES section. A handled
 # attended wake that recorded a captain outcome exits with one "supervision-host: branch-outcome:"
-# line naming its store rows, without the close it handled; main drains, where
+# line naming its store rows, without the close it handled, and leaves the
+# successor cycle watching through main's handling turn as a pass-through does
+# (outcome_to_main owns the fallback); main drains, where
 # the BRANCH OUTCOMES section (bin/fm-wake-drain.sh) presents every
 # unprocessed captain outcome until main acknowledges it. Otherwise the host
 # parks on the successor.
@@ -710,6 +712,24 @@ leave_successor_for_main() {
   detach_successor
 }
 
+# Hand a handled wake's captain outcomes to main and leave its successor cycle
+# watching through main's handling turn, as a pass-through does. Downtime is
+# republished first, because the engine's acknowledgement retired the handoff
+# and the re-arm owner delivers only while the recovery marker reads downtime;
+# then the successor is recorded and detached for the next park to take over.
+# A successor whose arm or watcher already exited, one that cannot be
+# recorded, or downtime that cannot be published falls back to exit_to_main.
+outcome_to_main() {  # <why> [further lines]
+  if [ -n "$SUCCESSOR_PID" ] && fm_pid_alive "$SUCCESSOR_PID" && fm_pid_alive "$SUCCESSOR_WATCHER" \
+    && fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1 \
+    && detach_successor; then
+    log_line "to-main	$1"
+    emit "supervision-host: $1" "${2:-}"
+    exit 0
+  fi
+  exit_to_main "$@"
+}
+
 # The engine conversation for this turn: the recorded one while it belongs to
 # this main session and has turns left, otherwise a new one. Sets ENGINE_SESSION
 # and ENGINE_MODE (new|resume).
@@ -1172,7 +1192,7 @@ while :; do
     CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
     if [ -n "$CAPTAIN_SEQS" ]; then
       ARM_TEXT=
-      exit_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
+      outcome_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
         "$HEALTH_NOTE"
     fi
   fi
