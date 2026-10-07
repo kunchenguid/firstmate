@@ -19,6 +19,7 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit
 
 REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
+REAL_MKTEMP=$(command -v mktemp)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
@@ -29,14 +30,15 @@ MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
+SLOW_HOLDER_CONTROL="$TMP_ROOT/slow-holder-control"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG TREEHOUSE_LOCK_DIR MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
-export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+export REAL_HERDR REAL_TREEHOUSE REAL_MKTEMP REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG TREEHOUSE_LOCK_DIR MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL SLOW_HOLDER_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -143,11 +145,19 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
+slow_holder=0
+if [ "$mutation" = tab-create ] && [ -n "$label" ] && [ -e "$SLOW_HOLDER_CONTROL/$label" ]; then
+  slow_holder=1
+  printf '%s\tstart\t%s\n' "$label" "$(date +%s)" >> "$SLOW_HOLDER_CONTROL/log"
+  : > "$SLOW_HOLDER_CONTROL/$label.started"
+  while [ ! -e "$SLOW_HOLDER_CONTROL/release" ]; do sleep 0.05; done
+fi
 if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
   status=0
 else
   status=$?
 fi
+[ "$slow_holder" -eq 0 ] || printf '%s\tend\t%s\n' "$label" "$(date +%s)" >> "$SLOW_HOLDER_CONTROL/log"
 if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
   case "$label" in
     $'└ active-seeded · p:'*)
@@ -259,7 +269,17 @@ printf 'workspace-move\t%s\t%s\t%s\n' "$before" "$after" "$2" >> "$FOCUS_AUDIT_L
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
 SH
-chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse"
+cat > "$FAKEBIN/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "$#" -eq 2 ] && [ "$1" = -d ] \
+  && [ "$2" = "${FM_TEST_PRESENTATION_LOCK:-}.owner.XXXXXX" ]; then
+  printf '%s\n' "$(date +%s)" >> "$FM_TEST_PRESENTATION_WAIT_LOG"
+  [ -z "${FM_TEST_PRESENTATION_ATTEMPT_DELAY:-}" ] || sleep "$FM_TEST_PRESENTATION_ATTEMPT_DELAY"
+fi
+exec "$REAL_MKTEMP" "$@"
+SH
+chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse" "$FAKEBIN/mktemp"
 chmod +x "$FAKEBIN/herdr-workspace-mover"
 export PATH="$FAKEBIN:$PATH"
 export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
@@ -278,8 +298,15 @@ export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
+PRIMARY_WAVE_PID=
+BRAVO_WAVE_PID=
 cleanup_all() {
   local wt
+  [ ! -d "$SLOW_HOLDER_CONTROL" ] || : > "$SLOW_HOLDER_CONTROL/release"
+  [ -z "$PRIMARY_WAVE_PID" ] || wait "$PRIMARY_WAVE_PID" 2>/dev/null || true
+  [ -z "$BRAVO_WAVE_PID" ] || wait "$BRAVO_WAVE_PID" 2>/dev/null || true
+  PRIMARY_WAVE_PID=
+  BRAVO_WAVE_PID=
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
     kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
@@ -484,7 +511,9 @@ projection_labels_from_log() {  # <start-line>
 session_presentation_lock_path() {
   PATH="$FAKEBIN:$PATH" HERDR_SESSION="$HERDR_LAB_SESSION" bash -c '
     . "$0/bin/backends/herdr.sh"
-    fm_backend_herdr_presentation_session_lock_path "$1"
+    . "$0/bin/fm-wake-lib.sh"
+    lock_path=$(fm_backend_herdr_presentation_session_lock_path "$1") || exit 1
+    fm_lock_abs_path "$lock_path"
   ' "$ROOT" "$HERDR_LAB_SESSION"
 }
 
@@ -1318,12 +1347,89 @@ PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for concurrent recovery"
 CONCURRENT_RECOVERY_FOCUS=$(focus_snapshot)
+# A live holder that keeps the session lock past the recovery wait is stuck:
+# recovery refuses clearly before any Herdr mutation.
+STUCK_RECOVERY_READY="$TMP_ROOT/stuck-recovery-ready"
+STUCK_RECOVERY_RELEASE="$TMP_ROOT/stuck-recovery-release"
+STUCK_RECOVERY_LOCK=$(session_presentation_lock_path) \
+  || fail "could not resolve the session presentation lock for stuck-holder recovery"
+ROOT="$ROOT" READY="$STUCK_RECOVERY_READY" RELEASE="$STUCK_RECOVERY_RELEASE" \
+  LOCK="$STUCK_RECOVERY_LOCK" bash -c '
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$LOCK" || exit 1
+  : > "$READY"
+  while [ ! -e "$RELEASE" ]; do sleep 0.05; done
+  fm_lock_release "$LOCK"
+' &
+LOCK_CONTENTION_OWNER_PID=$!
+while [ ! -e "$STUCK_RECOVERY_READY" ] && kill -0 "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null; do sleep 0.01; done
+[ -e "$STUCK_RECOVERY_READY" ] || fail "could not hold the session presentation lock for stuck-holder recovery"
+STUCK_RECOVERY_CALLS=$(log_line_count)
+STUCK_RECOVERY_WAIT=5
+if FM_TEST_HERDR_RECOVERY_LOCK_WAIT="$STUCK_RECOVERY_WAIT" FM_TEST_PRESENTATION_LOCK="$STUCK_RECOVERY_LOCK" \
+  FM_TEST_PRESENTATION_WAIT_LOG="$TMP_ROOT/stuck-recovery-attempts" FM_TEST_PRESENTATION_ATTEMPT_DELAY=1 \
+  spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" \
+  > "$TMP_ROOT/stuck-recovery.out" 2> "$TMP_ROOT/stuck-recovery.err"; then
+  STUCK_RECOVERY_STATUS=0
+else
+  STUCK_RECOVERY_STATUS=$?
+fi
+: > "$STUCK_RECOVERY_RELEASE"
+wait "$LOCK_CONTENTION_OWNER_PID" || fail "stuck-holder recovery lock owner failed"
+LOCK_CONTENTION_OWNER_PID=
+[ "$STUCK_RECOVERY_STATUS" -ne 0 ] || fail "recovery behind a stuck session lock holder unexpectedly succeeded"
+if [ -s "$TMP_ROOT/stuck-recovery-attempts" ]; then
+  STUCK_RECOVERY_START=$(head -n 1 "$TMP_ROOT/stuck-recovery-attempts")
+  STUCK_RECOVERY_END=$(tail -n 1 "$TMP_ROOT/stuck-recovery-attempts")
+  [ $((STUCK_RECOVERY_END - STUCK_RECOVERY_START)) -le "$STUCK_RECOVERY_WAIT" ] \
+    || fail "slow lock attempts extended the elapsed recovery wait budget"
+fi
+grep -F "herdr presentation recovery could not acquire its session lock within ${STUCK_RECOVERY_WAIT}s; refusing a concurrent resume" \
+  "$TMP_ROOT/stuck-recovery.err" >/dev/null 2>&1 \
+  || fail "recovery behind a stuck holder did not refuse clearly: $(cat "$TMP_ROOT/stuck-recovery.err")"
+[ "$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)" = "$PRIMARY_WAVE_OLD_PANE" ] \
+  || fail "a refused stuck-holder recovery changed the task endpoint"
+if sed -n "$((STUCK_RECOVERY_CALLS + 1)),\$p" "$HERDR_CALL_LOG" | grep -E $'^(workspace|tab|pane)\t(create|close|focus|move)' >/dev/null; then
+  fail "a refused stuck-holder recovery mutated Herdr: $(sed -n "$((STUCK_RECOVERY_CALLS + 1)),\$p" "$HERDR_CALL_LOG")"
+fi
+assert_focus_is "$CONCURRENT_RECOVERY_FOCUS" "refused stuck-holder recovery"
+mkdir -p "$SLOW_HOLDER_CONTROL"
+: > "$SLOW_HOLDER_CONTROL/fm-$PRIMARY_WAVE_ID"
+: > "$SLOW_HOLDER_CONTROL/fm-$BRAVO_WAVE_ID"
 spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
 PRIMARY_WAVE_PID=$!
-spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
+RECOVERY_READY_DEADLINE=$((SECONDS + 60))
+while [ ! -e "$SLOW_HOLDER_CONTROL/fm-$PRIMARY_WAVE_ID.started" ] \
+  && kill -0 "$PRIMARY_WAVE_PID" 2>/dev/null && [ "$SECONDS" -lt "$RECOVERY_READY_DEADLINE" ]; do sleep 0.05; done
+[ -e "$SLOW_HOLDER_CONTROL/fm-$PRIMARY_WAVE_ID.started" ] \
+  || fail "primary recovery did not reach its lock-held husk replacement"
+FM_TEST_PRESENTATION_LOCK="$STUCK_RECOVERY_LOCK" FM_TEST_PRESENTATION_WAIT_LOG="$TMP_ROOT/bravo-recovery-attempts" \
+  spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
+RECOVERY_READY_DEADLINE=$((SECONDS + 60))
+while [ ! -s "$TMP_ROOT/bravo-recovery-attempts" ] \
+  && kill -0 "$BRAVO_WAVE_PID" 2>/dev/null && [ "$SECONDS" -lt "$RECOVERY_READY_DEADLINE" ]; do sleep 0.05; done
+[ -s "$TMP_ROOT/bravo-recovery-attempts" ] || fail "secondmate recovery did not reach session lock acquisition"
+sleep 8
+while [ "$(wc -l < "$TMP_ROOT/bravo-recovery-attempts")" -le 50 ] \
+  && kill -0 "$BRAVO_WAVE_PID" 2>/dev/null && [ "$SECONDS" -lt "$RECOVERY_READY_DEADLINE" ]; do sleep 0.05; done
+kill -0 "$BRAVO_WAVE_PID" 2>/dev/null \
+  && [ "$(wc -l < "$TMP_ROOT/bravo-recovery-attempts")" -gt 50 ] \
+  && [ ! -e "$SLOW_HOLDER_CONTROL/fm-$BRAVO_WAVE_ID.started" ] \
+  || fail "secondmate recovery did not remain pending beyond the former lock budget: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+: > "$SLOW_HOLDER_CONTROL/release"
 wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+PRIMARY_WAVE_PID=
 wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+BRAVO_WAVE_PID=
+[ "$(grep -c $'\tstart\t' "$SLOW_HOLDER_CONTROL/log")" = 2 ] \
+  && [ "$(grep -c $'\tend\t' "$SLOW_HOLDER_CONTROL/log")" = 2 ] \
+  || fail "concurrent recovery did not stretch both husk replacements: $(cat "$SLOW_HOLDER_CONTROL/log")"
+SLOW_FIRST_END=$(awk -F '\t' '$2 == "end" { print $3; exit }' "$SLOW_HOLDER_CONTROL/log")
+SLOW_SECOND_START=$(awk -F '\t' '$2 == "start" { n++; if (n == 2) { print $3; exit } }' "$SLOW_HOLDER_CONTROL/log")
+[ "$SLOW_SECOND_START" -ge "$SLOW_FIRST_END" ] \
+  || fail "concurrent recoveries overlapped their husk replacements instead of serializing: $(cat "$SLOW_HOLDER_CONTROL/log")"
+rm -rf "$SLOW_HOLDER_CONTROL"
 PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
 BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
 PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
