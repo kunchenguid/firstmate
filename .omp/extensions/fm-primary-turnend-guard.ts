@@ -268,10 +268,20 @@ function stopSessionstartGeneration(generation: SessionstartGeneration): Promise
 // requires script paths in POSIX form (/d/newP/...), while import.meta.url
 // roots are native form (D:\newP\...), so convert before invoking. Paths
 // that are not drive-letter absolute (already-POSIX roots, UNC) pass through.
+// When the PATH bash is the WSL launcher instead, it cannot resolve the MSYS
+// form and the spawn fails to exec or the child exits 127, so every helper
+// retries once with the WSL mount form (/mnt/d/newP/...); a real helper
+// verdict, including the guard's 2, is never retried.
 function firstmateMsysPath(path: string): string {
   const windows = /^([A-Za-z]):[\\/]+(.*)$/.exec(path);
   if (!windows) return path;
   return `/${windows[1].toLowerCase()}/${windows[2].replace(/\\/g, "/")}`;
+}
+
+function firstmateWslPath(path: string): string {
+  const windows = /^([A-Za-z]):[\\/]+(.*)$/.exec(path);
+  if (!windows) return path;
+  return `/mnt/${windows[1].toLowerCase()}/${windows[2].replace(/\\/g, "/")}`;
 }
 
 function runSessionstartHook(generation: SessionstartGeneration): Promise<SessionstartResult> {
@@ -285,128 +295,151 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
     };
     const supervised = process.platform !== "win32";
     const runner = `${root}/bin/fm-sessionstart-run.sh`;
-    // The internal --pi-prerequisite mode is shared: it is the wrapper's
-    // "silent exit 3 on an intentional stand-down" contract, not a Pi-only path.
-    const invocation = supervised
-      ? {
-          command: "node",
-          args: [
-            `${root}/.pi/extensions/lib/fm-sessionstart-supervisor.mjs`,
-            runner,
-            "--source",
-            generation.source,
-            "--pi-prerequisite",
-          ],
-        }
-      : firstmateShellInvocation(
-          firstmateMsysPath(runner),
-          ["--source", generation.source, "--pi-prerequisite"],
-        );
-    let child: ChildProcess;
-    try {
-      child = spawn(
-        invocation.command,
-        invocation.args,
-        {
-          detached: supervised,
-          stdio: supervised
-            ? ["ignore", "pipe", "ignore", "ipc"]
-            : ["ignore", "pipe", "ignore"],
-        },
-      );
-    } catch {
-      settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
-      return;
-    }
-    generation.child = child;
-    generation.processGroupId = child.pid ?? null;
-    generation.childClose = new Promise<void>((resolveClose) => {
-      closeChild = resolveClose;
-    });
+    const scriptForms = [firstmateMsysPath(runner), firstmateWslPath(runner)];
+    let attempt = 0;
     const chunks: Buffer[] = [];
     let observedBytes = 0;
     let retainedBytes = 0;
     let truncated = false;
     let pendingCompletion: { code: number | null; bytes: number } | null = null;
-    const unrefSupervisor = (): void => {
-      if (!supervised) return;
-      child.unref();
-      child.channel?.unref?.();
-      const stdout = child.stdout as (NodeJS.ReadableStream & { unref?: () => void }) | null;
-      stdout?.unref?.();
-    };
-    const markClosed = (): void => {
-      if (generation.childClosed) return;
-      generation.childClosed = true;
-      if (generation.child === child) generation.child = null;
-      generation.processGroupId = null;
-      closeChild();
-    };
-    const complete = (code: number | null): void => {
-      unrefSupervisor();
-      if (generation.stopping) {
-        settle({ kind: "cancelled" });
-        return;
-      }
-      if (code === sessionstartIneligibleExit) {
-        settle({ kind: "ineligible" });
-        return;
-      }
-      if (code !== 0) {
-        settle({ kind: "failed" });
-        return;
-      }
-      const raw = Buffer.concat(chunks).toString("utf8").trim();
-      if (!raw) {
-        settle({ kind: "empty" });
-        return;
-      }
-      settle({
-        kind: "ready",
-        raw: truncated ? `${raw}${sessionstartTruncatedMarker}` : raw,
-      });
-    };
-    const completePending = (): void => {
-      if (!pendingCompletion || observedBytes < pendingCompletion.bytes) return;
-      complete(pendingCompletion.code);
-      pendingCompletion = null;
-    };
-    child.stdout?.on("data", (chunk: Buffer) => {
-      observedBytes += chunk.length;
-      if (retainedBytes >= sessionstartDeliveryBytes) {
-        truncated = true;
-        completePending();
-        return;
-      }
-      const remaining = sessionstartDeliveryBytes - retainedBytes;
-      const retained = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
-      chunks.push(retained);
-      retainedBytes += retained.length;
-      if (retained.length !== chunk.length) truncated = true;
-      completePending();
-    });
-    if (supervised) {
-      child.on("message", (message: unknown) => {
-        const result = message as { type?: unknown; code?: unknown; bytes?: unknown };
-        if (result.type !== "result" ||
-            (typeof result.code !== "number" && result.code !== null) ||
-            typeof result.bytes !== "number") return;
-        pendingCompletion = { code: result.code, bytes: result.bytes };
-        completePending();
-      });
-    }
-    child.on("error", () => {
-      markClosed();
-      settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
-    });
-    child.on("close", (code) => {
-      markClosed();
-      if (supervised) {
+    const startAttempt = (): void => {
+      // The internal --pi-prerequisite mode is shared: it is the wrapper's
+      // "silent exit 3 on an intentional stand-down" contract, not a Pi-only path.
+      const invocation = supervised
+        ? {
+            command: "node",
+            args: [
+              `${root}/.pi/extensions/lib/fm-sessionstart-supervisor.mjs`,
+              runner,
+              "--source",
+              generation.source,
+              "--pi-prerequisite",
+            ],
+          }
+        : firstmateShellInvocation(
+            scriptForms[attempt],
+            ["--source", generation.source, "--pi-prerequisite"],
+          );
+      let child: ChildProcess;
+      try {
+        child = spawn(
+          invocation.command,
+          invocation.args,
+          {
+            detached: supervised,
+            stdio: supervised
+              ? ["ignore", "pipe", "ignore", "ipc"]
+              : ["ignore", "pipe", "ignore"],
+          },
+        );
+      } catch {
+        if (!supervised && attempt + 1 < scriptForms.length) {
+          attempt += 1;
+          startAttempt();
+          return;
+        }
         settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
         return;
       }
-      complete(code);
-    });
+      generation.child = child;
+      generation.processGroupId = child.pid ?? null;
+      generation.childClosed = false;
+      generation.childClose = new Promise<void>((resolveClose) => {
+        closeChild = resolveClose;
+      });
+      const unrefSupervisor = (): void => {
+        if (!supervised) return;
+        child.unref();
+        child.channel?.unref?.();
+        const stdout = child.stdout as (NodeJS.ReadableStream & { unref?: () => void }) | null;
+        stdout?.unref?.();
+      };
+      let attemptClosed = false;
+      const markClosed = (): void => {
+        if (attemptClosed) return;
+        attemptClosed = true;
+        generation.childClosed = true;
+        if (generation.child === child) generation.child = null;
+        generation.processGroupId = null;
+        closeChild();
+      };
+      const complete = (code: number | null): void => {
+        unrefSupervisor();
+        if (generation.stopping) {
+          settle({ kind: "cancelled" });
+          return;
+        }
+        if (code === sessionstartIneligibleExit) {
+          settle({ kind: "ineligible" });
+          return;
+        }
+        if (code !== 0) {
+          settle({ kind: "failed" });
+          return;
+        }
+        const raw = Buffer.concat(chunks).toString("utf8").trim();
+        if (!raw) {
+          settle({ kind: "empty" });
+          return;
+        }
+        settle({
+          kind: "ready",
+          raw: truncated ? `${raw}${sessionstartTruncatedMarker}` : raw,
+        });
+      };
+      const completePending = (): void => {
+        if (!pendingCompletion || observedBytes < pendingCompletion.bytes) return;
+        complete(pendingCompletion.code);
+        pendingCompletion = null;
+      };
+      child.stdout?.on("data", (chunk: Buffer) => {
+        observedBytes += chunk.length;
+        if (retainedBytes >= sessionstartDeliveryBytes) {
+          truncated = true;
+          completePending();
+          return;
+        }
+        const remaining = sessionstartDeliveryBytes - retainedBytes;
+        const retained = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+        chunks.push(retained);
+        retainedBytes += retained.length;
+        if (retained.length !== chunk.length) truncated = true;
+        completePending();
+      });
+      if (supervised) {
+        child.on("message", (message: unknown) => {
+          const result = message as { type?: unknown; code?: unknown; bytes?: unknown };
+          if (result.type !== "result" ||
+              (typeof result.code !== "number" && result.code !== null) ||
+              typeof result.bytes !== "number") return;
+          pendingCompletion = { code: result.code, bytes: result.bytes };
+          completePending();
+        });
+      }
+      child.on("error", () => {
+        markClosed();
+        if (!supervised && !generation.stopping && attempt + 1 < scriptForms.length) {
+          attempt += 1;
+          startAttempt();
+          return;
+        }
+        settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
+      });
+      child.on("close", (code) => {
+        markClosed();
+        if (supervised) {
+          settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
+          return;
+        }
+        if (!generation.stopping && code === 127 && attempt + 1 < scriptForms.length) {
+          attempt += 1;
+          startAttempt();
+          return;
+        }
+        complete(code);
+      });
+    };
+    startAttempt();
   });
 }
 
@@ -480,33 +513,68 @@ async function claimSessionstartMessage(
   return sessionstartMessage(generation, result);
 }
 
+// One runner for the verdict-shaped helpers (turn-end guard and PreToolUse
+// seatbelts): collect stderr, never throw, and apply the win32 fallback
+// owned above - MSYS form first, one retry in WSL mount form when the spawn
+// fails to exec or the child exits 127, never retrying a real verdict.
+function runBashHelper(
+  script: string,
+  args: readonly string[],
+  stdinPayload?: string,
+): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const forms = process.platform === "win32"
+      ? [firstmateMsysPath(script), firstmateWslPath(script)]
+      : [script];
+    const startAttempt = (attempt: number): void => {
+      const invocation = firstmateShellInvocation(forms[attempt], args);
+      let child: ChildProcess;
+      try {
+        child = spawn(invocation.command, invocation.args, {
+          stdio: [stdinPayload === undefined ? "ignore" : "pipe", "ignore", "pipe"],
+        });
+      } catch {
+        if (attempt + 1 < forms.length) {
+          startAttempt(attempt + 1);
+          return;
+        }
+        resolveResult({ code: 0, stderr: "" });
+        return;
+      }
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      let finished = false;
+      const finish = (result: { code: number; stderr: string }, helperNeverRan: boolean): void => {
+        if (finished) return;
+        finished = true;
+        if (helperNeverRan && attempt + 1 < forms.length) {
+          startAttempt(attempt + 1);
+          return;
+        }
+        resolveResult(result);
+      };
+      child.on("error", () => finish({ code: 0, stderr: "" }, true));
+      child.on("close", (code) => finish({ code: code ?? 0, stderr }, code === 127));
+      if (stdinPayload !== undefined) {
+        child.stdin.on("error", () => {});
+        child.stdin.end(stdinPayload);
+      }
+    };
+    startAttempt(0);
+  });
+}
+
 // The shared guard reads stop_hook_active exactly as it does from Claude's
 // payload: a true value allows the stop, which is what bounds omp to one
 // forced continuation per turn.
 function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: string }> {
-  return new Promise((resolveResult) => {
-    const invocation = firstmateShellInvocation(
-      firstmateMsysPath(`${root}/bin/fm-turnend-guard.sh`),
-      [],
-    );
-    let child: ChildProcess;
-    try {
-      child = spawn(invocation.command, invocation.args, {
-        stdio: ["pipe", "ignore", "pipe"],
-      });
-    } catch {
-      resolveResult({ code: 0, stderr: "" });
-      return;
-    }
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
-    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
-    child.stdin.on("error", () => {});
-    child.stdin.end(JSON.stringify({ stop_hook_active: stopHookActive }));
-  });
+  return runBashHelper(
+    `${root}/bin/fm-turnend-guard.sh`,
+    [],
+    JSON.stringify({ stop_hook_active: stopHookActive }),
+  );
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
@@ -517,27 +585,7 @@ function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: stri
 // surfaced the reason verbatim to the model). Each owner script owns its own
 // decision and is inert outside the real primary checkout.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
-  return new Promise((resolveResult) => {
-    const invocation = firstmateShellInvocation(
-      firstmateMsysPath(`${root}/bin/${script}`),
-      ["--command", command],
-    );
-    let child: ChildProcess;
-    try {
-      child = spawn(invocation.command, invocation.args, {
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-    } catch {
-      resolveResult({ code: 0, stderr: "" });
-      return;
-    }
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
-    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
-  });
+  return runBashHelper(`${root}/bin/${script}`, ["--command", command]);
 }
 
 function runPretoolCheck(command: string): Promise<{ code: number; stderr: string }> {

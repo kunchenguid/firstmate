@@ -34,15 +34,24 @@ SH
 cat >"$project/bin/fm-cd-pretool-check.sh" <<SH
 #!$real_bash
 printf 'cd:%s\n' "\$*" >> "\$FM_WINDOWS_SHELL_LOG"
+case " \$FM_VERDICT2 " in
+  *" fm-cd-pretool-check.sh "*) printf 'cd deny\n' >&2; exit 2 ;;
+esac
 SH
 cat >"$project/bin/fm-arm-pretool-check.sh" <<SH
 #!$real_bash
 printf 'arm:%s\n' "\$*" >> "\$FM_WINDOWS_SHELL_LOG"
+case " \$FM_VERDICT2 " in
+  *" fm-arm-pretool-check.sh "*) printf 'arm deny\n' >&2; exit 2 ;;
+esac
 SH
 cat >"$project/bin/fm-turnend-guard.sh" <<SH
 #!$real_bash
 cat >/dev/null
 printf 'turnend:%s\n' "\$*" >> "\$FM_WINDOWS_SHELL_LOG"
+case " \$FM_VERDICT2 " in
+  *" fm-turnend-guard.sh "*) printf 'turnend deny\n' >&2; exit 2 ;;
+esac
 SH
 cat >"$project/bin/fm-operational-input.sh" <<SH
 #!$real_bash
@@ -58,12 +67,29 @@ chmod +x "$project/bin/"*.sh
 
 # The shim shadows bash on PATH and records every bash invocation with its
 # argv, proving the extension routed the helper through bash, then hands off
-# to the real bash so the fake helpers actually run.
+# to the real bash so the fake helpers actually run. When a script is named in
+# FM_WSL127_SCRIPTS the shim refuses its first invocation with bash's own
+# "cannot resolve the script" 127, simulating a WSL-launcher PATH bash that
+# rejects the MSYS path form; later invocations hand off normally.
 shim="$TMP_ROOT/shim"
 mkdir -p "$shim"
 cat >"$shim/bash" <<SH
 #!$real_bash
 printf 'bash-invoked:%s\n' "\$*" >> "\$FM_WINDOWS_SHELL_LOG"
+script_base=\$(basename "\$1" 2>/dev/null || true)
+case " \$FM_WSL127_SCRIPTS " in
+  *" \$script_base "*)
+    countfile="\$FM_WSL127_COUNTDIR/\$script_base"
+    count=0
+    [ -f "\$countfile" ] && count=\$(cat "\$countfile")
+    count=\$((count + 1))
+    printf '%s\n' "\$count" >"\$countfile"
+    if [ "\$count" -eq 1 ]; then
+      printf 'bash: %s: No such file or directory\n' "\$1" >&2
+      exit 127
+    fi
+    ;;
+esac
 exec "$real_bash" "\$@"
 SH
 chmod +x "$shim/bash"
@@ -110,6 +136,12 @@ expect_log() {
   esac
 }
 
+expect_count() {
+  local log=$1 needle=$2 want=$3 got
+  got=$(grep -c "$needle" "$log" || true)
+  [ "$got" = "$want" ] || fail "expected $want lines matching '$needle' in $log, got $got:\n$(cat "$log")"
+}
+
 run_driver() {
   local mode=$1 log=$2 path_prefix=${3:-}
   EXT="$project/.omp/extensions/fm-primary-turnend-guard.ts" \
@@ -118,6 +150,9 @@ run_driver() {
   FM_HOME="$project" FM_ROOT_OVERRIDE="$project" \
   FM_WINDOWS_SHELL_LOG="$log" \
   FM_OPERATIONAL_INPUT_SCRIPT="$project/bin/fm-operational-input.sh" \
+  FM_WSL127_SCRIPTS="${FM_WSL127_SCRIPTS-}" \
+  FM_WSL127_COUNTDIR="${FM_WSL127_COUNTDIR-}" \
+  FM_VERDICT2="${FM_VERDICT2-}" \
   PATH="${path_prefix}$shim:$PATH" \
     "$NODE" "$TMP_ROOT/driver.mjs"
 }
@@ -191,4 +226,48 @@ expected='RESULTS:{"toolCall":"allowed","sessionStop":"settled"}'
 [ "$out" = "$expected" ] || fail "unexpected degraded results: $out (want $expected)"
 [ ! -e "$degraded_log" ] || fail "helpers ran without a working bash:\n$(cat "$degraded_log")"
 
-pass "omp session-start, pre-tool, turn-end, and operational-input seams invoke Bash owners through bash on native Windows and degrade silently when bash cannot run"
+# WSL-launcher bash: the shim refuses the first bash attempt of every
+# extension-owned helper with bash's own 127, so the extension must retry once
+# in the other path form and still reach the helper; off Windows both forms
+# are the same POSIX path, so the retry visibly runs the helper there, while
+# on native Windows the MSYS-first order keeps the retry observable only as a
+# second bash invocation.
+wsl_log="$TMP_ROOT/wsl127-calls"
+wsl_countdir="$TMP_ROOT/wsl127-counts"
+mkdir -p "$wsl_countdir"
+FM_WSL127_SCRIPTS=" fm-sessionstart-run.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh fm-turnend-guard.sh "
+FM_WSL127_COUNTDIR="$wsl_countdir"
+out=$(run_driver full "$wsl_log" 2>&1)
+status=$?
+FM_WSL127_SCRIPTS=
+expect_code 0 "$status" "omp win32 WSL-launcher retry driver"
+expected='RESULTS:{"beforeAgentStart":"message","toolCall":"allowed","sessionStop":"settled"}'
+[ "$out" = "$expected" ] || fail "unexpected WSL-launcher retry results: $out (want $expected)"
+for script in fm-sessionstart-run.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh fm-turnend-guard.sh; do
+  expect_count "$wsl_log" "bash-invoked:.*$script" 2
+done
+if [ -n "$platform_override" ]; then
+  expect_log "$wsl_log" "sessionstart:--source startup --pi-prerequisite"
+  expect_log "$wsl_log" "cd:--command printf test"
+  expect_log "$wsl_log" "arm:--command printf test"
+  expect_log "$wsl_log" "turnend:"
+fi
+
+# A real helper verdict is never retried: with the arm seatbelt and the
+# turn-end guard exiting 2, each must be invoked exactly once and the verdict
+# must surface (tool blocked, session compelled to continue).
+verdict_log="$TMP_ROOT/verdict2-calls"
+FM_VERDICT2=" fm-arm-pretool-check.sh fm-turnend-guard.sh "
+out=$(run_driver full "$verdict_log" 2>&1)
+status=$?
+FM_VERDICT2=
+expect_code 0 "$status" "omp win32 verdict-2 no-retry driver"
+expected='RESULTS:{"beforeAgentStart":"message","toolCall":"blocked","sessionStop":"continued"}'
+[ "$out" = "$expected" ] || fail "unexpected verdict-2 results: $out (want $expected)"
+expect_count "$verdict_log" "bash-invoked:.*fm-cd-pretool-check.sh" 1
+expect_count "$verdict_log" "bash-invoked:.*fm-arm-pretool-check.sh" 1
+expect_count "$verdict_log" "bash-invoked:.*fm-turnend-guard.sh" 1
+expect_log "$verdict_log" "arm:--command printf test"
+expect_log "$verdict_log" "turnend:"
+
+pass "omp session-start, pre-tool, turn-end, and operational-input seams invoke Bash owners through bash on native Windows, retry once in the other path form when a WSL-launcher bash cannot resolve the script, never retry a real verdict, and degrade silently when bash cannot run"
