@@ -7,7 +7,7 @@ Azure DevOps Server and arbitrary on-premises hosts are not supported by this in
 ## Setup
 
 Install Python 3 and Azure CLI with the `azure-devops` extension, and authenticate Azure CLI for the organization using your existing Azure DevOps credentials.
-The transport uses `az devops invoke` and REST 7.1; the extension must preserve response continuation headers as `continuation_token` (the contract provided by azure-devops 1.0.5).
+The transport uses `az devops invoke`; the extension must preserve response continuation headers as `continuation_token` (the contract provided by azure-devops 1.0.5).
 Firstmate neither changes Azure defaults nor borrows GitHub credentials for Azure.
 A failed identity read prevents registration; a failed later read never proves a merge.
 
@@ -16,10 +16,10 @@ Initialize no-mistakes for the Azure repository using its current provider docum
 Firstmate's merge support does not change no-mistakes publication support, select an account for its shared daemon, waive review, or grant merge authority.
 Keep colleague approvals and required checks in Azure branch policies; Firstmate reads those policies instead of imposing a fixed approval count.
 
-For a repository requiring `users/<username>/...`, pass `--branch-prefix users/<username>/` at task intake using the branch-prefix option owned by `bin/fm-brief.sh` and `bin/fm-promote.sh`.
-The existing `branch=<prefix>` registry annotation can retain that project's preference; `bin/fm-project-mode.sh` owns its format.
+For a repository requiring `users/<username>/...`, select that prefix through the [ship-branch intake contract](../AGENTS.md#intake-and-authority), which covers the brief, spawn and scout promotion.
+The existing `branch=<prefix>` registry annotation can retain that project's preference; [`bin/fm-project-mode.sh`](../bin/fm-project-mode.sh) owns its format.
 No username is inferred from Azure login, GitHub login or Git author configuration.
-Existing tasks still default to `fm/...`.
+Existing task branches are not renamed.
 This is a per-task selection, not a global naming change or a reason to change the project's review or merge posture.
 
 ## Supported identities
@@ -54,13 +54,13 @@ An accepted request with unconfirmed landing returns a diagnostic and leaves mon
 
 Only a `completed` PR with successful merge evidence is considered merged.
 An `abandoned` PR is not a merge, even if its branch was pushed or equivalent content happens to be on the default branch.
-Azure cleanup additionally proves that clean local work is contained in the completed PR's actual merge result or landed default-branch content; later unlanded edits and commits are preserved.
-`bin/fm-teardown.sh` owns the complete cleanup test, using the shared proof whose evidence and ambiguity limits are owned by `bin/fm-content-containment.py`.
+Azure cleanup additionally proves that clean local work is contained in the completed PR's actual merge result or landed base-branch content (the default branch when no base was selected); later unlanded edits and commits are preserved.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the complete cleanup test, using the shared proof whose evidence and ambiguity limits are owned by [`bin/fm-content-containment.py`](../bin/fm-content-containment.py).
 
 ## Conservative limits and verification
 
 An incomplete API response carrying a continuation token is refused rather than treating the first page as complete evidence.
-For each check context, the newest status must be successful and bound to the current iteration; an older failed status can be superseded by a newer current-iteration success, but a newest unbound or old-iteration status requires reconciliation.
+For each check context, the newest status must be bound to the current iteration and report `succeeded` or `notApplicable`; it can supersede an older failure, but a newest unbound or old-iteration status requires reconciliation.
 Unresolved user discussions stop completion only when a mandatory Azure comment-resolution policy makes them blocking.
 An unsupported policy response or unknown merge strategy needs operator attention, never a guessed approval.
 No optional tool installation or authentication repair is performed automatically.

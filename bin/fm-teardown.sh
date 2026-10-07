@@ -42,33 +42,36 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
-# base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
-# Squash merges collapse the branch's commits, so per-commit patch ids against main
-# no longer match, and a pipeline rebase can leave the local worktree diverged from
-# the PR head. A diverged copy is not treated as landed: path-set coverage, git
-# cherry, and merge-tree containment each fail to prove content landed without also
-# accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or equivalent patch ids),
-# or a clean content-in-default tree match. Anything else refuses.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed; dirty refusals distinguish untracked-only
-# leftovers from tracked edits and list at most ten non-exempt untracked paths.
+# hard-resets/removes the worktree and kills its processes. Except for the Azure
+# prerequisite below, committed work is accepted when reachable from any
+# remote-tracking branch (including a fork), OR - for a normal ship task whose
+# commits are not so reachable - when GitHub confirms a merged PR whose actual
+# merge result contains the local work, or the up-to-date default branch contains
+# it. A task whose meta records base_branch= (bin/fm-spawn.sh) runs that branch
+# content check against origin's copy of its base instead of the default branch.
+# A merged PR's result proves containment by ancestry or by the shared
+# bin/fm-content-containment.py proof; the branch-content fallback uses that same
+# helper. Its header owns the raw-history, final-content and location obligations,
+# including restorations, and the ambiguity/resource limits. This recognizes
+# rebased and squash-merged work without accepting unmatched later local changes;
+# patch-id matches and merge/apply heuristics never override a failed proof.
+# GitHub PR discovery uses recorded pr= first, or looks up the local branch when
+# no PR was recorded; either route requires a confirmed merge. Missing result objects are fetched by SHA,
+# then via the PR head ref or default branch as available; the source head itself
+# is never substituted for the actual merge result. A gh lookup error falls back
+# to the branch-content proof; an inconclusive proof refuses cleanup.
+# Azure PR tasks instead require a registered canonical URL and confirmed
+# completion from bin/fm-azure-pr.py before any remote-reachability shortcut.
+# They then prove local work contained in the completed merge result or the
+# branch-content fallback above. An active, abandoned or unreadable Azure PR
+# cannot use that fallback to bypass completion. With no pr=, a non-local-only
+# task whose origin identifies Azure (HTTPS or SSH) refuses; an unreadable origin
+# classification also refuses. This prerequisite still applies when the task's
+# worktree is absent but an Azure PR URL is recorded.
+# Uncommitted changes are never landed, including in initialized nested
+# submodules even when ignore settings hide them. Dirty refusals distinguish
+# untracked-only leftovers from tracked edits and list at most ten non-exempt
+# untracked paths.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1610,11 +1613,8 @@ content_in_default() {
   content_in_commit "$ref"
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# The script header owns the landed-work decision; an unknown proof is a refusal,
+# not evidence that the local work is absent or safe to discard.
 work_is_landed() {
   local branch=$1
   [ "${TEARDOWN_AZURE_LANDED:-0}" != 1 ] || return 0

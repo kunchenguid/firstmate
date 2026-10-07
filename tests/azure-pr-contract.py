@@ -126,8 +126,11 @@ class AzureContract(unittest.TestCase):
                               text=True, capture_output=True, timeout=15)
 
     def script(self, script, *args):
+        # Successful registration/completion also publishes durable poll and
+        # wake records through the real locks. Allow that shell/filesystem work
+        # on slower hosts; the disposition test asserts its own tighter bound.
         return subprocess.run([str(ROOT / "bin" / script), *args], env=self.env,
-                              text=True, capture_output=True, timeout=30)
+                              text=True, capture_output=True, timeout=90)
 
     def prepare_crew(self, outcome):
         wt = self.dir / "wt"
