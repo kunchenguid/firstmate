@@ -412,6 +412,14 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: gemini:gemini-3.8-flash-high  provider=google  scope=all_models  remaining=72%  spendPriority=0.3  runway=through_reset  -> eligible' "Gemini resolves through its explicit provider"
 assert_contains "$out" "  profile: --harness 'gemini' --model 'gemini-3.8-flash-high'" "Gemini is a typed verified dispatch harness"
 
+CODEX_LUNA_RULE="$TMP_ROOT/codex-luna-rule.json"
+printf '%s\n' '{"rules":[{"when":"Codex Luna work.","use":{"harness":"codex","model":"gpt-6-luna","effort":"max"}}]}' > "$CODEX_LUNA_RULE"
+cp "$CODEX_LUNA_RULE" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "typed dispatch accepts Codex gpt-6-luna max effort"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-6-luna' --effort 'max'" "typed dispatch emits the accepted Codex gpt-6-luna max profile"
+
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'
 {"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
