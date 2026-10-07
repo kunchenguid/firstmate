@@ -1264,12 +1264,38 @@ test_kimi_disabled_project_mcp_still_refuses_before_launch() {
   pass "fm-spawn: a project MCP server with enabled false still refuses the Kimi launch"
 }
 
-test_kimi_unreadable_project_mcp_refuses_before_launch() {
+test_kimi_malformed_json_project_mcp_refuses_before_launch() {
   local id rec out rc
   id=kimi-mcp-badjson-a3
   rec=$(make_spawn_case mcp-badjson "$id")
   read_spawn_record "$rec"
   publish_project_mcp "$PROJ_DIR" 'not-json'
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a malformed JSON project MCP declaration should refuse the launch"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi started when the project MCP declaration was malformed JSON"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent when the project MCP declaration was malformed JSON"
+  assert_contains "$out" "could not be read" "a malformed JSON declaration did not say why the launch stopped"
+  pass "fm-spawn: a malformed JSON project MCP declaration refuses the Kimi launch"
+}
+
+test_kimi_unreadable_project_mcp_refuses_before_launch() {
+  local id rec out rc excl
+  if [ "$(id -u)" = 0 ]; then
+    pass "fm-spawn: an unreadable project MCP declaration refuses the Kimi launch (skipped as root: mode 000 does not restrict root)"
+    return 0
+  fi
+  id=kimi-mcp-noread-a5
+  rec=$(make_spawn_case mcp-noread "$id")
+  read_spawn_record "$rec"
+  excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  mkdir -p "$(dirname "$excl")"
+  printf '%s\n' '.kimi-code/' >> "$excl"
+  mkdir -p "$WT_DIR/.kimi-code"
+  # An empty server map launches when it can be read, so only the missing
+  # read permission can refuse this one.
+  printf '%s\n' '{"mcpServers":{}}' > "$WT_DIR/.kimi-code/mcp.json"
+  chmod 000 "$WT_DIR/.kimi-code/mcp.json"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   [ "$rc" -ne 0 ] || fail "an unreadable project MCP declaration should refuse the launch"
@@ -1443,6 +1469,7 @@ test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override
 test_kimi_declared_project_mcp_refuses_before_launch
 test_kimi_disabled_project_mcp_still_refuses_before_launch
+test_kimi_malformed_json_project_mcp_refuses_before_launch
 test_kimi_unreadable_project_mcp_refuses_before_launch
 test_kimi_undocumented_project_mcp_shape_refuses_before_launch
 test_kimi_directory_in_place_of_project_mcp_refuses_before_launch
