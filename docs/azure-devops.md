@@ -60,7 +60,8 @@ Azure cleanup additionally proves that clean local work is contained in the comp
 ## Conservative limits and verification
 
 An incomplete API response carrying a continuation token is refused rather than treating the first page as complete evidence.
-For each check context, the newest status must be bound to the current iteration and report `succeeded` or `notApplicable`; it can supersede an older failure, but a newest unbound or old-iteration status requires reconciliation.
+Each status selected by an enabled, blocking policy evaluation's `latestStatusId` must be uniquely present, bound to the current iteration, and report `succeeded` or `notApplicable`.
+Optional or informational statuses do not block completion, even when pending, failed, or retained from an older iteration.
 Unresolved user discussions stop completion only when a mandatory Azure comment-resolution policy makes them blocking.
 An unsupported policy response or unknown merge strategy needs operator attention, never a guessed approval.
 No optional tool installation or authentication repair is performed automatically.
