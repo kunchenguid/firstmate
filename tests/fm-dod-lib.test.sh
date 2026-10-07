@@ -385,13 +385,28 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
-  local home id meta out status mode
+  local home id meta out status mode project
   home="$TMP_ROOT/promote-base-home"
+  project="$home/proj"
+  mkdir -p "$home/state" "$project"
+  git -C "$project" init -q -b main
+  git -C "$project" config user.email fmtest@example.invalid
+  git -C "$project" config user.name fmtest
+  printf 'base\n' > "$project/base"
+  git -C "$project" add base
+  git -C "$project" commit -qm base
+  git -C "$project" checkout -qb feature/hub
+  printf 'hub\n' > "$project/hub"
+  git -C "$project" add hub
+  git -C "$project" commit -qm hub
+  git -C "$project" checkout -q main
+  git -C "$project" fetch -q . refs/heads/feature/hub:refs/remotes/origin/feature/hub
+  git -C "$project" config remote.origin.url "$project/.git"
   for mode in direct-PR local-only; do
     id="promote-base-$mode"
     meta="$home/state/$id.meta"
-    mkdir -p "$home/state" "$home/data/$id"
-    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=feature/hub\n' "$id" > "$meta"
+    mkdir -p "$home/data/$id"
+    printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=feature/hub\n' "$id" "$project" "$project" > "$meta"
     cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -409,8 +424,8 @@ EOF
     if [ "$mode" = direct-PR ]; then
       expect_code 0 "$status" "promoting a scout with a recorded base should succeed"$'\n'"$out"
       # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
-      assert_grep 'Return to a clean copy of the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
-        "promotion did not start the ship from the recorded base"
+      assert_grep 'Return to a clean `refs/remotes/origin/feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not start the ship from the verified remote base"
       # shellcheck disable=SC2016
       assert_grep 'against the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
         "promotion did not target the PR at the recorded base"

@@ -268,7 +268,10 @@ if [ -n "$BASE_BRANCH" ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev
 fi
 PROMOTE_BASE_REMOTE=0
 PROMOTE_REMOTE_BASE_REFS=
-if [ "$BASE_BRANCH_SET" -eq 1 ] && [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
+# A publishing promotion (no-mistakes/direct-PR) opens its PR against the base,
+# so the base must be verified whether it came from the CLI or the scout's
+# record. A local-only landing never publishes and cannot carry a base.
+if [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
   [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
     echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's project checkout; refusing promotion" >&2
     exit 1
