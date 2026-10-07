@@ -204,7 +204,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 # a task that already had one armed.
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    harness=*|model=*|effort=*|fleet_seat_state=*|fleet_seat_dead_token=*) ;;
+    harness=*|model=*|effort=*) ;;
     remote_spawn_gen=*) ;;
     fleet_seat_generation=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" ;;

@@ -394,7 +394,7 @@ seat_enter() {
   if ! printf '%s\n' "$record" | jq -e --arg t "$id" --arg g "$SEAT_OP" \
     --arg p "$SEAT_PREV" --arg home "$TARGET_HOME" --arg m "$model" '
       .schema == "fm-fleet-seat-holder.v2" and .task == $t
-      and (.state_dir | type == "string" and startswith("/"))
+      and (.incarnations | type == "array" and length == 1)
       and any(.incarnations[]; .generation == $g and .kind == "secondmate"
         and .lifecycle == "reserved" and .launch_phase == "dispatching"
         and .model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)

@@ -368,14 +368,17 @@ test_live_supervisors_hold_seats_even_while_idle() {
   printf 'window=firstmate:fm-mate-idle\nworktree=%s\nproject=%s\n' "$mate" "$mate" >> "$root/state/mate-idle.meta"
   kill "$mateholder"
   wait "$mateholder" 2>/dev/null
-  # An unmanaged record frees only on a backend-proven dead or missing endpoint.
   local fakebin
-  fakebin=$(fm_fakebin "$TMP_ROOT/supervisors/dead-backend")
-  # shellcheck disable=SC2016 # the child shell or fixture expands these.
-  printf '#!/usr/bin/env bash\n[ "$1" != list-windows ] || printf "main\\n"\n' > "$fakebin/tmux"
-  chmod +x "$fakebin/tmux"
-  assert_equals 3 "$(PATH="$fakebin:$PATH" used_seats "$root")" "a dead secondmate supervisor retained a seat"
-  pass "live pooled supervisors keep seats while idle and release them on death or model exit"
+  fakebin=$(endpoint_fakebin "$TMP_ROOT/supervisors/dead-backend")
+  assert_equals 4 "$(PATH="$fakebin:$PATH" used_seats "$root")" "unproven endpoint absence freed an unmanaged supervisor"
+  printf 'fm-mate-idle\n' > "$TMP_ROOT/supervisors/dead-backend/endpoint/windows"
+  assert_equals 4 "$(PATH="$fakebin:$PATH" used_seats "$root")" "a shell-only reading freed an unconfirmed unmanaged supervisor"
+  new_holder
+  out=$(PATH="$fakebin:$PATH" reserve_gen "$root" diagnostic g-diagnostic - pool-model-a 2>&1)
+  expect_code 0 "$?" "a probe beside an unconfirmed unmanaged supervisor: $out"
+  assert_contains "$out" "unmanaged pooled supervisor mate-idle stays counted" "unproven supervisor death lacked an actionable diagnostic"
+  seats "$root" release diagnostic --generation g-diagnostic --reason prelaunch >/dev/null || fail "diagnostic probe release"
+  pass "pooled supervisors hold seats while idle and after unproven death"
 }
 
 test_explicit_model_required_while_pooled() {
@@ -986,7 +989,16 @@ test_spawn_holds_a_seat_until_cleanup() {
   in_home "$SEATS" reserve "$TASK" --generation g-unpublished --previous-generation "$gen" \
     --kind ship --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" >/dev/null \
     || fail "could not reserve the unpublished successor"
+  touch "$HOME_DIR/state/$TASK.seat-operation.$gen" "$HOME_DIR/state/$TASK.seat-reservation.$gen" \
+    "$HOME_DIR/state/$TASK.seat-operation.g-unpublished" "$HOME_DIR/state/$TASK.seat-reservation.g-unpublished" \
+    "$HOME_DIR/state/other.seat-operation.g-other" "$HOME_DIR/state/other.seat-reservation.g-other"
   out=$(in_home "$ROOT/bin/fm-teardown.sh" "$TASK" 2>&1) || fail "cleanup failed: $out"
+  assert_absent "$HOME_DIR/state/$TASK.seat-operation.$gen" "cleanup retained the retired operation"
+  assert_absent "$HOME_DIR/state/$TASK.seat-reservation.$gen" "cleanup retained the retired reservation"
+  assert_absent "$HOME_DIR/state/$TASK.seat-operation.g-unpublished" "cleanup retained a sibling generation's operation"
+  assert_absent "$HOME_DIR/state/$TASK.seat-reservation.g-unpublished" "cleanup retained a sibling generation's reservation"
+  assert_present "$HOME_DIR/state/other.seat-operation.g-other" "cleanup removed another task's operation"
+  assert_present "$HOME_DIR/state/other.seat-reservation.g-other" "cleanup removed another task's reservation"
   assert_equals true "$(in_home "$SEATS" show "$TASK" | jq 'all(.incarnations[]; .lifecycle == "released")')" "cleanup left a generation hidden by stale metadata counted"
   new_holder
   out=$(in_home "$SEATS" reserve other --generation g-other --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1) \

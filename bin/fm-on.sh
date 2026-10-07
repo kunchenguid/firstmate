@@ -127,9 +127,14 @@ if [ "$COMMAND" = fm-remote-secondmate-control.sh ]; then
         [ "$STDIN_MODE" = closed ] || die "a seat operation owns the remote command input"
         SEAT_RECORD=$("$SCRIPT_DIR/fm-fleet-seats.sh" show "$SEAT_TASK") \
           || die "cannot read the parent seat operation for $SEAT_TASK"
+        SEAT_RECORD=$(printf '%s\n' "$SEAT_RECORD" \
+          | jq -c --arg g "$SEAT_OPERATION" '{schema, task, incarnations: [.incarnations[] | select(.generation == $g)]}') \
+          || die "cannot select the parent seat operation for $SEAT_TASK"
+        [ -n "$SEAT_RECORD" ] || die "operation $SEAT_OPERATION is not a dispatched parent reservation for $SEAT_TASK"
         printf '%s\n' "$SEAT_RECORD" | jq -e --arg g "$SEAT_OPERATION" --arg p "$SEAT_PREVIOUS" \
           --arg t "$SEAT_TASK" --arg h "$HOST" --arg r "$ROOT" --arg home "$HOME_PATH" --arg m "${4:-}" '
           .schema == "fm-fleet-seat-holder.v2" and .task == $t and
+          (.incarnations | type == "array" and length == 1) and
           any(.incarnations[]; .generation == $g and .kind == "secondmate"
             and .lifecycle == "reserved" and .launch_phase == "dispatching"
             and .model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)

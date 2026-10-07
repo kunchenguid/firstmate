@@ -72,6 +72,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    A mate that is mid-turn queues the request behind that turn.
    That is the whole point of the step, so do not work around it: it is what keeps a captain call the mate had formed but never registered from being lost with the conversation.
    Its header owns the request, generation-bound restart authorization, the bound, and the two knobs that change it.
+   A legacy remote mate without `remote_spawn_gen` stays nudge-only until one manual relaunch records its generation; the [remote relaunch contract](../../../docs/remote-secondmates.md#relaunch-a-live-remote-second-mate) owns that prerequisite.
 
    Read its per-mate lines and its closing `summary:` line as the outcome:
    - `restarted: <id>` - that mate is now genuinely running the current instructions and launch-time settings.
