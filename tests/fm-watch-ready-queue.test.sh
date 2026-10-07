@@ -17,7 +17,7 @@ test_ready_heartbeat() {
     || fail 'could not create dependency'
   FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" block cap-ready --by dependency >/dev/null \
     || fail 'could not record dependency'
-  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" done dependency --pr https://github.com/example/fixture/pull/1 >/dev/null \
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" 'done' dependency --pr https://github.com/example/fixture/pull/1 >/dev/null \
     || fail 'could not record landed dependency'
   if [ "$mode" = unreadable ]; then
     printf '#!/usr/bin/env bash\nprintf "readiness unavailable\\n" >&2\nexit 2\n' > "$dir/fakebin/tasks-axi"
