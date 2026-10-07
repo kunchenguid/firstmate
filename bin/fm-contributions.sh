@@ -268,8 +268,8 @@ forge() {
       : > "$TMP/budget-exhausted"
       return "$rc"
     fi
-    : > "$TMP/forge-unavailable"
     if [ "$attempt" -ge "$FORGE_TRANSIENT_ATTEMPTS" ] || ! forge_transient_error "$rc" "$forge_err"; then
+      : > "$TMP/forge-unavailable"
       return "$rc"
     fi
     attempt=$((attempt + 1))
