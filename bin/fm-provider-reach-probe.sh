@@ -31,12 +31,13 @@
 #                         preferred over it; must be a positive integer
 #   -h, --help            print this usage and exit 0
 #
-# Output: exactly one line on stdout. No token, key, header, or response body is
-# ever printed or written to disk: the response body is discarded to /dev/null
-# and only the HTTP status code is captured. The status code and DNS rcode are
+# Output: exactly one line on stdout. The probe label is hostname[:port] only;
+# any supplied path is omitted. No token, key, header, or response body is ever
+# printed or written to disk: the response body is discarded to /dev/null and
+# only the HTTP status code is captured. The status code and DNS rcode are
 # protocol facts, not secrets.
 #
-#   probe=<target> dns=<ok|nxdomain|unknown|skipped> http=<code|none> result=<verdict> <detail>
+#   probe=<hostname[:port]> dns=<ok|nxdomain|unknown|skipped> http=<code|none> result=<verdict> <detail>
 #
 # result is evidence, never eligibility. Each verdict carries its own exit status:
 #   reachable        0    HTTP 2xx: routable and answering, nothing more proven
@@ -100,8 +101,9 @@ Options:
                         beats FM_PROVIDER_REACH_PROBE_TIMEOUT
   -h, --help            show this help
 
-Prints exactly one line on stdout:
-  probe=<target> dns=<ok|nxdomain|unknown|skipped> http=<code|none> result=<verdict> <detail>
+Prints exactly one line on stdout; the probe label is hostname[:port] and
+omits any supplied path:
+  probe=<hostname[:port]> dns=<ok|nxdomain|unknown|skipped> http=<code|none> result=<verdict> <detail>
 
 A 2xx proves routability only - never that a model, credential, or large request
 works - so it is recorded as reachable, not as "channel available".
