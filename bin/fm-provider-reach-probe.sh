@@ -298,6 +298,11 @@ dns_probe() {
           error_detail="rc=${rc}"
           continue
         fi
+        if [ "$rc" -ne 0 ]; then
+          saw_error=1
+          error_detail="rc=${rc}"
+          continue
+        fi
         if printf '%s\n' "$out" | grep -qi 'NXDOMAIN'; then
           printf 'nxdomain %s\n' "${first:-no-address}"
           return 0
@@ -307,7 +312,12 @@ dns_probe() {
           printf 'ok %s\n' "$answer"
           return 0
         fi
-        if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -qiE 'status: NOERROR|status: NXDOMAIN|ANSWER: 0|no addresses'; then
+        if [ "$rc" -ne 0 ]; then
+          saw_error=1
+          error_detail="rc=${rc}"
+          continue
+        fi
+        if ! printf '%s\n' "$out" | grep -qiE 'status: NOERROR|status: NXDOMAIN|ANSWER: 0|no addresses'; then
           saw_error=1
           error_detail="rc=${rc}"
           continue
@@ -325,6 +335,11 @@ dns_probe() {
           error_detail="rc=${rc}"
           continue
         fi
+        if [ "$rc" -ne 0 ]; then
+          saw_error=1
+          error_detail="rc=${rc}"
+          continue
+        fi
         if printf '%s\n' "$out" | grep -qi 'NXDOMAIN'; then
           printf 'nxdomain %s\n' "${first:-no-address}"
           return 0
@@ -334,7 +349,12 @@ dns_probe() {
           printf 'ok %s\n' "$answer"
           return 0
         fi
-        if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -qiE 'not found|no .*records|has no'; then
+        if [ "$rc" -ne 0 ]; then
+          saw_error=1
+          error_detail="rc=${rc}"
+          continue
+        fi
+        if ! printf '%s\n' "$out" | grep -qiE 'not found|no .*records|has no'; then
           saw_error=1
           error_detail="rc=${rc}"
           continue

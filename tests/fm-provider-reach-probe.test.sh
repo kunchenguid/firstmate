@@ -394,6 +394,14 @@ assert_contains "$out" "dns=ok" "an AAAA-only name is not classified as no-addre
 assert_not_contains "$out" "dns=nxdomain" "an AAAA-only name is never reported as NXDOMAIN"
 assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "an AAAA-only name still reaches the HTTP probe"
 
+tmp=$TMP_ROOT/aaaa-unrecognized-failure; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=a-aaaa-error FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "an unrecognized failed AAAA query proceeds to HTTP"
+assert_contains "$out" "dns=unknown" "an uncertain AAAA lookup is never called NXDOMAIN"
+assert_not_contains "$out" "dns=nxdomain" "a failed AAAA query is not proof of no records"
+assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "HTTP follows the failed AAAA query"
+
 # --- the resolver sees only the host, never a port or an IP literal ---------
 # `--host` admits an optional port and IP-literal authorities. The resolver takes
 # a bare DNS name, so only the host component may reach it, and an IP literal

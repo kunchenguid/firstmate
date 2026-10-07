@@ -30,7 +30,9 @@ The default candidates are `/usr/bin/dig` and `/usr/bin/host`; `FM_PROVIDER_REAC
 Candidates that are not installed are skipped, and resolver errors (timeout, non-zero exit, SERVFAIL, FORMERR, or REFUSED) advance to the next installed candidate. If all installed candidates fail uncertainly, the probe reports `dns=unknown` and continues to HTTP; only a valid no-address answer terminates before HTTP.
 A valid no-address answer is terminal, so a later candidate cannot turn NXDOMAIN/NODATA into a positive result.
 The resolver receives only the host component of `--host`; a port is removed and a bracketed IPv6 literal is unwrapped, while IP literals skip DNS and proceed to HTTP.
-The deterministic regression cases for fallback, terminal no-address answers, and resolver output classification are in `tests/fm-provider-reach-probe.test.sh`.
+A failed A lookup without explicit NXDOMAIN/no-record evidence triggers an AAAA lookup where supported; an inconclusive resolver outcome is `dns=unknown` and does not suppress the HTTP request.
+For HTTPS requests, ambient HTTPS and all-proxy settings remain usable when credential-free; proxy URLs carrying userinfo are refused before HTTP, and `NO_PROXY` matches are reported as direct.
+The deterministic regression cases for fallback, terminal no-address answers, resolver output classification, and proxy routing are in `tests/fm-provider-reach-probe.test.sh`.
 
 Two asymmetries are load-bearing and are the reason the verdicts are not collapsed into exit-success:
 
