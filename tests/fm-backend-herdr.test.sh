@@ -4027,7 +4027,7 @@ SH
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
   status=$?
-  [ "$status" -eq 1 ] || fail "a repo parent whose group opens another workspace was removed (status $status): $out"
+  [ "$status" -eq 2 ] || fail "a repo parent whose group opens another workspace was removed (status $status): $out"
   assert_contains "$out" "already groups" "a parent with a grouped workspace did not explain why it stays"
   assert_not_contains "$(cat "$log")" $'close' "a parent with a grouped workspace was closed"
 
@@ -4039,7 +4039,7 @@ SH
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
   status=$?
-  [ "$status" -eq 1 ] || fail "a repo parent with an extra tab was removed (status $status): $out"
+  [ "$status" -eq 2 ] || fail "a repo parent with an extra tab was removed (status $status): $out"
   assert_contains "$out" "more than its seeded tab" "a parent with an extra tab did not explain why it stays"
   assert_not_contains "$(cat "$log")" $'close' "a parent with an extra tab was closed"
 
