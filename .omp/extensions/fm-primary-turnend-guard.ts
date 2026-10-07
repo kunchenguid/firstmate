@@ -288,15 +288,15 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
     const runner = `${root}/bin/fm-sessionstart-run.sh`;
     const scriptForms = [firstmateMsysPath(runner), firstmateWslPath(runner)];
     let attempt = 0;
-    const chunks: Buffer[] = [];
-    let observedBytes = 0;
-    let retainedBytes = 0;
-    let truncated = false;
-    let pendingCompletion: { code: number | null; bytes: number } | null = null;
     const startAttempt = (): void => {
       // The internal --pi-prerequisite mode is shared: it is the wrapper's
       // "silent exit 3 on an intentional stand-down" contract, not a Pi-only path.
       const attemptIndex = attempt;
+      const chunks: Buffer[] = [];
+      let observedBytes = 0;
+      let retainedBytes = 0;
+      let truncated = false;
+      let pendingCompletion: { code: number | null; bytes: number } | null = null;
       const invocation = supervised
         ? {
             command: "node",
