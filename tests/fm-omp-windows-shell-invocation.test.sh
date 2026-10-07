@@ -94,6 +94,24 @@ exec "$real_bash" "\$@"
 SH
 chmod +x "$shim/bash"
 
+opshim="$TMP_ROOT/opshim"
+mkdir -p "$opshim"
+cat >"$opshim/bash" <<SH
+#!$real_bash
+printf 'op-bash:%s\n' "\$*" >> "\$FM_WINDOWS_SHELL_LOG"
+case "\$1" in
+  /mnt/d/*)
+    input=\$(cat)
+    printf 'encoded:%s:%s\n' "\$3" "\$input"
+    ;;
+  *)
+    printf 'bash: %s: No such file or directory\n' "\$1" >&2
+    exit 127
+    ;;
+esac
+SH
+chmod +x "$opshim/bash"
+
 cat >"$TMP_ROOT/driver.mjs" <<'JS'
 import { pathToFileURL } from "node:url";
 
@@ -125,6 +143,17 @@ results.toolCall = toolCall && Object.keys(toolCall).length > 0 ? "blocked" : "a
 const sessionStop = await handlers.get("session_stop")({ stop_hook_active: false });
 results.sessionStop = sessionStop === undefined ? "settled" : "continued";
 console.log(`RESULTS:${JSON.stringify(results)}`);
+JS
+
+cat >"$TMP_ROOT/op-driver.mjs" <<'JS'
+import { pathToFileURL } from "node:url";
+
+if (process.env.PLATFORM_OVERRIDE) {
+  Object.defineProperty(process, "platform", { value: process.env.PLATFORM_OVERRIDE });
+}
+
+const lib = await import(`${pathToFileURL(process.env.OPLIB).href}?op=${Date.now()}`);
+console.log(`OPRESULT:${lib.encodeFirstmateOperationalInput("session-start", "hello digest")}`);
 JS
 
 expect_log() {
@@ -235,7 +264,7 @@ expected='RESULTS:{"toolCall":"allowed","sessionStop":"settled"}'
 wsl_log="$TMP_ROOT/wsl127-calls"
 wsl_countdir="$TMP_ROOT/wsl127-counts"
 mkdir -p "$wsl_countdir"
-FM_WSL127_SCRIPTS=" fm-sessionstart-run.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh fm-turnend-guard.sh "
+FM_WSL127_SCRIPTS=" fm-sessionstart-run.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh fm-turnend-guard.sh fm-operational-input.sh "
 FM_WSL127_COUNTDIR="$wsl_countdir"
 out=$(run_driver full "$wsl_log" 2>&1)
 status=$?
@@ -243,7 +272,7 @@ FM_WSL127_SCRIPTS=
 expect_code 0 "$status" "omp win32 WSL-launcher retry driver"
 expected='RESULTS:{"beforeAgentStart":"message","toolCall":"allowed","sessionStop":"settled"}'
 [ "$out" = "$expected" ] || fail "unexpected WSL-launcher retry results: $out (want $expected)"
-for script in fm-sessionstart-run.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh fm-turnend-guard.sh; do
+for script in fm-sessionstart-run.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh fm-turnend-guard.sh fm-operational-input.sh; do
   expect_count "$wsl_log" "bash-invoked:.*$script" 2
 done
 if [ -n "$platform_override" ]; then
@@ -251,7 +280,29 @@ if [ -n "$platform_override" ]; then
   expect_log "$wsl_log" "cd:--command printf test"
   expect_log "$wsl_log" "arm:--command printf test"
   expect_log "$wsl_log" "turnend:"
+  expect_log "$wsl_log" "operational:kind"
 fi
+
+# The shared operational-input seam converts a native drive-letter script path
+# to the MSYS form first and retries once in WSL mount form when that bash
+# answers 127: the opshim refuses every form except /mnt/d/..., so a successful
+# encode proves both the conversion and the retry engaged.
+op_log="$TMP_ROOT/op-calls"
+out=$(OPLIB="$project/.pi/extensions/lib/fm-operational-input.ts" \
+  PLATFORM_OVERRIDE="$platform_override" \
+  FM_OPERATIONAL_INPUT_SCRIPT='D:/fm/bin/fm-operational-input.sh' \
+  FM_WINDOWS_SHELL_LOG="$op_log" \
+  PATH="$opshim:$PATH" \
+    "$NODE" "$TMP_ROOT/op-driver.mjs" 2>&1)
+status=$?
+expect_code 0 "$status" "win32 operational-input native-path retry driver"
+[ "$out" = "OPRESULT:encoded:session-start:hello digest" ] ||
+  fail "unexpected operational-input encode result: $out"
+expect_count "$op_log" "op-bash:" 2
+first_op_line=$(head -n 1 "$op_log")
+[ "$first_op_line" = "op-bash:/d/fm/bin/fm-operational-input.sh encode session-start" ] ||
+  fail "MSYS form was not attempted first:\n$(cat "$op_log")"
+expect_log "$op_log" "op-bash:/mnt/d/fm/bin/fm-operational-input.sh encode session-start"
 
 # A real helper verdict is never retried: with the arm seatbelt and the
 # turn-end guard exiting 2, each must be invoked exactly once and the verdict

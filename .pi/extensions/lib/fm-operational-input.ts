@@ -30,6 +30,18 @@ export function firstmateShellInvocation(
     : { command: script, args: [...args] };
 }
 
+export function firstmateMsysPath(path: string): string {
+  const windows = /^([A-Za-z]):[\\/]+(.*)$/.exec(path);
+  if (!windows) return path;
+  return `/${windows[1].toLowerCase()}/${windows[2].replace(/\\/g, "/")}`;
+}
+
+export function firstmateWslPath(path: string): string {
+  const windows = /^([A-Za-z]):[\\/]+(.*)$/.exec(path);
+  if (!windows) return path;
+  return `/mnt/${windows[1].toLowerCase()}/${windows[2].replace(/\\/g, "/")}`;
+}
+
 // The one owner of how each command is invoked and how its exit status and
 // stdout become an answer, shared by the synchronous and awaited callers
 // below so the two can never drift.
@@ -54,20 +66,26 @@ function runOperationalInputCommand(
   content: string,
   kind?: FirstmateCurrentOperationalKind,
 ): string | undefined {
-  const invocation = firstmateShellInvocation(
-    operationalInputScript,
-    operationalInputArgs(command, kind),
-  );
-  try {
-    const result = spawnSync(invocation.command, invocation.args, {
-      encoding: "utf8",
-      input: content,
-      maxBuffer: 1024 * 1024,
-    });
-    return operationalInputAnswer(command, result.status, result.stdout ?? "");
-  } catch {
-    return undefined;
+  const args = operationalInputArgs(command, kind);
+  const scripts = process.platform === "win32"
+    ? [firstmateMsysPath(operationalInputScript), firstmateWslPath(operationalInputScript)]
+    : [operationalInputScript];
+  for (let attempt = 0; attempt < scripts.length; attempt += 1) {
+    const invocation = firstmateShellInvocation(scripts[attempt], args);
+    try {
+      const result = spawnSync(invocation.command, invocation.args, {
+        encoding: "utf8",
+        input: content,
+        maxBuffer: 1024 * 1024,
+      });
+      if (attempt + 1 === scripts.length || (!result.error && result.status !== 127)) {
+        return operationalInputAnswer(command, result.status, result.stdout ?? "");
+      }
+    } catch {
+      continue;
+    }
   }
+  return undefined;
 }
 
 function encodeFailure(kind: FirstmateCurrentOperationalKind): Error {

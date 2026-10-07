@@ -36,7 +36,9 @@ import { fileURLToPath } from "node:url";
 import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
+  firstmateMsysPath,
   firstmateShellInvocation,
+  firstmateWslPath,
 } from "../../.pi/extensions/lib/fm-operational-input.ts";
 
 // The omp extension API surface this file uses, declared locally: omp ships no
@@ -272,17 +274,6 @@ function stopSessionstartGeneration(generation: SessionstartGeneration): Promise
 // form and the spawn fails to exec or the child exits 127, so every helper
 // retries once with the WSL mount form (/mnt/d/newP/...); a real helper
 // verdict, including the guard's 2, is never retried.
-function firstmateMsysPath(path: string): string {
-  const windows = /^([A-Za-z]):[\\/]+(.*)$/.exec(path);
-  if (!windows) return path;
-  return `/${windows[1].toLowerCase()}/${windows[2].replace(/\\/g, "/")}`;
-}
-
-function firstmateWslPath(path: string): string {
-  const windows = /^([A-Za-z]):[\\/]+(.*)$/.exec(path);
-  if (!windows) return path;
-  return `/mnt/${windows[1].toLowerCase()}/${windows[2].replace(/\\/g, "/")}`;
-}
 
 function runSessionstartHook(generation: SessionstartGeneration): Promise<SessionstartResult> {
   return new Promise((resolveResult) => {
