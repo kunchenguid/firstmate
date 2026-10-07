@@ -15,6 +15,8 @@
 #     own start time. Two pids can name one process only while that token
 #     matches, so a recycled pid reads as a dead owner rather than a live one.
 #     `kill -0` alone proves nothing and is never the whole answer.
+#     A legacy sidecar without line 3 retains the pre-token live-harness
+#     judgment; new records omit that line when the start time is unreadable.
 #   harness identity - FM_HARNESS_IS_DAEMON: a shared long-lived server that
 #     hosts sessions without being one (Codex's `codex app-server`, OpenCode's
 #     `opencode serve`, Claude's transient `claude daemon run`). Such a process
@@ -345,16 +347,26 @@ fm_session_lock_pane_identity() {
 # so a caller that cannot resolve its own session fails closed instead of
 # anchoring on the shared server that would outlive it.
 fm_session_lock_pane_session_pid() {  # <pane-marker>
-  local marker=$1 line pid rest parent candidate listing
+  local marker=$1 line pid rest parent candidate listing marker_name marker_value args
   local -a candidates=()
   [ -n "$marker" ] || return 1
   # pgrep cannot select on a process's environment, which is the only place the
   # pane marker exists, so this has to read the full listing and filter itself.
   # shellcheck disable=SC2009
-  listing=$(ps eww -A -o pid=,args= 2>/dev/null | grep -F "$marker" 2>/dev/null)
+  marker_name=${marker%%=*}
+  marker_value=${marker#*=}
+  [ "$marker_name" = TMUX_PANE ] || [ "$marker_name" = HERDR_PANE_ID ] || return 1
+  [ -n "$marker_value" ] || return 1
+  listing=$(ps eww -A -o pid=,args= 2>/dev/null)
   while IFS= read -r line; do
     pid=${line%% *}
     case "$pid" in '' | *[!0-9]*) continue ;; esac
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || continue
+    case "$args" in *"$marker"*) continue ;; esac
+    case " $line " in
+      *" $marker_name=$marker_value "*) ;;
+      *) continue ;;
+    esac
     rest=${line#* }
     fm_harness_process_matches "${rest%% *}" "$rest" || continue
     fm_harness_process_is_daemon "${rest%% *}" "$rest" && continue
@@ -559,7 +571,7 @@ fm_session_lock_recorded_owner_live() {  # <state>
   case "$pid" in '' | *[!0-9]*) return 1 ;; esac
   fm_harness_pid_alive "$pid" || return 1
   recorded=$(fm_session_lock_recorded_birth "$state" 2>/dev/null || true)
-  [ -n "$recorded" ] || return 0
+  [ -n "$recorded" ] || return 0 # legacy compatibility: pre-token liveness
   current=$(fm_session_lock_birth_token "$pid" 2>/dev/null || true)
   [ "$current" = "$recorded" ]
 }

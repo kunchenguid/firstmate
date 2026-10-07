@@ -129,9 +129,19 @@ publish_lock_session() {  # <anchor-pid>
   if fm_session_lock_resolve_trusted_id; then
     harness=$FM_SESSION_LOCK_ID_HARNESS
     birth=$(fm_session_lock_birth_token "$anchor" 2>/dev/null || true)
-    desired=$(printf '%s\n%s\n%s' "$FM_SESSION_LOCK_ID" "$harness" "$birth")
+    if [ -n "$birth" ]; then
+      desired=$(printf '%s\n%s\n%s' "$FM_SESSION_LOCK_ID" "$harness" "$birth")
+    else
+      desired=$(printf '%s\n%s' "$FM_SESSION_LOCK_ID" "$harness")
+    fi
     current=$(cat "$LOCK_SESSION" 2>/dev/null || true)
     [ "$current" = "$desired" ] && return 0
+    if [ -z "$birth" ] \
+      && [ "$(printf '%s\n' "$current" | sed -n '1p')" = "$FM_SESSION_LOCK_ID" ] \
+      && [ "$(printf '%s\n' "$current" | sed -n '2p')" = "$harness" ] \
+      && [ -n "$(printf '%s\n' "$current" | sed -n '3p')" ]; then
+      return 0
+    fi
     remember_lock_session || return 1
     tmp=$(mktemp "$STATE/.lock-session.XXXXXX" 2>/dev/null) || return 1
     if ! { printf '%s\n' "$desired" > "$tmp" && mv -f "$tmp" "$LOCK_SESSION"; } 2>/dev/null; then
