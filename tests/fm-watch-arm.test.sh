@@ -1264,6 +1264,49 @@ test_take_over_preserves_downtime_from_watcher_self_exit() {
   pass "watch-arm: takeover preserves self-exit downtime and surfaces a recovery wake"
 }
 
+test_scoped_stop_preserves_other_cycle_lock() {
+  local dir home state owner unrelated out status=0
+  dir=$(make_case scoped-stop-stale-lock)
+  home="$dir/home"
+  state="$dir/state"
+  owner="$state/.watch.lock.owner.fixture"
+  mkdir -p "$home/data" "$owner"
+  sleep 300 &
+  unrelated=$!
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$home" > "$owner/fm-home"
+  printf '%s\n' "$WATCH" > "$owner/watcher-path"
+  printf '%s\n' 'other-cycle-identity' > "$owner/pid-identity"
+  ln -s "$owner" "$state/.watch.lock"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop-if-watcher "$unrelated" old-cycle-identity 2>&1) || status=$?
+  expect_code 0 "$status" "a scoped stop of another identity must no-op"
+  assert_contains "$out" "watcher: none running" "an identity mismatch should not report a stop"
+  [ -L "$state/.watch.lock" ] || fail "scoped stop cleared the other cycle's lock"
+  [ "$(cat "$owner/pid-identity")" = other-cycle-identity ] || fail "scoped stop changed the other cycle's identity"
+  [ ! -e "$state/.watcher-down" ] || fail "scoped stop published downtime for the other cycle"
+  is_live_non_zombie "$unrelated" || fail "scoped stop signalled the other cycle's pid"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop-if-watcher "$$" other-cycle-identity >/dev/null \
+    || fail "a scoped stop of another pid failed"
+  [ -L "$state/.watch.lock" ] && [ ! -e "$state/.watcher-down" ] \
+    || fail "a pid mismatch changed the other cycle's state"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop-if-watcher "$unrelated" other-cycle-identity >/dev/null \
+    || fail "a scoped stop of a reused pid failed"
+  [ -L "$state/.watch.lock" ] && [ ! -e "$state/.watcher-down" ] \
+    || fail "a scoped stop recovered the stale lock of another cycle"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop >/dev/null \
+    || fail "unscoped stop failed to recover the stale lock"
+  [ ! -e "$state/.watch.lock" ] && [ -e "$state/.watcher-down" ] \
+    || fail "unscoped stop did not retain stale-lock recovery"
+  is_live_non_zombie "$unrelated" || fail "unscoped stale-lock recovery signalled the unrelated process"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: scoped stop leaves another cycle intact while unscoped stop recovers stale locks"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -1614,3 +1657,4 @@ test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
+test_scoped_stop_preserves_other_cycle_lock

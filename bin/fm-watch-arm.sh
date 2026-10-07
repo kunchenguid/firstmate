@@ -86,6 +86,11 @@
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
 # the stop.
 #
+# --stop-if-watcher PID IDENTITY: --stop bound to one cycle. It stops the
+# lock holder only when the lock still names PID with that recorded identity,
+# and otherwise exits 0 without touching a newer cycle (the Claude Stop hook's
+# park boundary, bin/fm-claude-stop-autoarm.sh).
+#
 # A copy of this script living under a disposable no-mistakes validation
 # checkout (a path containing /.no-mistakes/worktrees/) refuses every mode
 # outside a marked lab with
@@ -476,6 +481,8 @@ handling_successor_generation() {
 }
 
 mode=arm
+stop_watcher_pid=
+stop_watcher_identity=
 handling_generation=
 handling_watcher_pid=
 take_over_arm_pid=
@@ -489,6 +496,13 @@ case "${1:-}" in
     case "$take_over_arm_pid" in ''|*[!0-9]*) echo "watcher: invalid take-over arm pid" >&2; exit 2 ;; esac
     [ "$#" -eq 2 ] || { echo "watcher: unexpected take-over arguments" >&2; exit 2; }
     ;;
+  --stop-if-watcher)
+    mode=stop
+    stop_watcher_pid=${2:-}
+    stop_watcher_identity=${3:-}
+    case "$stop_watcher_pid" in ''|*[!0-9]*) echo "watcher: invalid stop watcher pid" >&2; exit 2 ;; esac
+    [ -n "$stop_watcher_identity" ] && [ "$#" -eq 3 ] || { echo "watcher: invalid stop watcher identity" >&2; exit 2; }
+    ;;
   --handling-delivered)
     mode=handling-delivered
     handling_generation=${2:-}
@@ -498,7 +512,7 @@ case "${1:-}" in
     case "$handling_watcher_pid" in ''|*[!0-9]*) echo "watcher: invalid successor watcher pid" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "watcher: unexpected handling delivery arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: $(basename "$0") [--restart | --stop | --take-over ARM_PID | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [--restart | --stop | --stop-if-watcher PID IDENTITY | --take-over ARM_PID | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
 esac
 
 if [ "$mode" = handling-delivered ]; then
@@ -516,8 +530,13 @@ STOPPED_PID=
 stop_home_watcher() {
   local lock_pid i
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if [ -n "$stop_watcher_pid" ]; then
+    [ "$lock_pid" = "$stop_watcher_pid" ] || return 0
+    [ "$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)" = "$stop_watcher_identity" ] || return 0
+  fi
   fm_pid_alive "$lock_pid" || return 0
   if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+    [ -z "$stop_watcher_pid" ] || [ "$FM_WATCHER_MATCHED_IDENTITY" = "$stop_watcher_identity" ] || return 0
     kill -TERM "$lock_pid" 2>/dev/null || true
     i=0
     while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
@@ -525,6 +544,8 @@ stop_home_watcher() {
       i=$((i + 1))
     done
     STOPPED_PID=$lock_pid
+  elif [ -n "$stop_watcher_pid" ]; then
+    return 0
   elif ! clear_stale_recorded_watcher_lock; then
     echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
     return 1
@@ -664,7 +685,6 @@ handle_arm_signal() {
 trap 'handle_arm_signal HUP 129' HUP
 trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
-
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
