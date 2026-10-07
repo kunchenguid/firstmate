@@ -69,6 +69,10 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
+  case "$out_a" in
+    *"Then run the ready-work check below before reporting."*"Ready-work check: re-evaluate the queued backlog after every finish and every fleet check"*"Attended, including quiet mode, you cannot spawn:"*"report verdict captain through the wake's report surface, naming every ready unit"*"before acknowledging that outcome"*"Away, dispatch already-queued unblocked work"*"the existing spend cap"*"The recorded away words govern new filing only"*"including the condition that must change before retrying"*"An unchanged recorded stop needs no repeat note"*"a recorded not-ready reason on the unit's backlog note still applies"*) ;;
+    *) fail "delivered branch prompt lost the ready-work dispatch, handoff, posture, or recorded-stop contract" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 

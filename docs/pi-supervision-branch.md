@@ -421,7 +421,8 @@ The other half is processing, because a blocker, a decision, or a ready PR needs
    Summaries over 1024 characters are abbreviated within that bound and point to `bin/fm-branch-outcome.sh lookup --seqs <N>` for the full outcome.
    Main must read the full outcome for any abbreviated line before acting on, relaying, or acknowledging it.
    It says each outcome was recorded earlier and may already have been seen or handled, rather than claiming a visible entry in this transcript, because an outcome carried over from before a restart or a switch of primary has none here.
-   Main sorts the outcomes by that state, and its reply to the captain covers only the still-open ones, as if the settled ones had never been listed; a settled one needs only the acknowledgement below.
+   Main sorts the outcomes by that state, and its reply to the captain covers only the still-open ones, as if the settled ones had never been listed; a settled one needs only the acknowledgement below apart from any ready-work handoff.
+   Before acknowledging even a settled source task, main acts on each ready-work handoff under `AGENTS.md` section 10, dispatching its named units in that turn or recording an applicable not-ready reason on each unit's backlog note.
    A listed row without a valid age breaks the store's contract, so the extension reports it to main as a visible note and sends no request; every row stays unprocessed and is presented once the store is healthy.
 2. That request opens exactly one main turn.
 3. Main closes it only by calling `fm_branch_processed` with the highest sequence the request listed.
