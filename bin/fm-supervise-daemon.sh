@@ -7,7 +7,8 @@
 # ESCALATES a batched, distilled digest to the supervisor endpoint on
 # captain-relevant events plus bounded declared-wait rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
-# signal/stale/heartbeat wakes cost zero firstmate context; routing is owned by
+# signal/stale wakes and heartbeats without ready work or readiness uncertainty
+# cost zero firstmate context; routing is owned by
 # .agents/skills/afk/SKILL.md (Classification policy).
 # Escalated events reach the LLM as one pre-read digest per
 # batch window. That digest is byte-bounded (see escalate_flush); when it cuts
@@ -104,8 +105,8 @@
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
-#                                   captain-relevant escalation for matching
-#                                   kinds.
+#                                   captain-relevant status escalation for matching
+#                                   kinds, but never the heartbeat readiness check.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  seconds a declared wait stays declared,
@@ -491,8 +492,8 @@ classify_check() {  # <full reason>  — check scripts print only when firstmate
 }
 
 classify_heartbeat() {
-  # The wake itself is routine; the catch-all scan runs separately in
-  # housekeeping on the HEARTBEAT_SCAN_SECS cadence.
+  # handle_wake reaches this fallback only after checking backlog readiness.
+  # The status catch-all scan runs separately in housekeeping.
   printf 'self|heartbeat (catch-all scan runs in housekeeping)'
 }
 

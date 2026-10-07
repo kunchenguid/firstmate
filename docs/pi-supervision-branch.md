@@ -34,7 +34,7 @@ Once a Pi primary session owns this home's fleet lock, the branch handles two ki
 
 - Eligible task-local rows from ordinary actionable wakes.
   A row is one queued wake entry.
-- Heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant.
+- Heartbeat reviews emitted under the watcher header's policy in `bin/fm-watch.sh`.
 
 The branch then merges each outcome back into the captain conversation's transcript.
 
