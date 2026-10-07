@@ -373,8 +373,8 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   pass "fm-promote: changed bases and occupied crew branches are refused"
 }
 
-test_local_merge_lands_on_the_recorded_base() {
-  local home proj id office feature out
+test_local_merge_lands_on_the_default_branch() {
+  local home proj id feature out
   home="$TMP_ROOT/merge/home"
   proj="$TMP_ROOT/merge/proj"
   id=named-merge
@@ -387,106 +387,37 @@ test_local_merge_lands_on_the_recorded_base() {
   git -C "$proj" checkout -qb feature/widget
   commit_file "$proj" change change change
   feature=$(git -C "$proj" rev-parse HEAD)
-  git -C "$proj" checkout -qb scratch
-  printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$proj" \
+  git -C "$proj" checkout -q main
+  printf 'project=%s\nmode=local-only\nbranch=feature/widget\n' "$proj" \
     > "$home/state/$id.meta"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id") \
-    || fail "named-base merge failed: $out"
-  office=$(git -C "$proj" rev-parse refs/heads/office)
-  [ "$office" = "$feature" ] || fail "named-base merge did not fast-forward office"
-  [ "$(git -C "$proj" branch --show-current)" = scratch ] || fail "named-base merge changed the active checkout"
-  assert_contains "$out" "merged feature/widget into local office" "named-base merge did not name office"
-  pass "fm-merge-local: a recorded base is the landing branch"
+    || fail "local-only merge failed: $out"
+  [ "$(git -C "$proj" rev-parse refs/heads/main)" = "$feature" ] \
+    || fail "local-only merge did not fast-forward main"
+  [ "$(git -C "$proj" branch --show-current)" = main ] || fail "local-only merge changed the active checkout"
+  assert_contains "$out" "merged feature/widget into local main" "local-only merge did not name main"
+  pass "fm-merge-local: a local-only task lands on the default branch"
 }
 
-test_local_merge_refuses_a_linked_landing_checkout() {
-  local home proj linked id out status old
-  home="$TMP_ROOT/merge-linked/home"
-  proj="$TMP_ROOT/merge-linked/proj"
-  linked="$TMP_ROOT/merge-linked/office-worktree"
-  id=named-merge-linked
+test_local_merge_refuses_a_recorded_base() {
+  local home proj id out status
+  home="$TMP_ROOT/merge-base/home"
+  proj="$TMP_ROOT/merge-base/proj"
+  id=named-merge-based
   mkdir -p "$home/data" "$home/state" "$proj"
   git init -q -b main "$proj"
   git_identity "$proj"
   commit_file "$proj" base base base
-  git -C "$proj" checkout -qb office
-  commit_file "$proj" office office office
   git -C "$proj" checkout -qb feature/widget
   commit_file "$proj" change change change
-  git -C "$proj" checkout -qb scratch
-  git -C "$proj" worktree add -q "$linked" office
-  old=$(git -C "$proj" rev-parse refs/heads/office)
+  git -C "$proj" checkout -qb main
   printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$proj" \
     > "$home/state/$id.meta"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1); status=$?
-  expect_code 1 "$status" "a linked landing checkout was advanced"
-  assert_contains "$out" "checked out in linked worktree" "a linked landing checkout was not refused"
-  [ "$(git -C "$proj" rev-parse refs/heads/office)" = "$old" ] \
-    || fail "linked landing refusal changed the landing ref"
-  pass "fm-merge-local: a linked landing checkout is protected"
-}
-
-test_local_merge_refuses_a_bare_linked_landing_checkout() {
-  local home seed bare linked id out status old
-  home="$TMP_ROOT/bare-linked/home"
-  seed="$TMP_ROOT/bare-linked/seed"
-  bare="$TMP_ROOT/bare-linked/proj.git"
-  linked="$TMP_ROOT/bare-linked/office-worktree"
-  id=named-bare-linked
-  mkdir -p "$home/data" "$home/state" "$seed"
-  git init -q -b main "$seed"
-  git_identity "$seed"
-  commit_file "$seed" base base base
-  git init -q --bare "$bare"
-  git -C "$seed" remote add origin "$bare"
-  git -C "$seed" push -q origin main
-  git -C "$seed" checkout -qb office
-  commit_file "$seed" office office office
-  git -C "$seed" push -q origin office
-  git -C "$seed" checkout -qb feature/widget
-  commit_file "$seed" change change change
-  git -C "$seed" push -q origin feature/widget
-  git -C "$bare" worktree add -q "$linked" office
-  old=$(git -C "$bare" rev-parse refs/heads/office)
-  printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$bare" \
-    > "$home/state/$id.meta"
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1); status=$?
-  expect_code 1 "$status" "a bare linked landing checkout was advanced"
-  assert_contains "$out" "checked out in linked worktree" "a bare linked landing checkout was not refused"
-  [ "$(git -C "$bare" rev-parse refs/heads/office)" = "$old" ] \
-    || fail "bare linked landing refusal changed the landing ref"
-  pass "fm-merge-local: a bare linked landing checkout is protected"
-}
-
-test_local_merge_fast_forwards_a_bare_repository() {
-  local home seed bare id feature out landed
-  home="$TMP_ROOT/bare/home"
-  seed="$TMP_ROOT/bare/seed"
-  bare="$TMP_ROOT/bare/proj.git"
-  id=named-bare
-  mkdir -p "$home/data" "$home/state" "$seed"
-  git init -q -b main "$seed"
-  git_identity "$seed"
-  commit_file "$seed" base base base
-  git init -q --bare "$bare"
-  git -C "$seed" remote add origin "$bare"
-  git -C "$seed" push -q origin main
-  git -C "$seed" checkout -qb office
-  commit_file "$seed" office office office
-  git -C "$seed" push -q origin office
-  git -C "$seed" checkout -qb feature/widget
-  commit_file "$seed" change change change
-  feature=$(git -C "$seed" rev-parse HEAD)
-  git -C "$seed" push -q origin feature/widget
-  git -C "$bare" update-ref -d refs/heads/main
-  printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$bare" \
-    > "$home/state/$id.meta"
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id") \
-    || fail "bare named-base merge failed: $out"
-  landed=$(git -C "$bare" rev-parse refs/heads/office)
-  [ "$landed" = "$feature" ] || fail "bare repository did not fast-forward office"
-  assert_contains "$out" "merged feature/widget into local office" "bare merge did not name office"
-  pass "fm-merge-local: a bare repository fast-forwards the recorded base"
+  expect_code 1 "$status" "a local-only task with a recorded base was merged"
+  assert_contains "$out" "records a base branch but mode=local-only cannot carry one" \
+    "a contradictory local-only base was not named"
+  pass "fm-merge-local: a recorded base contradicts mode=local-only"
 }
 
 test_review_uses_the_recorded_base() {
@@ -568,7 +499,8 @@ test_bare_originless_project_lock_resolves
 test_spawn_checks_the_named_base_and_crew_branch_before_launch
 promote_keeps_the_named_branches
 test_promote_rejects_base_changes_and_branch_collisions
-test_local_merge_lands_on_the_recorded_base
+test_local_merge_lands_on_the_default_branch
+test_local_merge_refuses_a_recorded_base
 test_local_merge_refuses_a_linked_landing_checkout
 test_local_merge_refuses_a_bare_linked_landing_checkout
 test_local_merge_fast_forwards_a_bare_repository
