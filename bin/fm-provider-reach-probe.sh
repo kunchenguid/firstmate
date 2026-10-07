@@ -234,7 +234,7 @@ DETAIL=''
 # A pre-gate over the combined string silently skipped the resolver that was
 # actually installed and reported a lookup that never ran as dns=skipped.
 dns_probe() {
-  local tool out rc first answer answer_section saw_error=0 error_detail=''
+  local tool out rc first answer saw_error=0 error_detail=''
   local -a tools=()
   # The override is one tool or a whitespace-separated preference list; unset
   # means this host's own candidates in order. `read -ra` splits on IFS without
@@ -450,21 +450,22 @@ proxy_env_value() {
 }
 PROXY_MODE=direct
 proxy_host=$AUTHORITY
-proxy_port=443
 case "$AUTHORITY" in
   \[*\]*)
     proxy_host=${AUTHORITY#\[}; proxy_host=${proxy_host%%\]*}
-    authority_suffix=${AUTHORITY#*\]}
-    case "$authority_suffix" in :*) proxy_port=${authority_suffix#:} ;; esac
     ;;
-  *:*) proxy_host=${AUTHORITY%:*}; proxy_port=${AUTHORITY##*:} ;;
+  *:*) proxy_host=${AUTHORITY%:*} ;;
 esac
 no_proxy_list=$(proxy_env_value NO_PROXY no_proxy)
 no_proxy_bypass=0
+noglob_was_set=0
+case "$-" in *f*) noglob_was_set=1 ;; esac
+set -f
 old_ifs=$IFS; IFS=,
 for no_proxy_entry in $no_proxy_list; do
   no_proxy_entry=${no_proxy_entry//[[:space:]]/}
   [ -n "$no_proxy_entry" ] || continue
+  if [ "$no_proxy_entry" = '*' ]; then no_proxy_bypass=1; continue; fi
   entry_port=''
   case "$no_proxy_entry" in
     \[*\]*)
@@ -488,6 +489,7 @@ for no_proxy_entry in $no_proxy_list; do
   esac
 done
 IFS=$old_ifs
+[ "$noglob_was_set" -eq 1 ] || set +f
 if [ "$no_proxy_bypass" = 0 ]; then
   proxy_value=$(proxy_env_value HTTPS_PROXY https_proxy)
   [ -n "$proxy_value" ] || proxy_value=$(proxy_env_value ALL_PROXY all_proxy)

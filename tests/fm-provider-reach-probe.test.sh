@@ -412,6 +412,13 @@ expect_code 0 "$rc" "an IPv4 answer works with interval-incompatible awk"
 assert_contains "$out" "dns=ok" "IPv4 validation does not depend on awk intervals"
 assert_contains "$out" "result=reachable" "HTTP follows a valid IPv4 answer under mawk-like awk"
 assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "IPv4 answer still reaches HTTP under mawk-like awk"
+python3 - "$SCRIPT" <<'PY'
+import re, sys
+source = open(sys.argv[1], encoding="utf-8").read()
+programs = re.findall(r"awk\s+'(.*?)'", source, re.S)
+if any(re.search(r"\{[0-9]+(?:,[0-9]*)?\}", program) for program in programs):
+    raise SystemExit("probe implementation must not depend on awk interval quantifiers")
+PY
 
 tmp=$TMP_ROOT/digrc-nottl-noclass; new_case "$tmp"
 make_fake_dig "$tmp" "$tmp/dig.log"
@@ -853,6 +860,43 @@ expect_code 2 "$rc" "an embedded NO_PROXY wildcard does not bypass credential re
 assert_contains "$out" "proxy URL carries credentials" "unsupported NO_PROXY pattern keeps proxy credentials refused"
 assert_not_contains "$out" "private:secret" "wildcard refusal never discloses proxy credentials"
 [ ! -s "$tmp/calls.log" ] || fail "an embedded NO_PROXY wildcard allowed a credential-bearing HTTP request"
+
+# The test above fixes the operator's variables; this live-curl case proves the
+# real curl proxy is not reached before the credential guard rejects the request.
+real_wild_proxy_portfile=$TMP_ROOT/real-wild-proxy.port
+real_wild_proxy_log=$TMP_ROOT/real-wild-proxy.log
+start_proxy_listener "$real_wild_proxy_portfile" "$real_wild_proxy_log"
+real_wild_proxy_pid=$LISTENER_PID
+wait_for_file "$real_wild_proxy_portfile"
+real_wild_proxy_port=$(cat "$real_wild_proxy_portfile")
+real_wild_dig_dir=$TMP_ROOT/real-wild-dig-only
+mkdir -p "$real_wild_dig_dir"
+make_fake_dig "$real_wild_dig_dir" "$TMP_ROOT/real-wild-dig.log"
+out=$(env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy \
+  -u NO_PROXY -u no_proxy -u CURL_HOME -u XDG_CONFIG_HOME \
+  HTTPS_PROXY="http://private:secret@127.0.0.1:$real_wild_proxy_port" \
+  NO_PROXY='example.*' PATH="$real_wild_dig_dir:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_DIG_MODE=address "$SCRIPT" --host api.example.com --timeout 2 2>&1); rc=$?
+wait "$real_wild_proxy_pid" 2>/dev/null || true
+expect_code 2 "$rc" "real curl plus embedded NO_PROXY wildcard still refuses proxy credentials"
+assert_contains "$out" "proxy URL carries credentials" "real curl wildcard regression uses fixed refusal text"
+assert_not_contains "$out" "private:secret" "real curl wildcard regression does not disclose credentials"
+[ ! -s "$real_wild_proxy_log" ] || fail "credential-bearing real proxy received a request despite NO_PROXY wildcard"
+
+for proxy_settings in https-only https-and-all; do
+  tmp=$TMP_ROOT/no-proxy-star-$proxy_settings; new_case "$tmp"
+  case "$proxy_settings" in
+    https-only) out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' NO_PROXY='*' \
+      PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
+      FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$? ;;
+    https-and-all) out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
+      ALL_PROXY='http://other:secret@proxy.example:8080' NO_PROXY='*' PATH="$tmp:$BASE_PATH" \
+      FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address FM_FAKE_CURL_CODE=200 \
+      "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$? ;;
+  esac
+  expect_code 0 "$rc" "NO_PROXY=* permits direct request with $proxy_settings configured"
+  assert_contains "$out" "route=direct" "NO_PROXY=* labels $proxy_settings request direct"
+done
 
 # --- unknown and malformed input are refusals, never silent guesses ---------
 tmp=$TMP_ROOT/unknown-target; new_case "$tmp"
