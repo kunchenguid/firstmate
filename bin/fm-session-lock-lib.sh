@@ -12,8 +12,8 @@
 # parts and every liveness question asks all three:
 #
 #   process identity - the anchor pid plus fm_session_lock_birth_token, the pid's
-#     own start time. Two pids can name one process only while that token
-#     matches, so a recycled pid reads as a dead owner rather than a live one.
+#     own start time. Procfs tokens combine start ticks and NUL-separated
+#     cmdline; the ps lstart fallback has a one-second resolution floor.
 #     `kill -0` alone proves nothing and is never the whole answer.
 #     A legacy sidecar without line 3 retains the pre-token live-harness
 #     judgment; new records omit that line when the start time is unreadable.
@@ -312,8 +312,32 @@ fm_harness_pid_alive() {
 # narrower birth-only form, because a harness rewrites its own argv as its title
 # changes, so the command line cannot be part of a long-lived identity.
 fm_session_lock_birth_token() {  # <pid>
-  local pid=$1 out
+  local pid=$1 out proc_root stat_line starttime cmdline_hex
+  local -a stat_fields
   case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null || true)
+    if [ -n "$stat_line" ]; then
+      read -r -a stat_fields <<< "${stat_line##*)}"
+      if [ "${#stat_fields[@]}" -ge 20 ]; then
+        starttime=${stat_fields[19]}
+        case "$starttime" in
+          '' | *[!0-9]*) ;;
+          *)
+            cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$cmdline_hex" ]; then
+              case "$(uname 2>/dev/null || true)" in
+                Linux) printf 'linux-starttime=%s cmdline-hex=%s\n' "$starttime" "$cmdline_hex" ;;
+                *) printf 'proc-starttime=%s cmdline-hex=%s\n' "$starttime" "$cmdline_hex" ;;
+              esac
+              return 0
+            fi
+            ;;
+        esac
+      fi
+    fi
+  fi
   out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   out=${out#"${out%%[![:space:]]*}"}
   out=${out%"${out##*[![:space:]]}"}
@@ -569,13 +593,25 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # recycled pid cannot pass as the owner. A record with no birth token is judged
 # exactly as it was before process identity was recorded.
 fm_session_lock_recorded_owner_live() {  # <state>
-  local state=$1 pid recorded current
+  local state=$1 pid recorded current recorded_harness comm args current_harness
   pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$pid" in '' | *[!0-9]*) return 1 ;; esac
   fm_harness_pid_alive "$pid" || return 1
   recorded=$(fm_session_lock_recorded_birth "$state" 2>/dev/null || true)
   [ -n "$recorded" ] || return 0 # legacy compatibility: pre-token liveness
   current=$(fm_session_lock_birth_token "$pid" 2>/dev/null || true)
+  case "$recorded" in
+    proc-starttime=* | linux-starttime=*) ;;
+    *)
+      recorded_harness=$(fm_session_lock_recorded_harness "$state" 2>/dev/null || true)
+      if [ -n "$recorded_harness" ]; then
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        current_harness=$(fm_harness_process_name "$comm" "$args" 2>/dev/null || true)
+        [ "$current_harness" = "$recorded_harness" ] || return 1
+      fi
+      ;;
+  esac
   [ "$current" = "$recorded" ]
 }
 

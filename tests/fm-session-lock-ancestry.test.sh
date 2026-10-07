@@ -251,6 +251,58 @@ ROW
   pass "session-lock: a pid the OS recycled does not pass as the recorded live owner"
 }
 
+test_birth_token_prefers_procfs_start_ticks_and_cmdline() {
+  local dir fakebin proc_root table got n
+  dir="$TMP_ROOT/proc-birth-token"
+  fakebin=$(fm_fakebin "$dir")
+  proc_root="$dir/proc"
+  mkdir -p "$proc_root/700"
+  table="$dir/ps-table"
+  cat > "$table" <<'ROW'
+700|codex|/opt/codex/codex-code-mode-host|1|Tue Oct  7 11:05:00 2026|CODEX_THREAD_ID=thread
+ROW
+  use_table "$fakebin" "$table" self
+  {
+    printf '700 (codex) S'
+    n=0
+    while [ "$n" -lt 18 ]; do printf ' %s' "$n"; n=$((n + 1)); done
+    printf ' 4242\n'
+  } > "$proc_root/700/stat"
+  printf 'codex\0code-mode-host\0' > "$proc_root/700/cmdline"
+  got=$(FM_PROC_ROOT_OVERRIDE="$proc_root" lib_eval "$fakebin" 'fm_session_lock_birth_token 700') \
+    || fail "procfs birth identity was not readable"
+  case "$got" in
+    *'starttime=4242 cmdline-hex=636f64657800636f64652d6d6f64652d686f737400'*) ;;
+    *) fail "procfs identity omitted start ticks or NUL-separated cmdline: $got" ;;
+  esac
+  pass "session-lock: birth identity uses procfs start ticks and cmdline"
+}
+
+test_fallback_birth_token_rejects_harness_mismatch() {
+  local dir fakebin table state
+  dir="$TMP_ROOT/fallback-harness-mismatch"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  mkdir -p "$state" "$dir/no-proc"
+  table="$dir/ps-table"
+  cat > "$table" <<'ROW'
+700|codex|/opt/codex/codex-code-mode-host|1|Tue Oct  7 11:05:00 2026|CODEX_THREAD_ID=thread
+self|bash|bash /repo/bin/fm-tool.sh|1|Tue Oct  7 11:06:00 2026|SHLVL=1
+ROW
+  use_table "$fakebin" "$table" self
+  printf '700\n' > "$state/.lock"
+  printf 'thread\nopencode\nTue Oct  7 11:05:00 2026\n' > "$state/.lock-session"
+  if FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_TEST_KILL_RC=0 \
+    lib_eval "$fakebin" "fm_session_lock_recorded_owner_live '$state'"; then
+    fail "the one-second fallback accepted a different recorded harness"
+  fi
+  printf 'thread\n' > "$state/.lock-session"
+  FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_TEST_KILL_RC=0 \
+    lib_eval "$fakebin" "fm_session_lock_recorded_owner_live '$state'" \
+    || fail "line-2-absent legacy identity changed its pre-token liveness judgment"
+  pass "session-lock: fallback checks harness while legacy records keep compatibility"
+}
+
 test_prompt_text_does_not_mark_harness_as_daemon() {
   local result args
   for args in \
@@ -1433,6 +1485,8 @@ test_verified_reclaim_keeps_new_sidecar() {
 test_codex_session_under_a_shared_daemon_owns_its_own_process
 test_two_codex_sessions_sharing_one_daemon_hold_distinct_locks
 test_pid_reuse_is_not_mistaken_for_a_live_owner
+test_birth_token_prefers_procfs_start_ticks_and_cmdline
+test_fallback_birth_token_rejects_harness_mismatch
 test_prompt_text_does_not_mark_harness_as_daemon
 test_opencode_session_identity_is_the_pane_under_a_shared_server
 test_tokenless_legacy_lock_liveness
