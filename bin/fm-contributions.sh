@@ -247,10 +247,8 @@ forge() {
     # The budget, not the forge, refused a read that never started. An attempt
     # that already ran is left as the hard failure it was.
     if [ "$remaining" -le 0 ]; then
-      if [ "$attempt" -eq 1 ]; then
-        BUDGET_EXHAUSTED=1
-        : > "$TMP/budget-exhausted"
-      fi
+      BUDGET_EXHAUSTED=1
+      : > "$TMP/budget-exhausted"
       return 1
     fi
     [ "$remaining" -le 5 ] || remaining=5
