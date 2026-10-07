@@ -1421,6 +1421,7 @@ Optional configuration variables in `.env`:
   An explicit allowlist overrides this built-in default with a warning; an explicitly configured exclusion still wins over an allowlist and produces a warning.
 - `FM_DISCORD_ALLOW_DMS`: `true` or `false` (defaults to `true`).
 - `FM_DISCORD_AUTHORIZED_USER_IDS`: comma-separated Discord user IDs allowed to answer pushed decisions, including the captain and any trusted operators; unset or empty authorizes nobody.
+- `FM_DISCORD_COMMAND_CHANNELS`: optional comma-separated channel IDs where an **authorized** user's plain message (no `@mention`) is an inbound Firstmate request. This is separate from the polling allowlist (`FM_DISCORD_CHANNEL_ID`/`FM_DISCORD_ALLOWED_CHANNELS`): the bot must poll the channel, and the channel must also be explicitly listed here for mention-free capture. The built-in exclusion for `1551134713727426570` is overridden by explicitly allowlisting that channel, but an explicitly configured exclusion takes precedence over both lists. A command channel still excluded after polling configuration is dropped with a `fm-discord: command channel … is also excluded; exclusion wins` diagnostic. Unauthorized authors and bot messages are ignored.
 Replies and follow-ups for self-hosted Discord mentions post directly to Discord's REST API using `FM_DISCORD_BOT_TOKEN`.
 Quiet-mode status reports also use the first configured channel; the report command refuses to run during away mode.
 

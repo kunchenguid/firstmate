@@ -115,6 +115,33 @@ fm_discord_load_config() {
     FM_DISCORD_AUTHORIZED_USERS=$(fmx_env_get FM_DISCORD_AUTHORIZED_USER_IDS "$env_file")
   fi
   export FM_DISCORD_AUTHORIZED_USERS
+
+  # Captain command channels: an explicit opt-in list of channels where an
+  # authorized captain's plain message (no @mention) is a Firstmate request.
+  # This is NOT the polling allowlist: the allowlist sets where we poll, this
+  # sets where a mention-free message is treated as a command. A command channel
+  # that is also excluded is dropped with an explicit diagnostic (exclusion
+  # wins) rather than silently chosen.
+  if [ -n "${FM_DISCORD_COMMAND_CHANNELS+x}" ]; then
+    FM_DISCORD_COMMAND_CHANNEL_IDS=${FM_DISCORD_COMMAND_CHANNELS-}
+  else
+    FM_DISCORD_COMMAND_CHANNEL_IDS=$(fmx_env_get FM_DISCORD_COMMAND_CHANNELS "$env_file")
+  fi
+  if [ -n "$FM_DISCORD_COMMAND_CHANNEL_IDS" ] && [ -n "$FM_DISCORD_EXCLUDES" ]; then
+    local cmd_keep="" cmd_id=""
+    local -a cmd_ids
+    IFS=',' read -r -a cmd_ids <<< "$FM_DISCORD_COMMAND_CHANNEL_IDS"
+    for cmd_id in "${cmd_ids[@]}"; do
+      cmd_id=${cmd_id//[[:space:]]/}
+      [ -n "$cmd_id" ] || continue
+      case ",$FM_DISCORD_EXCLUDES," in
+        *",$cmd_id,"*) printf 'fm-discord: command channel %s is also excluded; exclusion wins\n' "$cmd_id" >&2 ;;
+        *) cmd_keep=${cmd_keep:+$cmd_keep,}$cmd_id ;;
+      esac
+    done
+    FM_DISCORD_COMMAND_CHANNEL_IDS=$cmd_keep
+  fi
+  export FM_DISCORD_COMMAND_CHANNEL_IDS
 }
 
 # Check if a request_id or context is from self-hosted Discord

@@ -38,6 +38,7 @@ export FM_DISCORD_CHANNELS="${FM_DISCORD_CHANNELS:-}"
 export FM_DISCORD_EXCLUDES="${FM_DISCORD_EXCLUDES-}"
 export FM_DISCORD_ALLOW_DMS="${FM_DISCORD_DMS:-true}"
 export FM_DISCORD_AUTHORIZED_USER_IDS="${FM_DISCORD_AUTHORIZED_USERS:-}"
+export FM_DISCORD_COMMAND_CHANNELS="${FM_DISCORD_COMMAND_CHANNEL_IDS:-}"
 
 # Only a token-gated run can capture anything, so the wake library is loaded
 # only here: without a token this stays a hard no-op that touches no state.

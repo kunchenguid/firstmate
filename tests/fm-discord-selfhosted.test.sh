@@ -301,6 +301,99 @@ test_bootstrap_activation() {
   pass "fm-bootstrap handles FM_DISCORD_BOT_TOKEN activation and artifact generation"
 }
 
+# Captain command channel: an authorized captain's plain message (no @mention) in
+# an explicitly opted-in channel is an inbound Firstmate request.
+test_command_channel_plain_message_is_captured() {
+  local home wake_out inbox
+  home="$TMP_ROOT/command-channel"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000003001","channel_id":"1000000000000000009","guild_id":"1000000000000000000","author":{"id":"8000000000000000001","username":"captain"},"mentions":[],"content":"PR 94 다시 검사해","attachments":[]}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000009" \
+    FM_DISCORD_AUTHORIZED_USER_IDS="8000000000000000001" FM_DISCORD_COMMAND_CHANNELS="1000000000000000009" \
+    "$ROOT/bin/fm-discord-poll.sh")
+  assert_equals "x-mention discord-sh-1352000000000003001" "$wake_out" "command-channel plain message wakes firstmate"
+  inbox="$home/state/x-inbox/discord-sh-1352000000000003001.json"
+  assert_present "$inbox" "command-channel message captured"
+  assert_equals "PR 94 다시 검사해" "$(jq -r '.text' "$inbox")" "plain text preserved without a mention"
+  assert_equals "discord-selfhosted" "$(jq -r '.source' "$inbox")" "command-channel input normalizes to the canonical source"
+  pass "an authorized captain's plain message in a command channel is captured"
+}
+
+test_command_channel_unauthorized_author_is_ignored() {
+  local home wake_out
+  home="$TMP_ROOT/command-channel-unauth"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000003002","channel_id":"1000000000000000009","guild_id":"1000000000000000000","author":{"id":"8000000000000000999","username":"stranger"},"mentions":[],"content":"do something","attachments":[]}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000009" \
+    FM_DISCORD_AUTHORIZED_USER_IDS="8000000000000000001" FM_DISCORD_COMMAND_CHANNELS="1000000000000000009" \
+    "$ROOT/bin/fm-discord-poll.sh")
+  [ -z "$wake_out" ] || fail "unauthorized author must not wake (got: $wake_out)"
+  assert_absent "$home/state/x-inbox/discord-sh-1352000000000003002.json" "unauthorized author not captured"
+  pass "an unauthorized author is ignored even in a command channel"
+}
+
+test_command_channel_plain_message_ignored_in_ordinary_channel() {
+  local home wake_out
+  home="$TMP_ROOT/command-channel-ordinary"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000003003","channel_id":"1000000000000000008","guild_id":"1000000000000000000","author":{"id":"8000000000000000001","username":"captain"},"mentions":[],"content":"no mention here","attachments":[]}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000008" \
+    FM_DISCORD_AUTHORIZED_USER_IDS="8000000000000000001" FM_DISCORD_COMMAND_CHANNELS="1000000000000000009" \
+    "$ROOT/bin/fm-discord-poll.sh")
+  [ -z "$wake_out" ] || fail "ordinary channel plain message must not wake (got: $wake_out)"
+  assert_absent "$home/state/x-inbox/discord-sh-1352000000000003003.json" "ordinary channel plain message not captured"
+  pass "a plain message in an ordinary channel is still ignored"
+}
+
+test_command_channel_duplicate_poll_is_idempotent() {
+  local home count
+  home="$TMP_ROOT/command-channel-idem"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  run_poll() {
+    FM_TEST_REAL_NODE=$(command -v node) \
+      FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000003004","channel_id":"1000000000000000009","guild_id":"1000000000000000000","author":{"id":"8000000000000000001","username":"captain"},"mentions":[],"content":"twice","attachments":[]}]' \
+      PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000009" \
+      FM_DISCORD_AUTHORIZED_USER_IDS="8000000000000000001" FM_DISCORD_COMMAND_CHANNELS="1000000000000000009" \
+      "$ROOT/bin/fm-discord-poll.sh" >/dev/null
+  }
+  run_poll
+  run_poll
+  count=0
+  for inbox_file in "$home/state/x-inbox"/*discord-sh-1352000000000003004*; do
+    [ -e "$inbox_file" ] && count=$((count + 1))
+  done
+  assert_equals "1" "$count" "a re-polled command-channel message yields exactly one inbox record"
+  pass "command-channel capture is idempotent across re-polls"
+}
+
+test_command_channel_conflict_with_exclusion_is_reported() {
+  local home wake_out
+  home="$TMP_ROOT/command-channel-conflict"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000003005","channel_id":"1000000000000000009","guild_id":"1000000000000000000","author":{"id":"8000000000000000001","username":"captain"},"mentions":[],"content":"conflict","attachments":[]}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-test-token FM_DISCORD_CHANNEL_ID="1000000000000000009" \
+    FM_DISCORD_AUTHORIZED_USER_IDS="8000000000000000001" FM_DISCORD_COMMAND_CHANNELS="1000000000000000009" \
+    FM_DISCORD_EXCLUDE_CHANNELS="1000000000000000009" \
+    "$ROOT/bin/fm-discord-poll.sh" 2>"$home/warnings.log")
+  [ -z "$wake_out" ] || fail "an excluded command channel must not capture (got: $wake_out)"
+  assert_contains "$(cat "$home/warnings.log")" "command channel 1000000000000000009 is also excluded; exclusion wins" "command/exclusion conflict is reported"
+  pass "an excluded command channel fails safe with an explicit diagnostic"
+}
+
 test_poll_no_token_is_hard_noop
 test_ingestion_payload_shape_and_wake
 test_default_dm_discovery
@@ -313,3 +406,8 @@ test_reply_to_member_without_mention_is_ignored
 test_dm_reply_is_polled_with_configured_channel
 test_out_of_band_mention_enqueues_durable_wake
 test_bootstrap_activation
+test_command_channel_plain_message_is_captured
+test_command_channel_unauthorized_author_is_ignored
+test_command_channel_plain_message_ignored_in_ordinary_channel
+test_command_channel_duplicate_poll_is_idempotent
+test_command_channel_conflict_with_exclusion_is_reported

@@ -34,6 +34,16 @@ const excludeIds = excludeConfig
 const allowDMs = (process.env.FM_DISCORD_ALLOW_DMS || process.env.FM_DISCORD_DMS || "true").toLowerCase() !== "false";
 const authorizedUserIds = new Set((process.env.FM_DISCORD_AUTHORIZED_USER_IDS || "").split(",").map((s) => s.trim()).filter(Boolean));
 
+// Captain command channels: an explicit opt-in list where an authorized
+// captain's plain message (no @mention) is an inbound Firstmate request. This is
+// NOT the polling allowlist. An unauthorized author is still ignored.
+const commandChannels = new Set(
+	(process.env.FM_DISCORD_COMMAND_CHANNELS || process.env.FM_DISCORD_COMMAND_CHANNEL_IDS || "")
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean),
+);
+
 const cursorDir = join(stateDir, "x-context");
 function cursorFile(chId) {
 	return join(cursorDir, `discord-cursor-${chId}.json`);
@@ -241,18 +251,22 @@ async function main() {
 					continue;
 				}
 
-				// Check if mentioned, a DM, or a reply to one of the bot's own
-				// messages. A reply to the bot's message is an inbound command
-				// even without an explicit @mention: the captain answers a bot
-				// post by replying to it, and Discord does not add a mention for
-				// that. Dropping it is the silent no-reaction bug this guards.
+				// Check if mentioned, a DM, a reply to one of the bot's own
+				// messages, or a plain message in a captain command channel. A
+				// reply to the bot's message is an inbound command even without
+				// an explicit @mention: the captain answers a bot post by
+				// replying to it, and Discord does not add a mention for that.
+				// A command channel is the same idea for a dedicated console
+				// channel: the captain types naturally, no mention needed. Both
+				// still require an authorized author.
 				const isDM = !msg.guild_id;
 				if (isDM && !allowDMs) continue;
 				const isMentioned = Array.isArray(msg.mentions) && msg.mentions.some((m) => m.id === botId);
 				const contentHasBotMention = msg.content && (msg.content.includes(`<@${botId}>`) || msg.content.includes(`<@!${botId}>`));
 				const isReplyToBot = msg.referenced_message?.author?.id === botId;
+				const isCommandChannel = commandChannels.has(chId) && authorizedUserIds.has(msg.author?.id);
 
-				if (!isDM && !isMentioned && !contentHasBotMention && !isReplyToBot) {
+				if (!isDM && !isMentioned && !contentHasBotMention && !isReplyToBot && !isCommandChannel) {
 					continue;
 				}
 
