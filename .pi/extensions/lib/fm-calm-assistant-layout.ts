@@ -15,7 +15,6 @@ import { calmPresentationHides } from "./fm-calm-visibility.ts";
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
 type AssistantMessagePresentationState = {
-  hiddenThinkingLabel: string;
   hideThinkingBlock: boolean;
   lastMessage?: AssistantMessage;
 };
@@ -72,10 +71,10 @@ export function installCalmAssistantLayout(): void {
     message: AssistantMessage,
   ): void {
     const state = this as unknown as AssistantMessagePresentationState;
-    const hideThinking =
-      state.hiddenThinkingLabel === "" &&
-      state.hideThinkingBlock &&
-      patch.hidesThinking();
+    // Pi keeps one hiddenThinkingLabel for the whole session and any other Calm
+    // toggle (for example the standalone global Pi Calm) can rewrite it after
+    // Firstmate Calm blanks it, so Calm's hiding must not read that shared label.
+    const hideThinking = state.hideThinkingBlock && patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() &&
       isMidTurnAssistantMessage(message) &&

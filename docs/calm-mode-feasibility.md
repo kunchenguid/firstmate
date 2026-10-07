@@ -65,7 +65,8 @@ Removing only all six thinking blocks from the failing persisted session left al
 Enabling Pi's `terminal.clearOnShrink` on the unchanged failing session left the gap at 14 rows, which rules out stale terminal allocation as the cause.
 
 The initiating trigger was a non-empty thinking block in an assistant message that Pi rendered through `AssistantMessageComponent`.
-The masking condition was the combination of Calm being active and Pi's thinking display being collapsed, because Calm replaced the visible label with an empty string while Calm off or explicit thinking expansion filled those rows with visible content.
+The masking condition was the combination of Calm being active and Pi's thinking display being collapsed, because the pre-fix adapter blanked Pi's visible label with an empty string and required that same empty label back as its hiding gate, while Calm off or explicit thinking expansion filled those rows with visible content.
+The current adapter no longer reads that shared label; see the [2026-10-07 dual-install record](#2026-10-07-dual-install-shared-hidden-thinking-label-verification).
 The visible symptom was the large empty vertical field between the intentionally visible collapsed skill row and final assistant response.
 
 The earliest divergent layout path was `AssistantMessageComponent.updateContent`, before terminal differential rendering or tool-result composition.
@@ -89,6 +90,20 @@ The disconfirming checks deliberately retain supported boundaries.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
 Expanded thinking remains visible by design, while re-collapsing it returns to zero-height Calm presentation.
 Ordinary user-role near misses remain visible, including quoted current markers, ASCII-only labels, unrelated text before a marker, unrelated text after U+2063, and image-bearing input.
+
+## 2026-10-07 dual-install shared hidden-thinking label verification
+
+A session that loads both this project's Firstmate Calm and the standalone global Pi Calm shares Pi's single `AssistantMessageComponent.hiddenThinkingLabel`.
+The global extension loads after Firstmate Calm and, when its own preference is off, calls `setHiddenThinkingLabel(undefined)` at session start, restoring Pi's default `Thinking...` label after Firstmate Calm had blanked it.
+The pre-fix adapter also required that blank label back as its hiding gate, so the restored label failed the gate and Pi rendered one visible `Thinking...` row per collapsed thinking block.
+
+Reproduction on the installed Pi 1.0.4 bundle with firstmate at `53b5bc11` drove the adapter with Calm active, collapsed thinking, and a non-empty `Thinking...` label.
+The pre-fix adapter rendered one collapsed row; the fixed adapter rendered zero.
+Expanded thinking still rendered the original reasoning and Calm off still rendered Pi's stock `Thinking...` label under both.
+
+`tests/fm-calm-pi-extension.test.sh` pins this in `test_dual_install_hidden_thinking_label`.
+The fix drops the shared-label clause from the hiding gate.
+The adapter now hides collapsed thinking from `state.hideThinkingBlock` and the Calm visibility policy alone, so any other writer of Pi's session-wide label cannot cancel it.
 
 ## Duplicate-turn regression and semantic boundary
 
@@ -302,6 +317,7 @@ The same real-Pi reproduction then delivered the notification exactly once in a 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; its rendered HTML export check accepts either omission or default-hidden hook rows for legacy synthetic messages while rejecting visible leakage.
 `tests/fm-pi-branch-extension.test.sh` verifies both `fm_branch_outcomes` and `fm_branch_processed` call headers against pre-0.99 and 0.99+ Pi stock rendering, plus Calm toggling, capability-probed all-line versus collapsed stock result output, exact expanded output, and export rendering for outcomes.
 Together they exercise redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and cover every policy class.
+`test_dual_install_hidden_thinking_label` drives the adapter with Calm active and a non-empty shared hidden thinking label and asserts zero collapsed-thinking rows, expanded reasoning, and stock Calm-off rendering.
 It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.

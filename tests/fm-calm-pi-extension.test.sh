@@ -2128,6 +2128,116 @@ JS
   pass "Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
+# A second Calm toggle sharing Pi's process - the standalone global Pi Calm - writes
+# Pi's one session-wide hiddenThinkingLabel. When that toggle's own preference is off it
+# restores `Thinking...` after Firstmate Calm blanked the label, and the old layout guard
+# then failed and left one visible collapsed-thinking row per block. This pins the
+# dual-install outcome independently of the label value.
+test_dual_install_hidden_thinking_label() {
+  local fixture out output_file status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi Calm dual-install thinking test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi Calm dual-install thinking label"
+
+  fixture="$TMP_ROOT/dual-install-thinking"
+  mkdir -p "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+
+  output_file="$fixture/node-output"
+  (cd "$fixture" && PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ AssistantMessageComponent }, { initTheme }, { setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+// One live visibility module, exactly as a single Pi process has.
+const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
+const layout = await import(
+  pathToFileURL(`${process.cwd()}/lib/fm-calm-assistant-layout.ts`).href,
+);
+
+const message = {
+  role: "assistant",
+  api: "calm-dual-install-test",
+  provider: "calm-dual-install-test",
+  model: "deterministic",
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  stopReason: "stop",
+  timestamp: 1,
+  content: [
+    { type: "thinking", thinking: "DUAL_INSTALL_HIDDEN_THINKING" },
+    { type: "text", text: "DUAL_INSTALL_VISIBLE_REPLY" },
+  ],
+};
+
+// Firstmate Calm active, collapsed thinking, and the shared label the standalone
+// global Calm restores when its own preference is off.
+visibility.setCalmPresentation(true);
+layout.installCalmAssistantLayout();
+const collapsed = new AssistantMessageComponent(message, true, undefined, "Thinking...");
+const collapsedRendered = collapsed.render(120).join("\n");
+if (collapsedRendered.includes("Thinking...") || collapsedRendered.includes("DUAL_INSTALL_HIDDEN_THINKING")) {
+  throw new Error(
+    "Firstmate Calm let a non-empty shared hidden thinking label restore a collapsed-thinking row",
+  );
+}
+if (!collapsedRendered.includes("DUAL_INSTALL_VISIBLE_REPLY")) {
+  throw new Error("Firstmate Calm hid the genuine assistant reply while hiding thinking");
+}
+
+// A later write of the shared label must stay hidden too.
+collapsed.setHiddenThinkingLabel("Thinking...");
+if (collapsed.render(120).join("\n").includes("Thinking...")) {
+  throw new Error("a later shared-label write restored a collapsed-thinking row under Calm");
+}
+
+// Expanded thinking still renders the real reasoning content.
+collapsed.setHideThinkingBlock(false);
+if (!collapsed.render(120).join("\n").includes("DUAL_INSTALL_HIDDEN_THINKING")) {
+  throw new Error("expanded thinking did not render its reasoning content under Calm");
+}
+collapsed.setHideThinkingBlock(true);
+
+// Calm off keeps Pi's stock collapsed-thinking rendering.
+visibility.setCalmPresentation(false);
+const calmOff = new AssistantMessageComponent(message, true, undefined, "Thinking...");
+if (!calmOff.render(120).join("\n").includes("Thinking...")) {
+  throw new Error("Calm off did not restore Pi's collapsed thinking label");
+}
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi Calm dual-install thinking contract failed: $out"
+  [ -z "$out" ] || fail "Pi Calm dual-install thinking test printed output: $out"
+  pass "Pi Calm hides collapsed thinking even when a second Calm toggle restores Pi's shared hidden thinking label, while expansion and Calm-off rendering stay unchanged"
+}
+
 test_operational_followup_turn_e2e() {
   local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
@@ -4990,6 +5100,7 @@ test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
+test_dual_install_hidden_thinking_label
 test_operational_followup_turn_e2e
 test_queued_operational_escape_e2e
 test_hidden_block_geometry_e2e

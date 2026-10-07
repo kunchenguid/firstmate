@@ -73,6 +73,7 @@ Calm hides these rows:
 Pi applies the preservation rule independently to each text block.
 A short working note can therefore hide beside preserved substantive content in the same message.
 A working note is briefly visible while it streams, before its settled row collapses.
+Calm's collapsed-thinking hiding does not read Pi's session-wide hidden thinking label, so a second Calm extension that rewrites that shared label cannot restore the hidden rows.
 
 The narration is hidden only from the live transcript presentation.
 It remains in the message, model context, session storage, and `/export` artifacts.
