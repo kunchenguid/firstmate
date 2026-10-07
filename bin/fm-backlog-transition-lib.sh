@@ -195,27 +195,6 @@ fm_backlog_data_relative() {  # <data-dir>
 }
 
 
-# The parent an authorized data directory was named from, kept in the caller's
-# own path shape. fm_backlog_record_parent_authorized only applies its FM_HOME
-# containment guard to a root that still spells out `$FM_HOME`, so a root
-# already resolved through `pwd -P` would skip that guard whenever the data
-# directory is a symlink.
-fm_backlog_authorized_root() {  # <authorized-data-dir>
-  local data=$1 parent
-  while [ "$data" != / ] && [ "${data%/}" != "$data" ]; do
-    data=${data%/}
-  done
-  case "$data" in
-    /) parent=/ ;;
-    */*)
-      parent=${data%/*}
-      [ -n "$parent" ] || parent=/
-      ;;
-    *) parent=. ;;
-  esac
-  printf '%s\n' "$parent"
-}
-
 # Any adapter selection or exemption derived from a home's `.tasks.toml` is only
 # as safe as that file, so validate it before reading it.
 fm_backlog_config_present() {  # <root> <authorized-root>
@@ -240,10 +219,10 @@ fm_backlog_source_present() {  # <data-dir> <authorized-data-dir> [root authoriz
   local data=$1 authorized_data=$2 root=${3:-} authorized_root=${4:-} file backend
   if [ -z "$root" ]; then
     root=$(fm_backlog_root "$data") || return 1
-    authorized_root=$(fm_backlog_authorized_root "$authorized_data")
+    authorized_root=$(fm_backlog_root "$authorized_data")
   fi
   if [ -z "$authorized_root" ]; then
-    authorized_root=$(fm_backlog_authorized_root "$authorized_data")
+    authorized_root=$(fm_backlog_root "$authorized_data")
   fi
   fm_backlog_config_present "$root" "$authorized_root" || return 1
   backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
@@ -300,7 +279,7 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     return 2
   fi
   root=$(fm_backlog_root "$data") || return 2
-  authorized_root=$(fm_backlog_authorized_root "$authorized_data")
+  authorized_root=$(fm_backlog_root "$authorized_data")
   fm_backlog_config_present "$root" "$authorized_root" || return 2
   backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
     FM_BACKLOG_TRANSITION_ERROR=$backend

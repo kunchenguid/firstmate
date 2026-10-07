@@ -340,7 +340,8 @@ While the home runs the host, main's lease-checked commands also take the per-ta
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
-The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Each home's own gitignored `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Bootstrap copies the tracked `.tasks.toml.example` into a home that has none, so a fresh clone gets those defaults, and it never reads or rewrites a `.tasks.toml` the home already has.
 A home may instead select another tasks-axi adapter such as Beads through its own `.tasks.toml` or `TASKS_AXI_BACKEND`; firstmate still uses only tasks-axi verbs for routine backlog reads and mutations, and the adapter maps `start` and evidence-bearing `done` transitions to its native statuses and evidence fields.
 
 ### Captain holds on Beads
@@ -401,7 +402,8 @@ On the default markdown adapter, tasks-axi and manual edits produce the same `##
 
 ### Using a separate operational home
 
-The tracked `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`, so a bare `tasks-axi` run from the code root addresses the code root's `data/` whenever the home lives elsewhere.
+A home's `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`.
+Whenever the home lives elsewhere, a bare `tasks-axi` run from the code root addresses that root rather than this home: the code root's `data/` when it holds a `.tasks.toml` of its own, and tasks-axi's built-in defaults when it does not.
 tasks-axi replaces its target by renaming a temporary file over it.
 If the target is a symlink, the write replaces it with a regular file.
 Linking the code-root copy into the home therefore forks the queue on the first write instead of keeping the copies in sync.

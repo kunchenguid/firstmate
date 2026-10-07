@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-tasks-axi.sh home addressing and bootstrap's
 # shadow-backlog check, over the split layout where the operational home lives
-# outside the code root that carries the tracked .tasks.toml.
+# outside a code root that holds its own .tasks.toml, copied there from the
+# tracked .tasks.toml.example.
 #
 # The fork these guard against: .tasks.toml names data/backlog.md relative to
 # the caller's working directory, and tasks-axi writes by renaming a temp file
@@ -33,13 +34,13 @@ empty_backlog() {  # <path>
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$1"
 }
 
-# A code root carrying the tracked .tasks.toml and an operational home beside
-# it, with the code-root backlog linked into the home the way an operator
-# would try to keep the two in sync.
+# A code root holding its own .tasks.toml (copied from the tracked example)
+# and an operational home beside it, with the code-root backlog linked into the
+# home the way an operator would try to keep the two in sync.
 make_split() {  # <name>; prints the case directory
   local dir="$TMP_ROOT/$1"
   mkdir -p "$dir/code/data" "$dir/home/data" "$dir/home/state" "$dir/home/config"
-  cp "$ROOT/.tasks.toml" "$dir/code/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$dir/code/.tasks.toml"
   empty_backlog "$dir/home/data/backlog.md"
   ln -s "$dir/home/data/backlog.md" "$dir/code/data/backlog.md"
   printf '%s\n' "$dir"
@@ -104,7 +105,7 @@ test_guard_silent_for_single_home() {
   local dir out
   dir="$TMP_ROOT/single-guard"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$dir/.tasks.toml"
   empty_backlog "$dir/data/backlog.md"
   printf '## Done\n' > "$dir/data/done-archive.md"
   out=$(bootstrap_backlog_lines "$dir")
@@ -231,7 +232,7 @@ test_wrapper_single_home() {
   local dir
   dir="$TMP_ROOT/single-wrapper"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$dir/.tasks.toml"
   empty_backlog "$dir/data/backlog.md"
   (cd "$dir" && FM_ROOT_OVERRIDE="$dir" "$WRAPPER" add solo-1 "single home" >/dev/null) \
     || fail "add in the single-home layout failed"
