@@ -21,6 +21,8 @@
 #    an expected value. The fake curl records every URL it was handed, so
 #    "unauthenticated, exactly one request, bounded" are observable facts.
 set -u
+unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy
+unset CURL_HOME XDG_CONFIG_HOME
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -77,6 +79,8 @@ make_fake_dig() {
   cat > "$dir/dig" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$log"
+query_type=A
+for arg in "\$@"; do [ "\$arg" = AAAA ] && query_type=AAAA; done
 case "\${FM_FAKE_DIG_MODE:-address}" in
   nxdomain) printf 'status: NXDOMAIN\nno answer\n' ; exit 0 ;;
   empty) printf ';; no addresses\n'; exit 0 ;;
@@ -89,6 +93,13 @@ case "\${FM_FAKE_DIG_MODE:-address}" in
     ';; Query time: 1 msec' \
     ';; SERVER: 100.100.100.100#53(100.100.100.100)' \
     ';; WHEN: Mon Oct 07 00:00:00 UTC 2026' ; exit 0 ;;
+  authority-additional) if [ "\$query_type" = AAAA ]; then printf 'unfamiliar response\n'; else printf '%s\n' \
+    ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 12345' \
+    ';; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1' \
+    ';; AUTHORITY SECTION:' \
+    'example.invalid. 300 IN A 1.2.3.4' \
+    ';; ADDITIONAL SECTION:' \
+    'ns.example.invalid. 300 IN AAAA 2001:db8::1'; fi; exit 0 ;;
   nodata) printf '%s\n' \
     '; <<>> DiG 9.10.6 <<>> nodata.example.invalid' \
     ';; global options: +cmd' \
@@ -109,13 +120,14 @@ case "\${FM_FAKE_DIG_MODE:-address}" in
   answer-diagnostics) printf '%s\n' \
     ';; Query time: 1 msec' \
     ';; SERVER: 100.100.100.100#53(100.100.100.100)' \
+    ';; ANSWER SECTION:' \
     'nodata.example.invalid. 300 IN A 1.2.3.4' ; exit 0 ;;
-  ipv6) printf '2001:db8::1\n'; exit 0 ;;
-  a-noanswer) if [ "\${2:-}" = AAAA ]; then printf '2001:db8::1\n'; else printf ';; no A records\n'; fi; exit 0 ;;
-  a-aaaa-error) if [ "\${2:-}" = AAAA ]; then printf 'unrecognized resolver failure\n'; exit 9; else printf ';; no A records\n'; exit 0; fi ;;
+  ipv6) printf ';; ANSWER SECTION:\nexample.invalid. 300 IN AAAA 2001:db8::1\n'; exit 0 ;;
+  a-noanswer) if [ "\$query_type" = AAAA ]; then printf ';; ANSWER SECTION:\nexample.invalid. 300 IN AAAA 2001:db8::1\n'; else printf ';; no A records\n'; fi; exit 0 ;;
+  a-aaaa-error) if [ "\$query_type" = AAAA ]; then printf 'unrecognized resolver failure\n'; exit 9; else printf ';; no A records\n'; exit 0; fi ;;
   fail) printf 'connection failed\n'; exit 9 ;;
   hang) sleep 30; printf 'ok\n'; exit 0 ;;
-  *) printf '1.2.3.4\n'; exit 0 ;;
+  *) printf ';; ANSWER SECTION:\nexample.invalid. 300 IN A 1.2.3.4\n'; exit 0 ;;
 esac
 SH
   chmod +x "$dir/dig"
@@ -371,6 +383,14 @@ assert_contains "$out" "http=none" "NODATA issues no HTTP request"
 assert_not_contains "$out" "dns=ok" "dig SERVER/WHEN diagnostics are never read as an address"
 [ ! -s "$tmp/urls.log" ] || fail "NODATA still issued an HTTP request: $(cat "$tmp/urls.log")"
 
+tmp=$TMP_ROOT/authority-additional-only; new_case "$tmp"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=authority-additional FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "authority/additional records do not prove an A answer"
+assert_contains "$out" "dns=unknown" "addresses outside dig's answer output are not treated as resolved"
+assert_contains "$out" "result=reachable" "HTTP follows uncertain DNS output"
+assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "HTTP proceeds after no answer-section address"
+
 tmp=$TMP_ROOT/answer-with-diagnostics; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=answer-diagnostics FM_PROVIDER_REACH_DNS_TOOL=dig \
   FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
@@ -415,7 +435,7 @@ out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=200 FM_FAKE_DIG_MODE=address \
   "$SCRIPT" --host "$PROBE_HOST:8443" 2>&1); rc=$?
 expect_code 0 "$rc" "a host:port authority still probes over HTTP"
 assert_contains "$out" "dns=ok" "the host component resolves"
-assert_contains "$out" "dns_detail=1.2.3.4" "the DNS answer is reported"
+assert_contains "$out" "dns_detail=example.invalid. 300 IN A 1.2.3.4" "the DNS answer record is reported"
 [ "$(cat "$tmp/dig.log")" = "$PROBE_HOST" ] || fail "the resolver was handed a port-bearing name: $(cat "$tmp/dig.log")"
 assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST:8443" "the port is preserved in the HTTPS URL"
 
@@ -480,7 +500,7 @@ out=$(PATH="$later_dir/onlydig:$later_dir:$BASE_PATH" FM_FAKE_CURL_CODE=200 \
   FM_FAKE_CURL_URL_LOG="$later_dir/urls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
 expect_code 0 "$rc" "a usable later entry in the list still gets its HTTP phase"
 assert_contains "$out" "dns=ok" "an installed entry further down the list is tried, not skipped"
-assert_contains "$out" "dns_detail=1.2.3.4" "the tried entry's own answer is reported"
+assert_contains "$out" "dns_detail=example.invalid. 300 IN A 1.2.3.4" "the tried entry's own answer record is reported"
 assert_not_contains "$out" "dns_tool_missing" "a partially usable list is never disclosed as a missing resolver"
 assert_not_contains "$out" "dns=fail" "an absent earlier entry is skipped, not reported as a lookup failure"
 [ "$(grep -c . "$later_dir/pref.log")" = 1 ] || fail "expected exactly one resolver call, got: $(cat "$later_dir/pref.log")"
@@ -526,6 +546,42 @@ out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=address \
 expect_code 20 "$rc" "a valid NXDOMAIN answer is terminal"
 assert_contains "$out" "dns=nxdomain" "NXDOMAIN remains terminal with a later candidate configured"
 [ ! -s "$tmp/second.log" ] || fail "the second resolver ran after terminal NXDOMAIN: $(cat "$tmp/second.log")"
+
+tmp=$TMP_ROOT/resolver-fallback-success-unknown; new_case "$tmp"
+cat > "$tmp/firstresolver" <<'SH'
+#!/usr/bin/env bash
+printf 'unfamiliar successful resolver output\\n'
+exit 0
+SH
+chmod +x "$tmp/firstresolver"
+make_fake_dig "$tmp" "$tmp/second.log"
+: > "$tmp/second.log"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=address FM_PROVIDER_REACH_DNS_TOOL='firstresolver dig' \
+  FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "successful unknown resolver output falls through"
+assert_contains "$out" "dns=ok" "later recognized resolver determines DNS"
+[ "$(grep -c . "$tmp/second.log")" = 1 ] || fail "later resolver was not tried after unknown success"
+
+tmp=$TMP_ROOT/resolver-all-success-unknown; new_case "$tmp"
+cat > "$tmp/firstresolver" <<'SH'
+#!/usr/bin/env bash
+printf 'unfamiliar successful resolver output\\n'
+exit 0
+SH
+chmod +x "$tmp/firstresolver"
+cat > "$tmp/secondresolver" <<'SH'
+#!/usr/bin/env bash
+printf '\\n'
+exit 0
+SH
+chmod +x "$tmp/secondresolver"
+out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL='firstresolver secondresolver' \
+  FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+  "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "all successful unknown resolver output still allows HTTP"
+assert_contains "$out" "dns=unknown" "unrecognized successes remain uncertain"
+assert_contains "$out" "result=reachable" "HTTP proceeds when all resolver output is uncertain"
+assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "HTTP follows all unknown resolver results"
 
 # --- every entry missing is disclosed as a skipped lookup -------------------
 # The same preference-list semantics, from the other end: when no listed entry is
@@ -596,6 +652,42 @@ assert_not_contains "$urls" "key=" "the probe URL carries no query credential"
 # probe's own invocation passes -q, so a fresh listener must stay silent.
 command -v python3 >/dev/null 2>&1 || fail "python3 is required for the local curl-config listener"
 curl_bin=$(command -v curl) || fail "curl is required for the curl-config isolation case"
+# Real curl must treat brace/bracket path characters literally and send exactly
+# one request. The local HTTP server persists briefly to expose accidental URL
+# glob expansion as multiple observable requests.
+glob_portfile=$TMP_ROOT/glob.port
+glob_log=$TMP_ROOT/glob.log
+glob_cert=$TMP_ROOT/glob-cert.pem
+glob_key=$TMP_ROOT/glob-key.pem
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$glob_key" -out "$glob_cert" -subj '/CN=127.0.0.1' -days 1 >/dev/null 2>&1 || fail "openssl is required for the local HTTPS glob fixture"
+python3 - "$glob_portfile" "$glob_log" "$glob_cert" "$glob_key" <<'PY' &
+import http.server, ssl, sys
+portfile, logfile, certfile, keyfile = sys.argv[1:5]
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(logfile, 'a') as f: f.write(self.path + '\n')
+        self.send_response(200); self.end_headers()
+    def log_message(self, *args): pass
+server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(certfile, keyfile)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+with open(portfile, 'w') as f: f.write(str(server.server_port))
+server.timeout = 2
+server.handle_request()
+server.server_close()
+PY
+GLOB_PID=$!
+wait_for_file "$glob_portfile"
+glob_port=$(cat "$glob_portfile")
+env -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u all_proxy \
+  -u NO_PROXY -u no_proxy -u CURL_HOME -u XDG_CONFIG_HOME \
+  PATH="$BASE_PATH" CURL_CA_BUNDLE="$glob_cert" FM_PROVIDER_REACH_DNS_TOOL=missing \
+  "$SCRIPT" --host "127.0.0.1:$glob_port/{health,status}[v1]" >/dev/null 2>&1
+wait "$GLOB_PID" 2>/dev/null || true
+[ "$(wc -l < "$glob_log" | tr -d ' ')" = 1 ] || fail "curl URL glob sent more than one request: $(cat "$glob_log")"
+[ "$(cat "$glob_log")" = '/{health,status}[v1]' ] || fail "curl did not preserve the literal path: $(cat "$glob_log")"
+
 tmp=$TMP_ROOT/curl-q-isolation
 digdir=$tmp/digbin
 mkdir -p "$digdir" "$tmp/home"
@@ -633,7 +725,7 @@ assert_contains "$out" "http=000" "the probe completed its own request without t
 [ ! -s "$probe_log" ] || fail "curl honored the user .curlrc proxy despite -q: $(cat "$probe_log")"
 
 # --- proxy environment is explicit, credential-safe, and reported ------------
-proxy_env=(-u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy)
+proxy_env=(-u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy -u CURL_HOME -u XDG_CONFIG_HOME)
 for proxy_name in HTTPS_PROXY https_proxy ALL_PROXY all_proxy; do
   tmp=$TMP_ROOT/proxy-credential-$proxy_name; new_case "$tmp"
   out=$(env "${proxy_env[@]}" "$proxy_name=http://private:secret@proxy.example:8080" \
@@ -674,23 +766,49 @@ out=$(env "${proxy_env[@]}" HTTP_PROXY='http://private:secret@proxy.example:8080
 expect_code 0 "$rc" "HTTP proxy credentials do not affect an HTTPS request"
 assert_contains "$out" "route=direct" "an irrelevant HTTP proxy does not alter route reporting"
 
-# NO_PROXY ports participate in curl's bypass decision: a different explicit
-# port must not bypass the configured proxy, while an exact port does.
+# Prove curl's port-qualified behavior with the real executable: the local proxy
+# observes CONNECT plus Proxy-Authorization even when NO_PROXY includes :443.
+real_proxy_portfile=$TMP_ROOT/real-proxy.port
+real_proxy_log=$TMP_ROOT/real-proxy.log
+start_proxy_listener "$real_proxy_portfile" "$real_proxy_log"
+real_proxy_pid=$LISTENER_PID
+wait_for_file "$real_proxy_portfile"
+real_proxy_port=$(cat "$real_proxy_portfile")
+env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy \
+  -u NO_PROXY -u no_proxy -u CURL_HOME -u XDG_CONFIG_HOME \
+  HTTPS_PROXY="http://localuser:localpass@127.0.0.1:$real_proxy_port" \
+  NO_PROXY='api.example.invalid:443' "$curl_bin" -q -sS --max-time 1 \
+  'https://api.example.invalid:443/' >/dev/null 2>&1 || true
+wait "$real_proxy_pid" 2>/dev/null || true
+assert_contains "$(cat "$real_proxy_log")" 'CONNECT api.example.invalid:443' "real curl does not bypass a proxy for port-qualified NO_PROXY"
+assert_contains "$(cat "$real_proxy_log")" 'Proxy-Authorization' "real curl sends proxy auth when port-qualified NO_PROXY is ignored"
+
+# curl does not honor port-qualified NO_PROXY entries. Bare host/domain suffix
+# entries bypass the proxy and are reported as direct.
 tmp=$TMP_ROOT/no-proxy-port-mismatch; new_case "$tmp"
 out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
   NO_PROXY="$PROBE_HOST:443" PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
   FM_FAKE_DIG_MODE=address FM_FAKE_CURL_LOG="$tmp/calls.log" \
-  "$SCRIPT" --host "$PROBE_HOST:8443" 2>&1); rc=$?
-expect_code 2 "$rc" "a mismatched NO_PROXY port does not bypass proxy credential refusal"
+  "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 2 "$rc" "NO_PROXY host:443 does not bypass proxy credential refusal for HTTPS"
 assert_contains "$out" "proxy URL carries credentials" "the mismatched port retains effective proxy credentials"
 [ ! -s "$tmp/calls.log" ] || fail "a mismatched NO_PROXY port reached curl"
 
 tmp=$TMP_ROOT/no-proxy-port-match; new_case "$tmp"
 out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
   NO_PROXY="$PROBE_HOST:8443" PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_DIG_MODE=address FM_FAKE_CURL_LOG="$tmp/calls.log" \
+  "$SCRIPT" --host "$PROBE_HOST:8443" 2>&1); rc=$?
+expect_code 2 "$rc" "a port-qualified NO_PROXY entry does not bypass proxy credentials"
+assert_contains "$out" "proxy URL carries credentials" "port-qualified NO_PROXY retains effective proxy credentials"
+[ ! -s "$tmp/calls.log" ] || fail "port-qualified NO_PROXY reached curl"
+
+tmp=$TMP_ROOT/no-proxy-host-suffix; new_case "$tmp"
+out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
+  NO_PROXY='example.invalid' PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
   FM_FAKE_DIG_MODE=address FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST:8443" 2>&1); rc=$?
-expect_code 0 "$rc" "an exact NO_PROXY port bypasses proxy credential refusal"
-assert_contains "$out" "route=direct" "an exact NO_PROXY port is labeled direct"
+expect_code 0 "$rc" "a bare NO_PROXY domain suffix bypasses proxy credentials"
+assert_contains "$out" "route=direct" "bare domain suffix is labeled direct"
 
 # --- unknown and malformed input are refusals, never silent guesses ---------
 tmp=$TMP_ROOT/unknown-target; new_case "$tmp"
