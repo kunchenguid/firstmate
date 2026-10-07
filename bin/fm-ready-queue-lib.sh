@@ -4,7 +4,7 @@ fm_ready_queue_needs_review() (
   script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$script_dir/fm-tasks-axi-lib.sh"
-  # shellcheck source=bin/fm-backlog-transition-lib.sh
+  # shellcheck source=/dev/null # Linted separately; its globals stay in this subshell.
   . "$script_dir/fm-backlog-transition-lib.sh"
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$script_dir/fm-timeout-lib.sh"
