@@ -475,6 +475,7 @@ test_relaunch_preserves_durable_task_metadata() {
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
+    printf '%s\n' 'native_control=retired-worker-channel'
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
@@ -487,6 +488,8 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
+  [ -z "$(meta_field "$dir" rl19 native_control)" ] \
+    || fail "a replacement without native control must remove the old channel"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
@@ -2255,6 +2258,43 @@ test_herdr_reclaim_refuses_an_agent_that_came_back() {
   pass "reclaim: a herdr agent that came back with its server refuses, so one worktree keeps one agent"
 }
 
+test_herdr_native_control_respects_override_and_replaces_metadata() {
+  local setting dir id out rc channel
+  for setting in on off; do
+    id="native-$setting"
+    herdr_case_or_skip "$id" "$id" fmlab '%none' || {
+      echo "skip - native relaunch needs jq"
+      return 0
+    }
+    dir=$HERDR_CASE_DIR
+    mkdir -p "$dir/override" "$dir/home/config"
+    printf '%s\n' "$setting" > "$dir/override/claude-native-control" \
+      || fail "could not write override configuration"
+    if [ "$setting" = on ]; then
+      printf 'off\n' > "$dir/home/config/claude-native-control" \
+        || fail "could not write default configuration"
+    else
+      printf 'on\n' > "$dir/home/config/claude-native-control" \
+        || fail "could not write default configuration"
+    fi
+    printf 'native_control=retired-worker-channel\n' >> "$dir/home/state/$id.meta"
+    rc=0
+    out=$(FM_CONFIG_OVERRIDE="$dir/override" run_control "$dir" "$id" relaunch --note "replace native channel") || rc=$?
+    expect_code 0 "$rc" "native relaunch should honor the selected configuration"$'\n'"$out"
+    channel=$(meta_field "$dir" "$id" native_control)
+    if [ "$setting" = on ]; then
+      [ -n "$channel" ] && [ "$channel" != retired-worker-channel ] \
+        || fail "enabled relaunch did not publish a replacement native channel"
+      python3 -c 'import json,sys; q=json.load(open(sys.argv[1]+"/boot.json")); assert q["task"]==sys.argv[2] and q["target"]==sys.argv[3]' \
+        "$channel" "$id" "$(meta_field "$dir" "$id" window)" \
+        || fail "replacement channel belongs to another task or endpoint"
+    else
+      [ -z "$channel" ] || fail "disabled relaunch retained a native channel"
+    fi
+    pass "native relaunch: override=$setting replaces or removes the retired channel"
+  done
+}
+
 test_herdr_reclaim_keeps_the_task_whole() {
   local dir out rc=0 head_before
   herdr_case_or_skip gone-herdr-work rl75 fmlab '%none' || {
@@ -2507,6 +2547,7 @@ test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
+test_herdr_native_control_respects_override_and_replaces_metadata
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause

@@ -1154,6 +1154,9 @@ Background-work exit confirmation is outside this adapter's scope: a live backgr
 An edit before native exit is enqueued refuses the operation and preserves that edit in the live matrix.
 There is a separate accepted race after native exit is already in flight: on Claude 2.1.288 / Herdr 0.9.1, measured on 2026-10-03, an edit during an approximately 114 ms held exit handoff was lost when the process exited.
 Native readback is not an atomic compare-and-exit operation; the CLI help exposes this limitation at the explicit discard gate.
+The portable delayed-fill regressions cover both issued replacements past the client deadline: control reports an uncertain outcome and retains the input lock until the fill settles or Claude stops, while a real inbox ring remains deferred and its queued record unacknowledged.
+A human edit during that stalled clear can still be overwritten; this is the same exposure class as the accepted in-flight-exit race in [#6202](https://github.com/kunchenguid/firstmate/issues/6202), and the maintainer should judge this additional limitation in the PR.
+These delayed-fill cases are fixture proof, not a live Claude replay.
 
 ## Herdr
 

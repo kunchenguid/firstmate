@@ -57,12 +57,18 @@
 #              Requires config/claude-native-control=on at worker launch.
 #              It proves sentinel and empty readback, then invokes native exit;
 #              there is no screen-based clear or typed /exit fallback.
-#              Text arriving before native exit is sent causes refusal. A
+#              Input observed before native exit is sent causes refusal. A
 #              sub-second race remains after exit is in flight: a live test
 #              held the handoff about 114 ms and an intervening edit was lost.
 #              Stop typing before using this explicit discard operation.
 #              Failure after clearing may leave the old draft discarded; a
 #              timeout cannot cancel an already-issued native API operation.
+#              On timeout it reports uncertain, the clear may still land,
+#              retaining the input lock until replacements settle or Claude
+#              stops. Firstmate writers remain excluded; human typing during
+#              a stalled clear can still be overwritten. This is the same
+#              exposure class as the in-flight-exit race accepted in #6202,
+#              and the maintainer should judge this stalled-clear limitation.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -211,6 +217,10 @@ RELAUNCH_PHASE=start
 control_cleanup() {
   local status=$?
   if [ "$INPUT_LOCK_HELD" = 1 ]; then
+    while ! python3 "$NATIVE_BRIDGE" retire "$NATIVE_CHANNEL"; do
+      printf '%s\n' 'uncertain, the clear may still land; retaining input lock' >&2
+      sleep "$POLL"
+    done
     INPUT_LOCK_HELD=0
     fm_lock_release "$INPUT_LOCK" || true
   fi

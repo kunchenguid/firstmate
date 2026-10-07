@@ -2,7 +2,8 @@
 """Private native-control transport, used by fm-spawn, fm-control and the mod.
 
 prepare STATE TASK TARGET creates a unique 0700 launch channel.
-boot CHANNEL PID binds the exec'd Claude process; ready/poll/check/receipt are
+boot CHANNEL PID binds the exec'd Claude process; retire CHANNEL revokes and
+waits for replacement fills to settle or that process to die; ready/poll/check/receipt are
 mod-only operations with JSON on stdin. inspect/client bind a caller to the
 task, endpoint and current Herdr foreground process supplied on stdin.
 Requests expire, bind the caller PID and native module lifetime, and are
@@ -111,6 +112,36 @@ def inspect(channel, task, target, process_info):
     return ready
 
 
+def retire(channel):
+    with locked(channel):
+        boot = read(channel / "boot.json")
+        if ("pid" not in boot and not (channel / "ready.json").exists()
+                and not (channel / "request.json").exists()):
+            return
+        pid = boot["pid"]
+        if not alive(pid):
+            return
+        if not (channel / "request.json").exists():
+            if ((channel / "ready.json").exists()
+                    and read(channel / "ready.json").get("consumed")):
+                raise ValueError("missing native request after consumption")
+            return
+        q = read(channel / "request.json")
+        q["revoked"] = True
+        write(channel / "request.json", q)
+    while alive(pid):
+        with locked(channel):
+            current = read(channel / "request.json")
+            if current.get("nonce") != q["nonce"]:
+                raise ValueError("native request changed while retiring")
+            pending = current.get("fill_pending")
+            if pending is False:
+                return
+            if pending is not True:
+                raise ValueError("malformed native fill status")
+        time.sleep(0.05)
+
+
 def main():
     action = sys.argv[1]
     channel = Path(sys.argv[2])
@@ -130,6 +161,9 @@ def main():
             boot["pid"] = int(sys.argv[3])
             write(channel / "boot.json", boot)
         return
+    if action == "retire":
+        retire(channel)
+        return
     data = json.loads(sys.stdin.read(LIMIT + 1))
     if action in ("inspect", "client"):
         with locked(channel):
@@ -139,7 +173,8 @@ def main():
                 return
             q = {k: ready[k] for k in ("task", "target", "session", "instance", "pid")}
             q.update(schema=1, discard=True, nonce=secrets.token_hex(16),
-                     caller=os.getpid(), owner=int(sys.argv[5]), expires=time.time() + 20)
+                     caller=os.getpid(), owner=int(sys.argv[5]), expires=time.time() + 20,
+                     fill_pending=False)
             write(channel / "request.json", q)
         last = "not-started"
         try:
@@ -155,11 +190,10 @@ def main():
                             if last == "refused":
                                 raise ValueError(f"native discard refused: {r.get('reason')}; draft-may-be-discarded={r.get('mutated')}")
                 time.sleep(0.05)
-            raise ValueError(f"native discard timed out at {last}; an already issued native operation may be in flight; do not retry blindly")
+            print(f"native discard timed out at {last}: uncertain, the clear may still land; retaining input lock until any issued replacement settles or Claude stops", file=sys.stderr, flush=True)
+            raise ValueError("native discard timed out; outcome uncertain; do not retry blindly")
         finally:
-            with locked(channel):
-                q["revoked"] = True
-                write(channel / "request.json", q)
+            retire(channel)
         return
     with locked(channel):
         boot = read(channel / "boot.json")
@@ -196,8 +230,13 @@ def main():
             print(json.dumps({"authorized": valid}))
         elif action == "receipt":
             # A refusal is useful after expiry as well; it never authorizes exit.
-            if not valid and data.get("phase") != "refused":
+            if data.get("nonce") != q["nonce"]:
+                raise ValueError("receipt belongs to another request")
+            if not valid and data.get("phase") not in ("refused", "fill-settled"):
                 raise ValueError("request expired or was retired")
+            if data.get("phase") in ("fill-issued", "fill-settled"):
+                q["fill_pending"] = data["phase"] == "fill-issued"
+                write(channel / "request.json", q)
             receipt = {k: q[k] for k in ("nonce", "instance", "session", "pid", "task", "target")}
             receipt.update(phase=data["phase"], mutated=data.get("mutated", False),
                            reason=data.get("reason", ""))

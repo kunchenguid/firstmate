@@ -4951,7 +4951,7 @@ else
 fi
 NATIVE_CONTROL_CHANNEL=
 if [ "$HARNESS" = claude ] && [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" = 0 ] \
-   && [ "$(cat "$FM_HOME/config/claude-native-control" 2>/dev/null || true)" = on ]; then
+   && [ "$(cat "$CONFIG/claude-native-control" 2>/dev/null || true)" = on ]; then
   NATIVE_CONTROL_CHANNEL=$(python3 "$FM_ROOT/.claude/mods/firstmate-native-control/bridge.py" \
     prepare "$STATE_REAL" "$ID" "$T") || exit 1
 fi
@@ -4959,7 +4959,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window native_control endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)

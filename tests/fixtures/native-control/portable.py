@@ -13,8 +13,8 @@ mod = root / ".claude/mods/firstmate-native-control"
 bridge = mod / "bridge.py"
 
 
-def wait_for(fn):
-    for _ in range(150):
+def wait_for(fn, attempts=150):
+    for _ in range(attempts):
         try:
             if fn():
                 return
@@ -48,14 +48,66 @@ def run_case(name, options, success=False, args=None, mutate=None, ready_expecte
                 mutate(channel, meta)
             env = dict(os.environ, FM_HOME=str(home), NATIVE_FIXTURE=str(path),
                        PATH=f"{bin_dir}:{os.environ['PATH']}", FM_CONTROL_POLL="0.05", FM_CONTROL_EXIT_WAIT=".6", FM_CONTROL_SETTLE_WAIT=".1")
-            result = subprocess.run(["bash", str(root / "bin/fm-control.sh"), "t1", *(args or ["exit", "--discard-pending"])], env=env, text=True, capture_output=True, timeout=25)
+            command = ["bash", str(root / "bin/fm-control.sh"), "t1", *(args or ["exit", "--discard-pending"])]
+            if options.get("holdFill"):
+                stderr_path = path / "control.stderr"
+                with stderr_path.open("w") as stderr:
+                    control = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE, stderr=stderr)
+                    try:
+                        wait_for(lambda: (channel / "fill-waiting").exists())
+                        wait_for(lambda: "uncertain, the clear may still land" in stderr_path.read_text(), 1000)
+                        wait_for(lambda: json.loads((channel / "request.json").read_text()).get("revoked") is True)
+                        assert control.poll() is None, "control returned while replacement was pending"
+                        assert (home / "state/.input-t1.lock").exists(), "timeout released input lock"
+                        if options.get("erasePending"):
+                            request_path = channel / "request.json"
+                            request = json.loads(request_path.read_text())
+                            del request["fill_pending"]
+                            request_path.write_text(json.dumps(request))
+                            wait_for(lambda: "malformed native fill status" in stderr_path.read_text())
+                        if options.get("dropRequest"):
+                            (channel / "request.json").unlink()
+                            wait_for(lambda: "missing native request after consumption" in stderr_path.read_text())
+                        assert control.poll() is None and (home / "state/.input-t1.lock").exists(), "missing fill status released exclusion"
+                        ring = subprocess.run(["bash", "-c", '''
+source "$1/bin/fm-wake-lib.sh"
+source "$1/bin/fm-task-inbox-lib.sh"
+rec=$(fm_task_inbox_write "$2/state" t1 'queued during stalled clear') || exit 2
+printf '%s\\n' "$rec"
+fm_task_inbox_ring herdr fixture:w1:p1 "$rec" fm-t1
+''', "fixture", str(root), str(home)], env=env, text=True, capture_output=True, timeout=5)
+                        assert ring.returncode == 4, ("writer delivered during pending fill", ring.stdout, ring.stderr)
+                        record = Path(ring.stdout.strip())
+                        assert record.exists() and not (record.parent / "handled" / record.name).exists()
+                        assert not (path / "keys").exists() and not (path / "unexpected").exists()
+                        if options.get("stopFill"):
+                            process.terminate()
+                            process.wait(timeout=5)
+                        else:
+                            (channel / "new-input").touch()
+                            wait_for(lambda: (channel / "edit-observed").exists())
+                            assert json.loads((channel / "box.json").read_text())["text"] == "NEW EDIT"
+                            (channel / "release-fill").touch()
+                            wait_for(lambda: (channel / "fill-completed").exists())
+                        stdout, _ = control.communicate(timeout=5)
+                        result = subprocess.CompletedProcess(command, control.returncode, stdout, stderr_path.read_text())
+                        assert "stopped t1" not in result.stdout, "uncertain discard reported done"
+                        assert record.exists() and not (record.parent / "handled" / record.name).exists()
+                    finally:
+                        if control.poll() is None:
+                            process.terminate()
+                            process.wait(timeout=5)
+                            control.communicate(timeout=5)
+            else:
+                result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=25)
             assert (result.returncode == 0) == success, (name, result.stdout, result.stderr)
             if success:
                 process.wait(timeout=2)
                 assert "stopped t1" in result.stdout and process.returncode == 0
                 assert json.loads((channel / "box.json").read_text())["text"] == ""
             else:
-                assert process.poll() is None, "refusal killed fixture process"
+                if not options.get("stopFill"):
+                    assert process.poll() is None, "refusal killed fixture process"
                 if not options.get("stubborn") and not options.get("commandError"):
                     assert not (channel / "command.json").exists(), "refusal sent native exit"
                 if options.get("conflict"):
@@ -66,19 +118,6 @@ def run_case(name, options, success=False, args=None, mutate=None, ready_expecte
                         wait_for(lambda: (channel / "receipt.json").exists()
                                  and json.loads((channel / "receipt.json").read_text())["phase"] == "refused")
                     assert not (channel / "command.json").exists(), "retired caller sent native exit"
-                if options.get("holdFill"):
-                    assert (channel / "fill-waiting").exists(), "replacement fill was not issued"
-                    assert json.loads((channel / "request.json").read_text())["revoked"] is True
-                    assert not (home / "state/.input-t1.lock").exists(), "timeout did not release input lock"
-                    (channel / "new-input").touch()
-                    wait_for(lambda: (channel / "edit-observed").exists())
-                    assert json.loads((channel / "box.json").read_text())["text"] == "NEW EDIT"
-                    (channel / "release-fill").touch()
-                    wait_for(lambda: (channel / "fill-completed").exists())
-                    assert json.loads((channel / "box.json").read_text())["text"] == "NEW EDIT", (
-                        name, "issued replacement erased post-timeout input",
-                        json.loads((channel / "box.json").read_text()))
-                    assert not (channel / "command.json").exists()
                 if options.get("holdPoll"):
                     before = (channel / "box.json").read_bytes()
                     (channel / "release-poll").touch()
@@ -132,6 +171,7 @@ for retirement in ("caller", "module", {"revoked": True}, {"expires": 0},
 # authorization, private paths, atomic publication or single-use consumption.
 with tempfile.TemporaryDirectory(prefix="fm-native-protocol-") as tmp:
     channel = Path(subprocess.check_output([sys.executable, str(bridge), "prepare", tmp, "t1", "fixture:w1:p1"], text=True).strip())
+    subprocess.run([sys.executable, str(bridge), "retire", str(channel)], check=True, timeout=5)
     subprocess.run([sys.executable, str(bridge), "boot", str(channel), str(os.getpid())], check=True)
     def call(action, value):
         result = subprocess.run([sys.executable, str(bridge), action, str(channel)], input=json.dumps(value), text=True, capture_output=True)
@@ -165,11 +205,7 @@ with tempfile.TemporaryDirectory(prefix="fm-native-protocol-") as tmp:
     assert result.returncode != 0, "symlink request accepted"
     print("ok - wrong bindings, dead owners, expiry, replay, reload and symlink all refuse", flush=True)
 
-failures = []
 for fill in (2, 3):
-    try:
-        run_case(f"issued replacement {fill} preserves post-timeout input", {"holdFill": fill})
-    except AssertionError as error:
-        failures.append(str(error))
-        print("not ok -", error, flush=True)
-assert not failures, failures
+    run_case(f"issued replacement {fill} retains lock and excludes writers until settled", {"holdFill": fill})
+run_case("missing fill status retains lock through replacement failure", {"holdFill": 2, "fillError": True, "erasePending": True})
+run_case("missing request retains uncertain lock until Claude death", {"holdFill": 3, "stopFill": True, "dropRequest": True})

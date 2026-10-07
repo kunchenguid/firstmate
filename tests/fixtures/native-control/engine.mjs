@@ -47,6 +47,10 @@ const engine = {
           }
           await new Promise(r => setTimeout(r, 20));
         }
+        if (config.fillError) {
+          writeFileSync(`${channel}/fill-completed`, "", {mode: 0o600});
+          throw new Error("replacement refused after delay");
+        }
       }
       box = {text: input.mode === "append" ? box.text + input.text : input.text, cursor: input.text.length};
       if (config.rewrite && fills === 2) box.text = "MIDDLEWARE REWRITE";

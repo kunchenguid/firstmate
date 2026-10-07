@@ -38,6 +38,15 @@ export const register = (on) => {
       const receipt = (phase, reason = "") => bridge($, "receipt", {
         nonce: request.nonce, phase, reason, mutated,
       });
+      const replace = async (text) => {
+        await receipt("fill-issued");
+        try {
+          mutated = true;
+          return await $.prompt.fill({text, mode: "replace"});
+        } finally {
+          await receipt("fill-settled");
+        }
+      };
       try {
         request = await bridge($, "poll");
         if (!request) return;
@@ -49,12 +58,11 @@ export const register = (on) => {
         const sentinel = `FM_DISCARD_${request.nonce}`;
         await receipt("clearing");
         await check();
-        mutated = true;
-        const filled = await $.prompt.fill({text: sentinel, mode: "replace"});
+        const filled = await replace(sentinel);
         const proof = await $.prompt.read();
         if (!filled.isFilled || proof.text !== sentinel) throw new Error("sentinel readback failed");
         await check();
-        const cleared = await $.prompt.fill({text: "", mode: "replace"});
+        const cleared = await replace("");
         const empty = await $.prompt.read();
         if (!cleared.isFilled || empty.text !== "" || empty.cursor !== 0)
           throw new Error("empty readback failed");
