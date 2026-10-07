@@ -245,8 +245,10 @@ if [ -n "$PROMOTE_PROJECT" ]; then
   refuse_impossible_forge_posture || exit 1
 fi
 CLI_BASE=$BASE_BRANCH
-BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | head -n 1)
+BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
 fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
+# The CLI value gets the same mode/forge validation as the recorded one.
+fm_base_branch_valid "$CLI_BASE" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
 PROMOTE_BASE_WORDS='default-branch base'
 [ -z "$BASE_BRANCH" ] || PROMOTE_BASE_WORDS="copy of the base branch \`$BASE_BRANCH\`"
 # An unbound project keeps the exact wording it always had.
