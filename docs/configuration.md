@@ -1088,7 +1088,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 
 A fresh worker starts from origin's default branch, which Firstmate normally learns from git.
 Some remotes, such as AWS CodeCommit, never advertise their default branch over git, so git can only guess from which branches point at the remote's HEAD commit, and the launch is refused when several do.
-For a CodeCommit origin Firstmate then asks `aws codecommit get-repository` for the default branch configured there, using your existing AWS CLI configuration and the region named in the remote URL.
+For a CodeCommit origin Firstmate then asks `aws codecommit get-repository` for the default branch configured there, using your existing AWS CLI configuration plus any region or profile the remote URL names.
 When the AWS CLI is unavailable or unauthenticated, or for any other remote that does not advertise its default branch, add `default-branch=<branch>` to the project's bracket annotation in `data/projects.md`, for example `- my-lib [no-mistakes default-branch=main] - ...`.
 A registered default branch is the last fallback: Firstmate uses it only when git's inference and, for a CodeCommit origin, the CodeCommit API both fail, and every launch still refuses when origin has no such branch.
 [`bin/fm-project-mode.sh`](../bin/fm-project-mode.sh) owns the registry token, and [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns the resolution order.
