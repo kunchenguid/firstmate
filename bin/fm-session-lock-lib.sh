@@ -594,21 +594,16 @@ fm_session_lock_recorded_owner_live() {  # <state>
   pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$pid" in '' | *[!0-9]*) return 1 ;; esac
   fm_harness_pid_alive "$pid" || return 1
+  recorded_harness=$(fm_session_lock_recorded_harness "$state" 2>/dev/null || true)
+  if [ -n "$recorded_harness" ]; then
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    current_harness=$(fm_harness_process_name "$comm" "$args" 2>/dev/null || true)
+    [ "$current_harness" = "$recorded_harness" ] || return 1
+  fi
   recorded=$(fm_session_lock_recorded_birth "$state" 2>/dev/null || true)
   [ -n "$recorded" ] || return 0 # legacy compatibility: pre-token liveness
   current=$(fm_session_lock_birth_token "$pid" 2>/dev/null || true)
-  case "$recorded" in
-    proc-starttime=* | linux-starttime=*) ;;
-    *)
-      recorded_harness=$(fm_session_lock_recorded_harness "$state" 2>/dev/null || true)
-      if [ -n "$recorded_harness" ]; then
-        comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
-        current_harness=$(fm_harness_process_name "$comm" "$args" 2>/dev/null || true)
-        [ "$current_harness" = "$recorded_harness" ] || return 1
-      fi
-      ;;
-  esac
   [ "$current" = "$recorded" ]
 }
 
@@ -682,6 +677,9 @@ fm_session_lock_owned_by_self() {
     # A shared server is in everyone's ancestry, so it is never this session's
     # own lock owner.
     fm_harness_pid_is_daemon "$lock_pid" && return 1
+    # Membership proves this pid is literally in this session's own contiguous
+    # harness ancestry. That is stronger than the recorded token: both name the
+    # same pid, and same-session confirmation is separately claim-lock guarded.
     return 0
   done <<EOF
 $pids

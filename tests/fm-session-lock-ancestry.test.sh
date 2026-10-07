@@ -279,6 +279,13 @@ ROW
   changed=$(FM_PROC_ROOT_OVERRIDE="$proc_root" lib_eval "$fakebin" 'fm_session_lock_birth_token 700') \
     || fail "procfs birth identity failed after argv changed"
   [ "$changed" = "$got" ] || fail "mutable argv changed the stable birth identity"
+  mkdir -p "$dir/state"
+  printf '700\n' > "$dir/state/.lock"
+  printf 'thread\nopencode\n%s\n' "$got" > "$dir/state/.lock-session"
+  if FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_KILL_RC=0 \
+    lib_eval "$fakebin" "fm_session_lock_recorded_owner_live '$dir/state'"; then
+    fail "a procfs identity accepted a recorded harness mismatch"
+  fi
   pass "session-lock: birth identity uses stable procfs start ticks"
 }
 
