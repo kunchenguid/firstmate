@@ -2145,8 +2145,8 @@ fm_active_check_stop() {
 # and the signal is consumed, so a stop request could leave this watcher
 # polling forever while its stopper waits (fixed upstream in bash 5.3). Bash
 # 3.2 holds HUP and TERM until a running command substitution's child exits, so
-# pane captures go through watcher_capture instead. INT keeps its trap because
-# bash ignores a direct SIGINT while a child runs.
+# fm_backend_capture pane reads go through watcher_capture instead. INT keeps
+# its trap because bash ignores a direct SIGINT while a child runs.
 watcher_stop_signals() {
   trap - HUP TERM
   trap 'exit 1' INT
@@ -2196,7 +2196,7 @@ fm_capture_output_cleanup() {
 # so a stop is not held for a blocked read (watcher_stop_signals). The group is
 # recorded like a check's, so watcher_cleanup stops a read still in flight.
 watcher_capture() {  # <backend> <target> <lines> [expected-label]
-  local rc
+  local rc pgid
   fm_capture_output_cleanup
   WATCHER_CAPTURE=
   FM_CAPTURE_OUTPUT=$(mktemp "$STATE/.fm-capture-output.XXXXXX") || return 1
@@ -2212,6 +2212,12 @@ watcher_capture() {  # <backend> <target> <lines> [expected-label]
   set +m
   watcher_stop_signals
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
+    fm_active_check_stop || true
+    fm_capture_output_cleanup
+    return 1
+  fi
   wait "$FM_ACTIVE_CHECK_PID"
   rc=$?
   FM_ACTIVE_CHECK_PID=
