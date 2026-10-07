@@ -985,9 +985,12 @@ _fm_recovery_marker_reopen_announced() {
 # The handover rule for a watcher stopped by bin/fm-watch-arm.sh --take-over
 # (docs/watcher-continuity.md "Generation reuse" owns it). The snapshot reads
 # the marker token and the queue's append sequence under both locks before the
-# stop; handover-restore puts an acknowledged token back only while that
-# sequence is unchanged and the marker reads the fresh pending downtime the
-# stopped watcher's own close published.
+# stop; handover-restore puts the snapshot token back only while that sequence
+# is unchanged and the marker reads the downtime the stopped watcher's own
+# close published: a fresh generation over an acknowledged episode, or the
+# same generation republished over a handling episode while nothing is
+# queued. A handling episode with rows still queued stays downtime, so the
+# fresh cycle recovers the unacknowledged work.
 FM_RECOVERY_HANDOVER_TOKEN=
 FM_RECOVERY_HANDOVER_SEQ=
 fm_recovery_marker_handover_snapshot() {  # <marker>
@@ -1011,8 +1014,8 @@ fm_recovery_marker_handover_snapshot() {  # <marker>
 }
 
 _fm_recovery_marker_handover_restore() {
-  local marker=$1 token=$2 seq=$3 lock status=0
-  case "$token" in acked:*) ;; *) return 0 ;; esac
+  local marker=$1 token=$2 seq=$3 lock status=0 restore=0
+  case "$token" in acked:*|pending:handling:*|announced:handling:*) ;; *) return 0 ;; esac
   lock="${marker}.lock"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if ! fm_lock_acquire_wait "$lock"; then
@@ -1023,11 +1026,28 @@ _fm_recovery_marker_handover_restore() {
     && fm_recovery_marker_read "$marker"; then
     case "$FM_RECOVERY_MARKER_TOKEN" in
       pending:downtime:*)
-        if [ "${FM_RECOVERY_MARKER_TOKEN##*:}" != "${token##*:}" ]; then
-          _fm_recovery_marker_restore_token_locked "$marker" "$token" || status=1
-        fi
+        case "$token" in
+          acked:*)
+            # The close over an acknowledged episode opened a fresh generation.
+            [ "${FM_RECOVERY_MARKER_TOKEN##*:}" = "${token##*:}" ] || restore=1
+            ;;
+          *)
+            # The close over a handling episode republished its generation as
+            # the interrupted-turn downtime. The Stop that requested this
+            # take-over ended that turn, so with nothing queued the stop is a
+            # handover rather than an interruption; queued rows are work the
+            # turn never acknowledged, left for the fresh cycle to recover.
+            if [ "${FM_RECOVERY_MARKER_TOKEN##*:}" = "${token##*:}" ] \
+              && [ ! -s "$FM_WAKE_QUEUE" ]; then
+              restore=1
+            fi
+            ;;
+        esac
         ;;
     esac
+    if [ "$restore" -eq 1 ]; then
+      _fm_recovery_marker_restore_token_locked "$marker" "$token" || status=1
+    fi
   fi
   fm_lock_release "$lock"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"

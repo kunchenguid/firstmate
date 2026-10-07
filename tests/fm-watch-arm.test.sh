@@ -1584,6 +1584,162 @@ test_handling_delivered_rejects_a_superseded_generation() {
   pass "watch-arm: a churned generation's handling confirmation reports a mismatch and an arm check keeps it"
 }
 
+# The attended supervision host leaves a handling successor running for main
+# and takes its cycle over at the Stop that ends main's turn
+# (bin/fm-supervision-host.sh leave_successor_for_main, bin/fm-watch-arm.sh
+# --take-over). When that turn's drain found nothing queued and the turn ended
+# without the generation-bound acknowledgement, the episode is still an open
+# handling one. The take-over's stop is a monitor handover, not downtime: the
+# fresh cycle must stay quiet and keep supervising rather than announce
+# `check: rearm-resurface` again for an empty queue, which is the loop that
+# never let the main session settle.
+test_take_over_of_an_unacknowledged_empty_handling_turn_stays_quiet() {
+  local dir home state fakebin armout watcher recovery_arm owner generation
+  dir=$(make_case take-over-unacked-empty)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  # Downtime with nothing queued, as a session exit leaves it: a plain cycle
+  # stopped by TERM publishes downtime through its own close.
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  is_live_non_zombie "$ARM_PID" || fail "fixture: the first watcher did not stay live"
+  watcher=$(cat "$state/.watch.lock/pid")
+  kill -TERM "$watcher" 2>/dev/null || fail "fixture: could not stop the first watcher"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    pending:downtime:*) ;;
+    *) fail "fixture: the stopped watcher did not publish downtime: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  [ ! -s "$state/.wake-queue" ] || fail "fixture: the queue was not empty"
+
+  # The next arm recovers that downtime exactly once.
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
+  recovery_arm=$ARM_PID
+  wait_for_exit "$recovery_arm" "$REARM_EXIT_POLLS" || fail "the recovery arm did not close on its recovery wake"
+  grep -F 'check: rearm-resurface' "$dir/recovery-arm.out" >/dev/null \
+    || fail "the arm after downtime did not announce recovery: $(cat "$dir/recovery-arm.out")"
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  [ "$(cat "$state/.watcher-down")" = "announced:downtime:$generation" ] \
+    || fail "the recovery announcement did not mark its generation announced: $(cat "$state/.watcher-down")"
+
+  # The host leaves a handling successor running for main, naming the closed arm.
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/successor-arm.out" "$recovery_arm"
+  owner=$ARM_PID
+  is_live_non_zombie "$owner" || fail "the handling successor did not stay live: $(cat "$dir/successor-arm.out")"
+  grep -q "recovery-generation=$generation" "$dir/successor-arm.out" \
+    || fail "the handling successor did not report the open generation: $(cat "$dir/successor-arm.out")"
+
+  # Main's handling turn drains, finds nothing queued, and ends without acknowledging.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "the handling drain failed: $(cat "$dir/drain.err")"
+  grep -q -- "--ack-through 0 --recovery-generation $generation" "$dir/drain.err" \
+    || fail "the empty drain did not print its generation-bound acknowledgement: $(cat "$dir/drain.err")"
+  [ "$(cat "$state/.watcher-down")" = "announced:handling:$generation" ] \
+    || fail "the drain did not begin handling the announced episode: $(cat "$state/.watcher-down")"
+  [ ! -s "$state/.wake-queue" ] || fail "fixture: the queue gained a row during the handling turn"
+  is_live_non_zombie "$owner" || fail "the handling drain stopped its live successor"
+
+  # The Stop that ended the turn takes the successor's cycle over.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" "$WATCH_ARM" --take-over "$owner" > "$armout" &
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "--take-over did not own a fresh cycle: $(cat "$armout")"
+  wait_for_exit "$owner" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
+  grep -q "arm_pid=$owner	.*signal=TERM	reason=signal-exit" "$state/.watch-cycle-exits.log" \
+    || fail "the taken-over arm did not record the take-over's TERM: $(cat "$state/.watch-cycle-exits.log")"
+  grep -q 'reason=taken-over	' "$state/.watch-cycle-exits.log" \
+    || fail "the taking arm did not record the handover: $(cat "$state/.watch-cycle-exits.log")"
+
+  # Several polls later the fresh cycle is still quiet on the empty queue.
+  sleep 4
+  is_live_non_zombie "$ARM_PID" \
+    || fail "the cycle taken over after an unacknowledged empty handling turn closed again: $(cat "$armout")"
+  ! grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "a monitor handover with nothing queued was announced as recovery: $(cat "$armout")"
+  [ "$(cat "$state/.watcher-down")" = "announced:handling:$generation" ] \
+    || fail "the take-over did not put the open handling episode back: $(cat "$state/.watcher-down")"
+  [ ! -s "$state/.wake-queue" ] || fail "the quiet handover queued a row"
+
+  # It is supervising: a real event still surfaces from that cycle.
+  printf 'done: a real event after the handover\n' > "$state/after-handover.status"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "the fresh cycle did not surface a real event"
+  grep -q '^signal:' "$armout" \
+    || fail "the fresh cycle closed on something other than the real event: $(cat "$armout")"
+  pass "watch-arm: a take-over after an unacknowledged empty handling turn stays quiet and keeps supervising"
+}
+
+# The same handover with work still queued is genuine recovery: the row main
+# drained but never acknowledged resurfaces exactly once through the fresh cycle.
+test_take_over_of_an_unacknowledged_handling_turn_with_queued_work_recovers_once() {
+  local dir home state fakebin armout owner closed_arm generation pair
+  dir=$(make_case take-over-unacked-queued)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  # A real wake is delivered and left durable.
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  closed_arm=$ARM_PID
+  is_live_non_zombie "$closed_arm" || fail "fixture: the first watcher did not stay live"
+  printf 'done: work main drains but never acknowledges\n' > "$state/queued.status"
+  wait_for_exit "$closed_arm" "$REARM_EXIT_POLLS" || fail "fixture: the watcher did not deliver its wake"
+  grep "$(printf '\tsignal\tqueued.status\t')" "$state/.wake-queue" >/dev/null \
+    || fail "fixture: the delivered wake was not durable"
+
+  # The host leaves a handling successor for main; main drains and ends without acknowledging.
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/successor-arm.out" "$closed_arm"
+  owner=$ARM_PID
+  is_live_non_zombie "$owner" || fail "the handling successor did not stay live: $(cat "$dir/successor-arm.out")"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "the handling drain failed: $(cat "$dir/drain.err")"
+  grep "$(printf '\tsignal\tqueued.status\t')" "$dir/drain.out" >/dev/null \
+    || fail "the handling drain did not present the durable wake"
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  [ "$(cat "$state/.watcher-down")" = "announced:handling:$generation" ] \
+    || fail "the drain did not begin handling: $(cat "$state/.watcher-down")"
+
+  # The Stop that ended the turn takes the successor's cycle over: the fresh
+  # cycle recovers the unacknowledged row once.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" "$WATCH_ARM" --take-over "$owner" > "$armout" &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  expect_code 0 "$?" "a take-over that resurfaces unacknowledged work closes cleanly"
+  grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "work main never acknowledged did not resurface after the take-over: $(cat "$armout")"
+  grep "$(printf '\tsignal\tqueued.status\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the recovery removed the unacknowledged durable wake"
+  [ "$(cat "$state/.watcher-down")" = "announced:downtime:$generation" ] \
+    || fail "the recovery did not re-announce the open generation: $(cat "$state/.watcher-down")"
+
+  # Main re-drains, handles it, and acknowledges; the next arm has nothing to recover.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/redrain.out" 2> "$dir/redrain.err" \
+    || fail "the recovery drain failed: $(cat "$dir/redrain.err")"
+  grep "$(printf '\tsignal\tqueued.status\t')" "$dir/redrain.out" >/dev/null \
+    || fail "the recovery drain did not present the durable wake"
+  pair=$(drain_ack_pair "$dir/redrain.err") || fail "the recovery drain printed no acknowledgement command"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "${pair%%$'\t'*}" --recovery-generation "${pair##*$'\t'}" \
+    || fail "the recovered wake could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "the acknowledged wake stayed queued"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/next-arm.out"
+  sleep 3
+  is_live_non_zombie "$ARM_PID" \
+    || fail "the arm after acknowledgement closed on nothing: $(cat "$dir/next-arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/next-arm.out" >/dev/null \
+    || fail "the recovered episode was announced a second time: $(cat "$dir/next-arm.out")"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  pass "watch-arm: a take-over after an unacknowledged handling turn with queued work recovers it exactly once"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -1614,3 +1770,5 @@ test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
+test_take_over_of_an_unacknowledged_empty_handling_turn_stays_quiet
+test_take_over_of_an_unacknowledged_handling_turn_with_queued_work_recovers_once

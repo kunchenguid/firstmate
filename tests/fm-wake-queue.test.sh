@@ -1994,15 +1994,17 @@ test_legacy_generationless_wake_is_adopted() {
 # Pin the recovery acknowledgement contract from docs/watcher-continuity.md at
 # the queue-library boundary.
 # A handover (bin/fm-watch-arm.sh --take-over) undoes only the downtime its own
-# watcher stop published over an acknowledged episode. A wake appended between
-# the snapshot and the stop, or an episode that was still open, is left for the
-# next watcher's arm check to surface.
-handover_case() {  # <state> <acked|handling> <append-between 0|1>
+# watcher stop published: over an acknowledged episode, or over a handling
+# episode whose turn ended with nothing queued. A wake appended between the
+# snapshot and the stop, or a handling episode with work still queued, is left
+# for the next watcher's arm check to surface.
+handover_case() {  # <state> <acked|handling> <append-between 0|1> [queued-before 0|1]
   FM_STATE_OVERRIDE="$1" bash -c '
     # shellcheck disable=SC1090,SC1091
     . "$1/bin/fm-wake-lib.sh"
     marker="$STATE/.watcher-down"
     fm_recovery_marker_publish "$marker" downtime || exit 1
+    [ "${4:-0}" = 0 ] || fm_wake_append signal handover "signal: queued before the handover" || exit 1
     fm_recovery_marker_read "$marker" || exit 1
     case "$2" in
       acked) fm_recovery_marker_ack "$marker" "${FM_RECOVERY_MARKER_TOKEN##*:}" || exit 1 ;;
@@ -2017,7 +2019,7 @@ handover_case() {  # <state> <acked|handling> <append-between 0|1>
     fm_recovery_marker_handover_restore "$marker" "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || exit 1
     fm_recovery_marker_read "$marker" || exit 1
     printf "after=%s\n" "$FM_RECOVERY_MARKER_TOKEN"
-  ' _ "$ROOT" "$2" "$3"
+  ' _ "$ROOT" "$2" "$3" "${4:-0}"
 }
 
 test_handover_restore_undoes_only_its_own_stop() {
@@ -2040,8 +2042,14 @@ test_handover_restore_undoes_only_its_own_stop() {
   before=$(printf '%s\n' "$out" | sed -n 's/^before=//p')
   after=$(printf '%s\n' "$out" | sed -n 's/^after=//p')
   case "$before" in pending:handling:*) ;; *) fail "fixture: the episode was not being handled: $out" ;; esac
-  [ "$after" = "pending:downtime:${before##*:}" ] || fail "a handover rewrote an episode main had not acknowledged: $out"
-  pass "a handover undoes only the downtime its own stop published over an acknowledged episode"
+  [ "$after" = "$before" ] || fail "a handover with nothing queued treated the turn it ended as interrupted handling: $out"
+
+  out=$(handover_case "$(make_case handover-handling-queued)/state" handling 0 1) || fail "queued handling handover case failed: $out"
+  before=$(printf '%s\n' "$out" | sed -n 's/^before=//p')
+  after=$(printf '%s\n' "$out" | sed -n 's/^after=//p')
+  case "$before" in pending:handling:*) ;; *) fail "fixture: the queued episode was not being handled: $out" ;; esac
+  [ "$after" = "pending:downtime:${before##*:}" ] || fail "a handover hid work a handling turn never acknowledged: $out"
+  pass "a handover undoes only the downtime its own stop published, over an acknowledged episode or an empty handling one"
 }
 
 test_stale_recovery_generation_cannot_touch_a_newer_episode() {
