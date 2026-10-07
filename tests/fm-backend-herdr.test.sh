@@ -3758,7 +3758,41 @@ test_capture_preserves_pane_read_failure() {
     "capture did not ensure the herdr server before reading the pane"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
     "capture did not try to read the requested pane"
-  pass "fm_backend_herdr_capture: ensures the session and preserves pane read failure"
+  pass "fm_backend_herdr_capture: probes the session and preserves pane read failure"
+}
+
+# A stopped session must read as unavailable for the passive observation reads
+# (capture, busy state) without ever running `herdr server`, while the
+# pane-acting helpers still start it.
+test_observation_reads_never_start_a_stopped_server() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/observe-stopped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  for n in 1 2 3 4; do printf '{"server":{"running":false}}\n' > "$resp/$n.out"; done
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 40' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "capture of a stopped session should report unavailable, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state default:w1:p2' "$ROOT" 2>&1 )
+  [ "$out" = unknown ] || fail "busy state of a stopped session should read unknown, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''server' "an observation read started the herdr server"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read' "an observation read touched the pane of a stopped session"
+  pass "fm_backend_herdr_capture/busy_state: a stopped session reads unavailable without running 'herdr server'"
+}
+
+test_pane_acting_helpers_still_start_a_stopped_server() {
+  local dir log resp fb
+  dir="$TMP_ROOT/act-stopped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"server":{"running":false}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_key default:w1:p2 Escape' "$ROOT"
+  expect_code 0 $? "send_key should start the stopped server and succeed"
+  assert_contains "$(cat "$log")" $'\x1f''server' "a pane-acting helper no longer starts a stopped herdr server"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2' "send_key did not reach the pane after starting the server"
+  pass "fm_backend_herdr_send_key: still starts a stopped server before acting on the pane"
 }
 
 test_send_key_normalizes_and_targets_pane() {
@@ -5983,6 +6017,8 @@ test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
+test_observation_reads_never_start_a_stopped_server
+test_pane_acting_helpers_still_start_a_stopped_server
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd

@@ -3040,6 +3040,19 @@ fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
+# fm_backend_herdr_target_observable: the NON-STARTING sibling of
+# fm_backend_herdr_target_ready, for passive observation reads (the bounded
+# capture and the busy-state read behind the fleet snapshot, bearings,
+# fm-peek.sh, fm-crew-state.sh, and the watcher). A stopped or unreadable
+# session fails the probe instead of running `herdr server`, so a dashboard or
+# read-only digest never revives a Herdr session that was deliberately stopped; each
+# caller already treats that failure as an unavailable capture or an `unknown`
+# state. Operations that act on the pane keep fm_backend_herdr_target_ready.
+fm_backend_herdr_target_observable() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 1
+  [ "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" = running ]
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.
@@ -3124,7 +3137,7 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
-  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_target_observable "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
@@ -3681,7 +3694,7 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # process read; idle and unknown are never trusted as busy by any consumer.
 fm_backend_herdr_busy_state() {  # <target>
   local verdict
-  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_target_observable "$1" || { printf 'unknown'; return 0; }
   verdict=$(fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
   if [ "$verdict" = busy ] \
