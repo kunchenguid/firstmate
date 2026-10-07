@@ -164,6 +164,38 @@ test_orphan_sweep_reaps_read_only_package_tree() {
   pass "the orphan sweep reaps read-only package fixtures"
 }
 
+# A suite that replaces lib.sh's EXIT trap without calling fm_test_cleanup
+# skips the release of its private tmux socket directory, so the next suite's
+# orphan sweep must reap it and any server still listening in it.
+test_orphan_sweep_reaps_abandoned_tmux_dir() (
+  local out tmux_dir server_pid tries
+  command -v tmux >/dev/null 2>&1 || { pass "abandoned tmux dir sweep skipped: tmux is not installed"; exit 0; }
+  # shellcheck disable=SC2016 # The child suite expands $1 in its own bash.
+  out=$(env -u FM_TEST_TMUX_TMPDIR -u TMUX_TMPDIR bash -c '
+    . "$1"
+    trap "" EXIT
+    tmux -f /dev/null new-session -d "exec sleep 600" || exit 1
+    printf "%s\n%s\n" "$FM_TEST_TMUX_TMPDIR" "$(tmux display-message -p "#{pid}")"
+  ' _ "$LIB") || fail "the trap-replacing child could not start a server in its private tmux directory"
+  tmux_dir=$(printf '%s\n' "$out" | sed -n '1p')
+  server_pid=$(printf '%s\n' "$out" | sed -n '2p')
+  trap 'kill "$server_pid" 2>/dev/null; rm -rf "$tmux_dir"' EXIT
+  assert_present "$tmux_dir" "the trap-replacing child did not leave its private tmux directory behind"
+  [ -f "$tmux_dir/.fm-test-fixture" ] || fail "the private tmux directory carries no fixture marker for the orphan sweep"
+  touch -t 202001010000 "$tmux_dir/.fm-test-fixture"
+
+  bash -c '. "$1"' _ "$LIB"
+
+  assert_absent "$tmux_dir" "the orphan sweep left an abandoned private tmux directory behind"
+  tries=0
+  while kill -0 "$server_pid" 2>/dev/null && [ "$tries" -lt 100 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  ! kill -0 "$server_pid" 2>/dev/null || fail "the orphan sweep left the abandoned directory's tmux server running"
+  pass "the orphan sweep reaps an abandoned private tmux directory and its server"
+)
+
 test_registries_avoid_git_worktree_root() {
   # A TMPDIR pointed at a repository root used to place live `.fm-test-*`
   # registries beside tracked files. A concurrent git add during a suite then
@@ -215,4 +247,5 @@ test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership
 test_orphan_sweep_reaps_read_only_package_tree
+test_orphan_sweep_reaps_abandoned_tmux_dir || fail "abandoned tmux dir sweep"
 test_registries_avoid_git_worktree_root

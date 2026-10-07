@@ -12,6 +12,9 @@
 # tests/git-config-helpers.sh - the shared helpers, bin/fm-test-run.sh's
 # per-suite wrapper, and the standalone scripts runnable without a live vendor.
 # That helper's header owns the contract and the layers it leaves in force.
+#
+# It is also the regression for tests/lib.sh's private tmux socket directory: a
+# suite run from inside the operator's tmux pane must not reach that server.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -279,6 +282,27 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+# A suite launched from a worker's pane inherits TMUX and TMUX_PANE naming the
+# server every live worker runs in, and a bare `tmux kill-session` there takes
+# that pane's whole session, so the server exits with every worker in it.
+test_suite_cannot_reach_inherited_tmux_server() (
+  local operator socket pid pane
+  command -v tmux >/dev/null 2>&1 || { pass "inherited tmux isolation skipped: tmux is not installed"; exit 0; }
+  operator=$(mktemp -d /tmp/fmo.XXXXXX) || fail "could not create the stand-in operator socket directory"
+  socket="$operator/default"
+  trap 'tmux -S "$socket" kill-server 2>/dev/null; rm -rf "$operator"' EXIT
+  tmux -S "$socket" -f /dev/null new-session -d -s firstmate 'exec sleep 600' \
+    || fail "could not start the stand-in operator tmux server"
+  pid=$(tmux -S "$socket" display-message -p -t =firstmate '#{pid}')
+  pane=$(tmux -S "$socket" display-message -p -t =firstmate '#{pane_id}')
+  # shellcheck disable=SC2016 # The child suite expands $1 in its own bash.
+  env -u FM_TEST_TMUX_TMPDIR -u TMUX_TMPDIR TMUX="$socket,$pid,0" TMUX_PANE="$pane" \
+    bash -c '. "$1/tests/lib.sh"; tmux kill-session; tmux kill-server' _ "$ROOT" >/dev/null 2>&1
+  tmux -S "$socket" has-session -t =firstmate 2>/dev/null \
+    || fail "a suite that inherited TMUX killed the operator's tmux server"
+  pass "a suite that inherits the operator's TMUX cannot address that tmux server"
+)
+
 test_git_config_isolation || fail "Git fixture config isolation"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant
@@ -287,3 +311,4 @@ test_fake_gh_and_gh_axi
 test_spawn_tmux_and_fakebin
 test_send_stubs_and_ssh
 test_spawn_home_layout
+test_suite_cannot_reach_inherited_tmux_server || fail "inherited tmux isolation"

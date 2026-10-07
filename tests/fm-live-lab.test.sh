@@ -13,21 +13,21 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-live-lab)
 : > "$TMP_ROOT/pids"
-: > "$TMP_ROOT/tmux-dirs"
+: > "$TMP_ROOT/lab-homes"
 LIVE_LAB="$ROOT/bin/fm-live-lab.sh"
 TRUST="$ROOT/bin/fm-claude-trust.sh"
 
 live_lab_cleanup() {
-  local dir pid marker
+  local home pid marker
   for marker in "$TMP_ROOT/orphan-child" "$TMP_ROOT/late-child" "$TMP_ROOT/reused-child"; do
     [ ! -s "$marker" ] || printf '%s\n' "$(<"$marker")" >> "$TMP_ROOT/pids"
   done
   while read -r pid; do [ -n "$pid" ] && { pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; }; done < "$TMP_ROOT/pids"
-  while read -r dir; do
-    [ -n "$dir" ] || continue
-    env -u TMUX TMUX_TMPDIR="$dir" tmux kill-server 2>/dev/null
-    case "$dir" in /tmp/fml.*) rm -rf "$dir" ;; esac
-  done < "$TMP_ROOT/tmux-dirs"
+  while read -r home; do
+    [ -n "$home" ] || continue
+    "$ROOT/bin/fm-lab-home.sh" tmux "$home" kill-server 2>/dev/null
+    "$ROOT/bin/fm-lab-home.sh" teardown "$home" >/dev/null 2>&1
+  done < "$TMP_ROOT/lab-homes"
   rm -rf "/tmp/fm-labt$$-mate" "/tmp/fm-labt$$-worker" "/tmp/fm-labt$$-other" /tmp/fm-labt"$$"-*+*
   fm_test_cleanup
 }
@@ -63,7 +63,7 @@ make_lab() {
   git -C "$home" add -A bin AGENTS.md .pi
   git -C "$home" -c user.name=t -c user.email=t@example.invalid commit -qm lab
   tmux_dir=$("$ROOT/bin/fm-lab-home.sh" tmux-dir "$home") || fail "lab tmux dir"
-  printf '%s\n' "$tmux_dir" >> "$TMP_ROOT/tmux-dirs"
+  printf '%s\n' "$home" >> "$TMP_ROOT/lab-homes"
   find "$HOME/.treehouse" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort > "$root/.treehouse-before"
   {
     echo 'fm-live-lab v1'
@@ -117,10 +117,10 @@ record_pid() {  # <root> <pid>
 }
 
 lab_tmux() {  # <root> <tmux args...>
-  local dir
-  dir=$(sed -n 's/^tmux_dir=//p' "$1/.fm-live-lab")
+  local home
+  home=$(sed -n 's/^home=//p' "$1/.fm-live-lab")
   shift
-  env -u TMUX TMUX_TMPDIR="$dir" tmux "$@"
+  "$ROOT/bin/fm-lab-home.sh" tmux "$home" "$@"
 }
 
 start_sleeper() {
@@ -182,6 +182,10 @@ WT_CASE="$TMP_ROOT/wtcase"
 fm_git_worktree "$WT_CASE/project" "$WT_CASE/wt" lab-wt
 cp "$C/.fm-live-lab" "$WT_CASE/.fm-live-lab"
 set_record "$WT_CASE" home "$WT_CASE/wt"
+# up always marks its home and records the lab's private tmux directory there.
+cp "$CH/.fm-lab-home" "$WT_CASE/wt/.fm-lab-home"
+mkdir -p "$WT_CASE/wt/state"
+cp "$CH/state/.fm-lab-tmux-dir" "$WT_CASE/wt/state/.fm-lab-tmux-dir"
 lab_tmux "$C" new-window -d -t firstmate: -n wtmain -c "$WT_CASE/wt" 'exec sleep 600'
 lab_tmux "$C" kill-window -t firstmate:=main
 lab_tmux "$C" rename-window -t firstmate:=wtmain main
