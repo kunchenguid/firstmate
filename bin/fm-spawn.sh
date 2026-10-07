@@ -3723,10 +3723,9 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
     if [ -n "$base" ]; then
-      [ "$MODE" = local-only ] || {
-        echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
-        return 1
-      }
+      # The base already passed ensure_named_base_present, so it exists locally
+      # in the project; reset the pooled worktree to that ref. (mode validation
+      # has already refused the local-only + base combination.)
       git -C "$worktree" rev-parse --verify --quiet "refs/heads/$base^{commit}" >/dev/null || {
         echo "error: named base '$base' does not exist locally for pooled worktree '$worktree'; refusing to launch" >&2
         return 1

@@ -69,9 +69,9 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
-# local-only projects additionally accept work merged into the task's recorded
-# base branch, or the local default branch when none was recorded (firstmate
-# performs that merge after configured approval) as a fallback for the common
+# local-only projects additionally accept work merged into the local default
+# branch (a local-only task cannot carry a recorded base; firstmate performs
+# that merge after configured approval) as a fallback for the common
 # case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
@@ -1358,10 +1358,17 @@ default_branch() {
 
 # The branch a local landing is measured against: the task's recorded
 # integration branch when meta names one, otherwise the repository default.
+# A local-only task can never legitimately record one (fm_base_branch_valid
+# refuses the combination), so a recorded base on a local-only meta refuses
+# instead of silently landing on the default.
 landing_branch() {
   local recorded
   recorded=$(meta_value "$META" base_branch)
   if [ -n "$recorded" ]; then
+    if [ "$MODE" = local-only ]; then
+      echo "task $ID records a base branch but mode=local-only cannot carry one (fm_base_branch_valid); the meta is contradictory; re-scaffold without the base or ship direct-PR" >&2
+      return 1
+    fi
     git check-ref-format --branch "$recorded" >/dev/null 2>&1 || return 1
     printf '%s\n' "$recorded"
     return 0
@@ -1627,8 +1634,8 @@ work_is_landed() {
 }
 
 # The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on its recorded integration
-# branch or local default, and every other ship carries the PR recorded on its own
+# deliverable is its report, a local-only ship lands on the local default
+# branch, and every other ship carries the PR recorded on its own
 # record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
