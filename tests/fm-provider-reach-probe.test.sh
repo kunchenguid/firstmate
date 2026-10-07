@@ -645,6 +645,15 @@ for proxy_name in HTTPS_PROXY https_proxy ALL_PROXY all_proxy; do
   [ ! -s "$tmp/calls.log" ] || fail "$proxy_name was not refused before curl ran: $(cat "$tmp/calls.log")"
 done
 
+tmp=$TMP_ROOT/proxy-user-only; new_case "$tmp"
+out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://user@proxy.example:8080' \
+  PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
+  FM_FAKE_CURL_LOG="$tmp/calls.log" "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 2 "$rc" "proxy userinfo without a password is refused"
+assert_contains "$out" "proxy URL carries credentials" "proxy userinfo refusal uses fixed safe text"
+assert_not_contains "$out" "user@proxy.example" "proxy URL is never echoed"
+[ ! -s "$tmp/calls.log" ] || fail "proxy userinfo reached curl: $(cat "$tmp/calls.log")"
+
 tmp=$TMP_ROOT/proxy-safe; new_case "$tmp"
 out=$(env "${proxy_env[@]}" https_proxy='http://proxy.example:8080' \
   PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
