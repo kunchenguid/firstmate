@@ -92,7 +92,7 @@ test_daemon_heartbeat() {
     FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add queued 'next unit' >/dev/null || fail 'could not queue unit'
     FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add dependency 'dependency' >/dev/null || fail 'could not add dependency'
     FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" block queued --by dependency >/dev/null || fail 'could not set dependency'
-    FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" done dependency --pr https://github.com/example/fixture/pull/1 >/dev/null || fail 'could not land dependency'
+    FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" 'done' dependency --pr https://github.com/example/fixture/pull/1 >/dev/null || fail 'could not land dependency'
   fi
   if [ "$mode" = held ]; then
     FM_HOME="$dir" "$ROOT/bin/fm-captain-hold.sh" hold queued --reason 'explicit hold' >/dev/null || fail 'could not hold unit'
