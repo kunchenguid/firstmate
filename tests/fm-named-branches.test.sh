@@ -55,6 +55,7 @@ test_brief_names_the_crew_and_base_branches() {
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR \
     --branch-name feature/widget --base-branch office >/dev/null
   brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
   assert_grep 'against the base branch `office` (`--base office`)' "$brief" "direct-PR brief omitted the PR base"
 
   id=named-brief-lo
