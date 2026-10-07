@@ -39,11 +39,13 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. When the pane shows the Claude background-task
-#                          exit picker, that same parenthetical ends with
-#                          "blocked-on-prompt:" and the picker's name, after the
-#                          demand-deep-inspection clause when that clause is
-#                          present. Unless afk is active. A pane about to escalate
+#                          resume. Unless afk is active. When the pane shows the
+#                          Claude background-task exit picker, that same
+#                          parenthetical ends with "blocked-on-prompt:" and the
+#                          picker's name, after the demand-deep-inspection clause
+#                          when that clause is present; the deferral and
+#                          dead-record reasons below end with it the same way.
+#                          A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
 #                          wait or a verified `captain-held` transfer its worker
 #                          declared, or, where config/wedge-defer-parked-gate
@@ -1193,15 +1195,15 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
 # counter is left alone: it is neither advanced (this is not an escalation) nor
 # reset (a later genuine escalation must still carry the demand-deep-inspection
 # history it had already earned).
-wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
-  local win=$1 since_file=$2 label=$3 age=$4 key wsf wage
+wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age> [dialog-name]
+  local win=$1 since_file=$2 label=$3 age=$4 dialog=${5-} key wsf wage
   key=$(window_key "$win")
   wsf="$STATE/.writing-since-$key"
   [ -e "$wsf" ] || date +%s > "$wsf"
   wage=$(age_of "$wsf")
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
+    "$(stale_reason_naming_dialog "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)" "$dialog")"
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
@@ -1368,8 +1370,8 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # The escalation counter is left alone, exactly as the write deferral leaves it:
 # this is not an escalation, and a later genuine one must keep the
 # demand-inspection history it had already earned.
-wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record>
-  local win=$1 since_file=$2 label=$3 age=$4 record=$5
+wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record> [dialog-name]
+  local win=$1 since_file=$2 label=$3 age=$4 record=$5 dialog=${6-}
   local kind subject whom action anchor key mtime wage min_age waited us ok
   us=$(printf '\037')
   IFS=$us read -r kind subject whom action anchor <<EOF
@@ -1423,7 +1425,7 @@ EOF
   clear_write_tracking "$key"
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.waiting-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s${waited} - $kind, $subject, rechecked on a long cadence not a wedge; $action)" \
+    "$(stale_reason_naming_dialog "stale: $win (idle ${age}s${waited} - $kind, $subject, rechecked on a long cadence not a wedge; $action)" "$dialog")" \
     '' "$min_age"
   triage_log "absorbed $label ($kind explains the quiet, idle ${age}s): $win"
   return 0
@@ -1472,8 +1474,8 @@ clear_write_tracking() {  # <window-key>
 # display stays absorbed. Under one unchanged incarnation a dead pane's static
 # display absorbs on every threshold either way.
 # Returns 0 when it has handled the window, 1 to escalate on the unchanged path.
-wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-hash> <task>
-  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 task=$6 key marker agent_state detail reason gen id
+wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-hash> <task> [dialog-name]
+  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 task=$6 dialog=${7-} key marker agent_state detail reason gen id
   key=$(window_key "$win")
   marker="$STATE/.dead-reported-$key"
   agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
@@ -1494,6 +1496,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
     return 0
   fi
   reason="stale: $win (idle ${age}s, agent $agent_state - $detail, so this is not a wedge; reported once and not re-escalated while it stays that way - reconcile this record, and check for unlanded work before any cleanup)"
+  reason=$(stale_reason_naming_dialog "$reason" "$dialog")
   # Append before the marker, for the reason stale_wait_record gives: a marker
   # written ahead of a failed append outlives it, and the next sighting would then
   # absorb the retry - the one way this bound could swallow the report outright
@@ -1539,14 +1542,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         if evidence=$(wedge_wait_evidence "$task") &&
-           wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
+           wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence" "$dialog"; then
           return 0
         fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
-          wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          wedge_defer_writing "$win" "$since_file" "$label" "$age" "$dialog"
           return 0
         fi
-        if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
+        if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task" "$dialog"; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
