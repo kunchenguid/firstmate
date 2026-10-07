@@ -3737,7 +3737,23 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if [ -n "$base" ]; then
+  if [ -n "$base" ] && git -C "$worktree" rev-parse --verify --quiet "refs/remotes/origin/$base^{commit}" >/dev/null 2>&1; then
+    default=$base
+  elif [ -n "$base" ] && git -C "$worktree" rev-parse --verify --quiet "refs/heads/$base^{commit}" >/dev/null 2>&1; then
+    # The named base was already validated by ensure_named_base_present and exists
+    # only locally (origin lacks it); reset to the local ref instead of refusing
+    # on the missing origin branch.
+    target="refs/heads/$base"
+    expected=$(git -C "$worktree" rev-parse --verify "$target^{commit}") || {
+      echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    }
+    if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+      echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch" >&2
+      return 1
+    fi
+    return 0
+  elif [ -n "$base" ]; then
     default=$base
   else
     if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
