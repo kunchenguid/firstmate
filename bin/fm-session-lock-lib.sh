@@ -100,7 +100,7 @@ fm_harness_path_name() {  # <path>
 # and `opencode serve --service` are both daemon shapes; `codex-code-mode-host`,
 # which carries one session's working directory, is not.
 fm_harness_process_is_daemon() {  # <comm> <args>
-  local args=$2 rest word
+  local args=$2 rest word flag_args
   case "$args" in
     *' '*) ;;
     *) return 1 ;; # a single-word command line carries no subcommand
@@ -110,7 +110,14 @@ fm_harness_process_is_daemon() {  # <comm> <args>
   case "$word" in
     app-server | serve | daemon) return 0 ;;
   esac
-  case " $args " in
+  # ps flattens argv, so option-looking text in a prompt cannot be
+  # distinguished after the prompt option. Only inspect preceding arguments.
+  flag_args=$args
+  case " $flag_args " in
+    *" --prompt "*) flag_args=${flag_args%% --prompt *} ;;
+    *" -p "*) flag_args=${flag_args%% -p *} ;;
+  esac
+  case " $flag_args " in
     *" --managed-daemon "* | *" --service "*) return 0 ;;
   esac
   return 1
