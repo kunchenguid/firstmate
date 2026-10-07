@@ -74,9 +74,10 @@
 # default-branch=<branch> (orthogonal) = the branch origin uses as its default,
 #   for a remote that does not advertise it, such as AWS CodeCommit, whose git
 #   endpoint never sends the HEAD symref, so git cannot tell which of several
-#   branches at the same commit is the default. When set it wins over every
-#   inference bin/fm-spawn.sh makes when refreshing a pooled copy's base, which
-#   still refuses unless origin has that branch. <branch> must be a valid branch
+#   branches at the same commit is the default. It is the last fallback
+#   bin/fm-spawn.sh consults when refreshing a pooled copy's base, only after
+#   git's inference and, on a CodeCommit origin, the CodeCommit API fail, and
+#   the spawn still refuses unless origin has that branch. <branch> must be a valid branch
 #   name; an empty or invalid value is REFUSED under --default-branch (nothing
 #   on stdout, exit status 3, the token named) rather than read as unset.
 #

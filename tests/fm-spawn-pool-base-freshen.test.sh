@@ -957,14 +957,14 @@ test_registered_default_branch_covers_an_unavailable_api() {
     || fail "the registered default branch did not reset the copy to origin/main"
   [ "$(git -C "$POOL_DIR" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/main ] \
     || fail "the registered default branch was not recorded as origin/HEAD"
-  [ ! -e "$CASE_DIR/aws.log" ] || fail "spawn asked the CodeCommit API although a default branch is registered"
+  [ -s "$CASE_DIR/aws.log" ] || fail "spawn used the registered default branch without first asking the CodeCommit API"
   pass "a registered default branch launches a CodeCommit project when the API cannot answer"
 }
 
-test_registered_default_branch_wins_over_inference() {
+test_git_default_beats_a_registered_default_branch() {
   local rec id out status
-  id='pool-override-wins-r1'
-  rec=$(make_case override-wins "$id")
+  id='pool-git-beats-token-r1'
+  rec=$(make_case git-beats-token "$id")
   read_case_record "$rec"
   publish_feature_branch release
   stub_aws
@@ -972,26 +972,59 @@ test_registered_default_branch_wins_over_inference() {
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "a registered default branch should launch"$'\n'"$out"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/release)" ] \
-    || fail "spawn followed origin's advertised HEAD instead of the registered default branch"
-  assert_grep 'only on release' "$POOL_DIR/feature-only.txt" \
-    "the copy is missing the registered default branch's content"
+  expect_code 0 "$status" "an origin that advertises HEAD should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "spawn followed the registered default branch instead of origin's advertised HEAD"
+  [ ! -e "$POOL_DIR/feature-only.txt" ] || fail "the copy carries the registered fallback branch's content"
+  [ "$(git -C "$POOL_DIR" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/main ] \
+    || fail "git's own default branch was not recorded as origin/HEAD"
   [ ! -e "$CASE_DIR/aws.log" ] || fail "spawn called the aws CLI for a non-CodeCommit origin"
+  pass "git's own default branch beats a registered default-branch= on an origin that advertises HEAD"
+}
 
-  id='pool-override-missing-r1'
-  rec=$(make_case override-missing "$id")
+test_codecommit_api_beats_a_registered_default_branch() {
+  local rec id out status
+  id='pool-api-beats-token-r1'
+  rec=$(make_case api-beats-token "$id")
   read_case_record "$rec"
+  publish_feature_branch release
+  make_origin_head_ambiguous
+  alias_origin_url https://git-codecommit.us-east-1.amazonaws.com/v1/repos/ProscAmazonCloudWatch
+  stub_aws
+  printf 'main\n' > "$CASE_DIR/aws-answer"
+  register_project 'no-mistakes default-branch=release'
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a CodeCommit origin whose API answers should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "spawn followed the registered default branch instead of the CodeCommit API's answer"
+  [ ! -e "$POOL_DIR/feature-only.txt" ] || fail "the copy carries the registered fallback branch's content"
+  [ "$(git -C "$POOL_DIR" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/main ] \
+    || fail "the CodeCommit API's default branch was not recorded as origin/HEAD"
+  [ -s "$CASE_DIR/aws.log" ] || fail "spawn did not ask the CodeCommit API before the registered default branch"
+  pass "the CodeCommit API's default branch beats a registered default-branch="
+}
+
+test_registered_default_branch_origin_lacks_refuses() {
+  local rec id out status
+  id='pool-token-missing-r1'
+  rec=$(make_case token-missing "$id")
+  read_case_record "$rec"
+  make_origin_head_ambiguous
+  stub_aws
   register_project 'no-mistakes default-branch=missing'
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a registered default branch origin lacks should refuse the spawn"
+  assert_contains "$out" "Multiple remote HEAD branches" \
+    "the refusal did not name git's ambiguity"
   assert_contains "$out" "default-branch=missing for project is not a branch on origin" \
     "the refusal did not name the missing registered default branch"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
     || fail "spawn moved HEAD after refusing a missing registered default branch"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn published task metadata"
-  pass "a registered default branch wins over origin's advertised HEAD, and one origin lacks refuses"
+  pass "a registered default branch origin lacks still refuses after git cannot infer one"
 }
 
 test_codecommit_default_unresolvable_still_refuses() {
@@ -1076,7 +1109,9 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_codecommit_origin_default_comes_from_the_api
 test_registered_default_branch_covers_an_unavailable_api
-test_registered_default_branch_wins_over_inference
+test_git_default_beats_a_registered_default_branch
+test_codecommit_api_beats_a_registered_default_branch
+test_registered_default_branch_origin_lacks_refuses
 test_codecommit_default_unresolvable_still_refuses
 test_ordinary_origin_never_asks_codecommit
 test_unreachable_origin_refuses_stale_pool_base

@@ -49,13 +49,14 @@
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
 #   Without --base-branch, a fresh launch resets its pooled copy to origin's
-#   default branch: the project's registered default-branch= when set
-#   (bin/fm-project-mode.sh), otherwise git's `remote set-head --auto`, and,
-#   when git cannot infer it on an AWS CodeCommit origin, whose endpoint never
-#   advertises HEAD, the default branch `aws codecommit get-repository` records,
-#   asked with the operator's own AWS CLI configuration under a bound. The
-#   chosen branch must exist on origin and becomes origin/HEAD; otherwise the
-#   launch is refused, naming the cause and the default-branch= override.
+#   default branch: git's `remote set-head --auto`; when git cannot infer it on
+#   an AWS CodeCommit origin, whose endpoint never advertises HEAD, the default
+#   branch `aws codecommit get-repository` records, asked with the operator's
+#   own AWS CLI configuration under a bound; and, only when those fail, the
+#   project's registered default-branch= (bin/fm-project-mode.sh) as the last
+#   fallback. The chosen branch must exist on origin and becomes origin/HEAD;
+#   otherwise the launch is refused, naming the causes and the default-branch=
+#   override.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -3592,25 +3593,14 @@ codecommit_default_branch() { # <region> <repository> <profile>
 }
 
 # Resolves origin's default branch in an already-fetched worktree and records it
-# as refs/remotes/origin/HEAD, printing the branch. The project's registered
-# default-branch= (bin/fm-project-mode.sh) wins when set; otherwise git's own
-# `set-head --auto` is tried first and, when it fails on a CodeCommit origin, the
-# CodeCommit API is asked. Every candidate must name a branch origin has. On
-# failure prints the cause and returns 1.
+# as refs/remotes/origin/HEAD, printing the branch. git's own `set-head --auto`
+# is tried first; when it fails on a CodeCommit origin the CodeCommit API is
+# asked next, and only when those fail is the project's registered
+# default-branch= (bin/fm-project-mode.sh) used as the last fallback. Every
+# candidate must name a branch origin has. On failure prints the causes and
+# returns 1.
 resolve_spawn_origin_default() { # <worktree> <project-name>
   local worktree=$1 project=$2 override cause url coords branch
-  override=$("$FM_ROOT/bin/fm-project-mode.sh" --default-branch "$project" 2>/dev/null) || {
-    echo "the registry entry for $project has an invalid default-branch= token: $("$FM_ROOT/bin/fm-project-mode.sh" --default-branch "$project" 2>&1 >/dev/null | head -n 1)"
-    return 1
-  }
-  if [ -n "$override" ]; then
-    if ! git -C "$worktree" remote set-head origin "$override" >/dev/null 2>&1; then
-      echo "the registered default-branch=$override for $project is not a branch on origin"
-      return 1
-    fi
-    printf '%s\n' "$override"
-    return 0
-  fi
   if cause=$(git -C "$worktree" remote set-head origin --auto 2>&1 >/dev/null); then
     default_branch "$worktree" || {
       echo "git recorded no default branch for origin"
@@ -3620,20 +3610,30 @@ resolve_spawn_origin_default() { # <worktree> <project-name>
   fi
   cause="git could not infer it ($(printf '%s\n' "$cause" | sed -n '1{s/^error: *//;p;}'))"
   url=$(git -C "$worktree" config --get remote.origin.url 2>/dev/null || true)
-  coords=$(codecommit_origin_coordinates "$url") || {
+  if coords=$(codecommit_origin_coordinates "$url"); then
+    # shellcheck disable=SC2086 # coordinates are three space-free words.
+    if ! branch=$(codecommit_default_branch $coords); then
+      cause="$cause; $branch"
+    elif git -C "$worktree" remote set-head origin "$branch" >/dev/null 2>&1; then
+      printf '%s\n' "$branch"
+      return 0
+    else
+      cause="$cause; CodeCommit's default branch '$branch' is not a branch on origin"
+    fi
+  fi
+  override=$("$FM_ROOT/bin/fm-project-mode.sh" --default-branch "$project" 2>/dev/null) || {
+    echo "$cause; the registry entry for $project has an invalid default-branch= token: $("$FM_ROOT/bin/fm-project-mode.sh" --default-branch "$project" 2>&1 >/dev/null | head -n 1)"
+    return 1
+  }
+  if [ -z "$override" ]; then
     echo "$cause"
     return 1
-  }
-  # shellcheck disable=SC2086 # coordinates are three space-free words.
-  branch=$(codecommit_default_branch $coords) || {
-    echo "$cause, and $branch"
-    return 1
-  }
-  if ! git -C "$worktree" remote set-head origin "$branch" >/dev/null 2>&1; then
-    echo "$cause, and CodeCommit's default branch '$branch' is not a branch on origin"
+  fi
+  if ! git -C "$worktree" remote set-head origin "$override" >/dev/null 2>&1; then
+    echo "$cause; the registered default-branch=$override for $project is not a branch on origin"
     return 1
   fi
-  printf '%s\n' "$branch"
+  printf '%s\n' "$override"
 }
 
 freshen_spawn_worktree_base() { # <worktree> [<base-branch>] [<project-name>]
