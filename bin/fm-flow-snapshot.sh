@@ -869,7 +869,8 @@ OMITTED=$(printf '%s' "$SCOPED" | jq -c '[
      reason:"recorded window no longer exists"}
 ]')
 
-AGENTS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-flow-agents.XXXXXX")
+AGENTS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-flow-agents.XXXXXX") \
+  || { echo "fm-flow-snapshot: could not create temporary file" >&2; exit 1; }
 trap 'rm -f "$AGENTS_FILE"' EXIT INT TERM
 printf '[' > "$AGENTS_FILE"
 FIRST=1
@@ -879,31 +880,16 @@ while IFS= read -r task; do
   # left a dangling one behind any agent whose record failed to build, which the
   # closing slurp then refused, so one failed agent emptied the whole document -
   # the opposite of this command's stated invariant. A record that cannot be
-  # built is replaced by a minimal one naming the agent and saying so, which is
-  # the same containment a failed collection already gets.
+  # built is skipped together with its separator, so one failed agent cannot
+  # empty the document.
   RECORD=
   if [ "$(printf '%s' "$task" | jq -r '.kind // ""')" = ship ]; then
     RECORD=$(agent_json "$task" | jq -c '.' 2>/dev/null) || RECORD=
   else
     RECORD=$(compact_json "$task" | jq -c '.' 2>/dev/null) || RECORD=
   fi
-  if [ -z "$RECORD" ] || ! printf '%s' "$RECORD" | jq -e . >/dev/null 2>&1; then
-    RECORD=$(jq -nc \
-      --arg id "$(printf '%s' "$task" | jq -r '.id // ""')" \
-      --arg kind "$(printf '%s' "$task" | jq -r '.kind // ""')" \
-      --arg branch "$(printf '%s' "$task" | jq -r '.branch // ""')" \
-      --arg now_iso "$NOW_ISO" --argjson now_epoch "$NOW_EPOCH" \
-      --argjson ci "$CI_EMPTY" \
-      '{id:$id, branch:$branch, project:"", worktree:"", window:"",
-        kind:$kind, mode:"", pipeline:false, state:null,
-        endpoint_alive:"unknown",
-        worker:{harness:null, model:null, effort:null},
-        pr:{url:null, number:null},
-        collection:{ok:false, reason:"this agent'"'"'s record could not be built",
-                    source:"", at:$now_iso, epoch:$now_epoch},
-        run:{present:false, id:"", status:"", error:"", head:""},
-        steps:[], active_steps:[], ci:$ci}')
-  fi
+  [ -n "$RECORD" ] || continue
+  printf '%s' "$RECORD" | jq -e . >/dev/null 2>&1 || continue
   [ "$FIRST" = 1 ] || printf ',' >> "$AGENTS_FILE"
   FIRST=0
   printf '%s' "$RECORD" >> "$AGENTS_FILE"
