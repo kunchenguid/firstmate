@@ -207,14 +207,15 @@ When the configured tasks-axi backlog gate applies, the spawn itself moves the w
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
-Steer a worker with ordinary text through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal, local and remote alike) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged local message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).
-A remote secondmate steer rides the same durable-inbox model through the remote transport; after an unconfirmed delivery, only the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe because it preserves the request body for remote enqueue deduplication (`bin/fm-send.sh` header).
-When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record at answer time, identically for local and remote workers (contract: `bin/fm-send.sh` header).
-`fm-send` is the data plane for text the worker should read; never use its key or text paths for interrupt, exit, or other lifecycle control, because routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
-Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
-A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
-For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
-When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
+- Steer a worker with ordinary text through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal, local and remote alike) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged local message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).
+- A remote secondmate steer rides the same durable-inbox model through the remote transport; after an unconfirmed delivery, only the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe because it preserves the request body for remote enqueue deduplication (`bin/fm-send.sh` header).
+- When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record at answer time, identically for local and remote workers (contract: `bin/fm-send.sh` header).
+- `fm-send` is the data plane for text the worker should read; never use its key or text paths for `/quit`, `/exit`, interrupt keys, or other lifecycle control, because routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
+- Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
+- A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
+- For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
+- When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
+
 Supervise all live work under section 8.
 
 ### Selected delivery path and merge authority
@@ -235,7 +236,7 @@ Delivery mode and `yolo` are orthogonal.
 Never merge a red PR, or one with a required check that has not reported, under either setting unless a current explicit captain instruction names the GitHub check to waive; `bin/fm-pr-merge.sh`'s header owns the attended-only waiver mechanics and remaining guards.
 Destructive, irreversible, and security-sensitive merges still escalate.
 Without a current explicit captain instruction that states the concrete merge, the green default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
-Load `ask-user-authority` and `validation-supervision` before deciding or answering any ask-user finding; the implementation worker never answers its own finding.
+Load `ask-user-authority` and `validation-supervision` before deciding, answering, or resolving any ask-user finding, including through `--resolve-key` and however unambiguous it looks; the implementation worker never answers its own finding.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
@@ -259,6 +260,7 @@ Whenever work is under way, keep exactly one live supervision cycle using the em
 Relay may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
+Extra empty drains or checks beyond that protocol are a repair signal, not supervision: after a few, repair the cycle through the emitted protocol or wait on the healthy one instead of polling.
 No turn ends blind while work is under way, including turns described as holding or waiting.
 
 - At the start of every wake-handling turn, drain the durable wake queue before peeking, reading beyond the reason line, steering, or starting work.
@@ -268,6 +270,7 @@ No turn ends blind while work is under way, including turns described as holding
 - Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 - After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 - After any supervision-branch acknowledgement succeeds or reports that a sequence is already processed, never acknowledge that sequence again or retry the refusal.
+- Otherwise, a silent, failed, or refused acknowledgement is not proof that an earlier attempt landed; confirm it through the owning script's state before relying on it.
 - A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
 - `bin/fm-classify-lib.sh` owns the distinction between declared `paused:` waits and `blocked:` events needing firstmate action; `bin/fm-brief.sh` owns worker declaration instructions.
 
@@ -348,7 +351,7 @@ Reach the captain immediately for:
 - A needed credential or login.
 
 - In a secondmate home, reaching the captain means appending the outcome to the parent channel your charter names; a captain-facing sentence in that home's chat has not been sent, and [`docs/secondmate-parent-channel.md`](docs/secondmate-parent-channel.md) owns which outcomes the home's own scripts deliver there without you.
-- Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
+- Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics such as monitoring gaps, restarts, quiet stretches, or empty checks.
 - Reply exactly `Captain, shipshape.` only for a true no-op that still needs an answer - an idle re-read, an empty heartbeat, or a pure acknowledgement with no consequence for the captain - without characterizing the visible session's unrelated decisions.
 - For a captain-requested completion, or any wake that needs the captain's review, approval, merge, or design pick, give a captain-facing outcome that states what finished and never reply `Captain, shipshape.`; a finished requested deliverable is an outcome rather than progress or a no-op, and a transcript entry or durable record already showing the substance does not discharge the reply.
 - Ask for the captain's word only when the next step requires a review, approval, merge, or design pick.
