@@ -257,10 +257,14 @@ if [ "$BASE_BRANCH_SET" -eq 0 ]; then
 else
   BASE_BRANCH=$CLI_BASE
   RECORDED_BASE=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
-  [ "$BASE_BRANCH" = "$RECORDED_BASE" ] || {
-    echo "error: --base-branch cannot change the scout's recorded base during promotion; promote with base_branch=${RECORDED_BASE:-<none>} to preserve the existing worktree" >&2
-    exit 1
-  }
+  if [ -n "$RECORDED_BASE" ]; then
+    [ "$BASE_BRANCH" = "$RECORDED_BASE" ] || {
+      echo "error: --base-branch cannot change the scout's recorded base during promotion; promote with base_branch=$RECORDED_BASE to preserve the existing worktree, or omit --base-branch to keep it" >&2
+      exit 1
+    }
+  fi
+  # Naming a base when none was recorded restates the default; keep it (it is
+  # validated and verified like any other explicit base below).
 fi
 if [ -n "$BASE_BRANCH" ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
   echo "error: task $ID has an invalid base branch '$BASE_BRANCH'" >&2
