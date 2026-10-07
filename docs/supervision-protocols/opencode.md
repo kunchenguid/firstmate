@@ -4,7 +4,7 @@ When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. First cycle: let `.opencode/plugins/fm-primary-watch-arm.js` arm supervision on the first normalized `QUIESCENT` lifecycle signal.
-3. `OpenCodeLifecycleAdapter` maps legacy `session.idle` and v2 `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` events to `QUIESCENT`; the plugin starts `bin/fm-watch-arm.sh --restart` from that signal and owns every later successor launch.
+3. `OpenCodeLifecycleAdapter` maps legacy `session.idle` and v2 `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` events to `QUIESCENT`; the plugin starts or re-arms `bin/fm-watch-arm.sh --restart` from each normalized lifecycle signal.
 4. After an actionable child close, the plugin rechecks session-lock ownership and verifies one singleton successor before it calls `client.session.promptAsync`; its bounded fallback is defined in `docs/watcher-continuity.md`.
 5. Ordinary wake: do not ask the model to re-arm because continuity is plugin-owned.
 6. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.
