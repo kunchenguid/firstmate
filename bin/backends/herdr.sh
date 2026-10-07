@@ -3668,8 +3668,8 @@ fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
 
 # fm_backend_herdr_agent_status_raw: one `agent get` read, echoing the raw
 # agent_status string (working/idle/done/blocked/...), or empty on any
-# failure. Deliberately skips fm_backend_herdr_target_ready's server-ensure
-# round trip (an extra `status --json` call) that fm_backend_herdr_busy_state
+# failure. Deliberately skips fm_backend_herdr_target_observable's server
+# status probe (an extra `status --json` call) that fm_backend_herdr_busy_state
 # pays on every call: fm_backend_herdr_wait_for_working polls this in a tight
 # loop right after a caller has already parsed the target and confirmed the
 # server is live (e.g. fm_backend_herdr_send_text_submit, immediately after a
