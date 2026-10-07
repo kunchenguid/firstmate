@@ -60,6 +60,25 @@ def run_case(name, options, success=False, args=None, mutate=None, ready_expecte
                     assert not (channel / "command.json").exists(), "refusal sent native exit"
                 if options.get("conflict"):
                     assert json.loads((channel / "box.json").read_text())["text"] == "NEW EDIT"
+                if options.get("retireFinal"):
+                    assert (channel / "final-retired").exists(), "final read retirement not exercised"
+                    if options["retireFinal"] != "module":
+                        wait_for(lambda: (channel / "receipt.json").exists()
+                                 and json.loads((channel / "receipt.json").read_text())["phase"] == "refused")
+                    assert not (channel / "command.json").exists(), "retired caller sent native exit"
+                if options.get("holdFill"):
+                    assert (channel / "fill-waiting").exists(), "replacement fill was not issued"
+                    assert json.loads((channel / "request.json").read_text())["revoked"] is True
+                    assert not (home / "state/.input-t1.lock").exists(), "timeout did not release input lock"
+                    (channel / "new-input").touch()
+                    wait_for(lambda: (channel / "edit-observed").exists())
+                    assert json.loads((channel / "box.json").read_text())["text"] == "NEW EDIT"
+                    (channel / "release-fill").touch()
+                    wait_for(lambda: (channel / "fill-completed").exists())
+                    assert json.loads((channel / "box.json").read_text())["text"] == "NEW EDIT", (
+                        name, "issued replacement erased post-timeout input",
+                        json.loads((channel / "box.json").read_text()))
+                    assert not (channel / "command.json").exists()
                 if options.get("holdPoll"):
                     before = (channel / "box.json").read_bytes()
                     (channel / "release-poll").touch()
@@ -105,6 +124,9 @@ run_case("other harness refused", {}, mutate=lambda c, m: m.write_text(m.read_te
 run_case("missing module channel refused", {}, mutate=lambda c, m: (c / "ready.json").unlink())
 run_case("wrong task capability refused", {}, mutate=lambda c, m: m.write_text(m.read_text().replace("native_control=", "missing_control=")))
 run_case("timeout retires request before delayed callback", {"holdPoll": True})
+for retirement in ("caller", "module", {"revoked": True}, {"expires": 0},
+                   {"owner": 0}, {"target": "wrong:w1:p1"}):
+    run_case(f"final read retirement refuses exit: {retirement}", {"retireFinal": retirement})
 
 # Protocol fault cases use the same executable as the module, with no mock of
 # authorization, private paths, atomic publication or single-use consumption.
@@ -142,3 +164,12 @@ with tempfile.TemporaryDirectory(prefix="fm-native-protocol-") as tmp:
     result = subprocess.run([sys.executable, str(bridge), "poll", str(channel)], input=json.dumps(newer), text=True, capture_output=True)
     assert result.returncode != 0, "symlink request accepted"
     print("ok - wrong bindings, dead owners, expiry, replay, reload and symlink all refuse", flush=True)
+
+failures = []
+for fill in (2, 3):
+    try:
+        run_case(f"issued replacement {fill} preserves post-timeout input", {"holdFill": fill})
+    except AssertionError as error:
+        failures.append(str(error))
+        print("not ok -", error, flush=True)
+assert not failures, failures

@@ -62,6 +62,7 @@ export const register = (on) => {
         await receipt("exit-ready");
         // Last native read and synchronous conflict check before enqueue.
         const final = await $.prompt.read();
+        await check();
         if (conflict || final.text !== "" || final.cursor !== 0 || Date.now() / 1000 >= request.expires)
           throw new Error("input changed before native exit");
         // Enqueue is asynchronous. A new edit after this call may still be lost

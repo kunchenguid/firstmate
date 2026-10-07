@@ -36,13 +36,48 @@ const engine = {
     fill: async input => {
       if (config.refusal) return {isFilled: false, refusal: config.refusal};
       fills++;
+      if (config.holdFill === fills) {
+        writeFileSync(`${channel}/fill-waiting`, String(fills), {mode: 0o600});
+        while (!existsSync(`${channel}/release-fill`)) {
+          if (existsSync(`${channel}/new-input`) && box.text !== "NEW EDIT") {
+            await hooks.get("prompt.edit")(engine, {inputText: "NEW EDIT"}, async () => {
+              box = {text: "NEW EDIT", cursor: 8}; save(); return box;
+            });
+            writeFileSync(`${channel}/edit-observed`, "", {mode: 0o600});
+          }
+          await new Promise(r => setTimeout(r, 20));
+        }
+      }
       box = {text: input.mode === "append" ? box.text + input.text : input.text, cursor: input.text.length};
       if (config.rewrite && fills === 2) box.text = "MIDDLEWARE REWRITE";
       save();
+      if (config.holdFill === fills)
+        writeFileSync(`${channel}/fill-completed`, "", {mode: 0o600});
       return {isFilled: true};
     },
     read: async () => {
       reads++;
+      if (config.retireFinal && reads === 3) {
+        const path = `${channel}/request.json`;
+        const request = JSON.parse(readFileSync(path, "utf8"));
+        if (config.retireFinal === "caller") {
+          process.kill(request.caller, "SIGTERM");
+          for (let i = 0; i < 150; i++) {
+            try { process.kill(request.caller, 0); }
+            catch { break; }
+            await new Promise(r => setTimeout(r, 20));
+          }
+        } else if (config.retireFinal === "module") {
+          const readyPath = `${channel}/ready.json`;
+          const ready = JSON.parse(readFileSync(readyPath, "utf8"));
+          ready.instance = "retired-module";
+          writeFileSync(readyPath, JSON.stringify(ready), {mode: 0o600});
+        } else {
+          Object.assign(request, config.retireFinal);
+          writeFileSync(path, JSON.stringify(request), {mode: 0o600});
+        }
+        writeFileSync(`${channel}/final-retired`, "", {mode: 0o600});
+      }
       if (config.conflict && reads === 3) {
         await hooks.get("prompt.edit")(engine, {inputText: "NEW EDIT"}, async () => {
           box = {text: "NEW EDIT", cursor: 8}; save(); return box;
