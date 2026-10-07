@@ -18,7 +18,8 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+The decision persists for the repository in the active Codex home's `config.toml` `[projects]` entries, so later worktrees of the same project launched on that home skip it.
+Trust does not carry across Codex homes: when `config/codex-home` selects a different home, trust recorded in the default `~/.codex` does not apply; [`Codex configuration directory`](../../../../../docs/configuration.md#codex-configuration-directory-configcodex-home) owns what that home's trust entries must cover.
 
 ## Hook trust
 
