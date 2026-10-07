@@ -62,3 +62,19 @@ export const FmPrimaryCdCheck = async ({ directory, worktree }) => {
     },
   };
 };
+
+export default {
+  id: "fm-primary-cd-check",
+  async setup(ctx) {
+    const hooks = await FmPrimaryCdCheck({
+      directory: ctx.location?.directory,
+      worktree: ctx.location?.worktree,
+    });
+    await ctx.tool.hook("execute.before", (event) =>
+      hooks["tool.execute.before"](
+        { tool: event.tool === "shell" ? "bash" : event.tool },
+        { args: event.input },
+      ),
+    );
+  },
+};

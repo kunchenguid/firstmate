@@ -58,3 +58,32 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
     },
   };
 };
+
+export default {
+  id: "fm-primary-sessionstart-nudge",
+  async setup(ctx) {
+    const client = {
+      session: {
+        promptAsync: ({ path, body }) => ctx.session.prompt({
+          sessionID: path.id,
+          text: body.parts.map((part) => part.text ?? "").join(""),
+        }),
+      },
+    };
+    const hooks = await FmPrimarySessionstartNudge({
+      client,
+      directory: ctx.location?.directory,
+      worktree: ctx.location?.worktree,
+    });
+    const controller = new AbortController();
+    const eventTask = (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        await hooks.event({ event: { ...event, properties: event.data } });
+      }
+    })().catch(() => {});
+    return async () => {
+      controller.abort();
+      await eventTask;
+    };
+  },
+};

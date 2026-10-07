@@ -62,3 +62,19 @@ export const FmPrimaryPretoolCheck = async ({ directory, worktree }) => {
     },
   };
 };
+
+export default {
+  id: "fm-primary-pretool-check",
+  async setup(ctx) {
+    const hooks = await FmPrimaryPretoolCheck({
+      directory: ctx.location?.directory,
+      worktree: ctx.location?.worktree,
+    });
+    await ctx.tool.hook("execute.before", (event) =>
+      hooks["tool.execute.before"](
+        { tool: event.tool === "shell" ? "bash" : event.tool },
+        { args: event.input },
+      ),
+    );
+  },
+};
