@@ -8,7 +8,8 @@
 # fails closed on either of two independent signals:
 #   1. NO_MISTAKES_GATE set in the environment (the marker no-mistakes stamps);
 #   2. the current worktree's git-common-dir resolves under a no-mistakes gate
-#      repo (.../.no-mistakes/repos/*.git) - the unspoofable backstop, which
+#      repo (.../.no-mistakes/repos/*.git, or <home>/repos/<id>.git under a
+#      relocated home holding state.sqlite) - the unspoofable backstop, which
 #      still refuses even if the marker was tampered/unset.
 # A normal firstmate session (real primary, real crew worktree) has NEITHER
 # signal and is completely unaffected.
@@ -53,22 +54,23 @@ PATH_MSG='no-mistakes gate worktree'
 
 # --- shared fixtures --------------------------------------------------------
 
-# make_gate_worktree <root> -> echoes a worktree whose git-common-dir is
-# <root>/.no-mistakes/repos/<id>.git, reproducing no-mistakes' gate topology
-# (<NM_HOME>/repos/<id>.git + <NM_HOME>/worktrees/<id>/<run>).
+# make_gate_worktree <root> [home] -> echoes a worktree whose git-common-dir is
+# <root>/<home>/repos/<id>.git (home defaults to .no-mistakes), reproducing
+# no-mistakes' gate topology (<NM_HOME>/repos/<id>.git +
+# <NM_HOME>/worktrees/<id>/<run>).
 make_gate_worktree() {
-  local root=$1 id=016d88035d58 run=01KXC3SD5NZYMERGDS68Z1C8ER seed
-  mkdir -p "$root/.no-mistakes/repos"
+  local root=$1 home=${2:-.no-mistakes} id=016d88035d58 run=01KXC3SD5NZYMERGDS68Z1C8ER seed
+  mkdir -p "$root/$home/repos"
   git init -q --bare "$root/origin.git"
   seed=$(mktemp -d "$TMP/gate-seed.XXXXXX")
   git init -q -b main "$seed"
   git -C "$seed" commit -q --allow-empty -m init
   git -C "$seed" push -q "$root/origin.git" HEAD:refs/heads/main
   rm -rf "$seed"
-  git clone -q --bare "$root/origin.git" "$root/.no-mistakes/repos/$id.git"
-  git -C "$root/.no-mistakes/repos/$id.git" worktree add --detach \
-    "$root/.no-mistakes/worktrees/$id/$run" main >/dev/null 2>&1
-  printf '%s\n' "$root/.no-mistakes/worktrees/$id/$run"
+  git clone -q --bare "$root/origin.git" "$root/$home/repos/$id.git"
+  git -C "$root/$home/repos/$id.git" worktree add --detach \
+    "$root/$home/worktrees/$id/$run" main >/dev/null 2>&1
+  printf '%s\n' "$root/$home/worktrees/$id/$run"
 }
 
 # make_normal_repo <dir> -> echoes a plain (non-gate) git repo to stand in for a
@@ -129,6 +131,24 @@ test_helper_path_backstop_refuses() {
   assert_contains "$out" "$PATH_MSG" "helper: path-backstop refusal message"
   assert_not_contains "$out" "$ENV_MSG" "helper: backstop must not be attributed to the env marker"
   pass "fm-gate-refuse-lib: refuses from a gate worktree via git-common-dir (marker unset)"
+}
+
+# A routed project's gate lives under a relocated NM_HOME; the backstop must
+# recognize it by the home's state.sqlite, and must not mistake an ordinary
+# repos/<id>.git checkout without one for a gate.
+test_helper_path_backstop_relocated_home() {
+  local wt out rc
+  wt=$(make_gate_worktree "$TMP/relocated" nm-personal)
+  : > "$TMP/relocated/nm-personal/state.sqlite"
+  out=$(run_guard_lib "$wt"); rc=$?
+  expect_code 3 "$rc" "helper: relocated-home gate worktree must refuse with the marker unset"
+  assert_contains "$out" "$PATH_MSG" "helper: relocated-home path-backstop refusal message"
+
+  wt=$(make_gate_worktree "$TMP/lookalike" projects)
+  out=$(run_guard_lib "$wt"); rc=$?
+  expect_code 0 "$rc" "helper: repos/<id>.git checkout without state.sqlite must not refuse"
+  assert_not_contains "$out" "$PATH_MSG" "helper: look-alike checkout must not print the backstop refusal"
+  pass "fm-gate-refuse-lib: backstop recognizes a relocated NM_HOME by its state.sqlite"
 }
 
 test_helper_normal_is_noop() {
@@ -529,6 +549,7 @@ test_teardown_refuses_and_admits() {
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
+test_helper_path_backstop_relocated_home
 test_helper_normal_is_noop
 test_helper_lab_home_admits
 test_lab_home_helper

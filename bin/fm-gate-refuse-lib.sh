@@ -21,12 +21,14 @@
 #   1. NO_MISTAKES_GATE set - the durable env marker no-mistakes stamps into every
 #      gate agent. This is the primary signal and covers a relocated NM_HOME.
 #   2. The current worktree's git-common-dir resolves under a no-mistakes gate
-#      repo (.../.no-mistakes/repos/*.git) - the UNSPOOFABLE backstop. It derives
+#      repo (<NM_HOME>/repos/<id>.git) - the UNSPOOFABLE backstop. It derives
 #      from the checkout's real filesystem location, which the agent cannot
 #      relocate without breaking the gate's own git operations, so it still
-#      detects a gate even if the agent tampered NO_MISTAKES_GATE away. Its limit: the
-#      literal-path match only fires for the default NM_HOME (~/.no-mistakes); a
-#      relocated NM_HOME is covered by signal 1.
+#      detects a gate even if the agent tampered NO_MISTAKES_GATE away. The
+#      default NM_HOME matches by its literal .../.no-mistakes/repos/*.git path;
+#      a relocated NM_HOME is recognized by the state.sqlite no-mistakes keeps
+#      at every home root, so <home>/repos/<id>.git counts only when
+#      <home>/state.sqlite exists.
 #
 # A NORMAL firstmate session - a real primary checkout, a real treehouse/Orca
 # crew worktree - has NEITHER signal and is COMPLETELY unaffected: the function
@@ -130,12 +132,15 @@ fm_is_gate_agent() {
     && cd "$(git rev-parse --git-common-dir 2>/dev/null || echo /nonexistent)" 2>/dev/null \
     && pwd -P || true)
   case "$common" in
-    */.no-mistakes/repos/*.git)
-      FM_GATE_REFUSE_REASON='path'
-      FM_GATE_REFUSE_COMMON=$common
-      return 0 ;;
+    */.no-mistakes/repos/*.git) ;;
+    */repos/*.git)
+      [ "${common%/*}" = "${common%/repos/*}/repos" ] \
+        && [ -f "${common%/repos/*}/state.sqlite" ] || return 1 ;;
+    *) return 1 ;;
   esac
-  return 1
+  FM_GATE_REFUSE_REASON='path'
+  FM_GATE_REFUSE_COMMON=$common
+  return 0
 }
 
 # fm_refuse_if_gate_agent: exit FM_GATE_REFUSE_EXIT with a clear stderr message if
