@@ -50,7 +50,7 @@ Handle it start to finish in one turn sequence:
 2. For each task you are about to mutate, claim its lease first: `bin/fm-lease.sh claim <task>`.
    Claim the reserved `backlog` lease around backlog writes (`bin/fm-lease.sh claim backlog`, then `bin/fm-tasks-axi.sh ...`, then release).
    A refused claim means MAIN is acting on that task right now: do not work around it; report the event with what you observed and let the next wake retry.
-3. Handle with real tools: `bin/fm-crew-state.sh <task>` for current state (a status line is a wake event, not current-state truth), `bin/fm-send.sh` for a short steer, `bin/fm-control.sh <task> interrupt|exit|relaunch` for lifecycle, `bin/fm-pr-check.sh <task> <url>` when the task's ready status or `pr=` metadata names the PR's URL, `bin/fm-tasks-axi.sh` for backlog moves, and `bin/fm-teardown.sh <task>` for the ordinary cleanup of a task whose PR has landed or a completed scout under the policies below.
+3. Handle with real tools: `bin/fm-crew-state.sh <task>` for current state (a status line is a wake event, not current-state truth), `bin/fm-send.sh` for a short steer, `bin/fm-control.sh <task> interrupt|exit|relaunch` for lifecycle, `bin/fm-pr-check.sh <task> <url>` when the task's ready status or `pr=` metadata names the PR's URL, `bin/fm-tasks-axi.sh` for backlog moves, and `bin/fm-teardown.sh <task>` for the ordinary cleanup of a task whose PR has landed or a completed scout under the policies below. After every finish and every fleet check, run the ready-work check below before reporting.
 4. Report exactly once per handled event through the report surface the wake names (the fm_branch_report tool, or the `bin/fm-branch-report.sh` command), with the task id, the verdict, and a one-or-two-sentence summary; set silent true only for a routine no-change outcome as defined under "Verdict: routine or captain" below.
    Run each task's cleanup in a separate tool call and use that call's exit status and output for its outcome.
    An allowance diagnostic is not a refusal; report a refusal only when that task's cleanup actually refuses, quoting its reason.
@@ -58,6 +58,11 @@ Handle it start to finish in one turn sequence:
 5. Acknowledge: after the report succeeds, run the exact `--ack-through` command the drain printed as WAKE_ACK_REQUIRED.
 6. Release every lease you claimed: `bin/fm-lease.sh release <task>`.
 A crash after the report but before acknowledgement re-presents the wake, and re-handling may append a second outcome note; that benign over-reporting is deliberately accepted because replay is preferred over loss, and no idempotency machinery exists for it by design.
+
+Ready-work check: re-evaluate the queued backlog after every finish and every fleet check, including heartbeats and landed-task cleanup found by any wake. Check each unit independently for landed dependencies, cleared time gates, captain holds, and an existing live worker; a note, handoff, or comment without a live worker leaves the unit queued.
+Attended, you cannot spawn: report verdict captain through the wake's report surface, naming every ready unit and asking MAIN to dispatch it in the same turn it receives the outcome, before acknowledging that outcome. This is the durable handoff, even for an unsolicited cleanup or heartbeat; a routine note never substitutes for it.
+Away, dispatch ready work only when the recorded away words call for it, using `bin/fm-spawn.sh` under the required leases and the existing spend cap, and confirm a live worker before counting it started. Work outside those words waits for the return; MAIN is parked, so a captain outcome is retained for the return rather than an immediate dispatch handoff.
+Keep captain-held work waiting and do not let a paused, stuck, or review-bound sibling freeze other ready units. Record any blocker, backend refusal, or spend-cap stop in the outcome with its exact reason; it leaves the unit queued and is not a missed dispatch. Do not report a silent no-change review when ready work needs a handoff or has a recorded stop.
 
 A heartbeat wake asks you to review the whole fleet the way MAIN would on an ordinary heartbeat: reconcile suspicious tasks and PR state from the fleet view, update the backlog, and report verdict routine with a one-line summary when nothing changed.
 Set silent true only when that review changed nothing, took no action, and found nothing worth a routine note; omit it or set it false after any successful automatic recovery, backlog reconciliation, or other real routine action.
@@ -97,9 +102,10 @@ Also report verdict captain for:
 Keep an unsolicited routine outcome as verdict routine, including a healthy result that was not requested by the captain.
 Keep an unchanged fleet review silent as instructed above.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
-Attended on the supervision host (no away-posture record, and the wake names the `bin/fm-branch-report.sh` command), a routine outcome opens no MAIN turn, so MAIN learns of it only at its next wake.
-There, also report verdict captain for anything MAIN must act on to move the work forward, such as a local-only branch ready to land, a pull request ready to merge, or a step MAIN said it would take once the work was ready, even when the captain asked not to hear about that work; MAIN, not you, decides what the captain hears.
+Attended (no away-posture record), on both the Pi branch and the supervision host, a routine outcome opens no MAIN turn, so MAIN learns of it only at its next wake.
+Also report verdict captain for anything MAIN must act on to move the work forward, including the ready-work handoff above, a local-only branch ready to land, a pull request ready to merge, or a step MAIN said it would take once the work was ready, even when the captain asked not to hear about that work; MAIN, not you, decides what the captain hears.
 Report that captain outcome once per unchanged situation: an earlier routine outcome that mentioned it does not count, and an earlier captain outcome for the same unchanged situation does.
+For a ready-work handoff, an earlier captain outcome counts only while it remains unprocessed or a live worker now exists; an acknowledged note without a worker does not suppress the next handoff.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.
 
 # PR identity: copy or abstain
