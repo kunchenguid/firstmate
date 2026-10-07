@@ -844,6 +844,16 @@ out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:808
 expect_code 0 "$rc" "a bare NO_PROXY domain suffix bypasses proxy credentials"
 assert_contains "$out" "route=direct" "bare domain suffix is labeled direct"
 
+tmp=$TMP_ROOT/no-proxy-embedded-wildcard; new_case "$tmp"
+out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
+  NO_PROXY='example.*' PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_DIG_MODE=address FM_FAKE_CURL_LOG="$tmp/calls.log" \
+  "$SCRIPT" --host api.example.com 2>&1); rc=$?
+expect_code 2 "$rc" "an embedded NO_PROXY wildcard does not bypass credential refusal"
+assert_contains "$out" "proxy URL carries credentials" "unsupported NO_PROXY pattern keeps proxy credentials refused"
+assert_not_contains "$out" "private:secret" "wildcard refusal never discloses proxy credentials"
+[ ! -s "$tmp/calls.log" ] || fail "an embedded NO_PROXY wildcard allowed a credential-bearing HTTP request"
+
 # --- unknown and malformed input are refusals, never silent guesses ---------
 tmp=$TMP_ROOT/unknown-target; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig "$SCRIPT" nosuchprovider 2>&1); rc=$?
