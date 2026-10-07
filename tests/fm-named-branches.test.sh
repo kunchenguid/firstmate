@@ -215,12 +215,12 @@ test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
   git -C "$proj" remote set-url origin "$TMP_ROOT/spawn/missing.git"
   id=named-spawn-local-only-offline
   FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
-    --branch-name feature/offline --base-branch office >/dev/null
+    --branch-name feature/offline >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
-    --branch-name feature/offline --base-branch office 2>&1); status=$?
+    --branch-name feature/offline 2>&1); status=$?
   assert_not_contains "$out" "could not check whether crew branch feature/offline exists on origin" \
     "a local-only spawn required an unreachable origin for crew collision checking"
   pass "fm-spawn: named base and crew-branch occupancy are refused before launch"
