@@ -4,6 +4,8 @@ The xAI `grok` TUI is Claude-Code-compatible.
 Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, exit on 2026-07-19 with 0.2.103, and folder trust, the training opt-in, and unsent composer delivery on 2026-09-24 with 1.0.41.
 Launch shape: `grok --always-approve "$(cat <brief>)"`.
 
+Grok is reserved for the primary Firstmate session and must never be selected for a crewmate, scout, or secondmate; [`docs/configuration.md`](../../../../../docs/configuration.md#harness-support) owns the supported-role set.
+
 ## Operating facts
 
 | Fact | Value |
@@ -70,9 +72,10 @@ Coverage is `../../../tests/fm-composer-ghost.test.sh` and `../../../tests/fm-ba
 Tmux `#{cursor_y}` may point at the pristine composer's bottom border.
 The shared classifier locates the full box and all content rows, so border cursor and multi-row composers require no adapter offsets.
 
-## Worker turn-end hook
+## Legacy worker turn-end hook
 
-Grok fires `Stop` each turn.
+The worker adapter remains for compatibility and focused tests, but the normal spawn quota preflight refuses Grok crew profiles before allocation; it diverts them to a permitted lane with confirmed runway only when `config/spawn-quota-divert` grants that.
+When that adapter is exercised in a test, Grok fires `Stop` each turn.
 Project hooks require folder trust in `~/.grok/trusted_folders.toml`, which the spawn does not edit, though answering the folder-trust gate above writes it; global `~/.grok/hooks/` is always trusted.
 The spawn installs guarded global `fm-turn-end.json` and `fm-turn-end.sh`.
 They act only when workspace `.fm-grok-turnend` matches the registry under `~/.grok/hooks/fm-turn-end.d/`, then touch the task's `state/<id>.turn-ended` through always-set `GROK_WORKSPACE_ROOT`, which equals the worktree.

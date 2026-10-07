@@ -73,6 +73,10 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Point the spawn quota preflight at a hermetic quota-axi stand-in so no suite
+# reads the host's live quota; a case supplies rows via FM_FAKE_QUOTA_AXI_JSON.
+export FM_QUOTA_AXI_BIN="$ROOT/tests/quota-axi-empty-stub.sh"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

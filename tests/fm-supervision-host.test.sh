@@ -263,6 +263,12 @@ assert_no_re() {  # <regex> <file> <msg>
   ! grep -E -- "$1" "$2" >/dev/null || fail "$3"$'\n'"--- $2 ---"$'\n'"$(cat "$2" 2>/dev/null)"
 }
 
+# A TERMed host retires its arm and successor for up to 10s each, and an arm
+# first lets a starting watcher reach its lock (up to the arm's confirm
+# timeout) before forwarding TERM, so a loaded runner can legitimately take
+# over 20s to stop; wait past that ceiling.
+TERM_STOP_POLLS=450
+
 wait_until() {  # <polls of 0.1s> <command...>
   local limit=$1 i=0
   shift
@@ -1667,7 +1673,7 @@ test_primary_without_a_verified_mirror_runs_away_only() {
   assert_re '^POSTURE: AWAY\.' "$home/engine-call.1" "the away wake must carry the away tail"
   [ ! -s "$home/host.rc" ] || fail "a handled away wake on grok reached main: $(cat "$home/host.out")"
   kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
-  wait_until 200 host_exited "$home" || fail "away grok: the host did not stop on TERM"
+  wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "away grok: the host did not stop on TERM"
   pass "host: a primary with no verified dialog mirror keeps every attended close on main, and its away posture still runs"
 }
 
@@ -1797,7 +1803,7 @@ SH
   wait_until 250 handled_at_least "$home" 1 || fail "mirror boundary: the first wake was not handled: $(cat "$home/state/.supervision-host.log")"
   assert_re '^\[captain\] first ask$' "$home/engine-call.1" "fixture: the first turn did not carry the first dialog"
   kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
-  wait_until 200 host_exited "$home" || fail "mirror boundary: the first host did not stop on TERM"
+  wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "mirror boundary: the first host did not stop on TERM"
 
   printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p2","prompt":"second ask, never handed over"}' > "$home/mirror-seed.2"
   : > "$home/slow-render"
@@ -1822,7 +1828,7 @@ SH
 
   printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p3","prompt":"third ask, turn stopped"}' > "$home/mirror-seed.3"
   kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
-  wait_until 200 host_exited "$home" || fail "mirror boundary: the second handling host did not stop on TERM"
+  wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "mirror boundary: the second handling host did not stop on TERM"
   echo hang > "$home/stub-mode"
   park_after_stop "$home"
   append_status "$home" 'stopped mid-turn'
@@ -1841,7 +1847,7 @@ SH
 
   printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p4","prompt":"fourth ask, turn unreported"}' > "$home/mirror-seed.4"
   kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
-  wait_until 200 host_exited "$home" || fail "mirror boundary: the third handling host did not stop on TERM"
+  wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "mirror boundary: the third handling host did not stop on TERM"
   echo noreport > "$home/stub-mode"
   park_after_stop "$home"
   append_status "$home" 'no report'
@@ -2035,7 +2041,7 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   pid=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
   watcher=$(cat "$home/state/.watch.lock/pid")
   kill -TERM "$pid"
-  wait_until 200 host_exited "$home" || fail "the host did not stop on TERM"
+  wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "the host did not stop on TERM"
   expect_code 143 "$(cat "$home/host.rc")" "a TERMed host must exit 143"
   wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" || fail "a stopped host left its watcher running"
   assert_absent "$home/state/.supervision-host" "a stopped host left its record"
@@ -2102,7 +2108,7 @@ test_silent_outcomes_are_not_relayed_when_the_captain_returns() {
       watcher_live "$home" || fail "$mode: the host did not park on its successor"
       host=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
       kill -TERM "$host"
-      wait_until 200 host_exited "$home" || fail "$mode: the host did not stop on TERM"
+      wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "$mode: the host did not stop on TERM"
     else
       wait_until 250 host_exited "$home" || fail "$mode: the failed turn did not hand the wake to main: $(cat "$home/host.out" 2>/dev/null) $(tail -n 8 "$home/state/.supervision-host.log" 2>/dev/null)"
       assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); this wake is yours$' \
@@ -2481,7 +2487,7 @@ park_outcome() {  # <name> <park-seconds>; sets PARK_OUTCOME to boundary or hand
     PARK_OUTCOME=boundary
   else
     kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
-    wait_until 200 host_exited "$home" || fail "$1: the host did not stop on TERM"
+    wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "$1: the host did not stop on TERM"
     PARK_OUTCOME=handled
   fi
 }
@@ -2516,7 +2522,7 @@ test_park_limit_lets_a_turn_outlive_the_boundary() {
     else
       [ "$want" = handled ] || fail "$name: a turn past the boundary ran without a later limit"
       kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
-      wait_until 200 host_exited "$home" || fail "$name: the host did not stop on TERM"
+      wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "$name: the host did not stop on TERM"
     fi
   done
   pass "host: an owner's later park limit lets a turn outlive the boundary, and no other limit does"
@@ -2582,7 +2588,7 @@ test_first_cycle_status_streams_and_owner_options_reach_it() {
   sleep 3
   host_exited "$home" && fail "a handling successor re-announced the pending episode: $(cat "$home/host.out")"
   kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
-  wait_until 200 host_exited "$home" || fail "stream: the successor host did not stop on TERM"
+  wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "stream: the successor host did not stop on TERM"
   pass "host: the first cycle's status streams once, --restart replaces a stale watcher, and an owner predecessor makes a handling successor"
 }
 
@@ -2816,7 +2822,7 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
   pid=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
   watcher=$(cat "$home/state/.watch.lock/pid")
   kill -TERM "$pid"
-  wait_until 200 host_exited "$home" || fail "held: the host did not stop on TERM"
+  wait_until "$TERM_STOP_POLLS" host_exited "$home" || fail "held: the host did not stop on TERM"
   wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" || fail "held: a stopped host left its watcher running"
   pass "host: an unchanged held outcome reaches the captain once across cadences, and a later decision on the task still does"
 }
@@ -2883,7 +2889,7 @@ test_superseded_host_leaves_the_owner_untouched() {
   fi
   FM_HOME="$home" "$LEASE" check demo 2>/dev/null | grep -q '^branch ' || fail "a superseded host released the owner's branch leases"
   kill -TERM "$owner"
-  wait_until 200 sh -c '! kill -0 "$1" 2>/dev/null && ! kill -0 "$2" 2>/dev/null' _ "$owner" "$watcher" \
+  wait_until "$TERM_STOP_POLLS" sh -c '! kill -0 "$1" 2>/dev/null && ! kill -0 "$2" 2>/dev/null' _ "$owner" "$watcher" \
     || fail "superseded: the owner host did not stop on TERM"
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
