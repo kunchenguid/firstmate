@@ -49,18 +49,21 @@
 # task's done. Teardown's landed-work test remains the complete discard gate.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
-# appends " forge=gerrit shape=squash" to that line, and a forge=forgejo or
-# forge=external block appends " forge=forgejo" or " forge=external". The "Ship branch: <branch>"
-# line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
+# appends " forge=gerrit shape=squash" to that line, a forge=gitlab block
+# appends " forge=gitlab", a forge=forgejo block appends " forge=forgejo", and a
+# forge=external block appends " forge=external". The "Ship branch: <branch>" line
+# under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
-# forge is none|gerrit|forgejo|external and defaults to none;
+# forge is none|gerrit|gitlab|forgejo|external and defaults to none;
 # bin/fm-project-mode.sh's header owns what the registry binding means, and this
-# file owns what each forge changes for a WORKER (docs/gerrit-forge-integration.md
-# is the gerrit design and docs/external-review-forge.md the external one). In
-# the Definition of done, forgejo changes only the CLI a direct-PR worker opens
-# its pull request with: tea instead of gh-axi. A forge composes with
-# the two modes that publish and is refused on local-only, which publishes
-# nothing. On gerrit the worker publishes one squashed change with
+# file owns what each binding changes for a WORKER (docs/gerrit-forge-integration.md
+# is the gerrit design and docs/external-review-forge.md the external one).
+# gitlab and forgejo keep both pull-request contracts and change only
+# their forge tool: the worker uses glab (gitlab) or tea (forgejo) instead of
+# gh-axi to open the merge or pull request, make sure it is not a draft, and
+# report its full URL as the PR URL; none renders the GitHub text unchanged. A
+# forge composes with the two modes that publish and is refused on local-only,
+# which publishes nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
 # that straight away, and no-mistakes first runs the pipeline with its three
 # forge-facing steps skipped and recovers the pipeline's own fix commits into its
@@ -81,10 +84,11 @@
 # `done: review <url> uploaded for review`, accepted on the URL alone, or, when
 # spawn recorded a personal backup remote, only once HEAD is on that remote's
 # backup namespace.
-# The two PR-based blocks require a non-draft pull request before the done
-# report, read back from the forge; a lane that deliberately holds a draft
-# declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
-# monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
+# The two PR-based blocks require a non-draft pull or merge request before the
+# done report, read back from the forge; a lane that deliberately holds a draft
+# declares a paused wait instead. bin/fm-pr-check.sh refuses to arm monitoring
+# on a positive GitHub isDraft or GitLab draft reading when jq is available.
+# bin/fm-pr-merge.sh owns the stricter live merge-time readiness checks.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -123,6 +127,7 @@
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
 # a worker off a remote is exactly the rule that changes when the forge does.
+# fm_ship_rule_forge_tools owns the ordinary ship brief's forge-tool rule.
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-pr-lib.sh"
@@ -161,9 +166,9 @@ EOF
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   local forge=$1 mode=$2 caller=$3
   case "$forge" in
-    none|gerrit|forgejo|external) ;;
+    none|gerrit|gitlab|forgejo|external) ;;
     *)
-      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, or external)" >&2
+      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, gitlab, forgejo, or external)" >&2
       return 1 ;;
   esac
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
@@ -193,8 +198,8 @@ fm_ship_branch_prefix() {  # <branch> <task-id>
 # bin/fm-spawn.sh takes it as --base-branch, refuses a brief whose Base branch
 # lines (fm_brief_base_branches) disagree, and records base_branch= in the task
 # metadata, and every later consumer reads that metadata field. It is
-# refused on local-only, whose landing fast-forwards local main, and on a Gerrit
-# forge, whose publish path targets the change's own branch.
+# refused on local-only, whose landing fast-forwards local main, and on explicit
+# Gerrit or GitLab bindings, whose delivery paths do not support this override.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0
@@ -260,6 +265,23 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
       echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
       return 1
       ;;
+  esac
+}
+
+# The ship brief's third rule names the forge tool. It sits beside rule one
+# because both change with the forge; only gitlab, forgejo, and external differ, so a GitHub
+# or Gerrit brief keeps its text unchanged.
+fm_ship_rule_forge_tools() {  # [<forge>]
+  case "${1:-none}" in
+    gitlab)
+      # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+      printf '%s\n' '3. This project is on GitLab: use `glab` for forge operations (never gh/gh-axi), and chrome-devtools-axi for browser operations.' ;;
+    forgejo)
+      printf '%s\n' '3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations.' ;;
+    external)
+      printf '%s\n' '3. Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations.' ;;
+    *)
+      printf '%s\n' '3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.' ;;
   esac
 }
 
@@ -448,9 +470,35 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
+# The forge-specific phrases of the two pull-request contracts, so a GitLab
+# worker gets glab where a GitHub worker gets gh-axi and every other sentence
+# stays shared. The none values are the GitHub text verbatim.
+fm_dod_pr_forge_phrases() {  # <none|gitlab|forgejo> <branch>
+  if [ "$1" = gitlab ]; then
+    FM_DOD_CONTRACT_FORGE=' forge=gitlab'
+    FM_DOD_FORGE_TOOL_LINE="This project's forge is GitLab: use \`glab\` for every forge operation, never \`gh\` or \`gh-axi\`.
+Wherever this contract says PR, it means your merge request; report it by its full \`https://<host>/<project path>/-/merge_requests/<number>\` URL exactly as glab printed it.
+"
+    FM_DOD_PR_OPEN="open a merge request with \`glab mr create --source-branch $2 --target-branch <default branch> --title <title> --description <description> --yes\` (never \`--draft\`)"
+    FM_DOD_PR_READY_CHECK="read the merge request back from the forge and confirm it is not a draft (\`glab mr view <number> -F json | jq .draft\` must print \`false\`, where <number> is the MR number from your merge request URL); if it is a draft, mark it ready with \`glab mr update <number> --ready\`."
+    return 0
+  fi
+  if [ "$1" = forgejo ]; then
+    FM_DOD_CONTRACT_FORGE=' forge=forgejo'
+    FM_DOD_FORGE_TOOL_LINE=
+    FM_DOD_PR_OPEN="open a PR with \`tea\`"
+    FM_DOD_PR_READY_CHECK="read the PR back from the forge and confirm it is not a draft (\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
+    return 0
+  fi
+  FM_DOD_CONTRACT_FORGE=
+  FM_DOD_FORGE_TOOL_LINE=
+  FM_DOD_PR_OPEN="open a PR with \`gh-axi\`"
+  FM_DOD_PR_READY_CHECK="read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
+}
+
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_consent='' adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   if [ -n "$consent" ]; then
@@ -459,12 +507,6 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
       return 1
     fi
     contract_consent=" upstream-consent=$consent"
-  fi
-  draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
-  if [ "$forge" = forgejo ]; then
-    contract_forge=' forge=forgejo'
-    forge_cli=tea
-    draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
   fi
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
@@ -551,14 +593,15 @@ EOF
       printf '%s\n' "$adapter"
       ;;
     direct-PR:*)
+      fm_dod_pr_forge_phrases "$forge" "$branch"
       cat <<EOF
 # Definition of done
-Delivery contract: mode=direct-PR$contract_forge$contract_consent
+Delivery contract: mode=direct-PR$FM_DOD_CONTRACT_FORGE$contract_consent
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
-Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
+${FM_DOD_FORGE_TOOL_LINE}The task is complete only when committed on your branch.
+When it is implemented and committed, push your branch and $FM_DOD_PR_OPEN that is ready for review, not a draft$pr_base.
+Before you report done, $FM_DOD_PR_READY_CHECK
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
@@ -580,11 +623,12 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
       ;;
     no-mistakes:*)
+      fm_dod_pr_forge_phrases "$forge" "$branch"
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes$contract_forge$contract_consent
+Delivery contract: mode=no-mistakes$FM_DOD_CONTRACT_FORGE$contract_consent
 Ship branch: $branch
-The task is complete only when committed on your branch.
+${FM_DOD_FORGE_TOOL_LINE}The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
@@ -593,7 +637,7 @@ EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), $FM_DOD_PR_READY_CHECK
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
