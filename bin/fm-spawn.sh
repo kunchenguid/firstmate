@@ -3851,6 +3851,7 @@ else
     HERDR_PROJECTED=0
     HERDR_REPO_PARENT_WORKSPACE_ID=""
     HERDR_REPO_PARENT_CREATED=""
+    HERDR_REPO_PARENT_LABEL=""
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -3945,18 +3946,25 @@ else
             # presentation floor or without worktree groups stays quiet.
             # The ensure runs in this shell so it can also report whether it
             # created the parent just now; a parent this spawn created is
-            # closed again below if the ordering move that must put this task
-            # ahead of it does not land. The attach itself happens after the
-            # pane's root shell has provably entered the leased task
-            # worktree, still under this lock.
+            # removed again below if the ordering move that must put this
+            # task ahead of it does not land. Before that, a parent an
+            # earlier spawn created here but could not remove, recorded per
+            # home, gets the same focus-preserving removal retried; a retry
+            # refused again keeps this task flat too and touches nothing
+            # else. The attach itself happens after the pane's root shell
+            # has provably entered the leased task worktree, still under
+            # this lock.
             if fm_backend_herdr_worktree_group_capable "$HERDR_SES"; then
-              if fm_backend_herdr_projection_repo_parent_ensure \
-                "$HERDR_SES" "$PROJ_ABS" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" >/dev/null; then
+              if fm_backend_herdr_projection_repo_parent_retry "$STATE" "$HERDR_SES" "$PROJ_ABS" \
+                && fm_backend_herdr_projection_repo_parent_ensure \
+                  "$HERDR_SES" "$PROJ_ABS" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" >/dev/null; then
                 HERDR_REPO_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_REPO_PARENT_ID
                 HERDR_REPO_PARENT_CREATED=$FM_BACKEND_HERDR_REPO_PARENT_CREATED
+                HERDR_REPO_PARENT_LABEL=$FM_BACKEND_HERDR_REPO_PARENT_LABEL
               else
                 HERDR_REPO_PARENT_WORKSPACE_ID=""
                 HERDR_REPO_PARENT_CREATED=""
+                HERDR_REPO_PARENT_LABEL=""
               fi
             else
               case $? in
@@ -4001,12 +4009,19 @@ else
               # pane close and never a workspace close, and the task stays in
               # the flat row the ordering warning already announced. An
               # adopted or pre-existing parent is never touched; a refused
-              # removal only leaves the parent standing, with its own warning
-              # (docs/herdr-backend.md "Presentation spaces"). The parent id
-              # is cleared on every not-placed outcome, removed or refused,
-              # so the later attach is skipped and the task stays flat.
+              # removal leaves the parent standing with its own warning and
+              # is recorded per home so the next spawn on this repository
+              # retries it (docs/herdr-backend.md "Presentation spaces").
+              # The parent id is cleared on every not-placed outcome,
+              # removed or refused, so the later attach is skipped and the
+              # task stays flat.
               if fm_backend_herdr_projection_repo_parent_close_fresh "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED"; then
                 echo "warning: herdr repo grouping closed the repo parent $HERDR_REPO_PARENT_CREATED it created for this task because the task could not be placed ahead of it; leaving this task's space flat" >&2
+              elif fm_backend_herdr_projection_repo_parent_retry_record \
+                "$STATE" "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED" "$HERDR_REPO_PARENT_LABEL" "$PROJ_ABS"; then
+                echo "warning: herdr repo grouping recorded the repo parent $HERDR_REPO_PARENT_CREATED left standing so the next spawn on this repository retries removing it" >&2
+              else
+                echo "warning: herdr repo grouping could not record the repo parent $HERDR_REPO_PARENT_CREATED left standing; the next spawn on this repository will not retry removing it" >&2
               fi
               HERDR_REPO_PARENT_WORKSPACE_ID=""
               HERDR_REPO_PARENT_CREATED=""

@@ -4115,6 +4115,128 @@ SH
   pass "herdr repo grouping: a fresh parent whose first child did not land ahead of it is removed by exact id through its seeded pane while still childless, and later spawns order and bind normally"
 }
 
+test_refused_fresh_parent_removal_is_retried_by_the_next_spawn() {
+  local state clone clone_real dir log resp fb out status record stub_env
+  local wt_one tabs_one panes_one pane_info pane_gone list_with list_without list_relabelled
+  state="$TMP_ROOT/retry-state"; mkdir -p "$state"
+  clone="$TMP_ROOT/retry-clone"; mkdir -p "$clone"; clone_real=$(cd "$clone" && pwd -P)
+  record="$state/.herdr-repo-parent-retry"
+  wt_one='{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"}]}}'
+  tabs_one='{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false}]}}'
+  panes_one='{"result":{"panes":[{"pane_id":"wF:t1:p1","tab_id":"wF:t1","workspace_id":"wF"}]}}'
+  pane_info='{"result":{"pane":{"pane_id":"wF:t1:p1","tab_id":"wF:t1","workspace_id":"wF"}}}'
+  pane_gone='{"error":{"code":"pane_not_found","message":"pane not found"}}'
+  list_with='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wF","label":"foo","focused":false},{"workspace_id":"w5","label":"└ flat · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
+  list_without='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"w5","label":"└ flat · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
+  list_relabelled='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wF","label":"renamed by a human","focused":false}]}}'
+  cat > "$TMP_ROOT/retry-stubs.sh" <<'SH'
+fm_backend_herdr_emptying_close_plan() { printf 'plain\n'; }
+fm_backend_herdr_projection_focus_restore() { return 0; }
+fm_backend_herdr_projection_focus_snapshot() { printf 'w1\tw1:t1'; }
+SH
+  stub_env=". \"\$0/bin/backends/herdr.sh\"; . \"$TMP_ROOT/retry-stubs.sh\""
+
+  # The record names exactly one parent per session and clone, survives a
+  # second identical record, and is read back by the clone's real path.
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2"' "$ROOT" "$state" "$clone" \
+    || fail "recording the refused parent failed"
+  [ "$(grep -c . "$record")" = 1 ] || fail "recording the same refused parent twice left $(grep -c . "$record") lines"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")
+  [ "$out" = $'wF\tfoo' ] || fail "the refused parent lookup returned '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$TMP_ROOT")
+  [ -z "$out" ] || fail "a lookup for another clone returned '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" other "$2"' "$ROOT" "$state" "$clone")
+  [ -z "$out" ] || fail "a lookup for another session returned '$out'"
+
+  # Nothing recorded for this clone: the next spawn asks Herdr nothing.
+  dir="$TMP_ROOT/retry-none"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$TMP_ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a retry with nothing recorded failed (status $status): $out"
+  [ -z "$out" ] || fail "a retry with nothing recorded printed: $out"
+  [ ! -s "$log" ] || fail "a retry with nothing recorded called Herdr: $(cat "$log")"
+
+  # The recorded parent is still standing, still labelled, still childless:
+  # the next spawn removes it through the same focus-preserving pane path,
+  # says so once, forgets the record, and the spawn continues normally.
+  dir="$TMP_ROOT/retry-succeeds"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$list_with" > "$resp/1.out"
+  printf '%s\n' "$wt_one" > "$resp/2.out"
+  printf '%s\n' "$tabs_one" > "$resp/3.out"
+  printf '%s\n' "$panes_one" > "$resp/4.out"
+  printf '%s\n' "$pane_info" > "$resp/5.out"
+  printf '%s\n' "$pane_gone" > "$resp/7.out"
+  printf '%s\n' "$list_without" > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$clone" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the retried removal of the recorded parent failed (status $status): $out"
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "the retried removal did not warn exactly once: $out"
+  assert_contains "$out" "removed the repo parent wF" "the retried removal did not say which parent it removed: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fwF:t1:p1' "the retried removal did not close the parent's seeded pane"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "the retried removal used a workspace close"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' "the retried removal renamed a workspace"
+  [ "$(grep -c $'\x1fpane\x1fclose\x1f' "$log")" = 1 ] || fail "the retried removal closed more than the parent's seeded pane"
+  [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
+    || fail "a successful retry kept the record"
+
+  # Refused again: one warning, the record stays for the spawn after this
+  # one, exactly one attempt, nothing else touched, and status 1 tells the
+  # spawn to keep this task flat.
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2"' "$ROOT" "$state" "$clone"
+  dir="$TMP_ROOT/retry-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$list_with" > "$resp/1.out"
+  printf '%s\n' "$wt_one" > "$resp/2.out"
+  printf '%s\n' "$tabs_one" > "$resp/3.out"
+  printf '%s\n' "$panes_one" > "$resp/4.out"
+  printf '%s\n' "$pane_info" > "$resp/5.out"
+  printf '%s\n' '{"error":{"code":"pane_close_refused","message":"refused"}}' > "$resp/6.err"
+  printf '%s\n' 1 > "$resp/6.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$clone" 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "a retry refused again did not report status 1 (status $status): $out"
+  assert_contains "$out" "next spawn" "a retry refused again did not say the next spawn retries: $out"
+  assert_contains "$out" "flat" "a retry refused again did not say this task stays flat: $out"
+  [ "$(grep -c $'\x1fpane\x1fclose\x1f' "$log")" = 1 ] || fail "a retry refused again did not stop after one attempt"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "a retry refused again fell back to a workspace close"
+  [ "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" = $'wF\tfoo' ] \
+    || fail "a retry refused again dropped the record"
+
+  # The recorded parent is gone (a human closed it): forget it silently.
+  dir="$TMP_ROOT/retry-gone"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$list_without" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$clone" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a retry for a parent that is already gone failed (status $status): $out"
+  [ -z "$out" ] || fail "a retry for a parent that is already gone warned: $out"
+  assert_not_contains "$(cat "$log")" $'close' "a retry for a parent that is already gone closed something"
+  [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
+    || fail "a retry for a parent that is already gone kept the record"
+
+  # The id now carries another label: not the parent this home created any
+  # more, so it is never touched and the record is dropped with one warning.
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2"' "$ROOT" "$state" "$clone"
+  dir="$TMP_ROOT/retry-relabelled"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$list_relabelled" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$clone" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a retry for a relabelled workspace failed (status $status): $out"
+  assert_contains "$out" "no longer" "a retry for a relabelled workspace did not explain why it is left alone: $out"
+  assert_not_contains "$(cat "$log")" $'close' "a retry for a relabelled workspace closed something"
+  [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
+    || fail "a retry for a relabelled workspace kept the record"
+  pass "herdr repo grouping: a refused fresh-parent removal is recorded and the next spawn on that repository retries it through the same pane path, forgetting the record once the parent is gone and otherwise warning once and keeping that task flat"
+}
+
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
   local dir state home other_home home_real journal legacy token label out mutation_log
   dir="$TMP_ROOT/projection-reclaim-refusals"; state="$dir/state"; home="$dir/home"; other_home="$dir/other-home"
@@ -6631,6 +6753,7 @@ test_attach_worktree_requires_exact_open_workspace_and_already_open
 test_projection_order_repo_parent_counts_as_home_block_member
 test_live_binding_accepts_repo_parent_between_home_and_child
 test_fresh_repo_parent_is_closed_when_its_first_child_is_not_placed
+test_refused_fresh_parent_removal_is_retried_by_the_next_spawn
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
