@@ -41,6 +41,13 @@ add_task parked-one scout 250000 5000 "state: parked · source: run-step · park
 add_task mate secondmate 400000 90000 "state: done · source: status-log"
 add_task gone-pr ship none 0 "state: done · source: run-step · PR merged"
 
+# Another home's delivered task, resident and with a readable state, that this
+# home's listing must never pick up.
+mkdir -p "$TMP_ROOT/other/state" "$TMP_ROOT/wt/other-home"
+fm_write_meta "$TMP_ROOT/other/state/other-home.meta" "kind=ship" "worktree=$TMP_ROOT/wt/other-home"
+echo "100$RANDOM 900000 9000 $TMP_ROOT/wt/other-home" >> "$TMP_ROOT/procs"
+echo "other-home=state: done · source: run-step · PR open" >> "$TMP_ROOT/states"
+
 run_list() {
   FM_HOME="$HOME_DIR" FM_RESIDENT_PROC_TABLE="$TMP_ROOT/procs" \
     FM_RESIDENT_CREW_STATE="$TMP_ROOT/crew-state" FM_FAKE_STATES="$TMP_ROOT/states" \
@@ -59,9 +66,12 @@ order=$(printf '%s\n' "$OUT" | grep -E '^[a-z-]+  kind=' | awk '{print $1}' | tr
 [ "$order" = "big-pr mate mid-unread mid-failed parked-one empty-state small-run gone-pr " ] \
   || fail "ordering by memory wrong: $order"
 
-# Terminal-but-held ship work is flagged safe, in words.
+# Delivered ship work is flagged safe, in words; a failed run is flagged for
+# release only once no retry is planned, since its state does not record that.
 row big-pr | grep -q 'SAFE TO RELEASE: work delivered' || fail "done ship not flagged"
-row mid-failed | grep -q 'SAFE TO RELEASE: the run failed' || fail "failed run not flagged"
+row mid-failed | grep -q '>> run failed - confirm no retry is planned before releasing' \
+  || fail "failed run not flagged: $(row mid-failed)"
+row mid-failed | grep -q 'SAFE TO RELEASE' && fail "failed run asserted safe without a retry record"
 
 # A running task is never flagged; neither is a parked scout or a secondmate.
 for id in small-run parked-one mate; do
@@ -84,8 +94,9 @@ row gone-pr | grep -q 'memory=not found' || fail "absent process not shown"
 sort -u "$TMP_ROOT/calls" | wc -l | grep -q '^8$' || fail "did not read each task's state once"
 [ -z "$(find "$TMP_ROOT/wt" -type f)" ] || fail "worktrees touched"
 
-# Only this home's records: an id outside the state dir is never listed.
+# Only this home's records: another home's task is never listed or read.
 printf '%s\n' "$OUT" | grep -q 'other-home' && fail "foreign task listed"
+grep -qx 'other-home' "$TMP_ROOT/calls" && fail "foreign task state read"
 
 # Real process table: a real agent-named process in a worktree is found.
 mkdir -p "$TMP_ROOT/real/wt" "$TMP_ROOT/real/state"
@@ -98,5 +109,20 @@ real=$(FM_HOME="$TMP_ROOT/real" FM_RESIDENT_CREW_STATE="$TMP_ROOT/crew-state" \
   FM_FAKE_STATES="$TMP_ROOT/states" FM_FAKE_CALLS="$TMP_ROOT/calls" bash "$LIST")
 kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 printf '%s\n' "$real" | grep -q 'live  kind=ship  memory=[0-9]* MB' || fail "real process not found: $real"
+
+# A node-bundle harness (Gemini: comm is the interpreter, identity in argv[1])
+# is found from its arguments, not its kernel name.
+mkdir -p "$TMP_ROOT/node/wt" "$TMP_ROOT/node/state" "$TMP_ROOT/node/bin"
+cp "$(command -v bash)" "$TMP_ROOT/node/bin/node"
+printf 'read -t 30 x <> /dev/zero\n' > "$TMP_ROOT/node/bin/gemini"
+fm_write_meta "$TMP_ROOT/node/state/bundle.meta" "kind=ship" "worktree=$TMP_ROOT/node/wt"
+( cd "$TMP_ROOT/node/wt" && exec "$TMP_ROOT/node/bin/node" "$TMP_ROOT/node/bin/gemini" ) &
+pid=$!
+sleep 1
+real=$(FM_HOME="$TMP_ROOT/node" FM_RESIDENT_CREW_STATE="$TMP_ROOT/crew-state" \
+  FM_FAKE_STATES="$TMP_ROOT/states" FM_FAKE_CALLS="$TMP_ROOT/calls" bash "$LIST")
+kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+printf '%s\n' "$real" | grep -q 'bundle  kind=ship  memory=[0-9]* MB  running=0m' \
+  || fail "node-bundle harness not found: $real"
 
 pass "fm-resident-agents"

@@ -24,15 +24,17 @@
 # Flags, derived only from the reconciled state:
 #   SAFE TO RELEASE (work delivered)  - a ship task whose state is done: its work
 #       reached a pull request or ready branch and is waiting on a human.
-#   SAFE TO RELEASE (run not retried) - a ship or scout task whose state is
-#       failed: the run is recorded as failed and nothing will retry it.
+#   run failed - confirm no retry is planned before releasing - a ship or
+#       scout task whose state is failed. A failed state does not record whether
+#       anyone will retry the run, so this is never flagged safe on its own.
 #   unknown                            - state or memory could not be read; an
 #       unreadable state is not a terminal one, so it is never flagged safe.
 # A running, parked, blocked, or paused task and every secondmate carries no
 # flag. A release preserves every local copy and commit.
 #
 # Memory is read from the process table of this machine, matching an agent
-# process (fm_agent_process_classify_name) whose cwd is the recorded worktree.
+# process (fm_agent_process_classify, from its name, argv[0], and arguments)
+# whose cwd is the recorded worktree.
 # Remote secondmates have no local process and are listed as remote, unflagged.
 #
 # usage: fm-resident-agents.sh
@@ -67,15 +69,27 @@ process_table() {
     cat "$FM_RESIDENT_PROC_TABLE" 2>/dev/null
     return 0
   fi
-  local pid rss etimes comm cwd
-  LC_ALL=C ps -A -o pid=,rss=,etimes=,comm= 2>/dev/null \
-    | while read -r pid rss etimes comm; do
+  local pid rss secs comm args cwd
+  {
+    LC_ALL=C ps -A -o pid=,args= 2>/dev/null
+    echo --
+    LC_ALL=C ps -A -o pid=,rss=,etime=,comm= 2>/dev/null
+  } | awk '
+      $0 == "--" { rows = 1; next }
+      !rows { p = $1; sub(/^[ \t]*[0-9]+[ \t]*/, ""); args[p] = $0; next }
+      { c = $0; sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[^ \t]+[ \t]+/, "", c)
+        e = $3; d = 0
+        if (index(e, "-")) { d = substr(e, 1, index(e, "-") - 1); e = substr(e, index(e, "-") + 1) }
+        n = split(e, t, ":"); s = 0
+        for (i = 1; i <= n; i++) s = s * 60 + t[i]
+        printf "%s\t%s\t%d\t%s\t%s\n", $1, $2, d * 86400 + s, c, args[$1] }' \
+    | while IFS="$(printf '\t')" read -r pid rss secs comm args; do
         [ -n "$comm" ] || continue
-        [ "$(fm_agent_process_classify_name "$comm")" = agent ] || continue
+        [ "$(fm_agent_process_classify "$comm" "${args%%[[:space:]]*}" "$args" "$pid")" = agent ] || continue
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || cwd=$(
           lsof -a -d cwd -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
         [ -n "$cwd" ] || continue
-        printf '%s %s %s %s\n' "$pid" "$rss" "$etimes" "$cwd"
+        printf '%s %s %s %s\n' "$pid" "$rss" "$secs" "$cwd"
       done
 }
 
@@ -129,14 +143,14 @@ EOF
     ship:done)
       flag="SAFE TO RELEASE: work delivered, its pull request or ready branch is waiting on a human; releasing keeps every local copy and commit" ;;
     ship:failed|scout:failed)
-      flag="SAFE TO RELEASE: the run failed and is recorded as not being retried; releasing keeps every local copy and commit" ;;
+      flag="run failed - confirm no retry is planned before releasing; releasing keeps every local copy and commit" ;;
     *:unknown)
       flag="unknown: state could not be read, so this is not flagged safe to release" ;;
   esac
 
   if [ -z "$rss" ]; then
     memkb=-1; mem="not found"; ageout="-"
-    # Nothing is resident to release, so a safe-to-release flag would mislead.
+    # Nothing is resident to release, so a release flag would mislead.
     [ "$state" = unknown ] || flag=""
   else
     memkb=$rss; mem=$(fmt_mem "$rss"); ageout=$(fmt_age "${age:-0}")
