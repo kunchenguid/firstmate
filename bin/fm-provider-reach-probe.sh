@@ -465,7 +465,6 @@ old_ifs=$IFS; IFS=,
 for no_proxy_entry in $no_proxy_list; do
   no_proxy_entry=${no_proxy_entry//[[:space:]]/}
   [ -n "$no_proxy_entry" ] || continue
-  if [ "$no_proxy_entry" = '*' ]; then no_proxy_bypass=1; continue; fi
   entry_port=''
   case "$no_proxy_entry" in
     \[*\]*)
@@ -482,8 +481,10 @@ for no_proxy_entry in $no_proxy_list; do
     continue
   fi
   entry_host=${entry_host#.}
+  # Quote the entry in the suffix pattern: NO_PROXY values are data, not
+  # shell globs. This accepts literal exact hosts and domain suffixes only.
   case "$proxy_host" in
-    "$entry_host"|*.$entry_host) no_proxy_bypass=1 ;;
+    "$entry_host"|*."$entry_host") no_proxy_bypass=1 ;;
   esac
 done
 IFS=$old_ifs
