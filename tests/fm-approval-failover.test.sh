@@ -17,6 +17,17 @@ for harness in codex claude; do
   pass "$harness classifier requires concrete refusal evidence, not generic auth errors"
 done
 
+# Match full marker byte sequences even without multibyte locale semantics.
+for marker in '›' '>' '❯'; do
+  screen=$(printf 'Would you like to run the following command?\n%s 1. Yes, proceed (y)\n' "$marker")
+  verdict=$(printf '%s\n' "$screen" | LC_ALL=C "$CMD" classify codex) || fail "C locale missed the complete $marker approval modal"
+  [ "$verdict" = codex-approval-prompt ] || fail 'C locale emitted the wrong approval verdict'
+  if printf '%s 1. Yes, proceed (y)\n' "$marker" | LC_ALL=C "$CMD" classify codex; then
+    fail 'C locale accepted a selection marker without the approval question'
+  fi
+done
+pass 'Codex approval evidence matches full markers under LC_ALL=C without accepting partial evidence'
+
 # Substitute backend and lifecycle collaborators, not the failover owner. Its
 # executable still performs the evidence check and real atomic filesystem write.
 BIN="$TMP_ROOT/bin"
