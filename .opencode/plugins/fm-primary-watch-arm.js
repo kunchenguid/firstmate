@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { OpenCodeLifecycleAdapter, QUIESCENT } from "./lib/fm-opencode-lifecycle-adapter.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
@@ -485,10 +486,9 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   };
 
   return {
-    event: async ({ event }) => {
-      if (event.type !== "session.idle") return;
-      const sessionID = event.properties?.sessionID;
-      if (!sessionID) return;
+    quiescent: async (signal) => {
+      if (signal?.type !== QUIESCENT || !signal.sessionID) return;
+      const sessionID = signal.sessionID;
       void ensureArm(paths, sessionID, client);
     },
   };
@@ -511,9 +511,11 @@ export default {
       worktree: ctx.location?.worktree,
     });
     const controller = new AbortController();
+    const lifecycle = new OpenCodeLifecycleAdapter();
     const eventTask = (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        await hooks.event({ event: { ...event, properties: event.data } });
+        const signal = lifecycle.normalize(event);
+        if (signal) await hooks.quiescent(signal);
       }
     })().catch(() => {});
     return async () => {

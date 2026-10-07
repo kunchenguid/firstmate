@@ -48,6 +48,7 @@ The live Herdr guard is `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 ../../../tests/fm-herdr-
 
 The tracked primary plugins use the OpenCode 2 default plugin definition (`id` plus `setup`) and subscribe through `ctx.event.subscribe`.
 Their adapter maps v2 `event.data` into the legacy handler event shape; the contract test is `../../../../tests/fm-opencode-v2-plugin-contract.test.sh`.
+The watcher adapter maps legacy `session.idle` and v2 execution terminal events into the normalized `QUIESCENT` signal before the watcher handler sees them.
 `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
 Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and uses `client.session.promptAsync` to force one follow-up turn when `../../../bin/fm-turnend-guard.sh` returns 2.
 The follow-up was verified in the interactive TUI.
