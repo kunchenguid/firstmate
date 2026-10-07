@@ -277,8 +277,10 @@ if [ -n "$PROMOTE_PROJECT" ]; then
   refuse_impossible_forge_posture || exit 1
 fi
 CLI_BASE=$BASE_BRANCH
-BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | head -n 1)
+BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
 fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
+# The CLI value gets the same mode/forge validation as the recorded one.
+fm_base_branch_valid "$CLI_BASE" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
 # The same self-repository publication gate bin/fm-spawn.sh applies to a fresh
 # ship spawn runs here on the recorded project: a promoted scout reaches no
 # greater upstream authority than the spawn path would grant.
