@@ -76,6 +76,9 @@
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
 #              that no longer resolves or is signed out refuses before the old
 #              agent stops.
+#              The same pre-stop refusal applies to this home's worker tool
+#              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
+#              replacement runtime that cannot hide the listed tools.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -176,6 +179,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-exclude-tools-lib.sh
+. "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -199,6 +204,11 @@ control_cleanup() {
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
+  fi
+  # Remove the dialog file while the lock is still held: once it is released,
+  # the next lifecycle command for this task writes the same path.
+  if [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    rm -f "$FM_COMPOSER_DIALOG_SINK"
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -313,6 +323,11 @@ trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
+# do_exit runs in a command substitution. That subshell does not run this
+# EXIT trap, so the parent has to hold the path the trap removes. Set it
+# only once the lock is held: a process that loses the lock runs the same
+# trap, and would remove the file the lock holder is reading.
+FM_COMPOSER_DIALOG_SINK=$STATE/$ID.composer-dialog
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
@@ -388,6 +403,13 @@ wait_agent_state() {  # <timeout> <wanted>...
 require_state_verified_backend() {  # <verb>
   fm_control_backend_state_verified "$BACKEND" && return 0
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
+}
+
+# refuse_blocking_prompt: the screen is a dialog a confirming Enter would
+# answer. Name it and stop. Do not type Escape or an option: both dismiss
+# or choose.
+refuse_blocking_prompt() {  # <dialog-name>
+  die "task $ID is blocked on a prompt: $1. Refusing to type Enter into it."
 }
 
 # rendered_matches <ere>: whether any row of the visible viewport matches.
@@ -548,16 +570,72 @@ do_interrupt() {
   printf '%s cancel=%s' "$proof" "$cancel"
 }
 
+# Drop busy_gen from the task record when it still names <gen>.
+# fm-busy-event.sh owns the sidecar and the record; fm_backlog_atomic_transition
+# publish owns the task record. Clearing the line inside the busy writer would
+# take the task-record lock that teardown and spawn already hold; the busy
+# writer is their child process, so it would wait on a live holder that is
+# itself waiting on the child, and neither would ever proceed.
+clear_retired_meta_busy_gen() {  # <gen>
+  local gen=$1 meta="$STATE/$ID.meta" lock tmp current line
+  [ -n "$gen" ] || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  if ! declare -F fm_backlog_atomic_transition >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  fi
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  current=$(fm_meta_get "$meta" busy_gen)
+  if [ "$current" != "$gen" ]; then
+    fm_lock_release "$lock"
+    return 0
+  fi
+  tmp=$(mktemp "$STATE/.$ID.meta.retire.XXXXXX") || {
+    fm_lock_release "$lock"
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      busy_gen=*) ;;
+      *)
+        printf '%s\n' "$line" >> "$tmp" || {
+          rm -f "$tmp"
+          fm_lock_release "$lock"
+          return 1
+        }
+        ;;
+    esac
+  done < "$meta" || {
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  }
+  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+}
+
 retire_busy_incarnation() {
+  local gen=
   if [ -f "$STATE/$ID.busy-gen" ]; then
-    "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --current-gen >/dev/null 2>&1 || true
+    gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
+    if [ -n "$gen" ] \
+      && "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$gen" >/dev/null 2>&1; then
+      clear_retired_meta_busy_gen "$gen" || true
+    fi
   fi
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
+  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -624,8 +702,16 @@ do_exit() {
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
   fi
+  : > "$FM_COMPOSER_DIALOG_SINK" \
+    || die "task $ID's dialog check could not be recorded"
   composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
     || composer_state=unknown
+  # The classify that filled the sink ran in a subshell, so read the file
+  # rather than a function that subshell sourced.
+  if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
+    refuse_blocking_prompt "$dialog"
+  fi
   case "$composer_state" in
     empty) ;;
     pending)
@@ -645,7 +731,24 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
+  # The submitting Enter can open the picker. The agent is still alive, and
+  # another Enter would confirm the selected row. A dead agent may leave the
+  # same text behind; that is not a prompt still waiting.
+  if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
+    if [ "$(agent_state)" != dead ]; then
+      refuse_blocking_prompt "$dialog"
+    fi
+  fi
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+    # A submit can return before any read sees the picker: a native busy
+    # verdict needs no composer read, and a cleared composer can be read
+    # before the picker renders. Read the screen once more here.
+    : > "$FM_COMPOSER_DIALOG_SINK" || true
+    fm_backend_composer_state "$BACKEND" "$T" "$LABEL" >/dev/null 2>&1 || true
+    if [ -s "$FM_COMPOSER_DIALOG_SINK" ]; then
+      refuse_blocking_prompt "$(cat "$FM_COMPOSER_DIALOG_SINK")"
+    fi
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
   # The incarnation is over: retire its busy wiring so no stale record or
@@ -858,6 +961,12 @@ resolve_relaunch_profile() {
   [ "$account_model" != default ] || account_model=
   fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
+  # Likewise config/crew-exclude-tools: a malformed file, or a replacement
+  # runtime that cannot hide the listed tools, refuses here, before the old
+  # agent stops. Secondmate agents are not covered.
+  if [ "$KIND" != secondmate ]; then
+    fm_exclude_tools_check "$TARGET_HARNESS" 0 "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" >/dev/null || return 1
+  fi
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch

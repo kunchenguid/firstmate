@@ -1322,6 +1322,24 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9.0 proves and submits a typed /exit behind its command popup
 ```
 
+### Claude background-task exit picker
+
+Measured 2026-10-05 against Claude Code 2.1.289 in an isolated tmux session.
+The Herdr lab was not running, so the Herdr path is covered by the existing fakes.
+Typing `/exit` while a background shell is still running opens a picker whose selected row is "Exit and stop tasks" and whose footer is "Enter to confirm · Esc to cancel".
+That screen still classifies as pending, the same verdict as unsubmitted composer text.
+A second Enter would confirm the selected row.
+The picker is recognised by its recorded structure only: the heading on its own line, then the selected row alone on its row, with `Enter to confirm · Esc to cancel` as the last non-blank row.
+The same strings quoted above a normal composer, as a diff, this note, or a test fixture shows them, are not a picker.
+Submit retries now stop after the Enter that opened the picker and report unknown.
+A typed submit to a pane that already shows the picker types nothing and sends no Enter.
+Exit reports that the worker is blocked on the Claude background-task exit picker and does not type another Enter.
+A submit can return before any read sees the picker, so exit reads the screen once more when its wait for the agent to stop times out, and names the picker there too.
+Exit does not report a stopped agent whose pane still shows the picker text as blocked on a prompt.
+The watcher does not read the picker: a pane parked on it keeps the ordinary stale triage.
+No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
+Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
@@ -1464,7 +1482,10 @@ ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session
 ```
 
 The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
-One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
+One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention remains a deliberate hard refusal by default rather than a flat fallback, which default-on makes reachable from any Herdr home.
+Callers that need concurrent recoveries to serialize can pass `fm-spawn.sh --herdr-resume-lock-wait`.
+The flag applies to a fresh ship or scout spawn, and the multi-task path forwards it to each per-pair spawn.
+It has no effect on `--relaunch` and `--secondmate`, because those paths take no exact-resume presentation-order lock.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:

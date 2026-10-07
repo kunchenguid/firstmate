@@ -29,6 +29,9 @@
 # is a project fact rather than a per-task decision, so promotion takes it from
 # there instead of asking firstmate to remember it.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# A scout spawned on a named base records base_branch= in its meta; promotion
+# keeps that base as the ship's starting point and pull-request target, and
+# refuses a mode that cannot carry one (bin/fm-dod-lib.sh fm_base_branch_valid).
 # There is no --forge flag here: the binding comes from the registry, and for a
 # task record naming no project it is none. bin/fm-brief.sh takes --forge instead
 # because that script has no registry access at all, and bin/fm-spawn.sh checks
@@ -195,6 +198,10 @@ if [ -n "$PROMOTE_PROJECT" ]; then
   FORGE=${PROMOTE_STANDING_FORGE:-none}
   refuse_impossible_forge_posture || exit 1
 fi
+BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | head -n 1)
+fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
+PROMOTE_BASE_WORDS='default-branch base'
+[ -z "$BASE_BRANCH" ] || PROMOTE_BASE_WORDS="copy of the base branch \`$BASE_BRANCH\`"
 # An unbound project keeps the exact wording it always had.
 PROMOTE_FORGE_WORDS=
 [ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
@@ -237,7 +244,7 @@ IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`$BRANCH_Q\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
-3. Return to a clean default-branch base, then create your branch: \`git checkout -b $BRANCH_Q --\`.
+3. Return to a clean $PROMOTE_BASE_WORDS, then create your branch: \`git checkout -b $BRANCH_Q --\`.
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
@@ -258,13 +265,13 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
-  fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE"
+  fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE"
+  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
