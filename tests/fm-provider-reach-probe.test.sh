@@ -394,6 +394,25 @@ assert_contains "$out" "dns=unknown" "addresses outside dig's answer output are 
 assert_contains "$out" "result=reachable" "HTTP follows uncertain DNS output"
 assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "HTTP proceeds after no answer-section address"
 
+tmp=$TMP_ROOT/ipv4-mawk-compat; new_case "$tmp"
+real_awk=$(command -v awk) || fail "awk is required for the compatibility fixture"
+cat > "$tmp/awk" <<SH
+#!/usr/bin/env bash
+# Model mawk versions that treat ERE interval expressions literally.
+for arg in "\$@"; do
+  case "\$arg" in *'{1,3}'*|*'{3}'*) exit 2 ;; esac
+done
+exec "$real_awk" "\$@"
+SH
+chmod +x "$tmp/awk"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=address FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+  "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "an IPv4 answer works with interval-incompatible awk"
+assert_contains "$out" "dns=ok" "IPv4 validation does not depend on awk intervals"
+assert_contains "$out" "result=reachable" "HTTP follows a valid IPv4 answer under mawk-like awk"
+assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "IPv4 answer still reaches HTTP under mawk-like awk"
+
 tmp=$TMP_ROOT/digrc-nottl-noclass; new_case "$tmp"
 make_fake_dig "$tmp" "$tmp/dig.log"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=digrc FM_PROVIDER_REACH_DNS_TOOL=dig \
