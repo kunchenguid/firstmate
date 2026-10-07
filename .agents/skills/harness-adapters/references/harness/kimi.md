@@ -25,6 +25,8 @@ The project-MCP refusal was checked against folder prompts recorded from Kimi Co
 
 `../../../bin/fm-spawn.sh` launches Kimi bare.
 When `.kimi-code/mcp.json` declares any project MCP server, including one with `enabled` false, that launch is refused before the process starts and before the brief pointer.
+A declaration that cannot be proven empty is refused the same way: a file that is unreadable or is not valid JSON, a `mcpServers` value that is anything but an object, or a host without `jq` to read it.
+Only a missing file, a missing `mcpServers` key, or an empty `mcpServers` object counts as no project MCP servers.
 A directory with no project MCP servers still handles the complete folder prompt when it appears.
 The spawn then waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
 A visible pane that lists `Project MCP targets:` is not answered, so a declaration read that misses those servers still cannot press Enter.
