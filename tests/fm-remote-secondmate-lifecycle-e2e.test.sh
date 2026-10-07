@@ -1038,6 +1038,7 @@ rm -f "$PARENT/state/.wake-queue"
 
 printf '{"revision":2}\n' > "$PARENT/config/crew-dispatch.json"
 printf 'grok\n' > "$PARENT/config/crew-harness"
+partial_records_before=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
 set +e
 FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-config-push.sh" \
   > "$TMP_ROOT/config-partial.out" 2>&1
@@ -1047,6 +1048,13 @@ set -e
 assert_grep '"revision":2' "$REMOTE_HOME/config/crew-dispatch.json" "partial inheritance did not apply its first file"
 [ "$(cat "$REMOTE_HOME/config/crew-harness")" != grok ] \
   || fail "partial inheritance unexpectedly applied the failed file"
+# The already-applied item nudges the running home even though a later item
+# failed, matching the local route; the failure keeps its retry marker.
+assert_grep 'config-reread: sent' "$TMP_ROOT/config-partial.out" \
+  "partial inheritance did not nudge the running home about its applied change"
+partial_records_after=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+[ "$partial_records_after" -eq $((partial_records_before + 1)) ] \
+  || fail "partial inheritance did not write exactly one applied-change reread record (went $partial_records_before -> $partial_records_after)"
 NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
 assert_grep 'remote=1' "$NUDGE_MARKER" "partial inheritance left no durable remote reread marker"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
@@ -1133,6 +1141,71 @@ CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.3.result"
 remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 3 "$CONFIG_RESULT" >/dev/null \
   || fail "remote config reread acknowledgement was not ingested"
 pass "remote inherited config retains and retries a failed live reread nudge"
+
+# Changed success: a full-success push whose propagation changes an item nudges
+# the running home and clears the marker.
+printf '{"revision":3}\n' > "$PARENT/config/crew-dispatch.json"
+changed_records_before=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-changed.out" \
+  || fail "changed-success remote config push exited non-zero"
+assert_grep '"revision":3' "$REMOTE_HOME/config/crew-dispatch.json" \
+  "changed-success push did not apply the changed item"
+assert_grep 'config-reread: sent' "$TMP_ROOT/config-push-changed.out" \
+  "changed-success push did not send a reread nudge"
+assert_absent "$NUDGE_MARKER" "changed-success push left its retry marker"
+changed_records_after=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+[ "$changed_records_after" -eq $((changed_records_before + 1)) ] \
+  || fail "changed-success push did not write exactly one reread record (went $changed_records_before -> $changed_records_after)"
+CHANGED_CORR=$(newest_remote_inbox_corr)
+[ -n "$CHANGED_CORR" ] || fail "changed-success reread did not carry a correlation token"
+printf 'done [corr=%s]: changed inherited config re-read\n' "$CHANGED_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
+await_reply_result "$PARENT/state/procevent-inbox/$SID.4.result" \
+  || fail "remote reply source did not capture the changed config reread acknowledgement"
+CHANGED_RESULT="$PARENT/state/procevent-inbox/$SID.4.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 4 "$CHANGED_RESULT" >/dev/null \
+  || fail "changed config reread acknowledgement was not ingested"
+pass "remote config push nudges and clears the marker on a changed-item success"
+
+# Unchanged success: a full-success push whose propagation changes nothing and
+# has no pending notice stays quiet and leaves no marker.
+unchanged_records_before=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-unchanged.out" \
+  || fail "unchanged-success remote config push exited non-zero"
+assert_no_grep 'config-reread: sent' "$TMP_ROOT/config-push-unchanged.out" \
+  "unchanged-success push sent an unexpected reread nudge"
+assert_absent "$NUDGE_MARKER" "unchanged-success push left a retry marker"
+unchanged_records_after=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+[ "$unchanged_records_after" -eq "$unchanged_records_before" ] \
+  || fail "unchanged-success push wrote an unexpected reread record (went $unchanged_records_before -> $unchanged_records_after)"
+pass "remote config push stays quiet and leaves no marker on an unchanged success"
+
+# Bootstrap sibling: a partial convergence (an applied inherited item plus a
+# later failed one) nudges the running home about the applied change and keeps
+# its retry marker, matching the config-push route. The failing item exits the
+# bootstrap convergence non-zero in later work, but the already-applied change
+# still reaches the home.
+assert_absent "$NUDGE_MARKER" "bootstrap partial-nudge baseline unexpectedly started with a retry marker"
+printf '{"revision":4}\n' > "$PARENT/config/crew-dispatch.json"
+printf 'pi\n' > "$PARENT/config/crew-harness"
+publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
+bootstrap_partial_before=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-bootstrap.sh" \
+  > "$TMP_ROOT/bootstrap-partial.out" 2>&1 || true
+assert_grep '"revision":4' "$REMOTE_HOME/config/crew-dispatch.json" \
+  "bootstrap partial convergence did not apply its first inherited item"
+[ "$(cat "$REMOTE_HOME/config/crew-harness")" != pi ] \
+  || fail "bootstrap partial convergence unexpectedly applied the failed item"
+bootstrap_partial_after=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+[ "$bootstrap_partial_after" -eq $((bootstrap_partial_before + 1)) ] \
+  || fail "bootstrap partial convergence did not nudge the running home about its applied change (went $bootstrap_partial_before -> $bootstrap_partial_after)"
+assert_grep 'remote=1' "$NUDGE_MARKER" "bootstrap partial convergence cleared its retry marker"
+# Converge the remaining item so later tests resume from a clean, nudged state.
+remote_env "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/bootstrap-partial-retry.out" \
+  || fail "bootstrap did not converge the remaining inherited item"
+[ "$(cat "$REMOTE_HOME/config/crew-harness")" = pi ] \
+  || fail "bootstrap retry did not apply the remaining inherited item"
+assert_absent "$NUDGE_MARKER" "bootstrap retry left its retry marker after full convergence"
+pass "bootstrap sibling nudges on an applied change and retains its marker on a partial convergence"
 
 resolve_ios_pending() {
   local pending_record pending_corr pending_result pending_seq before_results now_results pending_seen
