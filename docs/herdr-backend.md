@@ -297,7 +297,7 @@ Existing legacy child labels may extend an already adjacent block read-only but 
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
 
 Ordering failure never fails the task spawn.
-Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
+Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch, except for the one fresh childless repo parent described under [Repository worktree groups](#repository-worktree-groups).
 The worker remains on the ordinary flat or Herdr-current-order path.
 
 ### Repository worktree groups
