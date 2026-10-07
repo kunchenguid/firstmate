@@ -117,16 +117,19 @@ fm_harness_process_is_daemon() {  # <comm> <args>
   esac
   # ps flattens argv, so option-looking text in a prompt cannot be
   # distinguished after the prompt option. Only inspect preceding arguments.
-  flag_args=$args
-  case " $flag_args " in
-    *" --prompt="*) flag_args=${flag_args%% --prompt=*} ;;
-    *" -p="*) flag_args=${flag_args%% -p=*} ;;
-    *" --instructions="*) flag_args=${flag_args%% --instructions=*} ;;
-    *" --prompt "*) flag_args=${flag_args%% --prompt *} ;;
-    *" -p "*) flag_args=${flag_args%% -p *} ;;
-    *" --instructions "*) flag_args=${flag_args%% --instructions *} ;;
-    *" -i "*) flag_args=${flag_args%% -i *} ;;
-  esac
+  rest=$args
+  flag_args=
+  while [ -n "$rest" ]; do
+    word=${rest%% *}
+    case "$word" in
+      --prompt | -p | --instructions | -i | --prompt=* | -p=* | --instructions=* | -i=*) break ;;
+    esac
+    flag_args="${flag_args}${flag_args:+ }$word"
+    case "$rest" in
+      *' '*) rest=${rest#* } ;;
+      *) rest= ;;
+    esac
+  done
   case " $flag_args " in
     *" --managed-daemon "* | *" --service "*) return 0 ;;
   esac

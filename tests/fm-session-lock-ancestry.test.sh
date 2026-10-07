@@ -320,10 +320,12 @@ test_prompt_text_does_not_mark_harness_as_daemon() {
     'codex --prompt explain --service' \
     'codex -p explain --managed-daemon' \
     'codex --instructions explain --service' \
+    'codex --instructions explain --service --prompt foo' \
     'codex -i explain --managed-daemon' \
     'codex --prompt=explain --service' \
     'codex -p=explain --managed-daemon' \
-    'codex --instructions=explain --service'; do
+    'codex --instructions=explain --service' \
+    'codex --instructions=explain --service --prompt foo'; do
     result=$(lib_eval "$FAKEBIN" "fm_harness_process_is_daemon codex '$args'" && printf daemon || printf session)
     [ "$result" = session ] || fail "prompt option value classified Codex session as daemon: $args"
   done
