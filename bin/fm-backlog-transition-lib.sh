@@ -55,6 +55,18 @@
 # closes a row that reads as an open captain call. An answer that closes the row
 # first applies any supported retained artifact from the validated record, then
 # replay simply retires the record.
+#
+# CLEANUP-ONLY RECORDS. A record carrying `cleanup_recovery=<reason>` is the one
+# exception to the invariant: it names resources a fresh spawn left behind
+# without ever committing its row In flight, so the row stays where dispatch
+# preflight found it. `orca` marks an aborted Orca spawn whose worktree could not
+# be removed; `delivery-unconfirmed` marks a launched endpoint that failed its
+# brief-delivery gate (bin/fm-spawn.sh), which may still be a live worker and so
+# is kept rather than discarded. Session start never starts such a row, relaunch
+# refuses such a record, and teardown cleans its resources through the ordinary
+# landed-work gates with no backlog transition, so a worker that never confirmed
+# its brief can never close its item as Done.
+# fm_backlog_record_cleanup_reason is the single predicate all three read.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -754,6 +766,16 @@ fm_backlog_record_publish() {
     return 1
   fi
   return 0
+}
+
+# Prints the cleanup-only reason of <meta> (see CLEANUP-ONLY RECORDS above) and
+# succeeds; prints nothing and fails for an ordinary worker record. Like
+# fm_meta_get, the last `cleanup_recovery=` line wins.
+fm_backlog_record_cleanup_reason() {  # <meta>
+  local reason
+  reason=$(LC_ALL=C awk -F= '$1 == "cleanup_recovery" { sub(/^[^=]*=/, ""); value = $0 } END { printf "%s", value }' "$1" 2>/dev/null) || reason=
+  [ -n "$reason" ] || return 1
+  printf '%s\n' "$reason"
 }
 
 fm_backlog_meta_spawn_gen() {

@@ -1985,25 +1985,59 @@ test_recovery_reports_an_owned_row_read_failure() {
   pass "session start reports owned backlog rows it cannot read"
 }
 
-test_orca_cleanup_recovery_never_transitions_the_backlog() {
-  local case_dir id meta out
-  id=atomic-orca-cleanup-recovery-b8
-  case_dir=$(make_home orca-cleanup-recovery)
-  add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship local-only "cleanup_recovery=orca"
-  meta="$(home_of "$case_dir")/state/$id.meta"
+# A cleanup-only record names what a spawn left behind without ever committing
+# its row In flight: an aborted Orca spawn, or a launched endpoint that failed
+# its brief-delivery gate. Healing that queued row In flight at session start
+# and then closing it at teardown is the false Done that silently loses a work
+# item that never ran, and a relaunch would commit the row while republishing
+# the marker, leaving a worker whose teardown never closes it.
+test_cleanup_only_records_never_transition_the_backlog() {
+  local case_dir id meta out reason rc data
+  for reason in orca delivery-unconfirmed; do
+    id=atomic-cleanup-only-$reason-b8
+    case_dir=$(make_home "cleanup-only-$reason")
+    add_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" ship local-only "cleanup_recovery=$reason"
+    meta="$(home_of "$case_dir")/state/$id.meta"
 
-  out=$(run_bootstrap "$case_dir")
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "session start treated cleanup recovery as a launched worker: $out"
-  assert_present "$meta" "session start removed the cleanup recovery record"
+    out=$(run_bootstrap "$case_dir")
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "session start treated a $reason cleanup record as a launched worker: $out"
+    assert_present "$meta" "session start removed the $reason cleanup record"
 
-  out=$(run_teardown "$case_dir" "$id") \
-    || fail "cleanup recovery teardown failed: $out"
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "cleanup recovery teardown completed work that never launched"
-  assert_absent "$meta" "cleanup recovery teardown retained its task record"
-  pass "Orca cleanup recovery is excluded from backlog lifecycle transitions"
+    rc=0
+    out=$(run_spawn "$case_dir" "$id" --relaunch) || rc=$?
+    [ "$rc" -ne 0 ] || fail "relaunch accepted a $reason cleanup record: $out"
+    assert_contains "$out" "record is cleanup-only" \
+      "relaunch of a $reason cleanup record did not name the refusal"
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "a refused relaunch of a $reason cleanup record moved its item"
+    assert_present "$meta" "a refused relaunch removed the $reason cleanup record"
+
+    out=$(run_teardown "$case_dir" "$id") \
+      || fail "$reason cleanup record teardown failed: $out"
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "$reason cleanup record teardown completed work that never launched"
+    assert_absent "$meta" "$reason cleanup record teardown retained its task record"
+    assert_contains "$out" "Backlog: $id was left unchanged" \
+      "$reason cleanup record teardown did not say its item was left alone"
+  done
+
+  # A manual-backend home is told by hand what to do with the row, so the
+  # reminder there must not ask for a close either.
+  id=atomic-cleanup-only-manual-b8
+  case_dir=$(make_home cleanup-only-manual)
+  printf '%s\n' manual > "$(home_of "$case_dir")/config/backlog-backend"
+  data="$case_dir/manual-data"
+  mv "$(home_of "$case_dir")/data" "$data"
+  write_task_meta "$case_dir" "$id" ship local-only "cleanup_recovery=delivery-unconfirmed"
+  out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
+    || fail "manual-backend cleanup record teardown failed: $out"
+  assert_not_contains "$out" "move $id to Done" \
+    "manual-backend teardown asked for a never-delivered item to be closed"
+  assert_contains "$out" "Backlog: $id was left unchanged" \
+    "manual-backend teardown did not say the item was left alone"
+  pass "cleanup-only records never transition the backlog, relaunch, or ask for a close"
 }
 
 test_recovery_marks_an_owned_record_in_flight() {
@@ -3167,7 +3201,7 @@ test_completion_refuses_a_close_target_symlinked_to_a_directory
 test_completion_fails_when_its_close_marker_cannot_be_removed
 test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
-test_orca_cleanup_recovery_never_transitions_the_backlog
+test_cleanup_only_records_never_transition_the_backlog
 test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record

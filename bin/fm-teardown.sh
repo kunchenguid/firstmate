@@ -22,7 +22,9 @@
 # A close that fails is fatal and loud, preserves its pending-close record, and
 # is retried by the next session start. The transition is skipped on a
 # config/backlog-backend=manual home and in a markdown home that keeps no
-# data/backlog.md; those cases print the manual follow-up. A configured
+# data/backlog.md; those cases print the manual follow-up. A cleanup-only
+# record (bin/fm-backlog-transition-lib.sh) runs no transition in any home and
+# says its item was never dispatched instead. A configured
 # non-markdown adapter remains active without a markdown file; any active
 # automatic backend without compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
@@ -682,7 +684,7 @@ if [ "$TEARDOWN_META_KIND" = secondmate ]; then
   }
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
 fi
-TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
+TEARDOWN_CLEANUP_RECOVERY=$(fm_backlog_record_cleanup_reason "$META" || true)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
 TEARDOWN_LEGACY_ACCEPTED=0
@@ -717,7 +719,7 @@ case "$TEARDOWN_WINDOW_COUNT:$(fm_meta_get "$META" window)" in
     esac
     ;;
 esac
-if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
+if [ -z "$TEARDOWN_CLEANUP_RECOVERY" ]; then
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
     TEARDOWN_BACKLOG_APPLIES=1
   else
@@ -1841,7 +1843,12 @@ backlog_done_args() {
 backlog_refresh_reminder() {
   local backlog_display root backend=markdown
   [ "$KIND" = secondmate ] && return 0
-  [ "$CLEANUP_RECOVERY" = orca ] && return 0
+  # A cleanup-only record never owned its row, so no home - automatic or
+  # manual - is told to move it to Done.
+  if [ -n "$CLEANUP_RECOVERY" ]; then
+    printf '%s\n' "Backlog: $ID was left unchanged ($BACKLOG_SKIP_REASON). Dispatch it again when it is due; if this worker did finish the work after all, close the item by hand."
+    return 0
+  fi
   if root=$(fm_backlog_root "$DATA"); then
     backend=$(fm_tasks_axi_backend "$root") || return 2
   fi
@@ -4003,6 +4010,10 @@ teardown_legacy_stamp_rollback() {
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
+  elif [ "$CLEANUP_RECOVERY" = delivery-unconfirmed ]; then
+    BACKLOG_SKIP_REASON="its spawn never confirmed brief delivery, so it never became a backlog worker"
+  elif [ -n "$CLEANUP_RECOVERY" ]; then
+    BACKLOG_SKIP_REASON="cleanup-only record ($CLEANUP_RECOVERY) is not a launched backlog worker"
   else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi

@@ -712,8 +712,12 @@
 # endpoint, worktree, or record exists, unless the home's backlog has an
 # unheld, unblocked Queued or In flight item for the id; a transition that fails
 # after publication removes the record it just wrote rather than leaving a
-# worker the backlog does not own. A relaunch re-reads the row instead of
-# re-running the transition, so an eligible In-flight item is left untouched.
+# worker the backlog does not own. A kimi, rovo or agy delivery gate that fails
+# before the transition instead keeps the record as a cleanup-only record with
+# its item left unchanged (spawn_delivery_gate_failed), so bin/fm-teardown.sh can
+# clean up what was launched. A relaunch re-reads the row instead of
+# re-running the transition, so an eligible In-flight item is left untouched,
+# and it refuses a cleanup-only record.
 # The transition is
 # skipped entirely for --secondmate spawns (persistent agents are not work
 # items), on a config/backlog-backend=manual home, and in a markdown home that
@@ -2460,6 +2464,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
     exit 1
   }
+  # A relaunch would commit the row In flight while republishing the marker,
+  # leaving a worker whose teardown never closes its item.
+  if RELAUNCH_CLEANUP_REASON=$(fm_backlog_record_cleanup_reason "$RELAUNCH_META"); then
+    echo "error: --relaunch refused: task $ID's record is cleanup-only (cleanup_recovery=$RELAUNCH_CLEANUP_REASON), left by a spawn that never became a backlog worker; clean it up with bin/fm-teardown.sh $ID, then dispatch the task again" >&2
+    exit 1
+  fi
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
@@ -5692,9 +5702,57 @@ kimi_wait_for_delivery() {
   return 1
 }
 
+# Every launch-then-confirm gate failure (kimi, rovo, agy) ends here, after the
+# endpoint was launched. The failure is recorded in the task status first, and
+# a `close` argument then closes the endpoint (rovo_endpoint_cleanup). A fresh
+# dispatch keeps its provisional record as a cleanup-only record
+# (bin/fm-backlog-transition-lib.sh) instead of rolling it back: an unconfirmed
+# delivery can still be a live worker that did receive its brief, so its
+# endpoint, local copy, harness wiring and slot claim are neither discarded
+# here nor stranded with no record naming them. bin/fm-teardown.sh cleans them
+# through its landed-work gates, and the backlog row is left unchanged. If the
+# record cannot be marked, the exit trap rolls it back as before. A relaunch
+# already owns an In-flight record and leaves it unchanged.
+spawn_delivery_gate_failed() { # <detail> [close]
+  local detail=$1 close=${2:-}
+  printf '%s\n' "$(status_stamp_line "failed: $detail")" >>"$STATE/$ID.status"
+  [ "$close" != close ] || rovo_endpoint_cleanup
+  if [ "$SPAWN_FRESH_COMMIT_PENDING" != 1 ]; then
+    echo "error: $detail; inspect window $T" >&2
+  elif ! spawn_mark_cleanup_only_record; then
+    echo "error: $detail; inspect window $T. Its task record could not be kept for cleanup${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)} and is rolled back - close out endpoint $T and local copy $WT by hand before retrying" >&2
+  elif [ "$close" = close ]; then
+    echo "error: $detail; its endpoint $T was closed. Its task record was kept for cleanup and its backlog item was left unchanged: run bin/fm-teardown.sh $ID to clean up its local copy, then dispatch it again" >&2
+  else
+    echo "error: $detail; inspect window $T. Its task record was kept for cleanup and its backlog item was left unchanged: once the window holds nothing worth keeping, run bin/fm-teardown.sh $ID to clean up its endpoint and local copy, then dispatch it again" >&2
+  fi
+}
+
+# Republish the provisional record with the cleanup-only marker under the
+# task's meta lock, and stop the exit trap from rolling it back.
+spawn_mark_cleanup_only_record() {
+  local meta="$STATE/$ID.meta"
+  FM_BACKLOG_TRANSITION_ERROR=
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+  fi
+  SPAWN_META_TMP="$STATE/.$ID.meta.cleanup.${BASHPID:-$$}"
+  if awk -F= '$1 != "cleanup_recovery"' "$meta" >"$SPAWN_META_TMP" &&
+    printf 'cleanup_recovery=delivery-unconfirmed\n' >>"$SPAWN_META_TMP" &&
+    fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+    SPAWN_META_TMP=
+    SPAWN_FRESH_COMMIT_PENDING=0
+    return 0
+  fi
+  rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  SPAWN_META_TMP=
+  return 1
+}
+
 kimi_spawn_fail() { # <detail>
-  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
+  spawn_delivery_gate_failed "$1"
 }
 
 # rovo mirrors kimi's launch-then-send shape exactly: a positional brief is
@@ -5761,18 +5819,16 @@ rovo_wait_for_delivery() {
 }
 
 rovo_spawn_fail() { # <detail>
-  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  spawn_delivery_gate_failed "$1" close
 }
 
 # The launch-then-confirm gates run after the task record is published, when
-# ORCA_ABORT_CLEANUP is already cleared and neither the abort trap nor a
-# teardown owns this endpoint yet, so a gate failure must close the launched
-# process here or it keeps running as an orphaned autonomous agent outside
-# task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
-# the exact terminal is closed: that stops the CLI while its worktree stays
-# for the record's own teardown, which owns worktree deletion.
+# ORCA_ABORT_CLEANUP is already cleared and the abort trap no longer owns this
+# endpoint, so a rovo or agy gate failure closes the launched process here
+# rather than leave an unconfirmed autonomous agent running until its kept
+# cleanup-only record is torn down. Mirrors fm-teardown.sh's own generic kill
+# call. On orca only the exact terminal is closed: that stops the CLI while its
+# worktree stays for the record's own teardown, which owns worktree deletion.
 rovo_endpoint_cleanup() {
   if [ "$BACKEND" = orca ]; then
     fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
@@ -5878,9 +5934,7 @@ agy_wait_for_working() {
 }
 
 agy_spawn_fail() {  # <detail>
-  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  spawn_delivery_gate_failed "$1" close
 }
 
 # polytoken's launch-then-confirm gate, in the same shape as agy's: the brief

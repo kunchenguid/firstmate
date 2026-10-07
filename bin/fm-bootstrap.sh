@@ -1402,7 +1402,7 @@ backlog_record_reconcile() {
       return 2
     fi
     if [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
-       && [ "$(fm_meta_get "$meta" cleanup_recovery)" != orca ]; then
+       && ! fm_backlog_record_cleanup_reason "$meta" >/dev/null; then
       row=
       if fm_backlog_row_probe "$DATA" "$id"; then
         row=$FM_BACKLOG_ROW_STATE
@@ -1491,7 +1491,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
           exit 1
         fi
         if [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" kind)" != secondmate ] \
-           && [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" cleanup_recovery)" != orca ]; then
+           && ! fm_backlog_record_cleanup_reason "$BOOTSTRAP_BACKLOG_META" >/dev/null; then
           BOOTSTRAP_BACKLOG_GATE_KIND=ship
           break
         fi

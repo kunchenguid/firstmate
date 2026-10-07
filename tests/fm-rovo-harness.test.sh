@@ -341,6 +341,35 @@ test_rovo_unconfirmed_delivery_fails_loudly() {
   pass "fm-spawn: rovo treats a silent pointer drop as a failed spawn, and tears down the created endpoint"
 }
 
+# A failed gate keeps its record as a cleanup-only record
+# (bin/fm-backlog-transition-lib.sh), so the local copy and hooks directory of
+# the closed endpoint are cleaned through ordinary teardown instead of being
+# stranded with no record naming them.
+test_rovo_failed_delivery_keeps_a_cleanup_record_teardown_can_use() {
+  local id rec out rc meta
+  id="rovo-strand-z8-$$"
+  rec=$(make_spawn_case strand "$id")
+  read_spawn_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  rc=0
+  out=$(FM_FAKE_ROVO_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed rovo delivery should fail"
+  assert_grep 'cleanup_recovery=delivery-unconfirmed' "$meta" \
+    "a failed rovo delivery did not keep a cleanup-only record: $out"
+  assert_present "$HOME_DIR/state/$id.git-hooks" "a failed rovo delivery lost its hooks directory"
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" FM_FAKE_ROVO_STATE="$CASE_DIR/rovo.state" \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$ROOT/bin/fm-teardown.sh" "$id" 2>&1) \
+    || fail "teardown could not clean up a failed rovo delivery: $out"
+  assert_absent "$meta" "teardown kept the cleanup-only record"
+  assert_absent "$HOME_DIR/state/$id.git-hooks" "teardown kept the hooks directory"
+  pass "fm-spawn: a failed rovo delivery keeps a cleanup-only record that teardown cleans up"
+}
+
 test_rovo_missing_binary_refuses_before_pane_creation() {
   local id rec out rc
   id="rovo-missing-z4-$$"
@@ -491,6 +520,7 @@ test_rovo_effort_xhigh_is_recorded_but_omitted
 test_rovo_effort_high_sets_config_override
 test_rovo_readiness_gate_precedes_pointer
 test_rovo_unconfirmed_delivery_fails_loudly
+test_rovo_failed_delivery_keeps_a_cleanup_record_teardown_can_use
 test_rovo_missing_binary_refuses_before_pane_creation
 test_rovo_secondmate_is_refused
 test_rovo_detection_precedence_and_ancestry
