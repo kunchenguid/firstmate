@@ -207,11 +207,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
       printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). Never merge a PR."
       ;;
     local-only)
-      if [ -n "$base" ]; then
-        printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`$base\`."
-      else
-        printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
-      fi
+      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
       ;;
     no-mistakes)
       printf '%s\n' "1. Never push to $target. Never merge a PR."
