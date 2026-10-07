@@ -3354,6 +3354,22 @@ EOF
   return "$rc"
 }
 
+heartbeat_queue_needs_review() (
+  # Readiness belongs to the backlog consumer, not status logs or task titles.
+  # An unreadable queue must reach supervision rather than count as empty.
+  . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+  . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+  backend=$(fm_tasks_axi_backend "${data%/*}" 2>/dev/null) || return 0
+  if [ "$backend" = markdown ] && [ ! -e "$data/backlog.md" ] && [ ! -L "$data/backlog.md" ]; then
+    return 1
+  fi
+  ready=$(fm_run_timed 10 env FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$data" \
+    "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null) || return 0
+  count=$(printf '%s\n' "$ready" | awk '/^count: [0-9]+$/ { print $2; exit }')
+  [ "$count" != 0 ]
+)
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any status log carries a captain-relevant event past the position already
 # surfaced to firstmate (.hb-surfaced-<task>). It walks every log rather than only
@@ -4499,11 +4515,11 @@ EOF
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
-    # no-change case (advance the schedule and back off exactly as wake() would,
+    # turns up ready queued work or a captain-relevant status the per-wake path
+    # missed. Absorb the no-change case (advance the schedule and back off as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    if afk_present || heartbeat_queue_needs_review; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
