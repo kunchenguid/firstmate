@@ -3357,6 +3357,7 @@ EOF
   return "$rc"
 }
 
+# shellcheck source=bin/fm-ready-queue-lib.sh
 . "$SCRIPT_DIR/fm-ready-queue-lib.sh"
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
