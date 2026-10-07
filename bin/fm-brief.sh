@@ -437,6 +437,8 @@ SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
 if [ -n "$SOURCE_REPO" ]; then
   [ "${SOURCE_REPO#/}" != "$SOURCE_REPO" ] || { echo "error: --source-repo requires an absolute path" >&2; exit 1; }
+  [ -d "$SOURCE_REPO" ] || { echo "error: source repository is not a directory: $SOURCE_REPO" >&2; exit 1; }
+  SOURCE_REPO=$(cd "$SOURCE_REPO" && pwd -P)
   PROJECT_CLONES_BODY="None. External source repository: $SOURCE_REPO"
   PROJECT_CLONES_NOTE="The source repository is recorded in \`data/external-source\`. For each task, pass its recorded path as the project directory to \`bin/fm-spawn.sh\`; that command acquires a linked Treehouse worktree from the source repository. Never work in the source checkout."
 elif [ "$NO_PROJECTS" -eq 1 ]; then

@@ -552,6 +552,9 @@ validate_external_source() { # <absolute-primary-checkout>
     return 1
   }
   SOURCE_PROJECT=$(basename "$SOURCE_PATH")
+  case "$SOURCE_PROJECT" in
+    *[[:space:]]*) echo "error: source repository directory name must not contain whitespace: $SOURCE_PROJECT" >&2; return 1 ;;
+  esac
 }
 
 validate_external_source_home() { # <home>

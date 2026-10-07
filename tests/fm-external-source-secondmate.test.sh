@@ -73,7 +73,19 @@ test_external_source_rejects_nonprimary_and_overlap() {
     fail "seed wrote a home inside the source checkout"
   fi
   assert_absent "$source/nested-home" "overlap refusal wrote inside source"
-  pass "source validation rejects linked worktrees and home overlap"
+  local spaced="$TMP_ROOT/spaced source"
+  fm_git_init_commit "$spaced"
+  if FM_HOME="$parent" FM_SECONDMATE_CHARTER='External work.' \
+    "$ROOT/bin/fm-home-seed.sh" mlir "$TMP_ROOT/spaced-home" --source-repo "$spaced" >/dev/null 2>"$err"; then
+    fail "source with whitespace in its name was accepted"
+  fi
+  assert_grep 'whitespace' "$err" "whitespace refusal was not precise"
+  mkdir -p "$parent/data/slash"
+  FM_HOME="$parent" FM_SECONDMATE_CHARTER='External work.' \
+    "$ROOT/bin/fm-brief.sh" slash --secondmate --source-repo "$source/" >/dev/null || fail "trailing-slash scaffold failed"
+  FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" slash "$TMP_ROOT/slash-home" --source-repo "$source" >/dev/null 2>"$err" \
+    || fail "trailing-slash charter conflicted with canonical seed: $(cat "$err")"
+  pass "source validation rejects linked worktrees, whitespace names, and home overlap"
 }
 
 test_external_source_linked_worktree_and_retirement() {
@@ -82,7 +94,8 @@ test_external_source_linked_worktree_and_retirement() {
   local task=mlir-task err=$TMP_ROOT/teardown.err
   mkdir -p "$parent/data" "$parent/state" "$fakebin"
   mark_firstmate_home "$home"
-  fm_git_worktree "$source" "$linked" linked-task
+  fm_git_init_commit "$source"
+  fm_git_add_origin "$source" "$source.origin.git"
   FM_HOME="$parent" FM_SECONDMATE_CHARTER='Own MLIR work.' \
     "$ROOT/bin/fm-home-seed.sh" mlir "$home" --source-repo "$source" >/dev/null \
     || fail "external source seed failed before child spawn"
@@ -93,7 +106,17 @@ test_external_source_linked_worktree_and_retirement() {
   mv "$home/data/$task/brief.tmp" "$home/data/$task/brief.md"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = send-keys ]; then printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"; fi
+prev=
+for a in "$@"; do
+  [ "$prev" != -c ] || printf '%s\n' "$a" > "$FM_FAKE_PANE_DIR"
+  prev=$a
+done
+if [ "${1:-}" = send-keys ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+  case "$*" in
+    *'treehouse get'*) git -C "$(cat "$FM_FAKE_PANE_DIR")" worktree add --quiet -b linked-task "$FM_FAKE_CHILD_WT" ;;
+  esac
+fi
 case "$*" in
   *'#{pane_current_path}'*) printf '%s\n' "$FM_FAKE_CHILD_WT" ;;
   *'#{cursor_y}'*) printf '0\n' ;;
@@ -108,13 +131,14 @@ exit 0
 SH
   chmod +x "$fakebin/tmux" "$fakebin/treehouse"
   if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_BACKEND=tmux FM_SPAWN_NO_GUARD=1 \
-    FM_FAKE_CHILD_WT="$linked" FM_FAKE_TREEHOUSE_LOG="$log" TMUX='fake,1,0' \
+    FM_FAKE_CHILD_WT="$linked" FM_FAKE_TREEHOUSE_LOG="$log" FM_FAKE_PANE_DIR="$TMP_ROOT/work-pane" TMUX='fake,1,0' \
     "$ROOT/bin/fm-spawn.sh" "$task" "$source" --mode local-only --yolo off --harness codex >/dev/null 2>"$err"; then
     fail "child spawn from external source failed: $(cat "$err")"
   fi
   assert_grep "project=$source" "$home/state/$task.meta" "spawn used another repository"
   assert_grep "worktree=$linked" "$home/state/$task.meta" "spawn did not record linked worktree"
   assert_grep 'get' "$log" "spawn did not ask Treehouse for a worktree"
+  [ "$(cat "$TMP_ROOT/work-pane")" = "$source" ] || fail "spawn did not start the pane in the recorded source"
   git -C "$source" worktree list --porcelain | grep -Fx "worktree $linked" >/dev/null \
     || fail "linked task copy is absent from the source repository worktree list"
   fm_git_init_commit "$other"
