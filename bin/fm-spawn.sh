@@ -3501,16 +3501,16 @@ ensure_named_base_present() { # <repo> <branch>
     if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
       return 0
     fi
-    echo "error: named base '$branch' does not exist locally or on origin for $repo; refusing to launch" >&2
+    echo "error: named base 'origin/$branch' does not exist locally or on origin for $repo; refusing to launch" >&2
     return 1
   fi
   if spawn_worktree_has_origin_config "$repo"; then
     if ! git -C "$repo" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
-      echo "error: could not fetch named base '$branch' for $repo; refusing to launch" >&2
+      echo "error: could not fetch 'origin/$branch' for $repo; refusing to launch from a potentially stale base" >&2
       return 1
     fi
     if ! git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" >/dev/null; then
-      echo "error: named base '$branch' does not exist on origin for $repo; refusing to launch" >&2
+      echo "error: named base 'origin/$branch' does not exist on origin for $repo; refusing to launch" >&2
       return 1
     fi
     return 0
