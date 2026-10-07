@@ -583,8 +583,7 @@ EOF
 # main, only where fm_supervision_host_outcomes_drained holds (the Pi branch
 # extension owns this path on Pi), and never while an away record exists,
 # because those outcomes wait for the return; quiet mode's record is a present
-# captain (bin/fm-afk-contract.sh AWAY OR QUIET). Bounded, and silent when
-# nothing is new or unprocessed.
+# captain (bin/fm-afk-contract.sh AWAY OR QUIET).
 #   - Captain outcomes come first and never wait behind routine ones. Every
 #     unprocessed captain row is presented on every drain until main
 #     acknowledges it, one line per outcome in sequence order, preserving older
@@ -617,6 +616,7 @@ EOF
 # (bin/fm-afk-return.sh) keeps its catch-up gated instead of clearing over
 # outcomes a later drain would present again.
 print_branch_outcomes_section() {
+  local LC_ALL=C
   local config rows through captain routine line seq task_line target
   local text='' used=0 shown=0 held=0 bytes item_bytes=600 captain_bytes=4000 routine_bytes=2000
   local routine_lines='' routine_count=0 routine_shown=0
@@ -641,7 +641,7 @@ print_branch_outcomes_section() {
       | .[]
       | "\(.seq)\t[seq \(.seq), recorded \(.recordedAgo) ago] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
-      | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
+      | "\(.seq)\t[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
     || case "$through" in ''|*[!0-9]*) true ;; *) false ;; esac; then
     printf 'BRANCH OUTCOMES SKIPPED: the outcome store could not be projected safely; nothing was marked read, so these outcomes are presented again on the next drain.\n' >&2
     return 1
@@ -654,13 +654,12 @@ print_branch_outcomes_section() {
       held=$((held + 1))
       continue
     fi
-    cap_outcome_line "$task_line" $((item_bytes - 1))
-    bytes=$(( used + OUTCOME_LINE_BYTES + 1 ))
-    if [ "$bytes" -gt "$captain_bytes" ]; then
+    bytes=$(( used + ${#task_line} + 1 ))
+    if [ "$bytes" -gt "$captain_bytes" ] && [ "$shown" -gt 0 ]; then
       held=1
       continue
     fi
-    captain_lines[shown]=$OUTCOME_LINE
+    captain_lines[shown]=$task_line
     shown=$((shown + 1))
     used=$bytes
     target=$seq
@@ -681,16 +680,16 @@ ROWS
   fi
 
   used=0
-  while IFS= read -r line; do
+  while IFS=$(printf '\t') read -r seq line; do
     [ -n "$line" ] || continue
     routine_count=$((routine_count + 1))
   done <<ROWS
 $routine
 ROWS
   # Newest first against the cap, printed oldest first.
-  while IFS= read -r line; do
+  while IFS=$(printf '\t') read -r seq line; do
     [ -n "$line" ] || continue
-    cap_outcome_line "$line" $((item_bytes - 1))
+    cap_outcome_line "$line" $((item_bytes - 1)) "$seq"
     bytes=$(( OUTCOME_LINE_BYTES + 1 ))
     [ $((used + bytes)) -le "$routine_bytes" ] || break
     routine_lines="$OUTCOME_LINE
@@ -717,19 +716,15 @@ ROWS
   fi
 }
 
-# BRANCH OUTCOMES' per-item cut: the shared digest marker in place of the
-# tail once the line passes <max> bytes, cut bytewise whatever the caller's
-# locale and backed off to the last whole UTF-8 character, so a multibyte
-# summary keeps the section inside its byte budgets and stays valid text. Sets
-# OUTCOME_LINE and OUTCOME_LINE_BYTES.
-cap_outcome_line() {  # <line> <max-bytes>
+cap_outcome_line() {
   local LC_ALL=C line=$1 max=$2 keep body tail rest need
+  local suffix=" [truncated; read the full outcome with bin/fm-branch-outcome.sh lookup --seqs $3]"
   if [ "${#line}" -le "$max" ]; then
     OUTCOME_LINE=$line
     OUTCOME_LINE_BYTES=${#line}
     return 0
   fi
-  keep=$((max - ${#FM_LINE_CAP_SUFFIX}))
+  keep=$((max - ${#suffix}))
   [ "$keep" -ge 0 ] || keep=0
   body=${line:0:keep}
   tail=${body##*[!$'\x80'-$'\xbf']}
@@ -741,7 +736,7 @@ cap_outcome_line() {  # <line> <max-bytes>
     *) need=0 ;;
   esac
   [ "${#tail}" -ge "$need" ] || body=${rest%?}
-  OUTCOME_LINE=$body$FM_LINE_CAP_SUFFIX
+  OUTCOME_LINE=$body$suffix
   OUTCOME_LINE_BYTES=${#OUTCOME_LINE}
 }
 
