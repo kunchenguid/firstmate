@@ -175,18 +175,21 @@ fi
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
 
 case "$HOST_ARG" in
+  *\?*) die_input "query component is not supported" ;;
+esac
+case "$HOST_ARG" in
   *@*) die_input "--host must not contain userinfo" ;;
 esac
 if [[ "$HOST_ARG" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
   die_input "--host must be a host[:port][/path], not a URL"
 fi
-PROBE=host:$HOST_ARG
 BASE=https://$HOST_ARG
 
 # A --host value with no host part cannot yield a request authority: that is a
 # caller error, never a healthy probe, so it gets its own verdict before any
 # resolver or request runs instead of letting curl invent a connection failure.
 AUTHORITY=$(printf '%s\n' "$BASE" | sed -nE 's|^https?://([^/?#]+).*|\1|p')
+PROBE=host:$AUTHORITY
 
 # The resolver takes a bare DNS name, never a URL authority: a `:port` suffix and
 # the brackets around an IPv6 literal are URL syntax, not part of the name to look

@@ -734,15 +734,28 @@ assert_contains "$out" "must be a host[:port][/path], not a URL" "full URL refus
 [ ! -s "$tmp/dig.log" ] || fail "a full URL reached the resolver"
 [ ! -s "$tmp/urls.log" ] || fail "a full URL reached curl"
 
-for valid_host in 'example.invalid/path/https://resource' 'example.invalid/path?q=https://resource'; do
+for valid_host in 'example.invalid/path' 'example.invalid/path/https://resource'; do
   tmp=$TMP_ROOT/embedded-url-$RANDOM; new_case "$tmp"
   out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig FM_FAKE_DIG_MODE=address \
     FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
     "$SCRIPT" --host "$valid_host" 2>&1); rc=$?
-  expect_code 0 "$rc" "an embedded :// after the authority is accepted"
+  expect_code 0 "$rc" "a supported host/path is accepted"
   assert_contains "$out" "result=reachable" "the host/path target is probed"
-  assert_contains "$(cat "$tmp/urls.log")" "https://$valid_host" "the full path/query reaches curl"
+  assert_contains "$out" "probe=host:example.invalid" "the label contains only the authority"
+  assert_not_contains "$out" "/path" "the output excludes the path"
+  assert_contains "$(cat "$tmp/urls.log")" "https://$valid_host" "the full path reaches curl"
 done
+
+tmp=$TMP_ROOT/query-component; new_case "$tmp"
+make_fake_dig "$tmp" "$tmp/dig.log"
+out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_URL_LOG="$tmp/urls.log" \
+  "$SCRIPT" --host 'api.example/path?token=secret' 2>&1); rc=$?
+expect_code 2 "$rc" "a query component is rejected"
+assert_contains "$out" "query component is not supported" "query refusal is fixed text"
+assert_not_contains "$out" "secret" "query contents are not disclosed"
+[ ! -s "$tmp/dig.log" ] || fail "a query component reached the resolver"
+[ ! -s "$tmp/urls.log" ] || fail "a query component reached curl"
 
 tmp=$TMP_ROOT/host-no-authority; new_case "$tmp"
 make_fake_dig "$tmp" "$tmp/dig.log"
@@ -751,7 +764,8 @@ out=$(PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
 expect_code 2 "$rc" "--host with no authority exits 2"
 assert_contains "$out" "result=invalid-target" "an authority-less host says invalid-target"
 assert_contains "$out" "base_url_has_no_authority" "it names why"
-assert_contains "$out" "probe=host:/not-a-host" "the line still identifies the requested host"
+assert_contains "$out" "probe=host:" "the line identifies the empty authority without disclosing the path"
+assert_not_contains "$out" "/not-a-host" "the invalid path is excluded from the output"
 assert_contains "$out" "dns=skipped http=none" "an invalid host resolves nothing and requests nothing"
 [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "expected exactly one probe line, got: $out"
 [ ! -s "$tmp/dig.log" ] || fail "an invalid host still ran a resolver: $(cat "$tmp/dig.log")"
