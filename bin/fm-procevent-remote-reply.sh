@@ -583,8 +583,9 @@ cmd_ingest() {
   fi
   if [ "$class" = continuity-broken ]; then
     # The same offset, prefix, and retirement count build the same line, so a
-    # retry appends nothing. Retirement bumps that count before it drops the
-    # cursor, so a later break is a new line even when the restored bytes match.
+    # retry appends nothing. Retirement removes the cursor before it records
+    # the next count, so a later break is a new line even when the restored
+    # bytes match, and a stop between those steps leaves the count unchanged.
     read_retirement_count "$id"
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason) at offset ${CURSOR_OFFSET} prefix $(continuity_prefix) retirements ${RETIREMENT_COUNT}"
     append_rc=0
@@ -768,7 +769,7 @@ cmd_retire_quiesce_locked() {
 }
 
 cmd_retire_finalize_locked() {
-  local id=${1:-} force=${2:-} sid path
+  local id=${1:-} force=${2:-} sid path cursor
   validate_id "$id"
   [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
   sid=$(source_id "$id")
@@ -784,11 +785,16 @@ cmd_retire_finalize_locked() {
       done
     fi
   fi
-  # Bump before the cursor is removed. A failed write leaves both as they were.
+  # Remove the cursor first. A stop before the count write leaves that count
+  # unchanged, so the same break still builds the same line.
+  cursor=$(cursor_path "$id")
+  rm -f -- "$cursor" || die "cannot remove remote reply cursor"
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    die "cannot remove remote reply cursor"
+  fi
   read_retirement_count "$id"
   write_retirement_count "$id" "$((RETIREMENT_COUNT + 1))" \
     || die "cannot record remote reply retirement"
-  rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }

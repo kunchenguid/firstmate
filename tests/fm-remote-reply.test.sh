@@ -1249,4 +1249,53 @@ assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
   "a repeated read of the break after an identical restore closed the decision"
 pass "a continuity break after retirement and an identical restore opens the decision once"
 
+# A directory cannot be removed by rm without -r, for any user. Retirement must
+# fail and leave the count where it was.
+count_before=$(cat "$PARENT/state/remote-replies/ios.retirements")
+rm -f "$PARENT/state/remote-replies/ios.cursor"
+mkdir "$PARENT/state/remote-replies/ios.cursor"
+set +e
+remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-cursor-stuck.out" 2>&1
+retire_rc=$?
+set -e
+[ "$retire_rc" -ne 0 ] || fail "retirement reported success when the cursor could not be removed"
+assert_grep 'cannot remove remote reply cursor' "$TMP_ROOT/retire-cursor-stuck.out" \
+  "retirement did not report the failed cursor removal"
+[ "$(cat "$PARENT/state/remote-replies/ios.retirements")" = "$count_before" ] \
+  || fail "a failed cursor removal increased the retirement count"
+[ -d "$PARENT/state/remote-replies/ios.cursor" ] \
+  || fail "a failed cursor removal removed the cursor"
+pass "a failed cursor removal does not increase the retirement count"
+
+# The count write is the step after removal. Stopping there leaves the old count.
+rm -rf "$PARENT/state/remote-replies/ios.cursor"
+printf 'schema=fm-remote-reply-cursor.v1\noffset=1\nprefix_sha256=%064d\n' 0 \
+  > "$PARENT/state/remote-replies/ios.cursor"
+RETIRE_COUNT_FAIL_BIN="$TMP_ROOT/retire-count-fail-bin"
+mkdir -p "$RETIRE_COUNT_FAIL_BIN"
+REAL_MKTEMP=$(command -v mktemp)
+{
+  cat <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */.retirements.XXXXXX) exit 73 ;;
+esac
+SH
+  printf 'exec %q "$@"\n' "$REAL_MKTEMP"
+} > "$RETIRE_COUNT_FAIL_BIN/mktemp"
+chmod +x "$RETIRE_COUNT_FAIL_BIN/mktemp"
+set +e
+PATH="$RETIRE_COUNT_FAIL_BIN:$PATH" remote_env "$ADAPTER" retire ios \
+  > "$TMP_ROOT/retire-count-stopped.out" 2>&1
+retire_rc=$?
+set -e
+[ "$retire_rc" -ne 0 ] || fail "retirement reported success when the count could not be recorded"
+assert_grep 'cannot record remote reply retirement' "$TMP_ROOT/retire-count-stopped.out" \
+  "retirement did not report the failed count write"
+assert_absent "$PARENT/state/remote-replies/ios.cursor" \
+  "a retirement that stopped after removal left the cursor"
+[ "$(cat "$PARENT/state/remote-replies/ios.retirements")" = "$count_before" ] \
+  || fail "a retirement that stopped after removal changed the count"
+pass "a retirement that stops after removing the cursor leaves the old count"
+
 echo "ALL TESTS PASSED"
