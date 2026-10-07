@@ -1099,10 +1099,14 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 
 `bin/fm-approval-failover.sh` owns the positive evidence check and durable failover for both runtimes.
 For a recorded, unconfigured bypass launch, a visible Codex command-approval modal, or Claude's HTTP 403 containing the specific managed-policy blocked-connection refusal, is actionable evidence.
+Viewport probing is limited to the first 120 seconds after the launch timestamp already carried in `spawn_gen`, with no negative-result cache or extra marker.
+A defeated bypass appears at the first command (Codex) or first model request (Claude); the window allows startup latency without repeatedly capturing healthy workers throughout their lifetime.
+Once the window expires, automatic detection and apply stop; ordinary operator recovery remains available.
 Generic login failures, unrelated 403s, unsupported launch metadata, and remote endpoints are not evidence.
 The watcher reports the result to firstmate's ordinary recovery path, which rechecks the live viewport, atomically creates the owning home's absent mode file, and interrupts and relaunches the affected worker through the existing control plane.
 Claude selects `auto`; Codex selects `approve-for-me`.
 The switch is reported and future launches use that saved mode directly, without repeating the bypass trial.
+Approval-setting inheritance preserves home-local fallbacks against primary absence as described by the [inherited-local-material owner](../.agents/skills/secondmate-provisioning/SKILL.md).
 Explicit values are never overwritten, even when empty, invalid, or a dangling symlink; a concurrent explicit write wins too.
 A lifecycle failure is reported with the fallback still persisted and the work preserved, rather than claiming successful recovery.
 Only tmux and herdr currently support verified lifecycle recovery; other backends require operator reconciliation before the setting changes.

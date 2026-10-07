@@ -3744,8 +3744,9 @@ EOF
     key=$(window_key "$w")
     # A managed-policy refusal needs action even when a secondmate is otherwise
     # exempt from stale-pane handling. Probe only canonical unconfigured bypass
-    # launches and emit once per recorded incarnation; firstmate owns applying
-    # the persistent fallback and guarded lifecycle recovery.
+    # launches within fm-approval-failover's startup window and emit once per
+    # recorded incarnation; firstmate owns applying the persistent fallback
+    # and guarded lifecycle recovery.
     if [ -n "$task" ] && [ "$(fm_meta_get "$STATE/$task.meta" approval_configured)" = 0 ] \
       && [ "$(fm_meta_get "$STATE/$task.meta" approval_mode)" = bypass ]; then
       approval_gen=$(fm_meta_get "$STATE/$task.meta" spawn_gen)
