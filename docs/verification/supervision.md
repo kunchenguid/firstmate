@@ -255,6 +255,44 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+### Wiring liveness
+
+The busy contract withdraws a record whose wiring has no live writer ([`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) "Wiring liveness").
+For Pi that rests on one fact only a real Pi can answer: the per-task extension runs inside the Pi process at load and names that process, so the identity it records lives exactly as long as the agent holding the wiring.
+Verified on 2026-10-06 on macOS arm64 against Pi 0.99.1, launched with the extension the real `fm-spawn` wrote, with no prompt submitted.
+
+```sh
+tests/fm-busy-wiring-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Pi 0.99.1 records the process its Firstmate extension loaded into, with no turn submitted
+ok - Pi 0.99.1: the wiring reads as live while the agent that loaded it is running
+ok - Pi 0.99.1: once the agent holding the wiring is gone its record classifies unknown wiring-lost
+```
+
+The guard spends no model tokens, so it runs by default wherever Pi and tmux are installed, and it fails naming the installed Pi version.
+It is the refresh command after a Pi upgrade.
+
+The loss it guards against was observed on the same day on Herdr 0.9.1: after a reboot, the restored server spawned each pane and registered a running Pi in it within a second, with no relaunch through `fm-spawn`.
+
+```sh
+grep -E 'persist.restore|agent changed' ~/.config/herdr/herdr-server.log
+```
+
+Two of the lines it printed for that restore:
+
+```text
+2026-10-06T05:35:14.522759Z  INFO herdr::logging: session restore evaluated event="persist.restore" subsystem="persist" outcome="ok" workspaces=1
+2026-10-06T05:35:15.245681Z  INFO herdr::pane: agent changed pane=5 previous_agent=None agent=Some(Pi) process=pi pgid=Some(3812)
+```
+
+Every Pi worker resumed that way kept the busy record its previous process had last written and never posted to it again.
+The boot proof is what classifies those workers, since none of them had recorded an identity.
+Only Pi and pi-signed are covered: omp, Gemini, and Devin also carry wiring on their launch, and none of them has a verified proof here.
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-21, with Claude's replacement Stop-owned path revalidated on 2026-09-21, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.

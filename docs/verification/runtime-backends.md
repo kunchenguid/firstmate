@@ -733,6 +733,53 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-10-06 pi 0.99.1 with the pi-vimmode status rule
+
+Verified on 2026-10-06 on macOS arm64 against Pi 0.99.1 with the pi-vimmode 0.9.0 package installed, read with the cursorless capability descriptor every non-tmux backend uses (`styled=1`, `cursor=0`, `identity=1`).
+That package replaces Pi's editor and draws its mode and cursor position into the composer's bottom rule (`─ INSERT 1:1 ────`), so the rule is no longer the solid separator the separated shape was built on.
+The composer therefore never closed, and the verdict came from whichever solid rule sat above its top rule: a status notice between an earlier rule and the composer read as typed text, and a blank gap there read as an empty composer whatever the real one held.
+
+Each state was captured from a real Pi in a scratch directory on a private tmux socket, with an environment that carries no Herdr or Firstmate variables, and no prompt was submitted:
+
+```sh
+env -i HOME="$HOME" PATH="$PATH" TERM=xterm-256color LANG=en_US.UTF-8 \
+  tmux -L fm-pi-vim new-session -d -s probe -x 160 -y 45 -c "$(mktemp -d)" 'pi --no-session'
+sleep 12
+env -i HOME="$HOME" PATH="$PATH" tmux -L fm-pi-vim capture-pane -t probe -e -p > pi-vim.ansi
+env -i HOME="$HOME" PATH="$PATH" tmux -L fm-pi-vim kill-server
+bash -c '. bin/fm-composer-lib.sh
+  caps=$(printf "styled=1\ncursor=0\nidentity=1")
+  cap=$(cat pi-vim.ansi)
+  v=$(fm_composer_classify_screen "$caps" "$cap")
+  [ "$v" != need-identity ] || v=$(fm_composer_classify_screen "$caps" "$cap" "" "$(printf "pi\tidle")")
+  printf "%s\n" "$v"'
+```
+
+The other states were reached in the same pane before capturing: a resumed session, Shift+Tab to print a `Thinking level` notice above the composer, typed text left unsubmitted, and Escape for normal mode.
+
+| Real pane state | Before | After |
+| --- | --- | --- |
+| Empty composer, fresh session | `empty` | `empty` |
+| Empty composer below a `Thinking level` notice | `pending` | `empty` |
+| Typed draft, nothing between the rules above it | `empty` | `pending` |
+| Typed draft below the notice | `pending` | `pending` |
+| Empty composer in normal mode | `empty` | `unknown` |
+
+The second row is the false `pending` that withheld every doorbell from an idle worker, and the third is the false `empty` that would have typed over a draft.
+The fifth is deliberate: outside insert mode the same keys are editor commands, so an empty composer there is not one a caller may type into.
+
+The rule is recognised by geometry, never by its words: one leading dash, an ASCII status, then a dash run to the row's end, spanning exactly the width of the composer's own top rule.
+Only the package's left-aligned default is read, and only its default `INSERT` label proves insert mode; a right-aligned or renamed status leaves the composer unproven, which costs a doorbell its first ring and nothing else.
+`test_matrix_pi_vim_status_rule_closes_composer` in `tests/fm-composer-lib.test.sh` carries the captured rows on the cursorless and the tmux profiles, the identity conjunction, the normal-mode refusal, a short rule that closes nothing, and a Codex turn separator of the same outline that stays Codex's.
+
+The live refresh for this entry is the composer-matrix guard, which launches the operator's own Pi with whatever packages it loads and requires its idle composer to read `empty` on tmux and not `pending` cursorless:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+That guard was not run for this entry, so the captures above are its live evidence.
+
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
 Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Firstmate workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

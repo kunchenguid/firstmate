@@ -242,6 +242,14 @@ That keeps a launch that never began its brief from holding the busy-age exempti
 A record any real hook event has advanced is never reclassified this way however its pane looks, no captured tail means the record's own state stands, and the general busy bound is unchanged.
 The per-harness signature table lives in `bin/fm-busy-lib.sh`'s header, and [runtime backend verification](verification/runtime-backends.md#launch-prompt-backstop-signatures) owns the live evidence.
 
+A record is only as current as the writer that posts to it, and Pi's writer exists only inside the process `fm-spawn` launched, because its extension rides on that launch's command line.
+When that process is replaced by an agent that never loaded the extension - a terminal manager that restores its panes after a restart or a reboot resumes the agent with its own command - nothing posts another event, and the record stays frozen at whatever the old process last wrote.
+The contract therefore withdraws a record whose wiring provably has no live writer and reports `unknown wiring-lost` whatever state it holds, on either of two independent proofs: the process the extension recorded itself loading into (`state/<id>.busy-wired`) is gone, or the launch that armed the wiring predates this machine's last boot.
+The second proof needs no record, which is what covers a worker launched before the first existed, and it applies only to a harness whose wiring rides on the launch; a Claude worker's hooks live in its worktree, so an agent resumed there is still wired.
+The watcher reports a live worker in that state as `stale: <window> (unmonitored: ...)`, once per launch and then again only on the `FM_PAUSE_RESURFACE_SECS` cadence while it stays that way, because such a worker raises no turn-end signal and its redrawing pane is never stale, so nothing else would ever look at it.
+Relaunching it through `bin/fm-control.sh` arms a new incarnation and restores the wiring; the report itself never interrupts or relaunches anything.
+`bin/fm-busy-lib.sh`'s "Wiring liveness" section owns the proofs, and [supervision verification](verification/supervision.md#wiring-liveness) owns the live evidence.
+
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.

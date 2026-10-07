@@ -670,6 +670,56 @@ test_matrix_pi_dollar_status_footer_is_empty() {
   pass "matrix: a dollar-first pi status footer reads empty; dead shells still refuse"
 }
 
+test_matrix_pi_vim_status_rule_closes_composer() {
+  # Real pi 0.99.1 with the pi-vimmode 0.9.0 package: the composer's BOTTOM rule
+  # carries the mode and cursor position (`─ INSERT 1:1 ────`), so it is not a
+  # solid separator. Unrecognised, the composer never closed and the verdict
+  # came from whatever solid rule happened to sit above its top rule. Rows are
+  # the captured ones, narrowed: an idle pane showing a `Thinking level` notice
+  # above an EMPTY composer read `pending` and every doorbell was skipped, and
+  # the same pane without the notice read `empty` while holding a typed draft.
+  local rule status footer notice idle cycled typed normal typed_normal narrow foreign
+  local pi_idle pi_working none out
+  pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
+  rule='────────────────────────────────────────'
+  status='─ INSERT 1:1 ───────────────────────────'
+  footer=$'/Users/captain/worktree\n↑10 ↓10 $0.000 (sub) 0.0%/272k (auto)\n⠠⠄ caveman level: FULL 🔌 MCP: 2 servers enabled vim'
+  notice=$' - Disk nearly full: 241 MiB free.\n\n'"$rule"$'\n Update Available\n New version 1.0.4 is available. Run pi update\n'"$rule"
+
+  idle="$notice"$'\n\n'"$rule"$'\n\n'"$status"$'\n'"$footer"
+  cycled="$notice"$'\n\n Thinking level: xhigh\n\n'"$rule"$'\n\n'"$status"$'\n'"$footer"
+  assert_screen "pi vim idle on herdr" empty "$CAPS_STYLED" "$idle" '' "$pi_idle"
+  assert_screen "pi vim idle below a notice on herdr" empty "$CAPS_STYLED" "$cycled" '' "$pi_idle"
+  assert_screen "pi vim idle below a notice on tmux" empty "$CAPS_TMUX" "$cycled" 10 "$pi_idle"
+  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$cycled")" = need-identity ] \
+    || fail "a pi vim composer must still request the lazy identity probe"
+  assert_screen "pi vim without identity capability" unknown "$CAPS_PLAIN" "$cycled"
+  assert_screen "working pi vim defers" unknown "$CAPS_STYLED" "$cycled" '' "$pi_working"
+  assert_screen "non-pi identity over a vim rule defers" unknown "$CAPS_STYLED" "$cycled" '' "$none"
+
+  # A typed draft is the composer's own content whatever sits above it.
+  typed="$notice"$'\n\n'"$rule"$'\ndraft text not submitted\n─ INSERT 1:25 ──────────────────────────\n'"$footer"
+  assert_screen "pi vim typed draft" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
+  [ "$out" = 'draft text not submitted' ] \
+    || fail "a pi vim composer's content must be its own rows, got '$out'"
+
+  # Only insert mode takes typed text as text. In any other mode the same keys
+  # are editor commands, so an empty composer there proves nothing safe.
+  normal="$notice"$'\n\n'"$rule"$'\n\n─ NORMAL 1:1 ───────────────────────────\n'"$footer"
+  assert_screen "pi vim normal mode defers" unknown "$CAPS_STYLED" "$normal" '' "$pi_idle"
+  typed_normal="$notice"$'\n\n'"$rule"$'\ndraft text not submitted\n─ NORMAL 1:25 ──────────────────────────\n'"$footer"
+  assert_screen "pi vim normal mode draft" pending "$CAPS_STYLED" "$typed_normal" '' "$pi_idle"
+
+  # The rule is proven by geometry, not by its words: one that does not span
+  # the top rule's width is transcript text and closes nothing.
+  narrow="$notice"$'\n\n Thinking level: xhigh\n\n'"$rule"$'\n\n─ INSERT 1:1 ──────────\n'"$footer"
+  assert_screen "a short status rule closes nothing" pending "$CAPS_STYLED" "$narrow" '' "$pi_idle"
+  foreign=$'transcript\n'"$rule"$'\n\n─ Worked for 2m 05s ────────────────────\n\n› '
+  assert_screen "a codex turn separator below a rule stays codex's" empty "$CAPS_STYLED" "$foreign"
+  pass "matrix: pi-vimmode's status rule closes the pi composer; only insert mode proves it empty"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -1033,6 +1083,7 @@ test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
+test_matrix_pi_vim_status_rule_closes_composer
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule

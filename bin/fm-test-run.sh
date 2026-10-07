@@ -379,6 +379,7 @@ family_for_basename() {
     fm-send-inbox-doorbell-live-e2e.test.sh|\
     fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
     fm-calm-pi-queue-retention-live-e2e.test.sh|\
+    fm-busy-wiring-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
@@ -713,6 +714,7 @@ tests/fm-bootstrap.test.sh 50965
 tests/fm-branch-supervision.test.sh 22979
 tests/fm-busy-adapter-wiring.test.sh 31642
 tests/fm-busy-state.test.sh 3185
+tests/fm-busy-wiring-live-e2e.test.sh 5000
 tests/fm-calm-claude-mod-live-e2e.test.sh 47
 tests/fm-calm-claude-mod-plugin.test.sh 77
 tests/fm-calm-claude-mod.test.sh 2527

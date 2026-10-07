@@ -76,6 +76,15 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#   stale: <window> (unmonitored: ...)
+#                          a live worker whose busy wiring has no writer left
+#                          (the `unknown wiring-lost` verdict bin/fm-busy-lib.sh
+#                          owns): its agent was replaced by one Firstmate did
+#                          not launch, so nothing reports its busy state or its
+#                          turn ends. Reported once per launch, then again only
+#                          on the PAUSE_RESURFACE_SECS cadence while it stays
+#                          that way, and cleared by a relaunch (unwired_report);
+#                          inspection only, like every other stale report.
 #   stale: <window> (unread firstmate instruction: ...)
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
@@ -215,6 +224,15 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# The busy contract's wiring-liveness proof compares against this machine's
+# boot time. Read it once here and export it, so the per-window classifications
+# below (each its own subshell) and the scripts this watcher runs do not each
+# pay to read it again. It cannot change while this process lives.
+if FM_BUSY_BOOT_EPOCH=$(fm_busy_boot_epoch); then
+  export FM_BUSY_BOOT_EPOCH
+else
+  unset FM_BUSY_BOOT_EPOCH
+fi
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -442,7 +460,50 @@ window_is_busy() {  # <window> <tail40>
     verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
+  # The whole verdict, for a caller that needs the producing source as well:
+  # the stale scan reads it to report lost wiring (unwired_report below).
+  WINDOW_BUSY_VERDICT=$verdict
   [ "${verdict%% *}" = busy ]
+}
+
+# unwired_report: report a LIVE worker whose busy wiring has no writer left -
+# the `unknown wiring-lost` verdict
+# bin/fm-busy-lib.sh owns. Such a worker is running unmonitored: nothing posts
+# its busy state or its turn ends, so it raises no turn-end signal however much
+# it does, and a pane that keeps redrawing is never stale. Left unreported it
+# is invisible for as long as its agent keeps running.
+#
+# Only a live agent is reported here. A pane whose agent is gone is the
+# dead-record report's (wedge_dead_record), and an unreadable one proves
+# nothing, so both are re-probed on the STALE_ESCALATE_SECS budget rather than
+# on every poll. The marker is keyed on the busy gen, which changes exactly
+# when the agent is relaunched through fm-spawn - the one thing that restores
+# the wiring - so a relaunched worker that loses it again is reported again, and
+# a caller clears the marker as soon as the verdict is anything else. A worker
+# left unmonitored is reported again once per PAUSE_RESURFACE_SECS, the same
+# long cadence a declared wait is rechecked on, so one missed report cannot
+# leave it working unseen for good.
+# Like every other stale report this is for inspection only: it never
+# interrupts, signals, or relaunches the worker itself.
+unwired_report() {  # <window> <task>
+  local w=$1 task=$2 key marker probed gen agent_state reason
+  key=$(window_key "$w")
+  marker="$STATE/.unwired-reported-$key"
+  probed="$STATE/.unwired-probed-$key"
+  gen=$(fm_busy_current_gen "$STATE" "$task") || return 0
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$gen" ] \
+     && [ "$(age_of "$marker")" -lt "$PAUSE_RESURFACE_SECS" ]; then
+    return 0
+  fi
+  [ "$(age_of "$probed")" -ge "$STALE_ESCALATE_SECS" ] || return 0
+  touch "$probed"
+  agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null) || agent_state=unreadable
+  [ "$agent_state" = alive ] || return 0
+  reason="stale: $w (unmonitored: the agent running here is not the one Firstmate launched, so nothing reports its busy state or finished turns and it can work or hang unseen; rechecked on a long cadence until it is relaunched - relaunch it through fm-control to restore supervision)"
+  # Append before the marker, for the reason wedge_dead_record gives.
+  fm_wake_append stale "$w" "$reason" || exit 1
+  printf '%s' "$gen" > "$marker"
+  wake "$reason"
 }
 
 window_kind() {
@@ -488,7 +549,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .writing-*, .waiting-*, .unwired-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -3031,6 +3092,11 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$WINDOW_BUSY_VERDICT" = "unknown wiring-lost" ]; then
+      unwired_report "$w" "$task"
+    elif [ -e "$STATE/.unwired-reported-$key" ] || [ -e "$STATE/.unwired-probed-$key" ]; then
+      rm -f "$STATE/.unwired-reported-$key" "$STATE/.unwired-probed-$key"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

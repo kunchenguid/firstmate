@@ -5356,6 +5356,200 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
 }
 
+# --- unmonitored worker: busy wiring with no writer left ---------------------
+# 2026-10-06: a reboot, then the terminal manager restoring its panes, resumed
+# every Pi worker with its own command. None of them carried the per-task
+# extension fm-spawn passes at launch, so nothing posted agent-start or touched
+# a turn-end marker again: each busy record stayed frozen at the `idle` its old
+# process last wrote while the worker kept working behind a churning pane, which
+# is never stale and never busy, so no path here ever looked at it.
+# bin/fm-busy-lib.sh now classifies such a record `unknown wiring-lost`, and the
+# watcher reports a LIVE worker in that state once per launch, then again only
+# on the long recheck cadence while nobody relaunches it.
+
+# Keep <file> changing faster than the poll, the way a working agent's spinner
+# does, so every poll sees a pane hash it has never seen and no stale path can
+# run. Echoes the ticker's pid; the caller stops it.
+tick_pane() {  # <file>
+  local f=$1
+  (
+    n=0
+    while :; do
+      n=$((n + 1))
+      printf 'Working... (%s.%ss)' "$((n / 5))" "$((n % 10))" > "$f.next" && mv "$f.next" "$f"
+      sleep 0.2
+    done
+  ) > /dev/null 2>&1 &
+  printf '%s' "$!"
+}
+
+# One Pi worker whose record reads idle, with nothing else for the watcher to
+# act on: its status and turn-end marker are already seen. Echoes the case dir;
+# the task id is <id> and its window is test:fm-<id>.
+unwired_case() {  # <name> <id>
+  local dir state id=$2 sig gen
+  dir=$(make_case "$1"); state="$dir/state"
+  printf 'Working... (0.0s)' > "$dir/pane.txt"
+  printf 'window=test:fm-%s\nkind=ship\nharness=pi\n' "$id" > "$state/$id.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" --source pi-ext --event agent-settled
+  printf 'working: setup complete\n' > "$state/$id.status"
+  sig=$(seen_sig "$state/$id.status"); printf '%s' "$sig" > "$state/.seen-${id}_status"
+  touch "$state/$id.turn-ended"
+  prime_turnend_seen "$state/$id.turn-ended"
+  printf '%s\n' "$dir"
+}
+
+# Record a wiring identity for <id> naming a real process, then end that process
+# when <fate> is `gone`. Stores its pid in UNWIRED_WRITER_PID.
+unwired_writer() {  # <state> <id> <gone|alive>
+  local state=$1 id=$2 fate=$3 pid
+  sleep 600 > /dev/null 2>&1 &
+  pid=$!
+  "$ROOT/bin/fm-busy-event.sh" wired "$state" "$id" --gen "$(cat "$state/$id.busy-gen")" --pid "$pid" \
+    || fail "could not record a wiring identity for $id"
+  if [ "$fate" = gone ]; then
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null || [ "$?" -eq 143 ] || fail "could not reap the wiring writer for $id"
+  fi
+  UNWIRED_WRITER_PID=$pid
+}
+
+unwired_watch() {  # <dir> <id> <out> <agent-command> [extra env assignments...]
+  local dir=$1 id=$2 out=$3 agent=$4
+  shift 4
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-$id" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND="$agent" FM_STATE_OVERRIDE="$dir/state" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
+}
+
+test_unmonitored_live_worker_is_reported_once() {
+  local proof=$1 dir state out key pid ticker gen booted=''
+  dir=$(unwired_case "unwired-$proof" "lost-$proof"); state="$dir/state"; out="$dir/watch.out"
+  key="test_fm-lost-$proof"; gen=$(cat "$state/lost-$proof.busy-gen")
+  case "$proof" in
+    # The process the wiring loaded into is gone, as after any manager restart.
+    identity) unwired_writer "$state" "lost-$proof" gone > /dev/null ;;
+    # No identity was ever recorded, but the machine booted after this launch.
+    boot) booted="FM_BUSY_BOOT_EPOCH=$(( $(date +%s) + 100 ))" ;;
+    *) fail "unknown wiring proof: $proof" ;;
+  esac
+  ticker=$(tick_pane "$dir/pane.txt")
+
+  unwired_watch "$dir" "lost-$proof" "$out" pi ${booted:+"$booted"}
+  pid=$!
+  wait_for_exit "$pid" 100 || { kill "$ticker" 2>/dev/null; reap "$pid"; fail "a live worker with no busy wiring left ($proof proof) was never reported"; }
+  grep -F "stale: test:fm-lost-$proof (unmonitored:" "$out" >/dev/null \
+    || { kill "$ticker" 2>/dev/null; fail "the report did not name the worker as unmonitored: $(cat "$out")"; }
+  [ "$(cat "$state/.unwired-reported-$key" 2>/dev/null)" = "$gen" ] \
+    || { kill "$ticker" 2>/dev/null; fail "the report was not recorded against the worker's launch"; }
+  ack_stopped_cycle "$state" || { kill "$ticker" 2>/dev/null; fail "could not acknowledge the unmonitored report"; }
+
+  # The same launch is never reported twice, however long it keeps running.
+  : > "$out"
+  unwired_watch "$dir" "lost-$proof" "$out" pi ${booted:+"$booted"}
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    kill "$ticker" 2>/dev/null; reap "$pid"; fail "an unmonitored worker ($proof proof) was reported a second time: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || { kill "$ticker" 2>/dev/null; fail "an already reported unmonitored worker printed a wake reason: $(cat "$out")"; }
+  ack_stopped_cycle "$state" || { kill "$ticker" 2>/dev/null; fail "could not acknowledge the quiet unmonitored stop"; }
+
+  # Left that way past the long recheck cadence, it is reported again rather
+  # than left to work unseen for good.
+  set_mtime $(( $(date +%s) - 500 )) "$state/.unwired-reported-$key"
+  set_mtime $(( $(date +%s) - 500 )) "$state/.unwired-probed-$key"
+  : > "$out"
+  unwired_watch "$dir" "lost-$proof" "$out" pi FM_PAUSE_RESURFACE_SECS=300 ${booted:+"$booted"}
+  pid=$!
+  wait_for_exit "$pid" 100 || { kill "$ticker" 2>/dev/null; reap "$pid"; fail "a worker left unmonitored past the recheck cadence ($proof proof) was not reported again"; }
+  kill "$ticker" 2>/dev/null
+  grep -F "stale: test:fm-lost-$proof (unmonitored:" "$out" >/dev/null \
+    || fail "the recheck did not name the worker as unmonitored: $(cat "$out")"
+  pass "a live worker whose busy wiring has no writer left is reported unmonitored once per launch, then only on the long recheck cadence ($proof proof)"
+}
+
+test_unmonitored_report_follows_the_launch() {
+  local dir state out key pid ticker gen writer
+  dir=$(unwired_case unwired-relaunch relaunched); state="$dir/state"; out="$dir/watch.out"
+  key="test_fm-relaunched"
+  unwired_writer "$state" relaunched gone > /dev/null
+  ticker=$(tick_pane "$dir/pane.txt")
+
+  # An agent that is not running is not an unmonitored worker: that pane is the
+  # dead-record report's, so nothing is reported and the probe is throttled.
+  unwired_watch "$dir" relaunched "$out" zsh
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    kill "$ticker" 2>/dev/null; reap "$pid"; fail "a pane with no agent was reported as an unmonitored worker: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -e "$state/.unwired-reported-$key" ] || { kill "$ticker" 2>/dev/null; fail "a pane with no agent was recorded as reported"; }
+  [ -e "$state/.unwired-probed-$key" ] || { kill "$ticker" 2>/dev/null; fail "the liveness probe for a lost wiring left no throttle"; }
+  ack_stopped_cycle "$state" || { kill "$ticker" 2>/dev/null; fail "could not acknowledge the dead-agent stop"; }
+  rm -f "$state/.unwired-probed-$key"
+
+  # Reported for the first launch, then relaunched: the new launch's wiring is
+  # live, so the old report is cleared rather than left to absorb the next loss.
+  printf '%s' "$(cat "$state/relaunched.busy-gen")" > "$state/.unwired-reported-$key"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" relaunched)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" relaunched idle --gen "$gen" --source pi-ext --event agent-settled
+  unwired_writer "$state" relaunched alive
+  writer=$UNWIRED_WRITER_PID
+  : > "$out"
+  unwired_watch "$dir" relaunched "$out" pi
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    kill "$ticker" "$writer" "$pid" 2>/dev/null || :
+    wait "$writer" 2>/dev/null || [ "$?" -eq 143 ] || :
+    reap "$pid"
+    fail "a relaunched worker with live wiring was reported: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -e "$state/.unwired-reported-$key" ] || { kill "$ticker" "$pid" 2>/dev/null; fail "a relaunch with live wiring kept the old report"; }
+  ack_stopped_cycle "$state" || { kill "$ticker" "$pid" 2>/dev/null; fail "could not acknowledge the relaunch stop"; }
+
+  # The relaunched agent is replaced in its turn: that is a new loss, reported.
+  kill "$writer" 2>/dev/null || :
+  wait "$writer" 2>/dev/null || [ "$?" -eq 143 ] || fail "could not reap the relaunched wiring writer"
+  : > "$out"
+  unwired_watch "$dir" relaunched "$out" pi
+  wait_for_exit "$!" 100 || { kill "$ticker" 2>/dev/null; reap "$!"; fail "a relaunched worker that lost its wiring again was not reported"; }
+  kill "$ticker" 2>/dev/null
+  grep -F "stale: test:fm-relaunched (unmonitored:" "$out" >/dev/null \
+    || fail "the second loss was not reported as unmonitored: $(cat "$out")"
+  [ "$(cat "$state/.unwired-reported-$key" 2>/dev/null)" = "$gen" ] \
+    || fail "the second report was not recorded against the new launch"
+  pass "an unmonitored report needs a live agent, clears on a relaunch with live wiring, and fires again for the next loss"
+}
+
+test_wired_worker_is_never_reported_unmonitored() {
+  local dir state out key pid ticker writer
+  dir=$(unwired_case unwired-control wired); state="$dir/state"; out="$dir/watch.out"
+  key="test_fm-wired"
+  # Identical to the reported case but for one fact: the writer is still alive.
+  unwired_writer "$state" wired alive
+  writer=$UNWIRED_WRITER_PID
+  ticker=$(tick_pane "$dir/pane.txt")
+  unwired_watch "$dir" wired "$out" pi
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    kill "$ticker" "$writer" "$pid" 2>/dev/null || :
+    wait "$writer" 2>/dev/null || [ "$?" -eq 143 ] || :
+    reap "$pid"
+    fail "a worker with live wiring was reported: $(cat "$out")"
+  fi
+  reap "$pid"
+  kill "$ticker" "$writer" 2>/dev/null || :
+  wait "$writer" 2>/dev/null || [ "$?" -eq 143 ] || fail "could not reap the wired worker's writer"
+  [ ! -s "$out" ] || fail "a worker with live wiring printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.unwired-reported-$key" ] && [ ! -e "$state/.unwired-probed-$key" ] \
+    || fail "a worker with live wiring left an unmonitored marker"
+  pass "a worker whose wiring still has its writer is never reported unmonitored"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6693,6 +6887,10 @@ test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
+test_unmonitored_live_worker_is_reported_once identity
+test_unmonitored_live_worker_is_reported_once boot
+test_unmonitored_report_follows_the_launch
+test_wired_worker_is_never_reported_unmonitored
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once

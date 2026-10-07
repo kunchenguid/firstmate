@@ -29,6 +29,15 @@
 #       turn-ended notification. Arm and retire clear the marker, and an old
 #       incarnation can never refresh its replacement's progress.
 #
+#   wired <state-dir> <id> --gen G --pid P
+#       Record which process holds this incarnation's wiring: state/<id>.busy-wired
+#       gets the pid beside the kernel's start stamp for it, which is what lets
+#       a reader tell that the writer has since been replaced
+#       (bin/fm-busy-lib.sh "Wiring liveness"). Posted by the adapter wiring
+#       from inside the process it loaded into. It neither changes busy state
+#       nor emits a notification. Arm and retire clear the record, and a pid
+#       with no readable start stamp is refused rather than recorded.
+#
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
 #       writer lock used by arm and apply. An exact gen prevents teardown for
@@ -46,6 +55,7 @@ usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
   fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
   fm-busy-event.sh progress <state-dir> <id> --gen G
+  fm-busy-event.sh wired <state-dir> <id> --gen G --pid P
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -58,7 +68,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD=${1:-}
 case "$CMD" in
-  arm|apply|progress|retire) shift ;;
+  arm|apply|progress|wired|retire) shift ;;
   *) usage ;;
 esac
 
@@ -71,6 +81,7 @@ case "$ID" in *[!A-Za-z0-9._-]*) echo "error: invalid task id" >&2; exit 1 ;; es
 
 NEW_STATE=
 GEN=
+PID=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
@@ -86,6 +97,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --state) NEW_STATE=${2:-}; shift 2 || usage ;;
     --gen) GEN=${2:-}; shift 2 || usage ;;
+    --pid) PID=${2:-}; shift 2 || usage ;;
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
@@ -98,10 +110,18 @@ if [ "$CMD" = apply ] || [ "$CMD" = arm ]; then
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
 fi
 
-[ "$CMD" != progress ] || [ "$USE_CURRENT_GEN" = 0 ] || usage
+case "$CMD" in
+  progress|wired) [ "$USE_CURRENT_GEN" = 0 ] || usage ;;
+esac
+if [ "$CMD" = wired ]; then
+  case "$PID" in ''|*[!0-9]*) echo "error: invalid --pid" >&2; exit 1 ;; esac
+elif [ -n "$PID" ]; then
+  usage
+fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
+WIRED=$(fm_busy_wired_path "$STATE" "$ID")
 LOCK="$REC.lock"
 
 # Portable mtime in epoch seconds. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU)
@@ -156,11 +176,13 @@ old_umask=$(umask)
 umask 077
 
 if [ "$CMD" = arm ]; then
+  # The token leads with its mint epoch: fm_busy_wiring_lost reads it to tell
+  # a gen minted before the machine last booted.
   GEN="g$(date +%s).$$.$RANDOM"
   lock_acquire || exit 1
   {
     printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
-      && write_record "$GEN" 1 && rm -f "$STATE/$ID.progress"
+      && write_record "$GEN" 1 && rm -f "$STATE/$ID.progress" "$WIRED"
   } || { lock_release; umask "$old_umask"; echo "error: arm failed for $ID" >&2; exit 1; }
   lock_release
   umask "$old_umask"
@@ -168,7 +190,7 @@ if [ "$CMD" = arm ]; then
   exit 0
 fi
 
-# apply / progress / retire
+# apply / progress / wired / retire
 if [ "$USE_CURRENT_GEN" = 1 ] && [ "$CMD" != retire ]; then
   GEN=$(fm_busy_current_gen "$STATE" "$ID") || {
     umask "$old_umask"
@@ -183,7 +205,7 @@ fi
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
-    rm -f "$REC" "$STATE/$ID.progress" || {
+    rm -f "$REC" "$STATE/$ID.progress" "$WIRED" || {
       lock_release
       umask "$old_umask"
       echo "error: busy-state retirement failed for $ID" >&2
@@ -208,7 +230,7 @@ if [ "$GEN" != "$CURRENT" ]; then
   exit 1
 fi
 if [ "$CMD" = retire ]; then
-  rm -f "$GEN_FILE" "$REC" "$STATE/$ID.progress" || {
+  rm -f "$GEN_FILE" "$REC" "$STATE/$ID.progress" "$WIRED" || {
     lock_release
     umask "$old_umask"
     echo "error: busy-state retirement failed for $ID" >&2
@@ -220,6 +242,22 @@ if [ "$CMD" = retire ]; then
 fi
 if [ "$CMD" = progress ]; then
   touch "$STATE/$ID.progress" || { lock_release; umask "$old_umask"; exit 1; }
+  lock_release
+  umask "$old_umask"
+  exit 0
+fi
+if [ "$CMD" = wired ]; then
+  START=$(fm_busy_process_start "$PID") || START=
+  if [ -z "$START" ]; then
+    lock_release
+    umask "$old_umask"
+    echo "error: no readable start stamp for pid $PID" >&2
+    exit 1
+  fi
+  {
+    printf '%s gen=%s pid=%s start=%s\n' "$FM_BUSY_LIB_VERSION" "$GEN" "$PID" "$START" > "$WIRED.tmp.$$" \
+      && mv -f "$WIRED.tmp.$$" "$WIRED"
+  } || { rm -f "$WIRED.tmp.$$"; lock_release; umask "$old_umask"; echo "error: wiring record write failed for $ID" >&2; exit 1; }
   lock_release
   umask "$old_umask"
   exit 0

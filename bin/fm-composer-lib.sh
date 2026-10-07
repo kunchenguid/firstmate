@@ -73,6 +73,10 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#                The closing rule may carry editor status instead of being
+#                solid (the pi-vimmode package's `─ INSERT 1:1 ────`); it then
+#                closes the pair by geometry, and only its insert mode proves
+#                an empty composer (_fm_composer_pi_status_rule_row).
 #                A separated pair that closes over a bare AGENT-GLYPH row is a
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
@@ -793,6 +797,63 @@ _fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
   [ "$spaces" = "$expected" ]
 }
 
+# _fm_composer_pi_status_rule_row: 0 when a trimmed row is a pi composer's
+# CLOSING rule with editor status burned into it, and FM_COMPOSER_PI_STATUS_ROW
+# then holds that status text. The pi-vimmode package draws its mode and cursor
+# position there (`─ INSERT 1:1 ────`, verified on pi 0.99.1 with pi-vimmode
+# 0.9.0), so the composer's bottom rule is not the solid separator
+# _fm_composer_pi_separator_row requires.
+#
+# Like _fm_composer_titled_rule_row this is deliberately a separate predicate
+# rather than a relaxation of the strict separator, and it is the mirror shape:
+# ONE leading dash, the status, then a dash run to the row's end. Claude's
+# titled top rule opens with the 8-column run instead, so the two never match
+# the same row. The row is proven by geometry, never by its words: it must
+# collapse to exactly the column width of <open-rule-spaces>, the composer's
+# own top rule mapped to spaces, by the same canonical-space comparison and
+# ASCII-printable status boundary that predicate holds. A status carrying any
+# other glyph (pi-vimmode's pending-operator `…`) leaves residue and closes
+# nothing, the safe direction.
+#
+# Only the left-aligned default is recognised. The package's right-aligned
+# setting draws Claude's titled-top-rule shape and is left unread on purpose.
+_fm_composer_pi_status_rule_row() {  # <trimmed-row> <open-rule-spaces>
+  local row=$1 expected=$2 rest status tail spaces
+  FM_COMPOSER_PI_STATUS_ROW=
+  case "$row" in
+    '─ '*────────) ;;
+    *) return 1 ;;
+  esac
+  rest=${row#'─ '}
+  status=${rest%%─*}
+  tail=${rest#"$status"}
+  [ -z "${tail//─/}" ] || return 1
+  case "$tail" in
+    *────────*) ;;
+    *) return 1 ;;
+  esac
+  fm_composer_normalize_trim_var status
+  [ -n "$status" ] || return 1
+  spaces=${row//─/ }
+  spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$spaces" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  [ "$spaces" = "$expected" ] || return 1
+  FM_COMPOSER_PI_STATUS_ROW=$status
+}
+
+# _fm_composer_pi_status_takes_text: 0 when a status rule's text shows the
+# editor in insert mode, the only mode in which typed keys are text. The label
+# is pi-vimmode's default `INSERT`; a renamed label is not recognised and the
+# composer then defers, which costs a doorbell its first ring and nothing else.
+_fm_composer_pi_status_takes_text() {  # <status-text>
+  case "$1" in
+    INSERT|'INSERT '*) return 0 ;;
+  esac
+  return 1
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
@@ -818,6 +879,9 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
+  # The status text of the selected pair's closing rule, or empty when that
+  # pair closed on a solid separator (_fm_composer_pi_status_rule_row).
+  FM_COMPOSER_SCAN_PI_STATUS=
   # The glyph PROOF of each envelope: the first row strictly inside it whose
   # content leads with an agent prompt glyph once its side borders are
   # stripped, and that glyph. This is what tells a composer container from a
@@ -829,7 +893,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_GLYPH=
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH=
-  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
+  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max pi_open_spaces=''
   local probe row_glyph row_glyph_row
   local box_glyph_row=-1 box_glyph='' pi_glyph_row=-1 pi_glyph=''
   pi_max=$FM_COMPOSER_PI_MAX_LINES
@@ -888,8 +952,29 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         fi
         FM_COMPOSER_SCAN_PI_GLYPH_ROW=$pi_glyph_row
         FM_COMPOSER_SCAN_PI_GLYPH=$pi_glyph
+        FM_COMPOSER_SCAN_PI_STATUS=
       fi
       pi_open=$row
+      pi_open_spaces=${trimmed//─/ }
+      pi_lines=0
+      pi_glyph_row=-1
+      pi_glyph=''
+    elif [ "$pi_open" -ge 0 ] && _fm_composer_pi_status_rule_row "$trimmed" "$pi_open_spaces"; then
+      # A status rule closes the candidate exactly as a separator does, but it
+      # is only ever a composer's bottom rule, so it opens no candidate below.
+      FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
+      FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
+      FM_COMPOSER_SCAN_PI_OPEN=$pi_open
+      FM_COMPOSER_SCAN_PI_CLOSE=$row
+      if [ "$pi_lines" -le "$pi_max" ]; then
+        FM_COMPOSER_SCAN_PI_PAIR_VALID=1
+      else
+        FM_COMPOSER_SCAN_PI_PAIR_VALID=0
+      fi
+      FM_COMPOSER_SCAN_PI_GLYPH_ROW=$pi_glyph_row
+      FM_COMPOSER_SCAN_PI_GLYPH=$pi_glyph
+      FM_COMPOSER_SCAN_PI_STATUS=$FM_COMPOSER_PI_STATUS_ROW
+      pi_open=-1
       pi_lines=0
       pi_glyph_row=-1
       pi_glyph=''
@@ -1974,7 +2059,14 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
     return 0
   fi
   case "$agent_status" in
-    idle|done) printf 'empty' ;;
+    idle|done)
+      if [ -n "$FM_COMPOSER_SCAN_PI_STATUS" ] \
+         && ! _fm_composer_pi_status_takes_text "$FM_COMPOSER_SCAN_PI_STATUS"; then
+        printf 'unknown'
+      else
+        printf 'empty'
+      fi
+      ;;
     *) printf 'unknown' ;;
   esac
 }

@@ -1130,6 +1130,41 @@ test_watcher_escalates_once_after_budget() {
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
 
+# The other way a doorbell fails to land: the composer reads as holding someone
+# else's unsent text, so every attempt is withheld rather than typed. fm-send
+# tells its caller "the watcher will re-ring" at that point, and this is what
+# backs the promise: a withheld attempt spends the same ladder budget a typed
+# one does, so the wait is bounded and ends in the ordinary stale wake instead
+# of sitting unread behind a composer that never clears.
+test_watcher_escalates_a_doorbell_the_composer_keeps_withholding() {
+  local dir state out log pid rec capture grace max
+  dir=$(setup_watch_case withheld)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  capture="$dir/draft.capture"
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$capture" FM_TASK_INBOX_RING_MAX=3
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a doorbell the composer kept withholding was never escalated"; }
+  [ ! -s "$log" ] || fail "a withheld doorbell was typed over the composer's text:"$'\n'"$(cat "$log")"
+  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a withheld doorbell should surface exactly one stale wake:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF 'after 3 doorbell delivery attempts' "$state/.wake-queue" \
+    || fail "the stale wake should count the withheld attempts:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF "$rec" "$state/.wake-queue" || fail "the stale wake should name the record path"
+  [ -f "$rec" ] || fail "the withheld instruction must stay durably recorded"
+  # The shipped schedule keeps that wait to minutes: every attempt, typed or
+  # withheld, is one grace apart, and the escalation follows the last one.
+  grace=$(inbox_lib "$state" fm_task_inbox_grace_secs)
+  max=$(inbox_lib "$state" fm_task_inbox_ring_max)
+  [ "$((grace * max))" -le 300 ] \
+    || fail "the default ladder takes $((grace * max))s to escalate a withheld doorbell, past the five-minute bound"
+  pass "watcher: a doorbell the composer keeps withholding is never typed and escalates once within the ladder's few minutes"
+}
+
 test_watcher_dead_pane_escalates_once_without_ringing() {
   local dir state out log pid rec
   dir=$(setup_watch_case dead-pane)
@@ -1226,5 +1261,6 @@ test_watcher_pays_fire_and_forget_retry_once
 test_watcher_holds_retry_while_the_worker_decides
 test_watcher_retry_keeps_a_newer_mark
 test_watcher_escalates_once_after_budget
+test_watcher_escalates_a_doorbell_the_composer_keeps_withholding
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state

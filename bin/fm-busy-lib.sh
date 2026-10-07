@@ -47,16 +47,23 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
+#   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt,
+#   wiring-lost
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source,
-#      UNLESS the record is still the untouched seed fm-spawn wrote at arm
-#      time (state=busy source=fm-spawn - no adapter hook has posted since
-#      launch) AND the caller supplied a captured tail that matches that
+#      UNLESS the wiring that writes it provably has no live writer left
+#      (fm_busy_wiring_lost; see "Wiring liveness" below). That record is
+#      frozen at whatever the departed writer last posted, so it classifies
+#      unknown wiring-lost whatever state it holds. This is the second
+#      process-level fact the contract reads, and like endpoint death it only
+#      ever withdraws a verdict: it never turns anything busy or idle.
+#      Otherwise, UNLESS the record is still the untouched seed fm-spawn wrote
+#      at arm time (state=busy source=fm-spawn - no adapter hook has posted
+#      since launch) AND the caller supplied a captured tail that matches that
 #      harness's own recognized interactive-prompt signature (a trust
 #      dialog, sign-in screen, or first-run menu - fm_busy_launch_prompt_parked
 #      owns the per-harness table). That combination classifies unknown
@@ -305,6 +312,114 @@ fm_busy_record_read() {  # <state-dir> <id>
     return 1
   fi
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+}
+
+# ---------------------------------------------------------------------------
+# Wiring liveness
+#
+# A record is only as current as the writer that posts to it. Pi's writer is
+# the per-task extension fm-spawn passes on the launch command line, so it
+# exists only inside the process that launch started. When that process is
+# replaced by anything else - a terminal manager restoring its panes after a
+# restart or a reboot resumes the agent with its own command - the new agent
+# runs with no writer at all: nothing posts agent-start or agent-settled, the
+# record stays frozen at whatever the old process last wrote, and a worker that
+# keeps working reads idle forever. A frozen record is stale data, and stale
+# data is unknown, never idle.
+#
+# Two independent proofs that the armed wiring has no live writer, either of
+# which is enough:
+#   1. Identity. The extension posts the pid of the process it loaded into
+#      (bin/fm-busy-event.sh wired), stored in state/<id>.busy-wired beside the
+#      kernel's start stamp for that pid:
+#        v1 gen=<token> pid=<uint> start=<ps lstart, LC_ALL=C TZ=UTC>
+#      The writer is gone once no process holds that pid, or one does but with
+#      a different start stamp (the pid was reused). A stamp that cannot be
+#      read for a pid that still exists proves nothing and is not a loss.
+#   2. Boot. A gen token leads with the epoch second it was minted
+#      (g<epoch>.<pid>.<random>), and every launch mints one, so a gen minted
+#      before this machine booted names a process that cannot have survived.
+#      This needs no record at all, which is what covers a worker launched
+#      before proof 1 existed. It applies only where the wiring rides on the
+#      launch itself (fm_busy_wiring_rides_launch): a Claude worker's hooks
+#      live in its worktree, so an agent resumed there is still wired.
+# A gen with no identity record and no boot proof is simply unproven and
+# classifies as before. bin/fm-watch.sh reports a live worker in this state
+# (unwired_report owns how often); relaunching it re-arms the wiring.
+
+fm_busy_wired_path() {  # <state-dir> <id>
+  printf '%s/%s.busy-wired' "$1" "$2"
+}
+
+# fm_busy_process_start: the kernel's start stamp for <pid> in one fixed locale
+# and zone, so the writer and every reader render the same process the same
+# way. Prints nothing when the stamp cannot be read.
+fm_busy_process_start() {  # <pid>
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  LC_ALL=C TZ=UTC ps -p "$1" -o lstart= 2>/dev/null | LC_ALL=C awk 'NF { $1 = $1; print; exit }'
+}
+
+# fm_busy_boot_epoch: the epoch second this machine booted, or failure when it
+# cannot be read. FM_BUSY_BOOT_EPOCH supplies it instead, which is how a
+# long-lived caller reads it once and how a test pins it.
+fm_busy_boot_epoch() {
+  local boot=${FM_BUSY_BOOT_EPOCH:-}
+  if [ -z "$boot" ]; then
+    if [ -r /proc/stat ]; then
+      boot=$(LC_ALL=C awk '$1 == "btime" { print $2; exit }' /proc/stat 2>/dev/null)
+    else
+      boot=$(sysctl -n kern.boottime 2>/dev/null | LC_ALL=C sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+    fi
+  fi
+  case "$boot" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$boot"
+}
+
+# fm_busy_wiring_rides_launch: 0 for a harness whose busy wiring exists only in
+# the process fm-spawn launched, so no other process in that pane can hold it.
+# Pi's extension is passed by -e from outside the worktree. Listed only where
+# that has been verified.
+fm_busy_wiring_rides_launch() {  # <harness>
+  case "${1:-}" in
+    pi|pi-signed) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_busy_wiring_lost: 0 when the task's armed wiring provably has no live
+# writer (the two proofs above); 1 when it has one or nothing is proven.
+fm_busy_wiring_lost() {  # <state-dir> <id> <harness>
+  local state=$1 id=$2 harness=${3:-} gen wired line rest w_gen w_pid w_start w_state now_start minted boot
+  gen=$(fm_busy_current_gen "$state" "$id") || return 1
+  wired="$state/$id.busy-wired"
+  line=
+  if [ -f "$wired" ] && { IFS= read -r line < "$wired"; } 2>/dev/null; then
+    case "$line" in
+      "$FM_BUSY_LIB_VERSION gen=$gen pid="*" start="?*)
+        rest=${line#"$FM_BUSY_LIB_VERSION gen=$gen pid="}
+        w_pid=${rest%% start=*}
+        w_start=${rest#* start=}
+        w_gen=$gen
+        ;;
+      *) w_gen= ;;
+    esac
+    case "${w_pid:-}" in ''|*[!0-9]*) w_gen= ;; esac
+    if [ -n "$w_gen" ]; then
+      kill -0 "$w_pid" 2>/dev/null || return 0
+      w_state=$(ps -o stat= -p "$w_pid" 2>/dev/null) || w_state=
+      case "$w_state" in *Z*) return 0 ;; esac
+      now_start=$(fm_busy_process_start "$w_pid") || now_start=
+      [ -z "$now_start" ] || [ "$now_start" = "$w_start" ] || return 0
+      return 1
+    fi
+  fi
+  fm_busy_wiring_rides_launch "$harness" || return 1
+  minted=${gen#g}
+  [ "$minted" != "$gen" ] || return 1
+  minted=${minted%%.*}
+  case "$minted" in ''|*[!0-9]*) return 1 ;; esac
+  boot=$(fm_busy_boot_epoch) || return 1
+  [ "$minted" -lt "$boot" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -1058,7 +1173,9 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
-      if [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
+      if fm_busy_wiring_lost "$state" "$id" "$harness"; then
+        printf 'unknown wiring-lost'
+      elif [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
         && printf '%s' "$tail40" | fm_busy_launch_prompt_parked "$harness"; then
         printf 'unknown launch-prompt'
       else

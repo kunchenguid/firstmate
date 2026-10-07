@@ -4722,6 +4722,12 @@ const busyEvent = (state: string, event: string) =>
     ], () => resolve());
   });
 export default function (pi: any) {
+  // This wiring exists only inside the process that loaded it. Recording that
+  // process lets Firstmate tell when the agent in this pane has since been
+  // replaced by one that never loaded it, instead of trusting a frozen record.
+  execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+    "wired", "$STATE_REAL", "$ID", "--gen", "$BUSY_GEN", "--pid", String(process.pid),
+  ], () => {});
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;

@@ -53,9 +53,18 @@ classify() {  # <harness> <id> <state-dir>
 
 # drive_pi_ext <ext-path> <mode>: load the generated Pi extension in a plain
 # Node host and fire one lifecycle handler. Modes: agent-start, settle-idle,
-# settle-continuing, turn-end.
+# settle-continuing, turn-end. `hold` fires nothing: it writes the host's pid
+# to $HOLD_PID and stays alive until $HOLD_RELEASE exists.
+#
+# The extension records the process it loaded into, and this host exits the
+# moment its one handler returns, where the Pi it stands in for keeps running.
+# So every mode but `hold` drops that identity with the host, leaving the
+# lifecycle assertions to read the events alone; `hold` keeps it, because the
+# identity is what its caller is asserting on.
 drive_pi_ext() {
-  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
+  local rc=0
+  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF' || rc=$?
+import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
@@ -71,12 +80,18 @@ switch (process.env.MODE) {
     break;
   case "turn-end": await handlers["turn_end"]({}, ctx); break;
   case "progress": await handlers["codex-native:progress"]({ type: "commandExecution", phase: "completed" }); break;
+  case "hold":
+    writeFileSync(process.env.HOLD_PID, String(process.pid));
+    while (!existsSync(process.env.HOLD_RELEASE)) await new Promise((resolve) => setTimeout(resolve, 50));
+    break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 if (["turn-end", "progress"].includes(process.env.MODE)) {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 EOF
+  [ "$2" = hold ] || rm -f "${1%.pi-ext.ts}.busy-wired"
+  return "$rc"
 }
 
 test_pi_extension_semantic_lifecycle() {
@@ -119,6 +134,44 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
   pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+}
+
+# The incident this pins: the wiring exists only inside the process that loaded
+# it. Once that process is replaced by an agent that never loaded it, nothing
+# posts another event and the record is frozen, so it must stop reading as the
+# worker's state the moment its writer is gone.
+test_pi_extension_records_the_process_it_loaded_into() {
+  local rec id=busy-pi-wired out state ext host hold_pid release i=0
+  rec=$(make_spawn_case pi-wired pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+  hold_pid="$CASE_DIR/host.pid"; release="$CASE_DIR/host.release"
+  assert_absent "$state/$id.busy-wired" "a spawn recorded a wiring identity before any process loaded the extension"
+
+  HOLD_PID="$hold_pid" HOLD_RELEASE="$release" drive_pi_ext "$ext" hold > "$CASE_DIR/host.out" 2>&1 &
+  host=$!
+  until [ -s "$hold_pid" ] && [ -s "$state/$id.busy-wired" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || { : > "$release"; fail "the loaded extension never recorded its process: $(cat "$CASE_DIR/host.out")"; }
+    sleep 0.05
+  done
+  case "$(cat "$state/$id.busy-wired")" in
+    "v1 gen=$(cat "$state/$id.busy-gen") pid=$(cat "$hold_pid") start="?*) ;;
+    *) : > "$release"; fail "the extension recorded something other than its own process: $(cat "$state/$id.busy-wired")" ;;
+  esac
+  fm_busy_wiring_lost "$state" "$id" pi && { : > "$release"; fail "a live process holding the wiring read as lost"; }
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || { : > "$release"; fail "a live writer must leave the record as written, got '$out'"; }
+
+  : > "$release"
+  wait "$host" 2>/dev/null
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "unknown wiring-lost" ] \
+    || fail "once the process holding the wiring is gone the record must classify 'unknown wiring-lost', got '$out'"
+  pass "pi extension records the process it loaded into, and the record stops counting once that process is gone"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
@@ -423,6 +476,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 }
 
 test_pi_extension_semantic_lifecycle
+test_pi_extension_records_the_process_it_loaded_into
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
