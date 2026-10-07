@@ -22,8 +22,8 @@
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
 # accepted while the named head exists only in the worker's disposable copy.
 # The check tests that head, not whether some branch moved. In no-mistakes
-# mode the pre-validation `done: {summary}` is the pipeline handoff and is
-# not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
+# mode a legacy pre-validation `done: {summary}` (workers now self-start the
+# pipeline and no longer send it) is not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
 # Gerrit project the later `done: PR <change url> published for review`. The
 # named head is the worker copy's HEAD, except that a done naming the task's
 # recorded pr= passes when the forge holds that head: a forge-reported
@@ -436,9 +436,8 @@ This project's review server is Gerrit: it has no pull requests and no forge CI 
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
 Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate.
-That first \`done:\` is the handoff that starts the pipeline; it is not a request to publish.
+Once it is committed, start the no-mistakes skill yourself immediately (Claude \`/no-mistakes\`, Codex \`\$no-mistakes\`, otherwise ask your harness to invoke the no-mistakes skill) to validate; do not append \`done:\` or wait for firstmate to tell you to.
+The pipeline run is not a request to publish.
 
 EOF
       fm_nm_driving_block "$forge"
@@ -494,9 +493,8 @@ EOF
 Delivery contract: mode=no-mistakes
 Ship branch: $branch
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
+Once it is committed, start the no-mistakes skill yourself immediately (Claude \`/no-mistakes\`, Codex \`\$no-mistakes\`, otherwise ask your harness to invoke the no-mistakes skill) to validate and ship a PR; do not append \`done:\` or wait for firstmate to tell you to.
+The pipeline owns the push; do not push from this copy.
 ${nm_base}
 EOF
       fm_nm_driving_block "$forge"
