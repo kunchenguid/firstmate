@@ -3018,6 +3018,7 @@ EOF
 fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id> [<which-parent> [<clone-realpath> [<seeded-pane>]]]
   local session=$1 parent=$2 what=${3:-it just created} strict_clone=${4:-} want_pane=${5:-}
   local group source others tabs panes pane presence root root_real
+  # shellcheck disable=SC2034  # the spawn consumes the seeded pane id when recording a refusal
   FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE=""
   [ -n "$parent" ] || return 1
   if ! group=$(fm_backend_herdr_cli "$session" worktree list --workspace "$parent" 2>/dev/null) \
@@ -3072,6 +3073,7 @@ fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
     echo "warning: herdr repo grouping left the parent $parent $what in place because it does not hold exactly one seeded pane" >&2
     return 2
   }
+  # shellcheck disable=SC2034  # the spawn consumes the seeded pane id when recording a refusal
   FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE=$pane
   if [ -n "$strict_clone" ]; then
     if [ -n "$want_pane" ] && [ "$pane" != "$want_pane" ]; then
