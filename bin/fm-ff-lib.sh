@@ -37,6 +37,13 @@
 # any other worktree's checkout. A standalone remote home may instead advance
 # its checked-out default branch under the same guard.
 
+# Neutralize the machine-level GREP_OPTIONS=--color=always trap (see fm-watch.sh
+# header): left set, it wraps every grep stdout line in ANSI escapes, so
+# live_secondmate_meta_records' `grep '^home=' | cut -d= -f2-` style extractions
+# hand validate_secondmate_home an escape-wrapped path and it falsely refuses
+# the home as "not a directory".
+unset GREP_OPTIONS 2>/dev/null || true
+
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
