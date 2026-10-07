@@ -12,8 +12,8 @@
 # parts and every liveness question asks all three:
 #
 #   process identity - the anchor pid plus fm_session_lock_birth_token, the pid's
-#     own start time. Procfs tokens combine start ticks and NUL-separated
-#     cmdline; the ps lstart fallback has a one-second resolution floor.
+#     own start time. Procfs tokens use start ticks and exclude argv because
+#     harnesses rewrite it; the ps lstart fallback has a one-second floor.
 #     `kill -0` alone proves nothing and is never the whole answer.
 #     A legacy sidecar without line 3 retains the pre-token live-harness
 #     judgment; new records omit that line when the start time is unreadable.
@@ -312,11 +312,11 @@ fm_harness_pid_alive() {
 # narrower birth-only form, because a harness rewrites its own argv as its title
 # changes, so the command line cannot be part of a long-lived identity.
 fm_session_lock_birth_token() {  # <pid>
-  local pid=$1 out proc_root stat_line starttime cmdline_hex
+  local pid=$1 out proc_root stat_line starttime
   local -a stat_fields
   case "$pid" in '' | *[!0-9]*) return 1 ;; esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+  if [ -r "$proc_root/$pid/stat" ]; then
     stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null || true)
     if [ -n "$stat_line" ]; then
       read -r -a stat_fields <<< "${stat_line##*)}"
@@ -325,14 +325,11 @@ fm_session_lock_birth_token() {  # <pid>
         case "$starttime" in
           '' | *[!0-9]*) ;;
           *)
-            cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]')
-            if [ -n "$cmdline_hex" ]; then
-              case "$(uname 2>/dev/null || true)" in
-                Linux) printf 'linux-starttime=%s cmdline-hex=%s\n' "$starttime" "$cmdline_hex" ;;
-                *) printf 'proc-starttime=%s cmdline-hex=%s\n' "$starttime" "$cmdline_hex" ;;
-              esac
-              return 0
-            fi
+            case "$(uname 2>/dev/null || true)" in
+              Linux) printf 'linux-starttime=%s\n' "$starttime" ;;
+              *) printf 'proc-starttime=%s\n' "$starttime" ;;
+            esac
+            return 0
             ;;
         esac
       fi
