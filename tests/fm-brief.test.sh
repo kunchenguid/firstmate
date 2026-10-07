@@ -1432,6 +1432,7 @@ test_branch_prefix_command_is_shell_safe() {
   git init -q "$repo" || fail "could not initialize shell-safety fixture repository"
   git -C "$repo" -c user.name=Test -c user.email=test@example.com commit --allow-empty -qm fixture
   git -C "$repo" branch -M main
+  # shellcheck disable=SC2034 # start_ref is read by the eval'd branch-creation command.
   ( cd "$repo" && start_ref=main && eval "$command" ) || fail "generated branch-creation command did not run"
   assert_absent "$marker" "generated branch command executed the prefix's command substitution"
   branch=$(git -C "$repo" branch --show-current)

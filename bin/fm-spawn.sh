@@ -3179,13 +3179,6 @@ if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
     exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
   fi
 fi
-# An admission deferral must not touch the pool, even for a capability probe.
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  if ! treehouse get --root "$SPAWN_TREEHOUSE_ROOT" --help >/dev/null 2>&1; then
-    echo "error: Treehouse must support get --root (v2.2.0 or newer) for clone-isolated allocation; upgrade Treehouse with operator approval, then retry; no slot was acquired" >&2
-    exit 1
-  fi
-fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
   exit 1
@@ -3350,6 +3343,17 @@ if [ "$KIND" = ship ]; then
   STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
   if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# An admission deferral must not touch the pool, even for a capability probe.
+# The probe runs after the task's own inputs - brief, launch brief, and delivery
+# agreement - are validated, so an input error is reported first, and before any
+# endpoint or slot is requested.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  if ! treehouse get --root "$SPAWN_TREEHOUSE_ROOT" --help >/dev/null 2>&1; then
+    echo "error: Treehouse must support get --root (v2.2.0 or newer) for clone-isolated allocation; upgrade Treehouse with operator approval, then retry; no slot was acquired" >&2
+    exit 1
   fi
 fi
 
