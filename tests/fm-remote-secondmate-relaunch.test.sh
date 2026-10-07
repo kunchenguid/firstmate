@@ -105,6 +105,12 @@ if [ "$action" = disposition ]; then
   exit 0
 fi
 [ "$action" = relaunch ] || exit 94
+if [ -n "$op" ]; then
+  jq -e --arg g "$op" '
+    keys == ["incarnations", "schema", "task"]
+    and (.incarnations | length == 1) and .incarnations[0].generation == $g
+  ' >/dev/null || exit 95
+fi
 if [ "${FM_FAKE_HOST_GENERATION:-}" != "" ] && [ "$expected" != - ] && [ "$expected" != "$FM_FAKE_HOST_GENERATION" ]; then
   [ -z "$op" ] || disposition prelaunch false false >&2
   printf 'error: generation-mismatch: host now runs %s\n' "$FM_FAKE_HOST_GENERATION" >&2
@@ -319,6 +325,16 @@ pass "a full fleet pool refuses a remote supervisor relaunch"
 reset_meta
 rm -f "$HOME_DIR/state/busy.meta"
 seed_pool
+FM_HOME="$HOME_DIR" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+  "$SEATS" reserve ios --generation prepared --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null
+' || fail "could not seed a never-dispatched predecessor"
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+expect_code 0 "$RC" "relaunch after the reserving owner died before dispatch: $OUT"
+assert_equals reclaimed "$(ios_lifecycle prepared)" "relaunch could not reclaim its never-dispatched predecessor"
+pass "remote relaunch reclaims never-dispatched predecessors without metadata self-contention"
+
+reset_meta
+seed_pool
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
 expect_code 0 "$RC" "a seated remote relaunch should succeed: $OUT"
 assert_grep 'model=pool-model-a' "$HOME_DIR/state/ios.meta" \
@@ -329,6 +345,14 @@ assert_equals confirmed "$(ios_lifecycle "$G1")" "the host's started disposition
 OUT=$(probe_pool); RC=$?
 expect_code 4 "$RC" "a worker after a successful pooled remote relaunch"
 pass "a successful remote relaunch confirms and keeps its fleet seat"
+
+HISTORY_FILE=$(printf '%s\n' "$HOME_DIR/state/fleet-seats/holders/"*.json)
+jq '
+  .incarnations = ([range(0; 5000) as $n | .incarnations[0]
+    | .generation = ("history-" + ($n | tostring)) | .lifecycle = "released"] + .incarnations)
+' "$HISTORY_FILE" > "$TMP/long-history"
+mv "$TMP/long-history" "$HISTORY_FILE"
+[ "$(wc -c < "$HISTORY_FILE")" -gt 1048576 ] || fail "the persisted history did not exceed the transport bound"
 
 # Same pool at full capacity: the replacement is the same holder, so it needs
 # no second seat, and the old generation is released only because the host
@@ -342,6 +366,7 @@ assert_equals confirmed "$(ios_lifecycle "$G2")" "the replacement was not confir
 OUT=$(probe_pool); RC=$?
 expect_code 4 "$RC" "a worker after a same-model remote relaunch"
 pass "a same-pool remote relaunch replaces one seat without dropping the count"
+assert_equals 5002 "$(seats show ios | jq '.incarnations | length')" "the bounded payload pruned authoritative history"
 
 # A token-scoped prelaunch refusal releases only the candidate.
 FM_FAKE_RELAUNCH_MODE='confirmed-failure'
@@ -568,8 +593,8 @@ host_control() {  # <args...>
 }
 
 host_parent_record() {  # <operation> [previous]: dispatched holder protocol input
-  jq -cn --arg g "$1" --arg p "${2:--}" --arg home "$HOST_HOME" --arg state "$HOME_DIR/state" '
-    {schema:"fm-fleet-seat-holder.v2", state_dir:$state, task:"ios", revision:2,
+  jq -cn --arg g "$1" --arg p "${2:--}" --arg home "$HOST_HOME" '
+    {schema:"fm-fleet-seat-holder.v2", task:"ios",
      incarnations:[{generation:$g, previous_generation:(if $p == "-" then null else $p end),
        kind:"secondmate", model:"pool-model-a", lifecycle:"reserved", launch_phase:"dispatching",
        route:{placement:"remote", operation:$g, home:$home}}]}'
@@ -693,6 +718,12 @@ for VERB in launch relaunch; do
     fm-remote-secondmate-control.sh "${HOST_ARGS[@]}" --operation forged 2>&1); RC=$?
   [ "$RC" -ne 0 ] || fail "the transport accepted an invented $VERB operation"
   assert_contains "$OUT" 'not a dispatched parent reservation' "the transport failed to verify its authoritative ledger"
+  OP="multiple.$VERB"
+  OUT=$(host_control "${HOST_ARGS[@]}" --operation "$OP" \
+    <<< "$(host_parent_record "$OP" | jq '.incarnations += [.incarnations[0] | .generation = "unrelated-history"]')"); RC=$?
+  [ "$RC" -ne 0 ] || fail "the host accepted unrelated history for $VERB"
+  assert_contains "$OUT" 'no verified dispatched parent reservation' "the host did not enforce the single-incarnation payload"
+  assert_absent "$HOST_HOME/state/parent-route/ios.seat-operation.$OP" "unrelated history opened an operation receipt"
 done
 pass "host and parent transport refuse invented launch and relaunch tokens before lifecycle effects"
 
@@ -701,6 +732,7 @@ for RECEIPT_DAMAGE in lost wrong; do
   OUT=$(host_control launch ios claude pool-model-a medium herdr --operation "$OP" \
     <<< "$(host_parent_record "$OP")"); RC=$?
   expect_code 0 "$RC" "a verified launch observing the existing host generation: $OUT"
+  assert_equals 'incarnations schema task' "$(jq -r 'keys | join(" ")' "$HOST_HOME/state/parent-route/ios.seat-reservation.$OP")" "the retained reservation was not the minimal protocol payload"
   RECEIPT="$HOST_HOME/state/parent-route/ios.seat-operation.$OP"
   if [ "$RECEIPT_DAMAGE" = lost ]; then
     rm "$RECEIPT"

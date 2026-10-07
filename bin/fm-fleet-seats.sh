@@ -78,7 +78,7 @@
 #     conflicts with every ledger incarnation fails admission closed. An
 #     unmanaged ship or scout counts while its record is pooled; an unmanaged
 #     local secondmate counts unless its session lock is free or stale and its
-#     endpoint reads dead or missing; an unresolved model counts everywhere.
+#     endpoint is proven destroyed; an unresolved model counts everywhere.
 #   - the primary supervisor, keyed "<root-state>\t.primary", when the root's
 #     config/fleet-seats declares "primary_model" in a pool and the root's
 #     session lock is not provably free or stale (bin/fm-session-lock-lib.sh).
@@ -510,12 +510,18 @@ meta_generation() {  # <meta>
 # meta_state <meta> <models-file>: "pooled", "other", "absent", or "unreadable"
 # for an UNMANAGED record.
 meta_state() {
-  local meta=$1 models=$2 model kind home id endpoint_state
+  local meta=$1 models=$2 model kind home id endpoint_state verdict
   if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
     echo absent
     return
   fi
   [ -f "$meta" ] && [ -r "$meta" ] || { echo unreadable; return; }
+  model=$(sed -n 's/^model=//p' "$meta" | tail -1)
+  case "$model" in ''|default|-) echo unreadable; return ;; esac
+  if ! grep -Fxq -- "$model" "$models"; then
+    echo other
+    return
+  fi
   kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
   if [ "$kind" = secondmate ] && [ -z "$(sed -n 's/^remote_host=//p' "$meta" | tail -1)" ]; then
     home=$(sed -n 's/^home=//p' "$meta" | tail -1)
@@ -525,19 +531,20 @@ meta_state() {
         free|stale)
           id=${meta##*/}
           id=${id%.meta}
+          endpoint_state=unreadable
           if fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
             endpoint_state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || endpoint_state=unreadable
-            case "$endpoint_state" in dead|missing) echo other; return ;; esac
+            if [ "$endpoint_state" = missing ]; then
+              verdict=$(fm_control_endpoint_absence_verdict "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
+              [ "${verdict%%$'\t'*}" != gone ] || { echo other; return; }
+            fi
+          fi
+          if [ "$endpoint_state" != alive ]; then
+            printf 'fleet-seats: unmanaged pooled supervisor %s stays counted without confirmed startup or proven endpoint destruction; reconcile or retire its endpoint explicitly\n' "$id" >&2
           fi
           ;;
       esac
     fi
-  fi
-  model=$(sed -n 's/^model=//p' "$meta" | tail -1)
-  case "$model" in ''|default|-) echo unreadable; return ;; esac
-  if ! grep -Fxq -- "$model" "$models"; then
-    echo other
-    return
   fi
   echo pooled
 }
@@ -1362,7 +1369,7 @@ if [ "$CMD" = reclaim ]; then
       *) uncertain "the endpoint for $TASK generation $GEN reads '$state'" ;;
     esac
   fi
-  if [ -e "$meta" ] || [ -L "$meta" ]; then
+  if [ "$verdict" != never-dispatched ] && { [ -e "$meta" ] || [ -L "$meta" ]; }; then
     META_LOCK_PATH=$(fm_meta_lock_path "$meta") || refuse "metadata lock path is invalid for $TASK"
     fm_lock_acquire_wait_max "$META_LOCK_PATH" "$LOCK_WAIT" || unavailable "the task record for $TASK stayed locked"
     trap 'fm_lock_release "$META_LOCK_PATH" || true; cleanup' EXIT
@@ -1764,7 +1771,6 @@ if [ "$CMD" = serve-remotes ]; then
     { printf '%s\n' "$EPOCH" > "$LEDGER/remote-$id.pending.tmp.$$" \
       && mv -f "$LEDGER/remote-$id.pending.tmp.$$" "$LEDGER/remote-$id.pending"; } \
       || unavailable "cannot invalidate the certificate for $id"
-    rm -f "$LEDGER/remote-$id.policy" "$LEDGER/remote-$id.holders" 2>/dev/null || true
     unlock
     served=0
     rpc_rc=0
