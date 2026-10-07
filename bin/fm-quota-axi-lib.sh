@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# Shared quota-axi compatibility floor for the bootstrap diagnostic.
+# Shared quota-axi compatibility floor for the bootstrap diagnostic, the
+# --json snapshot validator, and the provider-row join dispatch consumers use.
 # Usage: . bin/fm-quota-axi-lib.sh
 #
 # FM_QUOTA_AXI_MIN follows the axi-family floor policy owned beside the floor
@@ -8,23 +9,48 @@
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
 # turns a failing check into the operator-facing MISSING diagnostic, which is
 # what keeps an older build from reaching a dispatch intake at all.
+#
+# Snapshot schemas: fm_quota_json_valid accepts quota-axi schema 5 (one row per
+# provider, no accountKey) and schema 6 (every row carries accountKey, unique on
+# provider + accountKey; quota-axi emits it once any provider expands to more
+# than one account). Schema 5 keeps its exact pre-schema-6 rules so an older
+# quota-axi keeps working unchanged. FM_QUOTA_ROW_JQ is the one join used to
+# bind a candidate to its row under either schema.
 
-FM_QUOTA_AXI_MIN=0.1.29
+FM_QUOTA_AXI_MIN=0.1.51
 FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 
-fm_quota_axi_compatible() {
-  local timeout=${1:-} output parts major minor patch extra
+# The eligibility section of .agents/skills/quota-array-dispatch/SKILL.md
+# owns the account-matching contract these jq definitions implement.
+# Prepend them to a consumer's program:
+#   quota_lane($harness; $model)   the candidate's account key, or "" when none
+#                                  is identified by the contract.
+#   quota_row($snapshot; $provider; $lane)
+#                                  the one provider row the candidate binds to,
+#                                  or null; schema 5 ignores $lane.
+# shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
+FM_QUOTA_ROW_JQ='
+  def quota_lane($harness; $model):
+    if $harness == "codex" then "codex-home"
+    elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
+    then ($model | split("/") | first | if . == "codex-native" then "codex-home" else . end)
+    else "" end;
+  def quota_row($snapshot; $provider; $lane):
+    ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
+    if $snapshot.schemaVersion == 6 then
+      (([$rows[] | select(.accountKey == $lane)] | first) //
+       ([$rows[] | select(.accountKey == "default")] | first) // null)
+    else ($rows | first) // null
+    end;
+'
+
+# fm_quota_axi_version_compatible <version-output>
+# True when the printed `quota-axi --version` text meets FM_QUOTA_AXI_MIN.
+# Callers that already captured a bounded --version pass that text here so they
+# do not launch a second, unbounded version probe.
+fm_quota_axi_version_compatible() {
+  local output=${1-} parts major minor patch extra
   local min_major min_minor min_patch min_extra
-  command -v quota-axi >/dev/null 2>&1 || return 1
-  if [ -n "$timeout" ]; then
-    case "$timeout" in
-      ''|*[!0-9]*|0) return 1 ;;
-    esac
-    [ "$(type -t fm_run_timed)" = function ] || return 1
-    output=$(fm_run_timed "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
-  else
-    output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
-  fi
   parts=$(printf '%s\n' "$output" |
     sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
     head -1)
@@ -42,14 +68,38 @@ fm_quota_axi_compatible() {
   [ "$patch" -ge "$min_patch" ]
 }
 
+fm_quota_axi_compatible() {
+  local timeout=${1:-} output
+  command -v quota-axi >/dev/null 2>&1 || return 1
+  if [ -n "$timeout" ]; then
+    case "$timeout" in
+      ''|*[!0-9]*|0) return 1 ;;
+    esac
+    [ "$(type -t fm_run_timed)" = function ] || return 1
+    output=$(fm_run_timed "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
+  else
+    output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
+  fi
+  fm_quota_axi_version_compatible "$output"
+}
+
 fm_quota_json_valid() {
   jq -se --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     length == 1 and
     (.[0] | type) == "object" and
     (.[0] |
-      .schemaVersion == 5 and
       (.providers | type) == "array" and
-      (([.providers[].provider] | length) == ([.providers[].provider] | unique | length)) and
+      (if .schemaVersion == 5 then
+         (([.providers[].provider] | length) == ([.providers[].provider] | unique | length))
+       elif .schemaVersion == 6 then
+         all(.providers[];
+           (.accountKey | type) == "string" and
+           (.accountKey | length) > 0 and
+           ((.accountKey | test("\\s")) | not)) and
+         (([.providers[] | [.provider, .accountKey]] | length) ==
+          ([.providers[] | [.provider, .accountKey]] | unique | length))
+       else false
+       end) and
       all(.providers[];
       (.provider | type) == "string" and
       (.provider | test($provider_re)) and
@@ -104,15 +154,16 @@ fm_quota_single_provider_table() {
     'muse meta'
 }
 
+# Reads the whole table before answering: leaving the loop early closes the
+# pipe mid-write, and where SIGPIPE is ignored the writer prints a broken-pipe
+# error on stderr.
 fm_quota_single_provider_for_harness() {
-  local harness provider
+  local harness provider found=''
   while read -r harness provider; do
-    if [ "$harness" = "$1" ]; then
-      printf '%s\n' "$provider"
-      return 0
-    fi
+    [ -z "$found" ] && [ "$harness" = "$1" ] && found=$provider || :
   done < <(fm_quota_single_provider_table)
-  return 1
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
 }
 
 fm_quota_provider_for_harness() {

@@ -436,11 +436,17 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
+  # The fixture arm written here stands in for the watcher arm, so the home opts out
+  # of the supervision host a Claude home otherwise runs by default.
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host-off"
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
@@ -698,7 +704,9 @@ arm_count() {  # <dir>
 
 # The recycled chain must still be treated as the owner: arm, no diagnostic,
 # lock accepted, line 1 untouched while the recorded pid lives, sidecar bytes
-# untouched.
+# untouched. An owned actionable close records two arm invocations - the
+# foreground arm plus the handling successor the hook starts before the rewake -
+# so the cumulative <expected-arms> grows by two for every owned phase.
 expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
   local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5
   expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "$label: the Stop auto-arm did not rewake"
@@ -755,7 +763,7 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   # Phase 1: the healthy contiguous chain, the session's own id.
   fire_phase "$dir" 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
   grep -qx "$frontend" "$dir/state/phase-1/ancestry" || fail "the healthy chain did not reach the front-end"
-  expect_phase_owned "$dir" 1 1 "$frontend" "healthy chain"
+  expect_phase_owned "$dir" 1 2 "$frontend" "healthy chain"
 
   # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
   # the front-end that holds the lock stays alive.
@@ -774,16 +782,16 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
     fail "the recycled chain still reached the front-end, so this phase proves nothing"
   fi
   grep -qx "$spare" "$dir/state/phase-2/ancestry" || fail "the hook's ancestry lost its own spare"
-  expect_phase_owned "$dir" 2 2 "$frontend" "recycled chain, same session"
+  expect_phase_owned "$dir" 2 4 "$frontend" "recycled chain, same session"
 
   # Phases 3-5: a different id, the right id from a CLAUDE_PID outside the run,
   # and no id at all are each a non-owner over the same broken chain.
   fire_phase "$dir" 3 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
-  expect_phase_foreign "$dir" 3 2 "$frontend" "recycled chain, different session"
+  expect_phase_foreign "$dir" 3 4 "$frontend" "recycled chain, different session"
   fire_phase "$dir" 4 "export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$frontend"
-  expect_phase_foreign "$dir" 4 2 "$frontend" "recycled chain, untrusted id"
+  expect_phase_foreign "$dir" 4 4 "$frontend" "recycled chain, untrusted id"
   fire_phase "$dir" 5 ''
-  expect_phase_foreign "$dir" 5 2 "$frontend" "recycled chain, no id"
+  expect_phase_foreign "$dir" 5 4 "$frontend" "recycled chain, no id"
 
   # Phase 6: the front-end exits; the same session reclaims its dead anchor
   # onto the spare - the model-loop process - not onto the outermost pty-host.
@@ -795,7 +803,7 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   done
   kill -0 "$frontend" 2>/dev/null && fail "the front-end did not exit"
   fire_phase "$dir" 6 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
-  expect_phase_owned "$dir" 6 3 "$spare" "dead front-end, same session"
+  expect_phase_owned "$dir" 6 6 "$spare" "dead front-end, same session"
   [ "$spare" != "$ptyhost" ] || fail "fixture collapsed the spare into the pty-host"
 
   : > "$dir/state/stop-spare"

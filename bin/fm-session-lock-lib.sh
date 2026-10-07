@@ -18,8 +18,11 @@
 # cursor-agent and the far-too-generic legacy alias `agent`, and it runs as a
 # bundled node script. bin/fm-cursor-lib.sh is the fleet's single owner of that
 # decision, so this file delegates to it rather than widening the name match.
+_FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_SESSION_LOCK_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_SESSION_LOCK_LIB_DIR=.
 # shellcheck source=bin/fm-cursor-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+. "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
+unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
@@ -312,4 +315,73 @@ EOF
   # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid
   return 0
+}
+
+# Read-only classification of state/.lock for machine-readable callers.
+# Never acquires the lock. A held lock is not proof the holder is consuming
+# wakes; that question belongs to the inbox readiness projection.
+#
+# Sets:
+#   FM_LOCK_INSPECT_STATE         free|held|stale|unreadable|unknown
+#   FM_LOCK_INSPECT_PID           recorded pid, or empty
+#   FM_LOCK_INSPECT_LIVE_HARNESS  true|false|unknown
+#
+# held: the recorded pid is a live verified harness.
+# stale: the recorded pid is gone.
+# unknown: the file or pid cannot be classified without guessing, including a
+# live process that is not a verified harness. Existence of a lock file, a
+# session record, or a pane is never treated as liveness.
+# shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+FM_LOCK_INSPECT_STATE=unknown
+FM_LOCK_INSPECT_PID=
+FM_LOCK_INSPECT_LIVE_HARNESS=unknown
+fm_session_lock_inspect() {  # <state>
+  local state=$1 lock pid
+  # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+  FM_LOCK_INSPECT_STATE=unknown
+  # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+  FM_LOCK_INSPECT_PID=
+  # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+  FM_LOCK_INSPECT_LIVE_HARNESS=unknown
+  lock="$state/.lock"
+  if [ ! -e "$lock" ]; then
+    FM_LOCK_INSPECT_STATE=free
+    FM_LOCK_INSPECT_LIVE_HARNESS=false
+    return 0
+  fi
+  if [ ! -f "$lock" ] || [ -L "$lock" ]; then
+    FM_LOCK_INSPECT_STATE=unreadable
+    return 0
+  fi
+  pid=$(cat "$lock" 2>/dev/null) || {
+    FM_LOCK_INSPECT_STATE=unreadable
+    return 0
+  }
+  pid=${pid%%$'\n'*}
+  # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+  FM_LOCK_INSPECT_PID=$pid
+  case "$pid" in
+    ''|*[!0-9]*)
+      FM_LOCK_INSPECT_STATE=unknown
+      return 0
+      ;;
+  esac
+  if kill -0 "$pid" 2>/dev/null; then
+    if fm_harness_pid_alive "$pid"; then
+      FM_LOCK_INSPECT_STATE=held
+      FM_LOCK_INSPECT_LIVE_HARNESS=true
+    else
+      FM_LOCK_INSPECT_STATE=unknown
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
+    fi
+    return 0
+  fi
+  if ps -o comm= -p "$pid" >/dev/null 2>&1; then
+    FM_LOCK_INSPECT_STATE=unknown
+    return 0
+  fi
+  # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+  FM_LOCK_INSPECT_STATE=stale
+  # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+  FM_LOCK_INSPECT_LIVE_HARNESS=false
 }
