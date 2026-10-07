@@ -253,7 +253,10 @@ dns_probe() {
     # category (`host` is not one), so it answers any name with its usage block
     # and exit 64; calling it here recorded "the resolver errored" for names that
     # `dig` and `host` both reported as NXDOMAIN. It is therefore not a candidate.
-    out=$(fm_run_timed "$TIMEOUT" "$tool" "$DNS_HOST" 2>/dev/null </dev/null) && rc=0 || rc=$?
+    case "${tool##*/}" in
+      dig) out=$(fm_run_timed "$TIMEOUT" "$tool" +noall +answer +comments "$DNS_HOST" A 2>/dev/null </dev/null) && rc=0 || rc=$? ;;
+      *) out=$(fm_run_timed "$TIMEOUT" "$tool" "$DNS_HOST" 2>/dev/null </dev/null) && rc=0 || rc=$? ;;
+    esac
     if [ "$rc" -eq 124 ]; then
       saw_error=1
       error_detail="timeout_after_${TIMEOUT}s"
@@ -287,7 +290,10 @@ dns_probe() {
     # unnecessary request. Report the matched record, not the banner, as detail.
     case "${tool##*/}" in
       dig)
-        answer=$(printf '%s\n' "$out" | awk '/^;; ANSWER SECTION:/{inside=1; next} /^;; [A-Z]+ SECTION:/{inside=0} inside' | grep -E '^[^;[:space:]][^[:space:]]*[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]{1,3}\.){3}[0-9]{1,3}([[:space:]]|$)|^[^;[:space:]][^[:space:]]*[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+[^[:space:]]+[[:space:]]+[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)' | head -n 1)
+        answer=$(printf '%s\n' "$out" | awk '
+          /^;; [A-Z]+ SECTION:/ { sections=1; inside=($0 ~ /^;; ANSWER SECTION:/); next }
+          !/^;/ && NF && (!sections || inside) && $NF ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ { print; exit }
+        ' | head -n 1)
         ;;
       host) answer=$(printf '%s\n' "$out" | grep -E 'has address|IPv6 address' | head -n 1) ;;
       *) answer='' ;;
@@ -298,7 +304,7 @@ dns_probe() {
     fi
     case "${tool##*/}" in
       dig)
-        out=$(fm_run_timed "$TIMEOUT" "$tool" "$DNS_HOST" AAAA 2>/dev/null </dev/null) && rc=0 || rc=$?
+        out=$(fm_run_timed "$TIMEOUT" "$tool" +noall +answer +comments "$DNS_HOST" AAAA 2>/dev/null </dev/null) && rc=0 || rc=$?
         if [ "$rc" -eq 124 ]; then
           saw_error=1
           error_detail="timeout_after_${TIMEOUT}s"
@@ -318,7 +324,10 @@ dns_probe() {
           printf 'nxdomain %s\n' "${first:-no-address}"
           return 0
         fi
-        answer=$(printf '%s\n' "$out" | awk '/^;; ANSWER SECTION:/{inside=1; next} /^;; [A-Z]+ SECTION:/{inside=0} inside' | grep -E '^[^;[:space:]][^[:space:]]*[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+[^[:space:]]+[[:space:]]+[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)' | head -n 1)
+        answer=$(printf '%s\n' "$out" | awk '
+          /^;; [A-Z]+ SECTION:/ { sections=1; inside=($0 ~ /^;; ANSWER SECTION:/); next }
+          !/^;/ && NF && (!sections || inside) && $NF ~ /^[0-9a-fA-F]*:[0-9a-fA-F:]+$/ { print; exit }
+        ' | head -n 1)
         if [ -n "$answer" ]; then
           printf 'ok %s\n' "$answer"
           return 0

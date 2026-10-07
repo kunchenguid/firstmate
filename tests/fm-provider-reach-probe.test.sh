@@ -122,7 +122,10 @@ case "\${FM_FAKE_DIG_MODE:-address}" in
     ';; SERVER: 100.100.100.100#53(100.100.100.100)' \
     ';; ANSWER SECTION:' \
     'nodata.example.invalid. 300 IN A 1.2.3.4' ; exit 0 ;;
-  ipv6) printf ';; ANSWER SECTION:\nexample.invalid. 300 IN AAAA 2001:db8::1\n'; exit 0 ;;
+  digrc) if [ "\$query_type" = AAAA ]; then printf '%s\\n' \
+    ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 12345' \
+    ';; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 0'; else printf 'example.invalid. A 1.2.3.4\\n'; fi; exit 0 ;;
+  ipv6) printf ';; ANSWER SECTION:\\nexample.invalid. 300 IN AAAA 2001:db8::1\\n'; exit 0 ;;
   a-noanswer) if [ "\$query_type" = AAAA ]; then printf ';; ANSWER SECTION:\nexample.invalid. 300 IN AAAA 2001:db8::1\n'; else printf ';; no A records\n'; fi; exit 0 ;;
   a-aaaa-error) if [ "\$query_type" = AAAA ]; then printf 'unrecognized resolver failure\n'; exit 9; else printf ';; no A records\n'; exit 0; fi ;;
   fail) printf 'connection failed\n'; exit 9 ;;
@@ -391,6 +394,18 @@ assert_contains "$out" "dns=unknown" "addresses outside dig's answer output are 
 assert_contains "$out" "result=reachable" "HTTP follows uncertain DNS output"
 assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "HTTP proceeds after no answer-section address"
 
+tmp=$TMP_ROOT/digrc-nottl-noclass; new_case "$tmp"
+make_fake_dig "$tmp" "$tmp/dig.log"
+out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=digrc FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_CURL_CODE=200 FM_FAKE_CURL_URL_LOG="$tmp/urls.log" FM_FAKE_DIG_LOG="$tmp/dig.log" \
+  "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
+expect_code 0 "$rc" "dig output without TTL/class still recognizes an A answer"
+assert_contains "$out" "dns=ok" "a ~/.digrc-style A record proves DNS success"
+assert_contains "$out" "result=reachable" "HTTP follows the valid ~/.digrc-style A record"
+assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "HTTP proceeds after the valid A answer"
+assert_contains "$(cat "$tmp/dig.log")" "+noall +answer +comments $PROBE_HOST A" "the A lookup overrides ~/.digrc with a fixed format and explicit type"
+[ "$(wc -l < "$tmp/dig.log" | tr -d ' ')" = 1 ] || fail "a valid A answer should avoid the unnecessary AAAA fallback"
+
 tmp=$TMP_ROOT/answer-with-diagnostics; new_case "$tmp"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=answer-diagnostics FM_PROVIDER_REACH_DNS_TOOL=dig \
   FM_FAKE_CURL_CODE=200 "$SCRIPT" --host "$PROBE_HOST" 2>&1); rc=$?
@@ -436,7 +451,7 @@ out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_CURL_CODE=200 FM_FAKE_DIG_MODE=address \
 expect_code 0 "$rc" "a host:port authority still probes over HTTP"
 assert_contains "$out" "dns=ok" "the host component resolves"
 assert_contains "$out" "dns_detail=example.invalid. 300 IN A 1.2.3.4" "the DNS answer record is reported"
-[ "$(cat "$tmp/dig.log")" = "$PROBE_HOST" ] || fail "the resolver was handed a port-bearing name: $(cat "$tmp/dig.log")"
+[ "$(cat "$tmp/dig.log")" = "+noall +answer +comments $PROBE_HOST A" ] || fail "the resolver was handed a port-bearing name or non-fixed query: $(cat "$tmp/dig.log")"
 assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST:8443" "the port is preserved in the HTTPS URL"
 
 tmp=$TMP_ROOT/ipv4-literal; new_case "$tmp"
