@@ -27,16 +27,21 @@
 #     state: {ok,value,source,detail,reason} - the fleet document's own
 #       current_state, carried by a `pipeline:false` agent. It is null for a
 #       `pipeline:true` agent, whose journey is its steps instead.
-#     endpoint_alive: true, false, or "unknown" when liveness was never
-#       established.
+#     endpoint_alive: true, or "unknown" when liveness was never established.
+#       A provably dead endpoint is omitted rather than drawn, so false does
+#       not appear here.
 #     worker: {harness,model,effort}. A field the record does not state, or
 #       states as the `default` the harness resolved, is null.
 #     pr: {url,number}, both null when no pull request is recorded.
 #     collection: {ok,reason,source,at,epoch} - whether this agent's pipeline
-#       read succeeded, and when it was made. ok false means nothing in run,
-#       steps or active_steps was established.
+#       read succeeded, and when it was made. ok false means this agent's step
+#       list could not be established, so steps and active_steps are empty; run
+#       may still carry the id and status the overview attributed, when it was
+#       the per-run read that failed.
 #     run: {present,id,status,error,head} - the no-mistakes run attributed to
-#       this task's branch. error is the failed read's own first line.
+#       this task's branch. error is the run's OWN recorded error and is empty
+#       unless the read succeeded; a failed read's own first line is in
+#       collection.reason instead.
 #     steps[]: {step,status,findings,duration_ms}, the run's own steps behind
 #       the synthetic `building` step described under the limits below.
 #     active_steps[]: {step,status,active_for,active_ms,last_activity,
@@ -48,7 +53,10 @@
 #       is one of passed, failed, pending or skipped and the four counts are
 #       its tally. head is the commit those checks describe, and pr_state the
 #       pull request's own OPEN, MERGED or CLOSED.
-#   omitted[]: {id,kind,window,reason}, one per task dropped from agents[].
+#   omitted[]: {id,kind,window,reason}, one per task whose recorded window no
+#     longer exists. A record that could not be built is skipped with no entry
+#     here, so agents[] plus omitted[] is not guaranteed to account for every
+#     task in the fleet document.
 #
 # A numeric cell the running build did not declare is null, never zero: zero is
 # a measured value here.
