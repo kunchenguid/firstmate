@@ -117,8 +117,13 @@ fm_harness_process_is_daemon() {  # <comm> <args>
   # distinguished after the prompt option. Only inspect preceding arguments.
   flag_args=$args
   case " $flag_args " in
+    *" --prompt="*) flag_args=${flag_args%% --prompt=*} ;;
+    *" -p="*) flag_args=${flag_args%% -p=*} ;;
+    *" --instructions="*) flag_args=${flag_args%% --instructions=*} ;;
     *" --prompt "*) flag_args=${flag_args%% --prompt *} ;;
     *" -p "*) flag_args=${flag_args%% -p *} ;;
+    *" --instructions "*) flag_args=${flag_args%% --instructions *} ;;
+    *" -i "*) flag_args=${flag_args%% -i *} ;;
   esac
   case " $flag_args " in
     *" --managed-daemon "* | *" --service "*) return 0 ;;
