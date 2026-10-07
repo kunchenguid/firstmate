@@ -80,8 +80,69 @@ test_emitted_stop_revalidation_contract() {
   pass 'emitted supervision prompt requires current stop verification after finish'
 }
 
+test_daemon_heartbeat() {
+  local mode=$1 skip=${2:-heartbeat} dir state
+  dir=$(make_case "daemon-$mode-$skip")
+  state="$dir/state"
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  printf 'mode: quiet\n' > "$state/.afk"
+  if [ "$mode" != empty ]; then
+    FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add queued 'next unit' >/dev/null || fail 'could not queue unit'
+    FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add dependency 'dependency' >/dev/null || fail 'could not add dependency'
+    FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" block queued --by dependency >/dev/null || fail 'could not set dependency'
+    FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" done dependency --pr https://github.com/example/fixture/pull/1 >/dev/null || fail 'could not land dependency'
+  fi
+  if [ "$mode" = held ]; then
+    FM_HOME="$dir" "$ROOT/bin/fm-captain-hold.sh" hold queued --reason 'explicit hold' >/dev/null || fail 'could not hold unit'
+  fi
+  if [ "$mode" = unreadable ]; then
+    printf '#!/usr/bin/env bash\nexit 2\n' > "$dir/fakebin/tasks-axi"
+    chmod +x "$dir/fakebin/tasks-axi"
+  fi
+  if [ "$mode" = failed ]; then
+    mkdir "$state/.subsuper-escalations"
+  fi
+  append_wake "$state" heartbeat heartbeat heartbeat || fail 'could not enqueue daemon heartbeat'
+  (
+    . "$ROOT/bin/fm-supervise-daemon.sh"
+    export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config"
+    export PATH="$dir/fakebin:$PATH" FM_INJECT_SKIP="$skip" FM_ESCALATE_BATCH_SECS=90
+    LOG="$state/daemon.log"
+    if [ "$mode" = failed ]; then
+      if handle_durable_wakes heartbeat "$state"; then
+        fail 'failed handoff acknowledged its heartbeat'
+      fi
+    else
+      handle_durable_wakes heartbeat "$state" || fail 'daemon heartbeat handling failed'
+    fi
+  ) || fail 'daemon handling assertions failed'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" > "$dir/remaining" 2>/dev/null || fail 'could not inspect remaining wakes'
+  case "$mode" in
+    empty|held)
+      [ ! -s "$state/.subsuper-escalations" ] || fail 'nonready work reached dispatcher'
+      [ ! -s "$dir/remaining" ] || fail 'nonready heartbeat remained unacknowledged'
+      ;;
+    failed)
+      assert_contains "$(cat "$dir/remaining")" "$(printf '\theartbeat\t')" 'failed handoff lost its durable wake'
+      ;;
+    *)
+      assert_contains "$(cat "$state/.subsuper-escalations")" 'ready-queue fleet check:' 'ready work was silently consumed'
+      [ ! -s "$dir/remaining" ] || fail 'successful durable handoff did not acknowledge heartbeat'
+      ;;
+  esac
+  pass "daemon $mode heartbeat respects readiness before skip=$skip and acknowledgement"
+}
+
 test_ready_heartbeat
 test_ready_heartbeat unreadable
 test_not_ready_heartbeat empty
 test_not_ready_heartbeat held
 test_emitted_stop_revalidation_contract
+test_daemon_heartbeat ready
+test_daemon_heartbeat ready signal
+test_daemon_heartbeat empty
+test_daemon_heartbeat held
+test_daemon_heartbeat unreadable
+test_daemon_heartbeat failed

@@ -206,6 +206,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # (fm_busy_classify).
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
+. "$FM_DAEMON_DIR/fm-ready-queue-lib.sh"
 
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. rex goes
@@ -1741,15 +1742,23 @@ is_wake_reason() {  # <reason>
 # is populated, suppression markers commit, and the digest names the decision
 # instead of "unknown wake:".
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail dialog_name=''
+  local reason=$1 state=$2 decision='' action distilled task last stale_detail dialog_name=''
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
   local kind="" arg="" classification_failed=0 span_failure_repeat=0
   : > "$capture" || return 1
-  if should_force_self "$reason"; then
+  case "$reason" in
+    heartbeat|heartbeat:*)
+      if fm_ready_queue_needs_review; then
+        decision="escalate|ready-queue fleet check: evaluate tasks-axi ready and launch every authorized ready unit; if readiness is unavailable, resolve or report the blocker"
+      fi
+      ;;
+  esac
+  if [ -z "$decision" ] && should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
     rm -f "$capture"
     return
   fi
+  if [ -z "$decision" ]; then
   case "$reason" in
     signal:*|needs-decision:*)
               kind=signal
@@ -1820,6 +1829,7 @@ handle_wake() {  # <reason> <state>
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
+  fi
   action=${decision%%|*}
   distilled=${decision#*|}
   # A status escalation is built from the status log, which does not carry

@@ -3357,21 +3357,7 @@ EOF
   return "$rc"
 }
 
-heartbeat_queue_needs_review() (
-  # Readiness belongs to the backlog consumer, not status logs or task titles.
-  # An unreadable queue must reach supervision rather than count as empty.
-  . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-  . "$SCRIPT_DIR/fm-timeout-lib.sh"
-  data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-  backend=$(fm_tasks_axi_backend "${data%/*}" 2>/dev/null) || return 0
-  if [ "$backend" = markdown ] && [ ! -e "$data/backlog.md" ] && [ ! -L "$data/backlog.md" ]; then
-    return 1
-  fi
-  ready=$(fm_run_timed 10 env FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$data" \
-    "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null) || return 0
-  count=$(printf '%s\n' "$ready" | awk '/^count: [0-9]+$/ { print $2; exit }')
-  [ "$count" != 0 ]
-)
+. "$SCRIPT_DIR/fm-ready-queue-lib.sh"
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any status log carries a captain-relevant event past the position already
@@ -4522,7 +4508,7 @@ EOF
     # missed. Absorb the no-change case (advance the schedule and back off as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present || heartbeat_queue_needs_review; then
+    if afk_present || fm_ready_queue_needs_review; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
