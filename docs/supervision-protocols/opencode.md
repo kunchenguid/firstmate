@@ -3,10 +3,10 @@ Mode: OpenCode TUI plugin background wake.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
-2. First cycle: let `.opencode/plugins/fm-primary-watch-arm.js` arm supervision on the first normalized `QUIESCENT` lifecycle signal.
-3. `OpenCodeLifecycleAdapter` maps legacy `session.idle` and v2 `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` events to `QUIESCENT`; the plugin starts or re-arms `bin/fm-watch-arm.sh --restart` from each normalized lifecycle signal.
+2. `.opencode/plugins/fm-primary-watch-arm.js` starts or re-arms `bin/fm-watch-arm.sh --restart` when it receives a normalized `QUIESCENT` lifecycle signal.
+3. `OpenCodeLifecycleAdapter` maps legacy `session.idle` and v2 `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` events to `QUIESCENT`.
 4. After an actionable child close, the plugin rechecks session-lock ownership and verifies one singleton successor before it calls `client.session.promptAsync`; its bounded fallback is defined in `docs/watcher-continuity.md`.
-5. Ordinary wake: do not ask the model to re-arm because continuity is plugin-owned.
+5. Ordinary wake: do not ask the model to re-arm; the plugin handles arm attempts from normalized lifecycle terminal signals.
 6. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.
 7. Failure or missing cycle only: if the plugin reports a watcher failure, drain queued wakes, inspect the failure text, and use `bin/fm-watch-arm.sh` manually only as a short recovery probe.
 8. Never use shell `&` for watcher supervision.
