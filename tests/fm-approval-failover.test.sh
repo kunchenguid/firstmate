@@ -9,22 +9,31 @@ mkdir -p "$BIN"
 cp "$ROOT/bin/fm-approval-failover.sh" "$BIN/fm-approval-failover.sh"
 # Use the actual metadata, identity and lease owners. Substitute only lifecycle
 # control, avoiding real workers while proving the command releases its guard.
-for lib in fm-backend.sh fm-pr-lib.sh fm-wake-lib.sh fm-lease-lib.sh; do
+for lib in fm-backend.sh fm-pr-lib.sh fm-wake-lib.sh fm-lease-lib.sh fm-gate-refuse-lib.sh; do
   printf '. %q\n' "$ROOT/bin/$lib" > "$BIN/$lib"
 done
 cat > "$BIN/fm-control.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
 STATE=$FM_HOME/state
+. "$(dirname "$0")/fm-gate-refuse-lib.sh"
+fm_refuse_if_gate_agent
 . "$(dirname "$0")/fm-lease-lib.sh"
 trap fm_lease_guard_release EXIT
 fm_lease_guard "$1" 'test lifecycle control'
+if [ -n "${CHECK_INHERIT_SETTING:-}" ]; then
+  links=$("$REAL_PERL" -e 'print((stat($ARGV[0]))[3])' "$FM_HOME/config/$CHECK_INHERIT_SETTING")
+  [ "$links" = 1 ] || { echo 'error: saved fallback is still hardlinked during recovery' >&2; exit 1; }
+  empty_hash=$(printf '' | shasum -a 256 | awk '{print $1}')
+  "$TEST_ROOT/bin/fm-remote-inherit.sh" absent "config/$CHECK_INHERIT_SETTING" 0 "$empty_hash" 1 >> "$FM_HOME/inherit.log"
+fi
 printf '%s\n' "$*" >> "$FM_HOME/control.log"
 [ "${FAIL_CONTROL:-0}" != 1 ]
 SH
 chmod +x "$BIN/fm-control.sh"
 REAL_PERL=$(command -v perl)
-export REAL_PERL
+TEST_ROOT=$ROOT
+export REAL_PERL TEST_ROOT
 cat > "$BIN/perl" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -47,8 +56,51 @@ for harness in codex claude; do
   mkdir -p "$home/state" "$home/config"
   if [ "$harness" = codex ]; then setting=codex-approval-mode; fallback=approve-for-me; else setting=claude-permission-mode; fallback=auto; fi
   printf 'harness=%s\napproval_mode=bypass\napproval_configured=0\n' "$harness" > "$home/state/task.meta"
-  run_apply >/dev/null || fail "$harness apply failed"
+  printf 'branch\t0\t1\n' > "$home/state/.lease-task"
+  printf 'blocked: existing task event\n' > "$home/state/task.status"
+  cp "$home/state/.lease-task" "$home/lease.before"
+  cp "$home/state/task.status" "$home/status.before"
+  rc=0
+  run_apply FM_GATE_REFUSE_BYPASS=0 NO_MISTAKES_GATE=1 FM_SUPERVISION_ACTOR=branch > "$home/gate.out" 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || fail "$harness gate caller did not receive the gate refusal"
+  [ -z "$(find "$home/config" -mindepth 1 -print)" ] || fail 'gate refusal changed configuration'
+  cmp "$home/lease.before" "$home/state/.lease-task" || fail 'gate refusal reached stale-lease cleanup'
+  cmp "$home/status.before" "$home/state/task.status" || fail 'gate refusal changed task status'
+  [ ! -e "$home/state/.fm-lease-command.lock" ] || fail 'gate refusal left a lease lock'
+  [ ! -e "$home/control.log" ] || fail 'gate refusal reached lifecycle control'
+  rm "$home/state/.lease-task"
+  pass "$harness refuses gate callers before configuration, lease or lifecycle mutation"
+
+  lab=$("$ROOT/bin/fm-lab-home.sh" create "$TMP_ROOT/$harness-lab") || fail 'could not create disposable lab home'
+  printf 'harness=%s\napproval_mode=bypass\n' "$harness" > "$lab/state/task.meta"
+  rc=0
+  (
+    for var in "${!FM_@}"; do
+      case "$var" in *_OVERRIDE) unset "$var" ;; esac
+    done
+    env -u FM_GATE_REFUSE_BYPASS FM_HOME="$lab" NO_MISTAKES_GATE=1 FM_SUPERVISION_ACTOR=branch \
+      FM_CONFIG_OVERRIDE="$lab/config" "$BIN/fm-approval-failover.sh" apply task
+  ) > "$home/lab-override.out" 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || fail 'lab with an override escaped gate refusal'
+  [ -z "$(find "$lab/config" -mindepth 1 -print)" ] || fail 'refused lab override changed configuration'
+  [ ! -e "$lab/control.log" ] || fail 'refused lab override reached lifecycle control'
+  (
+    for var in "${!FM_@}"; do
+      case "$var" in *_OVERRIDE) unset "$var" ;; esac
+    done
+    env -u FM_GATE_REFUSE_BYPASS FM_HOME="$lab" NO_MISTAKES_GATE=1 FM_SUPERVISION_ACTOR=branch \
+      CHECK_INHERIT_SETTING="$setting" "$BIN/fm-approval-failover.sh" apply task
+  ) > "$home/lab.out" 2>&1 || fail "$harness disposable lab recovery was refused"
+  [ "$(cat "$lab/config/$setting")" = "$fallback" ] || fail 'lab fallback was not saved'
+  assert_grep 'task interrupt' "$lab/control.log" 'lab did not cancel the pending turn'
+  assert_grep 'task relaunch --note ' "$lab/control.log" 'lab did not relaunch'
+  [ "$(wc -l < "$lab/inherit.log" | tr -d ' ')" = 2 ] || fail 'lab fallback was not inheritable at both lifecycle boundaries'
+  pass "$harness permits disposable lab recovery only through its stock layout"
+
+  run_apply FM_SUPERVISION_ACTOR=branch CHECK_INHERIT_SETTING="$setting" >/dev/null || fail "$harness apply failed"
   [ "$(cat "$home/config/$setting")" = "$fallback" ] || fail "$harness fallback was not saved"
+  [ "$(wc -l < "$home/inherit.log" | tr -d ' ')" = 2 ] || fail 'fallback was not inheritable during interrupt and relaunch'
+  pass "$harness publishes a single-linked setting usable by remote inheritance during recovery"
   assert_grep 'task interrupt' "$home/control.log" 'pending turn was not cancelled'
   assert_grep 'task relaunch --note ' "$home/control.log" 'guarded relaunch was not called'
   before=$(wc -l < "$home/control.log")
