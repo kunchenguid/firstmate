@@ -534,7 +534,7 @@ assert_equals "150000" \
 # A JSON string cannot carry a control byte literally, and the pipeline fills
 # this cell with the tail of an agent log line, so one tab from a step that
 # logged tab-separated output made the whole document unparseable and this
-# agent's record collapsed to the placeholder. Asserted on the emitted JSON
+# agent's record impossible to build. Asserted on the emitted JSON
 # rather than on the decoded value, because comparing embedded control bytes in
 # shell is what made the first version of this check unreadable.
 CTRL_CELL=$(agent ship-wide '[.active_steps[] | select(.step == "review")][0] | tojson')

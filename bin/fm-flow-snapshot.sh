@@ -5,13 +5,13 @@
 # This header owns that wire format, the flags, the environment knobs, and the
 # exit codes.
 #
-# The command is read-only. It takes no session lock, drains no wakes, arms no
+# The command is read-only: it takes no session lock, drains no wakes, arms no
 # watcher, and writes nothing. Nothing in firstmate calls it; it exists to be
 # run by hand.
 #
 # It layers over bin/fm-fleet-snapshot.sh, which stays the single owner of fleet
-# state, and adds two things that document does not carry: the named pipeline
-# step each agent is on, and its GitHub check rollup.
+# state, and adds the named pipeline step each agent is on and its GitHub check
+# rollup.
 #
 # Top-level fields:
 #   schema: stable schema id, `fm-flow-snapshot.v1`.
@@ -53,51 +53,42 @@
 # A numeric cell the running build did not declare is null, never zero: zero is
 # a measured value here.
 #
-# An agent here is a task with a worker behind it, whatever its kind. A
-# `state/<id>.meta` outlives the window it names, so membership is decided by
-# `endpoint.exists`, bin/fm-fleet-snapshot.sh's own reading of
-# fm_backend_target_exists. Only a recorded endpoint that PROVABLY no longer
-# resolves is dropped, to `omitted`, named and counted rather than drawn.
-# `endpoint.exists` null means liveness was never established rather than
-# established as dead - which is every REMOTE worker, since that reader does
-# not probe one - so those are drawn with `endpoint_alive: "unknown"`, the
-# same three-way reading bin/fm-fleet-view.sh renders. Omitting them would
-# make this view disagree with the rest of firstmate about who is running.
+# An agent is a task with a worker behind it, whatever its kind, and membership
+# is decided by the fleet document's `endpoint.exists`, because a
+# `state/<id>.meta` outlives the window it names. Only a recorded endpoint that
+# PROVABLY no longer resolves is dropped, to `omitted`; null is liveness never
+# established - which is every REMOTE worker - and is drawn with
+# `endpoint_alive: "unknown"`, the reading bin/fm-fleet-view.sh renders.
 #
 # Kind decides only what an agent CARRIES: a `pipeline:true` agent carries a
-# no-mistakes run, its steps and its GitHub checks, and a `pipeline:false`
-# agent - a scout, a second mate - carries the fleet document's own
-# `current_state` instead. Pipeline agents are emitted first, so the wire order
-# is the draw order.
+# no-mistakes run, its steps and its checks, and a `pipeline:false` agent - a
+# scout, a second mate - carries the fleet document's own `current_state`
+# instead. Pipeline agents are emitted first, so the wire order is the draw
+# order.
 #
 # Run attribution goes through bin/fm-nm-run-lib.sh, the repository's single
-# owner of which no-mistakes run belongs to a branch. A worker cannot forge that
-# answer, which is why it is read here rather than self-reported.
+# owner of which run belongs to a branch, so a worker cannot forge that answer.
 #
 # Limits, stated because a blank cell should never read as a measured zero:
 #
 #   - Checks are read for GitHub pull requests only; a GitLab merge request or
-#     a Gerrit change reports as not read. The read is a direct `gh pr view
-#     --json statusCheckRollup` because fm_pr_github_read_record in
-#     bin/fm-pr-lib.sh returns a PR's state and merged flag, not its rollup.
+#     a Gerrit change reports as not read.
 #   - The building phase starts at the task record's modification time, which is
-#     approximate: bin/fm-pr-check.sh rewrites that record when it notes the PR.
-#     Once a run exists the phase reports completed with no duration, because no
-#     machine record states when the run began.
+#     approximate, and reports completed with no duration once a run exists,
+#     because no machine record states when the run began.
 #   - A run whose pipeline executed outside the task's own copy of the
 #     repository, such as a scratch clone raising a PR elsewhere, does not
 #     resolve here, and that row reports its run as unestablished.
 #   - Crew state and endpoint liveness are whatever bin/fm-fleet-snapshot.sh
-#     published, read at ITS observation time rather than at draw time. That
-#     keeps one owner for each, at the cost of a state as old as the document.
+#     published, read at ITS observation time rather than at draw time.
 #
 # Usage:
 #   fm-flow-snapshot.sh [--no-ci] [--task <id>]
 #
 #   --no-ci       skip every GitHub read this command can reach, so the whole
-#                 snapshot is local. It suppresses the check read here and sets
-#                 FM_CREW_STATE_NO_FORGE for the fleet read, whose crew-state
-#                 reader would otherwise make a bounded forge call of its own
+#                 snapshot is local; it also sets FM_CREW_STATE_NO_FORGE for the
+#                 fleet read, whose crew-state reader would otherwise make a
+#                 bounded forge call of its own
 #   --task <id>   restrict the snapshot to one task, for a targeted refresh
 #
 # Environment knobs:
@@ -105,10 +96,10 @@
 #                                   status` read (default 10)
 #   FM_FLOW_SNAPSHOT_GH_TIMEOUT     seconds bounding one `gh pr view` (default
 #                                   20)
-#   FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds. It is
-#                                   the ONLY clock input: the ISO timestamp
-#                                   beside it is derived from this, so both
-#                                   always describe the same instant
+#   FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds, and
+#                                   the ONLY clock input: the ISO stamp is
+#                                   derived from it, so one knob sets one
+#                                   instant
 #
 # Exit codes: 0 snapshot emitted, 1 a dependency or the fleet read failed,
 # 2 usage error. A per-agent collection failure is NOT an error: it is reported
@@ -122,18 +113,17 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
 GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
-# Whole seconds or the default, the same guard every sibling collector applies.
-# A non-numeric value reaches `timeout` as its duration argument, where it fails
-# the call rather than the parse, so every read would report as unreadable.
+# Whole seconds or the default, the guard every sibling collector applies: a
+# non-numeric value reaches `timeout` as its duration argument, where it fails
+# the call rather than the parse.
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 case "$GH_TIMEOUT" in ''|*[!0-9]*) GH_TIMEOUT=20 ;; esac
 
 WANT_CI=1
 ONLY_TASK=
 
-# The header IS the help, printed by walking the leading comment block until the
-# first line that is not one. A line range would have to be edited in step with
-# every header change, and when it is not the help simply stops mid-sentence.
+# The header IS the help, walked to the first line that is not a comment, so no
+# line range can fall out of step with it and stop the help mid-sentence.
 usage() {
   awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
@@ -157,15 +147,9 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
-# The link itself comes from the fleet document and nowhere else: taking one
-# from the run's own scalar would let this view report a pull request the rest
-# of firstmate does not associate with the task.
-#
-# The ONE owner of the pull request link grammar. A recorded link is read
-# through fm_pr_url_parse rather than by stripping its trailing number, because
-# the number alone does not say WHICH repository it belongs to: `gh pr view <n>`
-# with no --repo resolves the repository from the working directory, and this
-# view runs from the firstmate root while the PR belongs to the task's project.
+# The ONE owner of the pull request link grammar: a link is read through
+# fm_pr_url_parse rather than by stripping its trailing number, because the
+# number alone does not say WHICH repository it belongs to.
 # shellcheck source=bin/fm-pr-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -174,8 +158,8 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
-# One instant, one source. Two independent clock knobs let a document carry a
-# `generated` and a `generated_epoch` that described different moments.
+# One instant, one source: the epoch knob is validated BEFORE the ISO stamp is
+# derived from it, so the two can never describe different moments.
 iso_of_epoch() {  # <epoch-seconds>
   if [ "$(uname)" = Darwin ]; then
     date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ
@@ -197,25 +181,15 @@ path_mtime() {  # <path>
   fi
 }
 
-# `no-mistakes axi status` emits TOON on stdout; the version banner goes to
+# `no-mistakes axi status` emits TOON on stdout and its version banner on
 # stderr, so stdout needs no pre-filtering. A block is a header line naming its
 # columns followed by one comma-separated row per entry.
 #
-# Both parsers below index by the COLUMN NAMES that header declares, never by
-# position. The tool has already inserted a column mid-block between versions -
-# `round_active_for` arrives fourth in active_steps on some builds and not at
-# all on others - and a positional read silently relabels every column after it,
-# so the row would still parse and every value in it would be wrong.
-#
-# ONE prelude serves both block parsers below, because they read the same
-# emitter and drifted apart once already: the row splitter, the header column
-# map and the field accessor live here, so a hardening applied to one is applied
-# to both by construction.
-#
-# Splitting is quote-aware for the same reason. A field may be quoted and may
-# itself contain commas, and a plain comma split shifts every later column, so
-# a correct name map then indexes into a wrongly split row and reads numbers
-# that are confident and wrong.
+# ONE prelude serves both block parsers below, which index by the COLUMN NAMES
+# that header declares rather than by position, because the tool has already
+# inserted a column mid-block between versions and a positional read would
+# relabel every column after it. The split is quote-aware because a quoted cell
+# may itself contain commas.
 TOON_AWK_PRELUDE='
     function read_header(line,   body, names, i, m) {
       # Cleared first, so a column an earlier block declared cannot survive into
@@ -231,11 +205,9 @@ TOON_AWK_PRELUDE='
       }
       return m
     }
-    # Splits on commas that sit outside quotes, and sets the global n. The
-    # escape handling is not optional: this emitter escapes a quote inside a
-    # quoted cell, and toggling on every quote closes the field early and
-    # shifts every later column. bin/fm-nm-run-lib.sh row_fields reads rows from
-    # the same emitter the same way.
+    # Splits on commas outside quotes and sets the global n: this emitter
+    # escapes a quote inside a quoted cell, so toggling on every quote would
+    # close the field early and shift every later column.
     function split_row(line,   i, c, cur, q, esc) {
       n = 0; cur = ""; q = 0; esc = 0
       for (i in f) delete f[i]
@@ -250,14 +222,9 @@ TOON_AWK_PRELUDE='
       f[++n] = cur
       return n
     }
-    # An optional column the running build does not declare reads as empty
-    # rather than as whichever value happens to sit at that position.
-    #
-    # Control bytes are escaped, not just quotes and backslashes: a JSON string
-    # cannot carry one literally, and the pipeline fills last_activity with the
-    # tail of an agent log line, which is exactly where a tab arrives when a step
-    # logged diff context or any tab-separated output. One such cell made the
-    # whole document unparseable.
+    # An undeclared column reads as empty rather than as whichever value sits
+    # at that position, and control bytes are escaped because a JSON string
+    # cannot carry one and last_activity holds the tail of an agent log line.
     function field(name,   v) {
       if (!col[name] || col[name] > n) return ""
       v = f[col[name]]
@@ -266,26 +233,22 @@ TOON_AWK_PRELUDE='
       gsub(/[\001-\010\013\014\016-\037]/, "", v)
       return v
     }
-    # A row of the block being read, decided by INDENTATION rather than by its
-    # first character. Requiring a lowercase letter there dropped any row whose
-    # leading cell is quoted, which this emitter does elsewhere - its own runs
-    # table quotes the leading id - and because a miss also closes the block,
-    # one such row silently discarded every row after it too.
+    # A row is decided by INDENTATION rather than by its first character,
+    # because this emitter quotes some leading cells and a miss would also
+    # close the block, discarding every row after it.
     function is_row(line) {
       if (line !~ /^    [^ ]/) return 0
       if (line ~ /^    [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]\{/) return 0
       return 1
     }
-    # A row is readable only when the header named the columns it is read for.
     function has_cols(names,   parts, i, m) {
       m = split(names, parts, " ")
       for (i = 1; i <= m; i++) if (!col[parts[i]] || col[parts[i]] > n) return 0
       return 1
     }
-    # A numeric cell the header did not declare, or whose value this parser
-    # cannot read, is null. Zero is a MEASURED value here - a step that took no
-    # time, a step with no findings - so returning it for a column that was
-    # never emitted reports a measurement that was never made.
+    # A numeric cell the header did not declare, or that will not parse, is
+    # null: zero is a MEASURED value here, so it would report a measurement
+    # that was never made.
     function num(name,   v) {
       v = field(name)
       return (v ~ /^-?[0-9]+$/) ? v : "null"
@@ -310,12 +273,9 @@ steps_json() {  # <axi-status-output>
 
 active_steps_json() {  # <axi-status-output>
   printf '%s\n' "$1" | awk "$TOON_AWK_PRELUDE"'
-    # A RUNNING step publishes no duration; the only elapsed the tool states
-    # for it is the humanised `active_for` ("23h11m", "2m59s"), parsed back to
-    # milliseconds here so the renderer needs no second time format. The value
-    # is validated END TO END before a single token is summed, so a unit this
-    # parser does not know ("2w3d") yields null rather than the materially
-    # understated time a partial parse would give.
+    # A RUNNING step publishes no duration, only the humanised `active_for`, so
+    # it is parsed back to milliseconds here and validated END TO END first: a
+    # unit this parser does not know yields null, not an understated time.
     function active_ms(v,   total, tok, num, unit, rest) {
       if (v !~ /^([0-9]+(\.[0-9]+)?(ms|[dhms]))+$/) return "null"
       rest = v; total = 0
@@ -354,9 +314,8 @@ ci_unread() {  # <reason>
 
 ci_json() {  # <pr-url>
   local url=$1 raw norm head pr_state
-  # A link the one parser refuses is NOT EVALUATED, never guessed at: reading a
-  # trailing number off an unrecognised string and querying it is how a view
-  # like this reports another repository's PR of the same number as its own.
+  # A link the one parser refuses is NOT EVALUATED: reading a trailing number
+  # off an unrecognised string is how a view reports another repository's PR.
   if ! fm_pr_url_parse "$url"; then
     ci_unread "not a pull request link this view can read"
     return
@@ -369,13 +328,10 @@ ci_json() {  # <pr-url>
     ci_unread "gh not found"
     return
   fi
-  # --repo is what makes the answer the TASK's repository, because gh otherwise
-  # resolves it from the working directory, which is the firstmate root for
-  # every task this view draws. headRefOid rides the same call as the commit
-  # these checks describe, so the renderer can tell checks that passed on a head
-  # the run will replace from checks on the head that will land. `state` rides
-  # it as the PR's OWN lifecycle - OPEN, MERGED or CLOSED - because a green
-  # check tally is not evidence that anything is still open.
+  # --repo makes the answer the TASK's repository, because gh otherwise resolves
+  # it from the working directory, which is the firstmate root for every task
+  # this view draws. headRefOid and state ride the same call as the checks, so a
+  # green tally cannot be read as evidence that anything is still open.
   raw=$(fm_nm_bounded "$FM_ROOT" "$GH_TIMEOUT" \
     gh pr view "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" \
     --json statusCheckRollup,headRefOid,state 2>/dev/null) || raw=
@@ -384,30 +340,17 @@ ci_json() {  # <pr-url>
     return
   fi
   # The counts have ONE job: agree with what `gh pr checks <n>` prints for the
-  # same PR. Three rules get there.
-  #
-  # 1. Supersession. Checks are keyed on kind, workflow and name together. Name
-  #    alone is not unique, and workflow does not separate them either: a
-  #    commit status has no workflow, and neither does a check run created by
-  #    an app rather than by Actions, so a status whose context equals such a
-  #    check run's name would supersede it and one of the two would vanish.
-  #    They are different checks and gh counts both. The rollup keeps EVERY
-  #    attempt of a key; the latest wins and the rest are counted nowhere.
-  #    `kind` stays on the wire, because without it two such entries are
-  #    identical in every field a reader could tell them apart by.
-  # 2. Exclusive buckets. Reading `conclusion` without first checking `status`
-  #    counts a re-running check as both passed and pending, on a conclusion
-  #    left over from its previous attempt.
-  # 3. A check that verified nothing is its OWN class, never folded into
-  #    passing. That is SKIPPED, and NEUTRAL with it: `gh pr checks` puts both
-  #    in its skipping bucket and bin/fm-pr-merge.sh groups them the same way
-  #    as merely non-blocking, so counting NEUTRAL as a pass disagrees with
-  #    both, and with this script's own rule that a job which verified nothing
-  #    is never folded into passing.
+  # same PR, and three rules get there. Checks are keyed on kind, workflow and
+  # name together, because name alone is not unique and a commit status carries
+  # no workflow, so `kind` stays on the wire to tell two such entries apart.
+  # `status` is read before `conclusion`, or a re-running check counts as both
+  # passed and pending on a conclusion left over from its previous attempt.
+  # SKIPPED and NEUTRAL are their own class, never folded into passing, which is
+  # where `gh pr checks` and bin/fm-pr-merge.sh both put them.
   #
   # A StatusContext, a commit status rather than a check run, carries `state`
-  # and `context` instead; gh counts those too, so they are normalised rather
-  # than dropped into the pending bucket for want of a `status` field.
+  # and `context` instead, so it is normalised rather than dropped into the
+  # pending bucket for want of a `status` field.
   norm=$(printf '%s' "$raw" | jq -c '
     def normalize:
       if (.__typename // "") == "StatusContext" then
@@ -440,8 +383,8 @@ ci_json() {  # <pr-url>
     return
   fi
   head=$(printf '%s' "$raw" | jq -r '.headRefOid // ""' 2>/dev/null) || head=
-  # Empty when GitHub did not report it, which the renderer treats as a state it
-  # could not read rather than as an open PR.
+  # Empty when GitHub did not report it, read as a state that could not be read
+  # rather than as an open PR.
   pr_state=$(printf '%s' "$raw" | jq -r '.state // ""' 2>/dev/null) || pr_state=
   printf '%s' "$norm" | jq --arg head "$head" --arg pr_state "$pr_state" '{
       collection: {ok: true, reason: ""},
@@ -456,19 +399,15 @@ ci_json() {  # <pr-url>
     }'
 }
 
-# The failed read's own words: its first line of stdout, and failing that the
-# first line of stderr that is not the version banner. An exit code alone tells
-# the captain a read failed and nothing they can act on. The diagnosis is on
-# STDOUT because stderr carries that banner on every call including the ones
-# that work, which is also why the two streams are never merged: doing so would
-# put the banner into the TOON the step parsers read.
+# The failed read's own words: its first line of stdout, else the first line of
+# stderr that is not the version banner. The streams are never merged, because
+# that banner rides every call and would reach the TOON the step parsers read.
 axi_error() {  # <stdout> <stderr-file>
   local line
   line=$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -1)
   if [ -z "$line" ] && [ -s "$2" ]; then
     # A literal escape byte, not \x1b: that is a GNU sed extension, and the BSD
-    # sed this file already branches for matches the characters "x1b" instead,
-    # so a colourised diagnosis would reach the wire with its escapes intact.
+    # sed this file already branches for would match the characters "x1b".
     line=$(sed $'s/\033\\[[0-9;]*m//g' "$2" 2>/dev/null |
       grep -v -e '^[[:space:]]*$' -e 'version of no-mistakes' -e '^Run "no-mistakes update"' |
       head -1)
@@ -478,17 +417,14 @@ axi_error() {  # <stdout> <stderr-file>
 
 # The fields every agent carries whether or not it has a pipeline, resolved once
 # so the two builders below cannot drift apart in how they read the fleet
-# document. Sets the FM_ROW_* globals rather than echoing, because several of
-# them are needed as separate jq arguments.
+# document. Sets FM_ROW_* globals because several are needed as jq arguments.
 row_common() {  # <task-json>
   local task=$1
   FM_ROW_ID=$(printf '%s' "$task" | jq -r '.id')
   FM_ROW_KIND=$(printf '%s' "$task" | jq -r '.kind // ""')
   FM_ROW_MODE=$(printf '%s' "$task" | jq -r '.mode // ""')
-  # The repository-wide default prefix, applied here only for a record written
-  # before the branch was recorded at all. Resolved in this one place because
-  # that is what this function is for: the two builders below must not drift
-  # apart in how they read the fleet document.
+  # The repository-wide default prefix, applied only for a record written before
+  # the branch was recorded at all.
   FM_ROW_BRANCH=$(printf '%s' "$task" | jq -r '.branch // ""')
   [ -n "$FM_ROW_BRANCH" ] || FM_ROW_BRANCH="fm/$FM_ROW_ID"
   FM_ROW_PROJECT=$(printf '%s' "$task" | jq -r '.project // ""')
@@ -500,39 +436,28 @@ row_common() {  # <task-json>
     if .endpoint.exists == null then "unknown" else (.endpoint.exists == true) end')
   # bin/fm-fleet-snapshot.sh fills this for ANY task, from the record or from
   # the first link in its status log, so a scout that quoted a pull request
-  # carries one too. It is published with its number resolved by the same
-  # parser everywhere, so no row states a link it also denies having.
+  # carries one too, numbered by the same parser everywhere.
   FM_ROW_PR_URL=$(printf '%s' "$task" | jq -r '.pr.url // ""')
   FM_ROW_PR_NUMBER=null
   if [ -n "$FM_ROW_PR_URL" ] && fm_pr_url_parse "$FM_ROW_PR_URL"; then
     FM_ROW_PR_NUMBER=$FM_PR_NUMBER
   fi
-  # Resolved by bin/fm-fleet-snapshot.sh, which publishes it for every task in
-  # the document, so there is nothing to reconstruct it from here.
   FM_ROW_META=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
-  # Which model and effort the WORKER itself runs on, from the one machine
-  # record of it: the fields bin/fm-spawn.sh wrote at dispatch. `default` means
-  # the harness picked, which is not the name of a model, so it is emitted as
-  # absent rather than as the word.
+  # Which model and effort the WORKER itself runs on, from the fields
+  # bin/fm-spawn.sh wrote at dispatch; `default` means the harness picked, which
+  # is not the name of a model, so it is emitted as absent rather than as the
+  # word. These two are the only facts the fleet document does not publish.
   FM_ROW_HARNESS=$(printf '%s' "$task" | jq -r '.harness // ""')
-  # Model and effort are the two the fleet document does not publish, so they
-  # are the only facts still read from the task record here.
   FM_ROW_MODEL=$(fm_meta_get "$FM_ROW_META" model)
   [ "$FM_ROW_MODEL" != default ] || FM_ROW_MODEL=
   FM_ROW_EFFORT=$(fm_meta_get "$FM_ROW_META" effort)
   [ "$FM_ROW_EFFORT" != default ] || FM_ROW_EFFORT=
 }
 
-# The crew's current state as bin/fm-fleet-snapshot.sh published it, which is
-# that document's own parse of bin/fm-crew-state.sh: generation-pinned, with the
-# captured record and status overrides this reader does not have. Reading it
-# again here would be a second parser of one line grammar and a second answer
-# that can disagree with the fleet document inside a single frame.
-#
-# Resolved by the one builder that carries it rather than in row_common, whose
-# job is the fields BOTH builders read: a pipeline agent states `state:null` and
-# never consults this, so computing it there spent a jq process per ship task on
-# a value nothing read.
+# The crew's current state as bin/fm-fleet-snapshot.sh published it, rather than
+# a second parse of bin/fm-crew-state.sh that could disagree with the fleet
+# document inside a single frame. Resolved by the one builder that carries it,
+# because a pipeline agent states `state:null` and never consults it.
 row_state() {  # <task-json>
   printf '%s' "$1" | jq -c '
     if (.current_state | type) == "object" and ((.current_state.state // "") != "")
@@ -558,12 +483,9 @@ agent_json() {  # <task-json>
   endpoint_alive=$FM_ROW_ENDPOINT_ALIVE
   pr_url=$FM_ROW_PR_URL
   meta=$FM_ROW_META
-  # Read, never derived. Run attribution is keyed on this branch, and the ship
-  # branch is not always fm/<id>: a project can register its own branch prefix,
-  # bin/fm-spawn.sh builds the branch from it and records it, and
-  # bin/fm-fleet-snapshot.sh publishes that record. Deriving it here would key
-  # attribution on a branch no run was ever created for, and the row would
-  # report that a busy task has no pipeline run at all.
+  # Read, never derived: a project can register its own branch prefix, so
+  # deriving fm/<id> here would key run attribution on a branch no run was ever
+  # created for and report a busy task as having no pipeline run at all.
   branch=$FM_ROW_BRANCH
 
   steps='[]'
@@ -574,14 +496,10 @@ agent_json() {  # <task-json>
   run_error=''
   local collect_ok=true collect_reason=''
 
-  # `no-mistakes axi status` resolves its repository from the WORKING
-  # DIRECTORY, so the read is done in the task's own copy. The subshell inside
-  # fm_nm_bounded keeps that change local: this collector reads several tasks in
-  # one pass and must not carry one task's directory into the next.
-  # The task's OWN copy, with no second acceptance path. The project root is a
-  # different copy, and the pipeline keys its repository record on the working
-  # path, so reading there answers for a different repository - which is the
-  # limit this command's header states rather than something to work around.
+  # `no-mistakes axi status` resolves its repository from the WORKING DIRECTORY,
+  # so the read is done in the task's own copy and the subshell inside
+  # fm_nm_bounded keeps that change from carrying into the next task. There is
+  # no second acceptance path: the project root answers for another repository.
   rundir=$worktree
   if [ -z "$rundir" ] || [ ! -d "$rundir" ]; then
     collect_ok=false
@@ -590,11 +508,9 @@ agent_json() {  # <task-json>
     collect_ok=false
     collect_reason='no-mistakes not found'
   else
-    # fm_nm_run is the fail-open query wrapper: it discards the exit status, so
-    # a read that TIMED OUT returns the same empty string as a pipeline with no
-    # runs, and the row would report a claim about the pipeline's contents on
-    # the strength of a failed read. The bounded form keeps the status, so the
-    # two are told apart.
+    # The bounded form keeps the exit status, which the fail-open fm_nm_run
+    # discards: without it a read that TIMED OUT is indistinguishable from a
+    # pipeline with no runs, and the row would report a failed read's contents.
     overview=$(fm_nm_run_bounded "$rundir" "$NM_TIMEOUT" axi status 2>/dev/null)
     overview_rc=$?
     if [ $overview_rc -ne 0 ]; then
@@ -620,19 +536,17 @@ agent_json() {  # <task-json>
         collect_ok=false
         collect_reason='no-mistakes listed no runs to read' ;;
       *)
-        # unknown|<reason>: the library's own words, kept verbatim rather than
-        # collapsed, because which way the run list was unreadable is the whole
-        # of what the captain can act on.
+        # unknown|<reason>: the library's own words kept verbatim, because which
+        # way the run list was unreadable is what the captain can act on.
         collect_ok=false
         collect_reason=${sel#unknown|} ;;
     esac
   fi
 
   if [ -n "$run_id" ]; then
-    # Allocated rather than constructed, and for the same reason the agents
-    # buffer is: a name built from the pid and the task id is predictable by
-    # anyone who can read the fleet document or `ps`, and `2>` follows a symlink
-    # sitting at that name and truncates whatever it resolves to.
+    # Allocated rather than constructed, as the agents buffer is: a predictable
+    # name lets `2>` follow a symlink planted there and truncate what it
+    # resolves to.
     local axi_err
     axi_err=$(mktemp "${TMPDIR:-/tmp}/fm-flow-axi-err.XXXXXX") || axi_err=
     if [ -z "$axi_err" ]; then
@@ -645,8 +559,8 @@ agent_json() {  # <task-json>
     axi=$(fm_nm_run_bounded "$rundir" "$NM_TIMEOUT" axi status --run "$run_id" 2>"$axi_err")
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$axi" ]; then
-      # Exit 0 with an empty stdout is its own outcome, neither of the other
-      # two, and is reported as such rather than as a silent success.
+      # Exit 0 with an empty stdout is its own outcome, reported as such rather
+      # than as a silent success.
       local why
       if [ "$rc" = 124 ]; then
         why="axi status timed out after ${NM_TIMEOUT}s"
@@ -668,42 +582,36 @@ agent_json() {  # <task-json>
       steps=$(steps_json "$axi")
       actives=$(active_steps_json "$axi")
       # fm_nm_field, not a reader of this script's own: these scalars are not
-      # all at one indentation. `head` is a child of the run block while
-      # `error` and `outcome` sit at column 0, so a reader keyed on two leading
-      # spaces returns the empty string for the error text of every failed run.
-      # tests/captures/no-mistakes-v1.70.1/failed.toon is that shape.
+      # all at one indentation - `head` is a child of the run block while
+      # `error` sits at column 0 - so a reader keyed on two spaces misses them.
       run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" head)")
       run_error=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" error)")
     fi
   fi
 
   # The worker's own implementation phase, which no pipeline record describes
-  # because it happens before the pipeline exists. Its start and its precision
-  # are the header's third limit. No readable record leaves the step `unknown`
-  # rather than `pending`: not started yet is a claim, and it is the wrong one
-  # for a worker that is demonstrably running.
+  # because it happens before the pipeline exists; its start and precision are
+  # the header's second limit. No readable record leaves the step `unknown`
+  # rather than `pending`, which would be the wrong claim for a running worker.
   local built_at build_step build_active=''
   built_at=$(path_mtime "$meta")
   if [ -n "$run_id" ]; then
     build_step='{"step":"building","status":"completed","findings":0,"duration_ms":null}'
   elif [ -n "$built_at" ]; then
     build_step='{"step":"building","status":"running","findings":0,"duration_ms":0}'
-    # active_for is the tool's own humanised string for a step it owns; this
-    # step is not one of its own, so the field is empty and active_ms - the only
-    # value the renderer reads - is computed from the two epochs directly.
+    # Not one of the tool's own steps, so `active_for` is empty and active_ms is
+    # computed from the two epochs directly.
     local since=$(( (NOW_EPOCH - built_at) * 1000 ))
     [ "$since" -ge 0 ] || since=0
     build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$since,\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
   else
-    # Reached precisely because no start time could be read, so its duration is
-    # not zero, it is unknown - the same rule the numeric cells above follow.
+    # No start time could be read, so the duration is unknown, not zero.
     build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":null}'
   fi
 
-  # Only when the pipeline read succeeded. `collection.ok` false means the whole
-  # of this agent's step list could not be established, and the renderer draws
-  # every cell unknown on the strength of it; one step slipped in beside that
-  # would be a fact reported inside a frame that says nothing is known.
+  # Only when the pipeline read succeeded: `collection.ok` false means the step
+  # list could not be established, so one step slipped in beside it would be a
+  # fact reported inside a frame that says nothing is known.
   if [ "$collect_ok" = true ]; then
     steps=$(printf '%s' "$steps" | jq -c --argjson b "$build_step" '[$b] + .')
     if [ -n "$build_active" ]; then
@@ -713,10 +621,9 @@ agent_json() {  # <task-json>
     actives='[]'
   fi
 
-  # Three different answers, never one. "skipped" means the operator passed
-  # --no-ci; a task with no recorded pull request has nothing to read checks FOR,
-  # which is what the sibling compact path already distinguishes; and only a task
-  # with both gets a real read.
+  # Three different answers, never one: "skipped" is the operator's --no-ci, a
+  # task with no recorded pull request has nothing to read checks FOR, and only
+  # a task with both gets a real read.
   if [ -z "$pr_url" ]; then
     ci=$(ci_unread "no pull request recorded for this task")
   elif [ "$WANT_CI" = 0 ]; then
@@ -725,8 +632,6 @@ agent_json() {  # <task-json>
     ci=$(ci_json "$pr_url")
   fi
 
-  # Resolved by row_common through the same parser the check read uses, so a
-  # link one of them refuses cannot be numbered by the other.
   local pr_num=$FM_ROW_PR_NUMBER
 
   jq -n \
@@ -779,12 +684,11 @@ agent_json() {  # <task-json>
     }'
 }
 
-# A live worker that runs no no-mistakes pipeline: a scout, a second mate. It
-# gets an agent record like any other live worker, because being drawn is what
-# liveness earns, but no run, steps or checks: nine permanently empty boxes
-# would be an invented journey, and `pipeline:false` states that rather than
-# leaving the renderer to infer it from the kind string. Its one substantive
-# fact is the state, which row_common takes from the fleet document.
+# A live worker that runs no no-mistakes pipeline: a scout, a second mate. It is
+# drawn like any other live worker, because that is what liveness earns, but
+# with no run, steps or checks, since permanently empty boxes would be an
+# invented journey; `pipeline:false` states that rather than leaving the
+# renderer to infer it from the kind string.
 compact_json() {  # <task-json>
   local task=$1 state
 
@@ -832,12 +736,8 @@ compact_json() {  # <task-json>
 
 # The fleet is always read through its owner, never from a file handed in: a
 # second input would be a second source of truth for the one thing this view
-# must not disagree with the rest of firstmate about.
-#
-# Under --no-ci that read is told to skip its forge fallback too. Its crew-state
-# reader otherwise makes a bounded `gh api graphql` call for a ship task whose
-# run passed, which would make "the whole snapshot is local" false on the one
-# flag that promises it.
+# must not disagree with the rest of firstmate about. Under --no-ci that read is
+# told to skip its forge fallback, or "the whole snapshot is local" is false.
 FLEET_NO_FORGE=${FM_CREW_STATE_NO_FORGE:-0}
 [ "$WANT_CI" = 1 ] || FLEET_NO_FORGE=1
 FLEET=$(
@@ -846,9 +746,8 @@ FLEET=$(
     "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null
 ) || FLEET=
 
-# The fleet read is the one hard dependency: without the agent list there is
-# nothing to draw, and an empty document would read as an empty fleet, which is
-# a different and much more dangerous claim than a failure.
+# The fleet read is the one hard dependency: an empty document would read as an
+# empty fleet, a different and much more dangerous claim than a failure.
 if [ -z "$FLEET" ] || ! printf '%s' "$FLEET" | jq -e '.tasks' >/dev/null 2>&1; then
   echo "fm-flow-snapshot: fleet snapshot unavailable; refusing to emit an empty fleet" >&2
   exit 1
@@ -856,10 +755,9 @@ fi
 
 SCOPED=$(printf '%s' "$FLEET" | jq -c --arg only "$ONLY_TASK" '
   [ .tasks[] | select($only == "" or .id == $only) ]')
-# `endpoint.exists` is consumed rather than re-derived, so the view can never
-# disagree with the rest of firstmate about which workers are running. Only a
-# provable false drops a task; null is liveness that was never established,
-# and it is drawn as unknown rather than treated as dead.
+# `endpoint.exists` is consumed rather than re-derived, so this view can never
+# disagree with the rest of firstmate about which workers are running: only a
+# provable false drops a task, and null is drawn as unknown, not as dead.
 ORDER='([ .[] | select(.kind == "ship") ] + [ .[] | select(.kind != "ship") ])[]'
 TASKS=$(printf '%s' "$SCOPED" | jq -c "[ .[] | select(.endpoint.exists != false) ] | $ORDER")
 OMITTED=$(printf '%s' "$SCOPED" | jq -c '[
@@ -876,12 +774,9 @@ printf '[' > "$AGENTS_FILE"
 FIRST=1
 while IFS= read -r task; do
   [ -n "$task" ] || continue
-  # The record is built BEFORE its separator is written. Writing the comma first
-  # left a dangling one behind any agent whose record failed to build, which the
-  # closing slurp then refused, so one failed agent emptied the whole document -
-  # the opposite of this command's stated invariant. A record that cannot be
-  # built is skipped together with its separator, so one failed agent cannot
-  # empty the document.
+  # The record is built BEFORE its separator, and a record that cannot be built
+  # is skipped together with its separator, so one failed agent cannot leave a
+  # dangling comma that the closing slurp refuses.
   RECORD=
   if [ "$(printf '%s' "$task" | jq -r '.kind // ""')" = ship ]; then
     RECORD=$(agent_json "$task" | jq -c '.' 2>/dev/null) || RECORD=
