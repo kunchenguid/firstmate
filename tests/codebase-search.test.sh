@@ -8,10 +8,15 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 mkdir -p "$TMP_ROOT/src" "$TMP_ROOT/node_modules" "$TMP_ROOT/build" "$TMP_ROOT/.git"
 printf 'needle one\nneedle two\nother\n' > "$TMP_ROOT/src/app.txt"
+printf 'needle git metadata\n' > "$TMP_ROOT/.git/config"
 printf 'needle vendor\n' > "$TMP_ROOT/node_modules/dependency.txt"
 printf 'needle build\n' > "$TMP_ROOT/build/generated.txt"
 printf 'password=needle\n' > "$TMP_ROOT/.env.local"
 printf '%s\n' '-----BEGIN PRIVATE KEY-----' 'needle' > "$TMP_ROOT/signing.pem"
+mkdir "$TMP_ROOT/many"
+for index in {1..55}; do
+  printf 'needle %s\n' "$index" > "$TMP_ROOT/many/$index.txt"
+done
 
 help=$("$ROOT/bin/codebase-search" --help)
 [[ "$help" == *"files"* && "$help" == *"search"* && "$help" == *"context"* && "$help" == *"metrics"* ]] \
@@ -43,6 +48,26 @@ assert data["bounded"] is True
 assert len(data["matches"]) == 1
 assert data["matches"][0]["path"] == "src/app.txt"
 assert data["matches"][0]["line"] == 1
+PY
+
+safe_default=$("$ROOT/bin/codebase-search" search needle --root "$TMP_ROOT" --max-results 100)
+SAFE_DEFAULT_JSON=$safe_default python3 - <<'PY'
+import json, os
+data = json.loads(os.environ["SAFE_DEFAULT_JSON"])
+paths = {item["path"] for item in data["matches"]}
+assert all(not path.startswith(("node_modules/", "build/")) for path in paths)
+assert all(not path.startswith(".git/") for path in paths)
+assert ".env.local" not in paths
+assert "signing.pem" not in paths
+PY
+
+unbounded=$("$ROOT/bin/codebase-search" search needle --root "$TMP_ROOT" --all)
+UNBOUNDED_JSON=$unbounded python3 - <<'PY'
+import json, os
+data = json.loads(os.environ["UNBOUNDED_JSON"])
+assert data["status"] == "ok"
+assert data["bounded"] is False
+assert data["count"] >= 60
 PY
 
 empty=$("$ROOT/bin/codebase-search" search absent --root "$TMP_ROOT")

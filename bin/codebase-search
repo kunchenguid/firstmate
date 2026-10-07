@@ -101,9 +101,9 @@ def text_value(data: dict[str, Any], key: str) -> str:
     return value.get("text", "") if isinstance(value, dict) else ""
 
 
-def matches(root: Path, pattern: str, all_paths: bool, limit: int, before: int = 0, after: int = 0) -> list[dict[str, Any]]:
+def matches(root: Path, pattern: str, all_paths: bool, limit: int | None, before: int = 0, after: int = 0) -> list[dict[str, Any]]:
     args = rg_args(root, all_paths) + ["--json", "--line-number", "--column"]
-    args += [pattern, str(root)]
+    args += ["--", pattern, str(root)]
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     result: list[dict[str, Any]] = []
     assert proc.stdout is not None
@@ -126,7 +126,7 @@ def matches(root: Path, pattern: str, all_paths: bool, limit: int, before: int =
                 "after": [],
             }
             result.append(item)
-            if len(result) >= limit:
+            if limit is not None and len(result) >= limit:
                 proc.terminate()
                 break
     proc.wait()
@@ -176,7 +176,7 @@ def main() -> int:
             after = args.after if args.command == "context" else 0
             if before < 0 or after < 0:
                 raise ValueError("context values must not be negative")
-            values = matches(root, args.pattern, args.all, limit or DEFAULT_LIMIT, before, after)
+            values = matches(root, args.pattern, args.all, limit, before, after)
             for value in values:
                 if not before and not after:
                     value.pop("before", None)
