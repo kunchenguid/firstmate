@@ -252,9 +252,18 @@ ROW
 }
 
 test_prompt_text_does_not_mark_harness_as_daemon() {
-  local result
-  result=$(lib_eval "$FAKEBIN" 'fm_harness_process_is_daemon codex "codex --prompt explain --service"' && printf daemon || printf session)
-  [ "$result" = session ] || fail "prompt text classified Codex session as daemon"
+  local result args
+  for args in \
+    'codex --prompt explain --service' \
+    'codex -p explain --managed-daemon' \
+    'codex --instructions explain --service' \
+    'codex -i explain --managed-daemon' \
+    'codex --prompt=explain --service' \
+    'codex -p=explain --managed-daemon' \
+    'codex --instructions=explain --service'; do
+    result=$(lib_eval "$FAKEBIN" "fm_harness_process_is_daemon codex '$args'" && printf daemon || printf session)
+    [ "$result" = session ] || fail "prompt option value classified Codex session as daemon: $args"
+  done
   result=$(lib_eval "$FAKEBIN" 'fm_harness_process_is_daemon codex "codex --service --listen local"' && printf daemon || printf session)
   [ "$result" = daemon ] || fail "actual Codex daemon option was not recognized"
   pass "session-lock: prompt text cannot impersonate daemon flags"
