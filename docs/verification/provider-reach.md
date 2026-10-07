@@ -31,7 +31,7 @@ Candidates that are not installed are skipped, and resolver errors (timeout, non
 A valid no-address answer is terminal, so a later candidate cannot turn NXDOMAIN/NODATA into a positive result.
 The resolver receives only the host component of `--host`; a port is removed and a bracketed IPv6 literal is unwrapped, while IP literals skip DNS and proceed to HTTP.
 A failed A lookup without explicit NXDOMAIN/no-record evidence triggers an AAAA lookup where supported; an inconclusive resolver outcome is `dns=unknown` and does not suppress the HTTP request.
-For HTTPS requests, ambient HTTPS and all-proxy settings remain usable when credential-free; proxy URLs carrying userinfo are refused before HTTP, and `NO_PROXY` matches are reported as direct.
+For HTTPS requests, ambient HTTPS and all-proxy settings remain usable when credential-free; proxy URLs carrying userinfo are refused before HTTP unless `NO_PROXY` bypasses the proxy. `NO_PROXY` host and domain-suffix comparisons are case-insensitive, port-qualified entries do not bypass, wildcard characters are literal, and only a standalone `*` bypasses every host.
 The deterministic regression cases for fallback, terminal no-address answers, resolver output classification, and proxy routing are in `tests/fm-provider-reach-probe.test.sh`.
 
 Two asymmetries are load-bearing and are the reason the verdicts are not collapsed into exit-success:
