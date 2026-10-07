@@ -562,8 +562,8 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 # legitimately allocates and returns slots for crewmates in its own home.
 IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 7. Never administer infrastructure that every lane shares. Two things are shared:
-   - The `no-mistakes` daemon - one instance serving every lane/home, so stopping, restarting, or
-     updating it kills other lanes' in-flight pipeline runs; only firstmate manages the daemon.
+   - The `no-mistakes` daemon - one instance per no-mistakes home serving every lane routed there, so stopping,
+     restarting, or updating it kills other lanes' in-flight pipeline runs; only firstmate manages the daemon.
      Before you append `blocked:` about the pipeline, run `no-mistakes daemon status` and
      `no-mistakes axi status`. If the daemon socket refuses connections or is missing, append
      `blocked [at=<epoch>]: {the daemon error}` and stop even when the local run record still says running or

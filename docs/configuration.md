@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [no-mistakes home routing](#no-mistakes-home-routing-configno-mistakes-homes), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -918,6 +918,62 @@ Pins are not inherited into secondmate homes: a local secondmate agent launches 
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
+
+## No-mistakes home routing (config/no-mistakes-homes)
+
+The worker account pin chooses the account a worker itself runs on, but a no-mistakes pipeline's review, fix, and test agents are launched by the no-mistakes daemon with the daemon's own environment.
+no-mistakes keeps its config, gate repositories, daemon, and run state under one home, `NM_HOME` (default `~/.no-mistakes`), so the account a pipeline spends is chosen by that home's own `config.yaml`.
+A home that ships projects on different accounts, such as a personal project and a work project, can route each project's pipeline to its own no-mistakes home.
+
+The file is local, gitignored, and not inherited into secondmate homes; a secondmate home that should route its projects needs its own file.
+With no file, or for a project the file does not name, every launch is unchanged.
+
+### File format
+
+Each non-blank line that does not start with `#` holds a registered project name and the absolute path of that project's no-mistakes home:
+
+```text
+# config/no-mistakes-homes
+bookie /Users/you/.no-mistakes-personal
+vibrantly /Users/you/.no-mistakes-work
+```
+
+A relative path, a repeated project, or any other line shape refuses.
+
+### Setting up a home
+
+Create each home once and point its Claude agent at an executable that runs Claude under one account.
+`agent_path_override` names a file, so a shell alias such as `alias claude-p='CLAUDE_CONFIG_DIR=... claude'` cannot be named there; use a small wrapper script instead:
+
+```bash
+#!/bin/sh
+CLAUDE_CONFIG_DIR="$HOME/.claude-personal" exec claude "$@"
+```
+
+Then, in that home's `config.yaml`, select the Claude agent and the wrapper in block form:
+
+```yaml
+agent: claude
+agent_path_override:
+  claude: /Users/you/bin/claude-personal
+```
+
+Running any `NM_HOME=<home> no-mistakes` command creates the home and starts its own daemon, which runs beside the default daemon and every other home's daemon without touching them.
+A project's gate lives in exactly one home, so a project already initialized under another home must move once, while it has no active run: remove its `no-mistakes` remote, then run `NM_HOME=<home> no-mistakes init` in the project.
+
+### Launch scope and checks
+
+A `mode=no-mistakes` ship of a routed project, and its relaunch, launches with `NM_HOME` set to the project's home, so every `no-mistakes` command the worker runs reaches that home's daemon.
+Ships in other modes, scouts, and secondmates are not routed, because they run no pipeline.
+
+Before any worker endpoint, local copy, or task record exists, the spawn refuses when the file is malformed, the home is not a readable directory holding `config.yaml`, `agent_path_override.claude` is not set in block form to an executable file, that wrapper's `auth status` fails, the project's gate already sits under another home, or a raw launch command sets `NM_HOME` itself.
+The sign-in check runs the wrapper with only `HOME`, `PATH`, `TMPDIR`, `USER`, and `LOGNAME` in its environment, as the daemon would, so a credential in firstmate's own environment cannot answer for a signed-out account.
+A signed-out wrapper means that account needs a fresh login before its project's pipeline can run.
+
+Firstmate's own reads of a task's pipeline - current state, cleanup, landing checks, and pipeline spend - follow the home that owns the task's gate, derived from the `no-mistakes` remote's `<home>/repos/<id>.git` path, so they see the same runs the worker drives.
+Firstmate never edits a home's `config.yaml`, initializes a project, starts, stops, or restarts a daemon, copies a credential, or changes a login.
+
+[`bin/fm-nm-home-lib.sh`](../bin/fm-nm-home-lib.sh) owns parsing and the checks.
 
 ## Lavish server address (config/lavish-axi-host)
 

@@ -348,6 +348,15 @@
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
+# No-mistakes home routing (config/no-mistakes-homes):
+#   Opt-in per project. A mode=no-mistakes ship (and its relaunch) of a mapped
+#   project launches with NM_HOME naming that project's no-mistakes home, so
+#   its pipeline runs on the daemon and Claude account wrapper that home
+#   configures; an unmapped project or any other mode launches unchanged. The
+#   spawn refuses before any endpoint, worktree, or record exists when the
+#   file is malformed, the home or its account wrapper is unusable or signed
+#   out, the project's gate sits under another home, or a raw launch command
+#   sets NM_HOME itself. bin/fm-nm-home-lib.sh owns parsing and the checks.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -649,6 +658,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-nm-home-lib.sh
+. "$SCRIPT_DIR/fm-nm-home-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -3228,6 +3239,24 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
+# No-mistakes home routing (header above), resolved before any endpoint exists.
+NM_HOME_ROUTE=
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  NM_HOME_ROUTE=$(fm_nm_home_select "$CONFIG" "$PROJ_NAME" "$PROJ_ABS") || exit 1
+  if [ -n "$NM_HOME_ROUTE" ] && [ "$RAW_LAUNCH" = 1 ]; then
+    for word in $ARG3; do
+      case "$word" in
+      NM_HOME=*)
+        echo "error: config/no-mistakes-homes routes $PROJ_NAME to $NM_HOME_ROUTE, but the raw launch command sets NM_HOME, which would override that route; remove it from the raw command" >&2
+        exit 1
+        ;;
+      [A-Za-z_]*=*) ;;
+      *) break ;;
+      esac
+    done
+  fi
+fi
+
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
@@ -5209,6 +5238,7 @@ if [ -n "$WORKER_ACCOUNT" ]; then
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+[ -z "$NM_HOME_ROUTE" ] || LAUNCH="NM_HOME=$(shell_quote "$NM_HOME_ROUTE") $LAUNCH"
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")

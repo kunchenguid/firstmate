@@ -15,22 +15,63 @@
 # instead of orphaning it. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
-#
+
+# fm_nm_home_gate_root <dir>
+# Prints the no-mistakes home that owns the gate checkout <dir> pushes to:
+# remote.no-mistakes.url is always <root>/repos/<id>.git, the same rule
+# no-mistakes applies to its own push hooks. Prints nothing and returns 0 when
+# <dir> has no gate remote. Returns 1 when the remote is not a managed gate
+# path. bin/fm-nm-home-lib.sh's routing checks use it too.
+fm_nm_home_gate_root() {
+  local url repos
+  url=$(git -C "$1" config --get remote.no-mistakes.url 2>/dev/null) || return 0
+  [ -n "$url" ] || return 0
+  url=${url%/}
+  case "$url" in
+  /*/repos/*.git) ;;
+  *) return 1 ;;
+  esac
+  repos=${url%/*}
+  [ "${repos##*/}" = repos ] || return 1
+  printf '%s\n' "${repos%/*}"
+}
+
+# fm_nm_export_home <home>: export NM_HOME=<home> in the calling (sub)shell when
+# <home> is non-empty; a no-op otherwise. Never fails.
+fm_nm_export_home() {
+  [ -z "$1" ] || export NM_HOME="$1"
+}
+
+# The no-mistakes home a read from checkout $1 must use: an explicit NM_HOME
+# wins, otherwise the home that owns the checkout's gate
+# (fm_nm_home_gate_root above), otherwise empty for the
+# default root. A worker routed to another home by config/no-mistakes-homes
+# runs its pipeline there, so every Firstmate read of that run follows it.
+fm_nm_home_for() {  # <dir>
+  if [ -n "${NM_HOME:-}" ]; then
+    printf '%s\n' "$NM_HOME"
+  else
+    fm_nm_home_gate_root "$1" 2>/dev/null || true
+  fi
+}
+
 # Bounded call to an arbitrary command in dir $1, timeout $2 seconds, and its
 # `no-mistakes "$@"` specialization. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# The command runs with NM_HOME set to fm_nm_home_for when that is non-empty.
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+  local dir=$1 timeout_secs=$2 have_timeout=none nm_home
   shift 2
+  nm_home=$(fm_nm_home_for "$dir")
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
+    timeout)  ( fm_nm_export_home "$nm_home" && cd "$dir" && timeout "$timeout_secs" "$@" ) ;;
+    gtimeout) ( fm_nm_export_home "$nm_home" && cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
+    perl)     ( fm_nm_export_home "$nm_home" && cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
     *)        return 1 ;;
   esac
 }
@@ -66,11 +107,13 @@ fm_nm_strip_quotes() {
 }
 
 # Path of no-mistakes' local state database as the CLI would see it from
-# worktree $1: <NM_HOME>/state.sqlite, with NM_HOME defaulting to
-# ~/.no-mistakes and a relative NM_HOME resolving from that worktree. Readers
-# open it with SQLite's mode=ro, so a missing database is never created.
+# worktree $1: <home>/state.sqlite, with the home from fm_nm_home_for,
+# defaulting to ~/.no-mistakes, and a relative NM_HOME resolving from that
+# worktree. Readers open it with SQLite's mode=ro, so a missing database is
+# never created.
 fm_nm_state_db() {  # <worktree>
-  local root=${NM_HOME:-}
+  local root
+  root=$(fm_nm_home_for "$1")
   [ -n "$root" ] || root=~/.no-mistakes
   case "$root" in
     /*) ;;

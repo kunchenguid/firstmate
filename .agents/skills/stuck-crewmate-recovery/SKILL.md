@@ -64,7 +64,7 @@ Otherwise, if the run is still running or fixing with recent activity, the claim
 Nothing reaches the captain in that case.
 
 Never restart, stop, or update the shared daemon on a crewmate's claim.
-It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
+It is one instance per no-mistakes home serving every lane and home routed there, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
 ## Live-endpoint escalation
