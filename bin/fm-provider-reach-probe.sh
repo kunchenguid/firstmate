@@ -482,6 +482,8 @@ for no_proxy_entry in $no_proxy_list; do
     continue
   fi
   entry_host=${entry_host#.}
+  proxy_host=$(printf '%s' "$proxy_host" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  entry_host=$(printf '%s' "$entry_host" | LC_ALL=C tr '[:upper:]' '[:lower:]')
   # Quote the entry in the suffix pattern: NO_PROXY values are data, not
   # shell globs. This accepts literal exact hosts and domain suffixes only.
   case "$proxy_host" in

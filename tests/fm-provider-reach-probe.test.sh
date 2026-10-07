@@ -843,6 +843,13 @@ out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:808
 expect_code 0 "$rc" "a bare NO_PROXY domain suffix bypasses proxy credentials"
 assert_contains "$out" "route=direct" "bare domain suffix is labeled direct"
 
+tmp=$TMP_ROOT/no-proxy-case-insensitive; new_case "$tmp"
+out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
+  NO_PROXY='example.com' PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
+  FM_FAKE_DIG_MODE=address FM_FAKE_CURL_CODE=200 "$SCRIPT" --host API.EXAMPLE.COM 2>&1); rc=$?
+expect_code 0 "$rc" "$PROBE_HOST hostname matching ignores case for NO_PROXY"
+assert_contains "$out" "route=direct" "case-insensitive NO_PROXY suffix is labeled direct"
+
 tmp=$TMP_ROOT/no-proxy-embedded-wildcard; new_case "$tmp"
 out=$(env "${proxy_env[@]}" HTTPS_PROXY='http://private:secret@proxy.example:8080' \
   NO_PROXY='example.*' PATH="$tmp:$BASE_PATH" FM_PROVIDER_REACH_DNS_TOOL=dig \
