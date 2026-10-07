@@ -283,6 +283,7 @@ test_opencode_session_identity_is_the_pane_under_a_shared_server() {
   # down to both; two tabs of the server differ only in that pane id.
   cat > "$table" <<'ROW'
 900|opencode|/Users/u/.opencode/bin/opencode serve --service|1|Tue Oct  7 14:22:10 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p0
+710|opencode|/Users/u/.opencode/bin/opencode mini --prompt HERDR_PANE_ID=w1:p9|1|Tue Oct  7 14:23:00 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:other
 510|opencode|/Users/u/.opencode/bin/opencode mini --model opencode/x --prompt hi|1|Tue Oct  7 14:23:31 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p7
 610|opencode|/Users/u/.opencode/bin/opencode mini --model opencode/x --prompt hi|1|Tue Oct  7 14:24:02 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p9
 session-a|bash|bash /repo/bin/fm-tool.sh|900|Tue Oct  7 14:23:32 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p7
@@ -316,6 +317,57 @@ ROW
   FM_TEST_HERDR_PANE=w1:p7 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state'" \
     || fail "the live owning OpenCode pane could not recognize its own lock"
   pass "session-lock: an OpenCode session under a shared server is identified by its own pane, and panes stay distinct"
+}
+
+test_tokenless_legacy_lock_liveness() {
+  local dir fakebin table state
+  dir="$TMP_ROOT/tokenless-legacy"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  mkdir -p "$state"
+  table="$dir/ps-table"
+  cat > "$table" <<'ROW'
+700|codex|/opt/codex/codex-code-mode-host|1|Tue Oct  7 11:05:00 2026|CODEX_THREAD_ID=legacy-owner
+900|codex|/opt/codex/codex app-server --managed-daemon|1|Tue Oct  7 09:00:00 2026|CODEX_THREAD_ID=server
+self|bash|bash /repo/bin/fm-tool.sh|1|Tue Oct  7 11:06:00 2026|SHLVL=1
+ROW
+  use_table "$fakebin" "$table" self
+  printf '700\n' > "$state/.lock"
+  printf 'legacy-owner\ncodex\n' > "$state/.lock-session"
+  FM_TEST_KILL_RC=0 lib_eval "$fakebin" "fm_session_lock_recorded_owner_live '$state'" \
+    || fail "a tokenless legacy lock lost its live non-server owner"
+  printf '900\n' > "$state/.lock"
+  printf 'server\ncodex\n' > "$state/.lock-session"
+  FM_TEST_KILL_RC=0 lib_eval "$fakebin" "fm_session_lock_recorded_owner_live '$state'" \
+    && fail "a shared server kept a tokenless legacy lock live"
+  printf '700\n' > "$state/.lock"
+  printf 'legacy-owner\ncodex\n' > "$state/.lock-session"
+  FM_TEST_KILL_RC=1 lib_eval "$fakebin" "fm_session_lock_recorded_owner_live '$state'" \
+    && fail "a dead pid kept a tokenless legacy lock live"
+  pass "session-lock: tokenless legacy locks retain safe pre-token liveness"
+}
+
+test_unreadable_birth_token_is_omitted() {
+  local dir bin
+  dir="$TMP_ROOT/no-birth-token"
+  bin="$dir/bin"
+  mkdir -p "$bin" "$dir/state"
+  cat > "$bin/ps" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" = 'lstart=' ] && exit 1
+done
+exec /bin/ps "$@"
+SH
+  chmod +x "$bin/ps"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" PATH="$bin:$PATH" \
+    "$NAMED_CLAUDE" -c 'CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1; printf "%s\n" "$?" > "$FM_HOME/state/acquire.rc"'
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/acquire.rc")" \
+    "the session could not acquire its lock: $(cat "$dir/state/acquire.out")"
+  [ "$(wc -l < "$dir/state/.lock-session" | tr -d '[:space:]')" = 2 ] \
+    || fail "an unreadable birth token was written as a sidecar line"
+  pass "session-lock: an unreadable birth token is omitted from the sidecar"
 }
 
 test_version_named_session_is_identified_on_both_platforms() {
@@ -978,7 +1030,7 @@ arm_count() {  # <dir>
 # lock accepted, line 1 untouched while the recorded pid lives, sidecar bytes
 # untouched.
 expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
-  local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5
+  local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5 sidecar_mode=${6:-same} birth
   expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "$label: the Stop auto-arm did not rewake"
   [ "$(arm_count "$dir")" = "$arms" ] || fail "$label: expected $arms arm(s), got $(arm_count "$dir")"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "$label: no rewake claim was recorded, got: $(epoch_outcome "$dir")"
@@ -989,8 +1041,23 @@ expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
   expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh refused the session's own lock: $(cat "$dir/state/phase-$n/lock.out")"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$lock_pid" ] \
     || fail "$label: lock line 1 is $(phase_value "$dir" "$n" lock-after), expected $lock_pid"
-  cmp -s "$dir/state/phase-$n/session-after" "$dir/sidecar-initial" \
-    || fail "$label: the session sidecar is not byte-identical to the one the owner wrote"
+  if [ "$sidecar_mode" = same ]; then
+    cmp -s "$dir/state/phase-$n/session-after" "$dir/sidecar-initial" \
+      || fail "$label: the session sidecar is not byte-identical to the one the owner wrote"
+  else
+    [ "$(sidecar_id "$dir/state/phase-$n/session-after")" = S1 ] \
+      || fail "$label: refreshed sidecar lost the session id"
+    [ "$(sed -n '2p' "$dir/state/phase-$n/session-after")" = claude ] \
+      || fail "$label: refreshed sidecar lost the harness id"
+    birth=$(ps -p "$lock_pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
+    if [ -n "$birth" ]; then
+      [ "$(sed -n '3p' "$dir/state/phase-$n/session-after")" = "$birth" ] \
+        || fail "$label: refreshed sidecar birth token does not match lock pid $lock_pid"
+    else
+      [ "$(wc -l < "$dir/state/phase-$n/session-after" | tr -d '[:space:]')" = 2 ] \
+        || fail "$label: unreadable birth token was persisted"
+    fi
+  fi
 }
 
 # Not the owner: no arm, the guard's foreign-owner diagnostic naming the live
@@ -1073,7 +1140,7 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   done
   kill -0 "$frontend" 2>/dev/null && fail "the front-end did not exit"
   fire_phase "$dir" 6 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
-  expect_phase_owned "$dir" 6 3 "$spare" "dead front-end, same session"
+  expect_phase_owned "$dir" 6 3 "$spare" "dead front-end, same session" refreshed
   [ "$spare" != "$ptyhost" ] || fail "fixture collapsed the spare into the pty-host"
 
   : > "$dir/state/stop-spare"
@@ -1374,6 +1441,8 @@ test_two_codex_sessions_sharing_one_daemon_hold_distinct_locks
 test_pid_reuse_is_not_mistaken_for_a_live_owner
 test_prompt_text_does_not_mark_harness_as_daemon
 test_opencode_session_identity_is_the_pane_under_a_shared_server
+test_tokenless_legacy_lock_liveness
+test_unreadable_birth_token_is_omitted
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
