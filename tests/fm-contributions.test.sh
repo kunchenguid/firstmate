@@ -101,6 +101,9 @@ test_newest_check_has_no_verdict() {
 }
 
 
+# Budget seconds left depend on the wall clock unless a test freezes it.
+mask_budget() { sed -E 's/ with -?[0-9]+s of budget left: / with Ns of budget left: /'; }
+
 forge_home() {
   local home=$1
   mkdir -p "$home/forge" "$home/root/bin" "$home/wt"
@@ -700,12 +703,12 @@ test_genuine_failure_near_deadline_is_unavailable() {
   /bin/date +%s > "$home/forge/clock"
   printf 'fail-late\n' > "$home/forge/fault"
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed on a genuine forge failure'
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
-    || fail "a genuine forge failure past the deadline was swallowed: $out"
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 - reviews read exited 1 with -80s of budget left: HTTP 502' ] \
+    || fail "a genuine forge failure past the deadline was swallowed or lost its cause: $out"
   jq -e --arg now "$NOW" '.records[0].checked_at == $now
-    and .records[0].error == "forge observation unavailable or changed during read"' \
+    and .records[0].error == "forge observation unavailable: reviews read exited 1 with -80s of budget left: HTTP 502"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
-  pass 'a genuine forge failure inside the budget still records the error and wakes'
+  pass 'a genuine forge failure inside the budget still records the error, its cause and wakes'
 }
 
 test_shared_url_observed_once() {
@@ -719,17 +722,23 @@ test_shared_url_observed_once() {
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "shared-owner poll failed ($mode)"
     calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
     [ "$calls" = 1 ] || fail "a URL owned by two tasks was observed $calls times in one poll ($mode)"
+    case "$mode" in
+      ok) why= ;;
+      fail) why='reviews read exited 1 with Ns of budget left: HTTP 502' ;;
+      head) why='head changed during observation' ;;
+    esac
     if [ "$mode" = ok ]; then
       expected=null
       [ -z "$out" ] || fail "a healthy shared observation printed: $out"
     else
-      expected='"forge observation unavailable or changed during read"'
-      [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
-        || fail "a shared unavailable observation did not wake exactly once ($mode): $out"
+      expected="\"forge observation unavailable: $why\""
+      [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+        || fail "a shared unavailable observation did not wake exactly once with its cause ($mode): $out"
     fi
     for task in delivery duplicate; do
-      jq -e --arg now "$NOW" --argjson error "$expected" '.records[0].checked_at == $now and .records[0].error == $error' \
-        "$home/data/$task/contributions.json" >/dev/null || fail "owner $task did not receive the shared result ($mode)"
+      jq -e --arg now "$NOW" '.records[0].checked_at == $now' "$home/data/$task/contributions.json" >/dev/null \
+        && [ "$(jq -c .records[0].error "$home/data/$task/contributions.json" | mask_budget)" = "$expected" ] \
+        || fail "owner $task did not receive the shared result ($mode)"
     done
   done
   pass 'a URL owned by two tasks is observed once and every owner receives the result'
@@ -1047,19 +1056,24 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
 }
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
-  local error='"forge observation unavailable or changed during read"'
+  local why='core read exited 1 with Ns of budget left: HTTP 502'
+  local home out line="contributions: observation unavailable for https://github.com/o/r/pull/8 - $why"
   home=$(new_home failure-episode)
   forge_home "$home"
   wrap_forge "$home"
   printf 'down\n' > "$home/forge/fault"
-  poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll || fail "poll at $1 failed"; }
+  poll_at() {
+    local polled
+    polled=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll at $1 failed"
+    printf '%s\n' "$polled" | mask_budget
+  }
   out=$(poll_at 2026-09-16T09:00:00Z)
-  [ "$out" = "$line" ] || fail "the first failure of an episode did not wake: $out"
+  [ "$out" = "$line" ] || fail "the first failure of an episode did not wake with its cause: $out"
   out=$(poll_at 2026-09-16T10:00:00Z)
   [ -z "$out" ] || fail "an unchanged read failure woke again on the next cycle: $out"
-  jq -e --argjson error "$error" '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
+  jq -e '.records[0].checked_at == "2026-09-16T10:00:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
+    && [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a repeated read failure stopped recording its error and cause'
   [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
   : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
@@ -1073,21 +1087,21 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
-  local error='forge observation unavailable or changed during read' task
+  local why='core read exited 1 with Ns of budget left: HTTP 502' home out task
+  local line="contributions: observation unavailable for https://github.com/o/r/pull/8 - $why"
   home=$(new_home late-owner-failure-episode)
   forge_home "$home"
   wrap_forge "$home"
   printf 'down\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'initial failing poll failed'
-  [ "$out" = "$line" ] || fail "the initial failure did not wake: $out"
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "$line" ] || fail "the initial failure did not wake with its cause: $out"
   printf -- '- [ ] duplicate - Filed https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T10:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'late-owner failing poll failed'
   [ -z "$out" ] || fail "a late owner restarted an unchanged failure episode: $out"
   for task in delivery duplicate; do
-    jq -e --arg error "$error" '.records[0].error == $error' "$home/data/$task/contributions.json" >/dev/null \
+    [ "$(jq -r .records[0].error "$home/data/$task/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
       || fail "owner $task did not retain the shared failure evidence"
   done
   : > "$home/forge/fault"
@@ -1101,18 +1115,19 @@ test_late_owner_keeps_failure_episode_suppressed() {
   printf 'down\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T12:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'new shared failing poll failed'
-  [ "$out" = "$line" ] || fail "a failure after shared recovery did not wake: $out"
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "$line" ] || fail "a failure after shared recovery did not wake: $out"
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
 test_retire_ends_observation_of_a_gone_contribution() {
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8' url=https://github.com/o/r/pull/8
+  local home out url=https://github.com/o/r/pull/8
+  local line='contributions: observation unavailable for https://github.com/o/r/pull/8 - core read exited 1 with Ns of budget left: HTTP 404'
   home=$(new_home retire-gone)
   forge_home "$home"
   wrap_forge "$home"
   printf 'not-found\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) || fail 'failing poll failed'
-  [ "$out" = "$line" ] || fail "a gone repository did not raise the unavailable check: $out"
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "$line" ] || fail "a gone repository did not raise the unavailable check with its cause: $out"
   bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
     and .contributions.complete == false and .contributions.proven_clear == false' >/dev/null \
     || fail 'an unreadable contribution did not hold coverage incomplete before retirement'
