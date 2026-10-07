@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exercise heartbeat delivery through the watcher and the real backlog consumer.
 set -u
+# shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-ready-queue)
@@ -106,9 +107,11 @@ test_daemon_heartbeat() {
   fi
   append_wake "$state" heartbeat heartbeat heartbeat || fail 'could not enqueue daemon heartbeat'
   (
+    # shellcheck source=/dev/null # Production module is linted separately.
     . "$ROOT/bin/fm-supervise-daemon.sh"
     export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config"
     export PATH="$dir/fakebin:$PATH" FM_INJECT_SKIP="$skip" FM_ESCALATE_BATCH_SECS=90
+    # shellcheck disable=SC2034 # Used by the sourced daemon's log function.
     LOG="$state/daemon.log"
     if [ "$mode" = failed ]; then
       if handle_durable_wakes heartbeat "$state"; then
