@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
@@ -27,11 +27,37 @@ const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const REARM_RETRY_LIMIT = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+// session.idle is the only re-arm trigger, so a session that never emits idle
+// (continuously busy, or recreated without an idle cycle) can leave the watcher
+// dark indefinitely. The watchdog re-arms off beacon freshness instead, reading
+// the same `state/.last-watcher-beat` liveness signal bin/fm-watch-arm.sh and
+// bin/fm-guard.sh use and resolving the grace through the watcher's own
+// precedence. The interval stays a small fraction of the grace window so
+// recovery is prompt.
+const WATCHDOG_INTERVAL_MS = positiveInteger("FM_OPENCODE_WATCHDOG_INTERVAL_MS", 30000);
+
+// A healthy watcher touches its beacon once per poll cycle, so its beacon can
+// legitimately age up to FM_POLL seconds between touches. bin/fm-wake-lib.sh
+// fm_poll_derived_grace owns the max(300, FM_POLL+60) default mirrored here; a
+// flat 300 would restart a healthy long-poll watcher.
+function pollDerivedGrace() {
+  return Math.max(300, positiveInteger("FM_POLL", 15) + 60);
+}
+
+// The watcher's stale threshold precedence (bin/fm-watch.sh): an explicit
+// FM_WATCHER_STALE_GRACE, else FM_GUARD_GRACE, else the poll-derived default.
+function watchdogGraceSeconds() {
+  return positiveInteger("FM_WATCHER_STALE_GRACE", positiveInteger("FM_GUARD_GRACE", pollDerivedGrace()));
+}
 
 let child = null;
 let armStatus = "idle";
+let currentSessionID = "";
 let retryTimer = null;
+let retryPending = false;
 let retryFailures = 0;
+let failureEpisode = false;
+let failureEpisodeAt = 0;
 let launchInFlight = null;
 let restorationInFlight = null;
 let armClose = new WeakMap();
@@ -371,28 +397,36 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
 }
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
-  if (child || retryTimer) return;
-  if (!(await sessionOwnsLock(paths))) {
-    setArmStatus("failed");
-    surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
-    return;
+  if (child || retryTimer || retryPending || launchInFlight) return;
+  if (failureEpisode) return;
+  retryPending = true;
+  try {
+    if (!(await sessionOwnsLock(paths))) {
+      setArmStatus("failed");
+      surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
+      return;
+    }
+    retryFailures += 1;
+    if (retryFailures > REARM_RETRY_LIMIT) {
+      failureEpisode = true;
+      failureEpisodeAt = Date.now();
+      setArmStatus("failed");
+      surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries\n${reason}`);
+      return;
+    }
+    setArmStatus("retrying");
+    const timer = setTimeout(() => {
+      if (retryTimer === timer) retryTimer = null;
+      void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
+        if (["armed", "starting", "wake"].includes(status)) return;
+        surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
+      });
+    }, retryDelay(retryFailures));
+    timer.unref();
+    retryTimer = timer;
+  } finally {
+    retryPending = false;
   }
-  retryFailures += 1;
-  if (retryFailures > REARM_RETRY_LIMIT) {
-    setArmStatus("failed");
-    surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries\n${reason}`);
-    return;
-  }
-  setArmStatus("retrying");
-  const timer = setTimeout(() => {
-    if (retryTimer === timer) retryTimer = null;
-    void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
-      if (["armed", "starting", "wake"].includes(status)) return;
-      surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
-    });
-  }, retryDelay(retryFailures));
-  timer.unref();
-  retryTimer = timer;
 }
 
 function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
@@ -461,6 +495,8 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     if (classification.kind === "actionable") {
       if (restorationInFlight) return;
       retryFailures = 0;
+      failureEpisode = false;
+      failureEpisodeAt = 0;
       setArmStatus("wake");
       const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
@@ -514,7 +550,7 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
-  if (retryTimer) return { status: "retrying", armChild: null };
+  if (retryTimer || retryPending) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
@@ -543,15 +579,75 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
   return armAttempt(await waitForArmReady(armChild), armChild, includeArmChild);
 }
 
+// The watcher's liveness beacon: a beacon younger than the grace window means a
+// live cycle, and its absence or age means no healthy watcher owns supervision.
+function beaconMtimeMs(paths) {
+  try {
+    return statSync(`${paths.state}/.last-watcher-beat`).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function beaconFresh(paths, graceSeconds) {
+  const mtime = beaconMtimeMs(paths);
+  return mtime > 0 && (Date.now() - mtime) / 1000 < graceSeconds;
+}
+
+// The watchdog needs the root session id to deliver a later wake. Only a root
+// session event sets it, so a subagent child session can never take over
+// wake delivery; the idle trigger below still arms from its own event.
+function rememberRootSession(event) {
+  const info = event.properties?.info;
+  if (!info || info.parentID) return;
+  const sessionID = event.properties?.sessionID ?? info.id ?? "";
+  if (sessionID) currentSessionID = sessionID;
+}
+
+function trackRootSession(event) {
+  if (event.type === "session.created" || event.type === "session.updated") {
+    rememberRootSession(event);
+  }
+}
+
+// Re-arm supervision when the beacon says no healthy cycle is live, independent
+// of session.idle. ensureArm keeps every existing guard, so a healthy watcher,
+// an unowned lock, a non-primary root, and an in-flight launch are never
+// disturbed; a session id is still required to deliver a later wake.
+function startWatchdog(paths, client) {
+  const graceSeconds = watchdogGraceSeconds();
+  const timer = setInterval(() => {
+    if (child || retryTimer || retryPending || launchInFlight || restorationInFlight) return;
+    if (beaconFresh(paths, graceSeconds)) {
+      // A fresh beacon only proves recovery when it was touched after the
+      // failure episode began. A dead watcher's leftover beacon must not reopen
+      // the terminal retry limit, or a later stale beacon restarts retries and
+      // queues a second failure prompt.
+      if (!failureEpisode || beaconMtimeMs(paths) > failureEpisodeAt) {
+        retryFailures = 0;
+        failureEpisode = false;
+        failureEpisodeAt = 0;
+      }
+      return;
+    }
+    if (failureEpisode) return;
+    if (!currentSessionID) return;
+    void ensureArm(paths, currentSessionID, client);
+  }, WATCHDOG_INTERVAL_MS);
+  timer.unref();
+}
+
 export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
   const paths = effectivePaths(root);
   globalThis[COORDINATOR_KEY] = {
     ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
   };
+  startWatchdog(paths, client);
 
   return {
     event: async ({ event }) => {
+      trackRootSession(event);
       if (event.type !== "session.idle") return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;

@@ -4506,7 +4506,7 @@ if (hosts.length !== 2) throw new Error(`expected the host and one successor hos
 if (!hosts.every((row) => / args=park --restart primary=opencode /.test(row))) throw new Error(`the host must run as 'park --restart' with the opencode pin: ${hosts.join(" | ")}`);
 if (!/predecessor=[0-9]+$/.test(hosts[1])) throw new Error(`the successor host did not receive the closed host as its predecessor: ${hosts[1]}`);
 if (!rows.some((row) => row === "confirmed generation=fixture-generation watcher=" + hosts[1].replace(/^host=([0-9]+).*/, "$1"))) {
-  throw new Error(`the handling handoff was not confirmed against the successor host's cycle: ${rows.join(" | ")}`);
+  throw new Error(`the handling handoff was not confirmed against the successor host cycle: ${rows.join(" | ")}`);
 }
 if (prompts.length !== 1) throw new Error(`expected one wake prompt, got ${prompts.length}`);
 for (const needle of [
@@ -5181,6 +5181,653 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+# session.idle is the only re-arm trigger, so a continuously busy or recreated
+# session could leave the watcher dark. The beacon watchdog must recover that on
+# its own interval, with no idle event at all.
+test_opencode_watchdog_rearms_stale_beacon() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-stale-root"
+  home="$TMP_ROOT/opencode-watchdog-stale-home"
+  log="$TMP_ROOT/opencode-watchdog-stale.log"
+  stop="$TMP_ROOT/opencode-watchdog-stale.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// The session was created but never emits session.idle, and no beacon exists,
+// so only the watchdog can restore supervision.
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "session-test", info: { id: "session-test" } } } });
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watchdog did not re-arm off a stale beacon");
+  process.exit(1);
+}
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row === "arm");
+if (arms.length !== 1) throw new Error(`watchdog started ${arms.length} arm cycles: ${arms.join(" | ")}`);
+// A fresh beacon keeps the watchdog from spawning a successor arm once this
+// one stops, so no fake arm outlives the test harness.
+writeFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must re-arm supervision off a stale beacon with no session.idle: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog stale-beacon test printed output: $out"
+  pass "OpenCode watchdog re-arms supervision off a stale beacon without session.idle"
+}
+
+# A fresh beacon means a live watcher owns supervision, so the watchdog must
+# leave it alone; the same watchdog must still fire once that beacon goes stale,
+# which proves the negative case was not just a dead timer.
+test_opencode_watchdog_skips_healthy_watcher() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-healthy-root"
+  home="$TMP_ROOT/opencode-watchdog-healthy-home"
+  log="$TMP_ROOT/opencode-watchdog-healthy.log"
+  stop="$TMP_ROOT/opencode-watchdog-healthy.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  : > "$home/state/.last-watcher-beat"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "session-test", info: { id: "session-test" } } } });
+// Several watchdog intervals pass with a fresh beacon: a live watcher must not
+// be disturbed, so no arm may run.
+for (let i = 0; i < 15; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watchdog re-armed over a healthy watcher");
+// Staleness is now real: the same watchdog must recover, proving it was live.
+unlinkSync(`${process.env.FM_HOME}/state/.last-watcher-beat`);
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("watchdog never re-armed after the beacon went stale");
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row === "arm");
+if (arms.length !== 1) throw new Error(`watchdog started ${arms.length} arm cycles: ${arms.join(" | ")}`);
+// A fresh beacon keeps the watchdog from spawning a successor arm once this
+// one stops, so no fake arm outlives the test harness.
+writeFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must skip a healthy watcher and still recover a stale beacon: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog healthy-watcher test printed output: $out"
+  pass "OpenCode watchdog skips a healthy watcher and recovers once the beacon is stale"
+}
+
+# A session that does not own the fleet lock must never arm, even with a stale
+# beacon; once the lock becomes this session's, the same watchdog must recover.
+test_opencode_watchdog_skips_foreign_lock() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-foreign-root"
+  home="$TMP_ROOT/opencode-watchdog-foreign-home"
+  log="$TMP_ROOT/opencode-watchdog-foreign.log"
+  stop="$TMP_ROOT/opencode-watchdog-foreign.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+// A foreign live lock with a stale beacon must never arm.
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "session-test", info: { id: "session-test" } } } });
+for (let i = 0; i < 15; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watchdog armed without owning the session lock");
+// The lock is now this session: the same watchdog must recover.
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("watchdog never re-armed after the session lock matched");
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row === "arm");
+if (arms.length !== 1) throw new Error(`watchdog started ${arms.length} arm cycles: ${arms.join(" | ")}`);
+// A fresh beacon keeps the watchdog from spawning a successor arm once this
+// one stops, so no fake arm outlives the test harness.
+writeFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must skip a foreign lock and recover once this session owns it: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog foreign-lock test printed output: $out"
+  pass "OpenCode watchdog skips a foreign lock and recovers once this session owns it"
+}
+
+# A subagent child session emits its own session.created and busy status while
+# the root is busy. The watchdog must deliver the re-arm wake to the root
+# session, never to the child, so a dead watcher during a subagent run still
+# reaches main.
+test_opencode_watchdog_delivers_to_root_session_not_child() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-child-root"
+  home="$TMP_ROOT/opencode-watchdog-child-home"
+  log="$TMP_ROOT/opencode-watchdog-child.log"
+  stop="$TMP_ROOT/opencode-watchdog-child.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: watchdog synthetic wake\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const promptSessions = [];
+const client = { session: { promptAsync: async (request) => { promptSessions.push(request.path.id); } } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "root-session", info: { id: "root-session" } } } });
+// A subagent child session and its busy status must not displace the root.
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "child-session", info: { id: "child-session", parentID: "root-session" } } } });
+await hooks.event({ event: { type: "session.status", properties: { sessionID: "child-session", status: { type: "busy" } } } });
+for (let i = 0; i < 250 && promptSessions.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (promptSessions.length !== 1) throw new Error(`expected one wake prompt, got ${promptSessions.length}`);
+if (promptSessions[0] !== "root-session") throw new Error(`wake was delivered to ${promptSessions[0]}, not the root session`);
+// A fresh beacon keeps the watchdog from spawning a successor arm once this
+// one stops, so no fake arm outlives the test harness.
+writeFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must deliver its wake to the root session, not a subagent child: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog child-session test printed output: $out"
+  pass "OpenCode watchdog delivers its wake to the root session, not a subagent child"
+}
+
+# A plugin reload or resumed session can miss session.created while the root
+# session stays open. The watchdog must still learn the root id from
+# session.updated, arm off a stale beacon, and deliver its wake to the root,
+# while a subagent child session.updated never clobbers that root id.
+test_opencode_watchdog_learns_root_from_session_updated() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-updated-root"
+  home="$TMP_ROOT/opencode-watchdog-updated-home"
+  log="$TMP_ROOT/opencode-watchdog-updated.log"
+  stop="$TMP_ROOT/opencode-watchdog-updated.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: watchdog synthetic wake\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const promptSessions = [];
+const client = { session: { promptAsync: async (request) => { promptSessions.push(request.path.id); } } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// session.created is missed (plugin reload / resumed session): only
+// session.updated carries the root info.
+await hooks.event({ event: { type: "session.updated", properties: { info: { id: "root-session" } } } });
+// A subagent child session.updated must not displace the root.
+await hooks.event({ event: { type: "session.updated", properties: { info: { id: "child-session", parentID: "root-session" } } } });
+for (let i = 0; i < 250 && promptSessions.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (promptSessions.length !== 1) throw new Error(`expected one wake prompt, got ${promptSessions.length}`);
+if (promptSessions[0] !== "root-session") throw new Error(`wake was delivered to ${promptSessions[0]}, not the root session`);
+// A fresh beacon keeps the watchdog from spawning a successor arm once this
+// one stops, so no fake arm outlives the test harness.
+writeFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must learn the root session from session.updated when session.created is missed: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog session-updated test printed output: $out"
+  pass "OpenCode watchdog learns the root session from session.updated and ignores a child"
+}
+
+# The turn-end coordinator is invoked with the raw session.idle id, which carries
+# no parentID. A subagent child idle must never become the watchdog's wake
+# target, so the coordinator must not teach the plugin that id; with no
+# root-verified session the watchdog stays quiet instead of prompting the child.
+test_opencode_watchdog_child_idle_cannot_clobber_root() {
+  local arm_plugin guard_plugin repo home log stop out status
+  arm_plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  guard_plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  repo="$TMP_ROOT/opencode-watchdog-child-idle-root"
+  home="$TMP_ROOT/opencode-watchdog-child-idle-home"
+  log="$TMP_ROOT/opencode-watchdog-child-idle.log"
+  stop="$TMP_ROOT/opencode-watchdog-child-idle.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: watchdog synthetic wake\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 node 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
+const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
+const promptSessions = [];
+const client = { session: { promptAsync: async (request) => { promptSessions.push(request.path.id); } } };
+await armMod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const guardHooks = await guardMod.FmPrimaryTurnendGuard({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// No session.created/updated yet: the coordinator is called with a raw
+// subagent child idle id that carries no root signal.
+await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "child-session" } } });
+// The home is now armable and the beacon is stale: a learned child id would
+// make the watchdog prompt the child.
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "");
+for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+writeFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+if (promptSessions.length !== 0) throw new Error(`watchdog prompted ${promptSessions.join(", ")} without a root-verified session`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must ignore a child session.idle id from the turn-end coordinator: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog child-idle test printed output: $out"
+  pass "OpenCode watchdog ignores a child session.idle id from the turn-end coordinator"
+}
+
+# A healthy watcher touches its beacon once per poll cycle, so on a long-poll
+# home its beacon legitimately ages past 300s. The watchdog must use the same
+# poll-derived grace the arm and guard use, not a flat 300 that would restart a
+# healthy watcher; the same watchdog must still recover once the beacon is
+# genuinely stale.
+test_opencode_watchdog_uses_poll_derived_grace() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-grace-root"
+  home="$TMP_ROOT/opencode-watchdog-grace-home"
+  log="$TMP_ROOT/opencode-watchdog-grace.log"
+  stop="$TMP_ROOT/opencode-watchdog-grace.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 FM_POLL=600 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// A 400s-old beacon is older than a flat 300s grace but younger than the
+// FM_POLL=600 poll-derived grace of 660s, so a healthy long-poll watcher must
+// be left alone.
+const beat = `${process.env.FM_HOME}/state/.last-watcher-beat`;
+writeFileSync(beat, "");
+const past = Date.now() / 1000 - 400;
+utimesSync(beat, past, past);
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "session-test", info: { id: "session-test" } } } });
+for (let i = 0; i < 15; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watchdog restarted a healthy long-poll watcher");
+// The beacon is now genuinely stale: the same watchdog must recover.
+unlinkSync(beat);
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("watchdog never re-armed after the beacon went stale");
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row === "arm");
+if (arms.length !== 1) throw new Error(`watchdog started ${arms.length} arm cycles: ${arms.join(" | ")}`);
+// A fresh beacon keeps the watchdog from spawning a successor arm once this
+// one stops, so no fake arm outlives the test harness.
+writeFileSync(beat, "");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must honor the poll-derived grace instead of a flat 300: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog poll-derived-grace test printed output: $out"
+  pass "OpenCode watchdog honors the poll-derived grace and still recovers a stale beacon"
+}
+
+# An explicit FM_WATCHER_STALE_GRACE is the watcher's own stale threshold, so
+# the watchdog must resolve it first: a beacon the watcher still treats as fresh
+# must not be restarted; the same watchdog must still recover once it is stale.
+test_opencode_watchdog_uses_watcher_stale_grace_override() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-stale-grace-root"
+  home="$TMP_ROOT/opencode-watchdog-stale-grace-home"
+  log="$TMP_ROOT/opencode-watchdog-stale-grace.log"
+  stop="$TMP_ROOT/opencode-watchdog-stale-grace.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 FM_WATCHER_STALE_GRACE=1800 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// A 400s-old beacon is older than a flat 300s grace but younger than the
+// FM_WATCHER_STALE_GRACE=1800 override the watcher itself uses, so the live
+// watcher must be left alone.
+const beat = `${process.env.FM_HOME}/state/.last-watcher-beat`;
+writeFileSync(beat, "");
+const past = Date.now() / 1000 - 400;
+utimesSync(beat, past, past);
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "session-test", info: { id: "session-test" } } } });
+for (let i = 0; i < 15; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watchdog restarted a watcher under the FM_WATCHER_STALE_GRACE override");
+// The beacon is now genuinely stale: the same watchdog must recover.
+unlinkSync(beat);
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("watchdog never re-armed after the beacon went stale");
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row === "arm");
+if (arms.length !== 1) throw new Error(`watchdog started ${arms.length} arm cycles: ${arms.join(" | ")}`);
+// A fresh beacon keeps the watchdog from spawning a successor arm once this
+// one stops, so no fake arm outlives the test harness.
+writeFileSync(beat, "");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must honor the FM_WATCHER_STALE_GRACE override instead of a flat 300: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog watcher-stale-grace test printed output: $out"
+  pass "OpenCode watchdog honors the FM_WATCHER_STALE_GRACE override and still recovers a stale beacon"
+}
+
+# Once the bounded continuity retry is exhausted and its failure surfaced, the
+# watchdog must not keep spawning arms or queueing a failure prompt every
+# interval; the stale-beacon recovery that started the episode must still work.
+test_opencode_watchdog_honors_bounded_retry_limit() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-bounded-root"
+  home="$TMP_ROOT/opencode-watchdog-bounded-home"
+  log="$TMP_ROOT/opencode-watchdog-bounded.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = { session: { promptAsync: async () => { prompts += 1; } } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// No session.idle and no beacon: the watchdog must start the first arm off the
+// stale beacon, and the empty close of that arm must run the bounded retry
+// path to exhaustion.
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "session-test", info: { id: "session-test" } } } });
+for (let i = 0; i < 250 && prompts === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (prompts !== 1) throw new Error(`expected one exhausted-retry prompt, got ${prompts}`);
+// Many more watchdog intervals pass with the beacon still stale: a terminal
+// episode must not spawn more arms or queue more failure prompts.
+for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 3) throw new Error(`bounded retry launched ${rows.length} arm cycles: ${rows.join(" | ")}`);
+if (prompts !== 1) throw new Error(`exhausted retry queued ${prompts} failure prompts`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must stop re-arming and prompting after the bounded retry limit: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog bounded-retry test printed output: $out"
+  pass "OpenCode watchdog honors the bounded retry limit after a stale-beacon recovery"
+}
+
+# A dead watcher can leave state/.last-watcher-beat fresh for the whole grace
+# window. That leftover beacon must not reset the bounded retry budget, even
+# once it ages out: the exhausted episode stays terminal until a watcher
+# actually touches the beacon again, or the watchdog would spawn arms past the
+# limit and queue a failure prompt every interval. The explicit session.idle
+# trigger starts the episode because a fresh beacon keeps the watchdog quiet.
+test_opencode_watchdog_honors_bounded_retry_during_fresh_beacon() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-watchdog-fresh-bounded-root"
+  home="$TMP_ROOT/opencode-watchdog-fresh-bounded-home"
+  log="$TMP_ROOT/opencode-watchdog-fresh-bounded.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+sleep 0.05
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_WATCHDOG_INTERVAL_MS=20 FM_GUARD_GRACE=600 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = { session: { promptAsync: async () => { prompts += 1; } } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// A watcher touched the beacon and then died, leaving it fresh for the whole
+// grace window while the arm retries run.
+writeFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "");
+await hooks.event({ event: { type: "session.created", properties: { sessionID: "session-test", info: { id: "session-test" } } } });
+// With a fresh beacon the watchdog stays quiet, so session.idle is what starts
+// the episode whose retries must stay bounded.
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 400 && prompts === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (prompts !== 1) throw new Error(`expected one exhausted-retry prompt, got ${prompts}`);
+// Let a few watchdog intervals pass while the leftover beacon is still fresh:
+// the old code cleared the terminal episode here just because it was fresh.
+for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+// The leftover beacon is now genuinely stale. The terminal failure state must
+// hold: the watchdog must not spawn another arm or queue a second prompt.
+const beat = `${process.env.FM_HOME}/state/.last-watcher-beat`;
+const past = Date.now() / 1000 - 100000;
+utimesSync(beat, past, past);
+for (let i = 0; i < 30; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+if (rows.length !== 3) throw new Error(`a stale leftover beacon reopened the failed episode: ${rows.length} arm cycles: ${rows.join(" | ")}`);
+if (prompts !== 1) throw new Error(`a stale leftover beacon queued ${prompts} failure prompts`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watchdog must honor the bounded retry limit while a dead watcher's beacon is still fresh: $out"
+  [ -z "$out" ] || fail "OpenCode watchdog fresh-beacon bounded-retry test printed output: $out"
+  pass "OpenCode watchdog keeps a failed episode terminal when a leftover fresh beacon ages out"
+}
+
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
@@ -5241,3 +5888,13 @@ test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+test_opencode_watchdog_rearms_stale_beacon
+test_opencode_watchdog_skips_healthy_watcher
+test_opencode_watchdog_skips_foreign_lock
+test_opencode_watchdog_delivers_to_root_session_not_child
+test_opencode_watchdog_learns_root_from_session_updated
+test_opencode_watchdog_child_idle_cannot_clobber_root
+test_opencode_watchdog_uses_poll_derived_grace
+test_opencode_watchdog_uses_watcher_stale_grace_override
+test_opencode_watchdog_honors_bounded_retry_limit
+test_opencode_watchdog_honors_bounded_retry_during_fresh_beacon

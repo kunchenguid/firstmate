@@ -45,6 +45,11 @@ Each adapter:
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
+OpenCode's adapter also runs a beacon watchdog, because `session.idle` is its only other re-arm trigger.
+On an unref'd interval it reads the same `state/.last-watcher-beat` freshness and the watcher's stale-grace precedence (`FM_WATCHER_STALE_GRACE` first, then `FM_GUARD_GRACE`, then the poll-derived `max(300, FM_POLL+60)`), and re-arms through the same path when no healthy cycle is live.
+That covers a session that never emits idle, such as one that stays continuously busy or is recreated without an idle cycle.
+Every arm-path guard still applies, so a healthy watcher, an unowned lock, and a non-primary root are never disturbed.
+
 ### Pi session replacement
 
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`:
@@ -434,6 +439,8 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 - A mid-restore marker advance that delivers the wake with no rejection appendix, offers it to an accepting supervision branch like a confirmed delivery, and records the attempt and the confirm result in the bounded extension log when opted in.
 - A failed confirmation for a stale successor that spares a newer arm started by a repair.
 - A repair, a scheduled retry, and a deferred close over a dead-but-unclosed arm child that each start a fresh arm instead of stalling.
+
+It also covers OpenCode's beacon watchdog: re-arming off a stale beacon with no `session.idle`, leaving a healthy watcher and a foreign lock alone, root-only wake delivery while a subagent child session is active, the watcher's grace precedence, and the bounded-retry limit.
 
 The guard and session-start suites prove that active generation evidence tolerates a fresh-beacon handoff.
 They also prove that a legacy or handoff-phase watcher marker from an absent replacement extension still raises the outage diagnostic.
