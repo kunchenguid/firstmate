@@ -447,7 +447,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "explicit harness launch did not thread model, effort, and automatic approval review"
+    "explicit harness launch did not thread model, effort, and Codex bypass flag"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
@@ -540,7 +540,7 @@ test_codex_threads_model_and_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model, reasoning effort config, and automatic approval review"
+    "codex launch did not thread model, reasoning effort config, and Codex bypass flag"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -556,7 +556,7 @@ test_codex_threads_model_and_max_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread Luna's max reasoning effort config and automatic approval review"
+    "codex launch did not thread Luna's max reasoning effort config and Codex bypass flag"
   pass "codex Luna receives --model and model_reasoning_effort max profile flags"
 }
 
@@ -572,7 +572,7 @@ test_codex_omits_max_effort_for_unsupported_model() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag and automatic approval review when max effort was omitted"
+    "codex launch did not preserve the model flag and Codex bypass flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported model max reasoning effort"
   pass "codex omits max for models without the catalog capability"
 }
