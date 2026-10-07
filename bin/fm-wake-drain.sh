@@ -589,7 +589,9 @@ EOF
 #     acknowledges it, one line per outcome in sequence order, preserving older
 #     handoffs even when a newer summary for the task omits them. The byte
 #     cap presents only the oldest contiguous run of captain rows and counts
-#     the newer ones it holds back, so the printed bin/fm-branch-outcome.sh
+#     the newer ones it holds back. Captain summaries are never truncated;
+#     one oversized oldest row is printed in full so its handoff cannot be
+#     lost or stall the drain. Thus the printed bin/fm-branch-outcome.sh
 #     mark-processed target, the newest presented row, acknowledges exactly
 #     what was presented and always at least the oldest row. An unprocessed
 #     captain row is never adopted as processed, so a home that opts in
@@ -600,12 +602,15 @@ EOF
 #     presenter never advanced the read cursor), and the section asks main to
 #     check the task's current state first and reply to the captain only
 #     about outcomes still open, as if settled ones had never been listed,
-#     then acknowledge every presented outcome, settled and open alike.
+#     then follow AGENTS.md section 10's ready-work handoff contract before
+#     acknowledging every presented outcome, settled and open alike.
 #   - Visible routine outcomes are listed once, for awareness, the way the Pi
 #     branch's routine notes reach main's transcript without a turn; silent
 #     routine outcomes never appear. The newest visible rows that fit a byte
 #     cap are listed, and older visible rows collapse into a count, since
 #     bin/fm-branch-outcome.sh list keeps them all.
+#     Routine truncation respects whole UTF-8 characters in every locale and
+#     carries a sequence-specific full-outcome lookup.
 # Once the section is printed, the store's read cursor advances through every
 # presented row, which is what lets mark-processed accept main's
 # acknowledgement and keeps a routine row from repeating; a drain stopped

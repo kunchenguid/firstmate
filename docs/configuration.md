@@ -242,7 +242,7 @@ Main-only rows stay on the captain-facing path.
 [docs/pi-supervision-branch.md](pi-supervision-branch.md) defines its conversation lifecycle, row eligibility, mixed-queue dispatch, heartbeat routing, and pre-drain recheck.
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch is eligible for every task with no captain grant file required.
 
-Bash absorbs a genuinely no-op heartbeat before it reaches Pi.
+The header of `bin/fm-watch.sh` owns heartbeat emission and absorption.
 Every watcher-failure alarm stays on the captain-facing main path.
 If the branch breaks, wakes still fall back to main in both postures.
 The legacy `state/.afk` daemon flag has no effect on Pi.
