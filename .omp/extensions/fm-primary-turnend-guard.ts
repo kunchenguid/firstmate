@@ -296,6 +296,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
     const startAttempt = (): void => {
       // The internal --pi-prerequisite mode is shared: it is the wrapper's
       // "silent exit 3 on an intentional stand-down" contract, not a Pi-only path.
+      const attemptIndex = attempt;
       const invocation = supervised
         ? {
             command: "node",
@@ -408,6 +409,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
         });
       }
       child.on("error", () => {
+        if (attemptIndex !== attempt) return;
         markClosed();
         if (!supervised && !generation.stopping && attempt + 1 < scriptForms.length) {
           attempt += 1;
@@ -417,6 +419,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
         settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
       });
       child.on("close", (code) => {
+        if (attemptIndex !== attempt) return;
         markClosed();
         if (supervised) {
           settle(generation.stopping ? { kind: "cancelled" } : { kind: "failed" });
