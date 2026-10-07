@@ -234,7 +234,7 @@ DETAIL=''
 # A pre-gate over the combined string silently skipped the resolver that was
 # actually installed and reported a lookup that never ran as dns=skipped.
 dns_probe() {
-  local tool out rc first answer saw_error=0 error_detail=''
+  local tool out rc first answer answer_section saw_error=0 error_detail=''
   local -a tools=()
   # The override is one tool or a whitespace-separated preference list; unset
   # means this host's own candidates in order. `read -ra` splits on IFS without
@@ -285,7 +285,13 @@ dns_probe() {
     # an IPv4 in `;; SERVER:` or a colon run in `;; WHEN:`. Matching them turned a
     # NODATA reply (status NOERROR, zero answers) into a false dns=ok and an
     # unnecessary request. Report the matched record, not the banner, as detail.
-    answer=$(printf '%s\n' "$out" | grep -v '^;' | grep -E '(^|[[:space:]])([0-9]{1,3}\.){3}[0-9]{1,3}([[:space:]]|$)|(^|[[:space:]])[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)' | head -n 1)
+    case "${tool##*/}" in
+      dig)
+        answer=$(printf '%s\n' "$out" | awk '/^;; ANSWER SECTION:/{inside=1; next} /^;; [A-Z]+ SECTION:/{inside=0} inside' | grep -E '^[^;[:space:]][^[:space:]]*[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]{1,3}\.){3}[0-9]{1,3}([[:space:]]|$)|^[^;[:space:]][^[:space:]]*[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+[^[:space:]]+[[:space:]]+[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)' | head -n 1)
+        ;;
+      host) answer=$(printf '%s\n' "$out" | grep -E 'has address|IPv6 address' | head -n 1) ;;
+      *) answer='' ;;
+    esac
     if [ -n "$answer" ]; then
       printf 'ok %s\n' "$answer"
       return 0
@@ -312,7 +318,7 @@ dns_probe() {
           printf 'nxdomain %s\n' "${first:-no-address}"
           return 0
         fi
-        answer=$(printf '%s\n' "$out" | grep -v '^;' | grep -E '(^|[[:space:]])[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)' | head -n 1)
+        answer=$(printf '%s\n' "$out" | awk '/^;; ANSWER SECTION:/{inside=1; next} /^;; [A-Z]+ SECTION:/{inside=0} inside' | grep -E '^[^;[:space:]][^[:space:]]*[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+[^[:space:]]+[[:space:]]+[0-9a-fA-F]*:[0-9a-fA-F:]+([[:space:]]|$)' | head -n 1)
         if [ -n "$answer" ]; then
           printf 'ok %s\n' "$answer"
           return 0
@@ -322,7 +328,9 @@ dns_probe() {
           error_detail="rc=${rc}"
           continue
         fi
-        if ! printf '%s\n' "$out" | grep -qiE 'status: NOERROR|status: NXDOMAIN|ANSWER: 0|no addresses'; then
+        if ! { printf '%s\n' "$out" | grep -qi 'status: NXDOMAIN' ||
+          { printf '%s\n' "$out" | grep -qi 'status: NOERROR' && printf '%s\n' "$out" | grep -qi 'ANSWER: 0'; } ||
+          printf '%s\n' "$out" | grep -qi 'no addresses'; }; then
           saw_error=1
           error_detail="rc=${rc}"
           continue
@@ -366,8 +374,15 @@ dns_probe() {
         fi
         ;;
     esac
-    printf 'nxdomain no-address\n'
-    return 0
+    # A successful but unfamiliar resolver is not proof that the name has no
+    # address. Only explicitly recognized negative evidence may end the search.
+    if printf '%s\n' "$out" | grep -qiE 'NXDOMAIN|NOERROR-NODATA|no address|no records|has no' ||
+      { printf '%s\n' "$out" | grep -qi 'status: NOERROR' && printf '%s\n' "$out" | grep -qi 'ANSWER: 0'; }; then
+      printf 'nxdomain no-address\n'
+      return 0
+    fi
+    saw_error=1
+    error_detail="rc=${rc}"
   done
   if [ "$saw_error" = 1 ]; then
     printf 'fail %s\n' "$error_detail"
@@ -452,10 +467,9 @@ for no_proxy_entry in $no_proxy_list; do
     *:*) entry_host=${no_proxy_entry%:*}; entry_port=${no_proxy_entry##*:} ;;
     *) entry_host=$no_proxy_entry ;;
   esac
-  if [ -n "$entry_port" ]; then
-    case "$entry_port" in *[!0-9]*) continue ;; esac
-    [ "$entry_port" = "$proxy_port" ] || continue
-  elif [ "${no_proxy_entry%:*}" != "$no_proxy_entry" ]; then
+  # curl's NO_PROXY matching does not honor port-qualified entries; treating
+  # one as a bypass could send a credentialed proxy request unexpectedly.
+  if [ -n "$entry_port" ] || [ "${no_proxy_entry%:*}" != "$no_proxy_entry" ]; then
     continue
   fi
   entry_host=${entry_host#.}
@@ -490,7 +504,7 @@ DETAIL="${DETAIL} route=$PROXY_MODE"
 # local attacker to redirect. A valid code survives curl's non-zero exit (for
 # example a truncated body after a 2xx header); only an absent or malformed code
 # becomes 000.
-HTTP_CODE=$(fm_run_timed "$TIMEOUT" "$CURL_CMD" -q -sS -o /dev/null -w '%{http_code}' \
+HTTP_CODE=$(fm_run_timed "$TIMEOUT" "$CURL_CMD" -q --globoff -sS -o /dev/null -w '%{http_code}' \
   --max-time "$TIMEOUT" "$BASE" </dev/null 2>/dev/null)
 case "$HTTP_CODE" in
   ''|*[!0-9]*) HTTP_CODE=000 ;;
