@@ -163,9 +163,30 @@ pass "fixed: the workspace holds exactly the 2 replacement tabs after both respa
 # the freshly-respawned panes, then confirm a further same-labeled spawn
 # attempt refuses exactly as before - the husk fix must never touch a pane
 # that actually has something registered in it.
+# Back the registration with an agent-named foreground process so this
+# tests a live duplicate, not an idle-shell record that may disappear.
+# Versioned retention behavior: docs/verification/runtime-backends.md
+# "Stale agent registration".
 
+LIVE_SLEEP=$(command -v sleep) || fail "sleep not found"
+ln -s "$LIVE_SLEEP" "$SCRATCH/claude"
+printf -v LIVE_AGENT_Q '%q' "$SCRATCH/claude"
+fm_backend_herdr_send_text_line "$SESSION:$NEW_CREW_PANE_ID" "$LIVE_AGENT_Q 900" \
+  || fail "could not start the agent-named foreground process on the respawned crewmate-shaped pane"
+LIVE_TRIES=0
+until [ "$(fm_backend_herdr_pane_process_state "$SESSION" "$NEW_CREW_PANE_ID")" = agent ]; do
+  LIVE_TRIES=$((LIVE_TRIES + 1))
+  [ "$LIVE_TRIES" -lt 50 ] \
+    || fail "the respawned crewmate-shaped pane's agent-named foreground process reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$NEW_CREW_PANE_ID")' rather than 'agent' through pane process-info"
+  sleep 0.1
+done
 herdr pane report-agent "$NEW_CREW_PANE_ID" --source fm-respawn-e2e --agent fm-respawn-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the respawned crewmate-shaped pane"
+# Prove the scenario is the live case rather than passing on a stale or
+# unreadable registration, which the husk check also refuses.
+LIVE_STATE=$(fm_backend_herdr_pane_agent_state "$SESSION" "$NEW_CREW_PANE_ID")
+[ "$LIVE_STATE" = live ] \
+  || fail "live-duplicate setup is wrong: the respawned crewmate-shaped pane should classify live, got '$LIVE_STATE'"
 
 if fm_backend_herdr_create_task "$CONTAINER" "$CREW_LABEL" "$PROJ_CWD" >/dev/null 2>&1; then
   fail "REGRESSION: create_task should refuse a same-labeled tab whose pane hosts a genuinely live registered agent"

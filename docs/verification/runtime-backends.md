@@ -1603,7 +1603,7 @@ Real captures verified these active distinctions:
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
-- A bare shell prompt has no safe agent-composer container and is unknown.
+- Bare prompts using the classifier's shell-glyph set are unknown; `bin/fm-composer-lib.sh` owns the glyph distinction.
 - Codex 0.154's idle braille starfield rows are composer furniture, with the dated Herdr evidence and refresh command in [Composer classification matrix](#composer-classification-matrix).
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
@@ -1657,6 +1657,7 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 ```
 
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, and since 2026-09-10 that registration counts as an agent only while `pane process-info` shows a harness process behind it, so the guard backs the registration with a real process named like a harness (a symlink to `sleep`) and then stops that process, with no real harness launched.
+The guard runs the stand-in under a nested shell to preserve the stale-registration fixture; [Stale agent registration](#stale-agent-registration) owns the versioned retention behavior.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
 For Pi on Herdr 0.9.0, `herdr agent get` reflects whether the agent process remains live; its registration does not persist merely because the pane and parent shell do.
@@ -1747,7 +1748,24 @@ herdr pane process-info --pane w1:p1 --session "$LAB" | jq -c '.result.process_i
 ```
 
 Before the fix `fm_backend_agent_state herdr` read that second state as `alive`, so `bin/fm-control.sh <id> relaunch` and `bin/fm-spawn.sh --relaunch` were refused for as long as the registration lived, which is hours.
-The registration is still present after the wait, and Herdr's own `pane report-agent` leaves the same shape behind on any pane, which is what the lifecycle-control guard uses.
+The registration is still present after the wait, and a `pane report-agent` registration whose agent process exits under a nested shell leaves the same shape behind, which is what the lifecycle-control guard uses.
+With no nested shell, Herdr 0.9.2 and later releases a `pane report-agent` registration once its pane is back at an idle shell (herdr PR [4687](https://github.com/herdrdev/herdr/pull/4687); 0.9.3 does not change this).
+
+Measured 2026-10-05 on Linux x86_64 against Herdr 0.9.3 in an isolated `fm-lab-` session: a registration on a pane idling at its own top shell is released within about a second, while a nested shell in the foreground keeps it.
+A fixture that needs a lasting registration therefore backs it with a running foreground process, as the live-duplicate cases in `tests/fm-backend-herdr-smoke.test.sh` and `tests/fm-backend-herdr-respawn-idem-e2e.test.sh` do.
+
+```sh
+herdr pane report-agent w1:p1 --source fm-probe --agent probe-agent --state idle --session "$LAB"; sleep 2
+herdr agent get w1:p1 --session "$LAB" 2>&1
+herdr pane run w1:p1 bash --session "$LAB"; sleep 1
+herdr pane report-agent w1:p1 --source fm-probe --agent probe-agent --state idle --session "$LAB"; sleep 2
+herdr agent get w1:p1 --session "$LAB" | jq -c '.result.agent | {agent, agent_status}'
+```
+
+```text
+{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"},"id":"cli:agent:get"}
+{"agent":"probe-agent","agent_status":"idle"}
+```
 
 Two vendor facts the fix rests on, both read from the outputs above and from `fm_backend_herdr_pane_process_state`'s `pane process-info` parse:
 

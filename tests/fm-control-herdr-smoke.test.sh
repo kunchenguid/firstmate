@@ -83,6 +83,29 @@ $TASK_IDS
 EOF
 [ -n "$TAB_ID" ] && [ -n "$PANE_ID" ] || fail "create_task did not return tab/pane ids"
 
+# Herdr starts the pane in the developer's login shell, whose prompt is not this
+# test's to choose. A prompt drawn with an agent composer glyph - a `❯` prompt
+# is exactly claude's bare composer row - anywhere in the viewport makes the
+# final exit case read the composer as holding pending text instead of as
+# unproven. An rc-free bash with a shell-glyph prompt on a cleared screen draws
+# no recognized composer chrome, so every composer verdict below depends on this
+# test alone. `exec` keeps the pane's shell pid.
+BASH_BIN=$(command -v bash) || fail "bash not found"
+printf -v BASH_Q '%q' "$BASH_BIN"
+fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "exec env PS1='hsmoke\$ ' HISTFILE=/dev/null $BASH_Q --noprofile --norc" \
+  || fail "could not pin a neutral shell prompt in the task pane"
+fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "clear" \
+  || fail "could not clear the login shell's output from the task pane"
+neutral_screen_shown() {  # the viewport holds nothing but the neutral prompt
+  fm_backend_herdr_visible_capture "$SESSION:$PANE_ID" 2>/dev/null \
+    | awk 'NF { n++; last = $0 } END { exit(n == 1 && last ~ /^hsmoke\$ *$/ ? 0 : 1) }'
+}
+for _ in $(seq 1 50); do
+  ! neutral_screen_shown || break
+  sleep 0.1
+done
+neutral_screen_shown || fail "the task pane did not settle on a cleared neutral shell prompt"
+
 {
   echo "window=$SESSION:$PANE_ID"
   echo "endpoint_task_id=hsmoke"
@@ -233,6 +256,13 @@ start_agent_process() {
     || version_fail "a real agent-named foreground process reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")' rather than 'agent' through pane process-info"
 }
 
+# Keep a nested interactive shell in the foreground after the stand-in exits
+# so the stale-registration assertion below cannot race idle-shell cleanup.
+# Versioned retention behavior: docs/verification/runtime-backends.md
+# "Stale agent registration". The nested shell inherits the neutral PS1 and
+# HISTFILE from the top shell's environment.
+fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$BASH_Q --noprofile --norc" \
+  || fail "could not start a nested shell in the task pane"
 start_agent_process
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \

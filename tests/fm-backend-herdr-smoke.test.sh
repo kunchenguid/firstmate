@@ -35,8 +35,10 @@ herdr_forget_inherited_pane
 SESSION="fm-lab-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SM_SCRATCH=
+LIVE_DUP_SCRATCH=
 cleanup_all() {
   [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
+  [ -n "$LIVE_DUP_SCRATCH" ] && rm -rf "$LIVE_DUP_SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
@@ -133,6 +135,10 @@ pass "real herdr: create_task prunes the freshly-created workspace's seeded defa
 
 # 1. A genuinely LIVE duplicate (a real registered agent, via herdr's own
 #    `pane report-agent`) must still refuse exactly as before.
+#    Back the registration with an agent-named foreground process so this
+#    tests a live duplicate, not an idle-shell record that may disappear.
+#    Versioned retention behavior: docs/verification/runtime-backends.md
+#    "Stale agent registration".
 LIVE_DUP_LABEL="fm-smoke-livedup"
 LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp) || fail "could not create the live-duplicate scenario's tab"
 read -r LIVE_DUP_TAB_ID LIVE_DUP_PANE_ID <<EOF
@@ -141,8 +147,26 @@ EOF
 if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
   fail "live-duplicate scenario tab creation did not return ids"
 fi
+LIVE_DUP_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-smoke-livedup.XXXXXX")
+LIVE_DUP_SLEEP=$(command -v sleep) || fail "sleep not found"
+ln -s "$LIVE_DUP_SLEEP" "$LIVE_DUP_SCRATCH/claude"
+printf -v LIVE_DUP_AGENT_Q '%q' "$LIVE_DUP_SCRATCH/claude"
+fm_backend_herdr_send_text_line "$SESSION:$LIVE_DUP_PANE_ID" "$LIVE_DUP_AGENT_Q 900" \
+  || fail "could not start the agent-named foreground process in the live-duplicate scenario's pane"
+LIVE_DUP_TRIES=0
+until [ "$(fm_backend_herdr_pane_process_state "$SESSION" "$LIVE_DUP_PANE_ID")" = agent ]; do
+  LIVE_DUP_TRIES=$((LIVE_DUP_TRIES + 1))
+  [ "$LIVE_DUP_TRIES" -lt 50 ] \
+    || fail "the live-duplicate scenario's agent-named foreground process reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$LIVE_DUP_PANE_ID")' rather than 'agent' through pane process-info"
+  sleep 0.1
+done
 herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
+# Prove the scenario is the live case rather than passing on a stale or
+# unreadable registration, which the husk check also refuses.
+LIVE_DUP_STATE=$(fm_backend_herdr_pane_agent_state "$SESSION" "$LIVE_DUP_PANE_ID")
+[ "$LIVE_DUP_STATE" = live ] \
+  || fail "live-duplicate scenario setup is wrong: the pane should classify live, got '$LIVE_DUP_STATE'"
 if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then
   fail "REGRESSION: create_task should refuse a duplicate label whose pane hosts a genuinely live registered agent (idle counts as live)"
 fi
