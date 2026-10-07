@@ -31,7 +31,9 @@ FM_ROOT_OVERRIDE="$(fm_test_tmproot fm-parent-channel-scan-exclusion-root)"
 export FM_ROOT_OVERRIDE
 mkdir -p "$FM_ROOT_OVERRIDE"
 
-cleanup() { rm -rf -- "$TMP_ROOT"; }
+# Replace lib.sh's EXIT trap but keep its reaping, so every registered fixture
+# root (including FM_ROOT_OVERRIDE) is removed too.
+cleanup() { fm_test_cleanup; }
 trap cleanup EXIT
 
 # seed_remote_mate <dir>: build a remote mate home whose state dir carries one

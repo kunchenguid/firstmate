@@ -37,7 +37,10 @@ SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
-  [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
+  if [ -n "$SCRATCH" ]; then
+    fm_test_remove_spawn_launch_dirs "$SCRATCH"
+    fm_test_remove_tree "$SCRATCH"
+  fi
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT

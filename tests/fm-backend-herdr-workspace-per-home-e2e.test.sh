@@ -73,9 +73,8 @@ cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
   herdr_safe_stop_and_delete "$SESSION"
-  # Spawn leaves each state/<id>.git-hooks strip dir read-only.
-  find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
-  rm -rf "$TMP_ROOT"
+  fm_test_remove_spawn_launch_dirs "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"

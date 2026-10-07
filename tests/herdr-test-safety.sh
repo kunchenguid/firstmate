@@ -6,6 +6,8 @@ set -u
 
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
+# shellcheck source=tests/fixture-tree-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixture-tree-helpers.sh"
 
 # Herdr backend tests drive the real fm-spawn/fm-teardown but do not source
 # tests/lib.sh, so exempt them from the gate-lifecycle refusal here too (see
