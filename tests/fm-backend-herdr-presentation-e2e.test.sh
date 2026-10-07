@@ -571,14 +571,14 @@ grouping_capable() {
   ' "$ROOT" "$HERDR_LAB_SESSION"
 }
 
-# record_repo_parent_retry <parent-id> <label> <clone>: records a refused
+# record_repo_parent_retry <parent-id> <label> <clone> [<seeded-pane-id>]: records a refused
 # fresh-parent removal exactly as the spawn does, through the adapter's own
 # per-home record, so the next spawn's retry can be exercised without having
 # to make Herdr refuse a pane close in the middle of a spawn.
 record_repo_parent_retry() {
   PATH="$FAKEBIN:$PATH" HERDR_SESSION="$HERDR_LAB_SESSION" bash -c '
     . "$0/bin/backends/herdr.sh"
-    fm_backend_herdr_projection_repo_parent_retry_record "$1" "$2" "$3" "$4" "$5"
+    fm_backend_herdr_projection_repo_parent_retry_record "$1" "$2" "$3" "$4" "$5" "${6:-}"
   ' "$ROOT" "$HOME_DIR/state" "$HERDR_LAB_SESSION" "$@"
 }
 
@@ -1146,12 +1146,12 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
   # refused removal, and proves the next spawn removes it through its seeded
   # pane, forgets the record, and then groups normally under a new parent.
   RETRY_RECORD="$HOME_DIR/state/.herdr-repo-parent-retry"
-  record_repo_parent_retry "$FRESH_PARENT_WSID" "$FRESH_REPO_LABEL" "$FRESH_PROJECT_DIR" \
+  FRESH_PARENT_PANE=$(lab pane list --workspace "$FRESH_PARENT_WSID" | jq -r '[.result.panes[]?] | select(length == 1) | .[0].pane_id // empty')
+  [ -n "$FRESH_PARENT_PANE" ] || fail "the fresh-repository fixture parent does not hold exactly one seeded pane"
+  record_repo_parent_retry "$FRESH_PARENT_WSID" "$FRESH_REPO_LABEL" "$FRESH_PROJECT_DIR" "$FRESH_PARENT_PANE" \
     || fail "could not record the fresh-repository parent for retry"
   grep -F "$FRESH_PARENT_WSID" "$RETRY_RECORD" >/dev/null 2>&1 \
     || fail "the fresh-repository retry record does not name the parent: $(cat "$RETRY_RECORD" 2>/dev/null)"
-  FRESH_PARENT_PANE=$(lab pane list --workspace "$FRESH_PARENT_WSID" | jq -r '[.result.panes[]?] | select(length == 1) | .[0].pane_id // empty')
-  [ -n "$FRESH_PARENT_PANE" ] || fail "the fresh-repository fixture parent does not hold exactly one seeded pane"
   mkdir -p "$HOME_DIR/data/fresh-retry" "$HOME_DIR/data/fresh-stuck"
   write_ship_brief "$HOME_DIR" fresh-retry 'Fresh repository retried parent removal fixture.'
   write_ship_brief "$HOME_DIR" fresh-stuck 'Fresh repository refused retry fixture.'
@@ -1178,11 +1178,11 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
   [ "$FRESH_PARENT2_WSID" != "$FRESH_PARENT_WSID" ] \
     || fail "fresh-repository retried removal reused the parent it should have removed"
   assert_linked_child "$FRESH_RETRY_WSID" "$(grep '^worktree=' "$FRESH_RETRY_META" | cut -d= -f2-)" "$FRESH_PROJECT_DIR" "fresh-repository retried removal" "$TMP_ROOT/fresh-retry.err"
-  # The recorded parent leaves through the focus-preserving pane path: its
-  # lone idle shell is ended so Herdr removes the emptied workspace itself,
-  # with a plain close of exactly that seeded pane as the fallback, and the
-  # spawn prunes its own task workspace's seeded pane as always. Nothing
-  # else may be closed or renamed, and never through a workspace close.
+  # The recorded parent leaves through the focus-preserving pane-death path
+  # only: its lone idle shell is ended so Herdr removes the emptied workspace
+  # itself, never through a plain pane close, and the spawn prunes its own
+  # task workspace's seeded pane as always. Nothing else may be closed or
+  # renamed, and never through a workspace close.
   FRESH_RETRY_CALLS=$(sed -n "$((FRESH_RETRY_START + 1)),\$p" "$HERDR_CALL_LOG")
   FRESH_RETRY_FOREIGN_MUTATIONS=$(printf '%s\n' "$FRESH_RETRY_CALLS" | awk -F '\t' -v own="$FRESH_RETRY_WSID:" -v parent_pane="$FRESH_PARENT_PANE" '
     ($1 == "pane" && $2 == "close" && index($3, own) != 1 && $3 != parent_pane) || ($1 == "tab" && $2 == "close") || ($1 == "workspace" && ($2 == "close" || $2 == "rename")) || ($1 == "session" && ($2 == "stop" || $2 == "delete")) || $1 == "server" { print $1 " " $2 " " $3 }
@@ -1196,6 +1196,51 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
   teardown_task fresh-retry "$HOME_DIR" > "$TMP_ROOT/fresh-retry-teardown.out" 2> "$TMP_ROOT/fresh-retry-teardown.err" \
     || fail "fresh-repository retried-removal teardown failed: $(cat "$TMP_ROOT/fresh-retry-teardown.err")"
   assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository retried-removal teardown"
+
+  # A recorded parent whose seeded pane the captain has since started using
+  # is never closed by the retry: a long-running command in that pane makes
+  # the lone-idle-shell proof fail, which is a lasting refusal that forgets
+  # the record with one warning and adopts the parent, so the task groups
+  # under it and the busy pane keeps running.
+  FRESH_BUSY_PANE=$(lab pane list --workspace "$FRESH_PARENT2_WSID" | jq -r '[.result.panes[]?] | select(length == 1) | .[0].pane_id // empty')
+  [ -n "$FRESH_BUSY_PANE" ] || fail "the fresh-repository standing parent does not hold exactly one seeded pane"
+  lab pane run "$FRESH_BUSY_PANE" 'sleep 600' >/dev/null \
+    || fail "could not start a long-running command in the standing parent's seeded pane"
+  record_repo_parent_retry "$FRESH_PARENT2_WSID" "$FRESH_REPO_LABEL" "$FRESH_PROJECT_DIR" "$FRESH_BUSY_PANE" \
+    || fail "could not record the busy fresh-repository parent for retry"
+  mkdir -p "$HOME_DIR/data/fresh-busy"
+  write_ship_brief "$HOME_DIR" fresh-busy 'Fresh repository used-parent retry fixture.'
+  FRESH_BUSY_START=$(log_line_count)
+  FRESH_BUSY_FOCUS_START=$(focus_audit_line_count)
+  spawn_task fresh-busy "$HOME_DIR" "$FRESH_PROJECT_DIR" > "$TMP_ROOT/fresh-busy.out" 2> "$TMP_ROOT/fresh-busy.err" \
+    || fail "spawn after a retry refused for a used parent should still succeed: $(cat "$TMP_ROOT/fresh-busy.err")"
+  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository used parent"
+  assert_raw_presentation_mutations_preserved_since "$FRESH_BUSY_FOCUS_START" "fresh-repository used parent"
+  grep -F "the parent $FRESH_PARENT2_WSID an earlier spawn left standing" "$TMP_ROOT/fresh-busy.err" | grep -F "adopting it" >/dev/null 2>&1 \
+    || fail "fresh-repository used parent did not warn that the parent is left standing and adopted: $(cat "$TMP_ROOT/fresh-busy.err")"
+  [ "$(grep -c 'an earlier spawn left standing' "$TMP_ROOT/fresh-busy.err")" = 1 ] \
+    || fail "fresh-repository used parent warned more than once: $(cat "$TMP_ROOT/fresh-busy.err")"
+  [ ! -e "$RETRY_RECORD" ] || ! grep -F "$FRESH_PARENT2_WSID" "$RETRY_RECORD" >/dev/null 2>&1 \
+    || fail "fresh-repository used parent kept the retry record"
+  FRESH_BUSY_META="$HOME_DIR/state/fresh-busy.meta"
+  FRESH_BUSY_WT=$(remember_meta_worktree "$FRESH_BUSY_META")
+  FRESH_BUSY_WSID=$(grep '^herdr_workspace_id=' "$FRESH_BUSY_META" | cut -d= -f2-)
+  assert_linked_child "$FRESH_BUSY_WSID" "$FRESH_BUSY_WT" "$FRESH_PROJECT_DIR" "fresh-repository used parent" "$TMP_ROOT/fresh-busy.err"
+  [ "$(lab worktree list --workspace "$FRESH_PARENT2_WSID" | jq -r --arg id "$FRESH_BUSY_WSID" '[.result.worktrees[]? | select(.open_workspace_id == $id)] | length')" = 1 ] \
+    || fail "fresh-repository used parent did not group the task under exactly the recorded parent $FRESH_PARENT2_WSID"
+  lab pane get "$FRESH_BUSY_PANE" >/dev/null 2>&1 \
+    || fail "fresh-repository used parent lost the busy seeded pane $FRESH_BUSY_PANE"
+  lab pane process-info --pane "$FRESH_BUSY_PANE" | jq -e '[.result.process_info.foreground_processes[]?.name] | index("sleep") != null' >/dev/null 2>&1 \
+    || fail "fresh-repository used parent's command is no longer running in $FRESH_BUSY_PANE"
+  FRESH_BUSY_FOREIGN_MUTATIONS=$(sed -n "$((FRESH_BUSY_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' -v own="$FRESH_BUSY_WSID:" '
+    ($1 == "pane" && $2 == "close" && index($3, own) != 1) || ($1 == "tab" && $2 == "close") || ($1 == "workspace" && ($2 == "close" || $2 == "rename")) || ($1 == "session" && ($2 == "stop" || $2 == "delete")) || $1 == "server" { print $1 " " $2 " " $3 }
+  ')
+  [ -z "$FRESH_BUSY_FOREIGN_MUTATIONS" ] \
+    || fail "fresh-repository used parent closed or renamed something outside its own task workspace: $(printf '%s\n' "$FRESH_BUSY_FOREIGN_MUTATIONS" | tr '\n' ';')"
+  pass "real Herdr lab: a retry never closes a standing parent whose seeded pane is busy; it forgets the record with one warning and groups the task under that parent"
+  teardown_task fresh-busy "$HOME_DIR" > "$TMP_ROOT/fresh-busy-teardown.out" 2> "$TMP_ROOT/fresh-busy-teardown.err" \
+    || fail "fresh-repository used-parent teardown failed: $(cat "$TMP_ROOT/fresh-busy-teardown.err")"
+  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository used-parent teardown"
 
   # A lasting refusal (an extra tab on the recorded parent makes the
   # childless guard refuse the removal for good) forgets the record with one
@@ -1211,7 +1256,7 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
     || fail "spawn after a refused fresh-repository retry should still succeed: $(cat "$TMP_ROOT/fresh-stuck.err")"
   assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository refused retry"
   assert_raw_presentation_mutations_preserved_since "$FRESH_STUCK_FOCUS_START" "fresh-repository refused retry"
-  grep -F "can no longer remove the repo parent $FRESH_PARENT2_WSID an earlier spawn left standing" "$TMP_ROOT/fresh-stuck.err" | grep -F "leaving it standing and adopting it" >/dev/null 2>&1 \
+  grep -F "the parent $FRESH_PARENT2_WSID an earlier spawn left standing" "$TMP_ROOT/fresh-stuck.err" | grep -F "adopting it" >/dev/null 2>&1 \
     || fail "fresh-repository lasting refusal did not warn that the parent is left standing and adopted: $(cat "$TMP_ROOT/fresh-stuck.err")"
   [ "$(grep -c 'an earlier spawn left standing' "$TMP_ROOT/fresh-stuck.err")" = 1 ] \
     || fail "fresh-repository lasting refusal warned more than once: $(cat "$TMP_ROOT/fresh-stuck.err")"

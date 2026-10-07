@@ -4121,7 +4121,7 @@ test_refused_fresh_parent_removal_is_retried_by_the_next_spawn() {
   state="$TMP_ROOT/retry-state"; mkdir -p "$state"
   clone="$TMP_ROOT/retry-clone"; mkdir -p "$clone"; clone_real=$(cd "$clone" && pwd -P)
   record="$state/.herdr-repo-parent-retry"
-  wt_one='{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"}]}}'
+  wt_one="{\"result\":{\"source\":{\"source_workspace_id\":\"wF\",\"source_checkout_path\":\"$clone_real\",\"repo_root\":\"$clone_real\",\"repo_name\":\"foo\"},\"worktrees\":[{\"path\":\"/tmp/clone\",\"open_workspace_id\":\"wF\"}]}}"
   tabs_one='{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false}]}}'
   panes_one='{"result":{"panes":[{"pane_id":"wF:t1:p1","tab_id":"wF:t1","workspace_id":"wF"}]}}'
   pane_info='{"result":{"pane":{"pane_id":"wF:t1:p1","tab_id":"wF:t1","workspace_id":"wF"}}}'
@@ -4129,12 +4129,20 @@ test_refused_fresh_parent_removal_is_retried_by_the_next_spawn() {
   list_with='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wF","label":"foo","focused":false},{"workspace_id":"w5","label":"└ flat · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
   list_without='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"w5","label":"└ flat · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
   list_relabelled='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wF","label":"renamed by a human","focused":false}]}}'
+  # The retry may only remove the parent through the pane-death path and only
+  # after proving a lone idle shell, so the stubs let each case choose the
+  # close plan, the idle proof, and the death close, and log the pane each
+  # one was asked about.
   cat > "$TMP_ROOT/retry-stubs.sh" <<'SH'
-fm_backend_herdr_emptying_close_plan() { printf 'plain\n'; }
+fm_backend_herdr_emptying_close_plan() { [ "${RETRY_PLAN:-death}" = death ] && printf 'death 4242\n' || printf 'plain\n'; }
+fm_backend_herdr_pane_idle_shell_pid() { printf 'idle %s\n' "$2" >> "$RETRY_STUB_LOG"; [ "${RETRY_IDLE:-1}" = 1 ] && printf 4242; }
+fm_backend_herdr_death_close_pane() { printf 'death %s %s\n' "$2" "$3" >> "$RETRY_STUB_LOG"; [ "${RETRY_DEATH_OK:-1}" = 1 ]; }
 fm_backend_herdr_projection_focus_restore() { return 0; }
 fm_backend_herdr_projection_focus_snapshot() { printf 'w1\tw1:t1'; }
 SH
   stub_env=". \"\$0/bin/backends/herdr.sh\"; . \"$TMP_ROOT/retry-stubs.sh\""
+  export RETRY_STUB_LOG="$TMP_ROOT/retry-stub.log"
+  : > "$RETRY_STUB_LOG"
 
   # The record names exactly one parent per session and clone, survives a
   # second identical record, and is read back by the clone's real path.
@@ -4143,6 +4151,10 @@ SH
   [ "$(grep -c . "$record")" = 1 ] || fail "recording the same refused parent twice left $(grep -c . "$record") lines"
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")
   [ "$out" = $'wF\tfoo' ] || fail "the refused parent lookup returned '$out'"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2" wF:t1:p1' "$ROOT" "$state" "$clone" \
+    || fail "recording the refused parent with its seeded pane failed"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")
+  [ "$out" = $'wF\tfoo\twF:t1:p1' ] || fail "the refused parent lookup lost the seeded pane: '$out'"
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$TMP_ROOT")
   [ -z "$out" ] || fail "a lookup for another clone returned '$out'"
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" other "$2"' "$ROOT" "$state" "$clone")
@@ -4167,8 +4179,8 @@ SH
   printf '%s\n' "$tabs_one" > "$resp/3.out"
   printf '%s\n' "$panes_one" > "$resp/4.out"
   printf '%s\n' "$pane_info" > "$resp/5.out"
-  printf '%s\n' "$pane_gone" > "$resp/7.out"
-  printf '%s\n' "$list_without" > "$resp/8.out"
+  printf '%s\n' "$list_without" > "$resp/6.out"
+  : > "$RETRY_STUB_LOG"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$clone" 2>&1)
@@ -4176,35 +4188,37 @@ SH
   [ "$status" -eq 0 ] || fail "the retried removal of the recorded parent failed (status $status): $out"
   [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "the retried removal did not warn exactly once: $out"
   assert_contains "$out" "removed the repo parent wF" "the retried removal did not say which parent it removed: $out"
-  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fwF:t1:p1' "the retried removal did not close the parent's seeded pane"
+  assert_contains "$(cat "$log")" $'worktree\x1flist\x1f--workspace\x1fwF' "the retried removal did not read the parent's live worktree group"
+  [ "$(cat "$RETRY_STUB_LOG")" = $'idle wF:t1:p1\ndeath wF:t1:p1 4242' ] \
+    || fail "the retried removal did not prove the recorded pane idle and close it through the death path only: $(cat "$RETRY_STUB_LOG")"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "the retried removal used the plain explicit pane close"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "the retried removal used a workspace close"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "the retried removal renamed a workspace"
-  [ "$(grep -c $'\x1fpane\x1fclose\x1f' "$log")" = 1 ] || fail "the retried removal closed more than the parent's seeded pane"
   [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
     || fail "a successful retry kept the record"
 
   # Refused again for a transient reason (the pane close fails): one warning, the record stays for the spawn after this
   # one, exactly one attempt, nothing else touched, and status 1 tells the
   # spawn to keep this task flat.
-  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2"' "$ROOT" "$state" "$clone"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2" wF:t1:p1' "$ROOT" "$state" "$clone"
   dir="$TMP_ROOT/retry-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' "$list_with" > "$resp/1.out"
   printf '%s\n' "$wt_one" > "$resp/2.out"
   printf '%s\n' "$tabs_one" > "$resp/3.out"
   printf '%s\n' "$panes_one" > "$resp/4.out"
   printf '%s\n' "$pane_info" > "$resp/5.out"
-  printf '%s\n' '{"error":{"code":"pane_close_refused","message":"refused"}}' > "$resp/6.err"
-  printf '%s\n' 1 > "$resp/6.exit"
+  : > "$RETRY_STUB_LOG"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$(RETRY_DEATH_OK=0 PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$clone" 2>&1)
   status=$?
   [ "$status" -eq 1 ] || fail "a retry refused again did not report status 1 (status $status): $out"
   assert_contains "$out" "next spawn" "a retry refused again did not say the next spawn retries: $out"
   assert_contains "$out" "flat" "a retry refused again did not say this task stays flat: $out"
-  [ "$(grep -c $'\x1fpane\x1fclose\x1f' "$log")" = 1 ] || fail "a retry refused again did not stop after one attempt"
+  [ "$(grep -c '^death ' "$RETRY_STUB_LOG")" = 1 ] || fail "a retry refused again did not stop after one attempt"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "a retry whose death close failed fell back to the plain pane close"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "a retry refused again fell back to a workspace close"
-  [ "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" = $'wF\tfoo' ] \
+  [ "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" = $'wF\tfoo\twF:t1:p1' ] \
     || fail "a retry refused again dropped the record"
 
   # A lasting refusal (extra tab, or another open workspace in the group)
@@ -4212,7 +4226,7 @@ SH
   # adopts the parent, and closes nothing.
   local tabs_two wt_two lasting_case
   tabs_two='{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false},{"tab_id":"wF:t2","workspace_id":"wF","label":"2","focused":false}]}}'
-  wt_two='{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"},{"path":"/tmp/clone-wt","open_workspace_id":"w9"}]}}'
+  wt_two="{\"result\":{\"source\":{\"source_workspace_id\":\"wF\",\"source_checkout_path\":\"$clone_real\",\"repo_root\":\"$clone_real\",\"repo_name\":\"foo\"},\"worktrees\":[{\"path\":\"/tmp/clone\",\"open_workspace_id\":\"wF\"},{\"path\":\"/tmp/clone-wt\",\"open_workspace_id\":\"w9\"}]}}"
   for lasting_case in tabs group; do
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2"' "$ROOT" "$state" "$clone"
     dir="$TMP_ROOT/retry-lasting-$lasting_case"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4234,7 +4248,57 @@ SH
     [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
       || fail "a lasting refusal ($lasting_case) kept the record"
   done
-  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2"' "$ROOT" "$state" "$clone"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2" wF:t1:p1' "$ROOT" "$state" "$clone"
+
+  # The captain may have used the parent since: a busy pane, a different
+  # pane, or a group source at another checkout is a lasting refusal that
+  # forgets the record with one warning, returns 0 so the ordinary ensure
+  # adopts the parent, and closes nothing.
+  local wt_moved panes_other busy_case
+  wt_moved='{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/elsewhere","repo_root":"/tmp/elsewhere","repo_name":"foo"},"worktrees":[{"path":"/tmp/elsewhere","open_workspace_id":"wF"}]}}'
+  panes_other='{"result":{"panes":[{"pane_id":"wF:t1:p9","tab_id":"wF:t1","workspace_id":"wF"}]}}'
+  for busy_case in busy other-pane moved-clone; do
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2" wF:t1:p1' "$ROOT" "$state" "$clone"
+    dir="$TMP_ROOT/retry-used-$busy_case"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"; : > "$RETRY_STUB_LOG"
+    printf '%s\n' "$list_with" > "$resp/1.out"
+    printf '%s\n' "$wt_one" > "$resp/2.out"
+    printf '%s\n' "$tabs_one" > "$resp/3.out"
+    printf '%s\n' "$panes_one" > "$resp/4.out"
+    printf '%s\n' "$pane_info" > "$resp/5.out"
+    [ "$busy_case" != other-pane ] || printf '%s\n' "$panes_other" > "$resp/4.out"
+    [ "$busy_case" != moved-clone ] || printf '%s\n' "$wt_moved" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(RETRY_IDLE=$([ "$busy_case" = busy ] && echo 0 || echo 1) PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$clone" 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] || fail "a used parent ($busy_case) did not return 0 (status $status): $out"
+    [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "a used parent ($busy_case) did not warn exactly once: $out"
+    assert_contains "$out" "adopting it" "a used parent ($busy_case) did not say the parent is adopted: $out"
+    assert_not_contains "$(cat "$log")" $'close' "a used parent ($busy_case) closed something"
+    assert_not_contains "$(cat "$RETRY_STUB_LOG")" "death" "a used parent ($busy_case) reached the death close"
+    [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
+      || fail "a used parent ($busy_case) kept the record"
+  done
+
+  # A plan that cannot prove the pane death is also lasting: the retry never
+  # falls back to the plain explicit close.
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2" wF:t1:p1' "$ROOT" "$state" "$clone"
+  dir="$TMP_ROOT/retry-plain-plan"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"; : > "$RETRY_STUB_LOG"
+  printf '%s\n' "$list_with" > "$resp/1.out"
+  printf '%s\n' "$wt_one" > "$resp/2.out"
+  printf '%s\n' "$tabs_one" > "$resp/3.out"
+  printf '%s\n' "$panes_one" > "$resp/4.out"
+  printf '%s\n' "$pane_info" > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(RETRY_PLAN=plain PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_retry \"\$1\" fmtest \"\$2\"" "$ROOT" "$state" "$clone" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a plain close plan did not return 0 (status $status): $out"
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "a plain close plan did not warn exactly once: $out"
+  assert_not_contains "$(cat "$log")" $'close' "a plain close plan closed something"
+  [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
+    || fail "a plain close plan kept the record"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2" wF:t1:p1' "$ROOT" "$state" "$clone"
 
   # The recorded parent is gone (a human closed it): forget it silently.
   dir="$TMP_ROOT/retry-gone"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"

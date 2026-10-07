@@ -1022,11 +1022,16 @@ fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id
 # pane-death path. The exact-tab restore below remains the backstop, and any
 # ambiguity falls back to the plain explicit close, which the backstop masks
 # exactly as before this hardening.
+# When FM_BACKEND_HERDR_CLOSE_DEATH_ONLY is non-empty the pane leaves only
+# through the proven pane-death path: a plan that is not death, or a failed
+# death close, refuses (status 1, FM_BACKEND_HERDR_CLOSE_DEATH_REFUSED=1)
+# instead of falling back to the plain explicit close.
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
   local session=$1 pane_id=$2 required_agent_state=${3:-}
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
   local skip_restore=0
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
+  FM_BACKEND_HERDR_CLOSE_DEATH_REFUSED=""
   [ -n "$pane_id" ] || return 0
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe pane close" >&2
@@ -1074,6 +1079,11 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
         ;;
     esac
   fi
+  if [ -n "${FM_BACKEND_HERDR_CLOSE_DEATH_ONLY:-}" ] && [ "$plan" != death ]; then
+    FM_BACKEND_HERDR_CLOSE_DEATH_REFUSED=1
+    [ -z "$plan_move_record" ] || fm_backend_herdr_emptying_move_rollback "$plan_move_record" "$session" "$target_tab" || true
+    return 1
+  fi
   # Herdr has no atomic target-focus-aware mutation, so these immediate
   # checkpoints bound but cannot eliminate the checkpoint-to-mutation race;
   # a durable atomic close remains deferred until Herdr exposes one.
@@ -1084,7 +1094,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
         skip_restore=0
       fi
       close_status=0
-    elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab"; then
+    elif [ -z "${FM_BACKEND_HERDR_CLOSE_DEATH_ONLY:-}" ] && fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab"; then
       if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
         before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
         skip_restore=0
@@ -2994,13 +3004,34 @@ EOF
 # repository retries it (fm_backend_herdr_projection_repo_parent_retry).
 # The optional third argument names the parent in the warnings, "it just
 # created" by default, so the retry can say whose parent was left standing.
-fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id> [<which-parent>]
-  local session=$1 parent=$2 what=${3:-it just created} group source others tabs panes pane presence
+# The pane id it found is left in FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE
+# (empty when the refusal came before the pane listing) so the spawn can
+# record it with a refused removal.
+# The optional fourth argument is the recorded clone realpath and switches on
+# the strict retry mode for a parent an EARLIER spawn left standing, where the
+# captain may since have used it: Herdr must still name the parent as its own
+# group source at that clone, the optional fifth argument (the recorded seeded
+# pane) must still be the one pane, and that pane must hold a provably lone
+# idle shell, otherwise the refusal is lasting (status 2); the pane then leaves
+# only through the pane-death path (FM_BACKEND_HERDR_CLOSE_DEATH_ONLY), never
+# the plain explicit close, and a non-death plan is also lasting.
+fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id> [<which-parent> [<clone-realpath> [<seeded-pane>]]]
+  local session=$1 parent=$2 what=${3:-it just created} strict_clone=${4:-} want_pane=${5:-}
+  local group source others tabs panes pane presence root root_real
+  FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE=""
   [ -n "$parent" ] || return 1
   if ! group=$(fm_backend_herdr_cli "$session" worktree list --workspace "$parent" 2>/dev/null) \
     || ! source=$(printf '%s' "$group" | jq -er '.result.source.source_workspace_id | select(type == "string" and length > 0)' 2>/dev/null); then
     echo "warning: herdr repo grouping could not read the worktree group of the parent $parent $what; leaving it in place" >&2
     return 1
+  fi
+  if [ -n "$strict_clone" ]; then
+    root=$(printf '%s' "$group" | jq -er '.result.source.source_checkout_path | select(type == "string" and length > 0)' 2>/dev/null) || root=
+    root_real=$(cd "$root" 2>/dev/null && pwd -P) || root_real=$root
+    if [ "$source" != "$parent" ] || [ "$root_real" != "$strict_clone" ]; then
+      echo "warning: herdr repo grouping left the parent $parent $what in place because Herdr no longer reports it as the group source of the recorded clone" >&2
+      return 2
+    fi
   fi
   if [ "$source" = "$parent" ]; then
     others=$(printf '%s' "$group" | jq -r --arg parent "$parent" '
@@ -3041,7 +3072,25 @@ fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
     echo "warning: herdr repo grouping left the parent $parent $what in place because it does not hold exactly one seeded pane" >&2
     return 2
   }
-  if ! fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane"; then
+  FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE=$pane
+  if [ -n "$strict_clone" ]; then
+    if [ -n "$want_pane" ] && [ "$pane" != "$want_pane" ]; then
+      echo "warning: herdr repo grouping left the parent $parent $what in place because its pane is not the seeded pane $want_pane" >&2
+      return 2
+    fi
+    if ! fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null; then
+      echo "warning: herdr repo grouping left the parent $parent $what in place because its pane $pane is in use and not a provably idle lone shell" >&2
+      return 2
+    fi
+    if ! FM_BACKEND_HERDR_CLOSE_DEATH_ONLY=1 fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane"; then
+      if [ -n "${FM_BACKEND_HERDR_CLOSE_DEATH_REFUSED:-}" ]; then
+        echo "warning: herdr repo grouping left the parent $parent $what in place because its pane could not be removed through the pane-death path" >&2
+        return 2
+      fi
+      echo "warning: herdr repo grouping could not close the parent $parent $what without risking focus; leaving it in place" >&2
+      return 1
+    fi
+  elif ! fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane"; then
     echo "warning: herdr repo grouping could not close the parent $parent $what without risking focus; leaving it in place" >&2
     return 1
   fi
@@ -3054,7 +3103,8 @@ fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
 
 # Per-home record of the fresh repo parents a spawn created but could not
 # remove, state/.herdr-repo-parent-retry: one tab-separated line per session
-# and clone, <session> <workspace-id> <label> <clone-realpath> <epoch>, written
+# and clone, <session> <workspace-id> <label> <clone-realpath> <epoch>
+# <seeded-pane-id> (the last field may be absent or empty), written
 # and consumed only by the helpers below under the presentation session lock
 # and absent when nothing is pending. It names exactly the parent this home
 # created and journaled, so the next spawn on that repository can retry the
@@ -3064,8 +3114,8 @@ fm_backend_herdr_projection_repo_parent_retry_path() {  # <state>
   printf '%s/.herdr-repo-parent-retry' "$1"
 }
 
-fm_backend_herdr_projection_repo_parent_retry_record() {  # <state> <session> <parent-id> <label> <clone>
-  local state=$1 session=$2 parent=$3 label=$4 clone=$5 path tmp clone_real
+fm_backend_herdr_projection_repo_parent_retry_record() {  # <state> <session> <parent-id> <label> <clone> [<seeded-pane-id>]
+  local state=$1 session=$2 parent=$3 label=$4 clone=$5 pane=${6:-} path tmp clone_real
   [ -n "$session" ] && [ -n "$parent" ] && [ -n "$label" ] && [ -n "$clone" ] || return 1
   path=$(fm_backend_herdr_projection_repo_parent_retry_path "$state")
   clone_real=$(cd "$clone" 2>/dev/null && pwd -P) || clone_real=$clone
@@ -3074,18 +3124,18 @@ fm_backend_herdr_projection_repo_parent_retry_record() {  # <state> <session> <p
     if [ -f "$path" ]; then
       awk -F '\t' -v s="$session" -v p="$parent" -v c="$clone_real" '!($1 == s && ($2 == p || $4 == c))' "$path"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$session" "$parent" "$label" "$clone_real" "$(date +%s)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$session" "$parent" "$label" "$clone_real" "$(date +%s)" "$pane"
   } > "$tmp" && mv -f "$tmp" "$path"
 }
 
-# Prints "<workspace-id>\t<label>" for the parent recorded for <clone> in
-# <session>, or nothing.
+# Prints "<workspace-id>\t<label>[\t<seeded-pane-id>]" for the parent recorded
+# for <clone> in <session>, or nothing.
 fm_backend_herdr_projection_repo_parent_retry_lookup() {  # <state> <session> <clone>
   local state=$1 session=$2 clone=$3 path clone_real
   path=$(fm_backend_herdr_projection_repo_parent_retry_path "$state")
   [ -f "$path" ] || return 0
   clone_real=$(cd "$clone" 2>/dev/null && pwd -P) || clone_real=$clone
-  awk -F '\t' -v s="$session" -v c="$clone_real" '$1 == s && $4 == c { printf "%s\t%s\n", $2, $3; exit }' "$path"
+  awk -F '\t' -v s="$session" -v c="$clone_real" '$1 == s && $4 == c { printf "%s\t%s%s\n", $2, $3, ($6 == "" ? "" : "\t" $6); exit }' "$path"
 }
 
 fm_backend_herdr_projection_repo_parent_retry_forget() {  # <state> <session> <parent-id>
@@ -3112,11 +3162,13 @@ fm_backend_herdr_projection_repo_parent_retry_forget() {  # <state> <session> <p
 # a transient refusal warns once more, keeps the record for the spawn after
 # this one, and returns 1 so the caller keeps this task flat too.
 fm_backend_herdr_projection_repo_parent_retry() {  # <state> <session> <clone>
-  local state=$1 session=$2 clone=$3 entry parent label list count live_label reason status
+  local state=$1 session=$2 clone=$3 entry parent label seeded_pane list count live_label reason status clone_real
   entry=$(fm_backend_herdr_projection_repo_parent_retry_lookup "$state" "$session" "$clone") || entry=
   [ -n "$entry" ] || return 0
-  parent=${entry%%$'\t'*}
-  label=${entry#*$'\t'}
+  IFS=$'\t' read -r parent label seeded_pane <<EOF
+$entry
+EOF
+  clone_real=$(cd "$clone" 2>/dev/null && pwd -P) || clone_real=$clone
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || list=
   count=$(printf '%s' "$list" | jq -r --arg id "$parent" '
     select((.result.workspaces | type) == "array")
@@ -3139,19 +3191,19 @@ fm_backend_herdr_projection_repo_parent_retry() {  # <state> <session> <clone>
     fm_backend_herdr_projection_repo_parent_retry_forget "$state" "$session" "$parent" || true
     return 0
   fi
-  if reason=$(fm_backend_herdr_projection_repo_parent_close_fresh "$session" "$parent" "an earlier spawn left standing" 2>&1 >/dev/null); then
+  if reason=$(fm_backend_herdr_projection_repo_parent_close_fresh "$session" "$parent" "an earlier spawn left standing" "$clone_real" "$seeded_pane" 2>&1 >/dev/null); then
     fm_backend_herdr_projection_repo_parent_retry_forget "$state" "$session" "$parent" || true
     echo "warning: herdr repo grouping removed the repo parent $parent an earlier spawn left standing on this repository; grouping continues normally" >&2
     return 0
   else
     status=$?
   fi
+  reason=$(printf '%s' "${reason#warning: herdr repo grouping }" | tr '\n' ' ')
   if [ "$status" -eq 2 ]; then
     fm_backend_herdr_projection_repo_parent_retry_forget "$state" "$session" "$parent" || true
-    echo "warning: herdr repo grouping can no longer remove the repo parent $parent an earlier spawn left standing because it now holds other workspaces, tabs, or panes; leaving it standing and adopting it" >&2
+    echo "warning: herdr repo grouping ${reason}; leaving it standing and adopting it" >&2
     return 0
   fi
-  reason=$(printf '%s' "${reason#warning: herdr repo grouping }" | tr '\n' ' ')
   [ -n "$reason" ] || reason="could not remove the parent $parent an earlier spawn left standing"
   echo "warning: herdr repo grouping ${reason}; this task stays flat and the next spawn on this repository retries removing it" >&2
   return 1

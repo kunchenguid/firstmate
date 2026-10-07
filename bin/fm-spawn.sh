@@ -4018,7 +4018,8 @@ else
               if fm_backend_herdr_projection_repo_parent_close_fresh "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED"; then
                 echo "warning: herdr repo grouping closed the repo parent $HERDR_REPO_PARENT_CREATED it created for this task because the task could not be placed ahead of it; leaving this task's space flat" >&2
               elif fm_backend_herdr_projection_repo_parent_retry_record \
-                "$STATE" "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED" "$HERDR_REPO_PARENT_LABEL" "$PROJ_ABS"; then
+                "$STATE" "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED" "$HERDR_REPO_PARENT_LABEL" "$PROJ_ABS" \
+                "${FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE:-}"; then
                 echo "warning: herdr repo grouping recorded the repo parent $HERDR_REPO_PARENT_CREATED left standing so the next spawn on this repository retries removing it" >&2
               else
                 echo "warning: herdr repo grouping could not record the repo parent $HERDR_REPO_PARENT_CREATED left standing; the next spawn on this repository will not retry removing it" >&2
