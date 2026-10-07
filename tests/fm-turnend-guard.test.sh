@@ -1021,21 +1021,37 @@ EOF
   out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
+// OpenCode 2 plugin contract. The v1 (worktree, directory) pair is now
+// ctx.location: `directory` is this instance's own directory and is the worktree
+// when the session runs inside one, while `project.canonical` is the canonical
+// project root. The v1 case this test pins - the worktree wins over a directory
+// that is elsewhere - is therefore instance directory = worktree with the
+// canonical root pointing somewhere else.
+const worktree = process.env.WORKTREE;
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const definition = mod.default;
+if (!definition || typeof definition.setup !== "function") {
+  throw new Error("plugin module does not default-export an OpenCode 2 definition");
+}
 let promptBody = "";
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
-    },
+const events = [
+  {
+    type: "session.step.ended",
+    data: { sessionID: "session-test", finish: "stop" },
+    location: { directory: worktree },
   },
-};
-const hooks = await mod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.DIRECTORY,
-  worktree: process.env.WORKTREE,
+];
+await definition.setup({
+  location: { directory: worktree, project: { id: "t", directory: worktree, canonical: process.env.DIRECTORY } },
+  event: {
+    subscribe: () => ({ async *[Symbol.asyncIterator]() { for (const e of events) yield e; } }),
+  },
+  session: { prompt: async (input) => { promptBody = input.text; } },
 });
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+// The subscription is asynchronous; wait for the guard run and its delivery.
+for (let tick = 0; tick < 300 && !promptBody; tick += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
 if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
   console.error(`untyped operational prompt: ${promptBody}`);
   process.exit(1);
