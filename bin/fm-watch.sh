@@ -1634,8 +1634,9 @@ wedge_defer_parked_watch() {  # <window> <since-file> <triage-label> <idle-age>
 # can be absorbed this way: the plain non-terminal path, and the
 # stale_is_terminal-overridden path (a captain-relevant status-log line that an
 # active run/busy pane outranked).
-# The wait-evidence consult (wedge_wait_evidence), the worktree write probe, and
-# the dead-record probe (wedge_dead_record) run ONLY here, inside the
+# The wait-evidence consult (wedge_wait_evidence), the worktree write probe, the
+# dead-record probe (wedge_dead_record), and the settled-board-watch list read
+# (settled_board_watch_parked) run ONLY here, inside the
 # at-threshold branch that is about to escalate: at most one each per window per
 # STALE_ESCALATE_SECS, never on an ordinary poll. The crew-state read
 # wedge_wait_evidence may take under config/wedge-defer-parked-gate keeps that
@@ -1643,9 +1644,10 @@ wedge_defer_parked_watch() {  # <window> <since-file> <triage-label> <idle-age>
 # the idle timer like every other deferral below; an unconfigured home never
 # reaches that read at all. The wait consult runs first, because a pane that can
 # account for its own quiet has nothing to prove through its worktree. The dead-record probe
-# runs last of the three, so the two cheaper deferrals keep the panes they
-# already own on their existing bounded cadences and only a pane that would
-# otherwise alarm pays for a backend read.
+# runs ahead of the settled-board-watch read, so the cheaper deferrals keep the
+# panes they already own on their existing bounded cadences, a gone agent still
+# gets its one-shot report, and only a pane that would otherwise alarm pays for
+# a backend or registry read.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1847,8 +1849,8 @@ clear_pause_state() {  # <window-key>
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
-# timer and escalation count, and both deferral chains the timer can take - the
-# write-deferral chain and the wait-deferral throttle. Split out so a caller
+# timer and escalation count, and the deferral chains the timer can take - the
+# write-deferral chain, the parked-watch chain, and the wait-deferral throttle. Split out so a caller
 # that must keep a window's DECLARATION-scoped pause state - its .paused-* flag,
 # recheck, and re-surface throttle - can still reset the per-hash half alone.
 clear_stale_hash_tracking() {  # <window-key>
@@ -3329,6 +3331,10 @@ EOF
           #   - paused: a declared wait pause_state_class admits (its header owns which
           #     liveness evidence each kind of crew must supply), so absorb on the long
           #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - parked-watch: a task parked on a settled board review whose every
+          #     owned process-event source is live and round-free
+          #     (settled_board_watch_parked), so absorb on that same long cadence
+          #     instead of wedge-escalating (handle_parked_watch_stale);
           #   - none: no running pipeline, no exact busy verdict, no admitted declared wait.
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
