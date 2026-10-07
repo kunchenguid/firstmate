@@ -285,7 +285,7 @@ test_opencode_session_identity_is_the_pane_under_a_shared_server() {
 900|opencode|/Users/u/.opencode/bin/opencode serve --service|1|Tue Oct  7 14:22:10 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p0
 710|opencode|/Users/u/.opencode/bin/opencode mini --prompt HERDR_PANE_ID=w1:p9|1|Tue Oct  7 14:23:00 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:other
 510|opencode|/Users/u/.opencode/bin/opencode mini --model opencode/x --prompt hi|1|Tue Oct  7 14:23:31 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p7
-610|opencode|/Users/u/.opencode/bin/opencode mini --model opencode/x --prompt hi|1|Tue Oct  7 14:24:02 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p9
+610|opencode|/Users/u/.opencode/bin/opencode mini --model opencode/x --prompt HERDR_PANE_ID=w1:p9|1|Tue Oct  7 14:24:02 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p9
 session-a|bash|bash /repo/bin/fm-tool.sh|900|Tue Oct  7 14:23:32 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p7
 session-b|bash|bash /repo/bin/fm-tool.sh|900|Tue Oct  7 14:24:03 2026|HERDR_ENV=1 HERDR_PANE_ID=w1:p9
 ROW
