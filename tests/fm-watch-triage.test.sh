@@ -6932,86 +6932,8 @@ test_closed_exit_picker_drops_saved_dialog_name() {
   pass "a closed picker drops the saved dialog name, and the stale stays ordinary"
 }
 
-# The three reasons wedge_timer_check sends instead of a wedge escalation. Each
-# one replaces the escalation line for as long as the pane stays that way, so a
-# pane parked on the picker would otherwise never be named at all.
-show_exit_picker_on_wedge_fixture() {  # <state> <capture> <window-key>
-  write_exit_picker "$2"
-  printf '%s' "$(hash_text "$(cat "$2")")" > "$1/.hash-$3"
-  printf '%s' "$(hash_text "$(cat "$2")")" > "$1/.stale-$3"
-}
-
-test_exit_picker_wait_deferral_names_the_dialog() {
-  local dir state fakebin out capture window key
-  local working='state: working · source: run-step · ci running'
-  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
-  dir=$(wedge_threshold_fixture exit-picker-wait-deferral 'paused: waiting on the upstream release cut' 2000)
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  show_exit_picker_on_wedge_fixture "$state" "$capture" "$key"
-  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
-    || fail "a declared wait on the picker was never rechecked: $(cat "$out")"
-  grep -F 'declared wait' "$out" >/dev/null || fail "the picker recheck was not the wait deferral: $(cat "$out")"
-  grep -F 'confirm the wait still holds, blocked-on-prompt: Claude background-task exit picker)' "$out" >/dev/null \
-    || fail "the wait deferral did not end with the dialog name: $(cat "$out")"
-  grep -F 'possible wedge' "$out" >/dev/null && fail "the wait deferral on the picker was labeled a wedge: $(cat "$out")"
-  [ ! -e "$state/.wedge-escalations-$key" ] || fail "the wait deferral on the picker counted an escalation"
-  pass "a wait deferral for a pane on the exit picker ends with the dialog name"
-}
-
-test_exit_picker_write_deferral_names_the_dialog() {
-  local dir state fakebin out capture_file window key pid wt back
-  dir=$(make_case exit-picker-write-deferral); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-picker-writing"; wt="$dir/wt"
-  mkdir -p "$wt/src"
-  write_exit_picker "$capture_file"
-  key=$(prime_picker_window "$state" picker "$window" ship "$capture_file" 'working: implementing')
-  printf 'worktree=%s\n' "$wt" >> "$state/picker.meta"
-  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.stale-$key"
-  back=$(( $(date +%s) - 500 ))
-  echo "$back" > "$state/.stale-since-$key"
-  set_mtime "$back" "$state/.stale-since-$key"
-  : > "$state/.writing-since-$key"
-  set_mtime "$back" "$state/.writing-since-$key"
-  printf 'churn\n' > "$wt/src/main.c"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
-    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "a write deferral on the picker never re-surfaced: $(cat "$out")"
-  grep -F 'writing its worktree' "$out" >/dev/null || fail "the picker recheck was not the write deferral: $(cat "$out")"
-  grep -F 'confirm the writes are real progress, blocked-on-prompt: Claude background-task exit picker)' "$out" >/dev/null \
-    || fail "the write deferral did not end with the dialog name: $(cat "$out")"
-  grep -F 'possible wedge' "$out" >/dev/null && fail "the write deferral on the picker was labeled a wedge: $(cat "$out")"
-  [ ! -e "$state/.wedge-escalations-$key" ] || fail "the write deferral on the picker counted an escalation"
-  pass "a write deferral for a pane on the exit picker ends with the dialog name"
-}
-
-test_exit_picker_dead_record_names_the_dialog() {
-  local dir state fakebin out capture window key
-  local failed='state: failed · source: run-step · run failed'
-  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
-  dir=$(wedge_threshold_fixture exit-picker-dead-record 'working: still compiling' 0)
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  show_exit_picker_on_wedge_fixture "$state" "$capture" "$key"
-  gone_endpoint_env dead; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
-    || fail "a dead endpoint on the picker was never reported: $(cat "$out")"
-  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
-  grep -F 'agent dead' "$out" >/dev/null || fail "the picker report was not the dead-record report: $(cat "$out")"
-  grep -F 'check for unlanded work before any cleanup, blocked-on-prompt: Claude background-task exit picker)' "$out" >/dev/null \
-    || fail "the dead-record report did not end with the dialog name: $(cat "$out")"
-  grep -F 'possible wedge' "$out" >/dev/null && fail "the dead record on the picker was labeled a wedge: $(cat "$out")"
-  [ -s "$state/.dead-reported-$key" ] || fail "the dead-record report on the picker left no once-record"
-  pass "a dead-record report for a pane on the exit picker ends with the dialog name"
-}
-
 test_exit_picker_stale_names_the_dialog
 test_exit_picker_wedge_keeps_climbing
 test_quoted_exit_picker_stays_ordinary_stale
 test_secondmate_exit_picker_stays_quiet
 test_closed_exit_picker_drops_saved_dialog_name
-test_exit_picker_wait_deferral_names_the_dialog
-test_exit_picker_write_deferral_names_the_dialog
-test_exit_picker_dead_record_names_the_dialog

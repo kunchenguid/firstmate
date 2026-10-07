@@ -19,7 +19,8 @@ The throttle is scoped to both the current captain-call lifecycle and the status
 A secondmate reaches the stale path only for a wait declared in its status line, so a hold recorded only in the backlog while its last line is `working:` or `done:` is outside this guard.
 Reaching that case would require consulting the backlog for windows the secondmate gate deliberately skips, putting backlog reads on the ordinary poll hot path this design preserves.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
-A stale wake for a pane that shows a recognised dialog also ends its reason with `blocked-on-prompt:` and the dialog's name, on the unchanged triage and schedule; `bin/fm-watch.sh`'s header owns the wording.
+A plain stale wake, or the final wedge escalation, for a pane that shows a recognised dialog also ends its reason with `blocked-on-prompt:` and the dialog's name, on the unchanged triage and schedule; `bin/fm-watch.sh`'s header owns the wording.
+The deferral, dead-record, and declared-wait recheck reasons described below do not carry the name.
 In the same branch that is about to escalate, the pane's own account of its quiet is consulted first: the worker's declared `paused:` or verified `captain-held` status line.
 That declaration defers the escalation to the `FM_PAUSE_RESURFACE_SECS` recheck cadence instead, because a lane waiting on something it named is silent for a reason the escalation would misreport, and the ladder would otherwise climb for as long as the wait lasts.
 A declared clearing time (`paused: ... until <UTC ISO 8601>`) that has already passed stops counting as that account, so a lane whose own wait is over, and a lane that never declared one, both keep the unchanged escalation schedule, reason and `demand-deep-inspection` wording.
