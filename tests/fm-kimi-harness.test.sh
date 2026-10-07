@@ -75,6 +75,26 @@ fake_screen() {
     trust-wrapped)
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate ·        │\n│ Enter select · Esc   │\n│ exit                 │\n│ %s │\n│ ❯ Trust this folder  │\n│   Don'"'"'t trust         │\n╰──────────────────────╯\n' "$FM_FAKE_PANE_PATH"
       ;;
+    trust-nomcp)
+      # Recorded from a Kimi Code 2.1.1 folder prompt with no project servers.
+      # The explanatory sentence mentions project MCP targets. The listing
+      # header is absent.
+      printf '  Trust this folder?\n  ↑↓ navigate · Enter select · Esc exit\n\n  %s\n\n  Project-level MCP servers are disabled until you explicitly choose Trust.\n  Trust starts the listed project MCP targets and remembers this folder.\n\n   ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n\n     Don'"'"'t trust\n     Exit Kimi Code. Asked again next launch.\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    trust-targets)
+      # Recorded from a Kimi Code 2.1.1 prompt whose whole target list fit.
+      printf '  Trust this folder?\n  ↑↓ navigate · Enter select · Esc exit\n\n  %s\n\n  Project-level MCP servers are disabled until you explicitly choose Trust. Trust starts the\n  listed project MCP targets and remembers this folder.\n  Project MCP targets:\n    repro-marker (stdio): command=%s/repro-mcp-marker.sh\n    args=["--from-project-mcp"]\n    repro-remote (http): url=http://127.0.0.1:9/mcp\n\n   ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n\n     Don'"'"'t trust\n     Exit Kimi Code. Asked again next launch.\n' "$FM_FAKE_PANE_PATH" "$FM_FAKE_PANE_PATH"
+      ;;
+    trust-targets-clip)
+      # Recorded from a Kimi Code 0.43.1 80x16 pane: the title and the
+      # navigation hint are above the viewport, and the target list remains.
+      printf '  Project-level MCP servers are disabled until you explicitly choose Trust.\n  Trust starts the listed project MCP targets and remembers this folder.\n  Project MCP targets:\n    repro-marker (stdio):\n    command=%s/repro-mcp-marker.sh\n    args=["--from-project-mcp"]\n    repro-remote (http): url=http://127.0.0.1:9/mcp\n\n   ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n\n     Don'"'"'t trust\n     Exit Kimi Code. Asked again next launch.\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    trust-clip-bottom)
+      # Recorded from a Kimi Code 2.1.1 pane whose target header is above the
+      # viewport. Trust text remains. The complete dialog does not.
+      printf '    repro-0 (stdio):\n    command=%s/repro-mcp-marker.sh args=["--n0"]\n\n   ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n\n     Don'"'"'t trust\n     Exit Kimi Code. Asked again next launch.\n' "$FM_FAKE_PANE_PATH"
+      ;;
     pointer-typed)
       printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
       ;;
@@ -126,7 +146,7 @@ case "${1:-}" in
         *)
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
           case "$state" in
-            trust|trust-wrapped|trust-partial|trust-decoy|booting|banner-only|banner-first|blank-frame) ;;
+            trust|trust-wrapped|trust-partial|trust-decoy|trust-nomcp|trust-targets|trust-targets-clip|trust-clip-bottom|booting|banner-only|banner-first|blank-frame) ;;
             *) printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE" ;;
           esac
           ;;
@@ -145,17 +165,25 @@ case "${1:-}" in
                 late) printf 'booting\n' > "$FM_FAKE_KIMI_STATE" ;;
                 blink) printf 'banner-first\n' > "$FM_FAKE_KIMI_STATE" ;;
                 wrapped) printf 'trust-wrapped\n' > "$FM_FAKE_KIMI_STATE" ;;
+                nomcp) printf 'trust-nomcp\n' > "$FM_FAKE_KIMI_STATE" ;;
+                targets) printf 'trust-targets\n' > "$FM_FAKE_KIMI_STATE" ;;
+                targets-clip) printf 'trust-targets-clip\n' > "$FM_FAKE_KIMI_STATE" ;;
+                clip-bottom) printf 'trust-clip-bottom\n' > "$FM_FAKE_KIMI_STATE" ;;
                 *) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
               esac
             fi
             ;;
-          trust|trust-wrapped)
+          trust|trust-wrapped|trust-nomcp|trust-targets|trust-targets-clip|trust-clip-bottom)
             printf 'enter\n' >> "$FM_FAKE_KIMI_TRUST_ENTER_LOG"
             trust_enters=$(wc -l < "$FM_FAKE_KIMI_TRUST_ENTER_LOG" | tr -d ' ')
-            case "${FM_FAKE_KIMI_TRUST_CLEARS:-yes}" in
-              yes) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
-              after-second)
-                [ "$trust_enters" -lt 2 ] || printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+            case "$state" in
+              trust|trust-wrapped|trust-nomcp)
+                case "${FM_FAKE_KIMI_TRUST_CLEARS:-yes}" in
+                  yes) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
+                  after-second)
+                    [ "$trust_enters" -lt 2 ] || printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+                    ;;
+                esac
                 ;;
             esac
             ;;
@@ -285,6 +313,31 @@ read_spawn_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
 $1
 EOF
+}
+
+# Publish a project MCP declaration on the clone's default branch so the
+# spawn's base refresh keeps it. The marker only appends a line; these tests
+# assert that line never appears.
+publish_project_mcp() { # <proj> <json>
+  local proj=$1 json=$2
+  mkdir -p "$proj/.kimi-code"
+  printf '%s\n' "$json" > "$proj/.kimi-code/mcp.json"
+  if [ ! -f "$proj/repro-mcp-marker.sh" ]; then
+    cat > "$proj/repro-mcp-marker.sh" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$(CDPATH= cd -- "$(dirname "$0")" && pwd)/marker.log"
+SH
+    chmod +x "$proj/repro-mcp-marker.sh"
+  fi
+  git -C "$proj" add -- .kimi-code/mcp.json repro-mcp-marker.sh
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'declare project mcp' \
+    || fail "could not commit the project MCP fixture"
+  git -C "$proj" push --quiet origin HEAD:main \
+    || fail "could not publish the project MCP fixture"
+}
+
+assert_project_command_stayed_idle() {
+  [ ! -e "$WT_DIR/marker.log" ] || fail "the project command started"
 }
 
 test_kimi_launch_then_send_is_verified() {
@@ -1127,6 +1180,164 @@ test_kimi_bordered_prompt_needs_no_override() {
   pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
 }
 
+test_kimi_declared_project_mcp_refuses_before_launch() {
+  local id rec out rc json marker
+  id=kimi-mcp-declared-a1
+  rec=$(make_spawn_case mcp-declared "$id")
+  read_spawn_record "$rec"
+  marker=$WT_DIR/repro-mcp-marker.sh
+  json=$(jq -n --arg cmd "$marker" \
+    '{mcpServers: {"repro-marker": {command: $cmd, args: ["--from-project-mcp"]}, "repro-remote": {url: "http://127.0.0.1:9/mcp"}}}')
+  publish_project_mcp "$PROJ_DIR" "$json"
+  # remembered is the pane that would skip the folder prompt and open ready.
+  out=$(FM_FAKE_KIMI_TRUST=remembered run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "declared project MCP servers should refuse the launch"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi started despite a project MCP declaration"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent for a declared project MCP directory"
+  assert_not_contains "$out" "Read the brief" "the brief pointer was sent for declared project MCP servers"
+  assert_contains "$out" "declares project MCP servers" "the refusal did not name the declaration"
+  assert_contains "$out" "Remove the project servers" "the refusal did not say what the operator can do"
+  assert_project_command_stayed_idle
+  pass "fm-spawn: a directory that declares project MCP servers is refused before Kimi starts, even when the pane would otherwise open ready"
+}
+
+test_kimi_disabled_project_mcp_still_refuses_before_launch() {
+  local id rec out rc json marker
+  id=kimi-mcp-disabled-a2
+  rec=$(make_spawn_case mcp-disabled "$id")
+  read_spawn_record "$rec"
+  marker=$WT_DIR/repro-mcp-marker.sh
+  json=$(jq -n --arg cmd "$marker" \
+    '{mcpServers: {"repro-marker": {command: $cmd, args: ["--disabled-still-listed"], enabled: false}}}')
+  publish_project_mcp "$PROJ_DIR" "$json"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a disabled project MCP server should still refuse the launch"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi started for a disabled project MCP server"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent for a disabled project MCP server"
+  assert_contains "$out" "declares project MCP servers" "a disabled server was not treated as declared"
+  assert_project_command_stayed_idle
+  pass "fm-spawn: a project MCP server with enabled false still refuses the Kimi launch"
+}
+
+test_kimi_unreadable_project_mcp_refuses_before_launch() {
+  local id rec out rc
+  id=kimi-mcp-badjson-a3
+  rec=$(make_spawn_case mcp-badjson "$id")
+  read_spawn_record "$rec"
+  publish_project_mcp "$PROJ_DIR" 'not-json'
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreadable project MCP declaration should refuse the launch"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi started when the project MCP declaration could not be read"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent when the project MCP declaration could not be read"
+  assert_contains "$out" "could not be read" "an unreadable declaration did not say why the launch stopped"
+  assert_project_command_stayed_idle
+  pass "fm-spawn: an unreadable project MCP declaration refuses the Kimi launch"
+}
+
+test_kimi_directory_in_place_of_project_mcp_refuses_before_launch() {
+  local id rec out rc excl
+  id=kimi-mcp-dir-a4
+  rec=$(make_spawn_case mcp-dir "$id")
+  read_spawn_record "$rec"
+  excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  mkdir -p "$(dirname "$excl")"
+  printf '%s\n' '.kimi-code/' >> "$excl"
+  mkdir -p "$WT_DIR/.kimi-code/mcp.json"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a directory where the project MCP declaration should be should refuse the launch"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi started when the project MCP declaration was not a file"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent when the project MCP declaration was not a file"
+  assert_contains "$out" "could not be read" "a non-file declaration did not say why the launch stopped"
+  pass "fm-spawn: a non-file project MCP declaration refuses the Kimi launch"
+}
+
+test_kimi_no_project_mcp_still_answers_the_recorded_folder_prompt() {
+  local id rec out rc launch
+  id=kimi-mcp-none-a5
+  rec=$(make_spawn_case mcp-none "$id")
+  read_spawn_record "$rec"
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=nomcp run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "a directory with no project MCP servers should get past the folder prompt"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "--auto" "the no-MCP launch did not stay on kimi --auto"
+  assert_not_contains "$launch" " -p" "the no-MCP launch switched to kimi -p"
+  assert_not_contains "$launch" "--print" "the no-MCP launch switched to kimi --print"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "the recorded folder prompt with no target list was not answered once"
+  assert_contains "$out" "spawned $id harness=kimi" "the no-MCP launch did not reach delivery"
+  pass "fm-spawn: no project MCP servers still answers the recorded folder prompt, and the launch stays kimi --auto"
+}
+
+test_kimi_empty_project_mcp_map_still_answers_the_folder_prompt() {
+  local id rec out rc
+  id=kimi-mcp-empty-a6
+  rec=$(make_spawn_case mcp-empty "$id")
+  read_spawn_record "$rec"
+  publish_project_mcp "$PROJ_DIR" '{"mcpServers":{}}'
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=nomcp run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "an empty project MCP map should get past the folder prompt"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "an empty project MCP map did not answer the folder prompt once"
+  assert_project_command_stayed_idle
+  pass "fm-spawn: an empty project MCP map still answers the folder prompt"
+}
+
+test_kimi_listed_targets_dialog_is_not_answered_when_the_declaration_is_absent() {
+  local id rec out rc
+  id=kimi-mcp-listed-a7
+  rec=$(make_spawn_case mcp-listed "$id")
+  read_spawn_record "$rec"
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=targets run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a prompt that lists project MCP targets should not pass readiness"
+  [ -s "$CASE_DIR/launch.log" ] || fail "the listed-targets backstop should run after launch when no declaration was read"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent to a prompt that lists project MCP targets"
+  assert_not_contains "$out" "Read the brief" "the brief pointer was sent to a listed-targets prompt"
+  assert_contains "$out" "lists project MCP targets" "a listed-targets prompt did not name why it was not answered"
+  pass "fm-spawn: a folder prompt that lists project MCP targets receives no key even when the declaration read found none"
+}
+
+test_kimi_clipped_listed_targets_dialog_receives_no_key() {
+  local id rec out rc
+  id=kimi-mcp-clip-a8
+  rec=$(make_spawn_case mcp-clip "$id")
+  read_spawn_record "$rec"
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=targets-clip run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a clipped prompt that still lists project MCP targets should not pass readiness"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent to a clipped prompt that lists project MCP targets"
+  assert_not_contains "$out" "Read the brief" "the brief pointer was sent to a clipped listed-targets prompt"
+  assert_contains "$out" "lists project MCP targets" "a clipped listed-targets prompt did not name why it stopped"
+  pass "fm-spawn: a clipped prompt that lists project MCP targets receives no key"
+}
+
+test_kimi_clipped_dialog_without_the_target_header_reports_not_ready() {
+  local id rec out rc
+  id=kimi-mcp-clipbottom-a9
+  rec=$(make_spawn_case mcp-clipbottom "$id")
+  read_spawn_record "$rec"
+  out=$(FM_KIMI_READY_POLLS=2 FM_FAKE_KIMI_TRUST=clip-bottom run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a clipped folder prompt should not pass readiness"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent to a clipped folder prompt"
+  assert_not_contains "$out" "Read the brief" "the brief pointer was sent to a clipped folder prompt"
+  assert_contains "$out" "without the complete dialog" "a clipped folder prompt did not report that it was not ready"
+  assert_contains "$out" "No key was sent." "a clipped folder prompt did not say that no key was sent"
+  pass "fm-spawn: a clipped folder prompt receives no key and reports that it is not ready"
+}
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
@@ -1157,3 +1368,12 @@ test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override
+test_kimi_declared_project_mcp_refuses_before_launch
+test_kimi_disabled_project_mcp_still_refuses_before_launch
+test_kimi_unreadable_project_mcp_refuses_before_launch
+test_kimi_directory_in_place_of_project_mcp_refuses_before_launch
+test_kimi_no_project_mcp_still_answers_the_recorded_folder_prompt
+test_kimi_empty_project_mcp_map_still_answers_the_folder_prompt
+test_kimi_listed_targets_dialog_is_not_answered_when_the_declaration_is_absent
+test_kimi_clipped_listed_targets_dialog_receives_no_key
+test_kimi_clipped_dialog_without_the_target_header_reports_not_ready
