@@ -5554,7 +5554,13 @@ test_settled_board_watch_parked_absorbed_not_escalated() {
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the parked board watch enqueued a wake during absorb"; }
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
     || { reap "$pid"; fail "stale suppressor not advanced on the parked-watch absorb"; }
-  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "the parked-watch absorb left a wedge timer armed"; }
+  # No assertion on .stale-since-<key> here: the first-sight absorb clears it,
+  # but the NEXT poll of the still-quiet pane routes through wedge_timer_check,
+  # whose self-heal repair deterministically re-arms it - by design, because the
+  # at-threshold branch is exactly where the parked-watch deferral re-reads the
+  # evidence. Its absence is a one-poll transient this test can only observe by
+  # winning a race; the never-escalates contract it stood for is asserted below
+  # (no wake, no queue) and across the whole of phase B.
   [ -e "$state/.parked-watch-since-$key" ] || { reap "$pid"; fail "the parked-watch chain was not recorded"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
