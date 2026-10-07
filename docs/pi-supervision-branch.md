@@ -599,6 +599,7 @@ It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, 
 An archived, incomplete, invalid, or quiet record restores the attended refusal byte for byte.
 
 `bin/fm-branch-prompt.sh` owns the branch's ready-work check and "Postures" execution rules, including the rule that away dispatch reaches only work the captain's words name or a standing grant covers, while every other ready unit waits for MAIN with its reason recorded.
+The branch reads candidates through the home-aware backlog commands, persists and reads back scope stops before reporting, and counts a spawn only after inspecting a worker processing its brief. An unconfirmed startup stays queued with its endpoint preserved and its stop recorded. The opt-in development evaluation `FM_READY_QUEUE_AWAY_LIVE=1 bash tests/development/ready-queue-away.sh` exercises the real supervision engine's recorded scope stop and retry condition; it requires existing environment-based Claude authentication and runs outside deterministic CI.
 
 Each relocated script keeps its own gate, enforcing exactly what a script can check without reading words:
 
