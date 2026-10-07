@@ -267,9 +267,43 @@ test_branch_outcomes_preserve_older_ready_work_handoff() {
   pass "drain: two pending outcomes on one task preserve the older ready-work handoff until acknowledgement"
 }
 
-# Repeated captain outcomes retain each summary. The byte cap shows only the
-# oldest contiguous run its acknowledgement covers; later rows wait for the
-# next drain even when their task already has a presented row.
+test_branch_outcomes_preserve_long_ready_work_handoff() {
+  local home drained pad summary size target
+  for size in 700 4500; do
+    home="$TMP_ROOT/drain-long-handoff-$size"
+    mkdir -p "$home/state" "$home/config"
+    : > "$home/config/supervision-host"
+    pad=$(awk -v size="$size" 'BEGIN { for (i = 0; i < size; i++) printf "x" }')
+    summary="ready-work handoff: dispatch unit-first; $pad; dispatch unit-last; its dependency landed"
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task source --verdict captain --summary "$summary" >/dev/null \
+      || fail "fixture: long handoff"
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task source --verdict captain --summary 'source task finished; no new handoff' >/dev/null \
+      || fail "fixture: later outcome"
+    if FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 >/dev/null 2>&1; then
+      fail "an unpresented long handoff was acknowledged"
+    fi
+    drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+    assert_contains "$drained" "source: $summary" "the long handoff lost ready units"
+    target=2
+    if [ "$size" -gt 4000 ]; then
+      target=1
+      assert_not_contains "$drained" 'source: source task finished' "a row after an oversized outcome exceeded the batch budget"
+    fi
+    assert_contains "$drained" "mark-processed --through $target;" "the acknowledgement did not match the complete presented run"
+    drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+    assert_contains "$drained" "source: $summary" "the unprocessed long handoff did not repeat in full"
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through "$target" >/dev/null \
+      || fail "the fully presented long handoff could not be acknowledged"
+    drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+    assert_not_contains "$drained" 'dispatch unit-last' "the acknowledged long handoff repeated"
+    if [ "$target" -eq 1 ]; then
+      assert_contains "$drained" 'source: source task finished' "the held-back outcome did not follow the oversized handoff"
+      assert_contains "$drained" 'mark-processed --through 2;' "the held-back outcome lacked acknowledgement"
+    fi
+  done
+  pass "drain: long ready-work handoffs stay complete and oversized outcomes do not stall later rows"
+}
+
 test_branch_outcomes_preserve_repeated_captain_outcomes() {
   local home drained pad n task
   home="$TMP_ROOT/drain-collapse"
@@ -364,8 +398,6 @@ test_branch_outcomes_present_a_long_away_window_once() {
 }
 
 
-# The section's budgets count bytes: a multibyte summary is cut by whole
-# characters so each item and the routine list stay inside their byte caps.
 test_branch_outcomes_budgets_count_bytes() {
   local home drained wide n routine_block locale
   wide=$(awk 'BEGIN { for (i = 0; i < 300; i++) printf "\342\234\223" }')
@@ -380,13 +412,16 @@ test_branch_outcomes_budgets_count_bytes() {
     FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task wide-cap --verdict captain --summary "$wide" >/dev/null \
       || fail "fixture: could not record the captain outcome"
     drained=$(LC_ALL=$locale FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-    assert_contains "$drained" "wide-cap: " "the captain outcome must be presented (locale '$locale')"
-    printf '%s\n' "$drained" | LC_ALL=C awk '/^\[seq [0-9]+[^]]*\] wide-/ && length($0) > 599 { bad = 1 } END { exit bad }' \
+    assert_contains "$drained" "wide-cap: $wide" "the captain outcome must be presented in full (locale '$locale')"
+    printf '%s\n' "$drained" | LC_ALL=C awk '/^\[seq [0-9]+\] wide-/ && length($0) > 599 { bad = 1 } END { exit bad }' \
       || fail "an item exceeded its 599-byte cap (locale '$locale'): $drained"
-    printf '%s\n' "$drained" | grep '^\[seq [0-9]*[^]]*\] wide-' | grep -qv ' \[truncated\]$' \
+    printf '%s\n' "$drained" | grep '^\[seq [0-9]*\] wide-' | grep -qv ' \[truncated; read the full outcome with bin/fm-branch-outcome.sh lookup --seqs [0-9]*\]$' \
       && fail "an over-long multibyte item was not cut with the truncation marker (locale '$locale'): $drained"
     printf '%s\n' "$drained" | grep '^\[seq [0-9]*[^]]*\] wide-' | perl -ne 'utf8::decode($_) or exit 1' \
       || fail "an item was cut inside a character (locale '$locale')"
+    assert_contains "$drained" 'lookup --seqs 6]' "the truncated routine outcome must identify its retrieval command"
+    [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 6 | jq -r .summary)" = "$wide" ] \
+      || fail "the truncated routine outcome's retrieval did not return the full summary"
     routine_block=$(printf '%s\n' "$drained" | sed -n '/^BRANCH OUTCOMES, ROUTINE/,$p' | grep '^\[seq [0-9]*\] wide-[0-9]')
     [ "$(printf '%s\n' "$routine_block" | LC_ALL=C wc -c | tr -d ' ')" -le 2000 ] \
       || fail "the routine list exceeded its 2000-byte budget (locale '$locale'): $routine_block"
@@ -620,6 +655,7 @@ fm_test_run \
   test_branch_outcomes_only_on_a_host_home_off_pi \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_preserve_older_ready_work_handoff \
+  test_branch_outcomes_preserve_long_ready_work_handoff \
   test_branch_outcomes_preserve_repeated_captain_outcomes \
   test_branch_outcomes_present_a_long_away_window_once \
   test_branch_outcomes_budgets_count_bytes \
