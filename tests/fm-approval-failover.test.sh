@@ -1,49 +1,17 @@
 #!/usr/bin/env bash
-# Behavior tests for the managed-policy classifier and durable failover command.
+# Behavior tests for the firstmate-invoked persistent fallback command.
 set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-approval-failover)
-CMD="$ROOT/bin/fm-approval-failover.sh"
-CODEX_SCREEN=$'Would you like to run the following command?\n  $ pwd -P\n› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)'
-CLAUDE_SCREEN='API Error: 403 {"error":"A Formal policy has blocked the connection for your user to this resource"}'
-
-for harness in codex claude; do
-  if [ "$harness" = codex ]; then screen=$CODEX_SCREEN; else screen=$CLAUDE_SCREEN; fi
-  printf '%s\n' "$screen" | "$CMD" classify "$harness" >/dev/null || fail "$harness concrete evidence was missed"
-  for unrelated in 'Please run /login' 'Failed to authenticate' 'HTTP 403 invalid API key' 'Would you like to run the following command?' '› 1. Yes, proceed (y)' 'A Formal policy has blocked the connection for your user to this resource'; do
-    if printf '%s\n' "$unrelated" | "$CMD" classify "$harness"; then fail "$harness guessed failover on partial/unrelated output"; fi
-  done
-  pass "$harness classifier requires concrete refusal evidence, not generic auth errors"
-done
-
-# Match full marker byte sequences even without multibyte locale semantics.
-for marker in '›' '>' '❯'; do
-  screen=$(printf 'Would you like to run the following command?\n%s 1. Yes, proceed (y)\n' "$marker")
-  verdict=$(printf '%s\n' "$screen" | LC_ALL=C "$CMD" classify codex) || fail "C locale missed the complete $marker approval modal"
-  [ "$verdict" = codex-approval-prompt ] || fail 'C locale emitted the wrong approval verdict'
-  if printf '%s 1. Yes, proceed (y)\n' "$marker" | LC_ALL=C "$CMD" classify codex; then
-    fail 'C locale accepted a selection marker without the approval question'
-  fi
-done
-pass 'Codex approval evidence matches full markers under LC_ALL=C without accepting partial evidence'
-
-# Substitute backend and lifecycle collaborators, not the failover owner. Its
-# executable still performs the evidence check and real atomic filesystem write.
 BIN="$TMP_ROOT/bin"
 mkdir -p "$BIN"
-cp "$CMD" "$BIN/fm-approval-failover.sh"
-printf '. %q\n' "$ROOT/bin/fm-lease-lib.sh" > "$BIN/fm-lease-lib.sh"
-cat > "$BIN/fm-backend.sh" <<'SH'
-fm_meta_get() { awk -F= -v key="$2" '$1 == key {print substr($0, length(key)+2); exit}' "$1"; }
-fm_backend_validate_task_endpoint() { FM_BACKEND_VALIDATED_BACKEND=tmux; FM_BACKEND_VALIDATED_TARGET=firstmate:fm-task; }
-fm_backend_visible_capture() {
-  printf 'capture\n' >> "$FM_HOME/capture.log"
-  if [ "${WRITE_DURING_CAPTURE:-0}" = 1 ]; then printf 'bypass\n' > "$FM_HOME/config/$TEST_SETTING"; fi
-  if [ "${RESPAWN_DURING_CAPTURE:-0}" = 1 ]; then printf 'spawn_gen=two\n' >> "$FM_HOME/state/task.meta"; fi
-  cat "$FM_HOME/screen"
-}
-SH
+cp "$ROOT/bin/fm-approval-failover.sh" "$BIN/fm-approval-failover.sh"
+# Use the actual metadata, identity and lease owners. Substitute only lifecycle
+# control, avoiding real workers while proving the command releases its guard.
+for lib in fm-backend.sh fm-pr-lib.sh fm-wake-lib.sh fm-lease-lib.sh; do
+  printf '. %q\n' "$ROOT/bin/$lib" > "$BIN/$lib"
+done
 cat > "$BIN/fm-control.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -55,81 +23,100 @@ printf '%s\n' "$*" >> "$FM_HOME/control.log"
 [ "${FAIL_CONTROL:-0}" != 1 ]
 SH
 chmod +x "$BIN/fm-control.sh"
+REAL_PERL=$(command -v perl)
+export REAL_PERL
+cat > "$BIN/perl" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "${RACE_SETTING_KIND:-}" in
+  file) printf 'bypass\n' > "$FM_HOME/config/$TEST_SETTING" ;;
+  directory) mkdir "$FM_HOME/config/$TEST_SETTING" ;;
+  symlink) mkdir "$FM_HOME/operator-directory"; ln -s "$FM_HOME/operator-directory" "$FM_HOME/config/$TEST_SETTING" ;;
+esac
+exec "$REAL_PERL" "$@"
+SH
+chmod +x "$BIN/perl"
+run_apply() {
+  env -u FM_SUPERVISION_ACTOR FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    "$@" "$BIN/fm-approval-failover.sh" apply task
+}
 
 for harness in codex claude; do
   home="$TMP_ROOT/$harness"
-  gen="s$(date +%s).$$.1"
   mkdir -p "$home/state" "$home/config"
-  if [ "$harness" = codex ]; then setting=codex-approval-mode; fallback=approve-for-me; screen=$CODEX_SCREEN; else setting=claude-permission-mode; fallback=auto; screen=$CLAUDE_SCREEN; fi
-  printf '%s\n' "$screen" > "$home/screen"
-  printf 'harness=%s\napproval_mode=bypass\napproval_configured=0\nspawn_gen=%s\n' "$harness" "$gen" > "$home/state/task.meta"
-  FM_HOME="$home" "$BIN/fm-approval-failover.sh" probe task >/dev/null || fail "probe missed $harness"
-  FM_HOME="$home" "$BIN/fm-approval-failover.sh" apply task >/dev/null || fail "apply failed $harness"
-  [ "$(cat "$home/config/$setting")" = "$fallback" ] || fail "$harness fallback was not persisted"
-  assert_grep 'task interrupt' "$home/control.log" 'recovery did not cancel the refused turn'
-  assert_grep 'task relaunch --note ' "$home/control.log" 'recovery did not use guarded relaunch'
+  if [ "$harness" = codex ]; then setting=codex-approval-mode; fallback=approve-for-me; else setting=claude-permission-mode; fallback=auto; fi
+  printf 'harness=%s\napproval_mode=bypass\napproval_configured=0\n' "$harness" > "$home/state/task.meta"
+  run_apply >/dev/null || fail "$harness apply failed"
+  [ "$(cat "$home/config/$setting")" = "$fallback" ] || fail "$harness fallback was not saved"
+  assert_grep 'task interrupt' "$home/control.log" 'pending turn was not cancelled'
+  assert_grep 'task relaunch --note ' "$home/control.log" 'guarded relaunch was not called'
   before=$(wc -l < "$home/control.log")
-  if FM_HOME="$home" "$BIN/fm-approval-failover.sh" apply task; then fail 'repeat failover succeeded'; fi
+  if run_apply; then fail 'repeat failover succeeded'; fi
   [ "$(wc -l < "$home/control.log")" = "$before" ] || fail 'repeat attempt touched the worker'
-  pass "$harness fallback persists once and recovers through the lifecycle plane"
+  pass "$harness writes once and relaunches through the lifecycle owner"
 
   for explicit in bypass "$fallback" invalid ''; do
     printf '%s\n' "$explicit" > "$home/config/$setting"
     cp "$home/config/$setting" "$home/before"
-    if FM_HOME="$home" "$BIN/fm-approval-failover.sh" apply task; then fail "explicit $explicit was changed"; fi
+    if run_apply; then fail "explicit $explicit was changed"; fi
     cmp "$home/before" "$home/config/$setting" || fail 'explicit bytes overwritten'
   done
   rm "$home/config/$setting"
   ln -s "$home/missing" "$home/config/$setting"
-  if FM_HOME="$home" "$BIN/fm-approval-failover.sh" apply task; then fail 'dangling explicit setting overwritten'; fi
-  [ -L "$home/config/$setting" ] || fail 'explicit symlink was replaced'
+  if run_apply; then fail 'dangling explicit setting overwritten'; fi
+  [ -L "$home/config/$setting" ] || fail 'explicit symlink replaced'
   rm "$home/config/$setting"
-  printf 'harness=%s\napproval_mode=bypass\napproval_configured=1\nspawn_gen=%s\n' "$harness" "$gen" > "$home/state/task.meta"
-  if FM_HOME="$home" "$BIN/fm-approval-failover.sh" apply task; then fail 'previously explicit launch treated as unconfigured'; fi
-  [ ! -e "$home/config/$setting" ] || fail 'explicit launch caused setting write'
-  pass "$harness preserves all explicit settings and launch choices"
+  mkdir "$home/config/$setting"
+  if run_apply; then fail 'explicit directory was changed'; fi
+  [ -z "$(find "$home/config/$setting" -mindepth 1 -print)" ] || fail 'explicit directory acquired a nested link'
+  rmdir "$home/config/$setting"
+  [ "$(wc -l < "$home/control.log")" = "$before" ] || fail 'explicit-setting refusal touched the worker'
+  pass "$harness preserves explicit files, invalid values, empty files, links and directories"
 
-  printf 'harness=%s\napproval_mode=bypass\napproval_configured=0\nspawn_gen=%s\n' "$harness" "$gen" > "$home/state/task.meta"
-  if FM_HOME="$home" TEST_SETTING="$setting" WRITE_DURING_CAPTURE=1 "$BIN/fm-approval-failover.sh" apply task; then fail 'concurrent explicit write did not win'; fi
-  [ "$(cat "$home/config/$setting")" = bypass ] || fail 'concurrent explicit write overwritten'
-  rm "$home/config/$setting"
-  if FM_HOME="$home" RESPAWN_DURING_CAPTURE=1 "$BIN/fm-approval-failover.sh" apply task; then fail 'changed launch reused old evidence'; fi
-  [ ! -e "$home/config/$setting" ] || fail 'changed launch caused persistence'
-  pass "$harness rejects changed launch records and preserves concurrent explicit writes"
-
-  before=$(wc -l < "$home/capture.log")
-  expired="s$(( $(date +%s) - 121 )).$$.2"
-  future="s$(( $(date +%s) + 600 )).$$.3"
-  for old_gen in "$expired" "$future" one; do
-    printf 'harness=%s\napproval_mode=bypass\napproval_configured=0\nspawn_gen=%s\n' "$harness" "$old_gen" > "$home/state/task.meta"
-    for verb in probe apply; do
-      if FM_HOME="$home" "$BIN/fm-approval-failover.sh" "$verb" task; then fail "$harness $verb accepted an expired, future, or unknown launch"; fi
-    done
+  for race in file directory symlink; do
+    if run_apply PATH="$BIN:$PATH" TEST_SETTING="$setting" RACE_SETTING_KIND="$race"; then fail "concurrent $race did not win"; fi
+    case "$race" in
+      file) [ "$(cat "$home/config/$setting")" = bypass ] || fail 'concurrent explicit bytes overwritten'; rm "$home/config/$setting" ;;
+      directory) [ -z "$(find "$home/config/$setting" -mindepth 1 -print)" ] || fail 'publication linked inside a concurrent directory'; rmdir "$home/config/$setting" ;;
+      symlink) [ -L "$home/config/$setting" ] || fail 'concurrent symlink replaced'; [ -z "$(find "$home/operator-directory" -mindepth 1 -print)" ] || fail 'publication followed a concurrent symlink'; rm "$home/config/$setting"; rmdir "$home/operator-directory" ;;
+    esac
   done
-  [ "$(wc -l < "$home/capture.log")" = "$before" ] || fail "$harness captured a viewport past the startup window"
-  [ ! -e "$home/config/$setting" ] || fail 'expired launch changed configuration'
-  pass "$harness stops probing expired workers without additional marker state"
+  [ "$(wc -l < "$home/control.log")" = "$before" ] || fail 'publication failure touched the worker'
+  pass "$harness atomically preserves concurrent explicit destinations"
 
-  printf 'harness=%s\napproval_mode=bypass\napproval_configured=0\nspawn_gen=%s\n' "$harness" "$gen" > "$home/state/task.meta"
   printf '%s\n' "$$" > "$home/state/.lock"
   printf 'branch\t%s\t%s\n' "$$" "$(date +%s)" > "$home/state/.lease-task"
-  cp "$home/state/task.status" "$home/status-before"
-  before=$(wc -l < "$home/control.log")
-  rc=0
-  FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$BIN/fm-approval-failover.sh" apply task > "$home/lease.out" 2>&1 || rc=$?
-  [ "$rc" -eq 6 ] || fail 'other-actor lease did not refuse failover'
-  [ ! -e "$home/config/$setting" ] || fail 'lease refusal persisted fallback'
-  cmp "$home/status-before" "$home/state/task.status" || fail 'lease refusal changed task status'
-  [ "$(wc -l < "$home/control.log")" = "$before" ] || fail 'lease refusal reached lifecycle control'
-  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$BIN/fm-approval-failover.sh" apply task >/dev/null || fail 'same-actor failover did not release guard before child control'
+  for actor in '' main; do
+    rc=0
+    run_apply FM_SUPERVISION_ACTOR="$actor" > "$home/lease.out" 2>&1 || rc=$?
+    [ "$rc" -eq 6 ] || fail 'other-actor lease did not refuse failover'
+    [ ! -e "$home/config/$setting" ] || fail 'lease refusal saved fallback'
+    [ "$(wc -l < "$home/control.log")" = "$before" ] || fail 'lease refusal reached lifecycle control'
+  done
+  run_apply FM_SUPERVISION_ACTOR=branch >/dev/null || fail 'same-actor lifecycle call deadlocked or failed'
   [ "$(cat "$home/config/$setting")" = "$fallback" ] || fail 'authorized actor lost fallback'
   rm "$home/config/$setting" "$home/state/.lease-task" "$home/state/.lock"
-  pass "$harness authorizes every persistent change and permits guarded child lifecycle calls"
+  pass "$harness honors live leases before saving and releases its guard before child control"
 
-  if FM_HOME="$home" FAIL_CONTROL=1 "$BIN/fm-approval-failover.sh" apply task; then fail 'failed lifecycle claimed success'; fi
-  [ "$(cat "$home/config/$setting")" = "$fallback" ] || fail 'lifecycle failure lost persistent remedy'
-  assert_grep 'worker recovery failed' "$home/state/task.status" 'lifecycle failure was not reported'
-  pass "$harness retains the remedy but reports lifecycle failure honestly"
+  # No timestamp or detector state is needed: firstmate supplies the observed
+  # failure, including for an existing worker predating launch-mode metadata.
+  printf 'harness=%s\n' "$harness" > "$home/state/task.meta"
+  run_apply >/dev/null || fail 'manual recovery unnecessarily required detector metadata'
+  rm "$home/config/$setting"
+  printf 'harness=%s\napproval_mode=%s\n' "$harness" "$fallback" > "$home/state/task.meta"
+  if run_apply; then fail 'known non-bypass record accepted'; fi
+  [ ! -e "$home/config/$setting" ] || fail 'non-bypass refusal saved fallback'
+  printf 'harness=%s\napproval_mode=bypass\nremote_host=another-host\n' "$harness" > "$home/state/task.meta"
+  if run_apply; then fail 'remote supervisor record accepted'; fi
+  [ ! -e "$home/config/$setting" ] || fail 'remote refusal saved fallback'
+  pass "$harness needs no detector state and refuses contradictory or remote records"
+
+  printf 'harness=%s\napproval_mode=bypass\n' "$harness" > "$home/state/task.meta"
+  if run_apply FAIL_CONTROL=1 > "$home/failure.out" 2>&1; then fail 'failed lifecycle claimed success'; fi
+  [ "$(cat "$home/config/$setting")" = "$fallback" ] || fail 'lifecycle failure lost saved remedy'
+  assert_grep 'fallback saved, but worker recovery failed' "$home/failure.out" 'lifecycle failure was not reported'
+  pass "$harness keeps the setting while reporting incomplete recovery"
 done
 
 . "$ROOT/bin/fm-config-inherit-lib.sh"
@@ -147,7 +134,6 @@ for setting in codex-approval-mode claude-permission-mode; do
   [ "$(cat "$local_config/$setting")" = "$fallback" ] || fail 'primary absence erased local fallback'
   FM_HOME="$remote_home" "$ROOT/bin/fm-remote-inherit.sh" absent "config/$setting" 0 "$empty_hash" 1 >/dev/null || fail 'remote absence transfer failed'
   [ "$(cat "$remote_home/config/$setting")" = "$fallback" ] || fail 'primary absence erased remote fallback'
-
   printf 'bypass\n' > "$primary/$setting"
   propagate_inheritable_config "$primary" "$local_config" || fail 'explicit primary inheritance failed'
   [ "$(cat "$local_config/$setting")" = bypass ] || fail 'explicit primary did not replace local fallback'
@@ -159,5 +145,4 @@ for setting in codex-approval-mode claude-permission-mode; do
   [ "$(cat "$local_config/$setting")" = bypass ] && [ "$(cat "$remote_home/config/$setting")" = bypass ] || fail 'primary removal erased local choice'
   pass "$setting preserves home-local values on primary absence and honors explicit primary precedence locally and remotely"
 done
-
 echo '# all fm-approval-failover tests passed'

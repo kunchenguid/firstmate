@@ -1058,8 +1058,7 @@ It remedies a managed policy that leaves bypass launches with user-reviewed appr
 Firstmate targets current CLIs rather than detecting versions or emulating older approval flags.
 Crew and scout launches still request hook disablement and retain their notification wiring, while secondmates retain their primary-session hooks.
 A managed policy can override the requested hook disablement, so it may still require an operator's hook review.
-Verification on 2026-10-06 with codex-cli 0.160.1 confirmed automatic review could append the authorized status channel, inspect the steering channel, query the no-mistakes service, run a dry-run push, and make a GitHub read after automatic review admitted network access.
-The same workspace-write boundary means external writes and network operations can require automatic review rather than being unrestricted.
+See the [current verification and limits](verification/runtime-backends.md#codex-automatic-approval-review) for observed task-channel and network access.
 
 ## Claude permission mode (config/claude-permission-mode)
 
@@ -1076,7 +1075,7 @@ The token is the file's whitespace-trimmed content.
 
 An absent file defaults to bypass, preserving `--dangerously-skip-permissions` for unconfigured homes.
 Auto uses a model reviewer and avoids managed policies that block bypass-permission sessions.
-It is selected by an explicit setting or the evidence-based failover below.
+It is selected by an explicit setting or the firstmate-invoked failover below.
 Only the permission flag changes between the two modes.
 The environment prefix, session settings, model, effort flags, and the task-channel `--add-dir` grant below stay the same in both.
 
@@ -1097,21 +1096,14 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 
 ## Persistent managed-policy failover
 
-`bin/fm-approval-failover.sh` owns the positive evidence check and durable failover for both runtimes.
-For a recorded, unconfigured bypass launch, a visible Codex command-approval modal, or Claude's HTTP 403 containing the specific managed-policy blocked-connection refusal, is actionable evidence.
-Viewport probing is limited to the first 120 seconds after the launch timestamp already carried in `spawn_gen`, with no negative-result cache or extra marker.
-A defeated bypass appears at the first command (Codex) or first model request (Claude); the window allows startup latency without repeatedly capturing healthy workers throughout their lifetime.
-Once the window expires, automatic detection and apply stop; ordinary operator recovery remains available.
-Generic login failures, unrelated 403s, unsupported launch metadata, and remote endpoints are not evidence.
-The watcher reports the result to firstmate's ordinary recovery path, which rechecks the live viewport, atomically creates the owning home's absent mode file, and interrupts and relaunches the affected worker through the existing control plane.
-Claude selects `auto`; Codex selects `approve-for-me`.
-The switch is reported and future launches use that saved mode directly, without repeating the bypass trial.
+After firstmate observes a Codex command-approval prompt under its bypass flag or a Claude managed-policy refusal of a bypass session, it invokes `bin/fm-approval-failover.sh`; the script's header and help own the command and recovery mechanics.
+There is no automatic detection, polling, startup window, or approval-prompt answering.
+The command saves Codex's `approve-for-me` or Claude's `auto` in the owning home's absent mode file, so later launches use the model-reviewed remedy without retrying bypass.
+Existing explicit settings are never overwritten, including invalid or empty files, directories and dangling symlinks; a concurrent setting wins too.
 Approval-setting inheritance preserves home-local fallbacks against primary absence as described by the [inherited-local-material owner](../.agents/skills/secondmate-provisioning/SKILL.md).
-Explicit values are never overwritten, even when empty, invalid, or a dangling symlink; a concurrent explicit write wins too.
-A lifecycle failure is reported with the fallback still persisted and the work preserved, rather than claiming successful recovery.
-Only tmux and herdr currently support verified lifecycle recovery; other backends require operator reconciliation before the setting changes.
-Both fallback modes use a model reviewer, not unrestricted execution.
-Managed hook review remains a separate operator decision, not grounds for this failover.
+Recovery uses the existing [lifecycle control plane](agent-control.md), respecting its leases and supported-runtime limits; incomplete recovery is reported with the saved setting and work preserved.
+Generic login failures do not establish a defeated bypass, and managed hook review remains a separate operator decision.
+Neither fallback is unrestricted execution, and Firstmate does not change vendor or security-agent settings.
 
 ## Worker tool exclusions (config/crew-exclude-tools)
 

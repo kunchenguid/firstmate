@@ -748,7 +748,7 @@ A managed policy can still override the requested disablement, so the effective 
 The same launch with the hook disablement requested reached the composer with no modal, answered the prompt, and fired the turn-end program that rides the launch rather than any hook:
 
 ```sh
-codex --approve-for-me --disable hooks \
+codex --dangerously-bypass-approvals-and-sandbox --disable hooks \
   -c "notify=[\"bash\",\"-c\",\"touch $TURNEND\"]" "Say ACK and stop."
 ```
 
@@ -776,12 +776,10 @@ The networked operations initially required automatic review because the workspa
 This confirms unattended progress through the reviewer, not unrestricted network or external-write access.
 
 `tests/fm-spawn-dispatch-profile.test.sh` pins unchanged bypass defaults and explicit `approve-for-me` launches for ships and scouts, plus hook and secondmate launch wiring.
-`tests/fm-approval-failover.test.sh` exercises positive and negative evidence, atomic persistence, explicit-setting protection, and the guarded recovery invocation with substituted backend/control collaborators.
-These behavior tests are not a live vendor-refusal or actual lifecycle verification.
-The opt-in `FM_MANAGED_APPROVAL_LIVE=1 tests/fm-managed-approval-live-e2e.test.sh` requires real current-CLI refusals to match the classifier.
-Its 2026-10-07 Codex 0.160.1 attempt stopped at the managed `Hooks need review` dialog even with `--disable hooks`; no operator trust was manufactured, so live managed-policy failover remains unverified.
-The prior live automatic-review probe verifies the fallback's capabilities, not the new detector and relaunch path.
-Claude's specific policy 403 is required alongside the blocked-connection text; a UI that exposes only a generic login error does not justify changing permission posture.
+`tests/fm-approval-failover.test.sh` exercises the firstmate-invoked command through real filesystem publication and the existing lease owner, substituting lifecycle control to avoid touching real workers.
+It covers writing once, preserving explicit and concurrent settings, invoking guarded relaunch, retaining the remedy on recovery failure, and local/remote inheritance precedence.
+These behavior tests do not verify an actual vendor-refusal recovery or live relaunch; the prior live automatic-review probe verifies the fallback's capabilities, not that complete recovery path.
+There is no automatic detector or harness-output classifier to verify, and a generic login error does not establish a defeated bypass.
 
 ## Composer classification matrix
 

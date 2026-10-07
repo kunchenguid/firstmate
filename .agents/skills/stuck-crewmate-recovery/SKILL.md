@@ -21,10 +21,8 @@ The target window's harness is recorded as `harness=` in `state/<id>.meta`.
 
 ## Managed approval failover
 
-For a `check: managed-approval <id>` notification, load `harness-adapters`, then run `FM_HOME=<owning-home> bin/fm-approval-failover.sh apply <id>`.
-That script owns evidence rechecking, explicit-setting preservation, durable configuration, and recovery through `fm-control`; never implement those steps by editing vendor settings or answering the prompt.
-Report a successful switch as the runtime's managed-machine remedy now being remembered for later launches, including that approvals use a model reviewer.
-On a refusal, preserve the setting and work, read the exact failure, and reconcile through the ordinary recovery path rather than repeating a bypass launch.
+After observing a Codex command-approval prompt under bypass or a Claude policy refusal of a bypass session, load `harness-adapters` and use `FM_HOME=<owning-home> bin/fm-approval-failover.sh apply <id>`; its header owns persistent configuration and guarded recovery, with no automatic detection.
+Report the saved model-reviewed remedy and actual recovery result, preserving explicit settings and work rather than changing vendor policy or answering approval or hook-trust prompts.
 
 ## Session-start reconciliation for a dead ordinary direct report
 

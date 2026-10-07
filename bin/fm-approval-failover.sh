@@ -1,117 +1,82 @@
 #!/usr/bin/env bash
-# Managed-approval failover for a recorded local worker.
-# Usage: fm-approval-failover.sh classify codex|claude < visible-screen
-#        FM_HOME=<home> fm-approval-failover.sh probe <task-id>
-#        FM_HOME=<home> fm-approval-failover.sh apply <task-id>
-# classify is pure; probe reads only the recorded endpoint's visible viewport.
-# apply repeats probe, then atomically creates the runtime's home config only
-# if absent, reports the switch, interrupts the refused turn, and relaunches
-# through fm-control. It never answers an approval or edits vendor settings.
-# Only an unconfigured, canonical bypass launch recorded by fm-spawn is eligible.
-# Capture only in the first 120 seconds of its timestamped spawn_gen: a defeated
-# bypass appears at the first command or model request, not throughout healthy work.
-# Unknown legacy metadata, remote endpoints, explicit settings (including broken
-# symlinks), unrelated errors and unreadable screens are not evidence.
-# Codex requires its approval question AND the selected approval option; Claude
-# requires a policy-blocked-connection refusal AND HTTP 403 in the same viewport.
-# A failed lifecycle action leaves the durable fallback in place and reports
-# failure; it never repeats the bypass attempt or claims recovery succeeded.
-# Recovery-grade lifecycle operations are supported only by tmux and herdr.
-# The watcher emits the probe result for firstmate, which runs apply under its
-# normal recovery authority; the watcher itself never changes permission policy.
+# Firstmate-invoked managed-approval failover for a recorded local worker.
+# Usage: FM_HOME=<owning-home> fm-approval-failover.sh apply <task-id>
+# Firstmate must first observe a defeated bypass: a Codex command-approval
+# prompt under its bypass launch, or a Claude policy refusal of a bypass session.
+# This command does not detect, poll, capture a screen, or answer an approval.
+# It saves approve-for-me (Codex) or auto (Claude) only when the owning home's
+# mode file is absent, then uses fm-control interrupt/relaunch to preserve and
+# resume the assigned work. Both fallbacks use a model reviewer.
+# Explicit settings, including invalid files, directories and dangling links,
+# are never overwritten. Publication uses an exact-destination atomic link;
+# a concurrent setting wins. Remote endpoints and non-bypass launches refuse.
+# The existing task lease guard protects configuration publication. Release its
+# command lock before invoking child lifecycle commands, which guard themselves.
+# A lifecycle failure leaves the setting saved and reports incomplete recovery.
 set -eu
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-
-classify() {
-  local harness=$1 screen
-  screen=$(perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g')
-  case "$harness" in
-    codex)
-      printf '%s\n' "$screen" | grep -Eq '^[[:space:]]*Would you like to run the following command\?' || return 1
-      printf '%s\n' "$screen" | grep -Eq '^[[:space:]]*(›|>|❯)[[:space:]]*1\.[[:space:]]*Yes, proceed' || return 1
-      printf 'codex-approval-prompt\n'
-      ;;
-    claude)
-      printf '%s\n' "$screen" | grep -Fq 'A Formal policy has blocked the connection for your user to this resource' || return 1
-      printf '%s\n' "$screen" | grep -Eq '(HTTP|API Error:|status)[[:space:]:]*403' || return 1
-      printf 'claude-policy-403\n'
-      ;;
-    *) return 1 ;;
-  esac
-}
 case "${1:-}" in
-  --help|-h) head -n 21 "$0"; exit 0 ;;
-  classify) [ "$#" -eq 2 ] || exit 2; classify "$2"; exit $? ;;
-  probe|apply) [ "$#" -eq 2 ] || exit 2 ;;
-  *) echo 'error: expected classify <harness>, probe <task-id>, or apply <task-id>' >&2; exit 2 ;;
+  --help|-h)
+    printf '%s\n' 'Usage: FM_HOME=<owning-home> fm-approval-failover.sh apply <task-id>' \
+      'Run only after observing a defeated bypass. Saves the runtime fallback once and relaunches through fm-control.'
+    exit 0
+    ;;
+  apply) [ "$#" -eq 2 ] || { echo 'error: apply requires one task id' >&2; exit 2; } ;;
+  *) echo 'error: expected apply <task-id>; see --help' >&2; exit 2 ;;
 esac
-VERB=$1 ID=$2
+ID=$2
 : "${FM_HOME:?FM_HOME must explicitly name the owning home}"
-case "$ID" in ''|*[!A-Za-z0-9._-]*) echo 'error: invalid task id' >&2; exit 2 ;; esac
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 CONFIG=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
-# shellcheck source=/dev/null
+# shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_task_id_creation_valid "$ID" || { echo 'error: invalid task id' >&2; exit 2; }
+TMP=
+trap 'rm -f "$TMP"; fm_lease_guard_release' EXIT
+fm_lease_guard "$ID" 'managed approval failover'
 META="$STATE/$ID.meta"
-[ -f "$META" ] && [ ! -L "$META" ] || exit 1
-BINDING=$(cksum < "$META")
-GEN=$(fm_meta_get "$META" spawn_gen)
-case "$GEN" in s*.*.*) ;; *) exit 1 ;; esac
-LAUNCHED=${GEN#s}
-LAUNCHED=${LAUNCHED%%.*}
-case "$LAUNCHED" in ''|*[!0-9]*) exit 1 ;; esac
-HARNESS=$(fm_meta_get "$META" harness)
-[ "$(fm_meta_get "$META" approval_mode)" = bypass ] || exit 1
-[ "$(fm_meta_get "$META" approval_configured)" = 0 ] || exit 1
-[ -z "$(fm_meta_get "$META" remote_host)" ] || exit 1
+[ -f "$META" ] && [ ! -L "$META" ] || { echo "error: no regular task record for $ID" >&2; exit 1; }
+HARNESS=$(fm_backend_meta_exact_value "$META" harness) || exit 1
+MODE=$(fm_meta_get "$META" approval_mode)
+if [ -n "$MODE" ] && [ "$MODE" != bypass ]; then
+  echo 'error: the recorded launch did not use bypass; nothing changed' >&2
+  exit 1
+fi
+[ -z "$(fm_meta_get "$META" remote_host)" ] || {
+  echo 'error: invoke failover in the remote worker owning home' >&2
+  exit 1
+}
 case "$HARNESS" in
   codex) SETTING=codex-approval-mode; FALLBACK=approve-for-me ;;
   claude) SETTING=claude-permission-mode; FALLBACK=auto ;;
-  *) exit 1 ;;
+  *) echo 'error: managed approval failover supports only Codex and Claude' >&2; exit 1 ;;
 esac
-# Do not use test -e alone: a dangling symlink is an explicit setting too.
-[ ! -e "$CONFIG/$SETTING" ] && [ ! -L "$CONFIG/$SETTING" ] || exit 1
-if [ "$VERB" = apply ]; then
-  # shellcheck source=bin/fm-lease-lib.sh
-  . "$SCRIPT_DIR/fm-lease-lib.sh"
-  TMP=
-  trap 'rm -f "$TMP"; fm_lease_guard_release' EXIT
-  fm_lease_guard "$ID" "managed approval failover"
-fi
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
-BACKEND=$FM_BACKEND_VALIDATED_BACKEND TARGET=$FM_BACKEND_VALIDATED_TARGET
-AGE=$(( $(date +%s) - LAUNCHED ))
-[ "$AGE" -ge 0 ] && [ "$AGE" -lt 120 ] || exit 1
-SCREEN=$(fm_backend_visible_capture "$BACKEND" "$TARGET" "fm-$ID") || exit 1
-EVIDENCE=$(printf '%s\n' "$SCREEN" | classify "$HARNESS") || exit 1
-[ "$(cksum < "$META")" = "$BINDING" ] || {
-  echo 'error: launch record changed during capture; refusing stale evidence' >&2
+[ ! -e "$CONFIG/$SETTING" ] && [ ! -L "$CONFIG/$SETTING" ] || {
+  echo "error: config/$SETTING already exists; nothing overwritten" >&2
   exit 1
 }
-if [ "$VERB" = probe ]; then
-  printf 'managed-approval %s evidence=%s; load stuck-crewmate-recovery\n' "$ID" "$EVIDENCE"
-  exit 0
-fi
-case "$BACKEND" in
-  tmux|herdr) ;;
-  *) echo "error: $BACKEND cannot verify lifecycle recovery; permission setting unchanged" >&2; exit 1 ;;
-esac
-# Publish complete bytes with link(2)'s no-replacement semantics. A concurrent
-# explicit setting wins, even when empty or a symlink; no partial file is seen.
 mkdir -p "$CONFIG"
 TMP=$(mktemp "$CONFIG/.approval-failover.XXXXXX")
 printf '%s\n' "$FALLBACK" > "$TMP"
-if ! ln "$TMP" "$CONFIG/$SETTING" 2>/dev/null; then
-  echo "error: config/$SETTING appeared during failover; nothing overwritten" >&2
+# Perl's link calls link(2) at this exact path: unlike ln, it cannot place a
+# link inside a concurrently created directory or a symlink to a directory.
+if ! perl -e 'link($ARGV[0], $ARGV[1]) or die "$!\n"' "$TMP" "$CONFIG/$SETTING"; then
+  echo "error: could not publish config/$SETTING; nothing overwritten" >&2
   exit 1
 fi
-stamp=$(date +%s)
-printf 'working [at=%s]: managed approval failover selected %s=%s after %s\n' "$stamp" "$SETTING" "$FALLBACK" "$EVIDENCE" >> "$STATE/$ID.status"
+printf 'saved config/%s=%s; approvals use a model reviewer\n' "$SETTING" "$FALLBACK"
 fm_lease_guard_release
-if ! "$SCRIPT_DIR/fm-control.sh" "$ID" interrupt || ! "$SCRIPT_DIR/fm-control.sh" "$ID" relaunch --note "Managed approval failover: $EVIDENCE; config/$SETTING now selects $FALLBACK. Preserve all work and continue the assigned task."; then
-  fm_lease_guard "$ID" "managed approval recovery failure reporting"
-  stamp=$(date +%s)
-  printf 'blocked [at=%s]: managed approval fallback persisted, but worker recovery failed; preserve work and use fm-control to reconcile\n' "$stamp" >> "$STATE/$ID.status"
+# Cancel the pending approval/refused turn so guarded relaunch can exit the
+# composer without accepting the blocked command or typing into its dialog.
+if ! "$SCRIPT_DIR/fm-control.sh" "$ID" interrupt \
+  || ! "$SCRIPT_DIR/fm-control.sh" "$ID" relaunch --note "Managed bypass failed; config/$SETTING now selects $FALLBACK. Preserve all work and continue the assigned task."; then
+  echo 'error: fallback saved, but worker recovery failed; preserve work and reconcile through fm-control' >&2
   exit 1
 fi
-printf 'managed approval failover: %s uses config/%s=%s; worker relaunched\n' "$ID" "$SETTING" "$FALLBACK"
+printf 'managed approval failover: %s relaunched with config/%s=%s\n' "$ID" "$SETTING" "$FALLBACK"
