@@ -3655,6 +3655,13 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_DISPLAY_NAME_RECORD="$STATE/$ID.herdr-display-name"
+# The presentation display name is retired WITH its journal, never before it.
+# A retained journal still names a workspace whose label the session-start sweep
+# has to re-derive, and that derivation reads this record.
+teardown_herdr_display_name_retire() {
+  rm -f "$HERDR_DISPLAY_NAME_RECORD"
+}
 # teardown_herdr_journal_orphaned: true when the task's own journal names
 # nothing the session-start sweep could still close - a version 1 attempt whose
 # token-bearing projected workspace is confirmed gone, or a version 2 binding of
@@ -3721,6 +3728,7 @@ fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
+    teardown_herdr_display_name_retire
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
@@ -3825,6 +3833,9 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # read-only by its installer.
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
+if [ ! -e "$HERDR_PRESENTATION_JOURNAL" ] && [ ! -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+  teardown_herdr_display_name_retire
+fi
 # A presentation journal the close path left behind is orphaned once the
 # recorded pane is proven gone (the Herdr gate above) unless it still names a
 # live projected workspace - a version 2 binding of some other pane, or a
@@ -3833,6 +3844,7 @@ rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
 if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
   if teardown_herdr_journal_orphaned; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
+    teardown_herdr_display_name_retire
   else
     echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
   fi

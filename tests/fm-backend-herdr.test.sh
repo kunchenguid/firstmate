@@ -3084,6 +3084,168 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
   pass "herdr presentation labels: └ concise-task · p:<full-token> for primary and secondmate children"
 }
 
+test_projection_display_name_derives_readable_names_with_distinguishing_words_first() {
+  local out
+  # The reported failure: every worker on one project shared a leading project
+  # segment, so a narrow sidebar truncated every row to that same prefix.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive uacode-merge-conductor uacode' "$ROOT")
+  [ "$out" = "Merge Conductor" ] || fail "repeated project prefix was not dropped: $out"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive uacode-env-manager uacode' "$ROOT")
+  [ "$out" = "Env Manager" ] || fail "derived name was wrong: $out"
+  # A clone path stands in for the registry name.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive uacode-code-tools /srv/projects/uacode/' "$ROOT")
+  [ "$out" = "Code Tools" ] || fail "project path was not reduced to its name: $out"
+  # A differing case must still be recognized as the same project prefix.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive UACode-sre-agent uacode' "$ROOT")
+  [ "$out" = "Sre Agent" ] || fail "project prefix match was case sensitive: $out"
+  # Owner prefixes keep being stripped, exactly as the flat grammar always did.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive 2ndmate-fmdev-f2/deploy-runner ops' "$ROOT")
+  [ "$out" = "Deploy Runner" ] || fail "secondmate owner prefix survived: $out"
+  # Dropping the prefix must never consume the whole name.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive uacode uacode' "$ROOT")
+  [ "$out" = "Uacode" ] || fail "a task id equal to its project lost its name: $out"
+  # A project given as an alias or path whose last segment differs from the
+  # task id's prefix still drops it through the resolved clone's name.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive uacode-merge-conductor ua /srv/projects/uacode' "$ROOT")
+  [ "$out" = "Merge Conductor" ] || fail "an aliased project kept its clone-name prefix: $out"
+  # Only one segment is ever dropped, even when several candidates match.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive uacode-uacode-sync uacode /srv/projects/uacode' "$ROOT")
+  [ "$out" = "Uacode Sync" ] || fail "matching candidates dropped more than one segment: $out"
+  # No project argument leaves the whole task id as words.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_derive uacode-merge-conductor' "$ROOT")
+  [ "$out" = "Uacode Merge Conductor" ] || fail "projectless derivation was wrong: $out"
+  pass "herdr display names: derived readable, project prefix dropped, distinguishing words first"
+}
+
+test_projection_display_name_sanitize_cannot_forge_the_label_grammar() {
+  local out status token title
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  # A display name able to spell a second " · p:<token>" would make the token read
+  # ambiguous, so both bytes it needs are removed rather than escaped.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_sanitize "evil · p:AbCdEfGhIjKlMnOpQrStUv"' "$ROOT")
+  case "$out" in
+  *':'*) fail "sanitized display name kept a colon: $out" ;;
+  *'·'*) fail "sanitized display name kept U+00B7: $out" ;;
+  esac
+  # The resulting title must still parse to exactly the real token.
+  title=$(bash -c '. "$0/bin/backends/herdr.sh"; ST=$1; ID=forge; fm_backend_herdr_projection_display_name_record "$ST" "$ID" "evil · p:ZZZZZZZZZZZZZZZZZZZZZZ" >/dev/null; fm_backend_herdr_projection_workspace_label "$ID" '"$token"' "$ST"' "$ROOT" "$TMP_ROOT")
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label_token "$1"' "$ROOT" "$title")
+  [ "$out" = "$token" ]     || fail "a hostile display name changed the token a title parses to: title=$title token=$out"
+  rm -f "$TMP_ROOT/forge.herdr-display-name"
+  # Nothing label-safe at all is a refusal, not an empty label.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_sanitize "···"' "$ROOT" 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a display name with no usable character was accepted as '$out'"
+  # Punctuation alone is not a readable name either.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_sanitize "###"' "$ROOT" 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a punctuation-only display name was accepted as '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_sanitize "#1"' "$ROOT")
+  [ "$out" = "#1" ] || fail "a display name holding one digit was refused or changed: $out"
+  # The spawn refuses such a name up front, before any endpoint or record exists.
+  mkdir -p "$TMP_ROOT/display-name-spawn/home"
+  out=$(FM_HOME="$TMP_ROOT/display-name-spawn/home" "$ROOT/bin/fm-spawn.sh" dn-refuse-x1 \
+    "$TMP_ROOT/display-name-spawn/project" --display-name '###' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a punctuation-only --display-name"
+  case "$out" in
+  *"give at least one letter or digit"*) ;;
+  *) fail "spawn did not name the display-name refusal: $out" ;;
+  esac
+  [ ! -e "$TMP_ROOT/display-name-spawn/home/state/dn-refuse-x1.herdr-display-name" ] \
+    || fail "a refused display name still published a record"
+  # Over-long input is trimmed on a word boundary rather than mid-word.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_sanitize "alpha bravo charlie delta echo foxtrot golf"' "$ROOT")
+  [ "${#out}" -le 28 ] || fail "display name exceeded its budget: $out"
+  case "$out" in
+  *' ') fail "trimmed display name kept a trailing space: [$out]" ;;
+  esac
+  [ "$out" = "alpha bravo charlie delta" ] || fail "word-boundary trim was wrong: $out"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_sanitize "Fix Sidebar Label Truncation Bug"' "$ROOT")
+  [ "$out" = "Fix Sidebar Label Truncation" ] || fail "a cut landing on a word boundary dropped a whole word: $out"
+  pass "herdr display names: sanitizing cannot forge the token grammar and trims on words"
+}
+
+test_projection_label_reads_its_display_name_record_and_falls_back_without_one() {
+  local state token with without
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  state="$TMP_ROOT/display-name-record"
+  mkdir -p "$state"
+  # No record: byte-identical to the label this grammar produced before display
+  # names existed, so every already-labeled workspace still re-derives.
+  without=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label uacode-merge-conductor '"$token"' "$1"' "$ROOT" "$state")
+  [ "$without" = "└ uacode-merge-conductor · p:$token" ]     || fail "recordless label is not the legacy label: $without"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_record "$1" uacode-merge-conductor "Merge Conductor"' "$ROOT" "$state"     || fail "display-name record write failed"
+  with=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label uacode-merge-conductor '"$token"' "$1"' "$ROOT" "$state")
+  [ "$with" = "└ Merge Conductor · p:$token" ]     || fail "recorded display name was not used: $with"
+  # A damaged record degrades to the derived name instead of stranding the label.
+  printf 'one\ntwo\n' > "$state/uacode-merge-conductor.herdr-display-name"
+  with=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label uacode-merge-conductor '"$token"' "$1"' "$ROOT" "$state")
+  [ "$with" = "$without" ] || fail "a multi-line record did not fall back: $with"
+  : > "$state/uacode-merge-conductor.herdr-display-name"
+  with=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label uacode-merge-conductor '"$token"' "$1"' "$ROOT" "$state")
+  [ "$with" = "$without" ] || fail "an empty record did not fall back: $with"
+  ln -sf /etc/hostname "$state/symlinked.herdr-display-name"
+  with=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label symlinked '"$token"' "$1"' "$ROOT" "$state")
+  [ "$with" = "└ symlinked · p:$token" ] || fail "a symlinked record was read: $with"
+  pass "herdr display names: a valid record wins and anything else falls back to the derived name"
+}
+
+test_projection_discovery_matches_both_label_spellings_for_the_same_token() {
+  local state token new legacy
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  state="$TMP_ROOT/display-name-discovery"
+  mkdir -p "$state"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_display_name_record "$1" uacode-merge-conductor "Merge Conductor"' "$ROOT" "$state"     || fail "display-name record write failed"
+  new="└ Merge Conductor · p:$token"
+  legacy="└ uacode-merge-conductor · p:$token"
+  # Restart discovery re-derives a label, so it has to accept a workspace
+  # labeled before display names existed AND one labeled after.
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label_matches "$2" uacode-merge-conductor '"$token"' "$1"' "$ROOT" "$state" "$new"     || fail "discovery rejected the display-name label"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label_matches "$2" uacode-merge-conductor '"$token"' "$1"' "$ROOT" "$state" "$legacy"     || fail "discovery rejected the pre-display-name label"
+  # Widening the accepted title must not widen attribution: a foreign name or a
+  # different token is still refused.
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label_matches "└ Something Else · p:'"$token"'" uacode-merge-conductor '"$token"' "$1"' "$ROOT" "$state"; then
+    fail "discovery accepted a foreign display name"
+  fi
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label_matches "└ Merge Conductor · p:ZZZZZZZZZZZZZZZZZZZZZZ" uacode-merge-conductor '"$token"' "$1"' "$ROOT" "$state"; then
+    fail "discovery accepted a mismatched token"
+  fi
+  pass "herdr display names: discovery accepts both label spellings but only this exact token"
+}
+
+test_projection_journal_binds_its_label_by_token_not_by_display_name() {
+  local state journal token out
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  state="$TMP_ROOT/display-name-journal"
+  mkdir -p "$state"
+  journal="$state/uacode-merge-conductor.herdr-presentation"
+  {
+    printf 'version=2\n'
+    printf 'task_id=uacode-merge-conductor\n'
+    printf 'projection_id=%s\n' "$token"
+    printf 'home=%s\n' "$state"
+    printf 'session=fmtest\n'
+    printf 'workspace_id=w2\n'
+    printf 'tab_id=w2:t2\n'
+    printf 'pane_id=w2:p2\n'
+    printf 'parent_workspace_id=w1\n'
+    printf 'parent_label=firstmate\n'
+    printf 'workspace_label=└ Merge Conductor · p:%s\n' "$token"
+    printf 'task_label=fm-uacode-merge-conductor\n'
+  } > "$journal"
+  # A version 2 binding must stay valid with NO display-name record present:
+  # the display name is presentation only, so losing it cannot invalidate a
+  # journal that still binds a live workspace.
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" uacode-merge-conductor' "$ROOT" "$journal"     || fail "a bound journal was invalidated by the absent display-name record"
+  # The token in the recorded label still has to be this journal's own token.
+  sed -i.bak "s/p:$token/p:ZZZZZZZZZZZZZZZZZZZZZZ/" "$journal" && rm -f "$journal.bak"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" uacode-merge-conductor' "$ROOT" "$journal"; then
+    fail "a journal whose label carries a foreign token was accepted"
+  fi
+  pass "herdr display names: a version 2 journal binds its label by token, not by display name"
+}
+
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
@@ -5960,6 +6122,11 @@ test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
+test_projection_display_name_derives_readable_names_with_distinguishing_words_first
+test_projection_display_name_sanitize_cannot_forge_the_label_grammar
+test_projection_label_reads_its_display_name_record_and_falls_back_without_one
+test_projection_discovery_matches_both_label_spellings_for_the_same_token
+test_projection_journal_binds_its_label_by_token_not_by_display_name
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block
 test_projection_order_foreign_legacy_child_is_read_only

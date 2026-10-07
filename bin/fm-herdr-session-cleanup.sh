@@ -10,7 +10,8 @@
 # shared named-session Herdr presentation lock, in that order.
 #
 # A visible title is discovery only. Cleanup requires the exact current
-# "└ <concise-task> · p:<22-char-token>" grammar, one token occurrence across
+# "└ <display-name> · p:<22-char-token>" grammar (docs/herdr-backend.md
+# "Display names"), one token occurrence across
 # the named-session snapshot, exactly one matching home-local journal, one tab,
 # one pane, absent task metadata, no registered agent, and a process proof that
 # the pane contains only one idle recognized shell with no child process. A
@@ -40,30 +41,13 @@ fm_herdr_cleanup_warn() {
   printf 'warning: herdr session-start projection cleanup: %s\n' "$*" >&2
 }
 
-fm_herdr_cleanup_title_token() { # <workspace-title>
-  local title=$1 prefix token rest
-  case "$title" in
-    '└ '*' · p:'*) ;;
-    *) return 1 ;;
-  esac
-  token=${title##*' · p:'}
-  prefix=${title%" · p:$token"}
-  [ "$prefix" != "$title" ] && [ -n "${prefix#'└ '}" ] || return 1
-  [ "${#token}" -eq 22 ] || return 1
-  case "$token" in *[!A-Za-z0-9_-]*) return 1 ;; esac
-  rest=${title#*p:}
-  [ "$rest" != "$title" ] || return 1
-  case "$rest" in *p:*) return 1 ;; esac
-  printf '%s' "$token"
-}
-
 fm_herdr_cleanup_home_identity() {
   [ -d "$FM_HOME" ] && [ ! -L "$FM_HOME" ] || return 1
   (cd "$FM_HOME" 2>/dev/null && pwd -P)
 }
 
 fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
-  local title=$1 session=$2 home_real=$3 journal id expected journal_home
+  local title=$1 session=$2 home_real=$3 journal id journal_home
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
     [ -f "$journal" ] && [ ! -L "$journal" ] || continue
@@ -76,9 +60,16 @@ fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
       [ "$journal_home" = "$home_real" ] \
         && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
     fi
-    expected=$(fm_backend_herdr_projection_workspace_label \
-      "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-    [ "$expected" = "$title" ] || continue
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+      # The binding recorded the exact label this workspace was created with, so
+      # it is compared rather than re-derived.
+      [ "$title" = "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] || continue
+    else
+      # A version 1 attempt records no label, so its title is the one that still
+      # has to be re-derived - under either spelling this grammar has produced.
+      fm_backend_herdr_projection_workspace_label_matches \
+        "$title" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" "$STATE" || continue
+    fi
     printf '%s\t%s\t%s\n' "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
   done
 }
@@ -203,7 +194,9 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
   local tab pane state close_status=0
-  token=$(fm_herdr_cleanup_title_token "$title") || return 0
+  # The title grammar has ONE owner, in the Herdr adapter, so the builder and
+  # the parser can never drift apart.
+  token=$(fm_backend_herdr_projection_workspace_label_token "$title") || return 0
   if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
     return 0
   fi
@@ -278,7 +271,12 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
       && [ "$FM_HERDR_CLEANUP_BOUND_TAB" = "$bound_tab" ] \
       && [ "$FM_HERDR_CLEANUP_BOUND_PANE" = "$bound_pane" ] \
       && [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ]; then
-      rm -f -- "$journal" || fm_herdr_cleanup_warn "$id pane closed but its journal could not be retired"
+      if rm -f -- "$journal"; then
+        rm -f -- "$(fm_backend_herdr_projection_display_name_path "$STATE" "$id")" \
+          || fm_herdr_cleanup_warn "$id journal retired but its display-name record could not be removed"
+      else
+        fm_herdr_cleanup_warn "$id pane closed but its journal could not be retired"
+      fi
     else
       fm_herdr_cleanup_warn "$id pane closed but its journal changed and was preserved"
     fi

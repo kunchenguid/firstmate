@@ -140,6 +140,16 @@
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
 #   metadata are unchanged.
+#   The projected workspace is titled with a short DISPLAY NAME so a narrow
+#   sidebar still tells workers apart, and the distinguishing words lead
+#   (docs/herdr-backend.md "Display names" owns the grammar and its fallbacks).
+#   --display-name <name> sets it explicitly and wins over the name derived from
+#   the task id. A value holding nothing that can become a label refuses here,
+#   before any state exists, rather than degrading silently at label time. The
+#   flag reaches only this Herdr presentation title: the task tab keeps its exact
+#   fm-<id> label, which is endpoint identity that steering, control,
+#   current-state reconciliation, and cleanup all verify against, so no layout
+#   and no other backend is affected by it.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -665,6 +675,7 @@ MODE=
 YOLO=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
+DISPLAY_NAME_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -675,6 +686,7 @@ BRANCH_PREFIX_SET=0
 BASE_BRANCH=
 BASE_BRANCH_SET=0
 TRACEPARENT_SET=0
+DISPLAY_NAME_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -722,6 +734,10 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    display-name)
+      DISPLAY_NAME_ARG=$a
+      DISPLAY_NAME_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -786,6 +802,11 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --display-name) want_value="display-name" ;;
+  --display-name=*)
+    DISPLAY_NAME_ARG=${a#--display-name=}
+    DISPLAY_NAME_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -821,6 +842,24 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+[ "$DISPLAY_NAME_SET" -eq 0 ] || [ -n "$DISPLAY_NAME_ARG" ] || {
+  echo "error: --display-name requires a non-empty value" >&2
+  exit 1
+}
+# An explicit presentation display name is reduced to its label-safe form here,
+# before any endpoint, worktree, or record exists, so a value that could not
+# become a label refuses up front instead of degrading silently at label time.
+# The Herdr adapter that owns the rule is sourced lazily, so it is loaded inside
+# a subshell rather than pulled into every spawn's environment.
+if [ "$DISPLAY_NAME_SET" -eq 1 ]; then
+  if ! DISPLAY_NAME_ARG=$(
+    fm_backend_source herdr >/dev/null 2>&1 \
+      && fm_backend_herdr_projection_display_name_sanitize "$DISPLAY_NAME_ARG"
+  ) || [ -z "$DISPLAY_NAME_ARG" ]; then
+    echo "error: --display-name holds nothing usable as a presentation label; give at least one letter or digit" >&2
+    exit 1
+  fi
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -3780,8 +3819,25 @@ else
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
           else
+            # The display name is published after the journal is created, so a
+            # refused journal never rewrites the record an existing workspace
+            # was labeled from, and before the label is built, because every
+            # later re-derivation of this label - restart discovery, reclaim,
+            # startup cleanup - reads that record rather than the spawn
+            # arguments, which are gone by then. An explicit name wins over the
+            # automatic one. A failed record only falls back to the
+            # task-id-derived label, so it never fails the spawn.
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            if [ "$DISPLAY_NAME_SET" -eq 1 ]; then
+              HERDR_DISPLAY_NAME=$DISPLAY_NAME_ARG
+            else
+              HERDR_DISPLAY_NAME=$(fm_backend_herdr_projection_display_name_derive "$ID" "$PROJ" "$PROJ_ABS" 2>/dev/null || true)
+            fi
+            if [ -n "$HERDR_DISPLAY_NAME" ]; then
+              fm_backend_herdr_projection_display_name_record \
+                "$STATE" "$ID" "$HERDR_DISPLAY_NAME" 2>/dev/null || true
+            fi
+            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID" "$STATE")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then

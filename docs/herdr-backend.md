@@ -252,12 +252,37 @@ Creation proceeds in this order:
 
 1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
 2. After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding.
-   That binding records the physical home, named session, endpoint, parent, and immutable expected labels.
+   That binding records the physical home, named session, endpoint, parent, and the exact labels the projection was created with.
+   Those recorded labels are never rewritten.
 
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
 
 The token is visible in the workspace title, because Herdr exposes no verified hidden persistent field.
 Neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
+
+### Display names
+
+The workspace title is `└ <display name> · p:<22-character-token>`.
+The display name exists because the token consumes most of a sidebar row: at a default sidebar width the title truncates, so anything shared by every worker on one project truncates every row to that same shared text and the workers stop being distinguishable.
+The display name therefore leads with the words that distinguish one worker from another.
+
+A spawn resolves it once, in this order:
+
+1. An explicit `bin/fm-spawn.sh --display-name <name>` value wins.
+2. Otherwise one is derived from the task id: owner prefixes are stripped, one repeated leading `<project>-` segment is dropped (matched against the project as the spawn was given it and against the resolved clone's directory name, so an alias or path still drops it), dashes and underscores become spaces, and each word is capitalized.
+
+The resolved name is published as a `state/<id>.herdr-display-name` record after the journal is created, so a refused journal never rewrites the name an existing workspace was labeled from.
+It is published before the label is built, because every later re-derivation of the label happens during restart discovery, long after the spawn arguments are gone.
+The record is presentation-only and is retired with its journal, never before it.
+A name with no letter or digit left after sanitizing is refused at spawn; a record that is absent, symlinked, empty, multi-line, or holds no letter or digit falls back to the task-id-derived name rather than stranding the label.
+
+`:` and `·` are removed from a display name rather than escaped, so no name can spell a second `· p:` separator or a second `p:` occurrence and make a title's token ambiguous.
+A name longer than the budget is trimmed on a word boundary.
+
+The task tab keeps its exact `fm-<id>` label.
+That label is endpoint identity rather than presentation - steering, control, current-state reconciliation, and cleanup all verify against it - so it is not shortened here.
+
+Existing workspaces are never renamed or moved.
 
 ### Owning parent and tabs
 
@@ -400,11 +425,13 @@ Locked session start has one narrower cleanup for a restored projected child tha
 It runs only when the current home has at least one ordinary presentation journal, and it considers only that home.
 A primary never recursively sweeps a secondmate home.
 
-Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
+Discovery starts from the exact current `└ <display name> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
 A candidate must meet all of these conditions:
 
 - The title must contain exactly one token occurrence across the named-session snapshot.
-- The title must equal the title derived from exactly one valid presentation journal in this home's own `state/`.
+- The title must equal the title of exactly one valid presentation journal in this home's own `state/`.
+  A version 2 binding is compared against the label it recorded.
+  A version 1 attempt records no label, so its title is re-derived, and both the display-name spelling and the task-id-derived spelling are accepted for the same token - that is what keeps a workspace labeled before display names existed discoverable.
 - A version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
 - The task's ordinary metadata must be absent.
 - The candidate must have exactly one tab and exactly one pane.
