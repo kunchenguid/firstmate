@@ -1085,9 +1085,13 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
 # Change the task immediately before the second offer computation, rather
 # than racing the successor startup. The first offer accepts the close; the
 # turn-boundary offer must see the new main-owned decision.
-turn_main_only_at_second_offer() {  # <home>
-  local real_node
+turn_main_only_at_second_offer() {  # <home> [quiet]
+  local real_node turn
   real_node=$(command -v node)
+  turn='printf '"'"'needs-decision [at=%s]: which export format?\n'"'"' "$(date +%s)" >> "$FM_HOME/state/demo.status"'
+  # Quiet: the offer alone turns main-only, with no status line for the
+  # successor watcher to close on.
+  [ "${2:-}" != quiet ] || turn='echo eligible=0; exit 0'
   cat > "$1/fakebin/node" <<SH
 #!/usr/bin/env bash
 case "\$*" in
@@ -1096,7 +1100,7 @@ case "\$*" in
     count=\$((count + 1))
     printf '%s\n' "\$count" > "\$FM_HOME/offer-count"
     if [ "\$count" -eq 2 ]; then
-      printf 'needs-decision [at=%s]: which export format?\n' "\$(date +%s)" >> "\$FM_HOME/state/demo.status"
+      $turn
     fi ;;
 esac
 exec "$real_node" "\$@"
@@ -1403,6 +1407,27 @@ test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
   assert_rewoke_main "$home" "hook turns-main-only"
   watcher_live "$home" || fail "hook turns-main-only: the pass-through left no successor watcher"
   pass "host+hook: a close that turns main-only at its turn rewakes main and keeps its successor watcher"
+}
+
+# The successor a close that turns main-only at its turn leaves for main
+# outlives the Stop hook's process group teardown, like the pass-through's.
+test_successor_left_at_the_turn_survives_the_hook_process_group_teardown() {
+  local home watcher
+  home=$(make_primary_home hook-turns-main-only-teardown)
+  turn_main_only_at_second_offer "$home" quiet
+  : > "$home/hook.own-group"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "at-turn teardown: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'step one'
+  wait_until 250 hook_exited "$home" || fail "at-turn teardown: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] || fail "fixture: the close was not accepted before it turned main-only"
+  assert_rewoke_main "$home" "at-turn teardown"
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
+  sleep 2
+  kill -0 "$watcher" 2>/dev/null || fail "at-turn teardown: the successor watcher (pid $watcher) did not survive the hook's process group teardown"
+  pass "host+hook: the successor a close that turns main-only at its turn leaves for main survives the hook's process group teardown"
 }
 
 # If the at-turn hand-back cannot publish downtime, the healthy successor
@@ -2962,6 +2987,7 @@ test_claude_stop_hook_delivers_a_main_only_pass_through
 test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
 test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
+test_successor_left_at_the_turn_survives_the_hook_process_group_teardown
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_pass_through_successor_survives_the_hook_process_group_teardown

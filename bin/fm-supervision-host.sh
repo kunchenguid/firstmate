@@ -1121,7 +1121,7 @@ while :; do
 
   # A turn that could outlive the boundary would outlive the hook registration.
   turn_crosses_boundary && boundary_exit
-  if ! start_successor "$CLOSED_ARM_PID"; then
+  if ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID"; then
     exit_to_main "the successor watcher cycle could not be verified before handling; this wake is yours"
   fi
   if [ -n "$SUCCESSOR_GENERATION" ]; then
