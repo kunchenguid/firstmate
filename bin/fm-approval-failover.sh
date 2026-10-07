@@ -26,6 +26,9 @@ case "${1:-}" in
 esac
 ID=$2
 : "${FM_HOME:?FM_HOME must explicitly name the owning home}"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+fm_refuse_if_gate_agent
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 CONFIG=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 # shellcheck source=bin/fm-backend.sh
@@ -70,6 +73,8 @@ if ! perl -e 'link($ARGV[0], $ARGV[1]) or die "$!\n"' "$TMP" "$CONFIG/$SETTING";
   echo "error: could not publish config/$SETTING; nothing overwritten" >&2
   exit 1
 fi
+rm -f -- "$TMP"
+TMP=
 printf 'saved config/%s=%s; approvals use a model reviewer\n' "$SETTING" "$FALLBACK"
 fm_lease_guard_release
 # Cancel the pending approval/refused turn so guarded relaunch can exit the
