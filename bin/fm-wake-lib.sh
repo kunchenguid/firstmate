@@ -954,9 +954,12 @@ _fm_recovery_marker_arm_check() {
 }
 
 # Apply the owner-documented announced-episode arm transition atomically with
-# the queue read. Handling successors must not call this transition.
+# the queue read. Handling successors must not call this transition. A fresh
+# watcher started by a confirmed take-over passes the handover snapshot's token
+# and queue sequence; while both still hold, the episode stays announced
+# because the take-over was not a new down stretch.
 _fm_recovery_marker_reopen_announced() {
-  local marker=$1 lock
+  local marker=$1 handover_token=${2:-} handover_seq=${3:-} lock
   lock="${marker}.lock"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if ! fm_lock_acquire_wait "$lock"; then
@@ -970,7 +973,10 @@ _fm_recovery_marker_reopen_announced() {
   fi
   case "$FM_RECOVERY_MARKER_TOKEN" in
     announced:*)
-      if [ -s "$FM_WAKE_QUEUE" ] \
+      if [ -n "$handover_token" ] && [ "$FM_RECOVERY_MARKER_TOKEN" = "$handover_token" ] \
+        && [ "$(cat "$STATE/.wake-queue.seq" 2>/dev/null || true)" = "$handover_seq" ]; then
+        :
+      elif [ -s "$FM_WAKE_QUEUE" ] \
         && ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
         fm_lock_release "$lock"
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -1050,7 +1056,7 @@ fm_recovery_transition() {
       _fm_recovery_marker_arm_check "$marker"
       ;;
     reopen-announced)
-      _fm_recovery_marker_reopen_announced "$marker"
+      _fm_recovery_marker_reopen_announced "$marker" "$target" "$value"
       ;;
     release-lock)
       [ -n "$target" ] || return 1
@@ -1097,8 +1103,8 @@ fm_recovery_marker_arm_check() {
   fm_recovery_transition "$1" arm-check
 }
 
-fm_recovery_marker_reopen_announced() {
-  fm_recovery_transition "$1" reopen-announced
+fm_recovery_marker_reopen_announced() {  # <marker> [handover-token handover-seq]
+  fm_recovery_transition "$1" reopen-announced "${2:-}" "${3:-}"
 }
 
 fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-seq>

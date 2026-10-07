@@ -589,6 +589,8 @@ take_over_cycle() {  # <watcher-pid> <identity>
   if [ "$owner_signal" = TERM ]; then
     fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
       "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
+    TAKE_OVER_HANDOVER_TOKEN=$FM_RECOVERY_HANDOVER_TOKEN
+    TAKE_OVER_HANDOVER_SEQ=$FM_RECOVERY_HANDOVER_SEQ
     cycle_log_append unknown unknown taken-over none
   else
     cycle_log_append unknown unknown taken-over-unconfirmed-stop none
@@ -597,6 +599,8 @@ take_over_cycle() {  # <watcher-pid> <identity>
 }
 
 TAKEN_OVER=0
+TAKE_OVER_HANDOVER_TOKEN=
+TAKE_OVER_HANDOVER_SEQ=
 if [ "$mode" = take-over ]; then
   mode=arm
   if healthy_watcher \
@@ -675,7 +679,8 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
-  "$WATCH" >"$child_out" &
+  FM_WATCH_HANDOVER_TOKEN=$TAKE_OVER_HANDOVER_TOKEN FM_WATCH_HANDOVER_SEQ=$TAKE_OVER_HANDOVER_SEQ \
+    "$WATCH" >"$child_out" &
 fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"

@@ -221,7 +221,7 @@ An unacknowledged downtime generation is announced at most once.
 The first recovery marks that generation announced, and later empty-queue arms leave it announced until durable work or interrupted handling makes recovery pending again.
 A non-successor watcher start checks the durable queue and recovery marker under their locks.
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
-If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
+With queued work, the start reopens an announced-but-unacknowledged episode as a fresh pending downtime generation so buried work still resurfaces once, subject to the confirmed take-over exception in [Generation reuse](#generation-reuse).
 
 ### Generation reuse
 
@@ -234,6 +234,9 @@ An announced handling episode becomes pending downtime on the same generation be
 That handling republication gives a successor exactly one recovery presentation without orphaning the acknowledgement already printed for that generation.
 A watcher stopped so an arm can take its cycle over (`bin/fm-watch-arm.sh --take-over`) publishes downtime like any close, but the taking arm restores an acknowledged episode that stop reopened only when the taken-over arm's cycle-ledger row for that exact arm and watcher records the watcher ending by the take-over's TERM and no wake was appended in between.
 The taking arm waits within a short bound for that row; a missing row or any other signal leaves downtime for the fresh cycle's ordinary recovery wake, while take-over still proceeds.
+Under the same confirmed stop, the fresh cycle also keeps an already-announced episode announced instead of reopening it, while the marker token and queue sequence still match the taking arm's snapshot.
+A take-over is not a new down stretch, so preserving the announcement prevents repeated Claude Stop continuations while main's shown wake awaits a drain.
+That wake stays queued and is presented again by the next appended wake, or by a genuinely new watcher start such as a session start.
 Any other episode is left for the next cycle's arm check.
 
 ### What an acknowledgement retires
@@ -459,6 +462,8 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.
+
+`tests/fm-supervision-host.test.sh` drives the real Claude Stop hook through an undrained wake with and without the supervision host: it is presented once, the next turn end parks with the episode unchanged, and a new event still reaches main's drain alongside it.
 
 `tests/fm-watch-recovery-loop.test.sh` covers:
 

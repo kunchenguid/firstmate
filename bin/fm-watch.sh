@@ -2492,8 +2492,15 @@ WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+# A confirmed take-over (bin/fm-watch-arm.sh --take-over) passes its handover
+# snapshot so an episode it already announced is not re-presented by this
+# fresh start (docs/watcher-continuity.md "Generation reuse").
+WATCH_HANDOVER_TOKEN=${FM_WATCH_HANDOVER_TOKEN:-}
+WATCH_HANDOVER_SEQ=${FM_WATCH_HANDOVER_SEQ:-}
+unset FM_WATCH_HANDOVER_TOKEN FM_WATCH_HANDOVER_SEQ
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
-  if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
+  if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER" \
+    "$WATCH_HANDOVER_TOKEN" "$WATCH_HANDOVER_SEQ"; then
     echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
     exit 1
   fi

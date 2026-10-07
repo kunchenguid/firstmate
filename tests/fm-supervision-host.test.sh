@@ -1451,6 +1451,49 @@ test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end() {
   pass "host+hook: a successor close that lands during main's turn is delivered at the next turn end"
 }
 
+# A refused drain must not turn every following Stop into another billed turn.
+# Confirmed take-over must preserve the shown episode while its queued work
+# is unchanged (docs/watcher-continuity.md "Generation reuse"). The host-off
+# path attaches instead of taking over and must park the same way; a new event
+# must still wake main with both the undrained and new work available.
+assert_undrained_wake_is_presented_once() {  # <name> <host|host-off>
+  local name=$1 home marker drained
+  home=$(make_primary_home "$name")
+  [ "$2" = host ] || : > "$home/config/supervision-host-off"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "$name: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "$name: the first close never reached the Stop hook"
+  assert_rewoke_main "$home" "$name (first)"
+  marker=$(cat "$home/state/.watcher-down")
+  case "$marker" in announced:downtime:*) ;; *) fail "$name: the presented episode is not announced: $marker" ;; esac
+  turn_end "$home"
+  if wait_until 150 hook_exited "$home"; then
+    fail "$name: the undrained turn end woke main again (exit $(cat "$home/hook.rc")): $(cat "$home/hook.err")"
+  fi
+  watcher_live "$home" || fail "$name: the undrained turn end left no watcher"
+  [ "$(cat "$home/state/.watcher-down")" = "$marker" ] \
+    || fail "$name: the undrained turn end changed the episode: $marker -> $(cat "$home/state/.watcher-down")"
+  append_status "$home" 'which region?' needs-decision
+  # Without the host the parked hook's arm follows the handling successor and
+  # reports that successor's delivered wake only after its bounded wait for a
+  # healthy successor, measured at about half a minute in this fixture, so
+  # this bound leaves room for that.
+  wait_until 900 hook_exited "$home" || fail "$name: a new event after the parked turn end never reached the Stop hook: $(cat "$home/hook.err" 2>/dev/null)"
+  assert_rewoke_main "$home" "$name (new event)"
+  drained=$(main_drain "$home")
+  assert_contains "$drained" 'which export format?' "$name: the undrained wake must still reach main's drain"
+  assert_contains "$drained" 'which region?' "$name: the new event must reach main's drain"
+  pass "host+hook ($2): an undrained wake is presented once, the next turn end parks, and a new event still reaches main"
+}
+test_undrained_wake_is_presented_once_with_the_host() {
+  assert_undrained_wake_is_presented_once hook-undrained-host host
+}
+test_undrained_wake_is_presented_once_without_the_host() {
+  assert_undrained_wake_is_presented_once hook-undrained-host-off host-off
+}
+
 # The arm processes running from <home>'s bin, one "<pid> <ppid>" per line.
 # A command substitution inside an arm is a forked copy that shows the same
 # command line, so a process whose parent is itself an arm is not counted.
@@ -2926,6 +2969,8 @@ test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
+test_undrained_wake_is_presented_once_with_the_host
+test_undrained_wake_is_presented_once_without_the_host
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_unrecorded_successor_is_stopped_rather_than_left_for_main
