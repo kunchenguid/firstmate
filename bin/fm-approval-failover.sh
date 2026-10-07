@@ -26,7 +26,7 @@ classify() {
   case "$harness" in
     codex)
       printf '%s\n' "$screen" | grep -Eq '^[[:space:]]*Would you like to run the following command\?' || return 1
-      printf '%s\n' "$screen" | grep -Eq '^[[:space:]]*[›>❯][[:space:]]*1\.[[:space:]]*Yes, proceed' || return 1
+      printf '%s\n' "$screen" | grep -Eq '^[[:space:]]*(›|>|❯)[[:space:]]*1\.[[:space:]]*Yes, proceed' || return 1
       printf 'codex-approval-prompt\n'
       ;;
     claude)
