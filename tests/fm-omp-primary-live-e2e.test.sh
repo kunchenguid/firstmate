@@ -22,6 +22,8 @@ set -u
 fm_live_gate opt-in FM_OMP_LIVE_E2E omp node jq
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$ROOT/bin/fm-omp-process-lib.sh"
 unset NO_MISTAKES_GATE
 
 fail() {
@@ -212,11 +214,28 @@ case "$first" in
   *) fail "the session-start digest did not reach model context before the first turn; reply was: $first" ;;
 esac
 lock_pid=$(sed -n '1p' "$PROJECT/state/.lock" 2>/dev/null || true)
-omp_real_pid=$(pgrep -P "$OMP_PID" -x omp 2>/dev/null | head -1 || true)
-[ -n "$omp_real_pid" ] || omp_real_pid=$OMP_PID
-[ "$lock_pid" = "$omp_real_pid" ] || fail "the session lock names pid '$lock_pid', not the omp process $omp_real_pid; ancestry detection failed"
+lock_ppid=$(ps -o ppid= -p "$lock_pid" 2>/dev/null | tr -d ' ')
+lock_comm=$(ps -o comm= -p "$lock_pid" 2>/dev/null)
+lock_args=$(ps -o args= -p "$lock_pid" 2>/dev/null)
+[ "$lock_pid" = "$OMP_PID" ] || [ "$lock_ppid" = "$OMP_PID" ] \
+  || fail "the session lock names pid '$lock_pid', outside the launched omp process $OMP_PID"
+case "${lock_comm##*/}" in bun) ;; *) fail "the session lock owner '$lock_comm' is not the Bun-launched OMP process" ;; esac
+fm_omp_process_matches "$lock_comm" "$lock_args" \
+  || fail "the session lock names '$lock_comm' with arguments '$lock_args', not an OMP entrypoint"
 [ -f "$PROJECT/state/.session-start-complete" ] || fail "session start did not record completion"
-pass "omp $OMP_VERSION: before_agent_start delivered the digest into model context and the lock names the omp process"
+pass "omp $OMP_VERSION: before_agent_start delivered the digest into model context and the lock names the OMP process"
+
+# An unrelated caller must refuse the live Bun-owned lock without publishing
+# anything over it. The test runner's harness ancestry is independent of the
+# background OMP RPC process, so this exercises the real foreign-holder path.
+cp "$PROJECT/state/.lock" "$LAB/omp-lock.before-foreign-acquire"
+if FM_HOME="$PROJECT" "$PROJECT/bin/fm-lock.sh" > "$LAB/foreign-acquire.log" 2>&1; then
+  fail "an unrelated caller acquired the live OMP session lock"
+fi
+grep -Fq "another live firstmate session holds the lock (pid $lock_pid" "$LAB/foreign-acquire.log" || fail "foreign acquisition failed for an unexpected reason: $(cat "$LAB/foreign-acquire.log")"
+cmp -s "$LAB/omp-lock.before-foreign-acquire" "$PROJECT/state/.lock" || fail "foreign acquisition changed the live OMP lock bytes"
+kill -0 "$OMP_PID" 2>/dev/null || fail "the OMP lock owner exited during the foreign acquisition check"
+pass "omp $OMP_VERSION: unrelated lock acquisition was refused and live lock bytes stayed unchanged"
 
 # --- 2. watcher arm, successor, and wake delivery ------------------------------
 : > "$PROJECT/state/omp-e2e.meta"
@@ -228,6 +247,8 @@ if [ -z "$watcher_pid" ] || ! kill -0 "$watcher_pid" 2>/dev/null; then
   fail "no live watcher holds the lab home lock after fm_watch_arm_omp"
 fi
 pass "omp $OMP_VERSION: fm_watch_arm_omp started a live watcher through the extension"
+initial_arm_calls=$(tool_call_count fm_watch_arm_omp)
+[ "$initial_arm_calls" -ge 1 ] || fail "the initial arm turn never called fm_watch_arm_omp"
 
 printf 'done: omp live e2e watcher fire\n' > "$PROJECT/state/omp-e2e.status"
 i=0
@@ -241,7 +262,8 @@ grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$PROJECT/state/.w
 wait_for_log "FIRSTMATE WATCHER WAKE: signal:" 240 || fail "the actionable close was not delivered to main as a watcher follow-up"
 wait_for_agent_ends 3 360 || fail "omp did not finish the wake turn"
 arm_calls=$(tool_call_count fm_watch_arm_omp)
-[ "$arm_calls" -eq 1 ] || fail "the model re-armed from memory instead of the extension (fm_watch_arm_omp call count $arm_calls)"
+[ "$arm_calls" -eq "$initial_arm_calls" ] \
+  || fail "the model re-armed after the wake instead of relying on the extension (fm_watch_arm_omp calls $initial_arm_calls -> $arm_calls)"
 pass "omp $OMP_VERSION: an actionable close spawned a ledger-linked successor and woke main exactly once"
 
 # --- 3. the compelled turn-end guard continuation -------------------------------
