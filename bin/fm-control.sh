@@ -105,10 +105,10 @@
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
 #
-# Teardown and discard are NOT verbs here and never will be. `exit` stops an
-# agent and preserves everything else; removing a worktree, killing an
-# endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
-# landed-work test.
+# Teardown and filesystem discard are NOT verbs here and never will be.
+# `exit` preserves the endpoint and filesystem; its explicit native discard
+# option is described above. Removing a worktree, killing an endpoint, or
+# discarding work stays with bin/fm-teardown.sh, which owns the landed-work test.
 #
 # `resume` is not a verb: it is not deterministic across the verified adapters
 # (bin/fm-control-lib.sh's header owns that reasoning). `relaunch` covers the
@@ -139,7 +139,8 @@
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
 #
-# Environment knobs (all bounded waits, seconds):
+# Environment knobs (postcondition wait budgets in seconds, except retries):
+# Native discard's input-lock cleanup can outlast these budgets; see above.
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_ARM_WAIT          wait for an armed interrupt's rendered proof

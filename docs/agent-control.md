@@ -53,11 +53,8 @@ Ordinary `exit` reads the composer's state before typing the exit command and re
 Ordinary `exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog that a further Enter would answer, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option, so closing the dialog is left to the operator.
 A stopped agent whose pane still shows the dialog text is not refused.
 [`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
-For workers launched with the [optional native adapter](configuration.md#optional-native-draft-control), `bin/fm-control.sh --help` owns the explicit `exit --discard-pending` exception and its limits.
-That path uses native composer proof and native exit, serializes with doorbell delivery, and does not modify the shared screen reader or ordinary exit and interrupt behavior.
-On the client deadline it reports `uncertain, the clear may still land` and retains the input lock until any issued replacement fill settles or the Claude process is gone.
-Firstmate writers remain excluded during that wait; a human typing directly into the pane during a stalled clear can still lose that text.
-This is the same exposure class as the in-flight-exit race accepted in [#6202](https://github.com/kunchenguid/firstmate/issues/6202), and the maintainer should judge the stalled-clear limitation when reviewing the PR.
+For workers launched with the [optional native adapter](configuration.md#optional-native-draft-control), [`bin/fm-control.sh --help`](../bin/fm-control.sh) owns the explicit `exit --discard-pending` exception, timeout lock retention, and input-loss limits.
+The [verification record](verification/runtime-backends.md#optional-claude-native-draft-discard) documents the accepted in-flight-exit race and the stalled-clear human-input exposure that the maintainer must judge.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` preserves the endpoint and filesystem; only its explicit native discard option authorizes losing the unsent composer draft.
