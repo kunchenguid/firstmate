@@ -465,15 +465,14 @@ if [ "$no_proxy_bypass" = 0 ]; then
   if [ -n "$proxy_value" ]; then
     PROXY_MODE=via-proxy
     proxy_authority=${proxy_value#*://}
+    proxy_authority=${proxy_authority%%[/?#]*}
     case "$proxy_authority" in
       *@*)
         proxy_userinfo=${proxy_authority%%@*}
-        case "$proxy_userinfo" in
-          *:*)
-            printf 'probe=%s dns=%s http=none result=invalid-input proxy URL carries credentials\\n' "$PROBE" "$DNS"
-            exit 2
-            ;;
-        esac
+        if [ -n "$proxy_userinfo" ]; then
+          printf 'probe=%s dns=%s http=none result=invalid-input proxy URL carries credentials\\n' "$PROBE" "$DNS"
+          exit 2
+        fi
         ;;
     esac
   fi
