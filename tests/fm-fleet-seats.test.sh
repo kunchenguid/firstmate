@@ -1464,7 +1464,7 @@ test_unpooled_grants_exist_before_certificate_publication() {
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     FM_HOME="$R_REMOTE" "$SEATS" reserve unpooled --generation "$gen" --harness pi \
     --model unpooled-model --holder-pid "$LAST_HOLDER" > "$base/client.out" 2>&1 &
-  pid=$!
+  pid="$!"
   req=
   for n in $(seq 1 100); do
     for req in "$R_REMOTE/state/fleet-seats/requests/"*.req; do [ ! -f "$req" ] || break; done
@@ -1498,7 +1498,7 @@ test_remote_descendants_use_one_authority() {
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     FM_HOME="$child" "$SEATS" reserve nested-worker --generation g-nested --harness pi \
     --model pool-model-a --holder-pid "$LAST_HOLDER" > "$base/client.out" 2>&1 &
-  pid=$!
+  pid="$!"
   for n in $(seq 1 100); do
     [ -z "$(ls "$R_REMOTE/state/fleet-seats/requests/"*.req 2>/dev/null)" ] || break
     sleep 0.1
