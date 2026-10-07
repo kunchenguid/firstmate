@@ -3527,8 +3527,23 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
     ensure_named_base_present "$PROJ_ABS" "$BASE_BRANCH" || exit 1
   fi
   if [ "$KIND" = ship ]; then
-    refuse_shared_crew_branch || exit 1
-    refuse_named_crew_branch_collision || exit 1
+    SPAWN_OCCUPANCY_LOCK=
+    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" != 1 ]; then
+      # Orca spawns without a capacity declaration skipped the shared project
+      # lock at admission; the occupancy scan and refusal below must still run
+      # under it so two spawns cannot claim the same crew branch.
+      SPAWN_OCCUPANCY_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
+        echo "error: could not resolve the shared project lock for $PROJ_ABS; refusing to check crew-branch occupancy" >&2
+        exit 1
+      }
+      fm_lock_acquire_wait "$SPAWN_OCCUPANCY_LOCK"
+    fi
+    refuse_shared_crew_branch || { [ -z "$SPAWN_OCCUPANCY_LOCK" ] || fm_lock_release "$SPAWN_OCCUPANCY_LOCK"; exit 1; }
+    refuse_named_crew_branch_collision || { [ -z "$SPAWN_OCCUPANCY_LOCK" ] || fm_lock_release "$SPAWN_OCCUPANCY_LOCK"; exit 1; }
+    if [ -n "$SPAWN_OCCUPANCY_LOCK" ]; then
+      fm_lock_release "$SPAWN_OCCUPANCY_LOCK"
+      SPAWN_OCCUPANCY_LOCK=
+    fi
   fi
 fi
 
