@@ -4500,10 +4500,13 @@ test_procevent_marker_failure_exits_and_replays() {
 test_heartbeat_no_change_absorbed() {
   local dir state fakebin out pid i sig
   dir=$(make_case heartbeat-absorb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  mkdir -p "$dir/data"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   printf 'working: routine heartbeat history\n' > "$state/routine.status"
   sig=$(seen_sig "$state/routine.status"); printf '%s' "$sig" > "$state/.seen-routine_status"
   # A quiet fleet with a fast heartbeat cadence.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -4532,6 +4535,9 @@ test_heartbeat_no_change_absorbed() {
 test_heartbeat_backstop_surfaces_a_masked_status() {
   local dir state fakebin out sig pid
   dir=$(make_case heartbeat-masked); state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$dir/data"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   out="$dir/watch.out"
   # Same miss as below, but the captain-relevant event is followed by a routine
   # append, so its last line reads benign. The backstop must still catch it.
@@ -4541,7 +4547,7 @@ test_heartbeat_backstop_surfaces_a_masked_status() {
   printf '3\n' > "$state/.heartbeat-streak"
   touch "$state/.last-heartbeat"
   set_mtime "$(( $(date +%s) - 30 ))" "$state/.last-heartbeat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 \
@@ -4559,6 +4565,9 @@ test_heartbeat_backstop_surfaces_a_masked_status() {
 test_heartbeat_backstop_surfaces_unsurfaced_status() {
   local dir state fakebin out drain_out sig pid
   dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$dir/data"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   # A captain-relevant status whose .seen-* signature ALREADY matches (so the
   # per-poll signal scan stays quiet) but which was never surfaced (no
@@ -4569,7 +4578,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   printf '3\n' > "$state/.heartbeat-streak"
   touch "$state/.last-heartbeat"
   set_mtime "$(( $(date +%s) - 30 ))" "$state/.last-heartbeat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
