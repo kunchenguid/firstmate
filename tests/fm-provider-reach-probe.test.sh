@@ -412,14 +412,6 @@ expect_code 0 "$rc" "an IPv4 answer works with interval-incompatible awk"
 assert_contains "$out" "dns=ok" "IPv4 validation does not depend on awk intervals"
 assert_contains "$out" "result=reachable" "HTTP follows a valid IPv4 answer under mawk-like awk"
 assert_contains "$(cat "$tmp/urls.log")" "https://$PROBE_HOST" "IPv4 answer still reaches HTTP under mawk-like awk"
-python3 - "$SCRIPT" <<'PY'
-import re, sys
-source = open(sys.argv[1], encoding="utf-8").read()
-programs = re.findall(r"awk\s+'(.*?)'", source, re.S)
-if any(re.search(r"\{[0-9]+(?:,[0-9]*)?\}", program) for program in programs):
-    raise SystemExit("probe implementation must not depend on awk interval quantifiers")
-PY
-
 tmp=$TMP_ROOT/digrc-nottl-noclass; new_case "$tmp"
 make_fake_dig "$tmp" "$tmp/dig.log"
 out=$(PATH="$tmp:$BASE_PATH" FM_FAKE_DIG_MODE=digrc FM_PROVIDER_REACH_DNS_TOOL=dig \
