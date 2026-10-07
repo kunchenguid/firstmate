@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A missing window on the parent's server is not proof a child stopped.
+# A same-named window on the parent's server does not establish child ownership.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$ROOT/tests/git-config-helpers.sh"
@@ -25,6 +25,16 @@ export FM_ROOT_OVERRIDE="$HOME_PARENT" FM_GATE_REFUSE_BYPASS=1
 git -c init.defaultBranch=main init -q "$LAB/project"
 git -C "$LAB/project" -c user.name=Lab -c user.email=lab@example.invalid commit -q --allow-empty -m fixture
 git -C "$LAB/project" worktree add -q -b fm/child "$LAB/wt"
+# This fixture uses a Git worktree rather than a treehouse-managed slot.
+mkdir "$LAB/fakebin"
+cat > "$LAB/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 3 ] && [ "$1" = return ] && [ "$2" = --force ] || exit 1
+git worktree remove --force "$3"
+SH
+chmod +x "$LAB/fakebin/treehouse"
+export PATH="$LAB/fakebin:$PATH"
 export FM_HOME="$HOME_PARENT"
 tmux -f /dev/null -S "$LAB/p" new-session -d -s primary -n fm-parent -c "$ROOT" 'sleep 300'
 export TMUX="$LAB/p,1,0"
@@ -38,9 +48,11 @@ FM_HOME="$HOME_CHILD" "$ROOT/bin/fm-fleet-seats.sh" reserve child --generation g
 printf 'kind=ship\nmode=local-only\nbackend=tmux\nwindow=unavailable:fm-child\nendpoint_task_id=child\nspawn_gen=g-child\nmodel=pool-model-a\nworktree=%s\nproject=%s\n' "$LAB/wt" "$LAB/project" > "$HOME_CHILD/state/child.meta"
 tmux -f /dev/null -S "$LAB/c" new-session -d -s unavailable -n fm-child -c "$LAB/wt" 'sleep 300'
 [ "$(tmux -S "$LAB/c" display-message -p -t '=unavailable:=fm-child' '#{pane_dead}')" = 0 ] || fail 'child fixture is not live'
+tmux -S "$LAB/p" new-session -d -s unavailable -n fm-child -c "$ROOT" 'sleep 300'
 rc=0
 "$ROOT/bin/fm-teardown.sh" parent --force > "$LAB/stdout" 2> "$LAB/stderr" || rc=$?
 [ "$rc" -ne 0 ] || fail 'forced teardown succeeded while the child lived on another socket'
+[ "$(tmux -S "$LAB/p" display-message -p -t '=unavailable:=fm-child' '#{pane_dead}')" = 0 ] || fail 'wrong-socket decoy was stopped'
 [ "$(tmux -S "$LAB/c" display-message -p -t '=unavailable:=fm-child' '#{pane_dead}')" = 0 ] || fail 'unaddressed child was stopped'
 [ -f "$HOME_CHILD/state/child.meta" ] || fail 'child identity was deleted'
 [ -d "$LAB/wt" ] || fail 'child worktree was removed'
@@ -51,16 +63,16 @@ for task in parent child; do
   ledger=$(FM_HOME="$seat_home" "$ROOT/bin/fm-fleet-seats.sh" show "$task")
   [ "$(printf '%s' "$ledger" | jq -r '.incarnations[0].lifecycle')" = reserved ] || fail "$task seat was released"
 done
-# Once the recorded endpoint is reachable and can actually be closed, retry succeeds.
-tmux -S "$LAB/c" kill-server
-tmux -S "$LAB/p" new-session -d -s unavailable -n fm-child -c "$LAB/wt" 'sleep 300'
+# Cleanup from the child's own home and server, then retry the parent.
+FM_HOME="$HOME_CHILD" TMUX="$LAB/c,1,0" "$ROOT/bin/fm-teardown.sh" child --force > "$LAB/child.stdout" 2> "$LAB/child.stderr" || { cat "$LAB/child.stderr" >&2; fail 'owning-home child teardown failed'; }
+if tmux -S "$LAB/c" has-session -t '=unavailable' 2>/dev/null; then
+  fail 'owning-home cleanup left the child endpoint running'
+fi
 "$ROOT/bin/fm-teardown.sh" parent --force > "$LAB/retry.stdout" 2> "$LAB/retry.stderr" || { cat "$LAB/retry.stderr" >&2; fail 'reachable child teardown failed'; }
 [ ! -e "$HOME_CHILD" ] || fail 'successful retry retained the child home'
 [ ! -e "$HOME_PARENT/state/parent.meta" ] || fail 'successful retry retained the parent'
 for holder in "$HOME_PARENT/state/fleet-seats/holders/"*.json; do
   jq -e 'all(.incarnations[]; .lifecycle == "released")' "$holder" >/dev/null || fail 'successful retry retained a counted seat'
 done
-if tmux -S "$LAB/p" has-session -t '=unavailable' 2>/dev/null; then
-  fail 'successful retry left the child endpoint running'
-fi
-echo 'ok - forced teardown retains an unreachable tmux child and releases a closed child'
+[ "$(tmux -S "$LAB/p" display-message -p -t '=unavailable:=fm-child' '#{pane_dead}')" = 0 ] || fail 'successful retry stopped the decoy'
+echo 'ok - forced teardown preserves wrong-socket children until owning-home cleanup'

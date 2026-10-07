@@ -190,7 +190,10 @@
 # is the approved discard path that prevalidates child removal targets, locks each
 # descendant home's task set before enumeration, and holds those locks through
 # child cleanup. Contention refuses the complete forced teardown before child
-# mutation. Local and remote retirement serialize their destructive phase with
+# mutation. Tmux children must first be torn down from their owning home and
+# server: their records lack socket identity, so parent cleanup cannot safely
+# close them even when a same-named window is visible. Local and remote
+# retirement serialize their destructive phase with
 # that mate's backlog-handoff lock under the registry lock. Pending handoff wake
 # state is retired with the home, and local removal failure restores that state
 # before preserving the route for retry. After a successful local or remote
@@ -3563,11 +3566,11 @@ cleanup_firstmate_home_children() {
           return 1
         fi
       elif [ "$child_backend" = tmux ]; then
-        # Child records carry no socket identity. A missing window on this
-        # server cannot prove the child's endpoint stopped on its owning server;
-        # require an acknowledged close of the exact validated task window.
-        tmux kill-window -t "=${child_t%%:*}:=${child_t#*:}" 2>/dev/null \
-          || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
+        # Child records carry no socket identity. Even a successful close can
+        # address a same-named window on another server instead of this child.
+        echo "error: child $child_id has no recorded tmux socket ownership; tear it down from its owning home $home on its owning server, then retry secondmate teardown" >&2
+        endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0
+        return 1
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
