@@ -58,6 +58,18 @@
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
 #                          verdict escalates unchanged.
+#                          A task parked on a settled board review - every source
+#                          it owns in the process-event registry is live and has
+#                          no unhandled captured round (the OWNER column's
+#                          `task:<id>/listening`, settled_board_watch_parked) -
+#                          is idling by design: its quiet pane is absorbed on
+#                          first sight and the wedge ladder defers to that same
+#                          long recheck cadence (wedge_defer_parked_watch),
+#                          so a deliberately idle board guardian does not climb
+#                          the escalation count. The match is evidence-only:
+#                          a round-open source, a dead or orphaned watch, or no
+#                          registered watch at all keeps the unchanged schedule,
+#                          reason and escalation count.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -379,6 +391,11 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # invisibly - except an item held for the captain while the away-posture record
 # exists, which is never rechecked (away_record_present below).
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# The settled-board-watch liveness read parses the OWNER column that
+# `fm-procevent.sh list` publishes, so live-plus-round-free semantics keep one
+# owner. FM_PROCEVENT_LIST_BIN lets tests stub the verdict, the same seam
+# FM_CREW_STATE_BIN provides for the current-state read.
+FM_PROCEVENT_LIST_BIN=${FM_PROCEVENT_LIST_BIN:-$SCRIPT_DIR/fm-procevent.sh}
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
@@ -1500,6 +1517,116 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   wake "$reason"
 }
 
+# Task-owned source ids in this home's process-event registry, one per line.
+# The `owner_task=` field is written by fm-procevent-lib.sh's registration
+# publishers; the read here matches cmd_list's own unlocked field read, so the
+# record format keeps exactly one writer and one reader vocabulary.
+task_owned_procevent_sources() {  # <task> -> owned source ids on stdout
+  local task=$1 reg rec id owner
+  [ -n "$task" ] || return 0
+  reg=$(fm_procevent_registry_dir "$STATE")
+  [ -d "$reg" ] || return 0
+  for rec in "$reg"/*.source; do
+    [ -e "$rec" ] || continue
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    owner=$(sed -n 's/^owner_task=//p' "$rec" 2>/dev/null | head -1)
+    [ "$owner" = "$task" ] || continue
+    id=${rec##*/}
+    printf '%s\n' "${id%.source}"
+  done
+}
+
+# The settled-board-watch exemption: is this task parked on a RESOLVED board
+# review whose process-backed watch is LIVE? The shape is a deliberately idle
+# board guardian: it concluded every captured round of its registered watch (no
+# unhandled round is open), and the watch's runner still holds the claim, so
+# `fm-procevent.sh list` reports every source the task owns as
+# `task:<task>/listening`. Match on that recorded state alone - the registry
+# records and the published OWNER column - never on the task's name or title.
+# One list call answers all owned sources; EVERY owned source must qualify, so
+# a second, dead or round-open source keeps today's ladder. The list read runs
+# only where the caller already pays for evidence (a first-sight stale
+# classification, or the at-threshold branch of the wedge timer), never on an
+# ordinary poll, and every failure - no sources, an unreadable list, an
+# unexpected owner verdict - declines, keeping the unchanged escalation
+# schedule.
+settled_board_watch_parked() {  # <task>
+  local task=$1 ids id list_out
+  [ -n "$task" ] || return 1
+  ids=$(task_owned_procevent_sources "$task") || return 1
+  [ -n "$ids" ] || return 1
+  list_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$FM_PROCEVENT_LIST_BIN" list 2>/dev/null) || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    printf '%s\n' "$list_out" | awk -v id="$id" -v want="task:$task/listening" '
+      NR > 1 && $1 == id { found = 1; if ($3 == want) ok = 1 }
+      END { exit (found && ok) ? 0 : 1 }
+    ' || return 1
+  done <<EOF
+$ids
+EOF
+  return 0
+}
+
+# Drop a window's parked-watch chain wherever its stale bookkeeping resets, so
+# the re-surface cadence is measured from the CURRENT quiet stretch and a
+# resumed-and-reparked pane cannot inherit a stale age.
+clear_parked_watch_tracking() {  # <window-key>
+  local key=$1
+  rm -f "$STATE/.parked-watch-since-$key" "$STATE/.parked-watch-resurfaced-$key"
+}
+
+# One parked-watch absorb, shared by the two places the exemption takes over:
+# the first-sight stale classification and the at-threshold wedge ladder. The
+# quiet age publishes only what the window itself proves: <age> is the idle age
+# already in hand and <wage> ages the whole deferral chain from its own marker,
+# so the bounded re-surface cannot be reset by the timer restarts below. The
+# reason names the evidence and its own recheck action - confirm the registered
+# watch is still live - and the cadence is the shared resurface_absorbed,
+# throttled by this window's own .parked-watch-resurfaced-<key> marker.
+_parked_watch_absorb() {  # <window> <idle-age|""> <triage-label>
+  local win=$1 age=$2 label=$3 key wsf wage reason
+  key=$(window_key "$win")
+  wsf="$STATE/.parked-watch-since-$key"
+  [ -e "$wsf" ] || date +%s > "$wsf"
+  wage=$(age_of "$wsf")
+  reason="stale: $win ("
+  [ -n "$age" ] && reason="${reason}idle ${age}s, "
+  reason="${reason}settled board review parked on its live registered board watch for ${wage}s, rechecked on a long cadence not a wedge; confirm the registered watch is still live)"
+  resurface_absorbed "$win" "$STATE/.parked-watch-resurfaced-$key" "$wage" "$reason"
+  triage_log "absorbed $label (settled board watch parked, idle ${age:-0}s): $win"
+}
+
+# First-sight absorb for a stale pane whose task is parked on a settled board
+# watch: advance the stale suppressor and clear the wedge timer so the pane
+# never climbs the ladder while the watch stays live (pause_state_class answers
+# `parked-watch` for this shape). The escalation counter is cleared with the
+# timer, matching handle_paused_stale's classifier takeover.
+handle_parked_watch_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key
+  key=$(window_key "$win")
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_write_tracking "$key"
+  _parked_watch_absorb "$win" '' 'non-terminal stale'
+}
+
+# Defer ONE wedge escalation for a task parked on a settled board watch, exactly
+# the shape wedge_defer_writing gives a written worktree: a DEFERRAL, not a
+# cancellation, so the idle timer restarts and the next window re-reads the
+# evidence - a watch that dies is escalating again within one
+# STALE_ESCALATE_SECS, which is why the worst-case detection time for a pane
+# whose watch stops being live does not move. The escalation counter is left
+# alone: this is not an escalation, and a later genuine one must keep the
+# demand-deep-inspection history it had already earned.
+wedge_defer_parked_watch() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4
+  date +%s > "$since_file"
+  clear_write_tracking "$(window_key "$win")"
+  _parked_watch_absorb "$win" "$age" "$label"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1543,6 +1670,16 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           return 0
         fi
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
+          return 0
+        fi
+        # A task parked on a settled board review whose registered process-backed
+        # watch is live is idling by design, not wedging: defer to the shared
+        # long recheck cadence instead of climbing the ladder. Runs AFTER the
+        # dead-record probe so a gone agent still gets its one-shot report, and
+        # only inside the at-threshold branch, so the list read stays bounded to
+        # once per window per STALE_ESCALATE_SECS like the probes above it.
+        if settled_board_watch_parked "$task"; then
+          wedge_defer_parked_watch "$win" "$since_file" "$label" "$age"
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -1717,6 +1854,7 @@ clear_pause_state() {  # <window-key>
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
+  clear_parked_watch_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
     "$STATE/.waiting-resurfaced-$key"
 }
@@ -1738,7 +1876,23 @@ pause_state_class() {  # <window> <task>
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
-    crew_absorb_class "$task"
+    class=$(crew_absorb_class "$task")
+    if [ "$class" = working ]; then
+      printf 'working'
+      return
+    fi
+    # A task parked on a settled board review with a live registered
+    # process-backed watch is healthy-by-design idleness, so its quiet pane
+    # takes the bounded parked-watch cadence instead of surfacing as an
+    # inconclusive state. Only a `none` crew verdict reaches this read - a
+    # working or authoritatively paused crew keeps today's answer - and the
+    # predicate itself declines on every failure, so an unreadable registry or
+    # list keeps the unchanged `none`.
+    if [ "$class" = none ] && settled_board_watch_parked "$task"; then
+      printf 'parked-watch'
+      return
+    fi
+    printf '%s' "$class"
     return
   fi
   # Read once past the declared-wait gate and reused by both liveness gates below,
@@ -3189,6 +3343,9 @@ EOF
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
+              parked-watch)
+                handle_parked_watch_stale "$w" "$task" "$h"
+                ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
@@ -3223,6 +3380,7 @@ EOF
         else
           rm -f "$ssf" "$ewf"
           clear_write_tracking "$key"
+          clear_parked_watch_tracking "$key"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
         # is cleared - but not in the same poll the declared-pause cadence just
@@ -3241,6 +3399,7 @@ EOF
       else
         rm -f "$ssf" "$ewf"
         clear_write_tracking "$key"
+        clear_parked_watch_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
