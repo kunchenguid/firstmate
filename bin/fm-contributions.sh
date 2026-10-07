@@ -261,7 +261,7 @@ forge() {
     fi
     # A kill at the read bound or the deadline is budget refusal too; only the
     # forge's own nonzero exit is unavailable evidence.
-    if [ "$rc" -eq 124 ]; then
+    if fm_timed_out "$rc"; then
       BUDGET_EXHAUSTED=1
       : > "$TMP/budget-exhausted"
       return "$rc"
