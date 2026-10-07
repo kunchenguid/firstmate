@@ -198,7 +198,7 @@ Verify the worker is placed in the correct workspace.
 EOF
 }
 
-for id in uniqA uniqB dupC dupD staleF smE presU presD; do
+for id in uniqA uniqB dupC dupD staleF smE presU presD presC presL presS presF; do
   mkdir -p "$PRIMARY_HOME/data/$id" "$SM_HOME/data/$id" "$PRES_HOME/data/$id"
   write_ship_brief "$PRIMARY_HOME/data/$id/brief.md" "$id"
   write_ship_brief "$SM_HOME/data/$id/brief.md" "$id"
@@ -279,6 +279,122 @@ PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
   || fail "the projection journal does not name its own workspace"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
 pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
+
+# --- 2c. custom launcher label still publishes a binding for its exact id --
+
+read -r WS_CUSTOM _ LAUNCH_CUSTOM_PANE <<EOF
+$(make_workspace FIRSTMATE)
+EOF
+[ -n "$WS_CUSTOM" ] && [ -n "$LAUNCH_CUSTOM_PANE" ] \
+  || fail "could not create the custom-labeled launcher workspace"
+spawn_from_launcher "$LAUNCH_CUSTOM_PANE" "$PRES_HOME" presC "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "custom-labeled launcher spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
+PRESC_JOURNAL="$PRES_HOME/state/presC.herdr-presentation"
+[ "$(journal_field "$PRESC_JOURNAL" version)" = 2 ] \
+  || fail "custom-labeled launcher did not publish an exact binding"$'\n'"$(cat "$SPAWN_ERR")"
+[ "$(journal_field "$PRESC_JOURNAL" parent_workspace_id)" = "$WS_CUSTOM" ] \
+  || fail "custom-labeled launcher bound a different parent"
+[ "$(journal_field "$PRESC_JOURNAL" parent_label)" = FIRSTMATE ] \
+  || fail "binding did not preserve the observed custom parent label"
+PRESC_WS=$(journal_field "$PRESC_JOURNAL" workspace_id)
+FM_GATE_REFUSE_BYPASS=1 FM_HOME="$PRES_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$PRES_HOME/state" FM_DATA_OVERRIDE="$PRES_HOME/data" \
+  FM_CONFIG_OVERRIDE="$PRES_HOME/config" "$ROOT/bin/fm-teardown.sh" presC --force \
+  >"$TMP_ROOT/presC-teardown.out" 2>"$TMP_ROOT/presC-teardown.err" \
+  || fail "custom-labeled launcher teardown failed: $(cat "$TMP_ROOT/presC-teardown.err")"
+[ ! -e "$PRESC_JOURNAL" ] || fail "custom-labeled launcher teardown kept the presentation journal"
+[ -z "$(label_of_workspace "$PRESC_WS")" ] || fail "custom-labeled launcher teardown kept the projected workspace"
+[ "$(label_of_workspace "$WS_CUSTOM")" = FIRSTMATE ] || fail "custom-labeled launcher teardown changed the parent"
+pass "real herdr E2E: a custom-labeled exact launcher publishes a binding and retires its projected workspace cleanly"
+
+# A historical journal still identifies a child of a renamed parent by exact
+# parent id and token. A similarly shaped workspace without that journal is
+# foreign and must not authorize a new exact binding.
+LEGACY_TOKEN=$(bash -c '
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_projection_journal_create "$2" oldC
+' bash "$ROOT" "$PRES_HOME/state") || fail "could not create a historical presentation journal"
+LEGACY_LABEL="firstmate/oldC · p:$LEGACY_TOKEN"
+read -r WS_LEGACY TAB_LEGACY PANE_LEGACY <<EOF
+$(make_workspace "$LEGACY_LABEL")
+EOF
+[ -n "$WS_LEGACY" ] && [ -n "$TAB_LEGACY" ] && [ -n "$PANE_LEGACY" ] \
+  || fail "could not create the historical child workspace"
+bash -c '
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_projection_journal_bind \
+    "$2/state/oldC.herdr-presentation" oldC "$(cd "$2" && pwd -P)" "$3" \
+    "$4" "$5" "$6" "$7" firstmate "$8" fm-oldC
+' bash "$ROOT" "$PRES_HOME" "$HERDR_LAB_SESSION" \
+  "$WS_LEGACY" "$TAB_LEGACY" "$PANE_LEGACY" "$WS_CUSTOM" "$LEGACY_LABEL" \
+  || fail "could not bind the historical child journal"
+spawn_from_launcher "$LAUNCH_CUSTOM_PANE" "$PRES_HOME" presL "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "spawn after a journaled historical child failed: $(cat "$SPAWN_ERR")"
+PRESL_JOURNAL="$PRES_HOME/state/presL.herdr-presentation"
+[ "$(journal_field "$PRESL_JOURNAL" version)" = 2 ] \
+  || fail "historical child blocked exact binding: $(cat "$SPAWN_ERR")"
+[ "$(journal_field "$PRESL_JOURNAL" parent_workspace_id)" = "$WS_CUSTOM" ] \
+  || fail "spawn after historical child bound another parent"
+record_worktree "$PRES_HOME/state/presL.meta"
+PRESL_WS=$(journal_field "$PRESL_JOURNAL" workspace_id)
+PRESL_OLD_PANE=$(journal_field "$PRESL_JOURNAL" pane_id)
+PRESL_OFFSET=$(lab workspace list | jq -r --arg parent "$WS_CUSTOM" --arg old "$WS_LEGACY" --arg child "$PRESL_WS" '
+  [.result.workspaces[] | .workspace_id] as $ids
+  | (($ids | index($old)) - ($ids | index($parent))) as $old_offset
+  | (($ids | index($child)) - ($ids | index($old))) as $child_offset
+  | "\($old_offset),\($child_offset)"')
+[ "$PRESL_OFFSET" = 1,1 ] || fail "new child was not placed after the journaled historical child: $PRESL_OFFSET"
+pass "real herdr E2E: a renamed exact parent binds a new projection after its journaled historical child"
+
+REVIEW_TOKEN=$(bash -c '
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_projection_journal_create "$2" reviewC
+' bash "$ROOT" "$PRES_HOME/state") || fail "could not create the sibling parent journal"
+read -r WS_REVIEW _ _ <<EOF
+$(make_workspace REVIEW)
+EOF
+[ -n "$WS_REVIEW" ] || fail "could not create the sibling custom parent"
+REVIEW_LABEL="└ reviewC · p:$REVIEW_TOKEN"
+read -r WS_REVIEW_CHILD TAB_REVIEW_CHILD PANE_REVIEW_CHILD <<EOF
+$(make_workspace "$REVIEW_LABEL")
+EOF
+[ -n "$WS_REVIEW_CHILD" ] && [ -n "$TAB_REVIEW_CHILD" ] && [ -n "$PANE_REVIEW_CHILD" ] \
+  || fail "could not create the sibling parent's child"
+bash -c '
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_projection_journal_bind \
+    "$2/state/reviewC.herdr-presentation" reviewC "$(cd "$2" && pwd -P)" "$3" \
+    "$4" "$5" "$6" "$7" REVIEW "$8" fm-reviewC
+' bash "$ROOT" "$PRES_HOME" "$HERDR_LAB_SESSION" \
+  "$WS_REVIEW_CHILD" "$TAB_REVIEW_CHILD" "$PANE_REVIEW_CHILD" "$WS_REVIEW" "$REVIEW_LABEL" \
+  || fail "could not bind the sibling parent's child"
+spawn_from_launcher "$LAUNCH_CUSTOM_PANE" "$PRES_HOME" presS "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "spawn before a sibling custom parent failed: $(cat "$SPAWN_ERR")"
+PRESS_JOURNAL="$PRES_HOME/state/presS.herdr-presentation"
+[ "$(journal_field "$PRESS_JOURNAL" version)" = 2 ] \
+  || fail "sibling custom parent blocked exact binding: $(cat "$SPAWN_ERR")"
+record_worktree "$PRES_HOME/state/presS.meta"
+PRESS_WS=$(journal_field "$PRESS_JOURNAL" workspace_id)
+PRESS_ORDER=$(lab workspace list | jq -r --arg prior "$PRESL_WS" --arg child "$PRESS_WS" --arg sibling "$WS_REVIEW" --arg sibling_child "$WS_REVIEW_CHILD" '
+  [.result.workspaces[] | .workspace_id] as $ids
+  | "\(($ids | index($child)) - ($ids | index($prior))),\(($ids | index($sibling_child)) - ($ids | index($sibling)))"')
+[ "$PRESS_ORDER" = 1,1 ] || fail "sibling custom parent's child block was not preserved: $PRESS_ORDER"
+pass "real herdr E2E: another journaled custom parent keeps its child while the launcher binds exactly"
+
+FOREIGN_LABEL='firstmate/foreign · p:AbCdEfGhIjKlMnOpQrStUv'
+read -r WS_FOREIGN _ _ <<EOF
+$(make_workspace "$FOREIGN_LABEL")
+EOF
+[ -n "$WS_FOREIGN" ] || fail "could not create an unjournaled foreign child"
+spawn_from_launcher "$LAUNCH_CUSTOM_PANE" "$PRES_HOME" presF "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "foreign-child spawn should retain its worker: $(cat "$SPAWN_ERR")"
+PRESF_JOURNAL="$PRES_HOME/state/presF.herdr-presentation"
+[ "$(journal_field "$PRESF_JOURNAL" version)" = 1 ] \
+  || fail "foreign child incorrectly authorized an exact binding"
+record_worktree "$PRES_HOME/state/presF.meta"
+[ "$(label_of_workspace "$WS_FOREIGN")" = "$FOREIGN_LABEL" ] \
+  || fail "foreign child was changed during refused binding"
+pass "real herdr E2E: an unjournaled lookalike stays foreign and blocks exact binding"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------
@@ -429,7 +545,7 @@ pass "real herdr E2E: a --secondmate launch still stands up that secondmate's ow
 
 # --- 8. teardown closes only the worker's own pane --------------------------
 
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
   FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" dupC >"$TMP_ROOT/teardown.out" 2>&1
 status=$?
@@ -442,6 +558,28 @@ lab pane get "$LAUNCH_DUP_PANE" >/dev/null 2>&1 || fail "teardown closed the lau
 lab pane get "$UNIQB_PANE" >/dev/null 2>&1 || fail "teardown closed an unrelated worker's pane in the other same-labeled workspace"
 [ "$(label_of_workspace "$WS_PRIMARY_DUP")" = firstmate ] || fail "teardown removed or renamed the launcher's workspace"
 pass "real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact"
+
+"$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for custom-parent reclaim"
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for custom-parent reclaim"
+spawn_from_launcher "$LAUNCH_CUSTOM_PANE" "$PRES_HOME" presL "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "custom-parent reclaim failed: $(cat "$SPAWN_ERR")"
+record_worktree "$PRES_HOME/state/presL.meta"
+[ "$(journal_field "$PRESL_JOURNAL" workspace_id)" = "$PRESL_WS" ] \
+  || fail "custom-parent reclaim fell back to another workspace"
+PRESL_NEW_PANE=$(journal_field "$PRESL_JOURNAL" pane_id)
+[ -n "$PRESL_NEW_PANE" ] && [ "$PRESL_NEW_PANE" != "$PRESL_OLD_PANE" ] \
+  || fail "custom-parent reclaim did not replace the old husk pane"
+lab pane get "$PRESL_OLD_PANE" >/dev/null 2>&1 \
+  && fail "custom-parent reclaim left the old husk pane"
+FM_GATE_REFUSE_BYPASS=1 FM_HOME="$PRES_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$PRES_HOME/state" FM_DATA_OVERRIDE="$PRES_HOME/data" \
+  FM_CONFIG_OVERRIDE="$PRES_HOME/config" "$ROOT/bin/fm-teardown.sh" presL --force \
+  >"$TMP_ROOT/presL-teardown.out" 2>"$TMP_ROOT/presL-teardown.err" \
+  || fail "custom-parent reclaimed teardown failed: $(cat "$TMP_ROOT/presL-teardown.err")"
+[ ! -e "$PRESL_JOURNAL" ] || fail "custom-parent reclaimed teardown kept its presentation journal"
+pass "real herdr E2E: restart reclaims and tears down the exact custom-parent projection"
 
 if ! cleanup_all; then
   trap - EXIT

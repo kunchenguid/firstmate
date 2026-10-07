@@ -607,18 +607,11 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
   printf '%s' "$token"
 }
 
-fm_backend_herdr_projection_journal_field() {  # <journal> <key>
-  local journal=$1 key=$2 count
-  count=$(grep -c "^${key}=" "$journal" 2>/dev/null || true)
-  [ "$count" = 1 ] || return 1
-  grep "^${key}=" "$journal" 2>/dev/null | cut -d= -f2-
-}
-
 # fm_backend_herdr_projection_journal_snapshot: validate a version 1 attempt
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 lines=0 line='' key value seen='|' expected_label expected_legacy_label expected_task_label exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -632,10 +625,34 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=""
   FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=""
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
-  lines=$(wc -l < "$journal" 2>/dev/null | tr -d '[:space:]')
-  FM_BACKEND_HERDR_JOURNAL_VERSION=$(fm_backend_herdr_projection_journal_field "$journal" version) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TASK_ID=$(fm_backend_herdr_projection_journal_field "$journal" task_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=$(fm_backend_herdr_projection_journal_field "$journal" projection_id) || return 1
+  while IFS= read -r line; do
+    lines=$((lines + 1))
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) return 1 ;;
+    esac
+    case "$seen" in *"|$key|"*) return 1 ;; esac
+    seen="$seen$key|"
+    case "$key" in
+      version) FM_BACKEND_HERDR_JOURNAL_VERSION=$value ;;
+      task_id) FM_BACKEND_HERDR_JOURNAL_TASK_ID=$value ;;
+      projection_id) FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=$value ;;
+      home) FM_BACKEND_HERDR_JOURNAL_HOME=$value ;;
+      session) FM_BACKEND_HERDR_JOURNAL_SESSION=$value ;;
+      workspace_id) FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=$value ;;
+      tab_id) FM_BACKEND_HERDR_JOURNAL_TAB_ID=$value ;;
+      pane_id) FM_BACKEND_HERDR_JOURNAL_PANE_ID=$value ;;
+      parent_workspace_id) FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID=$value ;;
+      parent_label) FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=$value ;;
+      workspace_label) FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=$value ;;
+      task_label) FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=$value ;;
+      *) return 1 ;;
+    esac
+  done < "$journal"
+  [ -z "$line" ] || return 1
+  case "$seen" in *'|version|'*) ;; *) return 1 ;; esac
+  case "$seen" in *'|task_id|'*) ;; *) return 1 ;; esac
+  case "$seen" in *'|projection_id|'*) ;; *) return 1 ;; esac
   [ "$FM_BACKEND_HERDR_JOURNAL_TASK_ID" = "$id" ] || return 1
   [ "${#FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID}" -eq 22 ] || return 1
   case "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" in
@@ -646,15 +663,6 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
     2:12) ;;
     *) return 1 ;;
   esac
-  FM_BACKEND_HERDR_JOURNAL_HOME=$(fm_backend_herdr_projection_journal_field "$journal" home) || return 1
-  FM_BACKEND_HERDR_JOURNAL_SESSION=$(fm_backend_herdr_projection_journal_field "$journal" session) || return 1
-  FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=$(fm_backend_herdr_projection_journal_field "$journal" workspace_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TAB_ID=$(fm_backend_herdr_projection_journal_field "$journal" tab_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PANE_ID=$(fm_backend_herdr_projection_journal_field "$journal" pane_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_journal_field "$journal" parent_workspace_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" parent_label) || return 1
-  FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" workspace_label) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" task_label) || return 1
   case "$FM_BACKEND_HERDR_JOURNAL_HOME" in
     /*) ;;
     *) return 1 ;;
@@ -673,8 +681,13 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
   expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  expected_legacy_label=
+  if [[ $FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL =~ ^(firstmate|2ndmate-[^/]+)$ ]]; then
+    expected_legacy_label="$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL/$id · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
+  fi
   expected_task_label="fm-$id"
-  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
+  { [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_legacy_label" ]; } \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
 }
 
@@ -689,6 +702,28 @@ fm_backend_herdr_projection_home_identity() {  # <home>
   local home=$1
   [ -d "$home" ] || return 1
   (cd "$home" 2>/dev/null && pwd -P)
+}
+
+fm_backend_herdr_projection_owned_children() {  # <state> <home> <session> <parent-workspace-id>
+  local state=$1 home=$2 session=$3 parent_workspace=$4 journal id
+  local records=''
+  for journal in "$state"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
+    [ -f "$journal" ] && [ ! -L "$journal" ] || continue
+    id=${journal##*/}
+    id=${id%"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"}
+    fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || continue
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
+      || [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$home" ] \
+      || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ]; then
+      continue
+    fi
+    if [ -n "$parent_workspace" ] \
+      && [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" != "$parent_workspace" ]; then
+      continue
+    fi
+    records+="$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID"$'\t'"$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"$'\t'"$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID"$'\n'
+  done
+  printf '%s' "$records" | jq -Rn '[inputs | split("\t") | {workspace_id: .[0], token: .[1], parent_workspace_id: .[2]}]'
 }
 
 fm_backend_herdr_projection_journal_write_v2() {  # <journal> <task-id> <token> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
@@ -1457,16 +1492,12 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # returned by THIS projected create immediately after its owning parent's
 # contiguous child block and before the next parent.
 #
-# <parent-label> is the owning FM_HOME label (firstmate or 2ndmate-<id>).
-# Optional <parent-workspace-id> is that parent's EXACT id, which the caller
-# already resolved from the launching agent's own herdr identity. When given it
-# anchors the owning parent by id, so two workspaces sharing the home label no
-# longer make the whole layout ambiguous; when omitted the parent is located by
-# label exactly as before. With a unique label the two select the same
-# workspace, so ordering behavior is unchanged in the ordinary case.
-# New-format └ ... · p:<token> children and, for compatibility only, already
-# adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
-# the block read-only; they are never renamed or moved.
+# <parent-label> is the observed label of the already resolved parent, which
+# may differ from this home's computed label. Optional <parent-workspace-id>
+# anchors that exact parent regardless of label collisions; when omitted the
+# parent is located by a unique label. Production callers supply <state> and
+# <home> for home-local journal correlation; docs/herdr-backend.md "Ordering"
+# owns the sibling-evidence policy.
 #
 # This is presentation-only and always returns success.
 # Every unavailable, ambiguous, failed, or unverifiable ordering step prints a
@@ -1478,8 +1509,8 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # current workspace-create response.
 # After a successful move, every pre-existing workspace id sequence excluding
 # the new id must be byte-identical to the pre-move sequence.
-fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>]
-  local session=$1 created=$2 parent=$3 parent_ws=${4:-} list analysis current desired socket mover response move_status focus_before move_capable
+fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id> <state> <home>]
+  local session=$1 created=$2 parent=$3 parent_ws=${4:-} state=${5:-} home=${6:-} list analysis current desired socket mover response move_status focus_before move_capable owned='[]' canonical_home
   local before_existing after_existing
   [ -n "$parent" ] || {
     echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
@@ -1489,25 +1520,54 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
     return 0
   }
-  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" '
+  if [ -n "$parent_ws" ] && [ -n "$state" ]; then
+    canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || canonical_home=
+    if [ -n "$canonical_home" ]; then
+      owned=$(fm_backend_herdr_projection_owned_children "$state" "$canonical_home" "$session" '') || owned='[]'
+    fi
+  fi
+  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" --argjson owned "$owned" --arg strict "$state" '
     def is_parent:
       if ($parent_ws | length) > 0
       then .workspace_id == $parent_ws
       else (.label | type) == "string" and .label == $parent
       end;
-    def is_top_level_parent:
+    def is_conventional_parent:
       (.label | type) == "string"
       and ((.label == "firstmate") or (.label | test("^2ndmate-[^/]+$")));
+    def is_top_level_parent:
+      .workspace_id as $id
+      | is_conventional_parent
+        or (($strict | length) > 0 and any($owned[]; .parent_workspace_id == $id));
     def is_new_child:
       (.label | type) == "string"
       and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child:
       (.label | type) == "string"
       and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
+    def is_journaled_legacy_child:
+      (.label | type) == "string"
+      and (.label | test("^.+/.+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child_for($owner):
       is_legacy_child and (.label | startswith($owner + "/"));
-    def is_child_for($owner):
-      is_new_child or is_legacy_child_for($owner);
+    def is_owned_child_for($owner):
+      .workspace_id as $id
+      | .label as $label
+      | any($owned[]; .token as $token | .workspace_id == $id and .parent_workspace_id == $owner and ($label | endswith(" · p:" + $token)));
+    # A current-format sibling is read-only layout evidence, not ownership.
+    # Another home can project into the same exact launcher workspace.
+    def is_shared_child($spaces):
+      .workspace_id as $id | .label as $label
+      | is_new_child
+        and all($owned[] | select(.workspace_id == $id); .parent_workspace_id == $parent_ws)
+        and ([$spaces[] | select(.workspace_id == $id)] | length) == 1
+        and ([$spaces[] | select((.label | type) == "string" and (.label | endswith($label[-27:])))] | length) == 1;
+    def is_child_for($owner; $spaces):
+      if ($strict | length) > 0 then
+        is_shared_child($spaces) or ((is_new_child or is_journaled_legacy_child) and is_owned_child_for($parent_ws))
+      else
+        is_new_child or is_legacy_child_for($owner)
+      end;
     (.result.workspaces // null) as $spaces
     | select(($spaces | type) == "array" and ($spaces | length) > 0)
     | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $created)]) as $matches
@@ -1521,7 +1581,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     | (
         reduce range($pidx + 1; $current) as $i (
           0;
-          if ($spaces[$i] | is_child_for($parent)) and (. == ($i - $pidx - 1))
+          if ($spaces[$i] | is_child_for($parent; $spaces)) and (. == ($i - $pidx - 1))
           then . + 1
           else .
           end
@@ -1531,17 +1591,21 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
         {valid: true, active_parent: null};
         if .valid == false then .
         elif ($spaces[$i] | is_top_level_parent) then
-          .active_parent = $spaces[$i].label
-        elif ($spaces[$i] | is_new_child) then
-          if .active_parent == null then .valid = false else . end
-        elif ($spaces[$i] | is_legacy_child) then
+          .active_parent = (if ($strict | length) > 0 then $spaces[$i].workspace_id else $spaces[$i].label end)
+        elif ($spaces[$i] | is_new_child or is_legacy_child or (($strict | length) > 0 and is_journaled_legacy_child)) then
           .active_parent as $owner
           | if $owner == null then
               .valid = false
-            elif (($spaces[$i] | is_legacy_child_for($owner)) | not) then
-              .valid = false
-            else
+            elif ($strict | length) > 0 then
+              if ($spaces[$i] | is_owned_child_for($owner)) then .
+              elif $owner != $parent_ws and any($spaces[];
+                .workspace_id == $owner and is_conventional_parent
+                and (.label as $owner_label | $spaces[$i] | is_new_child or is_legacy_child_for($owner_label))) then .
+              else .valid = false end
+            elif ($spaces[$i] | is_new_child or is_legacy_child_for($owner)) then
               .
+            else
+              .valid = false
             end
         else
           .active_parent = null
@@ -2705,20 +2769,40 @@ fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-labe
   ' 2>/dev/null
 }
 
+# Read the observed label of the already resolved exact parent workspace.
+# The launcher identity (or the unique outside-Herdr home lookup) supplies its
+# id; this lookup never chooses a parent by label.
+fm_backend_herdr_projection_parent_label_exact() {  # <session> <parent-workspace-id>
+  local session=$1 parent_workspace=$2 list
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -er --arg parent_workspace "$parent_workspace" '
+    (.result.workspaces // null) as $spaces
+    | select(($spaces | type) == "array")
+    | [$spaces[]? | select(.workspace_id == $parent_workspace)]
+    | select(length == 1)
+    | .[0].label
+    | select(type == "string" and length > 0 and (index("\n") == null) and (index("\r") == null))
+  ' 2>/dev/null
+}
+
 # fm_backend_herdr_projection_live_binding_matches: verify one exact projected
 # workspace, its single task tab/pane, its unique token label, and its current
 # position inside the exact parent workspace's contiguous child block.
 # This read-only predicate grants no mutation authority by itself.
-fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
+fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label> [<state> <home>]
   local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
-  local parent_label=$7 workspace_label=$8 task_label=$9 list tabs panes
+  local parent_label=$7 workspace_label=$8 task_label=$9 state=${10:-} home=${11:-} list tabs panes owned='[]' canonical_home
+  if [ -n "$state" ]; then
+    canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || return 1
+    owned=$(fm_backend_herdr_projection_owned_children "$state" "$canonical_home" "$session" '') || return 1
+  fi
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e \
     --arg token "$token" \
     --arg workspace "$workspace" \
     --arg parent_workspace "$parent_workspace" \
     --arg parent_label "$parent_label" \
-    --arg workspace_label "$workspace_label" '
+    --arg workspace_label "$workspace_label" --argjson owned "$owned" --arg strict "$state" '
       def is_new_child:
         (.label | type) == "string"
         and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
@@ -2726,13 +2810,31 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
         (.label | type) == "string"
         and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
         and (.label | startswith($owner + "/"));
+      def is_legacy_child:
+        (.label | type) == "string"
+        and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
+      def is_journaled_legacy_child:
+        (.label | type) == "string"
+        and (.label | test("^.+/.+ · p:[A-Za-z0-9_-]{22}$"));
+      def is_owned_child:
+        .workspace_id as $id
+        | .label as $label
+        | any($owned[]; .token as $token | .workspace_id == $id and .parent_workspace_id == $parent_workspace and ($label | endswith(" · p:" + $token)));
+      # Foreign current-format siblings can share the exact parent block;
+      # only the target task journal and exact endpoint authorize its reclaim.
+      def is_shared_child($spaces):
+        .workspace_id as $id | .label as $label
+        | is_new_child
+          and all($owned[] | select(.workspace_id == $id); .parent_workspace_id == $parent_workspace)
+          and ([$spaces[] | select(.workspace_id == $id)] | length) == 1
+          and ([$spaces[] | select((.label | type) == "string" and (.label | endswith($label[-27:])))] | length) == 1;
       (.result.workspaces // null) as $spaces
       | select(($spaces | type) == "array")
       | select(([$spaces[]? | select(.workspace_id == $workspace)] | length) == 1)
       | select(([$spaces[]? | select(.workspace_id == $workspace and .label == $workspace_label)] | length) == 1)
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1)
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id == $workspace)] | length) == 1)
-      | select(([$spaces[]? | select(.workspace_id == $parent_workspace and .label == $parent_label)] | length) == 1)
+      | select(([$spaces[]? | select(.workspace_id == $parent_workspace and (($strict | length) > 0 or .label == $parent_label))] | length) == 1)
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $parent_workspace)]) as $parents
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $workspace)]) as $children
       | select(($parents | length) == 1 and ($children | length) == 1)
@@ -2740,7 +2842,9 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
       | ($children[0]) as $child_index
       | select($child_index > $parent_index)
       | reduce range($parent_index + 1; $child_index) as $i
-          (true; . and (($spaces[$i] | is_new_child) or ($spaces[$i] | is_legacy_child_for($parent_label))))
+          (true; . and ($spaces[$i] | if ($strict | length) > 0 then
+            is_shared_child($spaces) or ((is_new_child or is_journaled_legacy_child) and is_owned_child)
+            else is_new_child or is_legacy_child_for($parent_label) end))
       | select(. == true)
     ' >/dev/null 2>&1 || return 1
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
@@ -2778,9 +2882,9 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
 # refusal with flat fallback permitted, and 1 means a live/unknown or
 # post-mutation uncertainty that must refuse the launch.
-fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
+fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <task-label> <cwd>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
-  local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status
+  local task_label=$8 cwd=$9 canonical_home state focus_before active_tab out new_tab new_pane info close_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
@@ -2797,7 +2901,6 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
      || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$meta_workspace" ] \
      || [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$meta_tab" ] \
      || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$meta_pane" ] \
-     || [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" != "$parent_label" ] \
      || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$task_label" ]; then
     echo "warning: herdr presentation binding for $id does not match its exact home, endpoint, or parent; spawning flat" >&2
     return 2
@@ -2805,8 +2908,8 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   if ! fm_backend_herdr_projection_live_binding_matches \
     "$session" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
     "$meta_workspace" "$meta_tab" "$meta_pane" \
-    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$parent_label" \
-    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label"; then
+    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label" "$(dirname "$journal")" "$canonical_home"; then
     echo "warning: herdr presentation binding for $id has an ambiguous, renamed, foreign, or non-nested live shape; spawning flat" >&2
     return 2
   fi
@@ -2904,8 +3007,8 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   if ! fm_backend_herdr_projection_live_binding_matches \
     "$session" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
     "$meta_workspace" "$new_tab" "$new_pane" \
-    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$parent_label" \
-    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label"; then
+    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label" "$(dirname "$journal")" "$canonical_home"; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id did not converge exactly; spawning flat" >&2
     return 2

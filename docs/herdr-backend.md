@@ -252,9 +252,12 @@ Creation proceeds in this order:
 
 1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
 2. After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding.
-   That binding records the physical home, named session, endpoint, parent, and immutable expected labels.
+   That binding records the physical home, named session, exact endpoint and parent ids, the observed label of that exact parent, and the expected task labels.
+   A launcher workspace may carry a custom label different from the computed home label; its verified id still owns the projection.
 
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
+Reclaim checks the recorded exact parent id against the live topology.
+The recorded parent label describes its appearance when the binding was published and may differ from its current label.
 
 The token is visible in the workspace title, because Herdr exposes no verified hidden persistent field.
 Neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
@@ -276,7 +279,7 @@ An ambiguous response grants no mutation or cleanup authority.
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 
-Projected children are placed in one contiguous block immediately after their owning home when all of these are verifiable:
+Projected children are placed in one contiguous block immediately after their exact owning parent workspace when all of these are verifiable:
 
 - The session layout.
 - The protocol.
@@ -284,8 +287,13 @@ Projected children are placed in one contiguous block immediately after their ow
 - `python3`.
 - The machine-private per-session lock.
 
-Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
-A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
+An adjacent current-format `└` child with a unique workspace id and visible token extends the exact launcher's block as read-only layout evidence, allowing multiple homes to project beneath the same launcher without reading another home's journals.
+That evidence grants no ownership or mutation authority over the sibling; reclaim and cleanup still require the target task's own exact home, session, workspace, tab, and pane binding.
+A historical child extends the launcher's block only when this home's version 2 journal matches the session, exact parent and child workspace ids, and the child's visible label token.
+The journal reader accepts current `└` labels and historical `firstmate/<task>` or `2ndmate-<id>/<task>` labels; the live child may retain its old prefix after its parent is renamed.
+A journaled child also identifies a custom-labeled top-level parent when ordering past that parent's block.
+Legacy children are never renamed or migrated, and an unjournaled legacy child in the launcher's block, ambiguous token, detached child, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
+Ordering may traverse another conventional parent's adjacent current-format or matching-prefix historical children as read-only layout evidence without consulting that home's journals.
 
 Ordering failure never fails the task spawn.
 Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
@@ -372,7 +380,7 @@ The replacement is allowed only when all of these agree:
 - The session.
 - The metadata endpoint.
 - The unique token match.
-- The workspace shape and labels.
+- The projected workspace shape and labels.
 - The parent identity and placement.
 - The non-target focus snapshot.
 
@@ -386,7 +394,7 @@ These cases fall back flat without mutating the old projection when duplicate-ag
 - Version 1 journals.
 - Dead or missing panes.
 - Duplicate or absent tokens.
-- Renamed or detached spaces.
+- Renamed or detached projection workspaces.
 - Cross-home mismatches.
 - Inconsistent endpoint bindings.
 - Active target tabs.
