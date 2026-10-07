@@ -654,6 +654,17 @@ case "$fault:$*" in
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
   not-found:'api repos/o/r/'*) printf 'HTTP 404\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
+  # The core read fails with a caller-chosen transient message for the first
+  # $FORGE_TRANSIENT_FAILS attempts, then the fixture answer is served.
+  transient-core:'api repos/o/r/pulls/8')
+    n=$(cat "$FORGE/transient-count" 2>/dev/null || printf '0')
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$FORGE/transient-count"
+    if [ "$n" -le "${FORGE_TRANSIENT_FAILS:-1}" ]; then
+      printf '%s\n' "${FORGE_TRANSIENT_ERR:-gh: HTTP 500}" >&2
+      exit 1
+    fi ;;
+  always-500:'api repos/o/r/'*) printf 'gh: HTTP 500\n' >&2; exit 1 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
@@ -706,6 +717,72 @@ test_genuine_failure_near_deadline_is_unavailable() {
     and .records[0].error == "forge observation unavailable or changed during read"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
   pass 'a genuine forge failure inside the budget still records the error and wakes'
+}
+
+test_transient_forge_failure_retries_within_budget() {
+  local home out calls
+  # ① one transient 5xx on the core read, then a healthy read: no unavailable
+  #    line, and the URL is recorded as a successful observation with one retry.
+  home=$(new_home transient-recovers)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'transient-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_TRANSIENT_FAILS=1 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'a transient forge 5xx failed the whole poll'
+  [ -z "$out" ] || fail "a recovered transient forge 5xx printed a wake: $out"
+  jq -e --arg now "$NOW" --arg head "$HEAD_A" '.records[0] | .checked_at == $now and .error == null
+    and .observation.state == "open" and .observation.head == $head' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "a recovered transient 5xx was not recorded as a successful observation: $(cat "$home/data/delivery/contributions.json")"
+  calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "a transient 5xx made $calls attempt(s), expected exactly one retry"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a recovered transient forge 5xx enqueued a wake'
+  # ①b the same recovery when the failure is transport-class rather than 5xx.
+  home=$(new_home transient-transport)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'transient-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_TRANSIENT_FAILS=1 \
+    FORGE_TRANSIENT_ERR='error connecting to api.github.com: connection reset by peer' \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'a transport-class forge failure failed the whole poll'
+  [ -z "$out" ] || fail "a recovered transport-class failure printed a wake: $out"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a recovered transport-class failure was not recorded'
+  calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "a transport-class failure made $calls attempt(s), expected exactly one retry"
+  # ② an unchanged transient 5xx is retried but bounded, still wakes exactly
+  #    once in the round, and records the error evidence.
+  home=$(new_home transient-persistent)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'always-500\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'an unchanged transient forge failure failed the whole poll'
+  [ "$(printf '%s\n' "$out" | grep -c '^contributions: observation unavailable for https://github.com/o/r/pull/8$')" = 1 ] \
+    || fail "a persistent transient failure did not wake exactly once in the round: $out"
+  calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls" = 3 ] || fail "a persistent transient failure made $calls attempt(s), expected a bounded three"
+  jq -e '.records[0].error == "forge observation unavailable or changed during read"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a persistent transient failure left no error evidence'
+  # ③ a read killed at its bound (rc=124) is budget refusal, never a retry:
+  #    the prior record is kept untouched and nothing wakes.
+  home=$(new_home transient-budget-kill)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  /bin/date +%s > "$home/forge/clock"
+  printf 'hang\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'a budget-truncated read failed the whole poll'
+  [ -z "$out" ] || fail "a budget-truncated read printed a wake: $out"
+  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+    || fail 'the budget-truncated read was never attempted'
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail 'a budget-truncated read rewrote the prior record'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a budget-truncated read enqueued a wake'
+  pass 'a transient forge 5xx or transport failure is retried within the budget, bounded, without swallowing a genuine wake'
 }
 
 test_shared_url_observed_once() {
@@ -1048,7 +1125,7 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
   local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
-  local error='"forge observation unavailable or changed during read"'
+  local error='"forge observation unavailable or changed during read"' calls_before calls_after
   home=$(new_home failure-episode)
   forge_home "$home"
   wrap_forge "$home"
@@ -1056,11 +1133,13 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
   poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll || fail "poll at $1 failed"; }
   out=$(poll_at 2026-09-16T09:00:00Z)
   [ "$out" = "$line" ] || fail "the first failure of an episode did not wake: $out"
+  calls_before=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
   out=$(poll_at 2026-09-16T10:00:00Z)
   [ -z "$out" ] || fail "an unchanged read failure woke again on the next cycle: $out"
   jq -e --argjson error "$error" '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
-  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
+  calls_after=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls_after" -gt "$calls_before" ] || fail 'a failing open PR stopped being observed'
   : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
   [ -z "$out" ] || fail "a successful read printed: $out"
@@ -1183,7 +1262,7 @@ test_retire_is_idempotent_and_refuses_unknown_pairs() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_transient_forge_failure_retries_within_budget test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
