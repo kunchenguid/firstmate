@@ -81,6 +81,18 @@ test_emitted_stop_revalidation_contract() {
   pass 'emitted supervision prompt requires current stop verification after finish'
 }
 
+test_emitted_away_scope_gate() {
+  local prompt
+  # The away-scope gate is delivered through this generated interface, so the
+  # emitted bytes are the surface a test can prove; the branch's own reading of
+  # the captain's words is not.
+  prompt=$("$ROOT/bin/fm-branch-prompt.sh") || fail 'could not generate supervision prompt'
+  assert_contains "$prompt" 'Away, standing autonomy does not widen: dispatch only the queued unblocked work the recorded away words name or a standing grant covers' 'emitted prompt let away dispatch widen past the recorded words'
+  assert_contains "$prompt" 'Every other ready unit waits for MAIN, and you record its not-ready reason on its backlog note' 'emitted prompt omitted the waiting reason for out-of-scope away work'
+  assert_contains "$prompt" 'This is the durable handoff, even for an unsolicited cleanup or heartbeat; a routine note never substitutes for it' 'emitted prompt lost the attended handoff'
+  pass 'emitted supervision prompt gates away dispatch to the recorded words and keeps the attended handoff'
+}
+
 test_daemon_heartbeat() {
   local mode=$1 skip=${2:-heartbeat} dir state
   dir=$(make_case "daemon-$mode-$skip")
@@ -143,6 +155,7 @@ test_ready_heartbeat unreadable
 test_not_ready_heartbeat empty
 test_not_ready_heartbeat held
 test_emitted_stop_revalidation_contract
+test_emitted_away_scope_gate
 test_daemon_heartbeat ready
 test_daemon_heartbeat ready signal
 test_daemon_heartbeat empty
