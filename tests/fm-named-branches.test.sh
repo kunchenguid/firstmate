@@ -55,14 +55,20 @@ test_brief_names_the_crew_and_base_branches() {
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR \
     --branch-name feature/widget --base-branch office >/dev/null
   brief="$home/data/$id/brief.md"
-  assert_grep 'gh-axi pr create --base office' "$brief" "direct-PR brief omitted the PR base"
+  assert_grep 'against the base branch `office` (`--base office`)' "$brief" "direct-PR brief omitted the PR base"
+
+  id=named-brief-lo
+  out=$(FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
+    --branch-name feature/widget --base-branch office 2>&1); status=$?
+  expect_code 1 "$status" "a local-only named base was accepted"
+  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
 
   id=named-brief-lo
   FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
-    --branch-name feature/widget --base-branch office >/dev/null
+    --branch-name feature/widget >/dev/null
   brief="$home/data/$id/brief.md"
   # shellcheck disable=SC2016
-  assert_grep 'merge into local `office`' "$brief" "local-only brief omitted the landing branch"
+  assert_grep 'merge into local `main`' "$brief" "local-only brief omitted the landing branch"
   assert_grep 'ready in branch feature/widget' "$brief" "local-only brief omitted the crew branch"
 
   id=named-brief-default
@@ -83,7 +89,7 @@ test_brief_refuses_unusable_branch_selections() {
   expect_code 1 "$status" "both branch selectors were accepted"
   assert_contains "$out" "mutually exclusive" "both branch selectors were not named"
 
-  out=$(FM_HOME="$home" "$BRIEF" same proj --mode local-only \
+  out=$(FM_HOME="$home" "$BRIEF" same proj --mode direct-PR \
     --branch-name office --base-branch office 2>&1); status=$?
   expect_code 1 "$status" "a crew branch equal to its base was accepted"
   assert_contains "$out" "cannot be the crew branch" "equal branches were not named"
@@ -95,13 +101,13 @@ test_brief_refuses_unusable_branch_selections() {
   FM_HOME="$home" "$BRIEF" scout-base-collision proj --scout \
     --base-branch fm/scout-base-collision >/dev/null \
     || fail "a valid scout base equal to the default crew name was refused"
-  assert_grep 'Base branch contract: base_branch=fm/scout-base-collision' \
+  assert_grep 'Base branch: fm/scout-base-collision' \
     "$home/data/scout-base-collision/brief.md" \
     "a valid scout base was not recorded in the brief"
 
   out=$(FM_HOME="$home" "$BRIEF" bad proj --mode local-only --base-branch 'has space' 2>&1); status=$?
   expect_code 1 "$status" "a base branch with a space was accepted"
-  assert_contains "$out" "not a usable git branch name" "an unusable base was not named"
+  assert_contains "$out" "not a valid git branch name" "an unusable base was not named"
   pass "fm-brief: unusable crew and base selections are refused"
 }
 
@@ -134,62 +140,64 @@ test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
   git_identity "$proj"
   commit_file "$proj" base base base
   printf -- '- proj [local-only] - named branch fixture (added 2026-01-01)\n' > "$home/data/projects.md"
+  remote="$TMP_ROOT/spawn/remote.git"
+  git init -q --bare "$remote"
+  git -C "$proj" remote add origin "$remote"
+  git -C "$proj" push -q origin main
   id=named-spawn-missing
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
-    --branch-name feature/widget --base-branch office >/dev/null
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes \
+    --branch-name feature/widget --base-branch nowhere >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
-    --branch-name feature/widget --base-branch office 2>&1); status=$?
+    "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off \
+    --branch-name feature/widget --base-branch nowhere 2>&1); status=$?
   expect_code 1 "$status" "a missing named base was launched"
-  assert_contains "$out" "named base 'office' does not exist" "a missing named base was not named"
+  assert_contains "$out" "origin/nowhere" "a missing named base was not named"
   assert_absent "$home/state/$id.meta" "a refused launch published a task record"
 
   id=named-spawn-mismatch
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes \
     --branch-name feature/widget --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
+    "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off \
     --branch-name feature/widget 2>&1); status=$?
   expect_code 1 "$status" "a spawn that dropped the brief's base was accepted"
-  assert_contains "$out" "base mismatch" "a dropped base was not named"
+  assert_contains "$out" "records a Base branch line but the spawn has no --base-branch" "a dropped base was not named"
 
   id=named-spawn-collision
-  git -C "$proj" checkout -qb office
-  commit_file "$proj" office office office
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
-    --branch-name feature/widget --base-branch office >/dev/null
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes \
+    --branch-name feature/widget --base-branch main >/dev/null
   fill_brief "$home/data/$id/brief.md"
   printf 'kind=ship\nproject=%s\nbranch=feature/widget\n' "$(cd "$proj" && pwd -P)" \
     > "$home/state/named-spawn-other.meta"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
-    --branch-name feature/widget --base-branch office 2>&1); status=$?
+    "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off \
+    --branch-name feature/widget --base-branch main 2>&1); status=$?
   expect_code 1 "$status" "a shared crew branch was launched"
   assert_contains "$out" "already assigned to task named-spawn-other" "the occupying task was not named"
   assert_absent "$home/state/$id.meta" "a colliding launch published a task record"
 
   id=named-spawn-local-ref
   git -C "$proj" branch feature/local
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
-    --branch-name feature/local --base-branch office >/dev/null
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes \
+    --branch-name feature/local --base-branch main >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
-    --branch-name feature/local --base-branch office 2>&1); status=$?
+    "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off \
+    --branch-name feature/local --base-branch main 2>&1); status=$?
   expect_code 1 "$status" "an existing local crew branch was launched"
   assert_contains "$out" "already exists locally" "the local crew branch was not refused"
   assert_absent "$home/state/$id.meta" "a local branch collision published a task record"
 
-  remote="$TMP_ROOT/spawn/remote.git"
-  git init -q --bare "$remote"
-  git -C "$proj" remote add origin "$remote"
-  git -C "$proj" push -q origin refs/heads/office:refs/heads/office
+  git -C "$proj" checkout -qb office
+  commit_file "$proj" office office office
+  git -C "$proj" checkout -q main
+  git -C "$proj" push -q origin office
   git -C "$proj" push -q origin refs/heads/office:refs/heads/feature/remote
   id=named-spawn-remote-ref
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR \
@@ -227,17 +235,22 @@ promote_keeps_the_named_branches() {
   git_identity "$project"
   commit_file "$project" base base base
   git -C "$project" checkout -qb office
+  promote_remote="$home/remote.git"
+  git init -q --bare "$promote_remote"
+  git -C "$project" remote add origin "$promote_remote"
+  git -C "$project" push -q origin main office
   printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=office\n' "$id" "$project" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode local-only --yolo off --branch-name feature/widget --base-branch office >/dev/null
+    --mode direct-PR --yolo off --branch-name feature/widget --base-branch office >/dev/null
   instructions="$home/data/$id/ship-instructions.md"
   meta="$home/state/$id.meta"
   assert_grep 'Ship branch: feature/widget' "$instructions" "promotion omitted the crew branch"
-  assert_grep 'Base branch: office' "$instructions" "promotion omitted the base"
   # shellcheck disable=SC2016
-  assert_grep 'merge into local `office`' "$instructions" "promotion omitted the landing branch"
+  assert_grep 'Never push to the base branch `office`' "$instructions" "promotion omitted the base"
+  # shellcheck disable=SC2016
+  assert_grep 'against the base branch `office` (`--base office`)' "$instructions" "promotion omitted the PR base"
   assert_grep 'branch=feature/widget' "$meta" "promotion did not record the crew branch"
   assert_grep 'base_branch=office' "$meta" "promotion did not record the base"
   pass "fm-promote: a named crew branch and base survive promotion"
@@ -255,14 +268,15 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   git -C "$project" checkout -qb office
   git init -q --bare "$remote"
   git -C "$project" remote add origin "$remote"
-  git -C "$project" push -q origin main
+  git -C "$project" push -q origin main office
 
+  git -C "$project" fetch -q origin refs/heads/office:refs/remotes/origin/office
   id=named-promote-base-change
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=office\n' "$id" "$project" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode local-only --yolo off --branch-name feature/change --base-branch release 2>&1); status=$?
+    --mode direct-PR --yolo off --branch-name feature/change --base-branch release 2>&1); status=$?
   expect_code 1 "$status" "promotion changed the scout's recorded base"
   assert_contains "$out" "cannot change the scout's recorded base" "a changed promotion base was not refused"
   assert_grep 'kind=scout' "$home/state/$id.meta" "base-change refusal published ship metadata"
@@ -270,11 +284,12 @@ test_promote_rejects_base_changes_and_branch_collisions() {
 
   id=named-promote-local-collision
   git -C "$project" branch feature/local
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  git -C "$project" fetch -q origin refs/heads/office:refs/remotes/origin/office
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=office\n' "$id" "$project" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode local-only --yolo off --branch-name feature/local --base-branch office 2>&1); status=$?
+    --mode direct-PR --yolo off --branch-name feature/local --base-branch office 2>&1); status=$?
   expect_code 1 "$status" "promotion reused an existing local branch"
   assert_contains "$out" "already exists locally" "a local promotion branch collision was not refused"
   assert_grep 'kind=scout' "$home/state/$id.meta" "local collision published ship metadata"
@@ -298,7 +313,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode direct-PR --yolo off --branch-name feature/missing-base 2>&1); status=$?
+    --mode direct-PR --yolo off --branch-name feature/missing-base --base-branch release 2>&1); status=$?
   expect_code 1 "$status" "promotion accepted a missing remote base"
   assert_contains "$out" "does not exist on origin" "a missing remote base was not refused"
   assert_grep 'kind=scout' "$home/state/$id.meta" "missing remote base refusal published ship metadata"
@@ -313,7 +328,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
   fill_brief "$home/data/$id/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode direct-PR --yolo off --branch-name feature/remote-base >/dev/null
+    --mode direct-PR --yolo off --branch-name feature/remote-base --base-branch release >/dev/null
   assert_grep 'refs/remotes/origin/release' "$home/data/$id/ship-instructions.md" \
     "remote promotion instructions did not name the qualified base ref"
 
@@ -326,7 +341,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode direct-PR --yolo off --branch-name feature/missing-local-remote-base 2>&1); status=$?
+    --mode direct-PR --yolo off --branch-name feature/missing-local-remote-base --base-branch release 2>&1); status=$?
   expect_code 1 "$status" "promotion accepted a missing local remote-tracking base"
   assert_contains "$out" "not available in the scout worktree" \
     "missing local remote-tracking base was not refused"
@@ -335,21 +350,9 @@ test_promote_rejects_base_changes_and_branch_collisions() {
     "missing local remote-tracking base published ship instructions"
 
   git -C "$project" branch office main
-  id=named-promote-remote-base-local-only
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
-  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
-  fill_brief "$home/data/$id/brief.md"
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode local-only --yolo off --branch-name feature/remote-base-local-only 2>&1); status=$?
-  expect_code 1 "$status" "promotion accepted a remote-only local-only base"
-  assert_contains "$out" "does not exist locally" "a remote-only local-only base was not refused"
-  assert_grep 'kind=scout' "$home/state/$id.meta" "remote-only local-only refusal published ship metadata"
-  assert_absent "$home/data/$id/ship-instructions.md" "remote-only local-only refusal published ship instructions"
-
-  git -C "$project" remote set-url origin "$home/unreachable.git"
   id=named-promote-local-only-offline
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
-  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null
   fill_brief "$home/data/$id/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
     --mode local-only --yolo off --branch-name feature/offline >/dev/null \
@@ -362,7 +365,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode direct-PR --yolo off --branch-name feature/publishing-local-base 2>&1); status=$?
+    --mode direct-PR --yolo off --branch-name feature/publishing-local-base --base-branch office 2>&1); status=$?
   expect_code 1 "$status" "a publishing promotion accepted a local-only base"
   assert_contains "$out" "without origin" "a publishing promotion did not require a remote base"
   assert_grep 'kind=scout' "$home/state/$id.meta" "a local-only publishing base refusal published ship metadata"

@@ -244,6 +244,7 @@ if [ -n "$PROMOTE_PROJECT" ]; then
   FORGE=${PROMOTE_STANDING_FORGE:-none}
   refuse_impossible_forge_posture || exit 1
 fi
+CLI_BASE=$BASE_BRANCH
 BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | head -n 1)
 fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
 PROMOTE_BASE_WORDS='default-branch base'
@@ -254,6 +255,7 @@ PROMOTE_FORGE_WORDS=
 if [ "$BASE_BRANCH_SET" -eq 0 ]; then
   BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
 else
+  BASE_BRANCH=$CLI_BASE
   RECORDED_BASE=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
   [ "$BASE_BRANCH" = "$RECORDED_BASE" ] || {
     echo "error: --base-branch cannot change the scout's recorded base during promotion; promote with base_branch=${RECORDED_BASE:-<none>} to preserve the existing worktree" >&2
@@ -266,7 +268,7 @@ if [ -n "$BASE_BRANCH" ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev
 fi
 PROMOTE_BASE_REMOTE=0
 PROMOTE_REMOTE_BASE_REFS=
-if [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
+if [ "$BASE_BRANCH_SET" -eq 1 ] && [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
   [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
     echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's project checkout; refusing promotion" >&2
     exit 1
@@ -373,13 +375,8 @@ if [ "$BRANCH_NAME_SET" -eq 1 ]; then
   PROMOTE_PROJECT_LOCK_HELD=1
 fi
 refuse_promoted_branch_collision || exit 1
-PROMOTE_BASE_WORDS=default-branch
-if [ -n "$BASE_BRANCH" ]; then
-  if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
-    PROMOTE_BASE_WORDS="\`refs/remotes/origin/$BASE_BRANCH\`"
-  else
-    PROMOTE_BASE_WORDS="\`$BASE_BRANCH\`"
-  fi
+if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
+  PROMOTE_BASE_WORDS="\`refs/remotes/origin/$BASE_BRANCH\`"
 fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
