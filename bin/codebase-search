@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Bounded, read-only codebase discovery and search for agents."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from typing import Any
+
+
+DEFAULT_LIMIT = 50
+SAFE_GLOBS = [
+    "!**/.git/**",
+    "!**/node_modules/**",
+    "!**/vendor/**",
+    "!**/build/**",
+    "!**/dist/**",
+    "!**/target/**",
+    "!**/coverage/**",
+    "!**/.venv/**",
+    "!**/venv/**",
+    "!**/__pycache__/**",
+    "!**/.env*",
+    "!**/*.pem",
+    "!**/*.key",
+    "!**/*.crt",
+    "!**/*.cer",
+    "!**/*.p12",
+    "!**/*.pfx",
+    "!**/id_rsa*",
+]
+
+
+class JsonParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        emit({"status": "error", "error": "invalid_command", "message": message})
+        raise SystemExit(2)
+
+
+def emit(record: dict[str, Any], code: int = 0) -> int:
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+    return code
+
+
+def common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--root", default=".", help="repository root (default: current directory)")
+    parser.add_argument(
+        "--max-results", type=int, default=DEFAULT_LIMIT, help=f"output limit (default: {DEFAULT_LIMIT})"
+    )
+    parser.add_argument("--all", action="store_true", help="include sensitive/generated paths and remove the output limit")
+
+
+def rg_args(root: Path, all_paths: bool) -> list[str]:
+    args = ["rg"]
+    if not all_paths:
+        for glob in SAFE_GLOBS:
+            args += ["--glob", glob]
+    args += ["--no-ignore-vcs", "--hidden"]
+    return args
+
+
+def root_path(raw: str) -> Path:
+    path = Path(raw).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(f"root does not exist or is not a directory: {raw}")
+    return path
+
+
+def ensure_rg() -> None:
+    if shutil.which("rg") is None:
+        raise RuntimeError("ripgrep (rg) is unavailable")
+
+
+def listed_files(root: Path, all_paths: bool, limit: int | None) -> list[str]:
+    proc = subprocess.run(
+        rg_args(root, all_paths) + ["--files", "-0", str(root)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode not in (0, 1):
+        raise RuntimeError(proc.stderr.decode("utf-8", "replace").strip() or "ripgrep failed")
+    paths = []
+    for raw in proc.stdout.split(b"\0"):
+        if not raw:
+            continue
+        absolute = Path(os.fsdecode(raw))
+        paths.append(absolute.relative_to(root).as_posix())
+        if limit is not None and len(paths) >= limit:
+            break
+    return paths
+
+
+def text_value(data: dict[str, Any], key: str) -> str:
+    value = data.get(key, {})
+    return value.get("text", "") if isinstance(value, dict) else ""
+
+
+def matches(root: Path, pattern: str, all_paths: bool, limit: int, before: int = 0, after: int = 0) -> list[dict[str, Any]]:
+    args = rg_args(root, all_paths) + ["--json", "--line-number", "--column"]
+    args += [pattern, str(root)]
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result: list[dict[str, Any]] = []
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "context":
+            continue
+        elif event.get("type") == "match":
+            data = event.get("data", {})
+            path = text_value(data, "path")
+            item: dict[str, Any] = {
+                "path": Path(path).relative_to(root).as_posix(),
+                "line": data.get("line_number"),
+                "column": (data.get("submatches") or [{}])[0].get("start", 0) + 1,
+                "text": text_value(data, "lines").rstrip("\n"),
+                "before": [],
+                "after": [],
+            }
+            result.append(item)
+            if len(result) >= limit:
+                proc.terminate()
+                break
+    proc.wait()
+    if proc.returncode not in (0, 1, -15):
+        error = proc.stderr.read().decode("utf-8", "replace").strip() if proc.stderr else ""
+        raise ValueError(error or "invalid search pattern")
+    if before or after:
+        cache: dict[str, list[str]] = {}
+        for item in result:
+            lines = cache.setdefault(item["path"], (root / item["path"]).read_text(encoding="utf-8", errors="replace").splitlines())
+            line_index = item["line"] - 1
+            item["before"] = lines[max(0, line_index - before) : line_index]
+            item["after"] = lines[line_index + 1 : line_index + 1 + after]
+    return result
+
+
+def main() -> int:
+    parser = JsonParser(
+        prog="codebase-search",
+        description="Bounded, read-only codebase discovery and search. Defaults exclude generated and sensitive paths.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    files_parser = sub.add_parser("files", help="discover files")
+    common(files_parser)
+    search_parser = sub.add_parser("search", help="search file contents")
+    search_parser.add_argument("pattern")
+    common(search_parser)
+    context_parser = sub.add_parser("context", help="search with surrounding lines")
+    context_parser.add_argument("pattern")
+    common(context_parser)
+    context_parser.add_argument("--before", type=int, default=2)
+    context_parser.add_argument("--after", type=int, default=2)
+    metrics_parser = sub.add_parser("metrics", help="count bounded files, bytes, and lines")
+    common(metrics_parser)
+    args = parser.parse_args()
+    try:
+        ensure_rg()
+        root = root_path(args.root)
+        if args.max_results < 1:
+            raise ValueError("--max-results must be positive")
+        limit = None if args.all else args.max_results
+        if args.command == "files":
+            values = listed_files(root, args.all, limit)
+            return emit({"status": "ok", "command": "files", "files": values, "count": len(values), "bounded": not args.all})
+        if args.command in ("search", "context"):
+            before = args.before if args.command == "context" else 0
+            after = args.after if args.command == "context" else 0
+            if before < 0 or after < 0:
+                raise ValueError("context values must not be negative")
+            values = matches(root, args.pattern, args.all, limit or DEFAULT_LIMIT, before, after)
+            for value in values:
+                if not before and not after:
+                    value.pop("before", None)
+                    value.pop("after", None)
+            return emit({"status": "ok", "command": args.command, "matches": values, "count": len(values), "bounded": not args.all})
+        files = listed_files(root, args.all, limit)
+        byte_count = 0
+        line_count = 0
+        for name in files:
+            content = (root / name).read_bytes()
+            byte_count += len(content)
+            line_count += content.count(b"\n") + (1 if content and not content.endswith(b"\n") else 0)
+        return emit({"status": "ok", "command": "metrics", "files": len(files), "bytes": byte_count, "lines": line_count, "bounded": not args.all})
+    except ValueError as exc:
+        return emit({"status": "error", "error": "invalid_root" if "root" in str(exc) else "invalid_request", "message": str(exc)}, 2)
+    except RuntimeError as exc:
+        return emit({"status": "error", "error": "ripgrep_unavailable" if "unavailable" in str(exc) else "ripgrep_failed", "message": str(exc)}, 2)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
