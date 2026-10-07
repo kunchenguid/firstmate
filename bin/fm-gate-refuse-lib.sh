@@ -56,7 +56,7 @@
 # TEST-HARNESS ESCAPE HATCH (FM_GATE_REFUSE_BYPASS=1): firstmate's own test suite
 # must exercise the real fleet entrypoints, but the no-mistakes gate
 # runs that suite FROM a gate worktree (cwd git-common-dir under
-# .no-mistakes/repos/*.git, and possibly NO_MISTAKES_GATE set) - the exact
+# <NM_HOME>/repos/<id>.git, and possibly NO_MISTAKES_GATE set) - the exact
 # environment this guard refuses. So both signals would fire during firstmate's
 # own validation and break unrelated tests. FM_GATE_REFUSE_BYPASS=1 makes the
 # guard a no-op; firstmate's shared test helpers (tests/lib.sh and the backend
