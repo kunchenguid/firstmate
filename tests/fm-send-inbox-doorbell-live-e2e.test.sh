@@ -3,12 +3,13 @@
 # (live-harness-optin family).
 #
 # The steering inbox's one behavioral assumption is that a real worker agent
-# follows the constant self-describing doorbell line: list the inbox, read and
-# act on its records in numeric order, then mv each into handled/. The
-# doorbell names the inbox as "$FM_TASK_INBOX", so each worker is launched the
-# way bin/fm-spawn.sh launches it, with FM_TASK_INBOX exported to its home's
-# state/<task>.inbox, and receives no brief at all: it must resolve the inbox
-# from the doorbell plus its own environment. A stub can only confirm the
+# follows the constant doorbell line, which names the inbox and defers to its
+# brief's inbox section for how to read and acknowledge it. The doorbell names
+# the inbox as "$FM_TASK_INBOX", so each worker is launched the way
+# bin/fm-spawn.sh launches it, with FM_TASK_INBOX exported to its home's
+# state/<task>.inbox, and is handed only the inbox section of a real generated
+# bin/fm-brief.sh scout brief: it must read the instruction and acknowledge it
+# from the doorbell plus that section. A stub can only confirm the
 # assumption already written into the stub, so per
 # .agents/skills/firstmate-coding-guidelines this is proven against every
 # INSTALLED verified harness: each is launched idle in an isolated tmux server,
@@ -146,8 +147,43 @@ check_harness_doorbell() {  # <name>
   fi
   [ "$ready_rc" -eq 0 ] || note "$name ($version): idle composer never classified empty; proceeding as production does (advisory check skips only on pending)"
   printf 'window=%s:%s\nkind=ship\nharness=%s\n' "$SESSION" "$win" "$name" > "$home/state/$task.meta"
+  mkdir -p "$home/data"
+  if ! FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$task" firstmate --scout >/dev/null 2>&1; then
+    FAILED=1
+    printf 'not ok - %s (%s): fm-brief.sh could not render the brief inbox section\n' "$name" "$version" >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  sed -n '/^# Firstmate instruction inbox$/,/^$/p' "$home/data/$task/brief.md" > "$home/brief-inbox.md"
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l \
+    "Your Firstmate brief is $home/brief-inbox.md: read it now and follow it whenever told an instruction is waiting. Then run exactly this shell command: touch $LAB/ready-$name - and reply with one short line."
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Enter
+  i=0
+  while [ ! -e "$LAB/ready-$name" ] && [ "$i" -lt "$TIMEOUT" ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ ! -e "$LAB/ready-$name" ]; then
+    FAILED=1
+    printf 'not ok - %s (%s): the worker never finished reading its brief inbox section within %ss\n' "$name" "$version" "$TIMEOUT" >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  # The marker lands mid-turn, before the worker's reply: wait for that turn
+  # to end so the doorbell never interrupts it.
+  i=0
+  while fm_pane_is_busy "$SESSION:$win" "$name" && [ "$i" -lt "$TIMEOUT" ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if fm_pane_is_busy "$SESSION:$win" "$name" || ! wait_ready "$win"; then
+    FAILED=1
+    printf 'not ok - %s (%s): the brief-reading turn did not end with a proven-empty composer; not steering\n' "$name" "$version" >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
   if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
-    "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line." \
+    "Firstmate live check: run exactly this shell command now: touch $acted - then acknowledge this message as your brief says. Reply with one short line." \
     >/dev/null 2>&1; then
     FAILED=1
     printf 'not ok - %s (%s): fm-send refused the live steer\n' "$name" "$version" >&2

@@ -368,8 +368,8 @@ test_no_mistakes_dod_wording() {
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`no-mistakes axi run --help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around the help command"
+  assert_grep '`no-mistakes axi run --intent "<intent>"`' "$brief" \
+    "no-mistakes DOD must render literal backticks around the start command"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
@@ -1056,16 +1056,16 @@ test_workers_wait_without_spending_turns() {
     assert_grep "empty \`write_stdin\` polls of up to 300000 ms" "$brief" "$id: the Codex ceiling is missing"
     assert_grep "is the sanctioned foreground wait" "$brief" \
       "$id: the wait a Claude Code worker may use is not named"
-    assert_grep "reattach with \`no-mistakes axi run --wait\` instead, and never send the same \`respond\` again" "$brief" \
-      "$id: a timed-out respond must reattach with axi run, never resend its answer"
     assert_grep "Do not poll or list the inbox while waiting; a waiting instruction rings." "$brief" \
       "$id: polling the inbox while waiting is not forbidden"
     assert_grep "natural checkpoint" "$brief" "$id: the flag dropped the natural-checkpoint inbox check"
   done
   brief="$home/data/brief-wait-ship/brief.md"
-  assert_grep "issue the same foreground call again" "$brief" \
-    "the no-mistakes DOD must reattach with the same foreground call"
-  assert_no_grep "background the drive call" "$brief" "the no-mistakes DOD still backgrounds the drive call"
+  assert_grep "ONE backgrounded drive call that notifies you when it returns" "$brief" \
+    "the flag replaced the backgrounded drive call that notifies on completion"
+  assert_no_grep "Never background a wait" "$brief" "the flag still forbids the backgrounded drive call"
+  assert_grep "never send that \`respond\` again" "$brief" \
+    "a timed-out respond must reattach with axi run, never resend its answer"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-wait-sm --secondmate --no-projects >/dev/null 2>&1 \
@@ -1077,7 +1077,8 @@ test_workers_wait_without_spending_turns() {
   pass "fm-brief: workers end the turn on a decision, wait in one bounded shell command, and never poll"
 }
 
-# Without config/wait-no-turns the scaffold matches the pre-flag brief and drive text.
+# Without config/wait-no-turns the scaffold matches the pre-flag brief, and the
+# drive text is the same backgrounded, completion-notifying call either way.
 test_wait_no_turns_absent_keeps_the_previous_brief() {
   local home brief
   home="$TMP_ROOT/wait-off"
@@ -1089,10 +1090,84 @@ test_wait_no_turns_absent_keeps_the_previous_brief() {
   assert_no_grep "end your turn at once" "$brief" "an absent flag still added the waiting section"
   assert_grep "natural checkpoint" "$brief" "an absent flag dropped the unprompted inbox check"
   assert_no_grep "Do not poll or list the inbox while waiting" "$brief" "an absent flag still added the no-poll inbox line"
-  assert_grep "background the drive call" "$brief" "an absent flag replaced the backgrounded drive text"
-  assert_no_grep "issue the same foreground call again" "$brief" \
-    "an absent flag still asked for the foreground reattach"
-  pass "fm-brief: without config/wait-no-turns the brief and drive text stay as they were"
+  assert_grep "ONE backgrounded drive call that notifies you when it returns" "$brief" \
+    "an absent flag replaced the backgrounded drive text"
+  assert_grep "never with shell \`&\`" "$brief" "the backgrounded drive call may use shell job control"
+  pass "fm-brief: without config/wait-no-turns the brief stays as it was and the drive call backgrounds"
+}
+
+# Ship and scout briefs name a batched inbox take and ack; running the exact
+# commands the brief names prints every waiting message, leaves it waiting
+# until the ack, and then acknowledges it. A secondmate charter keeps the
+# manual sequence its remote copy can resolve.
+test_worker_briefs_take_and_ack_the_inbox_in_batches() {
+  local home id brief take ack out
+  home="$TMP_ROOT/inbox-take"
+  mkdir -p "$home/data" "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-take-ship some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-take-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  for id in brief-take-ship brief-take-scout; do
+    brief="$home/data/$id/brief.md"
+    # shellcheck disable=SC2016  # literal backticks delimit the brief's command
+    take=$(sed -n 's/.* run `\(.*fm-task-inbox\.sh. take [^`]*\)` once:.*/\1/p' "$brief")
+    # shellcheck disable=SC2016  # literal backticks delimit the brief's command
+    ack=$(sed -n 's/.*acknowledge them all in one call: `\(.*fm-task-inbox\.sh. ack --through NNN [^`]*\)`.*/\1/p' "$brief")
+    [ -n "$take" ] || fail "$id: the brief does not name the batched inbox take"
+    [ -n "$ack" ] || fail "$id: the brief does not name the batched inbox ack"
+    bash -c '. "$1"; fm_task_inbox_write "$2" "$3" "steer for $3"' _ \
+      "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state" "$id" >/dev/null \
+      || fail "$id: fixture steer write failed"
+    out=$(bash -c "$take") || fail "$id: the brief's take command failed"
+    assert_contains "$out" "steer for $id" "$id: the take command did not print the waiting message"
+    assert_contains "$out" "ack --through 001" "$id: the take command did not name the sequence to acknowledge"
+    [ -f "$home/state/$id.inbox/001.msg" ] || fail "$id: take must leave the message waiting until the ack"
+    bash -c "${ack/NNN/001}" >/dev/null || fail "$id: the brief's ack command failed"
+    [ -f "$home/state/$id.inbox/handled/001.msg" ] \
+      || fail "$id: the ack command did not acknowledge the message into handled/"
+    assert_grep "Only if those commands cannot run" "$brief" "$id: the manual fallback is missing"
+  done
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-take-sm --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  assert_no_grep "fm-task-inbox.sh" "$home/data/brief-take-sm/brief.md" \
+    "secondmate: the charter must keep the manual inbox sequence"
+  pass "fm-brief: ship and scout briefs take and acknowledge the inbox in two calls"
+}
+
+# Every no-mistakes subcommand, flag, and --action value the rendered DOD's
+# command list names exists in the installed binary's own help, so a worker
+# running exactly those commands never needs --help to correct them.
+test_no_mistakes_command_list_matches_installed_cli() {
+  local home id brief list line sub help flag action checked=0
+  command -v no-mistakes >/dev/null 2>&1 || {
+    pass "fm-brief: no-mistakes command-list check skipped: no-mistakes is not installed"
+    return 0
+  }
+  home="$TMP_ROOT/nm-command-list"
+  mkdir -p "$home/data"
+  id="brief-nm-commands"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # literal backticks delimit the brief text
+  list=$(sed -n '/^Use exactly these commands/,/^Open `--help` only/{/^- /p;}' "$brief")
+  [ -n "$list" ] || fail "the no-mistakes DOD lost its exact command list"
+  while IFS= read -r line; do
+    sub=$(printf '%s\n' "$line" | sed -n 's/.*`no-mistakes axi \([a-z]*\).*/\1/p')
+    [ -n "$sub" ] || fail "command-list line names no axi subcommand: $line"
+    help=$(no-mistakes axi "$sub" --help 2>&1) || fail "no-mistakes axi $sub --help failed: $help"
+    for flag in $(printf '%s\n' "$line" | grep -oE -- '--[a-z][a-z-]*' | sort -u); do
+      assert_contains "$help" "$flag" "no-mistakes axi $sub does not accept $flag named in the brief"
+      checked=$((checked + 1))
+    done
+    for action in $(printf '%s\n' "$line" | grep -oE -- '--action [a-z]+' | sed 's/--action //'); do
+      assert_contains "$help" "$action" "no-mistakes axi $sub does not accept --action $action named in the brief"
+    done
+  done <<< "$list"
+  [ "$checked" -ge 6 ] || fail "the command list named only $checked flags"
+  pass "fm-brief: every no-mistakes command the DOD names exists in the installed CLI"
 }
 
 test_worker_role_scope() {
@@ -1399,6 +1474,8 @@ test_branch_prefix_command_is_shell_safe() {
 }
 
 test_worker_role_scope
+test_worker_briefs_take_and_ack_the_inbox_in_batches
+test_no_mistakes_command_list_matches_installed_cli
 
 # Rule 2 governs file edits rather than pool administration, so every crewmate
 # scaffold must prohibit the administrative act itself. The rule is emitted from
