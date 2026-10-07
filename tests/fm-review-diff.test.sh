@@ -15,6 +15,8 @@
 #       reviewed even when the worktree HEAD has moved off it
 #   (g) meta records a corrupt branch= -> refused, never silently reviewed as
 #       the moved worktree HEAD
+#   (h) meta records base_branch= -> the diff is against origin/<base_branch>,
+#       so the base branch's own commits never appear as task changes
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -216,6 +218,26 @@ test_corrupt_recorded_branch_is_refused() {
   pass "fm-review-diff refuses a corrupt recorded ship branch instead of reviewing the wrong content"
 }
 
+test_recorded_base_branch_is_the_review_base() {
+  local case_dir out
+  case_dir=$(make_case base-branch)
+  git -C "$case_dir/project" checkout -q -b feature/hub main
+  printf 'hub only\n' > "$case_dir/project/hub.txt"
+  git -C "$case_dir/project" add hub.txt
+  git -C "$case_dir/project" commit -qm "hub branch commit"
+  git -C "$case_dir/project" push -q origin feature/hub
+  git -C "$case_dir/wt" reset -q --hard origin/feature/hub 2>/dev/null \
+    || { git -C "$case_dir/wt" fetch -q origin feature/hub && git -C "$case_dir/wt" reset -q --hard FETCH_HEAD; }
+  printf 'task change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" commit -qam "task change on hub"
+  write_task_meta "$case_dir" "base_branch=feature/hub"
+
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" '+task change' "base-branch: the task's own change is missing from the review diff"
+  assert_not_contains "$out" 'hub.txt' "base-branch: the base branch's own commit was reviewed as a task change"
+  pass "fm-review-diff compares a task against its recorded base branch"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -223,3 +245,4 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_branch_beats_moved_worktree_head
 test_corrupt_recorded_branch_is_refused
+test_recorded_base_branch_is_the_review_base

@@ -77,12 +77,10 @@
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
-#                          the steering-inbox ladder spent its delivery-attempt
-#                          budget on an idle pane without an acknowledgement
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
-#                          an unhandled record's ladder cannot advance; quiet
-#                          successful attempts never wake firstmate
-#                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
+#   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
+#                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
+#                          delivery-attempt, busy-deferral, and unavailable-endpoint policy
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -517,26 +515,14 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
-# Quiet when healthy: an absent, empty, or handled inbox costs one directory
-# glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
-# policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
-# delivery attempt, and a spent attempt budget surfaces as an ordinary stale
-# wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
-# or missing skips the ladder altogether: it is never typed into and surfaces
-# as that same stale wake exactly once. If the attempt's ladder write fails while
-# its record remains unhandled, that unwritable state surfaces through the same
-# stale path instead of silently re-ringing forever; acknowledgement or teardown
-# still makes the race quiet. The attempt is data-plane typing or a
-# composer-protected skip, never a wake, so normal retries keep the watcher
-# blocking. A fire-and-forget record's one retry ring follows the same busy
-# wait, also waits while the worker has an open decision or blocker of its own
-# (status_own_open_decisions), and never escalates: a dead pane just spends it.
-# Runs for secondmates
-# too: their pane-staleness exemption is about quiet panes being healthy,
-# while an unacknowledged instruction past the ladder is a stuck steer.
+# bin/fm-task-inbox-lib.sh owns delivery, busy-deferral, retry, and escalation policy.
+# Endpoint and busy checks precede delivery so recovery never types into a busy,
+# dead, or missing worker; the ring helper protects pending composer text.
+# Normal retries keep the watcher blocking rather than waking firstmate.
+# Runs for secondmates too: their pane-staleness exemption is about quiet panes
+# being healthy, while an unacknowledged instruction can still be a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -563,9 +549,22 @@ inbox_steer_check() {  # <window> <task>
       return 0
       ;;
   esac
-  capture_pane tail40 "$backend" "$w" 40 "$(window_label "$w")" || tail40=
+  watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
+  tail40=$WATCHER_CAPTURE
   if window_is_busy "$w" "$tail40"; then
-    return 0
+    [ "$verb" != retry ] || return 0
+    if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
+      [ -f "$rec" ] || return 0
+      reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be written while $rec stays unhandled; inspect the inbox directory)"
+    elif [ "$count" -ge "$(fm_task_inbox_busy_max)" ]; then
+      reason="stale: $w (unread firstmate instruction: stuck-busy after $count consecutive busy-deferred due doorbells; $rec stays unhandled and no doorbell was typed; inspect the worker)"
+    else
+      return 0
+    fi
+    verb=escalate
+  elif [ "$verb" != retry ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
+    reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a non-busy check; inspect the inbox directory)"
+    verb=escalate
   fi
   case "$verb" in
     ring)
@@ -599,7 +598,7 @@ inbox_steer_check() {  # <window> <task>
       triage_log "steer-inbox retry ring: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      reason=${reason:-"stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"}
       if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
@@ -765,7 +764,8 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "$hash_bytes" = 32 ] || return 1
     prev=$(cat "$hash_file" 2>/dev/null) || return 1
     [[ $prev =~ ^[0-9a-f]{32}$ ]] || return 1
-    capture_pane now "$backend" "$w" 40 "$label" || return 1
+    watcher_capture "$backend" "$w" 40 "$label" || return 1
+    now=$WATCHER_CAPTURE
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
     churned_keys+=("$key")
@@ -871,27 +871,29 @@ secondmate_in_active_turn() {  # <window> <idle>
   local w=$1 idle=$2 tail40
   [ -n "$w" ] || return 1
   [ "$idle" -lt "$BUSY_TURN_MAX_SECS" ] || return 1
-  capture_pane tail40 "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || return 1
+  watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || return 1
+  tail40=$WATCHER_CAPTURE
   window_is_busy "$w" "$tail40"
 }
 
-# First token of the semantic busy classification for <window>: busy, idle,
-# unknown, or dead. Capture failure and a missing window are unknown, never
-# idle. Empty inbox and a fresh watcher beacon are not consulted.
+# Set SECONDMATE_BUSY_CLASS to the first token of the semantic busy
+# classification for <window>: busy, idle, unknown, or dead. Capture failure and
+# a missing window are unknown, never idle. Empty inbox and a fresh watcher
+# beacon are not consulted. Call it directly, never in $(...), so its pane
+# capture runs in the watcher's own shell.
+SECONDMATE_BUSY_CLASS=
 secondmate_busy_class() {  # <window>
   local w=$1 task meta tail40 verdict
+  SECONDMATE_BUSY_CLASS=unknown
   task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
   if [ -z "$w" ] || [ -z "$task" ] || [ ! -f "$meta" ]; then
-    printf 'unknown'
     return 0
   fi
-  tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || {
-    printf 'unknown'
-    return 0
-  }
+  watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || return 0
+  tail40=$WATCHER_CAPTURE
   verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
-  printf '%s' "${verdict%% *}"
+  SECONDMATE_BUSY_CLASS=${verdict%% *}
 }
 
 # 0 iff a child ring is authorized: exact idle, a live agent, and a composer
@@ -901,7 +903,8 @@ secondmate_busy_class() {  # <window>
 secondmate_idle_ring_safe() {  # <window>
   local w=$1 backend agent_state cstate
   [ -n "$w" ] || return 1
-  [ "$(secondmate_busy_class "$w")" = idle ] || return 1
+  secondmate_busy_class "$w"
+  [ "$SECONDMATE_BUSY_CLASS" = idle ] || return 1
   backend=$(window_backend "$w")
   agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
   [ "$agent_state" = alive ] || return 1
@@ -2149,8 +2152,10 @@ fm_active_check_stop() {
 # parse of the next command substitution, the body then fails to parse ("trap:
 # line 2: unexpected EOF while looking for matching `)'", or nothing at all),
 # and the signal is consumed, so a stop request could leave this watcher
-# polling forever while its stopper waits (fixed upstream in bash 5.3). INT
-# keeps its trap because bash ignores a direct SIGINT while a child runs.
+# polling forever while its stopper waits (fixed upstream in bash 5.3). Bash
+# 3.2 holds HUP and TERM until a running command substitution's child exits, so
+# fm_backend_capture pane reads go through watcher_capture instead. INT keeps
+# its trap because bash ignores a direct SIGINT while a child runs.
 watcher_stop_signals() {
   trap - HUP TERM
   trap 'exit 1' INT
@@ -2187,31 +2192,47 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
-# Capture one pane into <outvar> without a blocking command substitution. Bash
-# 3.2 records a TERM that arrives while it waits on a command substitution and
-# acts on it only when something else wakes it, so a pane capture that hangs
-# would leave a stopped watcher polling. The capture runs as an owned process
-# group the EXIT cleanup stops through fm_active_check_stop, and the shell waits
-# on it with the builtin, which a stop signal ends at once on every supported
-# bash. Same status as the plain capture: nonzero when the capture failed.
-capture_pane() {  # <outvar> <backend> <window> <lines> <label>
-  local out=$1 file rc=0
-  file=$(mktemp "$STATE/.fm-capture-output.XXXXXX") || return 1
-  FM_CHECK_OUTPUT=$file
+FM_CAPTURE_OUTPUT=
+WATCHER_CAPTURE=
+
+fm_capture_output_cleanup() {
+  [ -z "$FM_CAPTURE_OUTPUT" ] || rm -f -- "$FM_CAPTURE_OUTPUT"
+  FM_CAPTURE_OUTPUT=
+}
+
+# watcher_capture: fm_backend_capture into WATCHER_CAPTURE with its exit status.
+# The read runs as a waited background process group rather than inside $(...),
+# so a stop is not held for a blocked read (watcher_stop_signals). The group is
+# recorded like a check's, so watcher_cleanup stops a read still in flight.
+watcher_capture() {  # <backend> <target> <lines> [expected-label]
+  local rc pgid
+  fm_capture_output_cleanup
+  WATCHER_CAPTURE=
+  FM_CAPTURE_OUTPUT=$(mktemp "$STATE/.fm-capture-output.XXXXXX") || return 1
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
+  # The group's stderr is redirected before the fork: bash 3.2 on macOS can
+  # print a harmless "child setpgid ... Operation not permitted" race from the
+  # child before the command's own redirections apply.
   set -m
-  fm_backend_capture "$2" "$3" "$4" "$5" > "$file" 2>/dev/null &
+  { fm_backend_capture "$@" < /dev/null > "$FM_CAPTURE_OUTPUT" & } 2>/dev/null
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   watcher_stop_signals
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || rc=$?
+  pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
+    fm_active_check_stop || true
+    fm_capture_output_cleanup
+    return 1
+  fi
+  wait "$FM_ACTIVE_CHECK_PID"
+  rc=$?
   FM_ACTIVE_CHECK_PID=
-  fm_active_check_stop || rc=1
-  printf -v "$out" '%s' "$(cat "$file" 2>/dev/null || true)"
-  fm_check_output_cleanup
+  fm_active_check_stop || { fm_capture_output_cleanup; return 1; }
+  WATCHER_CAPTURE=$(cat "$FM_CAPTURE_OUTPUT" 2>/dev/null || true)
+  fm_capture_output_cleanup
   return "$rc"
 }
 
@@ -2586,6 +2607,7 @@ watcher_cleanup() {
   fi
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
+  fm_capture_output_cleanup
   fm_custom_check_snapshot_cleanup
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
@@ -3063,7 +3085,8 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    capture_pane tail40 "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
+    watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
+    tail40=$WATCHER_CAPTURE
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"

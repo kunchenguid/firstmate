@@ -3487,7 +3487,12 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       esac
       # Native stayed idle. Composer empty is positive delivery (a landed
       # Claude turn that never flipped agent_status). Proven pending retries.
+      # A picker that classifies pending must not receive that retry.
       verdict=$(fm_backend_herdr_composer_state "$target")
+      if fm_composer_blocking_dialog_noted >/dev/null; then
+        printf 'unknown'
+        return 0
+      fi
       case "$verdict" in
         empty) printf 'empty'; return 0 ;;
         pending|pending-unproven) ;;
@@ -3496,6 +3501,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     else
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
+      if fm_composer_blocking_dialog_noted >/dev/null; then
+        printf 'unknown'
+        return 0
+      fi
       if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
         && [ "$footer_baseline" = idle ] \
         && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then

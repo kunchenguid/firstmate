@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -77,7 +77,7 @@ Each effective `FM_HOME` contains private operational directories.
 
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
-- Learnings, backlog, briefs, and scout reports.
+- Learnings, backlog, briefs, scout reports, and the optional per-task no-mistakes pipeline-spend ledger.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
@@ -580,6 +580,12 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## No-mistakes pipeline spend (config/pipeline-spend)
+
+The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.
+When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
+An existing ledger is left untouched while recording is disabled.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
@@ -660,6 +666,28 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
 
 The helper's header owns exact parsing, publication, and report output mechanics.
+
+### Daily startup growth check
+
+A home can arm a lightweight daily growth monitor with `bin/fm-startup-growth-check.sh arm`.
+It writes `state/startup-growth.check.sh` and binds it through the existing authenticated watcher-check mechanism, so no extra daemon or scheduler is installed.
+Registering it is a reason to watch on the same terms as the [watched-tool check](#watched-tool-updates-configwatched-toolsjson), so an armed home keeps needing a watcher after its last task is torn down.
+Use `bin/fm-startup-growth-check.sh disarm` to remove the check and its local report record.
+
+The check evaluates at most once per day and stays silent when nothing meaningful changed.
+A due evaluation uses file metadata and byte sizes before any content inspection: it asks `bin/fm-startup-memory-budget.sh report` for the budget verdict over `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, watches the `data/projects.md` and `data/secondmates.md` that session start also prints in full for growth without entering that budget total, and separately watches the tracked startup/instruction owner files described by the script header.
+`bin/fm-startup-memory-budget.sh` remains the sole owner of the budget total and its verdict, so the check never re-derives either: when that owner annotates an overrun caused by the primary-owned `data/captain-shared.md` alone, a secondmate home is not woken about an overrun it cannot act on.
+A secondmate home is likewise not notified about per-file growth of that same primary-owned `data/captain-shared.md`, which it receives read-only; the growth is still observed and recorded, and a primary home reports it normally.
+Those tracked bytes are code and instruction-surface size, not prompt-memory cost.
+The check does not run session-start, bootstrap, network checks, model calls, repository refreshes, `/stow`, or full preference/learnings rereads.
+
+Growth is measured against a per-file baseline retained in the check's own state record, so accumulation that stays under one day's threshold is still caught once it adds up; reporting a file rebases its baseline to the reported size, so accepted growth then stays silent.
+A surface observed for the first time is baselined silently, including the first content of an optional file that did not exist yet when the check was armed, and an established baseline survives that file disappearing and coming back.
+The fixed growth thresholds are inspectable in the script header: 2048 bytes for tracked startup/instruction files and 250 estimated tokens for the printed startup-memory files.
+Budget overrun, unsafe or unreadable inputs, missing required tracked owner files, or material growth are reported once and deduplicated until the finding changes or clears; the report line is delivered before the check advances its own record, so a state-publication failure can repeat a finding but never swallow one.
+That one line goes out through the shared per-line digest cut, so an over-long finding set carries the repo's `[truncated]` marker instead of ending mid-finding, while deduplication keeps comparing the full uncapped set.
+Older bulk learning files remain reference-only; this monitor neither loads nor merges them.
+A reported review need is only a recommendation, not cleanup authority.
 
 ## Stow pass horizon (config/stow-pass-horizon)
 
@@ -841,6 +869,43 @@ The file is a captain-wide safety preference, so it is inherited into secondmate
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
 
+## Worker tool exclusions (config/crew-exclude-tools)
+
+The optional local, gitignored `config/crew-exclude-tools` hides named tools from this home's ship and scout workers, for example to keep an MCP server's write tools out of reach while its read tools stay available.
+The contract is runtime-neutral: a runtime must support hiding the listed tool names or refuse the launch, and a non-empty list is never silently ignored.
+With no file, or a file with no entries, every launch on every runtime is unchanged.
+
+Create the file with one tool name per line, such as `mcp__<server>__<tool>` for an MCP tool.
+Blank lines and lines beginning with `#` are allowed, and surrounding whitespace on a line is trimmed; a trailing comment on an entry line is not allowed.
+The file is read from this home's own configuration directory on every launch, so a change reaches the next worker or relaunch without a restart.
+It is not in the inherited configuration set, so no other home, including a secondmate home, receives it; create the file in each home that wants it.
+It does not apply to a secondmate's own agent, which neither reads nor refuses on it.
+
+### Runtime support
+
+| Runtime | With a non-empty list |
+| --- | --- |
+| `pi`, `pi-signed` | Hides listed tool names, MCP tools included, on every ship and scout spawn and relaunch. |
+| Every other runtime, and a raw launch command | The launch refuses with an error naming `config/crew-exclude-tools`, because that runtime has no verified way to hide tools. |
+
+A relaunch validates the list and the replacement runtime's support before stopping the running worker, so an exclusion-list refusal preserves the running agent.
+
+### Validation
+
+An entry may use only `A-Z`, `a-z`, `0-9`, `_`, `.`, and `-`.
+An entry with any other character, including internal whitespace, a comma, or a `*`, refuses the launch and names the offending entry.
+An unreadable or nonregular file, or a path inspection error, also refuses and names the configuration file.
+For a new worker, these checks run before its endpoint, local copy, or task record is created; Firstmate never launches with a partial list.
+Only exact tool names are accepted, not wildcard patterns.
+Firstmate checks syntax and runtime support before launch but never runs `pi mcp list` or otherwise connects to servers to validate names.
+When its first agent run starts, after Pi's startup tool-loading boundary, the worker extension compares the launch's exclusion list with its own loaded-tool registry and appends a timestamped warning note to `state/<task-id>.status` naming the configuration file and every unmatched entry for the supervisor.
+The check runs before worker actions so it cannot supersede a terminal status emitted during the turn.
+An unmatched entry is reported as **unverified**, not valid: Pi versions that omit excluded tools from the registry cannot distinguish a correct exclusion from a typo, and a server that has not connected cannot verify its tools either.
+Names present in the registry produce no report; unknown or unverified names do not refuse the launch.
+Each relaunch installs a fresh worker extension with the home's current list, so the replacement performs the same check.
+
+[`bin/fm-exclude-tools-lib.sh`](../bin/fm-exclude-tools-lib.sh) implements parsing and pre-launch validation for this contract; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch-flag mechanics.
+
 ## Worker account pin (config/claude-account, config/pi-account)
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
@@ -995,6 +1060,29 @@ A repository whose config sets `core.hooksPath` to the empty string runs no proj
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+## Project capacity (config/project-capacity)
+
+The optional local, gitignored `config/project-capacity` tells Firstmate how many workers a project can run at once on this machine, for a project whose machine-local resource - a heavy test suite, a local editor stack, a device - only serves a few workers at a time.
+Without it, dispatch stays uncapped as `AGENTS.md` section 7 describes, and a surplus worker is launched only to spend full-context turns waiting for the resource.
+The file lives in the machine's root Firstmate home, so every local secondmate home reads the same limit, and it holds one line per project:
+
+```text
+# heavy suite serves two workers
+my-project 2
+```
+
+The name is the project's registered name, which is its clone directory name and may contain spaces, and the number, the last field on the line, is a positive integer.
+A line that is only `#`, or that begins with `#` followed by whitespace, is a comment, as is a `#` line whose last field is not an integer.
+A project name may begin with `#` when that `#` is written immediately against the rest of the name and the line ends with the project's capacity.
+A name that is `#`, or that begins with `#` and a space, cannot be declared, because that line is a comment.
+A place is held by every ship or scout on that project in the root home or any local secondmate home registered under it, including one working in a separate clone of the same origin, until its ready PR is recorded or it is cleaned up; a local-only ship or a scout holds its place until cleanup.
+The declaration is matched by the spawning clone's directory name, so clones of the same origin share the cap only when they use that same directory name.
+A clone of that origin under a different directory name finds no declaration and is not capped, though its workers are still counted as holders for a same-origin clone that is capped.
+When every place is held, `bin/fm-spawn.sh` launches nothing, creates no record, leaves the backlog item queued, prints one `deferred:` line naming the holders, and exits 75, so Firstmate dispatches the item again once a place frees.
+A malformed or unreadable file refuses every fresh ship or scout spawn until it is fixed, rather than guessing the intended limit, and so does a local home's state directory or task record that cannot be read while counting a capped project's holders.
+Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
+[`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -2296,6 +2384,7 @@ FM_INACTIVE_RECONCILE_BUDGET_SECS=10  # 1..30-second scan deadline; wedged-scan 
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or Relay dispatch)
 FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle pane; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
+FM_TASK_INBOX_BUSY_MAX=2      # consecutive busy-deferred due polls before a stuck-busy stale wake; 1..999999999, at most 9 decimal digits, otherwise 2; policy: bin/fm-task-inbox-lib.sh
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate

@@ -914,6 +914,90 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
   pass "a proven-idle leftover row is rung so the child home can drain without a parent alarm"
 }
 
+# The idle proof that gates a drain ring reads the mate's pane. A TERM that
+# lands while that read is blocked must still stop the watcher at once and run
+# its cleanup, as it does for every other pane read.
+test_term_stops_a_watcher_blocked_in_the_drain_ring_idle_capture() {
+  local dir state sub fakebin fifo out pid holder i rc orphan
+  dir=$(make_case secondmate-ring-blocked-capture)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  fifo="$dir/pane.fifo"
+  out="$dir/watch-blocked.out"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen \
+    --source claude-hook --event stop >/dev/null \
+    || fail "could not mark the mate idle"
+
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "first" progress mate "$(printf '1000\t100-7')"
+
+  # The active-turn read returns, then the idle-proof read blocks on a FIFO
+  # whose write end the holder keeps open without writing.
+  mv "$fakebin/tmux" "$fakebin/tmux-alive"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = capture-pane ]; then
+  n=$(( $(cat "$FM_FAKE_CAPTURE_COUNT" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "$n" > "$FM_FAKE_CAPTURE_COUNT"
+  [ "$n" -ge 2 ] || exit 0
+  exec cat "$FM_FAKE_TMUX_CAPTURE"
+fi
+exec "$(dirname "$0")/tmux-alive" "$@"
+SH
+  chmod +x "$fakebin/tmux"
+  mkfifo "$fifo"
+  ( exec 3> "$fifo"; : > "$dir/capture-blocked"; exec sleep 30 ) &
+  holder=$!
+
+  printf '1002\n' > "$dir/now"
+  touch "$state/.secondmate-liveness-tick"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_FAKE_TMUX_CAPTURE="$fifo" FM_FAKE_CAPTURE_COUNT="$dir/captures" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -e "$dir/capture-blocked" ] && [ "$i" -lt 300 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/capture-blocked" ] || ! is_live_non_zombie "$pid"; then
+    kill "$holder" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+    fail "the watcher never blocked inside the drain-ring idle capture: $(cat "$out")"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 100
+  rc=$?
+  orphan=$(pgrep -f "cat $fifo" || true)
+  [ -z "$orphan" ] || pkill -f "cat $fifo" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 124 ] || fail "TERM did not stop a watcher blocked in the drain-ring idle capture"
+  [ -z "$orphan" ] || fail "a watcher stopped in the drain-ring idle capture left that capture running"
+  [ "$(cat "$dir/captures")" = 2 ] \
+    || fail "the watcher did not block in the drain-ring idle capture: $(cat "$dir/captures") pane reads"
+  [ ! -e "$state/.watch.lock" ] \
+    || fail "a watcher stopped in the drain-ring idle capture kept its singleton lock"
+  [ ! -s "$dir/sent" ] || fail "a watcher stopped before its idle proof still rang the mate"
+  pass "TERM stops a watcher blocked in the drain-ring idle capture and runs its cleanup"
+}
+
 # Busy and unknown panes are never typed into. Busy still defers inside the
 # active-turn bound. Unknown keeps the parent alarm. Empty inbox is not idle
 # proof, so the unknown fixture starts with no instruction records.
@@ -3432,6 +3516,7 @@ test_secondmate_reprovisioned_queue_starts_a_fresh_interval
 test_secondmate_active_turn_defers_stall_until_the_turn_ends
 test_secondmate_long_lived_mate_mid_turn_is_not_a_stall
 test_secondmate_proven_idle_ring_lets_the_child_drain
+test_term_stops_a_watcher_blocked_in_the_drain_ring_idle_capture
 test_secondmate_busy_and_unknown_panes_are_not_rung
 test_secondmate_genuine_stall_after_idle_ring_still_alarms
 test_secondmate_stall_marker_rejects_symlink

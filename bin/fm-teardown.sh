@@ -49,7 +49,9 @@
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# on a remote yet the change is fully in main. A task whose meta records
+# base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
+# its base branch instead of the default branch.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -65,7 +67,8 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
+# Uncommitted changes are never landed; dirty refusals distinguish untracked-only
+# leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -291,6 +294,12 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+# After Fix 1 and Fix 2, when config/pipeline-spend opts this home in, a ship
+# task whose local copy this teardown owns has its no-mistakes pipeline spend
+# recorded by bin/fm-pipeline-spend.sh, which owns the attribution and the
+# ledger. It runs before the task branch it attributes runs by is deleted and
+# before state/<id>.meta is removed, and is best effort: a failure warns and
+# never blocks cleanup.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1157,6 +1166,7 @@ elif [ "$TREEHOUSE_SLOT_LOCK_REQUIRED" = 1 ]; then
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+BASE_BRANCH=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
 
 # A record accepted as a legacy incarnation (no spawn_gen, and either
 # --legacy-record given or the record is windowless) may be torn down only
@@ -1573,8 +1583,8 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  local name=${BASE_BRANCH:-} ref default_tree merged_tree
+  [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
@@ -1864,6 +1874,23 @@ teardown_treehouse_return() {
   return 1
 }
 
+report_worktree_dirt() {
+  # Use the same porcelain snapshot and exemptions as the refusal predicate.
+  printf '%s\n' "$1" | awk '
+    /^\?\? / { if (++untracked <= 10) paths = paths "  " substr($0, 4) "\n"; next }
+    NF { tracked = 1 }
+    END {
+      if (tracked) print "uncommitted changes present (includes tracked edits)"
+      else print "uncommitted changes present (untracked-only leftovers)"
+      if (untracked) {
+        print "untracked paths (up to 10):"
+        printf "%s", paths
+        if (untracked > 10) print "  ... additional untracked paths omitted"
+      }
+    }
+  ' >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1880,7 +1907,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1905,14 +1932,14 @@ validate_worktree_teardown_safety() {
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      [ -n "$dirty" ] && report_worktree_dirt "$dirty"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
-    echo "uncommitted changes present" >&2
+    report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
@@ -2310,50 +2337,15 @@ teardown_live_slot_path() {
   canonical_existing_dir "$WT"
 }
 
+# Every local Firstmate state directory whose records can name a pool slot this
+# task's slot might also be; bin/fm-wake-lib.sh's fm_local_firstmate_state_dirs
+# owns the walk and what it refuses.
 collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
+  fm_local_firstmate_state_dirs "$1" || {
+    echo "REFUSED: $FM_LOCAL_FIRSTMATE_ERROR; nothing was changed" >&2
     return 1
   }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
+  TREEHOUSE_OWNER_STATES=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
 }
 
 require_exclusive_worktree_slot_record() {
@@ -3563,6 +3555,11 @@ if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
+fi
+if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend" ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-pipeline-spend.sh" record "$ID" >/dev/null \
+    || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
