@@ -568,6 +568,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 
 ## Queued
 - [ ] queued-comma - Queued Comma Task (repo: beta, since 2026-07-08) (kind: ship)
+- [ ] queued-local-title - Refresh local office (repo: beta, since 2026-07-08) (kind: ship)
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
@@ -579,7 +580,11 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
-- [x] done-note - Done Note local main (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-note - Done Note (repo: delta, done 2026-07-11) (kind: ship)
+  local main
+- [x] done-title-local - Release local office (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-named-note - Done Named Note (repo: delta, done 2026-07-11) (kind: ship)
+  local office
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -615,6 +620,10 @@ EOF
     .backlog.records[] | select(.id == "queued-comma")
     | .repo == "beta" and .since == "2026-07-08"
   ' >/dev/null || fail "queued comma metadata did not split"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "queued-local-title")
+    | .title == "Refresh local office" and .local_note == null
+  ' >/dev/null || fail "an active title was mistaken for a local landing note"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "parenthetical-title")
     | .title == "Refresh sidebar (mobile)" and .repo == "beta"
@@ -679,6 +688,18 @@ EOF
       and .done == "2026-07-11"
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "done closure metadata did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-title-local")
+    | .title == "Release local office"
+      and .local_note == null
+      and .done == "2026-07-11"
+      and .completion == {verb:"done",date:"2026-07-11"}
+  ' >/dev/null || fail "an ordinary completed title was mistaken for a local landing note"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-named-note")
+    | .title == "Done Named Note"
+      and .local_note == "local office"
+  ' >/dev/null || fail "a named local landing note body was not projected"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -694,6 +715,10 @@ EOF
     "view should render bracketed PR artifact outside the title"
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
+  assert_contains "$view" "| done-title-local | Release local office | delta | ship | - | - |" \
+    "view should preserve an ordinary completed title ending in local office"
+  assert_contains "$view" "| done-named-note | Done Named Note | delta | ship | - | local office |" \
+    "view should render the named local landing note body"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>|--branch-name <name>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -38,11 +38,17 @@
 #   prints a one-line deviation notice and continues, because the registered
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
+#   --branch-name selects that full crew branch instead of prefix-plus-id. It is
+#   mutually exclusive with --branch-prefix, must agree with the brief's
+#   "Ship branch:" line, and is refused on scouts, secondmates, and relaunches.
+#   A fresh ship whose crew branch is already recorded on another ship task for
+#   the same project is refused before any endpoint exists.
 #   --base-branch is the optional branch selected at intake for a ship or scout
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
 #   origin or origin lacks that branch, or when the project's registered forge
-#   cannot carry it. It must agree with every Setup "Base branch:" line in the
+#   cannot carry it; a local-only task without origin requires the named ref
+#   locally. It must agree with every Setup "Base branch:" line in the
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
 #   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
@@ -166,8 +172,8 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
-#   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
-#   root Firstmate home's state directory before slot allocation and holds it through
+#   A fresh ship or scout spawn also takes the project-identity lock in the local
+#   root Firstmate home's state directory before allocation checks and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
 #   returning a slot, so allocation cannot reuse a slot before its owner record
 #   is published. Under that same lock it writes the slot's owner claim, which is
@@ -682,6 +688,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 BRANCH_PREFIX=fm/
+BRANCH_NAME=
+BASE_BRANCH=
 TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
@@ -690,6 +698,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 BRANCH_PREFIX_SET=0
+BRANCH_NAME_SET=0
 BASE_BRANCH=
 BASE_BRANCH_SET=0
 TRACEPARENT_SET=0
@@ -735,6 +744,10 @@ for a in "$@"; do
     branch-prefix)
       BRANCH_PREFIX=$a
       BRANCH_PREFIX_SET=1
+      ;;
+    branch-name)
+      BRANCH_NAME=$a
+      BRANCH_NAME_SET=1
       ;;
     base-branch)
       BASE_BRANCH=$a
@@ -798,6 +811,11 @@ for a in "$@"; do
     BRANCH_PREFIX=${a#--branch-prefix=}
     BRANCH_PREFIX_SET=1
     ;;
+  --branch-name) want_value="branch-name" ;;
+  --branch-name=*)
+    BRANCH_NAME=${a#--branch-name=}
+    BRANCH_NAME_SET=1
+    ;;
   --base-branch) want_value="base-branch" ;;
   --base-branch=*)
     BASE_BRANCH=${a#--base-branch=}
@@ -841,6 +859,14 @@ done
 }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
+  exit 1
+}
+[ "$BRANCH_NAME_SET" -eq 0 ] || [ -n "$BRANCH_NAME" ] || {
+  echo "error: --branch-name requires a non-empty value" >&2
+  exit 1
+}
+[ "$BASE_BRANCH_SET" -eq 0 ] || [ -n "$BASE_BRANCH" ] || {
+  echo "error: --base-branch requires a non-empty value" >&2
   exit 1
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -887,6 +913,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded ship branch; --branch-prefix cannot override it" >&2
+    exit 1
+  }
+  [ "$BRANCH_NAME_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded ship branch; --branch-name cannot override it" >&2
     exit 1
   }
   [ "$BASE_BRANCH_SET" -eq 0 ] || {
@@ -938,10 +968,22 @@ else
       echo "error: --branch-prefix applies only to ship spawns; a scout makes no branch and a secondmate records no ship branch" >&2
       exit 1
     }
+    [ "$BRANCH_NAME_SET" -eq 0 ] || {
+      echo "error: --branch-name applies only to ship spawns; a scout makes no branch and a secondmate records no ship branch" >&2
+      exit 1
+    }
     [ "$KIND" != secondmate ] || [ "$BASE_BRANCH_SET" -eq 0 ] || {
       echo "error: --base-branch applies only to ship and scout spawns; a secondmate charter has no task base" >&2
       exit 1
     }
+  fi
+  if [ "$BRANCH_NAME_SET" -eq 1 ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+    echo "error: --branch-name and --branch-prefix are mutually exclusive; pass the full crew branch or the prefix, not both" >&2
+    exit 1
+  fi
+  if [ "$BASE_BRANCH_SET" -eq 1 ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+    echo "error: --base-branch is not a usable git branch name: $BASE_BRANCH" >&2
+    exit 1
   fi
 fi
 
@@ -1365,6 +1407,7 @@ spawn_abort_cleanup() {
             [ -z "${MODE:-}" ] || echo "mode=$MODE"
             [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
             [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
+            [ -z "${BASE_BRANCH:-}" ] || echo "base_branch=$BASE_BRANCH"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
@@ -1539,6 +1582,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
+  [ "$BRANCH_NAME_SET" -eq 0 ] || shared_args+=(--branch-name "$BRANCH_NAME")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   for pair in "${POS[@]}"; do
@@ -1574,9 +1618,21 @@ fm_task_id_creation_valid "$ID" || {
   exit 2
 }
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
-  BRANCH="$BRANCH_PREFIX$ID"
-  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-    echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+  if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+    BRANCH=$BRANCH_NAME
+    if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+      echo "error: --branch-name is not a usable git branch name: $BRANCH" >&2
+      exit 1
+    fi
+  else
+    BRANCH="$BRANCH_PREFIX$ID"
+    if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+      echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+      exit 1
+    fi
+  fi
+  if [ "$BASE_BRANCH_SET" -eq 1 ] && [ "$BASE_BRANCH" = "$BRANCH" ]; then
+    echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different --branch-name" >&2
     exit 1
   fi
 fi
@@ -1864,6 +1920,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
     if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
       echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
       exit 1
+    fi
+  fi
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    BASE_BRANCH=$(fm_meta_get "$RELAUNCH_META" base_branch)
+    if [ -n "$BASE_BRANCH" ]; then
+      BASE_BRANCH_SET=1
+      if ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+        echo "error: task $ID has an invalid recorded base branch '$BASE_BRANCH'" >&2
+        exit 1
+      fi
     fi
   fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
@@ -3099,13 +3165,13 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
-    echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
+    echo "error: could not resolve the shared project lock for $PROJ_ABS" >&2
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
-    echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
+    echo "error: another project allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
@@ -3212,6 +3278,13 @@ if [ "$KIND" = ship ]; then
   BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
   BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
+  BRIEF_BASE=$(fm_brief_base_branches "$BRIEF" | head -n 1)
+  if [ -n "$BRIEF_BASE" ] || [ "$BASE_BRANCH_SET" -eq 1 ]; then
+    [ "$BRIEF_BASE" = "$BASE_BRANCH" ] || {
+      echo "error: base mismatch for $ID: the brief says base_branch=${BRIEF_BASE:-<none>} but this spawn selected base_branch=${BASE_BRANCH:-<none>}" >&2
+      exit 1
+    }
+  fi
   if [ -n "$BRIEF_BRANCH" ]; then
     [ "$BRIEF_BRANCH" = "$BRANCH" ] || {
       echo "error: branch mismatch for $ID: the brief says branch=$BRIEF_BRANCH but this spawn selected branch=$BRANCH" >&2
@@ -3274,6 +3347,136 @@ if [ "$KIND" = ship ]; then
   STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
   if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+elif [ "$KIND" = scout ]; then
+  BRIEF_BASE=$(fm_brief_base_branches "$BRIEF" | head -n 1)
+  if [ -n "$BRIEF_BASE" ] || [ "$BASE_BRANCH_SET" -eq 1 ]; then
+    [ "$BRIEF_BASE" = "$BASE_BRANCH" ] || {
+      echo "error: base mismatch for $ID: the brief says base_branch=${BRIEF_BASE:-<none>} but this spawn selected base_branch=${BASE_BRANCH:-<none>}" >&2
+      exit 1
+    }
+  fi
+fi
+
+# Named base and crew-branch occupancy are proven before a pane exists. A
+# missing base or a branch already assigned to another ship for this project
+# stops here, so a later freshen failure cannot leave an endpoint behind.
+# Resolved remote.origin.* variables cover Git's effective include/includeIf chain; raw headers are also detected in the worktree config and any included file Git names through another variable. Git cannot enumerate a variable-less included file, so an empty origin section that is its only content remains indistinguishable from absence and intentionally proceeds rather than reimplementing Git's config parser.
+spawn_worktree_has_origin_config() { # <worktree>
+  local worktree=$1 config origin key seen=$'\n'
+  git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1 && return 0
+  while IFS=$'\t' read -r origin key; do
+    case $origin in file:*) config=${origin#file:} ;; *) continue ;; esac
+    [ -f "$config" ] || continue
+    case $seen in *$'\n'"$config"$'\n'*) continue ;; esac
+    seen+="$config"$'\n'
+    awk '/^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee][[:space:]]+"origin"[[:space:]]*\][[:space:]]*([#;].*)?$/ || /^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee]\.origin[[:space:]]*\][[:space:]]*([#;].*)?$/ { found=1 } END { exit !found }' "$config" && return 0
+  done < <(git -C "$worktree" config --list --show-origin 2>/dev/null || true)
+  return 1
+}
+
+refuse_shared_crew_branch() {
+  local meta other_branch other_project other_kind other_real proj_real other_id
+  [ "$KIND" = ship ] || return 0
+  [ -n "${BRANCH:-}" ] || return 0
+  [ -d "$STATE" ] || return 0
+  proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || proj_real=$PROJ_ABS
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other_id=${meta##*/}
+    other_id=${other_id%.meta}
+    [ "$other_id" = "$ID" ] && continue
+    other_kind=$(fm_meta_get "$meta" kind)
+    [ "$other_kind" = ship ] || continue
+    other_branch=$(fm_meta_get "$meta" branch)
+    [ "$other_branch" = "$BRANCH" ] || continue
+    other_project=$(fm_meta_get "$meta" project)
+    [ -n "$other_project" ] || continue
+    if other_real=$(cd "$other_project" 2>/dev/null && pwd -P); then
+      [ "$other_real" = "$proj_real" ] || continue
+    else
+      [ "$other_project" = "$PROJ_ABS" ] || continue
+    fi
+    echo "error: crew branch $BRANCH is already assigned to task $other_id; refusing to launch a fresh task with a shared branch" >&2
+    return 1
+  done
+}
+
+refuse_named_crew_branch_collision() {
+  local remote_refs
+  [ "$KIND" = ship ] || return 0
+  [ "$BRANCH_NAME_SET" -eq 1 ] || return 0
+  if git -C "$PROJ_ABS" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    echo "error: crew branch $BRANCH already exists locally; refusing to launch a fresh task with a reused branch" >&2
+    return 1
+  fi
+  [ "$MODE" = local-only ] && return 0
+  if spawn_worktree_has_origin_config "$PROJ_ABS"; then
+    if ! remote_refs=$(git -C "$PROJ_ABS" ls-remote --heads origin "refs/heads/$BRANCH" 2>/dev/null); then
+      echo "error: could not check whether crew branch $BRANCH exists on origin; refusing to launch" >&2
+      return 1
+    fi
+    if [ -n "$remote_refs" ]; then
+      echo "error: crew branch $BRANCH already exists on origin; refusing to launch a fresh task with a reused branch" >&2
+      return 1
+    fi
+  fi
+}
+
+ensure_named_base_present() { # <repo> <branch>
+  local repo=$1 branch=$2 remote_refs
+  if [ "$MODE" = local-only ]; then
+    if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
+      return 0
+    fi
+    echo "error: named base '$branch' does not exist locally in $repo; refusing to launch" >&2
+    return 1
+  fi
+  if [ "$KIND" = scout ]; then
+    if spawn_worktree_has_origin_config "$repo"; then
+      if ! remote_refs=$(git -C "$repo" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null); then
+        echo "error: could not check named base '$branch' on origin for $repo; refusing to launch" >&2
+        return 1
+      fi
+      if [ -n "$remote_refs" ]; then
+        if ! git -C "$repo" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+          echo "error: could not fetch named base '$branch' for $repo; refusing to launch" >&2
+          return 1
+        fi
+        return 0
+      fi
+    fi
+    if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
+      return 0
+    fi
+    echo "error: named base 'origin/$branch' does not exist locally or on origin for $repo; refusing to launch" >&2
+    return 1
+  fi
+  if spawn_worktree_has_origin_config "$repo"; then
+    if ! git -C "$repo" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+      echo "error: could not fetch 'origin/$branch' for $repo; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" >/dev/null; then
+      echo "error: named base 'origin/$branch' does not exist on origin for $repo; refusing to launch" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
+    return 0
+  fi
+  echo "error: named base '$branch' does not exist in $repo; refusing to launch" >&2
+  return 1
+}
+
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  if [ -n "${BASE_BRANCH:-}" ]; then
+    ensure_named_base_present "$PROJ_ABS" "$BASE_BRANCH" || exit 1
+  fi
+  if [ "$KIND" = ship ]; then
+    refuse_shared_crew_branch || exit 1
+    refuse_named_crew_branch_collision || exit 1
   fi
 fi
 
@@ -3455,10 +3658,27 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
-    [ -z "$base" ] || {
-      echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
-      return 1
-    }
+    if [ -n "$base" ]; then
+      [ "$MODE" = local-only ] || {
+        echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
+        return 1
+      }
+      git -C "$worktree" rev-parse --verify --quiet "refs/heads/$base^{commit}" >/dev/null || {
+        echo "error: named base '$base' does not exist locally for pooled worktree '$worktree'; refusing to launch" >&2
+        return 1
+      }
+      target="refs/heads/$base"
+      expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}") || return 1
+      if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+        echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch" >&2
+        return 1
+      fi
+      actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+      if [ "$actual" != "$expected" ]; then
+        echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+        return 1
+      fi
+    fi
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
