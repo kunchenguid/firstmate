@@ -936,6 +936,23 @@ test_idle_agent_is_not_interrupted() {
   pass "fm-control exit: an idle agent goes straight to its exit command"
 }
 
+test_exit_drops_meta_busy_gen_with_the_sidecar() {
+  local dir out rc gen changed
+  dir=$(new_case codex-retire)
+  add_task "$dir" t1 codex
+  alive_as "$dir" codex
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  grep -v '^busy_gen=' "$dir/home/state/t1.meta" > "$dir/expected.meta"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a codex agent should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit should retire the busy sidecar and record"
+  changed=$(diff "$dir/expected.meta" "$dir/home/state/t1.meta") \
+    || fail "exit should drop only busy_gen from the task record:"$'\n'"$changed"
+  pass "fm-control exit: retiring a codex incarnation drops busy_gen with the sidecar"
+}
+
 test_interrupt_without_acknowledgement_preserves_busy_state() {
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
@@ -947,6 +964,8 @@ test_interrupt_without_acknowledgement_preserves_busy_state() {
   out=$(run_control "$dir" t1 interrupt); rc=$?
   expect_code 0 "$rc" "an interrupt without acknowledgement should still deliver"$'\n'"$out"
   after=$(cat "$dir/home/state/t1.busy-state")
+  grep -q "^busy_gen=$gen$" "$dir/home/state/t1.meta" \
+    || fail "an interrupt must leave the task record's busy_gen in place"
   [ "$after" = "$before" ] || fail "an unconfirmed interrupt must preserve adapter-owned busy state"
   assert_contains "$out" "verified=agent-alive cancel=unconfirmed" \
     "the result should distinguish delivery proof from unconfirmed cancellation"
@@ -1038,6 +1057,8 @@ test_agent_that_does_not_stop_fails_closed() {
     || fail "a stubborn busy agent should receive its interrupt sequence"
   [ "$(literals "$dir")" = /exit ] \
     || fail "a stubborn busy agent should receive its exit command"
+  grep -q "^busy_gen=$gen$" "$dir/home/state/t1.meta" \
+    || fail "a failed exit must leave busy_gen in the task record"
   pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
@@ -1183,6 +1204,7 @@ test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
+test_exit_drops_meta_busy_gen_with_the_sidecar
 test_exit_refuses_an_open_background_picker
 test_exit_refuses_the_confirming_enter
 test_exit_names_a_picker_that_renders_after_the_submit
