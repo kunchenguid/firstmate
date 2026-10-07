@@ -544,7 +544,7 @@ test_project_branch_prefix_selection() {
   local home id prefix out
   home="$TMP_ROOT/branch-prefix/home"
   mkdir -p "$home/state"
-  id=branch-prefix
+  id='branch-prefix'
   FM_HOME="$home" "$BRIEF" "$id" fixture --scout >/dev/null 2>&1 || fail "scout scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" "Ship the fix." "Keep project branch naming."
   printf 'kind=scout\nworktree=/tmp/unused\n' > "$home/state/$id.meta"
