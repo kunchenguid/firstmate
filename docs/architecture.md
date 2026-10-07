@@ -121,7 +121,7 @@ The pause path still never reads a secondmate's endpoint liveness - dead-or-miss
 In a home that armed the default-off `config/pause-ceiling` flag, a pause past its ceiling instead opens one keyed decision and leaves that cadence; [`configuration.md`](configuration.md#pause-ceiling-configpause-ceiling) owns that contract.
 Its initial normal-mode status signal still surfaces through the no-verb path, while a daemon-backed away posture self-handles that routine signal and owns later external-wait rechecks.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
-No-change heartbeats are also benign.
+Heartbeat absorption follows the readiness and status checks owned by the header of `bin/fm-watch.sh`; `tests/fm-watch-ready-queue.test.sh` covers ready, unreadable, empty, and captain-held queues.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start sends the same bounded local scan through `bin/fm-startup-network.sh`'s deferred worker so current-state reads never block the digest.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
 It withholds that verdict while the task's endpoint carries a live busy agent or a newer incarnation than the last status line (the script header owns the exact rule).
