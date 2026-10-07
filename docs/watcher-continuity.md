@@ -157,6 +157,7 @@ If the successor is not ready in that time, the adapter sends TERM and waits a b
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
 After the configured retry bound is exhausted, the adapter delivers the original wake with a typed continuity-restoration failure, even if every successor arm hung without reporting readiness.
+In OpenCode, a fleet that emptied before restoration needs no successor, so that case is a clean stop that delivers the wake with no failure message and starts no retry.
 
 This is deliberate Option B ordering.
 Whenever restoration succeeds, the fleet is protected before the model handles the wake.
@@ -419,6 +420,7 @@ It then simulates actionable and empty child closes against the actual Pi and Op
 - Verifies single-flight behavior.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+- Empties the fleet before OpenCode restoration to prove it stops cleanly with no failure message and no retry, while a successor that should have armed but never becomes ready still reports its typed failure.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:
 

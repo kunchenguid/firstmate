@@ -118,12 +118,14 @@ async function isPrimaryRoot(root, home) {
 }
 
 function shouldArm(paths) {
-  if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
+  if (existsSync(`${paths.state}/.afk`)) return "not-needed";
+  if (existsSync(`${paths.config}/x-mode.env`)) return "armed";
   try {
-    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
+    return readdirSync(paths.state).some((name) => name.endsWith(".meta")) ? "armed" : "not-needed";
   } catch {
-    return false;
+    // A state directory that cannot be listed is a failed fleet check, not a
+    // verified empty fleet: the caller must report it rather than stop cleanly.
+    return "check-failed";
   }
 }
 
@@ -357,6 +359,10 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
     if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
+    // shouldArm() answers not-needed once the fleet empties, so there is no
+    // successor to verify and nothing to supervise: a clean stop, not a
+    // continuity failure.
+    if (status === "not-needed") return { failure: "", recovery: null };
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
@@ -387,7 +393,9 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   const timer = setTimeout(() => {
     if (retryTimer === timer) retryTimer = null;
     void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
-      if (["armed", "starting", "wake"].includes(status)) return;
+      // not-needed is the same clean stop here: the fleet emptied before the
+      // retry, so there is nothing left to supervise.
+      if (["armed", "starting", "wake", "not-needed"].includes(status)) return;
       surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
     });
   }, retryDelay(retryFailures));
@@ -515,7 +523,8 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
-  if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  const armDecision = shouldArm(paths);
+  if (armDecision !== "armed") return { status: armDecision, armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
 
