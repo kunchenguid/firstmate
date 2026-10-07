@@ -173,6 +173,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-polytoken-lib.sh
+. "$SCRIPT_DIR/fm-polytoken-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -525,8 +527,37 @@ interrupt_cancel_claim() {
 # cancellation claim available after delivery. `not-running` means an armed
 # adapter's first press rendered no running turn, so nothing was cancelled; a
 # dismissed revert picker is reported beside the claim.
+# The rest transport (polytoken) takes a typed branch before any key is read:
+# the TUI has no interrupt chord at all (fm_control_interrupt_transport), so
+# POST /turn/cancel on the session daemon is the one verified interrupt, with
+# its typed acknowledgement (cancel_requested plus the turn settling) as the
+# claim, and the busy close written here because a cancelled turn emits no
+# stop hook (verified live).
 deliver_interrupt() {
-  local cancel devin_gen=
+  local cancel devin_gen= port cred token gen
+  if [ "$(fm_control_interrupt_transport "$HARNESS")" = rest ]; then
+    port=$(fm_meta_get "$META" polytoken_port)
+    cred=$(fm_meta_get "$META" polytoken_credential)
+    if [ -z "$port" ] || [ -z "$cred" ]; then
+      die "task $ID records no polytoken session binding (port or credential absent from its record); the REST control verbs address the session's own daemon, so an interrupt cannot be delivered without it. The session has likely ended or was launched raw; reconcile the task or relaunch it"
+    fi
+    token=$(fm_polytoken_credential_token "$cred") || token=
+    [ -n "$token" ] || die "task $ID's polytoken credential at $cred is missing or unreadable, so the session cannot be interrupted through its daemon; the session has likely ended. Reconcile the task or relaunch it"
+    cancel=$(fm_polytoken_interrupt "$port" "$token" "$SETTLE_WAIT") \
+      || die "task $ID's polytoken turn cancel was not acknowledged on port $port within ${SETTLE_WAIT}s; the interrupt status is unknown, so no further control action is safe here"
+    INTERRUPT_ARMED=yes
+    INTERRUPT_HAZARD=none
+    # A cancelled turn emits no stop hook (verified live), so the close the
+    # hooks would have written lands here: the settled turn is the typed
+    # proof this incarnation is no longer busy.
+    gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
+    if [ -n "$gen" ]; then
+      "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle \
+        --gen "$gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
+    fi
+    printf '%s' "$cancel"
+    return 0
+  fi
   # Devin does not emit Stop for cancellation. Capture this incarnation before
   # keys, then invalidate its state conservatively rather than claiming idle.
   if [ "$HARNESS" = devin ]; then

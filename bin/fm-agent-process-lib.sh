@@ -49,8 +49,11 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # single binary, comm=agy with argv[0]=agy), and a glob would claim
     # unrelated commands containing that fragment. devin is anchored the same
     # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
-    # claims an unrelated command.
-    agy|devin) printf 'agent' ;;
+    # claims an unrelated command. polytoken is anchored the same way (verified,
+    # polytoken 0.8.19: a TUI pane's foreground process is comm `polytoken`, the
+    # same binary name as its per-session daemon), so a `*polytoken*` glob
+    # never claims an unrelated command.
+    agy|devin|polytoken) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
