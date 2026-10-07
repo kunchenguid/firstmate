@@ -114,3 +114,75 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     printf 'other'
   fi
 }
+
+# fm_agent_process_worktree_scan: whether a verified harness process is still
+# working in <worktree> anywhere on this host, read from the kernel's own
+# per-process working directory rather than from any terminal endpoint. It
+# answers the one question a lost endpoint leaves open - would launching a
+# replacement join an agent that is still running on this task's local copy? -
+# without trusting a runtime backend that could not see the endpoint.
+#
+# Only processes whose /proc entry this user owns are read: a worker is always
+# launched as that user, and another user's working directory is not readable
+# anyway. A non-dumpable process is skipped along with them, because Linux
+# gives its /proc entry to root - no verified harness is non-dumpable, so none
+# is skipped that way. Each process is classified by fm_agent_process_classify,
+# so this answers from the same name vocabulary as every liveness probe.
+#
+# Prints "<verdict>\t<detail>", always exactly one TAB:
+#   none        - every readable process was read and none is an agent there
+#   agent       - "<pid> <name>" of an agent process working in <worktree>
+#   unreadable  - the reason the process table could not be read; the caller
+#                 must treat this as "an agent may be there"
+# The only reader is /proc, whose per-process `cwd` link is the kernel's own
+# answer for one exact process. A host without /proc answers `unreadable`, so
+# no tmux endpoint is proven absent there: every other way to ask - lsof's
+# file-set records, a ps listing - reports a path it may have failed to
+# resolve without saying so for the one process that matters, and reading that
+# silence as "no agent" is what launches a duplicate onto a live worktree.
+# A process that exits mid-scan, and a zombie that holds no working directory,
+# are skipped.
+fm_agent_process_worktree_scan() {  # <worktree>
+  local wt=${1-} wt_real dir pid cwd name argv0 args stat rest
+  if [ -z "$wt" ] || ! wt_real=$(cd "$wt" 2>/dev/null && pwd -P); then
+    printf 'unreadable\tthe worktree %s cannot be resolved' "'$wt'"
+    return 0
+  fi
+  if [ ! -r /proc/self/cmdline ] || [ ! -L /proc/self/cwd ]; then
+    printf 'unreadable\tthe absence proof reads /proc and this host has none, so reclaiming a tmux task is unavailable here. The only route left is a seat that still addresses the recorded tmux server, where the window classifies directly and no absence proof is needed - and once that server is gone there is no such seat, and no route'
+    return 0
+  fi
+  for dir in /proc/[0-9]*; do
+    [ -O "$dir" ] || continue
+    pid=${dir#/proc/}
+    if cwd=$(readlink "$dir/cwd" 2>/dev/null); then
+      case "$cwd" in
+        "$wt_real"|"$wt_real"/*) ;;
+        *) continue ;;
+      esac
+    else
+      # A process that exited mid-scan, or a zombie, has no working directory
+      # left. The refusal below covers only the race that reaches here: the
+      # link vanishing from a /proc directory this user still owns, mid-exec
+      # or mid-exit.
+      [ -d "$dir" ] || continue
+      stat=$(cat "$dir/stat" 2>/dev/null) || continue
+      rest=${stat##*) }
+      case "${rest%% *}" in
+        Z|X) continue ;;
+      esac
+      cwd=
+    fi
+    name=$(cat "$dir/comm" 2>/dev/null) || continue
+    argv0=$(tr '\0' '\n' < "$dir/cmdline" 2>/dev/null | head -n 1) || argv0=
+    args=$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null) || args=
+    [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ] || continue
+    if [ -z "$cwd" ]; then
+      printf 'unreadable\tthe working directory of agent process %s (%s) could not be read' "$pid" "${name:-$argv0}"
+      return 0
+    fi
+    printf 'agent\t%s %s' "$pid" "${name:-$argv0}"
+    return 0
+  done
+  printf 'none\t'
+}

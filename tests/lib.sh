@@ -613,6 +613,34 @@ fm_eval_launch() {
   (cd "$pane" && env "$@" PATH="$fakebin:${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c "$launch")
 }
 
+# --- planted processes -------------------------------------------------------
+
+# fm_proc_scan_available: whether this host can run the tmux absence proof at
+# all. fm_agent_process_worktree_scan reads /proc and refuses everywhere else,
+# so a case that needs a positive `none` or `agent` verdict has nothing to pin
+# on a host without it.
+fm_proc_scan_available() {
+  [ -r /proc/self/cmdline ] && [ -L /proc/self/cwd ]
+}
+
+# fm_wait_for_agent_argv0 <pid>: block until <pid> reports a verified harness
+# name as its argv[0], which is the identity the process-table absence proof
+# reads (bin/fm-agent-process-lib.sh). A process planted as
+# `(cd <dir> && exec -a claude /bin/sleep 60) &` is still the forking shell
+# until its exec lands, and a shell classifies as `shell` rather than `agent`,
+# so any reader of the process table must wait for the identity itself instead
+# of for a fixed interval that a loaded host can overrun. Returns nonzero if it
+# never appears, so a caller can fail with that as the reason.
+fm_wait_for_agent_argv0() {  # <pid>
+  local pid=$1 _
+  for _ in $(seq 1 100); do
+    [ "$(tr '\0' '\n' 2>/dev/null < "/proc/$pid/cmdline" | head -n 1)" = claude ] && return 0
+    ps -o args= -p "$pid" 2>/dev/null | grep -q '^claude' && return 0
+    /bin/sleep 0.05
+  done
+  return 1
+}
+
 # --- portable file timestamps -----------------------------------------------
 
 # fm_touch_epoch <epoch> <path> [path...]: set each path's modification time to
