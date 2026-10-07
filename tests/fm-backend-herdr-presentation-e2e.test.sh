@@ -1197,9 +1197,10 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
     || fail "fresh-repository retried-removal teardown failed: $(cat "$TMP_ROOT/fresh-retry-teardown.err")"
   assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository retried-removal teardown"
 
-  # A retry refused again warns once, keeps the record for the spawn after
-  # it, touches nothing, and leaves that task flat too. An extra tab on the
-  # recorded parent makes the childless guard refuse the removal.
+  # A lasting refusal (an extra tab on the recorded parent makes the
+  # childless guard refuse the removal for good) forgets the record with one
+  # warning, leaves the parent standing, and the ordinary parent ensure adopts
+  # that exact parent so the task groups under it.
   lab tab create --workspace "$FRESH_PARENT2_WSID" --cwd "$FRESH_PROJECT_DIR" --label fm-fresh-extra-tab --no-focus >/dev/null \
     || fail "could not give the fresh-repository parent an extra tab"
   record_repo_parent_retry "$FRESH_PARENT2_WSID" "$FRESH_REPO_LABEL" "$FRESH_PROJECT_DIR" \
@@ -1210,23 +1211,22 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
     || fail "spawn after a refused fresh-repository retry should still succeed: $(cat "$TMP_ROOT/fresh-stuck.err")"
   assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository refused retry"
   assert_raw_presentation_mutations_preserved_since "$FRESH_STUCK_FOCUS_START" "fresh-repository refused retry"
-  grep -F "left the parent $FRESH_PARENT2_WSID an earlier spawn left standing in place because it holds more than its seeded tab" "$TMP_ROOT/fresh-stuck.err" >/dev/null 2>&1 \
-    || fail "fresh-repository refused retry did not warn about the refused removal: $(cat "$TMP_ROOT/fresh-stuck.err")"
-  grep -F "next spawn on this repository retries" "$TMP_ROOT/fresh-stuck.err" >/dev/null 2>&1 \
-    || fail "fresh-repository refused retry did not say the next spawn retries: $(cat "$TMP_ROOT/fresh-stuck.err")"
+  grep -F "can no longer remove the repo parent $FRESH_PARENT2_WSID an earlier spawn left standing" "$TMP_ROOT/fresh-stuck.err" | grep -F "leaving it standing and adopting it" >/dev/null 2>&1 \
+    || fail "fresh-repository lasting refusal did not warn that the parent is left standing and adopted: $(cat "$TMP_ROOT/fresh-stuck.err")"
   [ "$(grep -c 'an earlier spawn left standing' "$TMP_ROOT/fresh-stuck.err")" = 1 ] \
-    || fail "fresh-repository refused retry warned more than once: $(cat "$TMP_ROOT/fresh-stuck.err")"
-  grep -F "$FRESH_PARENT2_WSID" "$RETRY_RECORD" >/dev/null 2>&1 \
-    || fail "fresh-repository refused retry dropped the retry record"
+    || fail "fresh-repository lasting refusal warned more than once: $(cat "$TMP_ROOT/fresh-stuck.err")"
+  [ ! -e "$RETRY_RECORD" ] || ! grep -F "$FRESH_PARENT2_WSID" "$RETRY_RECORD" >/dev/null 2>&1 \
+    || fail "fresh-repository lasting refusal kept the retry record"
   FRESH_STUCK_META="$HOME_DIR/state/fresh-stuck.meta"
-  remember_meta_worktree "$FRESH_STUCK_META" >/dev/null
+  FRESH_STUCK_WT=$(remember_meta_worktree "$FRESH_STUCK_META")
   FRESH_STUCK_WSID=$(grep '^herdr_workspace_id=' "$FRESH_STUCK_META" | cut -d= -f2-)
-  assert_flat_row "$FRESH_STUCK_WSID" "fresh-repository refused retry"
-  assert_no_attach_calls_since "$FRESH_STUCK_START" "fresh-repository refused retry"
+  assert_linked_child "$FRESH_STUCK_WSID" "$FRESH_STUCK_WT" "$FRESH_PROJECT_DIR" "fresh-repository lasting refusal" "$TMP_ROOT/fresh-stuck.err"
+  [ "$(lab worktree list --workspace "$FRESH_PARENT2_WSID" | jq -r --arg id "$FRESH_STUCK_WSID" '[.result.worktrees[]? | select(.open_workspace_id == $id)] | length')" = 1 ] \
+    || fail "fresh-repository lasting refusal did not group the task under exactly the recorded parent $FRESH_PARENT2_WSID"
   [ "$(lab workspace list | jq -r --arg id "$FRESH_PARENT2_WSID" '[.result.workspaces[] | select(.workspace_id == $id)] | length')" = 1 ] \
-    || fail "fresh-repository refused retry removed the parent it should have left alone"
+    || fail "fresh-repository lasting refusal removed the parent it should have left standing"
   [ "$(lab tab list --workspace "$FRESH_PARENT2_WSID" | jq -r '[.result.tabs[]?] | length')" = 2 ] \
-    || fail "fresh-repository refused retry changed the parent's tabs"
+    || fail "fresh-repository lasting refusal changed the parent's tabs"
   # The spawn still prunes its own task workspace's seeded pane; nothing
   # outside that workspace may be closed or renamed.
   FRESH_STUCK_CALLS=$(sed -n "$((FRESH_STUCK_START + 1)),\$p" "$HERDR_CALL_LOG")
@@ -1234,8 +1234,8 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
     ($1 == "pane" && $2 == "close" && index($3, own) != 1) || ($1 == "tab" && $2 == "close") || ($1 == "workspace" && ($2 == "close" || $2 == "rename")) || ($1 == "session" && ($2 == "stop" || $2 == "delete")) || $1 == "server" { print $1 " " $2 " " $3 }
   ')
   [ -z "$FRESH_STUCK_FOREIGN_MUTATIONS" ] \
-    || fail "fresh-repository refused retry closed or renamed something outside its own task workspace: $(printf '%s\n' "$FRESH_STUCK_FOREIGN_MUTATIONS" | tr '\n' ';')"
-  pass "real Herdr lab: a retry refused again warns once, keeps the record, touches nothing, and leaves that task flat"
+    || fail "fresh-repository lasting refusal closed or renamed something outside its own task workspace: $(printf '%s\n' "$FRESH_STUCK_FOREIGN_MUTATIONS" | tr '\n' ';')"
+  pass "real Herdr lab: a retry refused for a lasting reason forgets the record with one warning, leaves the parent standing, and groups the task under it"
   teardown_task fresh-stuck "$HOME_DIR" > "$TMP_ROOT/fresh-stuck-teardown.out" 2> "$TMP_ROOT/fresh-stuck-teardown.err" \
     || fail "fresh-repository refused-retry teardown failed: $(cat "$TMP_ROOT/fresh-stuck-teardown.err")"
   assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository refused-retry teardown"

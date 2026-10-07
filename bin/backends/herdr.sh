@@ -2986,8 +2986,11 @@ EOF
 # snapshots and restores focus, lets Herdr remove the emptied workspace through
 # its pane-death path, and refuses when that tab is the active one with a live
 # client. It is never forced or renamed and never retried within the spawn;
-# status 0 means the exact parent is confirmed gone from the workspace list,
-# and the spawn records a refused removal so the next spawn on that
+# status 0 means the exact parent is confirmed gone from the workspace list.
+# A refusal is status 2 when it is lasting (the parent already groups other open
+# workspaces or holds more than its seeded tab or pane) and status 1 when it is
+# transient (an unreadable listing, a focus-unsafe pane close, a failed close,
+# or the parent still listed). The spawn records a refused removal so the next spawn on that
 # repository retries it (fm_backend_herdr_projection_repo_parent_retry).
 # The optional third argument names the parent in the warnings, "it just
 # created" by default, so the retry can say whose parent was left standing.
@@ -3011,7 +3014,7 @@ fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
         ;;
       *)
         echo "warning: herdr repo grouping left the parent $parent $what in place because it already groups $others other open workspace(s)" >&2
-        return 1
+        return 2
         ;;
     esac
   fi
@@ -3019,17 +3022,24 @@ fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
     echo "warning: herdr repo grouping could not read the tabs of the parent $parent $what; leaving it in place" >&2
     return 1
   }
-  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array" and (.result.tabs | length) == 1' >/dev/null 2>&1; then
-    echo "warning: herdr repo grouping left the parent $parent $what in place because it holds more than its seeded tab" >&2
+  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+    echo "warning: herdr repo grouping could not read the tabs of the parent $parent $what; leaving it in place" >&2
     return 1
   fi
-  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$parent" 2>/dev/null) || panes=
+  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | length) == 1' >/dev/null 2>&1; then
+    echo "warning: herdr repo grouping left the parent $parent $what in place because it holds more than its seeded tab" >&2
+    return 2
+  fi
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$parent" 2>/dev/null) || {
+    echo "warning: herdr repo grouping could not read the panes of the parent $parent $what; leaving it in place" >&2
+    return 1
+  }
   pane=$(printf '%s' "$panes" | jq -er '
     select((.result.panes | type) == "array" and (.result.panes | length) == 1)
     | .result.panes[0].pane_id | select(type == "string" and length > 0)
   ' 2>/dev/null) || {
     echo "warning: herdr repo grouping left the parent $parent $what in place because it does not hold exactly one seeded pane" >&2
-    return 1
+    return 2
   }
   if ! fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane"; then
     echo "warning: herdr repo grouping could not close the parent $parent $what without risking focus; leaving it in place" >&2
@@ -3097,10 +3107,12 @@ fm_backend_herdr_projection_repo_parent_retry_forget() {  # <state> <session> <p
 # one warning. Otherwise the removal goes through
 # fm_backend_herdr_projection_repo_parent_close_fresh (same childless guards,
 # same focus-preserving pane path); success forgets the record and says so
-# once, while a refusal warns once more, keeps the record for the spawn after
+# once. A lasting refusal (close_fresh status 2) forgets the record with one
+# warning and returns 0 so the ordinary parent ensure adopts that exact parent;
+# a transient refusal warns once more, keeps the record for the spawn after
 # this one, and returns 1 so the caller keeps this task flat too.
 fm_backend_herdr_projection_repo_parent_retry() {  # <state> <session> <clone>
-  local state=$1 session=$2 clone=$3 entry parent label list count live_label reason
+  local state=$1 session=$2 clone=$3 entry parent label list count live_label reason status
   entry=$(fm_backend_herdr_projection_repo_parent_retry_lookup "$state" "$session" "$clone") || entry=
   [ -n "$entry" ] || return 0
   parent=${entry%%$'\t'*}
@@ -3130,6 +3142,13 @@ fm_backend_herdr_projection_repo_parent_retry() {  # <state> <session> <clone>
   if reason=$(fm_backend_herdr_projection_repo_parent_close_fresh "$session" "$parent" "an earlier spawn left standing" 2>&1 >/dev/null); then
     fm_backend_herdr_projection_repo_parent_retry_forget "$state" "$session" "$parent" || true
     echo "warning: herdr repo grouping removed the repo parent $parent an earlier spawn left standing on this repository; grouping continues normally" >&2
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 2 ]; then
+    fm_backend_herdr_projection_repo_parent_retry_forget "$state" "$session" "$parent" || true
+    echo "warning: herdr repo grouping can no longer remove the repo parent $parent an earlier spawn left standing because it now holds other workspaces, tabs, or panes; leaving it standing and adopting it" >&2
     return 0
   fi
   reason=$(printf '%s' "${reason#warning: herdr repo grouping }" | tr '\n' ' ')
