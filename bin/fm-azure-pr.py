@@ -263,34 +263,15 @@ class Azure:
                 require(all(type(settings.get(k)) is bool for k in keys.values()),
                         "unreadable Azure allowed merge strategies")
                 methods &= {m for m, k in keys.items() if settings[k]}
-        # A PR-scoped status without an iteration cannot prove the revision it
-        # checked. Require iteration-bound success rather than guessing from a
-        # timestamp or treating a previous iteration's success as current.
+        # Only mandatory policy evaluations select required status records.
+        # Require iteration-bound success for those records; informational
+        # statuses do not impose requirements of their own.
         statuses = self.listing("pullRequestStatuses")
         for status_id in required_status_ids:
             matches = [s for s in statuses if s.get("id") == status_id]
             require(len(matches) == 1 and matches[0].get("iterationId") == iteration["id"] and
                     matches[0].get("state") in ("succeeded", "notApplicable"),
                     "Azure status policy does not prove a successful current-iteration check")
-        contexts = {}
-        for status in statuses:
-            context = status.get("context", {})
-            require(isinstance(context, dict) and isinstance(context.get("name"), str) and context["name"]
-                    and isinstance(context.get("genre", ""), str) and type(status.get("id")) is int,
-                    "unreadable Azure check identity")
-            key = (context.get("genre", ""), context["name"])
-            contexts.setdefault(key, []).append(status)
-        for group in contexts.values():
-            current = [s for s in group if s.get("iterationId") == iteration["id"]]
-            require(current, "Azure PR check has no result bound to the current revision")
-            # Azure can retain several status records for a context. A newer
-            # current-iteration record supersedes older ones, never vice versa.
-            latest = max(group, key=lambda s: s["id"])
-            require(latest.get("iterationId") == iteration["id"],
-                    "newest Azure check record is not bound to the current revision")
-            require(sum(s["id"] == latest["id"] for s in group) == 1,
-                    "contradictory Azure check records")
-            require(latest.get("state") in ("succeeded", "notApplicable"), "Azure PR check is not successful")
         options = pr.get("completionOptions") or {}
         method = options.get("mergeStrategy")
         if method is None and type(options.get("squashMerge")) is bool:

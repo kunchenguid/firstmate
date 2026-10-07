@@ -22,6 +22,7 @@ PROJECT = "11111111-1111-1111-1111-111111111111"
 REPO = "22222222-2222-2222-2222-222222222222"
 MIN_APPROVER_POLICY = "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"
 MERGE_STRATEGY_POLICY = "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab"
+STATUS_POLICY = "cbdc66da-9728-4af8-aada-9a5a32e4a226"
 FILE_SIZE_POLICY = "2e26e725-8201-4edd-8bf5-978563c34a80"
 CASE_ENFORCEMENT_POLICY = "7ed39669-655c-494e-b4a0-a08b4da0fcce"
 MAX_PATH_LENGTH_POLICY = "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8"
@@ -120,6 +121,14 @@ class AzureContract(unittest.TestCase):
 
     def rows(self, resource, value):
         self.save(resource, dict(count=len(value), value=value, continuation_token=None))
+
+    def status_policy(self, status_id, *, blocking=True):
+        config = dict(id=3, revision=1, isEnabled=True, isBlocking=blocking,
+                      type=dict(id=STATUS_POLICY), settings=dict(statusName="ci"))
+        self.rows("policyConfigurations", self.configs + [config])
+        self.rows("evaluations", self.policies + [
+            dict(self.policies[0], configuration=config,
+                 context=dict(iterationId=2, sourceCommitId=HEAD, latestStatusId=status_id))])
 
     def run_helper(self, action, url=URL):
         return subprocess.run([sys.executable, str(ROOT / "bin/fm-azure-pr.py"), action, url], env=self.env,
@@ -323,6 +332,8 @@ else:
                 self.assertFalse((self.dir / "patch").exists())
 
     def test_policy_refusal_matrix(self):
+        # Optional failures must neither block nor waive a mandatory policy.
+        self.rows("pullRequestStatuses", [dict(id=1, context=dict(name="informational"), state="failed", iterationId=2)])
         for status in ("queued", "running", "rejected", "broken", None):
             with self.subTest(status=status):
                 self.rows("evaluations", [dict(self.policies[0], status=status), self.policies[1]])
@@ -379,39 +390,81 @@ else:
             self.assertNotEqual(self.run_helper("complete").returncode, 0)
         self.assertFalse((self.dir / "patch").exists())
 
-    def test_check_refusals_and_unresolved_discussions_without_policy(self):
+    def test_optional_checks_do_not_block_guarded_completion(self):
+        self.status_policy(1)
+        required = dict(id=1, state="succeeded", iterationId=2, context=dict(name="ci"))
         for check in (dict(state="pending", iterationId=2), dict(state="failed", iterationId=2),
-                      dict(state="succeeded", iterationId=1), dict(state="succeeded")):
-            self.rows("pullRequestStatuses", [dict(id=1, context=dict(name="ci"), **check)])
-            self.assertNotEqual(self.run_helper("complete").returncode, 0)
+                      dict(state="succeeded", iterationId=1), dict(state="failed", iterationId=1),
+                      dict(state="succeeded")):
+            with self.subTest(optional=check):
+                self.save("pullRequests", self.pr)
+                (self.dir / "patch").unlink(missing_ok=True)
+                self.rows("pullRequestStatuses", [required, dict(id=2, context=dict(name="informational"), **check)])
+                p = self.script("fm-pr-merge.sh", "task", URL)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertIn("merged", p.stdout.splitlines())
+                body = json.loads((self.dir / "patch").read_text())
+                self.assertEqual(body["lastMergeSourceCommit"], dict(commitId=HEAD))
+                self.assertIs(body["completionOptions"]["bypassPolicy"], False)
+
+    def test_only_blocking_status_policies_require_success(self):
+        self.rows("pullRequestStatuses", [dict(id=1, state="failed", iterationId=2, context=dict(name="ci"))])
+        # Same failed status and approved evaluation; only isBlocking changes.
+        for blocking in (False, True):
+            with self.subTest(blocking=blocking):
+                self.save("pullRequests", self.pr)
+                (self.dir / "patch").unlink(missing_ok=True)
+                self.status_policy(1, blocking=blocking)
+                p = self.run_helper("complete")
+                if blocking:
+                    self.assertNotEqual(p.returncode, 0, p.stdout)
+                    self.assertIn("status policy", p.stderr)
+                    self.assertFalse((self.dir / "patch").exists())
+                else:
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertTrue((self.dir / "patch").exists())
+
+    def test_unresolved_discussions_without_policy(self):
         self.rows("pullRequestStatuses", [])
         self.rows("pullRequestThreads", [dict(status="active", comments=[dict(commentType="text")])])
         self.assertEqual(self.run_helper("complete").returncode, 0)
 
     def test_status_policy_record_is_revision_bound(self):
-        self.rows("evaluations", [dict(self.policies[0], context=dict(latestStatusId=1)), self.policies[1]])
+        self.status_policy(1)
+        current = dict(id=1, state="succeeded", iterationId=2, context=dict(name="ci"))
         p = self.run_helper("complete")
         self.assertEqual(p.returncode, 0, p.stderr)
         (self.dir / "patch").unlink()
         self.save("pullRequests", self.pr)
-        self.rows("pullRequestStatuses", [dict(id=1, state="succeeded", iterationId=1, context=dict(name="ci")),
-                                           dict(id=2, state="succeeded", iterationId=2, context=dict(name="ci"))])
-        self.assertIn("status policy", self.run_helper("complete").stderr)
-        self.assertFalse((self.dir / "patch").exists())
+        cases = ([dict(current, state="pending")], [dict(current, state="failed")],
+                 [dict(id=1, state="succeeded", context=dict(name="ci"))],
+                 [dict(current, iterationId=1), dict(current, id=2)],
+                 [dict(current, id=2)], [], [current, current])
+        for statuses in cases:
+            with self.subTest(statuses=statuses):
+                self.rows("pullRequestStatuses", statuses)
+                p = self.run_helper("complete")
+                self.assertNotEqual(p.returncode, 0, p.stdout)
+                self.assertIn("status policy", p.stderr)
+                self.assertFalse((self.dir / "patch").exists())
 
-    def test_current_check_supersedes_old_record(self):
+    def test_status_policy_selects_the_current_check(self):
         older = dict(id=1, context=dict(name="ci"), state="failed", iterationId=1)
         current = dict(id=2, context=dict(name="ci"), state="succeeded", iterationId=2)
+        self.status_policy(2)
         self.rows("pullRequestStatuses", [older, current])
         p = self.run_helper("complete")
         self.assertEqual(p.returncode, 0, p.stderr)
         (self.dir / "patch").unlink()
         self.save("pullRequests", self.pr)
-        self.rows("pullRequestStatuses", [older, current, dict(current, id=3, state="pending")])
-        self.assertIn("not successful", self.run_helper("complete").stderr)
-        self.save("pullRequests", self.pr)
-        self.rows("pullRequestStatuses", [older, current, dict(id=3, context=dict(name="ci"), state="succeeded")])
-        self.assertIn("not bound", self.run_helper("complete").stderr)
+        self.status_policy(3)
+        for latest in (dict(current, id=3, state="pending"), dict(id=3, context=dict(name="ci"), state="succeeded")):
+            with self.subTest(latest=latest):
+                self.rows("pullRequestStatuses", [older, current, latest])
+                p = self.run_helper("complete")
+                self.assertNotEqual(p.returncode, 0, p.stdout)
+                self.assertIn("status policy", p.stderr)
+                self.assertFalse((self.dir / "patch").exists())
 
     def test_ambiguous_method_needs_selection(self):
         self.save("pullRequests", dict(self.pr, completionOptions={}))
@@ -433,6 +486,9 @@ else:
         self.assertFalse((self.dir / "patch").exists())
 
     def test_changed_head_and_server_race(self):
+        self.status_policy(1)
+        self.rows("pullRequestStatuses", [dict(id=1, state="succeeded", iterationId=2, context=dict(name="ci")),
+                                           dict(id=2, state="pending", iterationId=2, context=dict(name="informational"))])
         (self.dir / "changed").touch()
         self.assertIn("changed", self.run_helper("complete").stderr)
         self.assertFalse((self.dir / "patch").exists())
