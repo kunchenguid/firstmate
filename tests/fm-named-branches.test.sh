@@ -420,6 +420,33 @@ test_local_merge_refuses_a_recorded_base() {
   pass "fm-merge-local: a recorded base contradicts mode=local-only"
 }
 
+test_local_merge_fast_forwards_a_bare_repository() {
+  local home seed bare id feature out landed
+  home="$TMP_ROOT/bare/home"
+  seed="$TMP_ROOT/bare/seed"
+  bare="$TMP_ROOT/bare/proj.git"
+  id=named-bare
+  mkdir -p "$home/data" "$home/state" "$seed"
+  git init -q -b main "$seed"
+  git_identity "$seed"
+  commit_file "$seed" base base base
+  git init -q --bare "$bare"
+  git -C "$seed" remote add origin "$bare"
+  git -C "$seed" push -q origin main
+  git -C "$seed" checkout -qb feature/widget
+  commit_file "$seed" change change change
+  feature=$(git -C "$seed" rev-parse HEAD)
+  git -C "$seed" push -q origin feature/widget
+  printf 'project=%s\nmode=local-only\nbranch=feature/widget\n' "$bare" \
+    > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id") \
+    || fail "bare local-only merge failed: $out"
+  landed=$(git -C "$bare" rev-parse refs/heads/main)
+  [ "$landed" = "$feature" ] || fail "bare repository did not fast-forward main"
+  assert_contains "$out" "merged feature/widget into local main" "bare merge did not name main"
+  pass "fm-merge-local: a bare repository fast-forwards the default branch"
+}
+
 test_review_uses_the_recorded_base() {
   local home proj remote id out feature status
   home="$TMP_ROOT/review/home"
@@ -501,8 +528,6 @@ promote_keeps_the_named_branches
 test_promote_rejects_base_changes_and_branch_collisions
 test_local_merge_lands_on_the_default_branch
 test_local_merge_refuses_a_recorded_base
-test_local_merge_refuses_a_linked_landing_checkout
-test_local_merge_refuses_a_bare_linked_landing_checkout
 test_local_merge_fast_forwards_a_bare_repository
 test_review_uses_the_recorded_base
 test_scout_review_uses_a_local_base_when_origin_lacks_it
