@@ -145,6 +145,7 @@ A newly launched or relaunched secondmate already reads its files at launch, so 
 Quarantined pre-relaunch generations are retained in bounded private history, and cleanup skips creating an empty quarantine generation.
 Successfully delivered generations are retained only within a bounded per-home state history, while pending generations remain until delivery succeeds or a launch supersedes them.
 A remote home receives the same allowlisted bytes through `fm-remote-inherit.sh` and gets one marked re-read instruction after a changed transfer.
+It also gets that notice when some items were applied before a later item failed, matching the local route; the push still exits non-zero and keeps its retry marker so convergence retries the unapplied items.
 The parent records that nudge before delivery, retains it after a failed send, and retries the exact same route during locked bootstrap convergence.
 It does not receive a pointer to a primary-local generation path that cannot exist on that host.
 Inherited harness and runtime-backend defaults must not harden `fm-spawn` to reject a deliberate runtime choice that differs from those defaults.
