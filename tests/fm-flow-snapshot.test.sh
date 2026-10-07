@@ -402,14 +402,10 @@ assert_equals "$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$RO
   | jq -r '[.tasks[] | select(.id == "scout-one")][0].current_state.state')" \
   "$(agent scout-one '.state.value')" \
   "and it is that document's own value, not a second reading that could disagree"
-assert_equals "not_checked" "$(agent scout-one '.agent_alive')" \
-  "the fleet document's endpoint liveness is passed through, never re-probed here"
 assert_equals "77" "$(agent scout-one '.pr.number')" \
   "a link the fleet document published for a non-pipeline worker carries its number"
 assert_equals "https://github.com/example/project/pull/77" "$(agent scout-one '.pr.url')" \
   "and the link itself, rather than a row that states one and denies having it"
-assert_equals "not_checked" "$(agent ship-run '.agent_alive')" \
-  "including for a pipeline agent"
 assert_equals "this worker runs no pipeline, so no checks are read" \
   "$(agent scout-one '.ci.collection.reason')" \
   "a scout's checks are named as absent rather than reported as zero"

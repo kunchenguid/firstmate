@@ -29,8 +29,6 @@
 #       `pipeline:true` agent, whose journey is its steps instead.
 #     endpoint_alive: true, false, or "unknown" when liveness was never
 #       established.
-#     agent_alive: bin/fm-fleet-snapshot.sh's own probe result, passed through
-#       rather than re-probed, so `not_checked` stays its answer here too.
 #     worker: {harness,model,effort}. A field the record does not state, or
 #       states as the `default` the harness resolved, is null.
 #     pr: {url,number}, both null when no pull request is recorded.
@@ -187,6 +185,7 @@ iso_of_epoch() {  # <epoch-seconds>
 }
 
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
+case "$NOW_EPOCH" in ''|*[!0-9]*) NOW_EPOCH=$(date -u +%s) ;; esac
 NOW_ISO=$(iso_of_epoch "$NOW_EPOCH")
 
 # Portable mtime in epoch seconds, the repository's own idiom for it.
@@ -499,11 +498,6 @@ row_common() {  # <task-json>
   # worker is always the third: bin/fm-fleet-snapshot.sh does not probe one.
   FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -c '
     if .endpoint.exists == null then "unknown" else (.endpoint.exists == true) end')
-  # Passed straight through. bin/fm-fleet-snapshot.sh states as policy in its own
-  # header that it probes this for local second mates only and reports
-  # `not_checked` for everything else, and a probe here would reverse the fleet
-  # owner's decision from a new reader.
-  FM_ROW_AGENT_ALIVE=$(printf '%s' "$task" | jq -r '.endpoint.agent_alive // "not_checked"')
   # bin/fm-fleet-snapshot.sh fills this for ANY task, from the record or from
   # the first link in its status log, so a scout that quoted a pull request
   # carries one too. It is published with its number resolved by the same
@@ -550,7 +544,7 @@ row_state() {  # <task-json>
 }
 
 agent_json() {  # <task-json>
-  local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
+  local task=$1 id kind mode project worktree window branch endpoint_alive pr_url
   local rundir overview overview_rc sel axi rc steps actives ci meta
   local run_id run_status run_head run_error
 
@@ -562,7 +556,6 @@ agent_json() {  # <task-json>
   worktree=$FM_ROW_WORKTREE
   window=$FM_ROW_WINDOW
   endpoint_alive=$FM_ROW_ENDPOINT_ALIVE
-  agent_alive=$FM_ROW_AGENT_ALIVE
   pr_url=$FM_ROW_PR_URL
   meta=$FM_ROW_META
   # Read, never derived. Run attribution is keyed on this branch, and the ship
@@ -749,7 +742,6 @@ agent_json() {  # <task-json>
     --arg run_status "$run_status" \
     --arg run_error "$run_error" \
     --arg run_head "$run_head" \
-    --arg agent_alive "$agent_alive" \
     --arg collect_reason "$collect_reason" \
     --arg now_iso "$NOW_ISO" \
     --argjson now_epoch "$NOW_EPOCH" \
@@ -768,7 +760,6 @@ agent_json() {  # <task-json>
       pipeline:true,
       state:null,
       endpoint_alive:$endpoint_alive,
-      agent_alive:$agent_alive,
       worker:{
         harness:(if $harness == "" then null else $harness end),
         model:(if $w_model == "" then null else $w_model end),
@@ -808,7 +799,6 @@ compact_json() {  # <task-json>
     --arg window "$FM_ROW_WINDOW" \
     --arg kind "$FM_ROW_KIND" \
     --arg mode "$FM_ROW_MODE" \
-    --arg agent_alive "$FM_ROW_AGENT_ALIVE" \
     --arg harness "$FM_ROW_HARNESS" \
     --arg w_model "$FM_ROW_MODEL" \
     --arg w_effort "$FM_ROW_EFFORT" \
@@ -825,7 +815,6 @@ compact_json() {  # <task-json>
       pipeline:false,
       state:$state,
       endpoint_alive:$endpoint_alive,
-      agent_alive:$agent_alive,
       worker:{
         harness:(if $harness == "" then null else $harness end),
         model:(if $w_model == "" then null else $w_model end),
@@ -907,7 +896,7 @@ while IFS= read -r task; do
       --argjson ci "$CI_EMPTY" \
       '{id:$id, branch:$branch, project:"", worktree:"", window:"",
         kind:$kind, mode:"", pipeline:false, state:null,
-        endpoint_alive:"unknown", agent_alive:"not_checked",
+        endpoint_alive:"unknown",
         worker:{harness:null, model:null, effort:null},
         pr:{url:null, number:null},
         collection:{ok:false, reason:"this agent'"'"'s record could not be built",
