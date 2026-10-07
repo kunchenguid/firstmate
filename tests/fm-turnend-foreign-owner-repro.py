@@ -107,6 +107,14 @@ def session_lock_text(path):
     return text if text.isdigit() else None
 
 
+def recorded_session_id(home):
+    """Line 1 of the lock sidecar: the session id, harness and birth token after it."""
+    try:
+        return (home / "state/.lock-session").read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return ""
+
+
 PAYLOAD = json.dumps({"session_id": "synthetic-second", "stop_hook_active": True})
 
 
@@ -234,7 +242,7 @@ try:
     )
     same_lock_owner = session_lock_text(same_lock)
     require(
-        (same / "state/.lock-session").read_text().strip() == "synthetic-same",
+        recorded_session_id(same) == "synthetic-same",
         "the owner did not record its trusted session id beside the lock",
     )
     same_beat = same / "state/.last-watcher-beat"
@@ -247,7 +255,7 @@ try:
     print("same-session acquisition", "rc=" + str(accepted.returncode), "stdout=" + repr(accepted.stdout), "stderr=" + repr(accepted.stderr), flush=True)
     require("lock_rc=0" in accepted.stdout, "the same session id was refused as a foreign live owner")
     require(session_lock_text(same_lock) == same_lock_owner, "a same-session confirmation rewrote the live owner's lock line")
-    require((same / "state/.lock-session").read_text().strip() == "synthetic-same", "a same-session confirmation changed the recorded id")
+    require(recorded_session_id(same) == "synthetic-same", "a same-session confirmation changed the recorded id")
     refused = run(
         same_env | {"CLAUDE_CODE_SESSION_ID": "synthetic-other"},
         'export CLAUDE_PID=$$; "$FM_ROOT_OVERRIDE/bin/fm-lock.sh"; rc=$?; printf "lock_rc=%s\\n" "$rc"; true',

@@ -198,18 +198,21 @@ fi
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
-# Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
+# A prior session may have died after leaving its recorded anchor pid in .lock,
+# which can also be a pid the OS has since recycled onto an unrelated process or
+# a shared harness server that outlives every session it hosts. The shared
+# predicate recognizes only that stale-owner case, so a live session - never a
+# bare pid's existence - is what stands down. Defer the mutating claim until
+# after the unchanged AFK and need gates, so an idle or away home remains
+# byte-for-byte inert. Missing or malformed locks are uncertainty rather than
+# stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_recorded_owner_live "$STATE" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
 

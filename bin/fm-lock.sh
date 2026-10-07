@@ -11,14 +11,18 @@
 # a dead session's lock alive. Line 1 keeps its whole-line pid format because
 # every other reader takes the first line as the pid.
 #
-# The trusted id itself is recorded beside the lock in state/.lock-session, a
-# sidecar written only here and only under the claim lock: refreshed on every
-# confirmed-own acquisition, including the early already-mine exit that waits
-# for the claim lock, removed when the acquiring session proves no trusted id,
-# and left byte-identical when it already names that id. A same-session
+# The identity behind that anchor is recorded beside the lock in
+# state/.lock-session, a sidecar written only here and only under the claim lock:
+# line 1 the session id, line 2 the harness that published it, line 3 the
+# anchor's own start time. Refreshed on every confirmed-own acquisition,
+# including the early already-mine exit that waits for the claim lock, removed
+# when the acquiring session proves no trusted id, and left byte-identical when
+# it already names that id, harness, and process identity. A same-session
 # confirmation never rewrites line 1 while the recorded pid is alive, because
-# bin/fm-startup-network.sh compares that pid across its deferred sweeps; a dead
-# recorded pid is reclaimed and rewritten to this session's anchor.
+# bin/fm-startup-network.sh compares that pid across its deferred sweeps, so the
+# sidecar's process identity follows the pid that line 1 still carries, not this
+# session's own candidate; a dead recorded pid is reclaimed and rewritten to
+# this session's anchor.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0.
@@ -45,13 +49,12 @@ mkdir -p "$STATE" 2>/dev/null || {
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 if [ "${1:-}" = "status" ]; then
-  fm_session_lock_inspect "$STATE"
-  case "$FM_LOCK_INSPECT_STATE" in
-    free) echo "lock: free" ;;
-    unreadable) echo "lock: unreadable" ;;
-    held) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
-    *) echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)" ;;
-  esac
+  if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
+  old=$(cat "$LOCK" 2>/dev/null) || {
+    echo "lock: unreadable"
+    exit 0
+  }
+  if fm_session_lock_recorded_owner_live "$STATE"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead, recycled, or not a live harness session)"; fi
   exit 0
 fi
 
@@ -118,19 +121,23 @@ remember_lock_session() {
   LOCK_SESSION_PHASE=1
 }
 
-# Record the trusted session id beside the lock, or remove a sidecar that no
-# trusted id backs. Called only while the claim lock is held. A sidecar already
-# naming this id is left untouched, so a same-session confirmation keeps it
-# byte-identical.
-publish_lock_session() {
-  local trusted recorded tmp
-  if trusted=$(fm_session_lock_trusted_session_id); then
-    if recorded=$(fm_session_lock_recorded_session_id "$STATE") && [ "$recorded" = "$trusted" ]; then
-      return 0
-    fi
+# Record the session identity beside the lock, or remove a sidecar that no
+# trusted id backs. Called only while the claim lock is held. $1 is the pid line 1
+# will carry, so the recorded process identity describes the anchor actually in
+# force - the recorded pid on a same-session confirmation, which leaves line 1
+# untouched. A sidecar already naming that identity is left untouched, so a
+# same-session confirmation keeps it byte-identical.
+publish_lock_session() {  # <anchor-pid>
+  local anchor=$1 harness birth desired tmp current
+  if fm_session_lock_resolve_trusted_id; then
+    harness=$FM_SESSION_LOCK_ID_HARNESS
+    birth=$(fm_session_lock_birth_token "$anchor" 2>/dev/null || true)
+    desired=$(printf '%s\n%s\n%s' "$FM_SESSION_LOCK_ID" "$harness" "$birth")
+    current=$(cat "$LOCK_SESSION" 2>/dev/null || true)
+    [ "$current" = "$desired" ] && return 0
     remember_lock_session || return 1
     tmp=$(mktemp "$STATE/.lock-session.XXXXXX" 2>/dev/null) || return 1
-    if ! { printf '%s\n' "$trusted" > "$tmp" && mv -f "$tmp" "$LOCK_SESSION"; } 2>/dev/null; then
+    if ! { printf '%s\n' "$desired" > "$tmp" && mv -f "$tmp" "$LOCK_SESSION"; } 2>/dev/null; then
       rm -f "$tmp" 2>/dev/null
       return 1
     fi
@@ -143,8 +150,8 @@ publish_lock_session() {
   return 0
 }
 
-publish_lock_session_or_die() {
-  publish_lock_session && return 0
+publish_lock_session_or_die() {  # <anchor-pid>
+  publish_lock_session "$1" && return 0
   echo "error: cannot record the session identity beside the lock; operate read-only until resolved" >&2
   exit 1
 }
@@ -167,7 +174,7 @@ confirm_own_lock() {  # <recorded-pid>
   fi
   recorded=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$recorded" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
-    publish_lock_session_or_die
+    publish_lock_session_or_die "$recorded"
     commit_lock_session
     release_claim_lock
     echo "lock acquired: harness pid $recorded"
@@ -195,7 +202,7 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
   fi
-  if fm_harness_pid_alive "$old"; then
+  if fm_session_lock_recorded_owner_live "$STATE"; then
     refuse_live_owner "$old"
   fi
 fi
@@ -219,10 +226,10 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ "$old" != "$me" ] && fm_session_lock_recorded_owner_live "$STATE"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+    if [ "$old" != "$me" ] && fm_session_lock_recorded_owner_live "$STATE"; then
       refuse_live_owner "$old"
     fi
   fi
@@ -233,7 +240,7 @@ fi
 # not yet verified, a failure removes the sidecar and leaves the lock
 # ancestry-only. After line 1 verifies as this session's anchor, a later
 # signal leaves the published pair in place.
-publish_lock_session_or_die
+publish_lock_session_or_die "$me"
 if [ -f "$LOCK" ]; then
   LOCK_LINE_PRE=$(mktemp "$STATE/.lock.pre.XXXXXX") || {
     echo "error: cannot write session lock; operate read-only until resolved" >&2
