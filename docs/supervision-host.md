@@ -208,6 +208,7 @@ One example is a Cursor park superseded by the return turn's own end, which stop
 
 A captain outcome the attended engine records while the captain remains attended wakes main once, through the owner's ordinary wake path, with one `supervision-host: branch-outcome:` line naming its store rows.
 Main drains, and `bin/fm-wake-drain.sh` presents it in its `BRANCH OUTCOMES` section with the exact `bin/fm-branch-outcome.sh mark-processed --through <seq>` acknowledgement.
+Before acknowledging even a settled source task, main acts on each ready-work handoff under `AGENTS.md` section 10, dispatching its named units in that turn or recording an applicable not-ready reason on each unit's backlog note.
 That presentation is what the Pi branch's visible entry is, so it advances the store's read cursor through the rows it presents.
 Every later drain, including the session-start digest, presents unprocessed captain outcomes again until main acknowledges them, so an ignored outcome costs no extra turn and is never lost.
 The drain's header owns the section's bounds; these rules keep it bounded and in order:
