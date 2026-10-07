@@ -66,7 +66,7 @@
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
 # next URL that still has a full observation reserve; only a genuine forge
-# failure or head change records an error.
+# failure, structural refusal or head change records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. The error and its unavailable line name the first failing step: a
 # read's label, exit status, budget seconds left and first line of its error
