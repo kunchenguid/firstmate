@@ -29,7 +29,7 @@ SH
     : > "$dir/ready.log"
     (
       cd "$dir" || exit 2
-      export FM_HOME="$dir" HOME="$dir/home" PATH="$dir/fakebin:$PATH"
+      local addressing_home="$dir"
       export FM_TEST_BACKLOG_ROOT="$dir" FM_TEST_READY_LOG="$dir/ready.log"
       export FM_TEST_READY_RESULT="$result"
       unset TASKS_AXI_BACKEND FM_DATA_OVERRIDE
@@ -37,12 +37,13 @@ SH
         absolute) export FM_DATA_OVERRIDE="$dir/data" ;;
         relative) export FM_DATA_OVERRIDE=data ;;
         trailing-slash) export FM_DATA_OVERRIDE="$dir/data/" ;;
-        relative-home) export FM_HOME=. ;;
-        trailing-slash-home) export FM_HOME="$dir/" ;;
+        relative-home) addressing_home=. ;;
+        trailing-slash-home) addressing_home="$dir/" ;;
       esac
       # shellcheck source=bin/fm-ready-queue-lib.sh
       . "$ROOT/bin/fm-ready-queue-lib.sh"
-      fm_ready_queue_needs_review
+      FM_HOME="$addressing_home" HOME="$dir/home" PATH="$dir/fakebin:$PATH" \
+        fm_ready_queue_needs_review
     )
     rc=$?
     if [ "$result" = empty ]; then
@@ -170,16 +171,18 @@ test_daemon_heartbeat() {
   (
     # shellcheck source=/dev/null # Production module is linted separately.
     . "$ROOT/bin/fm-supervise-daemon.sh"
-    export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config"
-    export PATH="$dir/fakebin:$PATH" FM_INJECT_SKIP="$skip" FM_ESCALATE_BATCH_SECS=90
     # shellcheck disable=SC2034 # Used by the sourced daemon's log function.
     LOG="$state/daemon.log"
     if [ "$mode" = failed ]; then
-      if handle_durable_wakes heartbeat "$state"; then
+      if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+        PATH="$dir/fakebin:$PATH" FM_INJECT_SKIP="$skip" FM_ESCALATE_BATCH_SECS=90 \
+        handle_durable_wakes heartbeat "$state"; then
         fail 'failed handoff acknowledged its heartbeat'
       fi
     else
-      handle_durable_wakes heartbeat "$state" || fail 'daemon heartbeat handling failed'
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+        PATH="$dir/fakebin:$PATH" FM_INJECT_SKIP="$skip" FM_ESCALATE_BATCH_SECS=90 \
+        handle_durable_wakes heartbeat "$state" || fail 'daemon heartbeat handling failed'
     fi
   ) || fail 'daemon handling assertions failed'
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" > "$dir/remaining" 2>/dev/null || fail 'could not inspect remaining wakes'
