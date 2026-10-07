@@ -182,6 +182,7 @@ Classify the deliverable:
 
 - If established evidence already answers an informational question, relay it without a design-only scout; when implementation intent is unclear, answer and ask one concise implementation question when useful rather than dispatching speculative design work.
 - Never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
+- When the approach to an authorized ship is still undecided, converge design and options with the captain in intake and get agreement before dispatching; an optional brainstorming skill may help, but clear scope adds no stage.
 - A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 - Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
