@@ -8,10 +8,10 @@
 # own registration, so a later repository update does not invalidate it; task and
 # PR data live only in a private sidecar and are never interpolated into shell
 # source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance and a GitHub Enterprise pull request on a host this home names in
-# config/github-hosts. Azure DevOps Services URLs use bin/fm-azure-pr.py and
+# A GitHub or Azure DevOps Services pull request URL, a GitLab merge request URL,
+# and a Gerrit change URL are all accepted, including a merge request or change on
+# a self-hosted instance and a GitHub Enterprise pull request on a host this home
+# names in config/github-hosts. Azure Services URLs use bin/fm-azure-pr.py and
 # require python3 and az/azure-devops; a failed live identity/head read refuses
 # registration rather than arming an unusable Azure poll.
 # A GitHub or Azure pull request the forge reports as a draft is refused, naming
@@ -255,8 +255,9 @@ fi
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, and
+# head commit as a selectable field, and bin/fm-azure-pr.py reads an Azure
+# pull request's exact source commit with its live identity; plain glab exposes
+# it only inside its JSON output, which would need a JSON processor firstmate does not require, and
 # tea's single-PR view ignores field selection entirely, so neither a GitLab
 # nor a Forgejo task records a pr_head here, and neither does a Gerrit task: a
 # Gerrit revision names one patch set, every amend or rebase is a new patch set,
