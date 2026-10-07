@@ -658,6 +658,7 @@ case "$fault:$*" in
   not-found:'api repos/o/r/'*) printf 'HTTP 404\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
+  headless:'pr view '*) printf '{"headRefOid":null,"reviewDecision":"APPROVED"}\n'; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
 SH
@@ -713,7 +714,7 @@ test_genuine_failure_near_deadline_is_unavailable() {
 
 test_shared_url_observed_once() {
   local mode home out calls expected
-  for mode in ok fail head; do
+  for mode in ok fail head headless; do
     home=$(new_home "shared-once-$mode")
     forge_home "$home"
     wrap_forge "$home"
@@ -726,6 +727,7 @@ test_shared_url_observed_once() {
       ok) why= ;;
       fail) why='reviews read exited 1 with Ns of budget left: HTTP 502' ;;
       head) why='head changed during observation' ;;
+      headless) why='head read named no head commit' ;;
     esac
     if [ "$mode" = ok ]; then
       expected=null
