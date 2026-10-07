@@ -62,3 +62,4 @@ env -u CLAUDECODE FM_TASK_ID=managed-approval-live-probe claude -p \
 "$ROOT/bin/fm-approval-failover.sh" classify claude < "$TMP_ROOT/claude.txt" >/dev/null \
   || fail "claude $CLAUDE_VERSION: managed bypass did not expose the policy 403; generic auth errors must not cause failover"
 printf 'ok - %s live policy refusal matches the 403 classifier\n' "$CLAUDE_VERSION"
+echo "# all fm-managed-approval-live-e2e tests passed"
