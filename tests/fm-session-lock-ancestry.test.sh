@@ -251,6 +251,15 @@ ROW
   pass "session-lock: a pid the OS recycled does not pass as the recorded live owner"
 }
 
+test_prompt_text_does_not_mark_harness_as_daemon() {
+  local result
+  result=$(lib_eval "$FAKEBIN" 'fm_harness_process_is_daemon codex "codex --prompt explain --service"' && printf daemon || printf session)
+  [ "$result" = session ] || fail "prompt text classified Codex session as daemon"
+  result=$(lib_eval "$FAKEBIN" 'fm_harness_process_is_daemon codex "codex --service --listen local"' && printf daemon || printf session)
+  [ "$result" = daemon ] || fail "actual Codex daemon option was not recognized"
+  pass "session-lock: prompt text cannot impersonate daemon flags"
+}
+
 test_opencode_session_identity_is_the_pane_under_a_shared_server() {
   local dir fakebin state table got
   dir="$TMP_ROOT/opencode-shared-server"
@@ -1354,6 +1363,7 @@ test_verified_reclaim_keeps_new_sidecar() {
 test_codex_session_under_a_shared_daemon_owns_its_own_process
 test_two_codex_sessions_sharing_one_daemon_hold_distinct_locks
 test_pid_reuse_is_not_mistaken_for_a_live_owner
+test_prompt_text_does_not_mark_harness_as_daemon
 test_opencode_session_identity_is_the_pane_under_a_shared_server
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
