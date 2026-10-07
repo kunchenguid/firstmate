@@ -292,8 +292,8 @@ dns_probe() {
       dig)
         answer=$(printf '%s\n' "$out" | awk '
           /^;; [A-Z]+ SECTION:/ { sections=1; inside=($0 ~ /^;; ANSWER SECTION:/); next }
-          !/^;/ && NF && (!sections || inside) && $NF ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ { print; exit }
-        ' | head -n 1)
+          !/^;/ && NF && (!sections || inside) { print }
+        ' | grep -E '(^|[[:space:]])([0-9]{1,3}\.){3}[0-9]{1,3}$' | head -n 1)
         ;;
       host) answer=$(printf '%s\n' "$out" | grep -E 'has address|IPv6 address' | head -n 1) ;;
       *) answer='' ;;
@@ -326,8 +326,8 @@ dns_probe() {
         fi
         answer=$(printf '%s\n' "$out" | awk '
           /^;; [A-Z]+ SECTION:/ { sections=1; inside=($0 ~ /^;; ANSWER SECTION:/); next }
-          !/^;/ && NF && (!sections || inside) && $NF ~ /^[0-9a-fA-F]*:[0-9a-fA-F:]+$/ { print; exit }
-        ' | head -n 1)
+          !/^;/ && NF && (!sections || inside) { print }
+        ' | grep -E '(^|[[:space:]])[0-9a-fA-F]*:[0-9a-fA-F:]+$' | head -n 1)
         if [ -n "$answer" ]; then
           printf 'ok %s\n' "$answer"
           return 0
