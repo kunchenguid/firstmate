@@ -176,6 +176,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-launch-secrets-lib.sh
+. "$SCRIPT_DIR/fm-launch-secrets-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -949,13 +953,15 @@ resolve_relaunch_profile() {
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
-  # The launch owner applies this home's worker account pin too, but only after
-  # the old agent has been stopped, so a pin that no longer resolves or is
-  # signed out must refuse here, while nothing has changed yet.
-  local account_model=$TARGET_MODEL
+  # The launch owner applies this home's launch secrets and worker account pin
+  # too, but only after the old agent has been stopped, so a secrets file that
+  # no longer loads, or a pin that no longer resolves or is signed out, must
+  # refuse here, while nothing has changed yet.
+  local account_model=$TARGET_MODEL config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   [ "$account_model" != default ] || account_model=
-  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
-    "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
+  fm_launch_secrets_load "$config" "$TARGET_HARNESS" || return 1
+  fm_worker_account_select "$TARGET_HARNESS" "$config" \
+    "$account_model" "$TARGET_HARNESS" "" "$FM_LAUNCH_SECRETS_NAMES" >/dev/null || return 1
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch

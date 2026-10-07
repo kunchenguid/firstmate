@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [worker launch secrets](#worker-launch-secrets-configlaunch-secretsjson) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -763,6 +763,7 @@ On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation
 
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
+A `META_API_KEY` injected for muse through [worker launch secrets](#worker-launch-secrets-configlaunch-secretsjson) also satisfies that preflight.
 
 gemini is likewise refused for secondmates because it has no primary supervision protocol; [its adapter reference](../.agents/skills/harness-adapters/references/harness/gemini.md) owns the credential precondition, canonical-launch wiring, and raw-launch limitations.
 rovo is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no turn-end hook and no primary supervision protocol; [`docs/verification/rovo.md`](verification/rovo.md) owns that evidence, including the OAuth token's silent background refresh from a stored refresh token and both tmux and herdr pane liveness (herdr placement is verified live, with a Herdr-side agent-detection gap left open for recovery classification).
@@ -903,6 +904,7 @@ The refusal names the variable; remove that assignment from the raw command, or 
 
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
+The one addition is a Pi launch's [worker launch secrets](#worker-launch-secrets-configlaunch-secretsjson): the worker starts with those names set, so the Pi check sees each with a placeholder value, never the secret, and Pi's own provider mapping decides whether, for example, an injected `OPENROUTER_API_KEY` signs `openrouter` in.
 
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
 Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
@@ -988,7 +990,7 @@ Choose the minimum additions for the authentication method actually in use:
 | Provider login stored under the normal home directory | None for the environment contract; the same user still has access to that provider's stored login. |
 | Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`; a multi-provider tool needs each provider it will actually use. |
 | Custom provider store | Its configured location variables, such as `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's existing explicit Claude and Muse store assignments still apply. |
-| Muse environment authentication | `META_API_KEY`, already present in the target tmux session environment; Firstmate's preflight requires the stored-login path on other backends. |
+| Muse environment authentication | `META_API_KEY`, already present in the target tmux session environment; on other backends Firstmate's preflight requires the stored-login path or a key injected by [worker launch secrets](#worker-launch-secrets-configlaunch-secretsjson), whose names are forwarded without listing them here. |
 | Git over SSH with an agent | `SSH_AUTH_SOCK`; add `GIT_SSH_COMMAND` only if the chosen transport requires that override. |
 | Git over SSH with a key file | No credential variable when normal SSH configuration selects the key; file permissions and any passphrase handling still apply. |
 | Git over HTTPS with a credential helper | Whatever the configured helper requires; a GitHub CLI helper using an environment token needs its selected `GH_TOKEN` or `GITHUB_TOKEN`. |
@@ -1023,6 +1025,50 @@ A repository whose config sets `core.hooksPath` to the empty string runs no proj
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+## Worker launch secrets (config/launch-secrets.json)
+
+The optional local, gitignored `config/launch-secrets.json` launches a harness's workers inside a secret manager's injector, so named secrets such as `OPENROUTER_API_KEY` reach only that worker's process environment.
+Firstmate never writes the secret to the launch command, task record, status, logs, or brief; only its name appears there.
+The injector must not print secret values, for example through shell tracing: a failed launch copies the pane's last lines into the task status and spawn output, so anything the injector printed there is saved too.
+With no file, or with no entry for the launched harness, every launch is unchanged.
+
+The file is home-local: it is not inherited into secondmate homes, and a secondmate home that launches such workers needs its own file.
+Changes apply to subsequent launches, including relaunches; running workers keep the environment they started with.
+
+### Secrets file format
+
+```json
+{
+  "injector": ["av", "inject", "+{name}", "--"],
+  "harnesses": {
+    "pi": ["OPENROUTER_API_KEY"]
+  }
+}
+```
+
+- `injector` is the injector's argv; it must run the command that follows it with the named secrets in that command's environment, and pass on its exit status when it refuses.
+- Every `injector` element containing `{name}` is repeated once per secret name, in the listed order, with `{name}` replaced; other elements are kept as written, so `"+{name}"` above expands to `+OPENROUTER_API_KEY`.
+- The first element is the injector command, resolved from `PATH` when the worker is spawned, and cannot contain `{name}`.
+- `harnesses` maps a harness name, as resolved for the launch, to the distinct environment variable names to inject.
+
+A malformed file, an unreadable file, or an injector that is not installed stops the spawn before any worker, local copy, or record exists, and stops a relaunch before it stops the running worker.
+
+### Launch and refusal
+
+The worker command runs under `/bin/sh -c` inside the injector, so a raw launch command must be POSIX `sh`; with `config/launch-env-allowlist` enabled, the injected names are forwarded through the filtered environment automatically.
+The spawn then waits for the injected worker to start.
+If the injector refuses, for example when a vault approval is denied, or does not start the worker within `FM_LAUNCH_SECRETS_TIMEOUT` seconds (default 300, enough for an approval prompt), the spawn captures the pane's last three non-empty lines, closes the worker's endpoint, records `failed:` with the injector's exit status or the timeout and those lines in the task status, prints the same reason, and exits non-zero; an approval that lands after that timeout cannot start the worker.
+A spawn that is itself stopped while it waits, for example by its caller's timeout, takes the same claim and closes the endpoint on exit, so a later approval cannot start a worker no task record describes; a fresh spawn closes the endpoint even when the worker already started, because the stopped spawn removes its task record.
+Unattended launches cannot wait on an interactive approval: the watcher's automatic secondmate respawn stops its spawn after `FM_SECONDMATE_LIVENESS_TIMEOUT` seconds (default 120), so a respawn whose injector waits on a human approval past that bound fails closed and is recorded as a failed relaunch; each automatic retry fails the same way, and the secondmate stays down until it is relaunched by hand.
+For a harness whose secondmates must respawn unattended, use an injector that answers without a prompt.
+The captured lines carry the injector's own message, such as a denied approval or a missing secret, because the pane itself is gone once the spawn fails.
+A `FM_LAUNCH_SECRETS_TIMEOUT` that is not a non-negative integer stops the spawn before any worker, local copy, or record exists.
+
+A `muse` entry naming `META_API_KEY` satisfies muse's worker-reachable credential preflight, so muse needs no stored `auth.json` login.
+
+This keeps the secret out of Firstmate's records and the harness's own settings files; it is not a sandbox, so the worker and its child processes can still read the value from their environment.
+[`bin/fm-launch-secrets-lib.sh`](../bin/fm-launch-secrets-lib.sh) owns parsing, wrapping, and the launch handshake, with regression coverage in [`tests/fm-launch-secrets.test.sh`](../tests/fm-launch-secrets.test.sh).
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

@@ -331,6 +331,25 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Launch secrets (config/launch-secrets.json):
+#   Absent means unchanged. When present and naming secrets for the resolved
+#   harness, every launch of that harness (ship, scout, secondmate, raw
+#   command, and relaunch) runs inside the configured secret injector, so the
+#   named secrets reach only the worker's process environment; an enabled
+#   launch-env-allowlist forwards those names too. A malformed file or a
+#   missing injector refuses before any endpoint, worktree, or record exists.
+#   After launch delivery the spawn waits for the injected worker to start and
+#   stops with the concrete reason - the pane's last lines captured, then the
+#   endpoint closed and failed: appended to the task status - when the injector
+#   refuses or does not start it within FM_LAUNCH_SECRETS_TIMEOUT seconds
+#   (default 300; a non-integer refuses before any mutation). A spawn that is
+#   itself stopped while it waits takes the claim and closes the endpoint the
+#   same way; a fresh spawn closes it even when the worker already claimed it,
+#   because the abort removes the record. A muse entry naming META_API_KEY satisfies muse's credential
+#   preflight, and a pinned Pi account's sign-in check counts injected names. Under this
+#   opt-in the launch runs through /bin/sh -c, so raw commands must be POSIX sh.
+#   bin/fm-launch-secrets-lib.sh owns parsing, wrapping, and the handshake;
+#   docs/configuration.md "Worker launch secrets" owns the schema.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -552,6 +571,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-launch-secrets-lib.sh
+. "$SCRIPT_DIR/fm-launch-secrets-lib.sh"
 if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
   exit 1
 fi
@@ -1257,6 +1278,7 @@ CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
+LAUNCH_SECRETS_PENDING=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1287,6 +1309,15 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$LAUNCH_SECRETS_PENDING" = 1 ]; then
+    LAUNCH_SECRETS_PENDING=0
+    # A worker that already holds the claim still loses a fresh spawn's
+    # record to the rollback below, so its endpoint closes too.
+    if mkdir "$LAUNCH_SECRETS_CLAIM" 2>/dev/null ||
+      [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+      rovo_endpoint_cleanup
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -2464,7 +2495,11 @@ fi
 # trust registration below writes the store the worker will actually read.
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
-WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND") || exit 1
+# Launch secrets (header above): resolved before the account pin, whose Pi
+# sign-in check counts the names they inject, and before any endpoint,
+# worktree, or record exists.
+fm_launch_secrets_load "$CONFIG" "$HARNESS" || exit 1
+WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$FM_LAUNCH_SECRETS_NAMES") || exit 1
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
@@ -2561,13 +2596,18 @@ resolve_rovo_binary() {
 # without an interactive login. muse offers exactly two credential paths
 # (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
 # always takes priority, and a stored credential written by `muse auth set` or
-# `muse login` into <config>/muse/auth.json. This is a PREFLIGHT rather than a
+# `muse login` into <config>/muse/auth.json. META_API_KEY reaches the worker
+# when config/launch-secrets.json injects it for muse, or when it is present in
+# the tmux session environment the pane inherits. This is a PREFLIGHT rather than a
 # rendered-screen check because an unauthenticated pane does not exit - it sits
 # on an OAuth device-code prompt ("Sign in at this page ... Waiting for
 # approval...") waiting for a human who is not there, which would look to
 # supervision like a wedged worker rather than a missing credential.
 muse_worker_meta_api_key_present() {
   local session worker_env
+  case " $FM_LAUNCH_SECRETS_NAMES " in
+  *" META_API_KEY "*) return 0 ;;
+  esac
   if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
     *$'\nMETA_API_KEY\n'*) ;;
@@ -2764,9 +2804,9 @@ case "$LAUNCH" in
   MUSE_AUTH_FILE="$MUSE_CONFIG_HOME/muse/auth.json"
   if ! muse_credential_present "$MUSE_AUTH_FILE"; then
     if [ -n "${META_API_KEY:-}" ]; then
-      echo "error: muse has no worker-reachable credential; META_API_KEY is set for fm-spawn but cannot be proven present in the $BACKEND worker environment. Store the fleet credential at '$MUSE_AUTH_FILE' with 'muse login' or 'muse auth set --api-key-stdin'. The secret will not be copied into the launch command." >&2
+      echo "error: muse has no worker-reachable credential; META_API_KEY is set for fm-spawn but cannot be proven present in the $BACKEND worker environment. Store the fleet credential at '$MUSE_AUTH_FILE' with 'muse login' or 'muse auth set --api-key-stdin', or inject META_API_KEY for muse through config/launch-secrets.json. The secret will not be copied into the launch command." >&2
     else
-      echo "error: muse has no worker-reachable credential; META_API_KEY cannot be proven present in the $BACKEND worker environment and '$MUSE_AUTH_FILE' is absent or empty. Store the fleet credential with 'muse login' or 'muse auth set --api-key-stdin'." >&2
+      echo "error: muse has no worker-reachable credential; META_API_KEY cannot be proven present in the $BACKEND worker environment and '$MUSE_AUTH_FILE' is absent or empty. Store the fleet credential with 'muse login' or 'muse auth set --api-key-stdin', or inject META_API_KEY for muse through config/launch-secrets.json." >&2
     fi
     exit 1
   fi
@@ -4237,11 +4277,11 @@ rovo_spawn_fail() { # <detail>
   rovo_endpoint_cleanup
 }
 
-# The launch-then-confirm gates run after the task record is published, when
-# ORCA_ABORT_CLEANUP is already cleared and neither the abort trap nor a
-# teardown owns this endpoint yet, so a gate failure must close the launched
-# process here or it keeps running as an orphaned autonomous agent outside
-# task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
+# The launch-then-confirm gates, including the launch-secrets handshake, run
+# after the task record is published, when ORCA_ABORT_CLEANUP is already
+# cleared and neither the abort trap nor a teardown owns this endpoint yet, so
+# a gate failure must close the launched process here or it keeps running as
+# an orphaned autonomous agent outside task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
 # the exact terminal is closed: that stops the CLI while its worktree stays
 # for the record's own teardown, which owns worktree deletion.
 rovo_endpoint_cleanup() {
@@ -5388,7 +5428,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
     FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
-    $LAUNCH_ENV_NAMES; do
+    $LAUNCH_ENV_NAMES $FM_LAUNCH_SECRETS_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
     # shellcheck disable=SC2016
@@ -5448,6 +5488,14 @@ if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
 fi
 LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
 LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+# Launch secrets wrap outermost, so the injector runs with the pane's ambient
+# environment and an enabled allowlist's env -i expands the injected names
+# inside it.
+if [ -n "$FM_LAUNCH_SECRETS_NAMES" ]; then
+  LAUNCH_SECRETS_CLAIM="$LAUNCH_DIR/secrets.$SPAWN_GEN.claim"
+  LAUNCH_SECRETS_REFUSED="$LAUNCH_DIR/secrets.$SPAWN_GEN.refused"
+  LAUNCH=$(fm_launch_secrets_wrap "$LAUNCH" "$LAUNCH_SECRETS_CLAIM" "$LAUNCH_SECRETS_REFUSED")
+fi
 if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
   echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
   exit 1
@@ -5460,6 +5508,7 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
 fi
 sleep 0.3
 SPAWN_LAUNCH_SENT=1
+[ -z "$FM_LAUNCH_SECRETS_NAMES" ] || LAUNCH_SECRETS_PENDING=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -5467,6 +5516,21 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ -n "$FM_LAUNCH_SECRETS_NAMES" ]; then
+  LAUNCH_SECRETS_WAIT_STATUS=0
+  LAUNCH_SECRETS_FAILURE=$(fm_launch_secrets_wait "$LAUNCH_SECRETS_CLAIM" \
+    "$LAUNCH_SECRETS_REFUSED" "$FM_LAUNCH_SECRETS_TIMEOUT") || LAUNCH_SECRETS_WAIT_STATUS=$?
+  LAUNCH_SECRETS_PENDING=0
+  if [ "$LAUNCH_SECRETS_WAIT_STATUS" -ne 0 ]; then
+    LAUNCH_SECRETS_PANE=$(fm_launch_secrets_pane_reason "$(fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null)")
+    [ -z "$LAUNCH_SECRETS_PANE" ] || LAUNCH_SECRETS_FAILURE="$LAUNCH_SECRETS_FAILURE; the pane last showed: $LAUNCH_SECRETS_PANE"
+    LAUNCH_SECRETS_FAILURE="$LAUNCH_SECRETS_FAILURE; the $HARNESS worker for $ID was not started, because it never launches without its secrets ($FM_LAUNCH_SECRETS_NAMES)"
+    printf '%s\n' "$(status_stamp_line "failed: $LAUNCH_SECRETS_FAILURE")" >>"$STATE/$ID.status"
+    echo "error: $LAUNCH_SECRETS_FAILURE; closing window $T" >&2
+    rovo_endpoint_cleanup
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

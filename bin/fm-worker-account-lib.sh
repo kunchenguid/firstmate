@@ -47,11 +47,15 @@
 #           a root can authenticate; a row whose provider column is exactly
 #           <p> passes. --no-refresh keeps the check from rewriting a root's
 #           tokens while other workers use them.
+# The one exception is a Pi launch's own injected secrets
+# (config/launch-secrets.json): the worker starts with those names set, so
+# the Pi check sees each with a placeholder value and Pi's own provider
+# mapping decides whether one signs the provider in. Values never reach it.
 # A pinned Claude launch also unsets the environment credentials Claude ranks
 # above the root's stored login, so an ambient API key or token cannot outrank
 # the pin. Pi ranks a root's stored credentials above environment variables,
-# and the check refuses a provider the root has not stored, so a pinned Pi
-# launch unsets nothing.
+# and the check refuses a provider neither the root nor the launch's injected
+# secrets sign in, so a pinned Pi launch unsets nothing.
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
@@ -166,11 +170,11 @@ fm_worker_account_pi_provider() {
   esac
 }
 
-# fm_worker_account_check <harness> <declared> <root> <executable> [<provider>]
+# fm_worker_account_check <harness> <declared> <root> <executable> [<provider>] [<injected-names>]
 # Returns 0 only when the runner's own check says the selected root is signed
 # in for this launch; otherwise prints one error and returns 1.
 fm_worker_account_check() {
-  local harness=$1 declared=$2 root=$3 executable=$4 provider=${5:-} out verdict name
+  local harness=$1 declared=$2 root=$3 executable=$4 provider=${5:-} injected=${6:-} out verdict name
   local -a clean=(env -i "HOME=${HOME:-}" "PATH=${PATH:-}")
   for name in TMPDIR USER LOGNAME; do
     [ -z "${!name:-}" ] || clean+=("$name=${!name}")
@@ -191,6 +195,9 @@ fm_worker_account_check() {
     ;;
   pi | pi-signed)
     clean+=("PI_CODING_AGENT_DIR=$root")
+    for name in $injected; do
+      clean+=("$name=fm-launch-secret-placeholder")
+    done
     out=$(fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" "${clean[@]}" \
       "$executable" auth check --provider "$provider" --json --no-refresh 2>/dev/null </dev/null)
     verdict=$(printf '%s\n' "$out" | jq -r '
@@ -210,14 +217,14 @@ fm_worker_account_check() {
       verdict="no model listed for provider $provider"
       ;;
     esac
-    echo "error: config/pi-account pins Pi workers to $declared, which is not signed in for provider '$provider' ($verdict); sign in with PI_CODING_AGENT_DIR=$root $harness, then /login, or change the pin" >&2
+    echo "error: config/pi-account pins Pi workers to $declared, which is not signed in for provider '$provider' ($verdict); sign in with PI_CODING_AGENT_DIR=$root $harness, then /login, inject the provider's key through config/launch-secrets.json, or change the pin" >&2
     return 1
     ;;
   esac
   return 0
 }
 
-# fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command>]
+# fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command>] [<injected-names>]
 # The whole launch-time decision. Prints nothing for an unpinned runner, so
 # the caller keeps today's launch unchanged. For a pinned one prints
 # "declared<TAB>root<TAB>provider", where provider is the Pi launch model's
@@ -226,7 +233,7 @@ fm_worker_account_check() {
 # endpoint exists, and bin/fm-control.sh before a relaunch stops the live
 # agent.
 fm_worker_account_select() {
-  local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} selection declared root providers word provider=
+  local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} injected=${6:-} selection declared root providers word provider=
   selection=$(fm_worker_account_resolve "$harness" "$config") || return 1
   [ -n "$selection" ] || return 0
   declared=${selection%%$'\t'*}
@@ -264,7 +271,7 @@ fm_worker_account_select() {
       ;;
     esac
   fi
-  fm_worker_account_check "$harness" "$declared" "$root" "$executable" "$provider" || return 1
+  fm_worker_account_check "$harness" "$declared" "$root" "$executable" "$provider" "$injected" || return 1
   printf '%s\t%s\t%s\n' "$declared" "$root" "$provider"
 }
 
