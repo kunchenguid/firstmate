@@ -347,7 +347,7 @@ fm_session_lock_pane_identity() {
 # so a caller that cannot resolve its own session fails closed instead of
 # anchoring on the shared server that would outlive it.
 fm_session_lock_pane_session_pid() {  # <pane-marker>
-  local marker=$1 line pid rest parent candidate listing marker_name marker_value args
+  local marker=$1 line pid rest parent candidate listing marker_name marker_value args env
   local -a candidates=()
   [ -n "$marker" ] || return 1
   # pgrep cannot select on a process's environment, which is the only place the
@@ -362,14 +362,17 @@ fm_session_lock_pane_session_pid() {  # <pane-marker>
     pid=${line%% *}
     case "$pid" in '' | *[!0-9]*) continue ;; esac
     args=$(ps -o args= -p "$pid" 2>/dev/null) || continue
-    case "$args" in *"$marker"*) continue ;; esac
-    case " $line " in
+    rest=${line#* }
+    case "$rest" in
+      "$args "*) env=${rest#"$args "} ;;
+      *) continue ;;
+    esac
+    case " $env " in
       *" $marker_name=$marker_value "*) ;;
       *) continue ;;
     esac
-    rest=${line#* }
-    fm_harness_process_matches "${rest%% *}" "$rest" || continue
-    fm_harness_process_is_daemon "${rest%% *}" "$rest" && continue
+    fm_harness_process_matches "${args%% *}" "$args" || continue
+    fm_harness_process_is_daemon "${args%% *}" "$args" && continue
     candidates+=("$pid")
   done <<EOF
 $listing
