@@ -118,7 +118,7 @@ Its later sights are still held to that same bounded cadence rather than re-alar
 The pause path still never reads a secondmate's endpoint liveness - dead-or-missing recovery belongs to the dedicated liveness tick above - and a mate is admitted to that same cadence only to serve a status-declared wait's bounded re-surface, so a forgotten `paused:` declaration, or an attended `captain-held` declaration, cannot rot invisibly.
 Its initial normal-mode status signal still surfaces through the no-verb path, while a daemon-backed away posture self-handles that routine signal and owns later external-wait rechecks.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
-No-change heartbeats are also benign.
+Heartbeat absorption follows the readiness and status checks owned by the header of `bin/fm-watch.sh`; `tests/fm-watch-ready-queue.test.sh` covers ready, unreadable, empty, and captain-held queues.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start sends the same bounded local scan through `bin/fm-startup-network.sh`'s deferred worker so current-state reads never block the digest.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.

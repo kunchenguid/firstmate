@@ -153,8 +153,11 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
-#   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#   heartbeat              fleet-scan backstop found ready queued work, could not
+#                          read backlog readiness, or found an unsurfaced
+#                          captain-relevant status; daemon-backed afk emits every
+#                          heartbeat. The backlog consumer owns readiness;
+#                          supervision rechecks current stops and worker capacity.
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt

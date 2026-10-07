@@ -208,7 +208,7 @@ One example is a Cursor park superseded by the return turn's own end, which stop
 
 A captain outcome the attended engine records while the captain remains attended wakes main once, through the owner's ordinary wake path, with one `supervision-host: branch-outcome:` line naming its store rows.
 Main drains, and `bin/fm-wake-drain.sh` presents it in its `BRANCH OUTCOMES` section with the exact `bin/fm-branch-outcome.sh mark-processed --through <seq>` acknowledgement.
-Before acknowledging even a settled source task, main acts on each ready-work handoff under `AGENTS.md` section 10, dispatching its named units in that turn or recording an applicable not-ready reason on each unit's backlog note.
+Before acknowledging, main follows the ready-work handoff contract owned by `AGENTS.md` section 10.
 That presentation is what the Pi branch's visible entry is, so it advances the store's read cursor through the rows it presents.
 Every later drain, including the session-start digest, presents unprocessed captain outcomes again until main acknowledges them, so an ignored outcome costs no extra turn and is never lost.
 The drain's header owns the section's bounds; these rules keep it bounded and in order:
@@ -318,7 +318,8 @@ Before it arms, the next host does two things:
 The host stays parked across every close it handled itself and exits only when main is needed.
 Claude drops the exit 2 of a Stop hook it terminated at the hook timeout ([verification](verification/supervision.md#claude-drops-the-exit-2-of-a-hook-it-timed-out-2026-09-23)).
 Cursor's `stop` hook carries the same tracked 28,800-second registration.
-A plain watcher park rarely lasts that long, because heartbeat closes wake main. The watcher also delivers a heartbeat when the backlog consumer finds ready queued work or cannot read readiness, even without a new status event; the supervisor checks current stops and capacity before dispatching or handing the work to main.
+A plain watcher park rarely lasts that long, because heartbeat closes wake main.
+The watcher header in `bin/fm-watch.sh` owns heartbeat emission, including backlog-readiness checks.
 But a host absorbs its own wakes, so it ends its park itself before that registration.
 
 ### Setting the boundary
