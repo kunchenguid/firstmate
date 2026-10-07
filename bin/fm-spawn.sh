@@ -4028,7 +4028,8 @@ kimi_pane_lists_project_mcp_targets() { # <plain-pane-capture>
 # Count declared project servers in the worktree Kimi would start in.
 # `enabled: false` still counts: the prompt can list that command, so the
 # declaration has not gone away. A missing file declares nothing. A file that
-# cannot be parsed declares an unknown set, which is refused.
+# cannot be parsed, or whose `mcpServers` is anything but an object, declares
+# an unknown set, which is refused.
 # Kimi's per-folder trust is not a substitute for this read.
 kimi_project_mcp_blocks_launch() { # <worktree>
   local wt=$1 decl count
@@ -4043,15 +4044,10 @@ kimi_project_mcp_blocks_launch() { # <worktree>
   fi
   command -v jq >/dev/null 2>&1 || return 0
   count=$(jq -r '
-    def server_count:
-      if type == "object" then (keys_unsorted | length)
-      elif type == "array" then length
-      elif type == "null" then 0
-      else error("not a server map")
-      end;
     if type != "object" then error("not an object")
-    elif has("mcpServers") then (.mcpServers | server_count)
-    else 0
+    elif has("mcpServers") | not then 0
+    elif (.mcpServers | type) == "object" then (.mcpServers | length)
+    else error("not a server map")
     end
   ' "$decl" 2>/dev/null) || return 0
   case "$count" in
