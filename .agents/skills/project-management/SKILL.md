@@ -61,6 +61,8 @@ A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only`, a
 `yolo` is inactive on a `forge=gerrit` project, so never propose `+yolo` alongside it.
 `bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
 
+The optional `default-branch=<branch>` token records origin's default branch for a remote whose git endpoint does not advertise it, such as AWS CodeCommit; register it when the captain confirms that branch or a spawn refuses because origin's default branch cannot be resolved.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.

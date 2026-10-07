@@ -1084,6 +1084,15 @@ A malformed or unreadable file refuses every fresh ship or scout spawn until it 
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
 
+## Project default branch (data/projects.md default-branch=)
+
+A fresh worker starts from origin's default branch, which Firstmate normally learns from git.
+Some remotes, such as AWS CodeCommit, never advertise their default branch over git, so git can only guess from which branches point at the remote's HEAD commit, and the launch is refused when several do.
+For a CodeCommit origin Firstmate then asks `aws codecommit get-repository` for the default branch configured there, using your existing AWS CLI configuration and the region named in the remote URL.
+When the AWS CLI is unavailable or unauthenticated, or for any other remote that does not advertise its default branch, add `default-branch=<branch>` to the project's bracket annotation in `data/projects.md`, for example `- my-lib [no-mistakes default-branch=main] - ...`.
+A registered default branch wins over everything Firstmate would otherwise infer, and every launch still refuses when origin has no such branch.
+[`bin/fm-project-mode.sh`](../bin/fm-project-mode.sh) owns the registry token, and [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns the resolution order.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

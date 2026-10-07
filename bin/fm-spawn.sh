@@ -48,6 +48,14 @@
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
+#   Without --base-branch, a fresh launch resets its pooled copy to origin's
+#   default branch: the project's registered default-branch= when set
+#   (bin/fm-project-mode.sh), otherwise git's `remote set-head --auto`, and,
+#   when git cannot infer it on an AWS CodeCommit origin, whose endpoint never
+#   advertises HEAD, the default branch `aws codecommit get-repository` records,
+#   asked with the operator's own AWS CLI configuration under a bound. The
+#   chosen branch must exist on origin and becomes origin/HEAD; otherwise the
+#   launch is refused, naming the cause and the default-branch= override.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -3492,8 +3500,144 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
-  local worktree=$1 base=${2:-} default target expected actual status
+# An origin whose git endpoint never advertises the HEAD symref leaves
+# `git remote set-head --auto` to guess the default branch from which branches
+# point at HEAD's commit, and that guess fails whenever several do. AWS
+# CodeCommit is such a remote, but its API records the configured default
+# branch, so a CodeCommit origin is asked there. These helpers only recognize
+# that origin and read that one field; credentials come from the operator's own
+# AWS CLI configuration, and the CLI's output other than that field, including
+# its errors, is never printed.
+FM_SPAWN_CODECOMMIT_TIMEOUT=20
+
+# Prints "<region> <repository> <profile>" (each "-" when absent) for a
+# CodeCommit URL: https:// or ssh:// (or scp-style) to
+# git-codecommit[-fips].<region>.amazonaws.com[.cn]/v1/repos/<repository>, or
+# the git-remote-codecommit helper's codecommit::<region>://[<profile>@]<repository>
+# and codecommit://[<profile>@]<repository>. Returns 1 for any other URL.
+codecommit_origin_coordinates() { # <url>
+  local url=$1 host='' path region=- repo profile=-
+  case $url in
+    codecommit::*://*)
+      region=${url#codecommit::}
+      region=${region%%://*}
+      repo=${url#*://}
+      ;;
+    codecommit://*) repo=${url#codecommit://} ;;
+    *://*)
+      case $url in https://* | ssh://*) ;; *) return 1 ;; esac
+      host=${url#*://}
+      path=${host#*/}
+      [ "$path" != "$host" ] || return 1
+      host=${host%%/*}
+      ;;
+    *:*)
+      host=${url%%:*}
+      path=${url#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  if [ -n "$host" ]; then
+    host=${host##*@}
+    host=${host%%:*}
+    case $host in
+      git-codecommit.*.amazonaws.com | git-codecommit.*.amazonaws.com.cn) region=${host#git-codecommit.} ;;
+      git-codecommit-fips.*.amazonaws.com) region=${host#git-codecommit-fips.} ;;
+      *) return 1 ;;
+    esac
+    region=${region%.amazonaws.com.cn}
+    region=${region%.amazonaws.com}
+    path=${path#/}
+    case $path in v1/repos/*) repo=${path#v1/repos/} ;; *) return 1 ;; esac
+  else
+    case $repo in *@*) profile=${repo%@*}; repo=${repo##*@} ;; esac
+    [ -n "$profile" ] || return 1
+    case $profile in *[[:space:]]*) return 1 ;; esac
+  fi
+  repo=${repo%/}
+  case $region in '' | *[!a-z0-9-]*) [ "$region" = - ] || return 1 ;; esac
+  case $repo in '' | *[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s %s %s\n' "$region" "$repo" "$profile"
+}
+
+# Prints the default branch CodeCommit records for the repository, bounded by
+# FM_SPAWN_CODECOMMIT_TIMEOUT. On failure prints the cause instead and returns 1.
+codecommit_default_branch() { # <region> <repository> <profile>
+  local region=$1 repo=$2 profile=$3 answer rc=0
+  local args=(codecommit get-repository --repository-name "$repo" --query repositoryMetadata.defaultBranch --output text)
+  [ "$region" = - ] || args+=(--region "$region")
+  [ "$profile" = - ] || args+=(--profile "$profile")
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "the aws CLI is not installed"
+    return 1
+  fi
+  answer=$(fm_run_timed "$FM_SPAWN_CODECOMMIT_TIMEOUT" env AWS_PAGER= aws "${args[@]}" 2>/dev/null </dev/null) || rc=$?
+  if fm_timed_out "$rc"; then
+    echo "aws codecommit get-repository did not answer within ${FM_SPAWN_CODECOMMIT_TIMEOUT}s"
+    return 1
+  elif [ "$rc" -ne 0 ]; then
+    echo "aws codecommit get-repository for '$repo' failed with exit status $rc (check the AWS CLI's credentials and region)"
+    return 1
+  fi
+  answer=$(printf '%s' "$answer" | tr -d '\r' | sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}')
+  if [ -z "$answer" ] || [ "$answer" = None ]; then
+    echo "CodeCommit records no default branch for '$repo'"
+    return 1
+  fi
+  if ! git check-ref-format "refs/heads/$answer" 2>/dev/null; then
+    echo "CodeCommit answered '$answer' for '$repo', which is not a branch name"
+    return 1
+  fi
+  printf '%s\n' "$answer"
+}
+
+# Resolves origin's default branch in an already-fetched worktree and records it
+# as refs/remotes/origin/HEAD, printing the branch. The project's registered
+# default-branch= (bin/fm-project-mode.sh) wins when set; otherwise git's own
+# `set-head --auto` is tried first and, when it fails on a CodeCommit origin, the
+# CodeCommit API is asked. Every candidate must name a branch origin has. On
+# failure prints the cause and returns 1.
+resolve_spawn_origin_default() { # <worktree> <project-name>
+  local worktree=$1 project=$2 override cause url coords branch
+  override=$("$FM_ROOT/bin/fm-project-mode.sh" --default-branch "$project" 2>/dev/null) || {
+    echo "the registry entry for $project has an invalid default-branch= token: $("$FM_ROOT/bin/fm-project-mode.sh" --default-branch "$project" 2>&1 >/dev/null | head -n 1)"
+    return 1
+  }
+  if [ -n "$override" ]; then
+    if ! git -C "$worktree" remote set-head origin "$override" >/dev/null 2>&1; then
+      echo "the registered default-branch=$override for $project is not a branch on origin"
+      return 1
+    fi
+    printf '%s\n' "$override"
+    return 0
+  fi
+  if cause=$(git -C "$worktree" remote set-head origin --auto 2>&1 >/dev/null); then
+    default_branch "$worktree" || {
+      echo "git recorded no default branch for origin"
+      return 1
+    }
+    return 0
+  fi
+  cause="git could not infer it ($(printf '%s\n' "$cause" | sed -n '1{s/^error: *//;p;}'))"
+  url=$(git -C "$worktree" config --get remote.origin.url 2>/dev/null || true)
+  coords=$(codecommit_origin_coordinates "$url") || {
+    echo "$cause"
+    return 1
+  }
+  # shellcheck disable=SC2086 # coordinates are three space-free words.
+  branch=$(codecommit_default_branch $coords) || {
+    echo "$cause, and $branch"
+    return 1
+  }
+  if ! git -C "$worktree" remote set-head origin "$branch" >/dev/null 2>&1; then
+    echo "$cause, and CodeCommit's default branch '$branch' is not a branch on origin"
+    return 1
+  fi
+  printf '%s\n' "$branch"
+}
+
+freshen_spawn_worktree_base() { # <worktree> [<base-branch>] [<project-name>]
+  local worktree=$1 base=${2:-} project=${3:-} default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -3520,12 +3664,8 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
   if [ -n "$base" ]; then
     default=$base
   else
-    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-      return 1
-    fi
-    default=$(default_branch "$worktree") || {
-      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    default=$(resolve_spawn_origin_default "$worktree" "$project") || {
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree': $default; register the project's default branch as default-branch=<branch> in its data/projects.md entry; refusing to launch from a potentially stale base" >&2
       return 1
     }
   fi
@@ -4499,7 +4639,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$(basename "$PROJ_ABS")" || exit 1
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint

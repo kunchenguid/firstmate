@@ -874,6 +874,194 @@ test_scout_base_branch_refused_on_gerrit_forge() {
   pass "a based scout on a forge=gerrit project is refused at spawn"
 }
 
+# A stub aws CLI: every call is logged, and it answers with the contents of
+# $CASE_DIR/aws-answer and the status in $CASE_DIR/aws-status (default 0). No
+# test ever reaches the real AWS CLI or AWS.
+stub_aws() {
+  cat > "$FAKEBIN_DIR/aws" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$CASE_DIR/aws.log'
+[ ! -f '$CASE_DIR/aws-answer' ] || cat '$CASE_DIR/aws-answer'
+exit \$(cat '$CASE_DIR/aws-status' 2>/dev/null || echo 0)
+SH
+  chmod +x "$FAKEBIN_DIR/aws"
+}
+
+# Make origin behave like CodeCommit's git endpoint: HEAD is a bare commit, not
+# a symref, and another branch sits at the same commit as the default, so
+# `git remote set-head --auto` sees several candidates and fails.
+make_origin_head_ambiguous() {
+  local origin="$CASE_DIR/origin.git"
+  git --git-dir="$origin" branch tomcat11 "$DEFAULT_BRANCH"
+  git --git-dir="$origin" update-ref --no-deref HEAD "$(git --git-dir="$origin" rev-parse "$DEFAULT_BRANCH")"
+}
+
+# Point origin at <url> while git still fetches from the local fixture, so the
+# recognized URL is the configured one.
+alias_origin_url() { # <url>
+  git -C "$PROJECT_DIR" config "url.file://$CASE_DIR/origin.git.insteadOf" "$1"
+  git -C "$PROJECT_DIR" remote set-url origin "$1"
+}
+
+register_project() { # <annotation>
+  printf -- '- project [%s] - fixture (added 2026-01-01)\n' "$1" > "$HOME_DIR/data/projects.md"
+}
+
+test_codecommit_origin_default_comes_from_the_api() {
+  local rec id out status n url want
+  n=0
+  while IFS='|' read -r url want; do
+    n=$((n + 1))
+    id="pool-codecommit-api-$n-r1"
+    rec=$(make_case "codecommit-api-$n" "$id")
+    read_case_record "$rec"
+    make_origin_head_ambiguous
+    alias_origin_url "$url"
+    stub_aws
+    printf 'main\n' > "$CASE_DIR/aws-answer"
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "a CodeCommit origin whose HEAD git cannot infer should launch from the API's default branch ($url)"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+      || fail "the CodeCommit spawn did not start from current origin/main ($url)"
+    assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
+      "the CodeCommit spawn omitted advanced-main content ($url)"
+    [ "$(git -C "$POOL_DIR" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/main ] \
+      || fail "the CodeCommit spawn did not record origin/HEAD as main ($url)"
+    grep -qxF -- "codecommit get-repository --repository-name ProscAmazonCloudWatch --query repositoryMetadata.defaultBranch --output text $want" "$CASE_DIR/aws.log" \
+      || fail "the CodeCommit spawn did not ask the API for that repository with '$want' ($url): $(cat "$CASE_DIR/aws.log" 2>/dev/null)"
+  done <<'URLS'
+https://git-codecommit.us-east-1.amazonaws.com/v1/repos/ProscAmazonCloudWatch|--region us-east-1
+ssh://APKAEIBAERJR2EXAMPLE@git-codecommit.eu-west-2.amazonaws.com/v1/repos/ProscAmazonCloudWatch|--region eu-west-2
+codecommit::us-west-2://ops@ProscAmazonCloudWatch|--region us-west-2 --profile ops
+URLS
+  pass "a CodeCommit origin with an ambiguous HEAD launches from the default branch its API records"
+}
+
+test_registered_default_branch_covers_an_unavailable_api() {
+  local rec id out status
+  id='pool-codecommit-override-r1'
+  rec=$(make_case codecommit-override "$id")
+  read_case_record "$rec"
+  make_origin_head_ambiguous
+  alias_origin_url https://git-codecommit.us-east-1.amazonaws.com/v1/repos/ProscAmazonCloudWatch
+  stub_aws
+  printf '255\n' > "$CASE_DIR/aws-status"
+  register_project 'no-mistakes default-branch=main'
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a registered default branch should launch when the CodeCommit API is unavailable"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "the registered default branch did not reset the copy to origin/main"
+  [ "$(git -C "$POOL_DIR" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/main ] \
+    || fail "the registered default branch was not recorded as origin/HEAD"
+  [ ! -e "$CASE_DIR/aws.log" ] || fail "spawn asked the CodeCommit API although a default branch is registered"
+  pass "a registered default branch launches a CodeCommit project when the API cannot answer"
+}
+
+test_registered_default_branch_wins_over_inference() {
+  local rec id out status
+  id='pool-override-wins-r1'
+  rec=$(make_case override-wins "$id")
+  read_case_record "$rec"
+  publish_feature_branch release
+  stub_aws
+  register_project 'no-mistakes default-branch=release'
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a registered default branch should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/release)" ] \
+    || fail "spawn followed origin's advertised HEAD instead of the registered default branch"
+  assert_grep 'only on release' "$POOL_DIR/feature-only.txt" \
+    "the copy is missing the registered default branch's content"
+  [ ! -e "$CASE_DIR/aws.log" ] || fail "spawn called the aws CLI for a non-CodeCommit origin"
+
+  id='pool-override-missing-r1'
+  rec=$(make_case override-missing "$id")
+  read_case_record "$rec"
+  register_project 'no-mistakes default-branch=missing'
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a registered default branch origin lacks should refuse the spawn"
+  assert_contains "$out" "default-branch=missing for project is not a branch on origin" \
+    "the refusal did not name the missing registered default branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+    || fail "spawn moved HEAD after refusing a missing registered default branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn published task metadata"
+  pass "a registered default branch wins over origin's advertised HEAD, and one origin lacks refuses"
+}
+
+test_codecommit_default_unresolvable_still_refuses() {
+  local rec id out status case_kind
+  for case_kind in api-fails api-names-missing-branch; do
+    id="pool-codecommit-refuse-$case_kind-r1"
+    rec=$(make_case "codecommit-refuse-$case_kind" "$id")
+    read_case_record "$rec"
+    make_origin_head_ambiguous
+    alias_origin_url https://git-codecommit.us-east-1.amazonaws.com/v1/repos/ProscAmazonCloudWatch
+    stub_aws
+    if [ "$case_kind" = api-fails ]; then
+      printf 'An error occurred (UnrecognizedClientException)\n' > "$CASE_DIR/aws-answer"
+      printf '254\n' > "$CASE_DIR/aws-status"
+    else
+      printf 'gone\n' > "$CASE_DIR/aws-answer"
+    fi
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn succeeded with no resolvable default branch ($case_kind)"
+    assert_contains "$out" "could not resolve origin's current default branch" \
+      "spawn did not refuse an unresolvable default branch ($case_kind)"
+    assert_contains "$out" "Multiple remote HEAD branches" \
+      "the refusal did not name git's ambiguity ($case_kind)"
+    assert_contains "$out" "default-branch=<branch>" \
+      "the refusal did not name the registry override ($case_kind)"
+    assert_not_contains "$out" "UnrecognizedClientException" \
+      "the refusal printed the aws CLI's own output ($case_kind)"
+    if [ "$case_kind" = api-fails ]; then
+      assert_contains "$out" "exit status 254" "the refusal did not name the API failure"
+    else
+      assert_contains "$out" "default branch 'gone' is not a branch on origin" \
+        "the refusal did not name the API's missing branch"
+    fi
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+      || fail "spawn moved HEAD after failing to resolve the default branch ($case_kind)"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn published task metadata ($case_kind)"
+  done
+  pass "a CodeCommit origin with no resolvable default branch still refuses, naming the cause and the override"
+}
+
+test_ordinary_origin_never_asks_codecommit() {
+  local rec id out status
+  id='pool-ordinary-origin-r1'
+  rec=$(make_case ordinary-origin "$id")
+  read_case_record "$rec"
+  alias_origin_url https://github.com/example/project.git
+  stub_aws
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an ordinary origin should launch as before"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "an ordinary origin did not start from current origin/main"
+
+  id='pool-ordinary-ambiguous-r1'
+  rec=$(make_case ordinary-ambiguous "$id")
+  read_case_record "$rec"
+  make_origin_head_ambiguous
+  alias_origin_url https://github.com/example/project.git
+  stub_aws
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an ordinary origin with an ambiguous HEAD launched"
+  assert_contains "$out" "could not resolve origin's current default branch" \
+    "an ordinary ambiguous origin did not refuse as before"
+  [ ! -e "$CASE_DIR/aws.log" ] || fail "spawn called the aws CLI for a non-CodeCommit origin"
+  pass "an ordinary origin launches or refuses as before without asking CodeCommit"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
@@ -886,6 +1074,11 @@ test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
+test_codecommit_origin_default_comes_from_the_api
+test_registered_default_branch_covers_an_unavailable_api
+test_registered_default_branch_wins_over_inference
+test_codecommit_default_unresolvable_still_refuses
+test_ordinary_origin_never_asks_codecommit
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_launches_without_a_freshness_fetch
 test_originless_dirty_pool_refuses_without_discarding_work
