@@ -653,8 +653,8 @@ At that moment the branch reports any refusal instead of concluding there is "no
 
 `tests/fm-branch-supervision.test.sh` covers:
 
-- Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
-- Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
+- Prompt stability, including the pre-validation completion handoff and durable-history lookup instructions, the landed-work cleanup instruction, and the second-mate relay, signal-span, and stale-liveness rules.
+- Store append-only behavior, task-filtered history beyond the recent window and across acknowledgement without changing state, malformed-history refusal, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 
