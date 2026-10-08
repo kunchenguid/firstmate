@@ -200,8 +200,12 @@ The command requires the original immutable grant and bindings, the preserved un
 It then performs only the official read-only Codebase status and detail reads, requires the exact repository, MR URL, registered source head, merged status, and exact independently supplied merge commit, publishes a distinct readback-settlement receipt, and releases only that step's matching reservations.
 It never issues a merge, runs later steps, changes the original terminal result, or reports the failed or timed-out model execution as successful.
 Repeated settlement converges on the same receipt and missing or ambiguous evidence leaves the reservations intact.
-An attempted cleanup has no ShortTask-owned settlement command.
-The reservation remains held until the existing cleanup owner supplies exact completion readback for the same task and executor generation; the short agent never reconstructs authority from a historical lifecycle judgment or replays the operation through a separate recovery path.
+An attempted cleanup normally has no ShortTask-owned settlement command.
+The reservation remains held until the existing cleanup owner supplies exact completion readback for the same task and executor generation; the short agent never reconstructs authority from a historical lifecycle judgment or replays an endpoint effect through a separate recovery path.
+One narrower historical crash window is supported by `FM_HOME=/absolute/home node bin/fm-short-agent.mjs settle-cleanup <short-id> <step-index>`: an explicitly archived, non-captain-held task whose dead exact cleanup executor already recorded its effect, closed the bound endpoint, retained the identity-matched copy, and then received the exact status-presentation refusal before completing bookkeeping.
+The command requires the original unsuccessful result, request, nonce, step, generation, effect identity, matching reservation, partial cleanup receipt, absent endpoint, unchanged copy and Git identities, and fully presented status history.
+It invokes the existing teardown owner only for the idempotent remaining bookkeeping, publishes completion from that owner's exact readback, preserves the original failed result and retained copy/report, and releases the matching reservation.
+Repeated settlement returns the same receipt; a live executor, present or changed endpoint, active task, captain hold, unread status, changed identity, or any other refusal leaves the reservation intact.
 A changed candidate, identity, or grant likewise leaves the reservation intact and stops new writes.
 The CLI `reconcile` retries missing notifications and reconciles ordinary receipts without inventing recovery authority.
 [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs) owns the action schema and durable receipt mechanics.

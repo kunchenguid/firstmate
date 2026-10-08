@@ -1180,7 +1180,7 @@ status_presentation_marker_commit() {
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
 
-status_retire_presentation_task() {  # <state> <task-id> [--require-settled|--check-settled]
+status_retire_presentation_task() {  # <state> <task-id> [--require-settled|--check-settled|--require-archived|--check-archived]
   local state=$1 task=$2 mode=${3:-} lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
   local status_file="$1/$2.status" size presented open
   local signal_marker heartbeat_marker daemon_marker
@@ -1222,7 +1222,19 @@ EOF
   fi
 
   fm_lock_acquire_wait "$lock" || return 1
-  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ]; } \
+  if [ "$mode" = --require-archived ] || [ "$mode" = --check-archived ]; then
+    local record="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}/$task/task.json"
+    if [ ! -f "$record" ] || [ -L "$record" ] || ! jq -e --arg task "$task" '
+      .id == $task and .state == "archived" and
+      (.hold == null or .hold.kind != "captain")
+    ' "$record" >/dev/null 2>&1; then
+      echo "REFUSED: task $task lacks an exact non-captain archived disposition; preserving its presentation state" >&2
+      fm_lock_release "$lock"
+      return 1
+    fi
+  fi
+  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ] \
+      || [ "$mode" = --require-archived ] || [ "$mode" = --check-archived ]; } \
     && [ ! -e "$status_file" ] && [ ! -L "$status_file" ] \
     && { [ -e "$state/.$task.open-decisions-cursor" ] \
       || [ -L "$state/.$task.open-decisions-cursor" ]; }; then
@@ -1230,7 +1242,8 @@ EOF
     fm_lock_release "$lock"
     return 1
   fi
-  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ]; } \
+  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ] \
+      || [ "$mode" = --require-archived ] || [ "$mode" = --check-archived ]; } \
     && { [ -e "$status_file" ] || [ -L "$status_file" ]; }; then
     if [ ! -f "$status_file" ] || [ ! -r "$status_file" ] || [ -L "$status_file" ]; then
       echo "REFUSED: task $task status is unsafe; preserving its presentation state" >&2
@@ -1242,7 +1255,7 @@ EOF
       fm_lock_release "$lock"
       return 1
     }
-    if [ -n "$open" ]; then
+    if [ -n "$open" ] && { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ]; }; then
       echo "REFUSED: task $task has an open status decision; preserving its presentation state" >&2
       fm_lock_release "$lock"
       return 1
@@ -1283,14 +1296,14 @@ EOF
       done <<EOF
 $data
 EOF
-      if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ]; then
+      if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ] && [ "$mode" != --check-archived ]; then
         mv -f "$tmp" "$manifest" || rc=1
       fi
       [ "$rc" -eq 0 ] || rm -f "$tmp"
-      [ "$mode" != --check-settled ] || rm -f "$tmp"
+      if [ "$mode" = --check-settled ] || [ "$mode" = --check-archived ]; then rm -f "$tmp"; fi
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ]; then
+  if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ] && [ "$mode" != --check-archived ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
       "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
   fi

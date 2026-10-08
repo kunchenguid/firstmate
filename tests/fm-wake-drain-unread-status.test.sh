@@ -328,6 +328,69 @@ test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_hi
   pass "settled retirement preserves unread/open status and removes only fully presented closed history"
 }
 
+test_archived_retirement_makes_only_presented_non_captain_task_decisions_moot() {
+  local dir state status err id
+  dir=$(make_case archived-retirement)
+  state="$dir/state"
+  err="$dir/retire.err"
+
+  id=archived-blocker
+  register_task_fixture "$state" "$id"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" \
+    hold "$id" --kind blocker --reason 'obsolete external dependency' >/dev/null
+  prime_cursor "$state" "$state/$id.status"
+  printf 'blocked [key=obsolete]: external dependency unavailable\n' >> "$state/$id.status"
+  append_wake "$state" signal "$id.status" "signal: $id.status" || fail 'archived blocker signal failed'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" archive "$id" >/dev/null
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$2" "$3" --require-archived
+  ' _ "$ROOT" "$state" "$id" || fail 'explicit archive did not retire a presented obsolete task blocker'
+  assert_absent "$state/$id.status" 'archived obsolete status history was retained'
+
+  for id in active-decision archived-captain; do
+    register_task_fixture "$state" "$id"
+    prime_cursor "$state" "$state/$id.status"
+    printf 'needs-decision [key=choice]: choose a live action\n' >> "$state/$id.status"
+    append_wake "$state" signal "$id.status" "signal: $id.status" || fail "protected decision signal failed: $id"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null
+    if [ "$id" = archived-captain ]; then
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" \
+        hold "$id" --kind captain --reason 'actual unanswered captain call' >/dev/null
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" archive "$id" >/dev/null
+    fi
+    if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      . "$1/bin/fm-classify-lib.sh"
+      status_retire_presentation_task "$2" "$3" --require-archived
+    ' _ "$ROOT" "$state" "$id" 2>"$err"; then
+      fail "archived retirement ignored an active or captain decision: $id"
+    fi
+    assert_present "$state/$id.status" "refusal removed protected status history: $id"
+  done
+
+  id=archived-unread
+  register_task_fixture "$state" "$id"
+  prime_cursor "$state" "$state/$id.status"
+  printf 'blocked [key=obsolete]: presented blocker\n' >> "$state/$id.status"
+  append_wake "$state" signal "$id.status" "signal: $id.status" || fail 'archived unread signal failed'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null
+  printf 'note: unread archival context\n' >> "$state/$id.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" archive "$id" >/dev/null
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$2" "$3" --require-archived
+  ' _ "$ROOT" "$state" "$id" 2>"$err"; then
+    fail 'archived retirement removed unread status context'
+  fi
+  assert_grep 'has unread status bytes' "$err" 'archived unread refusal was not explicit'
+  assert_present "$state/$id.status" 'archived unread refusal removed status history'
+  pass 'archive retires only presented task-local blockers and preserves active, captain, and unread decisions'
+}
+
 test_settled_retirement_refuses_orphan_decision_cursor() {
   local dir state cursor err rc=0
   dir=$(make_case orphan-decision-cursor)
@@ -749,6 +812,7 @@ test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_settled_retirement_refuses_unread_and_open_status_then_removes_presented_history
+test_archived_retirement_makes_only_presented_non_captain_task_decisions_moot
 test_settled_retirement_refuses_orphan_decision_cursor
 test_status_append_serializes_with_retirement
 test_weak_identity_still_presents_and_advances

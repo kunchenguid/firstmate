@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Opt-in headless short jobs; read-only unless explicitly granted operations or Bash. CLI: models | submit <request.json> |
-// status <id> | result <id> | cancel <id> | reconcile | settle-merge <id> <index>:<merge-commit>.
+// status <id> | result <id> | cancel <id> | reconcile | settle-merge <id> <index>:<merge-commit> |
+// settle-cleanup <id> <index>.
 // Requires explicit FM_HOME.
 // Request: {key, goal, acceptance, provider?, model?, materials:[absolute file], operations?, bash?}.
 // Legacy budget fields are accepted and ignored so old callers and v1 records remain readable.
@@ -22,7 +23,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { validateOperations, bindOperations, executeOperations, processIdentity, operationReceipts, primaryOwner, reconcileOperationReceipts, settleMergeReceipt } from './fm-short-operations.mjs';
+import { validateOperations, bindOperations, executeOperations, processIdentity, operationReceipts, primaryOwner, reconcileOperationReceipts, settleMergeReceipt, settleArchivedStatusCleanup } from './fm-short-operations.mjs';
 import { shortPluginLoader, shortPluginEnvironment } from './fm-short-plugin.mjs';
 import { successfulNotification } from './fm-short-notification.mjs';
 const exec = promisify(execFile);
@@ -494,7 +495,7 @@ async function main() {
   const [command, arg, id] = process.argv.slice(2);
   if (command === '_run') return run(arg, id);
   if (command === '--help') {
-    console.log('FM_HOME=/absolute/home node bin/fm-short-agent.mjs models|submit request.json|status id|result id|cancel id|reconcile|settle-merge id index:expected-merge-commit\nRequest: key, goal, acceptance, optional provider/model (default openai-codex/gpt-5.6-luna), materials (canonical single-link regular files), and either optional fixed operations or optional bash {authority, cwd, scope, exclusions, expiresAt}. Bash uses Pi native Bash in the exact canonical cwd; it is not a path sandbox, so scope and exclusions remain explicit authorization constraints and must not bypass existing merge, sync, cleanup, discard, credential, security, or restart owners. Bash and fixed operations cannot be combined. Legacy budget fields are accepted but ignored. settle-merge is a MAIN-owned, readback-only recovery for a dead Codebase merge executor with an exact retained effect and reservations; it requires an independently observed merge commit and never runs later steps. Attempted cleanup effects remain reserved until the existing cleanup owner provides an exact completion readback; they are never replayed by a separate recovery path. Firstmate applies no wall-clock, request, tool-call, captured-input, or output budget; provider and model context limits still apply. No terminal, worktree, or parent history is inherited.');
+    console.log('FM_HOME=/absolute/home node bin/fm-short-agent.mjs models|submit request.json|status id|result id|cancel id|reconcile|settle-merge id index:expected-merge-commit|settle-cleanup id index\nRequest: key, goal, acceptance, optional provider/model (default openai-codex/gpt-5.6-luna), materials (canonical single-link regular files), and either optional fixed operations or optional bash {authority, cwd, scope, exclusions, expiresAt}. Bash uses Pi native Bash in the exact canonical cwd; it is not a path sandbox, so scope and exclusions remain explicit authorization constraints and must not bypass existing merge, sync, cleanup, discard, credential, security, or restart owners. Bash and fixed operations cannot be combined. Legacy budget fields are accepted but ignored. settle-merge is a MAIN-owned, readback-only recovery for a dead Codebase merge executor with an exact retained effect and reservations; it requires an independently observed merge commit and never runs later steps. settle-cleanup is MAIN-owned continuation for the exact dead archived cleanup that already removed its bound endpoint and retained its copy before a status-presentation refusal; it preserves the failed result, revalidates task/generation/resource identity and current readback, finishes only idempotent owner bookkeeping, and refuses live, changed, present-endpoint, captain-held, or uncertain evidence. Firstmate applies no wall-clock, request, tool-call, captured-input, or output budget; provider and model context limits still apply. No terminal, worktree, or parent history is inherited.');
     return;
   }
   if (command === 'models') {
@@ -508,6 +509,10 @@ async function main() {
   else if (command === 'status' || command === 'result') result = service.status(arg);
   else if (command === 'cancel') { result = service.cancel(arg); await service.notify(arg); }
   else if (command === 'reconcile') result = { jobs: await service.reconcile() };
+  else if (command === 'settle-cleanup') {
+    if (!/^\d+$/.test(id ?? '')) throw Error('settle-cleanup requires the exact cleanup step index');
+    result = settleArchivedStatusCleanup(service.home, arg, Number(id));
+  }
   else if (command === 'settle-merge') {
     const match = /^(\d+):([a-f0-9]{40}|[a-f0-9]{64})$/.exec(id ?? '');
     if (!match) throw Error('settle-merge requires index:expected-merge-commit');

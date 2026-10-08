@@ -22,6 +22,9 @@ fm_short_owner_release() {
 fm_short_owner_check() {
   if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
     node "$FM_SHORT_OWNER_LIB_DIR/fm-short-operations.mjs" verify "$FM_SHORT_OWNER_ACTION" "${FM_SHORT_OWNER_ARGS[@]}"
+  elif [ "$FM_SHORT_OWNER_ACTION" = cleanup ] && [ -n "${FM_SHORT_CLEANUP_RECOVERY:-}" ]; then
+    node "$FM_SHORT_OWNER_LIB_DIR/fm-short-operations.mjs" verify-cleanup-recovery \
+      "${FM_SHORT_OWNER_ARGS[0]}" "${FM_SHORT_CLEANUP_GENERATION:-}"
   else
     local marker
     for marker in "${FM_SHORT_OWNER_MARKERS[@]}"; do
@@ -67,6 +70,13 @@ fm_short_owner_enter() {
   # shellcheck source=bin/fm-wake-lib.sh
   . "$FM_SHORT_OWNER_LIB_DIR/fm-wake-lib.sh"
   fm_short_owner_release
+  # The public settle-cleanup owner already holds both the reservation and
+  # reconciliation locks. Its child teardown verifies that exact ancestry and
+  # must not recursively acquire the non-reentrant reservation lock.
+  if [ "$FM_SHORT_OWNER_ACTION" = cleanup ] && [ -n "${FM_SHORT_CLEANUP_RECOVERY:-}" ]; then
+    fm_short_owner_check
+    return $?
+  fi
   local marker
   for marker in "${FM_SHORT_OWNER_MARKERS[@]}"; do
     [ -d "${marker%/*}" ] || return 1

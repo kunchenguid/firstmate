@@ -7,7 +7,7 @@ import {execFile,execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 const [root,tmp]=process.argv.slice(2);
 const {ShortAgents,validate}=await import(pathToFileURL(path.join(root,'bin/fm-short-agent.mjs')));
-const {resource,processIdentity,bindOperations,settleMergeReceipt}=await import(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')));
+const {resource,processIdentity,bindOperations,settleMergeReceipt,settleArchivedStatusCleanup}=await import(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')));
 const home=path.join(tmp,'home'),pkg=path.join(tmp,'sdk');
 fs.mkdirSync(path.join(home,'state'),{recursive:true});
 fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
@@ -523,6 +523,66 @@ try {
   assert.equal(JSON.parse(fs.readFileSync(path.join(acceptedDir,'operation-0.receipt.json'))).state,'completed');
   assert.equal(closeCount(refusedEndpoint.root_pane.pane_id),1,'accepted retry replayed closure of the already absent exact endpoint');
   assert.ok(!fs.existsSync(resource(replayHome,acceptedInput.operations.steps[0]).file),'completed retry retained the resource reservation');
+
+  // Reconstruct the exact archived status-refusal history: the old wrapper
+  // recorded its runner-owned effect, endpoint and copy owners finished their
+  // phases, then status bookkeeping refused and no operation receipt landed.
+  const archivedTask='cleanup-archived-status-refusal',archivedGeneration='g-cleanup-archived-status-refusal',archivedCopy=path.join(tmp,'cleanup-archived-status-refusal-copy');
+  git('-C',replayProject,'worktree','add','-b','cleanup-archived-status-refusal-fixture',archivedCopy);
+  fs.writeFileSync(path.join(archivedCopy,'retained.txt'),'retain archived status refusal work\n');
+  const archivedCopySnapshot=()=>({head:git('-C',archivedCopy,'rev-parse','HEAD'),status:git('-C',archivedCopy,'status','--porcelain'),content:fs.readFileSync(path.join(archivedCopy,'retained.txt'),'utf8')});
+  const archivedCopyBefore=archivedCopySnapshot();
+  const archivedEndpoint=JSON.parse(execFileSync(path.join(recoveryBin,'herdr'),['workspace','create','--cwd',path.join(tmp,'idle'),'--label',archivedTask],{env:replayEnv,encoding:'utf8'})).result;
+  fs.mkdirSync(path.join(replayData,archivedTask));
+  fs.writeFileSync(path.join(replayData,archivedTask,'brief.md'),'Archived cleanup status-refusal fixture\n');
+  fs.writeFileSync(path.join(replayData,archivedTask,'report.md'),'Preserved archived cleanup report\n');
+  const archivedMetaPath=path.join(replayState,archivedTask+'.meta');
+  fs.writeFileSync(archivedMetaPath,`kind=scout\nmode=local-only\nspawn_gen=${archivedGeneration}\nwindow=fixture:${archivedEndpoint.root_pane.pane_id}\nendpoint_task_id=${archivedTask}\nworktree=${archivedCopy}\nproject=${replayProject}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=${archivedEndpoint.workspace.workspace_id}\nherdr_tab_id=${archivedEndpoint.tab.tab_id}\nherdr_pane_id=${archivedEndpoint.root_pane.pane_id}\n`);
+  addCompactTask(archivedTask,'Archived cleanup status refusal',replayEnv);
+  canonicalTasks(replayEnv,'hold',archivedTask,'--kind','blocker','--reason','obsolete task-local dependency');
+  execFileSync('bash',[path.join(root,'bin/fm-status-append.sh'),archivedTask,'working: preparing obsolete dependency'],{env:replayEnv});
+  execFileSync('bash',[path.join(root,'bin/fm-status-append.sh'),archivedTask,'blocked: [key=obsolete] old dependency is no longer needed'],{env:replayEnv});
+  execFileSync('bash',[path.join(root,'bin/fm-wake-drain.sh')],{env:replayEnv,stdio:'ignore'});
+  execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-classify-lib.sh"; snapshot=$(status_presentation_snapshot "$STATE" "$2") && acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "\n$2\n") && status_commit_presentation_snapshot "$STATE" "$acknowledged"','fixture',root,archivedTask],{env:replayEnv});
+  canonicalTasks(replayEnv,'archive',archivedTask,'--note','explicitly obsolete');
+  const archivedInput=req('cleanup-archived-status-refusal',[{action:'cleanup',task:archivedTask}]),archivedSubmission=replayService.submit(archivedInput,false);
+  const archivedDir=replayService.dir(archivedSubmission.id),archivedRequest=JSON.parse(fs.readFileSync(path.join(archivedDir,'request.json')));
+  const archivedDeadIdentity=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',`import {processIdentity} from ${JSON.stringify(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')).href)};console.log(JSON.stringify(processIdentity(process.pid)))`],{encoding:'utf8'}));
+  const archivedStarted={nonce:archivedRequest.nonce,pid:archivedDeadIdentity.pid,identity:archivedDeadIdentity,at:archivedRequest.acceptedAt+1};
+  fs.writeFileSync(path.join(archivedDir,'started.json'),JSON.stringify(archivedStarted));
+  fs.writeFileSync(path.join(archivedDir,'operation-0.intent.json'),JSON.stringify({nonce:archivedRequest.nonce,index:0,step:archivedInput.operations.steps[0],at:archivedRequest.acceptedAt+2}));
+  fs.writeFileSync(path.join(archivedDir,'operation-0.effect.json'),JSON.stringify({id:archivedSubmission.id,nonce:archivedRequest.nonce,index:0,owner:archivedDeadIdentity,at:archivedRequest.acceptedAt+3}));
+  const archivedRefusal=`REFUSED: task ${archivedTask} has an open status decision; preserving its presentation state\n`;
+  fs.writeFileSync(path.join(archivedDir,'operation-0.output.json'),JSON.stringify({stdout:'',stderr:archivedRefusal,error:`Command failed: bash ${path.join(root,'bin/fm-teardown.sh')} ${archivedTask}\n${archivedRefusal}`}));
+  fs.writeFileSync(path.join(archivedDir,'result.json'),JSON.stringify({id:archivedSubmission.id,state:'blocked',summary:'0/1 steps completed; operation chain incomplete; inspect intent and receipts',finishedAt:archivedRequest.acceptedAt+4,evidence:archivedDir,stage:'model-execution',requests:2,toolCalls:1}));
+  const archivedReservation=resource(replayHome,archivedInput.operations.steps[0]);
+  fs.writeFileSync(archivedReservation.file,JSON.stringify({home:replayHome,id:archivedSubmission.id,nonce:archivedRequest.nonce,index:0,target:archivedReservation.target}));
+  execFileSync('bash',['-c','. "$1"; fm_cleanup_receipt copy-bind "$2" "$3" >/dev/null','fixture',path.join(root,'bin/fm-cleanup-receipt-lib.sh'),archivedTask,archivedGeneration],{env:replayEnv});
+  const archivedCleanupPath=path.join(replayState,archivedTask+'.cleanup.json'),archivedCleanup=JSON.parse(fs.readFileSync(archivedCleanupPath));
+  archivedCleanup.phases={pane_close:{state:'confirmed',reason_code:'exact-pane-absent'},directory_return:{state:'retained',reason_code:'uncommitted-content'},record_close:{state:'confirmed',reason_code:'backlog-paired-resource-record-retained'}};
+  fs.writeFileSync(archivedCleanupPath,JSON.stringify(archivedCleanup));
+  const archivedCli=()=>JSON.parse(execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'settle-cleanup',archivedSubmission.id,'0'],{encoding:'utf8',env:{...replayEnv,PATH:process.env.PATH}}));
+  assert.throws(archivedCli,/already absent exact endpoint/,'present endpoint did not refuse partial cleanup recovery');
+  const archivedTaskPath=path.join(replayData,archivedTask,'task.json'),archivedTaskBytes=fs.readFileSync(archivedTaskPath,'utf8');
+  fs.writeFileSync(archivedTaskPath,JSON.stringify({...JSON.parse(archivedTaskBytes),state:'in_flight'}));assert.throws(archivedCli,/non-captain archived task/);fs.writeFileSync(archivedTaskPath,archivedTaskBytes);
+  fs.writeFileSync(archivedTaskPath,JSON.stringify({...JSON.parse(archivedTaskBytes),hold:{kind:'captain',reason:'unanswered',until:null,set:'2026-10-08T00:00:00Z'}}));assert.throws(archivedCli,/non-captain archived task/);fs.writeFileSync(archivedTaskPath,archivedTaskBytes);
+  const archivedOutputPath=path.join(archivedDir,'operation-0.output.json'),archivedOutputBytes=fs.readFileSync(archivedOutputPath,'utf8');
+  fs.writeFileSync(archivedOutputPath,JSON.stringify({stdout:'',stderr:'unknown failure\n',error:'unknown'}));assert.throws(archivedCli,/exact status-presentation refusal/);fs.writeFileSync(archivedOutputPath,archivedOutputBytes);
+  const archivedMetaBytes=fs.readFileSync(archivedMetaPath,'utf8');
+  fs.writeFileSync(archivedMetaPath,archivedMetaBytes.replace(archivedGeneration,'wrong-generation'));assert.throws(archivedCli,/task binding changed/);fs.writeFileSync(archivedMetaPath,archivedMetaBytes);
+  execFileSync(path.join(recoveryBin,'herdr'),['pane','close',archivedEndpoint.root_pane.pane_id,'--session','fixture'],{env:{...replayEnv,FM_HERDR_LOG:path.join(recoveryBin,'herdr.log')}});
+  const archivedCloseCalls=closeCount(archivedEndpoint.root_pane.pane_id),archivedResultBytes=fs.readFileSync(path.join(archivedDir,'result.json'),'utf8');
+  const archivedSettled=archivedCli();
+  assert.equal(archivedSettled.state,'completed');assert.equal(archivedSettled.result,'blocked');assert.equal(archivedSettled.settlement,'dead-owner-cleanup-readback');
+  assert.deepEqual(archivedCli(),archivedSettled,'repeated archived cleanup settlement did not converge');
+  fs.writeFileSync(path.join(archivedDir,'result.json'),JSON.stringify({...JSON.parse(archivedResultBytes),state:'completed'}));assert.throws(archivedCli,/preserved unsuccessful result/);fs.writeFileSync(path.join(archivedDir,'result.json'),archivedResultBytes);
+  assert.equal(fs.readFileSync(path.join(archivedDir,'result.json'),'utf8'),archivedResultBytes,'recovery rewrote the original failed result');
+  assert.ok(!fs.existsSync(archivedReservation.file),'completed archived recovery retained its exact reservation');
+  assert.ok(!fs.existsSync(archivedMetaPath),'completed archived recovery retained resource metadata');
+  assert.ok(!fs.existsSync(path.join(replayState,archivedTask+'.status')),'completed archived recovery retained obsolete status presentation');
+  assert.equal(closeCount(archivedEndpoint.root_pane.pane_id),archivedCloseCalls,'archived recovery replayed endpoint closure');
+  assert.deepEqual(archivedCopySnapshot(),archivedCopyBefore,'archived recovery changed the retained dirty copy');
+  assert.equal(fs.readFileSync(path.join(replayData,archivedTask,'report.md'),'utf8'),'Preserved archived cleanup report\n');
 } finally {process.env.PATH=priorPath;}
 if(process.env.FM_SHORT_CLEANUP_TARGET) {
   const target=JSON.parse(fs.readFileSync(process.env.FM_SHORT_CLEANUP_TARGET));
