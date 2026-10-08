@@ -35,6 +35,7 @@ import {
   createBranchDispatchOffer,
   dispositionForWakeTrigger,
   FM_BRANCH_DISPATCH_EVENT,
+  idaResultRowsForWake,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
 import {
@@ -606,7 +607,7 @@ export default function (pi: ExtensionAPI) {
     const isCheckTrigger = /^check:/.test(message);
     const scope = scopeForUnreadWake(state, heartbeat);
     const idaResultRows = isCheckTrigger
-      ? scope.eligibleIdaResults.filter((result) => result.trigger === message).map((result) => result.row)
+      ? idaResultRowsForWake(message, scope)
       : [];
     // A signal close containing a needs-decision status file, or a stale close
     // for a captain-held task, gets the identical main-only treatment as a

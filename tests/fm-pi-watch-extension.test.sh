@@ -1088,7 +1088,7 @@ CLASSES
 
 test_pi_routes_only_valid_ida_result_checks_to_branch() {
   local mode repo home plugin log stop out status
-  for mode in valid mismatched-result; do
+  for mode in valid mismatched-result unbound; do
     repo="$TMP_ROOT/pi-ida-result-$mode-root"
     home="$TMP_ROOT/pi-ida-result-$mode-home"
     log="$TMP_ROOT/pi-ida-result-$mode.log"
@@ -1112,7 +1112,7 @@ while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
-      FM_TEST_MODE="$mode" FM_TEST_REASON='check: procevent ida ida-ida-task 7' \
+      FM_TEST_MODE="$mode" FM_TEST_REASON='check: process-event result captured: procevent:ida-ida-task:7' \
       node --input-type=module 2>&1 <<'EOF'
 import { chmodSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -1135,18 +1135,21 @@ privateWrite(`${state}/remote-tasks/${task}/state.json`, JSON.stringify({
   instruction_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   outcome: "succeeded", error_class: null, waiter: "terminal", result_availability: "available",
   result_path: `${state}/remote-tasks/${task}/artifacts/observation.json`, report_path: `${home}/data/${task}/report.md`,
-  provider_state: { region: "sg", identity: "user", session_marker: marker, session_id: "70001", task_id: "80001" },
+  provider_state: { region: "sg", identity: "user", session_marker: marker,
+    session_id: process.env.FM_TEST_MODE === "unbound" ? null : "70001",
+    task_id: process.env.FM_TEST_MODE === "unbound" ? null : "80001" },
 }));
 privateWrite(`${state}/procevent-inbox/${source}.7.adapter`, "ida\n");
 privateWrite(`${state}/procevent-inbox/${source}.7.result`, JSON.stringify({
   schema: "fm-ida-observation.v1",
-  task_id: process.env.FM_TEST_MODE === "valid" ? task : "other-task",
+  task_id: process.env.FM_TEST_MODE === "mismatched-result" ? "other-task" : task,
   provider: "ida", region: "sg", kind: "session", session_marker: marker,
-  session_id: "70001", task_id_remote: "80001", provider_status: "completed",
+  session_id: process.env.FM_TEST_MODE === "unbound" ? null : "70001",
+  task_id_remote: process.env.FM_TEST_MODE === "unbound" ? null : "80001", provider_status: "completed",
   terminal: true, ambiguous: false, result_availability: "available", result_kind: "text",
   answer: "verified result", artifact_reference: null, error_class: null,
 }));
-privateWrite(`${state}/.wake-queue`, `1\t1\tcheck\tprocevent:${source}:7\t${process.env.FM_TEST_REASON}\n`);
+privateWrite(`${state}/.wake-queue`, `1\t1\tcheck\tprocevent:${source}:7\tcheck: procevent ida ${source} 7\n`);
 privateWrite(`${state}/.lock`, `${process.pid}\n`);
 
 const offers = [];

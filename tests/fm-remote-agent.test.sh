@@ -279,7 +279,7 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
       failed-answered) status=failed ;;
       cancelled-answered) status=cancelled ;;
       closed-answered) status=closed ;;
-      recorded-task-conflict|aggregate-error-running|aggregate-error-success|recorded-task-missing) status=error ;;
+      recorded-task-conflict|aggregate-error-running|aggregate-error-success|recorded-task-missing|recorded-status-missing) status=error ;;
     esac
     user="[Firstmate session marker: $marker]"$'\n\n'"PRIVATE_PROMPT_alpha OECID_sensitive"
     if { [ "$status" = completed ] && [ "$mode" != zero ] && [ "$mode" != renamed-empty ] \
@@ -344,7 +344,11 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
                finalAnswer:[{answer:"PRIVATE_OTHER_TASK_ANSWER"}]}
            }]
            else [] end)
-         + (if $answer=="" and ($mode | startswith("structured-") | not)
+         + (if $mode=="recorded-status-missing" then
+              [{id:91,type:8,status:1,visible:true,
+                deep_research_content:{taskId:$task,finalAnswer:[]},
+                task_result:{task_id:$task}}]
+            elif $answer=="" and ($mode | startswith("structured-") | not)
                 and $mode!="aggregate-error-success" and $mode!="recorded-task-conflict"
                 and $mode!="recorded-task-missing" then
               [{id:91,type:8,status:1,visible:true,
@@ -1308,6 +1312,127 @@ SH
   pass "iDA coalesces identical transient readback retries with bounded backoff while state changes, terminal results, and replay bypass safely"
 }
 
+test_nonterminal_unavailable_coalescing_across_restart_and_generation() {
+  local home fakebin id=ida-unavailable-repeat source mode_file sleep_log sleep_release runner tries
+  local sha marker provider staged observation results wakes artifacts
+  home=$(new_home unavailable-repeat); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  source="ida-$id"; mode_file="$home/mode"; : >"$home/bytedcli.log"
+  cat >"$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -z "${FM_IDA_FAKE_SLEEP_LOG:-}" ]; then exec /bin/sleep "$@"; fi
+case "$1" in 0.0*) ;; *) exec /bin/sleep "$@" ;; esac
+printf '%s\n' "$1" >>"$FM_IDA_FAKE_SLEEP_LOG"
+count=$(wc -l <"$FM_IDA_FAKE_SLEEP_LOG" | tr -d '[:space:]')
+if [ "$count" -ge "${FM_IDA_FAKE_SLEEP_BLOCK_AFTER:-1}" ]; then
+  while [ ! -e "${FM_IDA_FAKE_SLEEP_RELEASE:?}" ]; do /bin/sleep 0.01; done
+fi
+SH
+  chmod +x "$fakebin/sleep"
+  sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}')
+  marker="firstmate:$id:${sha:0:16}"
+  printf '%s\t%s\terror\t%s\n' "$SESSION_ID" "$marker" "$marker" >"$home/sessions.tsv"
+  provider=$(jq -cn --arg marker "$marker" \
+    '{region:"sg",identity:"user",session_marker:$marker,session_id:null,task_id:null,
+      agent_id:"9001",agent_name:"iDA Test",model:"ida-research-test",provider_status:null}')
+  FM_HOME="$home" bash -c '
+    . "$1/bin/fm-remote-agent-lib.sh"
+    STATE="$2/state"; DATA="$2/data"
+    fm_remote_state_initialize "$3" ida research "$2/data/$3/instructions.txt" "$4" "$5"
+    fm_remote_meta_write "$3" ida research
+  ' _ "$ROOT" "$home" "$id" "$sha" "$provider" || fail "unavailable-repeat state fixture failed"
+  staged="$home/state-$id.json"
+  jq '.phase="running" | .provider_checkpoint="provider-running"' "$(state_file "$home" "$id")" >"$staged"
+  chmod 0600 "$staged"; mv "$staged" "$(state_file "$home" "$id")"
+
+  printf 'recorded-status-missing\n' >"$mode_file"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null \
+    || fail "nonterminal unavailable source arm failed"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+    || fail "first nonterminal unavailable observation failed"
+  wait_phase "$home" "$id" running || fail "nonterminal unavailable observation changed the task to a terminal phase"
+  jq -e '
+    .generation==1 and .phase=="running" and .result_availability=="unavailable"
+    and .error_class==null and .provider_state.provider_status==null
+  ' "$(state_file "$home" "$id")" >/dev/null \
+    || fail "missing recorded-task status was interpreted as a terminal outcome"
+  results=$(ida_result_count "$home" "$source")
+  wakes=$(grep -c "procevent ida $source" "$home/state/.wake-queue" || true)
+  artifacts=$(find "$home/state/remote-tasks/$id/artifacts" -name '*-observation.json' | wc -l | tr -d '[:space:]')
+  [ "$results:$wakes:$artifacts" = 1:1:1 ] \
+    || fail "first unavailable observation did not retain exactly one durable notification: results=$results wakes=$wakes artifacts=$artifacts"
+  observation=$(find "$home/state/procevent-inbox" -name "$source.1.result" -print -quit)
+  jq -e '.kind=="reconcile" and .terminal==false and .provider_status==null
+    and .error_class=="recorded-task-status-unavailable"' \
+    "$observation" >/dev/null || fail "fixture did not reproduce the exact missing-status observation"
+
+  sleep_log="$home/unavailable-sleeps"; sleep_release="$home/unavailable-release"; : >"$sleep_log"
+  FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=20 FM_IDA_TRANSIENT_BACKOFF_MAX_MS=80 \
+    FM_IDA_FAKE_SLEEP_LOG="$sleep_log" FM_IDA_FAKE_SLEEP_RELEASE="$sleep_release" \
+    FM_IDA_FAKE_SLEEP_BLOCK_AFTER=1 \
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" \
+      >"$home/repeat.out" 2>"$home/repeat.err" &
+  runner=$!
+  tries=500
+  while [ ! -s "$sleep_log" ] && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "equal unavailable observation did not enter bounded coalescing"
+  [ "$(ida_result_count "$home" "$source")" -eq 1 ] \
+    || fail "the reconcile-to-session origin transition created a duplicate capture"
+
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" retire "$source" >/dev/null \
+    || fail "unavailable-repeat restart cleanup failed"
+  wait "$runner" 2>/dev/null || true
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null \
+    || fail "unavailable-repeat restart arm failed"
+  sleep_log="$home/restart-unavailable-sleeps"; sleep_release="$home/restart-unavailable-release"; : >"$sleep_log"
+  FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=20 FM_IDA_TRANSIENT_BACKOFF_MAX_MS=80 \
+    FM_IDA_FAKE_SLEEP_LOG="$sleep_log" FM_IDA_FAKE_SLEEP_RELEASE="$sleep_release" \
+    FM_IDA_FAKE_SLEEP_BLOCK_AFTER=1 \
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" \
+      >"$home/restart-repeat.out" 2>"$home/restart-repeat.err" &
+  runner=$!
+  tries=500
+  while [ ! -s "$sleep_log" ] && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "restart did not recover durable unavailable-observation coalescing"
+  [ "$(ida_result_count "$home" "$source")" -eq 1 ] \
+    || fail "restart published an equal unavailable observation again"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" retire "$source" >/dev/null \
+    || fail "unavailable-repeat generation cleanup failed"
+  wait "$runner" 2>/dev/null || true
+
+  staged="$home/generation-$id.json"
+  jq '.generation=2 | .revision+=1 | .result_path=null' "$(state_file "$home" "$id")" >"$staged"
+  chmod 0600 "$staged"; mv "$staged" "$(state_file "$home" "$id")"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null \
+    || fail "new generation unavailable source arm failed"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+    || fail "new generation unavailable observation failed"
+  [ "$(ida_result_count "$home" "$source")" -eq 2 ] \
+    || fail "new task generation inherited the prior generation's notification suppression"
+
+  sleep_log="$home/artifact-change-sleeps"; sleep_release="$home/artifact-change-release"; : >"$sleep_log"
+  FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=20 FM_IDA_TRANSIENT_BACKOFF_MAX_MS=80 \
+    FM_IDA_FAKE_SLEEP_LOG="$sleep_log" FM_IDA_FAKE_SLEEP_RELEASE="$sleep_release" \
+    FM_IDA_FAKE_SLEEP_BLOCK_AFTER=1 \
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" \
+      >"$home/artifact-change.out" 2>"$home/artifact-change.err" &
+  runner=$!
+  tries=500
+  while [ ! -s "$sleep_log" ] && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "new-generation repeat did not enter bounded coalescing"
+  printf 'structured-artifact\n' >"$mode_file"; : >"$sleep_release"
+  tries=500
+  while kill -0 "$runner" 2>/dev/null && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "new structured artifact remained hidden behind unavailable-observation coalescing"
+  wait "$runner" || fail "new structured artifact was not captured"
+  wait_phase "$home" "$id" terminal-success || fail "new structured artifact was not applied"
+  [ "$(ida_result_count "$home" "$source")" -eq 3 ] \
+    || fail "new structured artifact did not create a distinct capture"
+  [ "$(grep -F -c 'done: iDA remote research complete' "$home/state/$id.status" || true)" -eq 1 ] \
+    || fail "new structured artifact did not retain its actionable terminal notification"
+  pass "iDA silences equal unavailable observations across restart, resets at a new generation, and still captures new artifacts"
+}
+
 test_pre_submission_unavailable_recovers_without_duplicate() {
   local home fakebin id=ida-preflight creates tries=300
   home=$(new_home preflight-unavailable); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
@@ -1804,6 +1929,11 @@ case "${FM_REMOTE_TEST_CASE:-}" in
     test_terminal_disposition_guards_remote_effects
     exit 0
     ;;
+  coalescing)
+    test_transient_readback_coalescing_and_backoff
+    test_nonterminal_unavailable_coalescing_across_restart_and_generation
+    exit 0
+    ;;
 esac
 
 test_followup_identity_and_unknown_submission
@@ -1823,6 +1953,7 @@ test_timeout_reconciliation_and_no_duplicate
 test_local_readback_failure_and_recovery
 test_bytedcli_resolution_and_background_successor
 test_transient_readback_coalescing_and_backoff
+test_nonterminal_unavailable_coalescing_across_restart_and_generation
 test_artifact_store_idempotency
 test_abandon_after_authoritative_zero_match
 test_pre_submission_unavailable_recovers_without_duplicate

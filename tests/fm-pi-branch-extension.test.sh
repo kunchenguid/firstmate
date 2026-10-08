@@ -5151,7 +5151,8 @@ test_branch_dispatch_routes_only_identity_bound_ida_results() {
 import { chmodSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const { scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const { dispositionForWakeTrigger, idaResultRowsForWake, scopeForUnreadWake } =
+  await import(pathToFileURL(process.env.LIB).href);
 const state = `${process.env.FM_HOME}/state`;
 const task = "ida-task";
 const source = `ida-${task}`;
@@ -5229,6 +5230,22 @@ if (mixed.eligibleIdaResults.map((result) => result.trigger).join("|") !==
     `check: procevent ida ${source} 2|check: procevent ida ${source} 1|check: procevent ida ${source} 2`) {
   throw new Error(`iDA trigger identity was not preserved exactly: ${JSON.stringify(mixed)}`);
 }
+const surfaced = `check: process-event result captured: procevent:${source}:2`;
+if (!dispositionForWakeTrigger(surfaced, mixed).eligible ||
+    idaResultRowsForWake(surfaced, mixed).join(",") !== "1,3") {
+  throw new Error(`surfaced iDA capture did not resolve to its exact queue rows: ${JSON.stringify(mixed)}`);
+}
+if (dispositionForWakeTrigger("check: process-event result captured: procevent:ida-other:2", mixed).reason !==
+    "check-main-only") {
+  throw new Error("an unbound surfaced capture became branch eligible");
+}
+privateWrite(`${state}/.main-eligible-rows`, "1\n");
+const claimedDuplicate = scopeForUnreadWake(state, false);
+if (dispositionForWakeTrigger(surfaced, claimedDuplicate).reason !== "check-main-only" ||
+    idaResultRowsForWake(surfaced, claimedDuplicate).length !== 0) {
+  throw new Error(`a duplicate surfaced capture escaped an existing MAIN claim: ${JSON.stringify(claimedDuplicate)}`);
+}
+unlinkSync(`${state}/.main-eligible-rows`);
 
 const assertMainFallback = (label, row) => {
   privateWrite(`${state}/.wake-queue`, `${row}\n1\t9\tsignal\ttask-a.status\tsignal: task-a.status\n`);
@@ -5253,6 +5270,16 @@ writeCapture("1");
 writeCapture("1", observation(), "aime\n");
 assertMainFallback("mismatched captured adapter", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
 writeCapture("1");
+
+const unboundState = JSON.parse(readFileSync(`${state}/remote-tasks/${task}/state.json`, "utf8"));
+unboundState.provider_state.session_id = null;
+unboundState.provider_state.task_id = null;
+privateWrite(`${state}/remote-tasks/${task}/state.json`, JSON.stringify(unboundState));
+const unboundObservation = JSON.parse(observation());
+unboundObservation.session_id = null;
+unboundObservation.task_id_remote = null;
+writeCapture("1", JSON.stringify(unboundObservation));
+assertMainFallback("unbound provider identity", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
 
 unlinkSync(`${state}/procevent-inbox/${source}.1.result`);
 symlinkSync(`${state}/procevent-inbox/${source}.2.result`, `${state}/procevent-inbox/${source}.1.result`);
@@ -6722,6 +6749,13 @@ EOF
   expect_code 0 "$status" "authenticated ShortTask public notification boundary: $out"
   pass "$out"
 }
+
+case "${FM_PI_BRANCH_TEST_CASE:-}" in
+  ida-routing)
+    test_branch_dispatch_routes_only_identity_bound_ida_results
+    exit 0
+    ;;
+esac
 
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable

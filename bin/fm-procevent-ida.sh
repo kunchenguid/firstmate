@@ -28,12 +28,14 @@
 # Once handling reaches a terminal phase, later captured generations are only
 # acknowledged, so they cannot rewrite the report, regress state, or notify twice.
 #
-# After the first applied nonterminal transient read failure, `source` keeps
+# After the first applied nonterminal unavailable observation, `source` keeps
 # semantically identical retries inside this adapter and polls with bounded
-# exponential backoff. A changed observation returns immediately through the
-# ordinary capture, publication, automatic-application, and acknowledgement
-# path. The durable prior observation makes restart converge without rewriting
-# or discarding any captured generation or queued wake.
+# exponential backoff. This includes a missing provider status or a transient
+# read failure, neither of which is interpreted as a terminal outcome. A changed
+# observation returns immediately through the ordinary capture, publication,
+# automatic-application, and acknowledgement path. The task-, generation-, and
+# provider-bound durable prior observation makes restart converge without
+# rewriting or discarding any captured generation or queued wake.
 # The retry delay defaults to 5000 ms, doubles to a 60000 ms cap, and is tuned
 # only through FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS and
 # FM_IDA_TRANSIENT_BACKOFF_MAX_MS.
@@ -541,37 +543,47 @@ observe_or_submit() ( # <id> <allow-submit:true|false>
   fi
 )
 
-transient_observation_repeatable() { # <observation>
+nonterminal_observation_repeatable() { # <observation>
   jq -e '
     .terminal == false
     and .ambiguous == false
-    and .result_availability == "error"
     and .answer == null
-    and (.error_class == "provider-error"
-      or .error_class == "timeout"
-      or .error_class == "unavailable"
-      or .error_class == "rate-limited")
+    and .artifact_reference == null
+    and (.result_kind == null or (has("result_kind") | not))
+    and (
+      .result_availability == "unavailable"
+      or (
+        .result_availability == "error"
+        and (.error_class == "provider-error"
+          or .error_class == "timeout"
+          or .error_class == "unavailable"
+          or .error_class == "rate-limited")
+      )
+    )
   ' "$1" >/dev/null 2>&1
 }
 
 observations_semantically_equal() { # <older> <newer>
-  jq -s -e '((.[0] | del(.observed_at)) == (.[1] | del(.observed_at)))' "$1" "$2" >/dev/null 2>&1
+  # `kind` records which read path produced the observation (submission,
+  # reconcile, or the now-bound session), not provider progress. Once the
+  # exact provider identity is bound, that origin-only transition is silent.
+  jq -s -e '((.[0] | del(.observed_at,.kind)) == (.[1] | del(.observed_at,.kind)))' "$1" "$2" >/dev/null 2>&1
 }
 
 state_semantic_signature() { # <state-file>
-  jq -cS '{task_id,provider,phase,outcome,error_class,provider_checkpoint,result_availability,provider_state}' "$1"
+  jq -cS '{task_id,provider,generation:(.generation // 1),phase,outcome,error_class,provider_checkpoint,result_availability,provider_state}' "$1"
 }
 
-durable_transient_matches() { # <id> <observation>
+durable_nonterminal_matches() { # <id> <observation>
   local id=$1 observation=$2 task_dir previous
-  case "$REMOTE_STATE_PHASE" in result-unavailable|submission-not-started) ;; *) return 1 ;; esac
-  transient_observation_repeatable "$observation" || return 1
+  case "$REMOTE_STATE_PHASE" in running|result-unavailable|submission-not-started|submission-unknown) ;; *) return 1 ;; esac
+  nonterminal_observation_repeatable "$observation" || return 1
   previous=$REMOTE_STATE_RESULT_PATH
   task_dir=$(fm_remote_task_dir "$id") || return 1
   case "$previous" in "$task_dir"/artifacts/*-observation.json) ;; *) return 1 ;; esac
   fm_remote_private_file_safe "$previous" || return 1
   fm_ida_observation_validate "$previous" "$id" "$IDA_STATE_MARKER" || return 1
-  transient_observation_repeatable "$previous" || return 1
+  nonterminal_observation_repeatable "$previous" || return 1
   observations_semantically_equal "$previous" "$observation"
 }
 
@@ -587,7 +599,7 @@ source_observe_with_backoff() ( # <id>
   trap 'rm -rf -- "$root"' EXIT
   observe_or_submit "$id" true >"$current"
   fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
-  if ! durable_transient_matches "$id" "$current"; then cat "$current"; return; fi
+  if ! durable_nonterminal_matches "$id" "$current"; then cat "$current"; return; fi
   cp "$current" "$previous" || die "cannot stage iDA transient observation"
   state_signature=$(state_semantic_signature "$REMOTE_STATE_FILE") || die "cannot identify iDA transient state"
   delay=$IDA_TRANSIENT_BACKOFF_INITIAL_MS
@@ -597,7 +609,7 @@ source_observe_with_backoff() ( # <id>
     fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
     next_signature=$(state_semantic_signature "$REMOTE_STATE_FILE") || die "cannot identify iDA transient state"
     if [ "$next_signature" != "$state_signature" ] \
-        || ! transient_observation_repeatable "$current" \
+        || ! nonterminal_observation_repeatable "$current" \
         || ! observations_semantically_equal "$previous" "$current"; then
       cat "$current"
       return
