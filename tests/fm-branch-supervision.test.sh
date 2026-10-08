@@ -54,6 +54,10 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
   esac
   case "$out_a" in
+    *"A no-mistakes ship's first \`done:\`, appended before any pull request exists"*"report it as verdict captain"*"never as a routine outcome"*) ;;
+    *) fail "branch prompt lost the rule that a no-mistakes ship's pre-validation done is a captain outcome" ;;
+  esac
+  case "$out_a" in
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done [at=<epoch>]: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
