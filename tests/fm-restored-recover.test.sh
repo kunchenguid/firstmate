@@ -134,6 +134,20 @@ exec /bin/sh
 SH
 chmod +x "$LAB/fading-gate-pane.sh"
 
+# An agent in its worktree that is busy running a command in another
+# directory: the agent starts in the pane's directory, and the pane's
+# foreground process then moves to the task's primary checkout, which is where
+# the endpoint's own path reads.
+cat > "$LAB/busy-pane.sh" <<SH
+#!/bin/sh
+clear
+cat "\$1"
+"$LAB/bin/claude" 600 </dev/null &
+cd "$LAB/busy/proj" || exit 1
+exec sleep 600
+SH
+chmod +x "$LAB/busy-pane.sh"
+
 "$REAL_TMUX" -u -L "$SOCKET" new-session -d -s "$SESSION" -n idle -x 200 -y 50 -c "$LAB" -- /bin/sh \
   || fail "could not start the private tmux server"
 
@@ -227,6 +241,7 @@ new_task healthy wt "$LAB/composer.txt"
 new_task sub wt/pkg "$LAB/composer.txt"
 new_task husk proj ""
 new_task remote proj "$LAB/imports-gate.txt" remote_host=example.invalid
+PANE_WRAPPER="$LAB/busy-pane.sh" new_task busy wt "$LAB/composer.txt"
 
 [ "$(fm_backend_agent_state tmux "$SESSION:fm-husk")" = dead ] \
   || fail "the shell-only pane does not read dead, so the husk case below proves nothing"
@@ -241,6 +256,17 @@ pass "a restored worker is flagged when parked on a startup gate or running outs
 
 [ "$(fm_backend_agent_state tmux "$SESSION:fm-gate")" = alive ] \
   || fail "a dry run must not stop anything"
+
+[ "$(cd "$(tmux display-message -p -t "$SESSION:fm-busy" '#{pane_current_path}')" && pwd -P)" = "$LAB/busy/proj" ] \
+  || fail "the busy pane's foreground does not read outside the worktree, so the busy case proves nothing"
+OUT=$(run_recover --dry-run) || fail "the dry run exited nonzero: $OUT"
+case "$OUT" in
+  *busy*) fail "an agent in its worktree running a command elsewhere was flagged: $OUT" ;;
+esac
+[ "$(fm_backend_agent_state tmux "$SESSION:fm-busy")" = alive ] \
+  || fail "the sweep stopped an agent that was running a command outside its worktree"
+tmux kill-window -t "$SESSION:fm-busy"
+pass "an agent in its worktree that runs a command in another directory is not flagged or relaunched"
 
 # --- fm-control exit on a gate-parked agent ------------------------------
 #
