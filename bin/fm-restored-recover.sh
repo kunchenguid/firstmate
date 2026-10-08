@@ -3,6 +3,7 @@
 # work is, after a machine restart.
 #
 # Usage: fm-restored-recover.sh [--dry-run]
+#        fm-restored-recover.sh --background
 #
 # WHY. Herdr persists its session layout and, on restart, resumes each pane's
 # recorded agent session (`claude --resume <id>`) in the pane's saved cwd. That
@@ -30,7 +31,8 @@
 # gate, entering the recorded worktree, and launching the replacement there
 # with a progress note appended to the worker's instructions. A secondmate's
 # charter is never rewritten, so its note stays parent-side evidence.
-# Relaunches run concurrently; their output is replayed in task order.
+# Relaunches run concurrently, and each worker's line is published the moment
+# that worker is settled, never held back until the slowest one finishes.
 #
 # Every other state is left alone: `dead` and `missing` endpoints keep their own
 # recovery paths (the secondmate liveness sweep and stuck-crewmate recovery),
@@ -42,23 +44,45 @@
 #   RESTORED_WORKER: <id>: was <cause>; relaunch failed: <first error line>
 #   RESTORED_WORKER: <id>: was <cause>; not relaunched: a <backend> relaunch cannot move its endpoint back into <path>
 #   RESTORED_WORKER: <id>: was <cause>; not relaunched (dry run)
-# Exit status is 0 unless the home itself cannot be read.
+#   RESTORED_WORKER: sweep: <why the sweep itself did not run or finish>
+# Exit status is 0 unless the home itself cannot be read or a background job
+# cannot be started. Only one sweep runs per home at a time (a lock under
+# state/); a second one reports that and does nothing.
 #
-# bin/fm-bootstrap.sh runs this in its deferred network phase beside the dead
-# secondmate relaunch, so it runs once per locked session start and never on the
-# blocking path. Running it by hand from the lock-owning session is safe: each
-# relaunch takes fm-control's per-task lock, and a healthy worker is a no-op.
+# MODES. Bare (or --dry-run, which flags but never relaunches) runs the sweep
+# in the foreground and prints each line as it is settled; an operator may run
+# it by hand from the lock-owning session, since each relaunch also takes
+# fm-control's per-task lock and a healthy worker is a no-op.
+# --background is how bin/fm-bootstrap.sh runs it from its deferred locked
+# network phase: it starts the sweep as its own detached job and returns at
+# once, printing nothing. A relaunch can legitimately outlast the deferred
+# stage's aggregate deadline, and a deadline that killed it mid-transaction
+# would leave the worker with no agent, so the job runs outside that stage's
+# process group and deadline, under its own bound FM_RESTORED_RECOVER_TIMEOUT
+# (default 300s, sized for fm-control's TERM and KILL waits plus its launch
+# wait, all relaunches running concurrently). The job writes each line to
+# state/.restored-recover.results as it is settled, appends a
+# `RESTORED_WORKER: sweep:` line if its bound expired, and enqueues one
+# `check: restored-workers` wake naming that file whenever any line there is
+# actionable (anything but BOOTSTRAP_INFO); a clean sweep stays silent.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --job and --sweep-held are the background job's own internal stages: the
+# detached job, and the bounded sweep it runs while it holds the home's lock.
+MODE=foreground
 DRY_RUN=0
 case "${1:-}" in
   '') ;;
   --dry-run) DRY_RUN=1 ;;
+  --background) MODE=background ;;
+  --job) MODE=job ;;
+  --sweep-held) MODE=sweep-held ;;
   -h|--help) sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "error: unexpected argument '$1'" >&2; exit 2 ;;
 esac
+[ "$#" -le 1 ] || { echo "error: unexpected argument '$2'" >&2; exit 2; }
 
 [ -n "${FM_HOME:-}" ] && [ -d "$FM_HOME" ] || {
   echo "error: FM_HOME must name this firstmate home" >&2
@@ -71,8 +95,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$SCRIPT_DIR/fm-composer-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 RECHECK_DELAY=${FM_RESTORED_RECOVER_RECHECK:-1}
+TIMEOUT=${FM_RESTORED_RECOVER_TIMEOUT:-300}
+case "$TIMEOUT" in ''|*[!0-9]*|0) TIMEOUT=300 ;; esac
+SWEEP_LOCK="$STATE/.restored-recover.lock"
+RESULTS="$STATE/.restored-recover.results"
 
 real_dir() {  # <path>
   (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P)
@@ -174,23 +206,62 @@ recover_one() {  # <meta> <id>
   fi
 }
 
-OUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-restored-recover.XXXXXX") || {
-  echo "error: could not create a private output directory" >&2
-  exit 1
+# sweep: settle every recorded task concurrently. Each recover_one prints at
+# most one short line with a single write, so lines from concurrent workers
+# never interleave and each appears the moment its worker is settled.
+sweep() {
+  local meta id
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    recover_one "$meta" "$id" 2>/dev/null &
+  done
+  wait
 }
-trap 'rm -rf "$OUT_DIR"' EXIT
 
-n=0
-for meta in "$STATE"/*.meta; do
-  [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-  id=$(basename "$meta" .meta)
-  n=$((n + 1))
-  recover_one "$meta" "$id" > "$OUT_DIR/$n" 2>/dev/null &
-done
-wait
-i=1
-while [ "$i" -le "$n" ]; do
-  [ ! -s "$OUT_DIR/$i" ] || cat "$OUT_DIR/$i"
-  i=$((i + 1))
-done
+has_candidates() {
+  local meta
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] && return 0
+  done
+  return 1
+}
+
+case "$MODE" in
+  foreground)
+    fm_lock_try_acquire "$SWEEP_LOCK" || {
+      echo "RESTORED_WORKER: sweep: another restored-worker sweep is already running in this home (pid ${FM_LOCK_HELD_PID:-unknown}); nothing was done"
+      exit 0
+    }
+    trap 'fm_lock_release "$SWEEP_LOCK" 2>/dev/null || true' EXIT
+    sweep
+    ;;
+  sweep-held)
+    sweep
+    ;;
+  background)
+    has_candidates || exit 0
+    # Its own process group (monitor mode), nohup, and no inherited stdio, for
+    # the reasons bin/fm-startup-network.sh's own detach records: the caller
+    # runs inside a bounded stage that terminates its whole process group, and
+    # a job holding the caller's stdout would hold the digest open.
+    set -m 2>/dev/null || true
+    nohup "$0" --job >/dev/null 2>&1 </dev/null &
+    exit 0
+    ;;
+  job)
+    fm_lock_try_acquire "$SWEEP_LOCK" || exit 0
+    trap 'fm_lock_release "$SWEEP_LOCK" 2>/dev/null || true' EXIT
+    : > "$RESULTS" || exit 1
+    rc=0
+    fm_run_timed "$TIMEOUT" "$0" --sweep-held >> "$RESULTS" 2>/dev/null || rc=$?
+    if fm_timed_out "$rc"; then
+      echo "RESTORED_WORKER: sweep: stopped by its ${TIMEOUT}s bound (FM_RESTORED_RECOVER_TIMEOUT); a worker with no line above was not confirmed recovered" >> "$RESULTS"
+    fi
+    if awk 'NF && $0 !~ /^BOOTSTRAP_INFO:/ { found=1; exit } END { exit !found }' "$RESULTS" 2>/dev/null; then
+      fm_wake_append check restored-workers \
+        "check: restored-workers: restart recovery has results that need attention; read $RESULTS" || true
+    fi
+    ;;
+esac
 exit 0

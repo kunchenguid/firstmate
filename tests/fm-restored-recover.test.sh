@@ -101,6 +101,19 @@ exec /bin/sh
 SH
 chmod +x "$LAB/agent-pane.sh"
 
+# The same pane, but with an agent that ignores SIGTERM (an ignored signal
+# stays ignored across exec), so stopping it takes fm-control's full TERM wait
+# before KILL: a worker whose recovery is slow.
+cat > "$LAB/stubborn-pane.sh" <<SH
+#!/bin/sh
+clear
+cat "\$1"
+trap '' TERM
+"$LAB/bin/claude" 600 </dev/null
+exec /bin/sh
+SH
+chmod +x "$LAB/stubborn-pane.sh"
+
 "$REAL_TMUX" -u -L "$SOCKET" new-session -d -s "$SESSION" -n idle -x 200 -y 50 -c "$LAB" -- /bin/sh \
   || fail "could not start the private tmux server"
 
@@ -150,7 +163,7 @@ new_task() {  # <id> <cwd> <screen-file> [meta...]
     proj|wt|wt/*) cwd="$LAB/$id/$cwd"; mkdir -p "$cwd" ;;
   esac
   if [ -n "$screen" ]; then
-    tmux new-window -d -t "$SESSION:" -n "fm-$id" -c "$cwd" -- "$LAB/agent-pane.sh" "$screen" \
+    tmux new-window -d -t "$SESSION:" -n "fm-$id" -c "$cwd" -- "${PANE_WRAPPER:-$LAB/agent-pane.sh}" "$screen" \
       || fail "could not create $id's window"
     wait_for_state "$SESSION:fm-$id" alive || fail "$id's stand-in agent never read alive"
     wait_for_screen "$SESSION:fm-$id" "$(sed -n 2p "$screen" | sed 's/^ *//')" \
@@ -197,7 +210,8 @@ new_task remote proj "$LAB/imports-gate.txt" remote_host=example.invalid
 OUT=$(run_recover --dry-run) || fail "the dry run exited nonzero: $OUT"
 EXPECTED="RESTORED_WORKER: drift: was running in $LAB/drift/proj instead of its recorded worktree; not relaunched (dry run)
 RESTORED_WORKER: gate: was parked on the Claude external CLAUDE.md imports prompt; not relaunched (dry run)"
-[ "$OUT" = "$EXPECTED" ] || fail "the dry run should name exactly the gate-parked and drifted workers, got:
+EXPECTED=$(printf '%s\n' "$EXPECTED" | sort)
+[ "$(printf '%s\n' "$OUT" | sort)" = "$EXPECTED" ] || fail "the dry run should name exactly the gate-parked and drifted workers, got:
 $OUT"
 pass "a restored worker is flagged when parked on a startup gate or running outside its worktree, and no other shape is"
 
@@ -246,7 +260,8 @@ printf 'unlanded\n' > "$LAB/nobrief/wt/work-in-progress.txt"
 OUT=$(run_recover) || fail "the sweep exited nonzero: $OUT"
 EXPECTED="RESTORED_WORKER: drift: was running in $LAB/drift/proj instead of its recorded worktree; not relaunched: a tmux relaunch cannot move its endpoint back into $LAB/drift/wt
 RESTORED_WORKER: nobrief: was parked on the Claude external CLAUDE.md imports prompt; relaunch failed: task nobrief has no instructions at $LAB/home/data/nobrief/brief.md; refusing to relaunch a worker with nothing to work from"
-[ "$OUT" = "$EXPECTED" ] || fail "the sweep should report the drifted tmux worker and the failed relaunch, got:
+EXPECTED=$(printf '%s\n' "$EXPECTED" | sort)
+[ "$(printf '%s\n' "$OUT" | sort)" = "$EXPECTED" ] || fail "the sweep should report the drifted tmux worker and the failed relaunch, got:
 $OUT"
 for id in drift nobrief; do
   [ "$(fm_backend_agent_state tmux "$SESSION:fm-$id")" = alive ] \
@@ -281,6 +296,62 @@ case "$OUT" in
   *"$OK_ID"*) fail "a relaunched worker is flagged again: $OUT" ;;
 esac
 pass "a gate-parked worker is relaunched in its worktree with the restart explained, and is healthy afterwards"
+
+# --- the detached, separately bounded job ------------------------------
+#
+# Bootstrap starts the sweep with --background from inside the deferred startup
+# stage, whose deadline kills its whole process group. The job must outlive
+# that group, run under its own bound, publish each worker's line as soon as it
+# is settled, and raise a wake for anything actionable. The launcher here runs
+# in its own process group and is killed the moment --background returns. One
+# worker is reported quickly (a drifted tmux endpoint); the other ignores TERM,
+# so its stop outlasts the job's 3s bound.
+for w in $(tmux list-windows -t "$SESSION" -F '#{window_name}'); do
+  [ "$w" = idle ] || tmux kill-window -t "$SESSION:$w"
+done
+rm -f "$LAB/home/state/"*.meta "$LAB/home/state/.wake-queue"
+new_task quick proj "$LAB/composer.txt"
+PANE_WRAPPER="$LAB/stubborn-pane.sh" new_task slow wt "$LAB/imports-gate.txt"
+RESULTS="$LAB/home/state/.restored-recover.results"
+SWEEP_LOCK="$LAB/home/state/.restored-recover.lock"
+set -m
+(
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    FM_HOME="$LAB/home" HOME="$LAB/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_RESTORED_RECOVER_RECHECK=0.2 FM_RESTORED_RECOVER_TIMEOUT=3 \
+    FM_CONTROL_POLL=0.1 FM_CONTROL_EXIT_WAIT=10 \
+    "$RECOVER" --background
+  : > "$LAB/launched"
+  sleep 60
+) &
+LAUNCHER=$!
+set +m
+i=0
+while [ ! -e "$LAB/launched" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+[ -e "$LAB/launched" ] || fail "--background did not return promptly"
+kill -KILL -- "-$LAUNCHER" 2>/dev/null || fail "could not kill the launcher's process group"
+wait "$LAUNCHER" 2>/dev/null
+
+i=0
+while ! grep -q '^RESTORED_WORKER: quick: ' "$RESULTS" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+grep -Fqx "RESTORED_WORKER: quick: was running in $LAB/quick/proj instead of its recorded worktree; not relaunched: a tmux relaunch cannot move its endpoint back into $LAB/quick/wt" "$RESULTS" \
+  || fail "the quick worker's line was never published; results:
+$(cat "$RESULTS" 2>/dev/null)"
+[ -e "$SWEEP_LOCK" ] || fail "the job had already finished when the quick worker's line appeared, so this proves nothing about publishing early"
+grep -q '^RESTORED_WORKER: slow: ' "$RESULTS" && fail "the slow worker settled before the job's bound, so the bound below proves nothing"
+pass "the detached job outlives its launcher's process group and publishes each worker's line before the sweep finishes"
+
+i=0
+while [ -e "$SWEEP_LOCK" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+[ ! -e "$SWEEP_LOCK" ] || fail "the job outlived its own bound"
+grep -Fqx "RESTORED_WORKER: sweep: stopped by its 3s bound (FM_RESTORED_RECOVER_TIMEOUT); a worker with no line above was not confirmed recovered" "$RESULTS" \
+  || fail "the expired bound was not recorded; results:
+$(cat "$RESULTS")"
+[ "$(grep -c 'check: restored-workers' "$LAB/home/state/.wake-queue" 2>/dev/null)" = 1 ] \
+  || fail "actionable results should enqueue exactly one restored-workers wake; queue:
+$(cat "$LAB/home/state/.wake-queue" 2>/dev/null)"
+pass "the job honors its own bound, records that it expired, and raises one wake for actionable results"
 
 OUT=$(env -u FM_HOME "$RECOVER" 2>&1) && fail "the sweep must refuse without an explicit home: $OUT"
 pass "the sweep refuses without an explicit home"

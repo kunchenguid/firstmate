@@ -50,11 +50,13 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
-#          The restored-worker recovery that runs beside it is owned by
+#          The restored-worker recovery started beside it is owned by
 #          bin/fm-restored-recover.sh: an alive direct report parked on a
 #          harness startup gate, or running outside its recorded worktree after
-#          a machine restart, is relaunched there; a relaunch prints one
-#          BOOTSTRAP_INFO fact and a failed one an actionable RESTORED_WORKER line.
+#          a machine restart, is relaunched there by a detached job with its
+#          own bound, whose actionable results arrive as their own
+#          `check: restored-workers` wake. This run prints a RESTORED_WORKER
+#          line only when that job could not be started.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -1597,8 +1599,12 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       fm_timing_record phase secondmate-liveness "$__fm_timing_stamp"
     fi
     if network_sweep_authorized 'restored-worker recovery'; then
+      # Started as its own detached, separately bounded job, so this stage's
+      # aggregate deadline can never kill a relaunch mid-transaction; its
+      # results arrive through their own wake (bin/fm-restored-recover.sh).
       __fm_timing_stamp=$(fm_timing_now_ms)
-      FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-restored-recover.sh"
+      FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-restored-recover.sh" --background \
+        || echo "RESTORED_WORKER: sweep: the restored-worker recovery job could not be started, so workers a restart left in the wrong place were not checked"
       fm_timing_record phase restored-worker-recovery "$__fm_timing_stamp"
     fi
     if network_sweep_authorized 'secondmate convergence'; then
