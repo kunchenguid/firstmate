@@ -2361,10 +2361,11 @@ Every home requires:
 
 Registered GitHub projects additionally require `gh`, GitHub authentication, and compatible `gh-axi`.
 Registered GitLab projects additionally require `glab` and GitLab authentication via `glab auth login`.
+Projects with an explicit `forge=gerrit` binding additionally require `gerrit-axi` and `jq` for Gerrit publishing; bootstrap does not probe Gerrit credentials.
 Local-only homes need neither forge delta.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-Across these requirements, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+Across these requirements, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, gerrit-axi covers Gerrit publishing, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
 
 **Backend requirements**
@@ -2413,6 +2414,7 @@ An absent required tool with an automated install path reports `MISSING:` with i
 - An absent or board-incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with the 0.1.77 compatibility floor, install command, and explicit text fallback; compatible versions below 0.1.80 retain legacy board replies and report an upgrade recommendation for synchronous acceptance, while [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns diagnostic handling.
 - An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)` and an incompatible one reports `OUTDATED:` with its `quota-axi update` upgrade; firstmate cannot resolve a profile array without a compatible binary.
 - For a registered GitLab project, an absent `glab` reports `MISSING: glab` with the platform-specific install command.
+- For a project with `forge=gerrit`, an absent `gerrit-axi` or `jq` reports `MISSING` with its install command; Gerrit credentials are not probed by bootstrap.
 - An unsupported registered origin reports `FORGE_UNSUPPORTED` and is skipped by forge-dependent refreshes.
 
 **Checkout diagnostics**
