@@ -2738,6 +2738,65 @@ test_merge_watch_rearms_after_template_change() {
   pass "a kept merge watch re-arms from its record after a template change and refuses a different URL"
 }
 
+# When retirement recovery fails mid-cycle (here: the receipt's own removal is
+# refused by a stubbed rm), the merge-watch record must survive: it is the
+# identity binding the stranded receipt parses through, so a later watcher
+# start can still finish the retirement instead of rejecting it forever.
+test_merge_watch_record_survives_a_failed_retirement_recovery() {
+  local dir state rc url real_rm
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-watch-recoverable)
+  state="$dir/home/state"
+  seed_merge_watch "$dir" watch-a "$url"
+  seed_canonical_poll "$dir" watch-a "$url"
+
+  real_rm=$(command -v rm)
+  cat > "$dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" != "\${FM_TEST_RM_FAIL:-}" ] || exit 1
+done
+exec "$real_rm" "\$@"
+SH
+  chmod +x "$dir/fakebin/rm"
+
+  set +e
+  FM_TEST_RM_FAIL="$state/watch-a.pr-poll-retirement" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "recoverable-retirement watcher failed: $(cat "$dir/watch-1.err")"
+  case "$(cat "$dir/watch-1.out")" in
+    check:*watch-a.check.sh:*merged) ;;
+    *) fail "the failed-recovery cycle did not deliver the merge: $(cat "$dir/watch-1.out")" ;;
+  esac
+  [ -e "$state/watch-a.pr-poll-retirement" ] \
+    || fail "the refused removal left no recoverable receipt"
+  fm_pr_merge_watch_valid "$state" watch-a \
+    || fail "a failed retirement recovery removed the watch's identity binding"
+  ack_watcher_cycle "$state" || fail "failed-recovery wake acknowledgement failed"
+
+  # The next watcher start finishes the stranded receipt through the surviving
+  # record, and the orphan sweep then clears the record itself.
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "post-recovery watcher failed: $(cat "$dir/watch-2.err")"
+  case "$(cat "$dir/watch-2.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "post-recovery watcher did not reach the control check: $(cat "$dir/watch-2.out")" ;;
+  esac
+  ! grep -F 'rejected unauthenticated PR poll retirement receipts' "$dir/watch-2.out" >/dev/null \
+    || fail "the stranded receipt was rejected despite its watch record surviving"
+  [ ! -e "$state/watch-a.pr-poll-retirement" ] \
+    || fail "the recoverable receipt was not finished at watcher start"
+  [ ! -e "$state/watch-a.merge-watch" ] && [ ! -L "$state/watch-a.merge-watch" ] \
+    || fail "the orphan sweep did not clear the finished watch's record"
+  pass "a merge-watch record survives a failed retirement recovery so the receipt stays recoverable"
+}
+
 test_retirement_crash_recovery() {
   local dir state rc raw_count drain_count historical_poll
 
@@ -3709,6 +3768,7 @@ test_merge_watch_read_error_stays_silent
 test_merge_watch_reports_upward_from_a_secondmate_home
 test_closed_result_is_terminal_only_for_a_merge_watch
 test_merge_watch_rearms_after_template_change
+test_merge_watch_record_survives_a_failed_retirement_recovery
 test_retirement_crash_recovery
 test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results

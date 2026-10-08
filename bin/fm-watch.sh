@@ -2637,11 +2637,17 @@ fm_pr_merge_watch_prune_orphans "$STATE"
 retire_terminal_pr_poll() {  # <id> <result>
   local id=$1 result=$2
   if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$result"; then
-    fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-      || triage_log "$result PR poll retirement remains recoverable for $id"
-    # The poll is retired, so a merge watch bound to it ends here too.
-    fm_pr_merge_watch_retire "$STATE" "$id" \
-      || triage_log "merge watch record for $id could not be fully removed"
+    if fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+      # The poll is retired, so a merge watch bound to it ends here too.
+      fm_pr_merge_watch_retire "$STATE" "$id" \
+        || triage_log "merge watch record for $id could not be fully removed"
+    else
+      triage_log "$result PR poll retirement remains recoverable for $id"
+      # The watch record outlives the failed recovery on purpose: it is the
+      # identity binding a kept watch's receipt parses through (there is no
+      # task meta), so removing it here would strand the receipt that
+      # fm_pr_poll_retirement_recover_all must still finish at watcher start.
+    fi
   else
     triage_log "$result PR poll retirement deferred because its canonical snapshot changed for $id"
   fi
@@ -2916,16 +2922,6 @@ EOF
             # to the generic wake tail would wake firstmate every interval.
             pr_poll_control_release || exit 1
             touch "$STATE/.last-check"
-            continue
-          fi
-          if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
-            # Same residue rule as the merged branch above: a terminal poll
-            # armed on a secondmate belongs to a task in the mate's own home,
-            # so it retires with no outcome and no wake.
-            retire_terminal_pr_poll "$id" closed
-            pr_poll_control_release || exit 1
-            touch "$STATE/.last-check"
-            triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
             continue
           fi
           closed_outcome_rc=0
