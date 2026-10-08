@@ -55,7 +55,11 @@ A stopped agent whose pane still shows the dialog text is not refused.
 [`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
 
 **Teardown and discard are not verbs and will not become verbs.**
-`exit` stops an agent and preserves everything else.
+After proving the agent stopped, `exit` also runs browser-helper cleanup for ship and scout tasks, including already-stopped agents and proven-gone endpoints.
+`relaunch` inherits this cleanup through its exit step; a cleanup failure stops the operation even though the old agent has already stopped.
+The browser-only scope leaves unrelated worktree processes alone and preserves the endpoint, worktree, and uncommitted changes.
+Secondmates skip this cleanup entirely because their recorded worktree is a shared home containing child work.
+[`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns helper ownership checks and signaling limits; [`tests/fm-control.test.sh`](../tests/fm-control.test.sh) covers worker cleanup and secondmate exclusion.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**

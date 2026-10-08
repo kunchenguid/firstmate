@@ -31,7 +31,7 @@ Popup, queued-input, and readiness handling belongs to `../../../bin/fm-composer
 ## Interrupt and exit
 
 Use the control plane so capabilities are checked first.
-Interrupt preserves the agent and work; exit stops only the agent and preserves its endpoint, isolated copy, and uncommitted changes.
+See [the control-plane verb contract](../../../../../docs/agent-control.md#verbs) for interrupt and exit effects, including worker browser-helper cleanup and preservation guarantees.
 Cleanup and discard are not lifecycle verbs.
 The tool reference records repeat, acknowledgement, and clearing behavior, while the executable owner sends or refuses the sequence.
 

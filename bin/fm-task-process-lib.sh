@@ -7,7 +7,7 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
-# Fix 2 (see script header): pids of every process whose CURRENT WORKING
+# Pids of every process whose CURRENT WORKING
 # DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
 # -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
 # documents as slow). Never $$ (this script's own pid). Empty output when
@@ -135,7 +135,8 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
-# Directory of chrome-devtools-axi bridge.pid files. The default session file
+# Directory of chrome-devtools-axi bridge.pid files, ~/.chrome-devtools-axi
+# unless FM_BROWSER_HELPER_STATE_OVERRIDE replaces it. The default session file
 # is bridge.pid; named sessions are sessions/<name>/bridge.pid. An empty
 # FM_BROWSER_HELPER_STATE_OVERRIDE disables the recorded-pid lookup.
 browser_helper_state_root() {
@@ -376,13 +377,16 @@ task_owned_pids() {  # <dir>...
   TASK_PIDS=$(printf '%s\n' "$expanded" | grep -E '^[0-9]+$' | sort -un || true)
 }
 
-# Reap every process owned by this task's worktree or tasktmp before either is
-# removed. Ownership is the directory, a recorded bridge pid proved by that
-# directory, or ancestry from one of those processes. TERM first, then KILL
-# after a short grace period for anything still alive; a process that exits on
-# its own between the two passes is simply absent from the recheck. A missing
-# lsof uses the backend process-group fallback; a scan error refuses before
-# destructive teardown.
+# Shared cleanup for task teardown and worker exit. Task scope includes cwd
+# under the worktree/tasktmp roots; TASK_PROCESS_SCOPE=browser skips that scan
+# and seeds only recorded bridges whose command and PWD or OLDPWD prove task
+# ownership. Both scopes include descendants, even after setsid or chdir.
+# Callers must supply task-exclusive roots, never a secondmate's shared home.
+# Each signal requires both fresh ownership membership and matching process
+# identity. TERM precedes KILL after a grace period.
+# Missing lsof uses the backend process-group fallback in task scope
+# only; scan errors refuse cleanup. Unreadable bridge environments warn and
+# leave those bridges untouched. This does not remove Chrome temp files.
 reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities

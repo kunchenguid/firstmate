@@ -280,20 +280,10 @@
 #     alive: the CLI spawns it detached, the worker's exit reparents it to
 #     launchd, and the headless Chrome that chrome-devtools-mcp launches
 #     leaves that process group, so signalling the bridge alone leaves Chrome.
-#     reap_task_worktree_processes takes a process only when its current
-#     working directory is this task's own worktree or tasktmp (`lsof -a -d cwd`),
-#     or when chrome-devtools-axi's own bridge.pid still names that process,
-#     the process command is still the bridge, and that process's PWD or
-#     OLDPWD is this task's worktree or tasktmp. It then follows parent-to-child
-#     ancestry, including children that have called setsid or changed directory.
-#     It never selects a process by name. TERM, then KILL after a short grace
-#     period, goes to any survivor whose process identity still matches.
-#     FM_BROWSER_HELPER_STATE_OVERRIDE replaces ~/.chrome-devtools-axi as the
-#     directory that holds bridge.pid (named sessions live under sessions/<name>/).
-#     An empty override reads no pid files. Both directory roots are unique per
-#     task and never shared, and a recorded pid without this task's path is
-#     ignored, so another task, another home, or the operator's own Chrome is
-#     out of reach. Idempotent: nothing left to find is a silent no-op.
+#     bin/fm-task-process-lib.sh owns the shared ownership and signaling
+#     contract; teardown uses its task scope before removing either root.
+#     tests/fm-teardown.test.sh covers recorded bridges, descendants outside
+#     the worktree, unrelated processes, and process-identity checks.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
