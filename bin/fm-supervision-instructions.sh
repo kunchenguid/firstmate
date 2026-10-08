@@ -120,6 +120,14 @@ case "$HARNESS" in
 esac
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
+ORCA_CODEX=0
+if [ "$HARNESS" = codex ] && [ "$READ_ONLY" -eq 0 ] && [ "$AFK" -eq 0 ] \
+  && [ -z "$HOST_SNIPPET" ] && [ -n "${ORCA_TERMINAL_HANDLE:-}" ] \
+  && command -v python3 >/dev/null 2>&1 \
+  && python3 "$SCRIPT_DIR/fm-codex-orca-continuation.py" context --home "$FM_HOME" --code-root "$FM_ROOT" >/dev/null 2>&1; then
+  ORCA_CODEX=1
+  SNIPPET="$DOC_DIR/codex-orca.md"
+fi
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 omp_ext="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
@@ -133,6 +141,8 @@ shell_quote() {
 }
 
 x_mode_env_sh=$(shell_quote "$x_mode_env")
+orca_owner_sh=$(shell_quote "$FM_ROOT/bin/fm-codex-orca-continuation.py")
+orca_home_sh=$(shell_quote "$FM_HOME")
 
 if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
@@ -156,6 +166,8 @@ render_snippet() {  # [snippet]
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
     line=${line//__FM_GROK_ARM__/$grok_arm}
+    line=${line//__FM_ORCA_OWNER_SH__/$orca_owner_sh}
+    line=${line//__FM_HOME_SH__/$orca_home_sh}
     printf '%s\n' "$line"
   done < "$snippet"
 }
@@ -187,7 +199,11 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
     codex)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      if [ "$ORCA_CODEX" -eq 1 ]; then
+        printf '%s%s%s%s%s\n' "$prefix" 'verify or restore the Orca-owned continuation with python3 ' "$orca_owner_sh" " ensure --home $orca_home_sh" '; inspect any unconfirmed receipt before retrying.'
+      else
+        printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      fi
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
@@ -216,7 +232,11 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     codex)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      if [ "$ORCA_CODEX" -eq 1 ]; then
+        printf '%s\n' '- Ordinary wake: the Orca-owned continuation protects the successor; drain/handle/ACK, then ensure that same owner. Do not start a competing checkpoint.'
+      else
+        printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      fi
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'

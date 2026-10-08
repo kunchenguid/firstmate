@@ -171,6 +171,17 @@ fm_backend_orca_send_text_line() {  # <terminal-id> <text>
   fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --enter --json
 }
 
+# Receipt-preserving primary continuation transport. The owner validates exact
+# runtime/incarnation and stages; this helper never converts acceptance to proof.
+fm_backend_orca_primary_send() {  # <cli> <terminal> <text> <wait-seconds> [exact-retry-request]
+  local cli=$1 terminal=$2 text=$3 seconds=$4 retry=${5:-}
+  if [ -n "$retry" ]; then
+    "$cli" terminal send --terminal "$terminal" --text "$text" --enter --wait-submit "$seconds" --retry-request "$retry" --json
+  else
+    "$cli" terminal send --terminal "$terminal" --text "$text" --enter --wait-submit "$seconds" --json
+  fi
+}
+
 fm_backend_orca_send_literal() {  # <terminal-id> <text>
   local terminal=$1 text=$2
   fm_backend_orca_tool_check || return 1

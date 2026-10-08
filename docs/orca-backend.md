@@ -67,9 +67,30 @@ It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
 Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.
 
+## Attended Codex primary continuation
+
+A verified attended Codex primary in an Orca terminal uses one app-owned foreground continuation process.
+It establishes the identity-matched singleton handling successor before notifying Codex, while the primary alone drains and acknowledges durable wakes.
+The Codex Stop registration ensures that owner before running the existing generic guard; the second-stop safeguard remains intact.
+Workers, other runtimes, away mode and supervision-host homes keep their existing behavior.
+The rendered [Orca/Codex protocol](supervision-protocols/codex-orca.md) owns the agent operation, and [`fm-codex-orca-continuation.py`](../bin/fm-codex-orca-continuation.py) owns exact commands, receipt states and cleanup mechanics.
+
+The continuation process requires Python 3.9 or newer and local macOS/Linux process and file-lock support.
+Its Linux CLI selection follows Orca's exported command or managed-terminal context; outside a managed Linux terminal the installed Orca CLI is `orca-ide`, because bare `orca` can name the desktop screen reader.
+That continuation boundary does not establish Linux support for this backend's separate spawn/teardown implementation.
+The adapter accepts no remote-pairing selectors or endpoint-adoption operation.
+A changed primary PID/birth/runtime/incarnation fails explicitly without rebinding.
+Input acceptance remains distinct from a started model turn, and only the CLI's exact reported retry identity permits a bounded retry of the same payload.
+An unconfirmed delivery retains durable work and a protected successor for inspection rather than creating a fresh request on silence.
+
+Installation uses the checked-out template's tracked `.codex/hooks.json` and `bin/` files, with the normal Codex hook trust flow.
+From the actual lock-owning Orca primary, `python3 bin/fm-codex-orca-continuation.py ensure --home "$FM_HOME"` is the smallest update/readiness entry point; it reuses a verified owner and refuses an incompatible live binding.
+Global dotfile distribution is separate from this project-scoped installation.
+The [runtime verification record](verification/runtime-backends.md#orca) distinguishes portable behavior tests from live vendor lifecycle evidence.
+
 ## Active limits
 
-- Orca is macOS-only and explicit-only.
+- Orca spawning is macOS-only and explicit-only.
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
@@ -84,6 +105,7 @@ tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-codex-orca-continuation.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.

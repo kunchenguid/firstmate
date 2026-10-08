@@ -1911,6 +1911,46 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Attended Codex continuation
+
+On 2026-10-08, the portable continuation suite passed on macOS with Python 3.9.6 and Bash 3.2.57.
+It drives real isolated watcher/queue/ACK processes with a controlled Orca transport and a Codex-shaped parent; this is not vendor lifecycle proof.
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-orca-continuation.test.sh tests/fm-codex-orca-continuation-live-e2e.test.sh tests/fm-supervision-instructions.test.sh tests/fm-backend-orca.test.sh
+```
+
+```text
+Ran 14 tests in 114.617s
+OK
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=1 duration_ms=185033
+```
+
+The fourteen cases cover repeated successor-before-notify handoff and ACK replay, singleton reuse/refusal, owner death and restart, death during input, acceptance versus turn start, exact permitted retry, rejection/timeout, wrong receipt identities, primary/runtime/incarnation changes, successor failure, generation supersession, unconfirmed create, scoped rendering, second-stop behavior and cleanup.
+Each owner-bearing fixture checks that its owner, arm and transport processes and watcher lock are absent after cleanup.
+Linux portability is supported by the local process/flock implementation but has not been driven live here.
+
+The token-free installed Codex hook-feature guard passed on codex-cli 0.161.0:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+```text
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=5394
+```
+
+That proves the existing worker hook-disable posture, not primary continuation.
+Actual Orca 1.4.222/Codex 0.161.0 adapter final-to-wake acceptance and the installed Stop integration remain NOT_RUN.
+The read-only opt-in guard requires native final/completion/new-task events from two actual cycles and correlates them with exact receipts from one currently verified owner:
+
+```sh
+FM_CODEX_ORCA_CONTINUATION_LIVE=1 FM_HOME=<explicit-primary-home> FM_ORCA_CONTINUATION_EVENTS=<native-event-array.json> bin/fm-test-run.sh tests/fm-codex-orca-continuation-live-e2e.test.sh
+```
+
+Run it only from the actual primary after independently attended bounded testing.
+Its receipt correlation does not replace observer lifetime samples, root-owned drain/ACK evidence, cleanup, or proof that Codex loaded and executed the actual Stop hook.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.
