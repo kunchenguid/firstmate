@@ -162,7 +162,7 @@ fm_forge_detect_provider() {
     return 0
   }
   case "$remote_url" in
-    file://*|git+file://*|/*|./*|../*)
+    file://*|git+file://*|/*|./*|../*|[[:alpha:]]:[/\\]*)
       echo "local"
       return 0
       ;;
