@@ -38,12 +38,20 @@
 # recovery paths (the secondmate liveness sweep and stuck-crewmate recovery),
 # and an unreadable path, an unreadable viewport, or any non-`alive` verdict
 # never triggers a relaunch. Remote secondmates are skipped by name.
+# An endpoint that reads `unreadable` is not given up on at once, because Herdr
+# reports a just-resumed agent as `unknown` for a moment, and after a reboot the
+# primary resumes at the same instant as its workers: the sweep re-reads it every
+# FM_RESTORED_RECOVER_SETTLE_POLL seconds (default 3) for up to
+# FM_RESTORED_RECOVER_SETTLE seconds (default 60) and goes on with whatever
+# definite verdict it reaches. One still unreadable after that is reported, so
+# a worker the sweep could not check never passes silently.
 #
 # OUTPUT, one line per affected task, nothing for a healthy fleet:
 #   BOOTSTRAP_INFO: worker <id> was <cause>; relaunched in its recorded worktree <path>
 #   RESTORED_WORKER: <id>: was <cause>; relaunch failed: <first error line>
 #   RESTORED_WORKER: <id>: was <cause>; not relaunched: a <backend> relaunch cannot move its endpoint back into <path>
 #   RESTORED_WORKER: <id>: was <cause>; not relaunched (dry run)
+#   RESTORED_WORKER: <id>: its endpoint stayed unreadable for <n>s, so it was not checked
 #   RESTORED_WORKER: sweep: <why the sweep itself did not run or finish>
 # Exit status is 0 unless the home itself cannot be read or a background job
 # cannot be started. Only one sweep runs per home at a time (a lock under
@@ -103,6 +111,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 RECHECK_DELAY=${FM_RESTORED_RECOVER_RECHECK:-1}
+SETTLE=${FM_RESTORED_RECOVER_SETTLE:-60}
+case "$SETTLE" in ''|*[!0-9]*) SETTLE=60 ;; esac
+SETTLE_POLL=${FM_RESTORED_RECOVER_SETTLE_POLL:-3}
 TIMEOUT=${FM_RESTORED_RECOVER_TIMEOUT:-300}
 case "$TIMEOUT" in ''|*[!0-9]*|0) TIMEOUT=300 ;; esac
 SWEEP_LOCK="$STATE/.restored-recover.lock"
@@ -124,6 +135,19 @@ outside_worktree() {  # <seen> <worktree-real>
     "$2"/*) return 1 ;;
   esac
   return 0
+}
+
+# settled_agent_state <backend> <target>: the agent-state verdict, re-read while
+# it stays `unreadable` until it settles or SETTLE seconds have passed.
+settled_agent_state() {  # <backend> <target>
+  local state start
+  start=$(date +%s)
+  state=$(fm_backend_agent_state "$1" "$2")
+  while [ "$state" = unreadable ] && [ $(($(date +%s) - start)) -lt "$SETTLE" ]; do
+    sleep "$SETTLE_POLL"
+    state=$(fm_backend_agent_state "$1" "$2")
+  done
+  printf '%s' "$state"
 }
 
 # drifted <backend> <target> <worktree-real>: true when the endpoint runs
@@ -170,7 +194,7 @@ relaunch_note() {  # <cause> <worktree>
 
 # recover_one <meta> <id>: print at most one line for this task.
 recover_one() {  # <meta> <id>
-  local meta=$1 id=$2 kind wt wt_real backend target cause drift out rc first
+  local meta=$1 id=$2 kind wt wt_real backend target state cause drift out rc first
   kind=$(fm_meta_get "$meta" kind)
   [ -n "$kind" ] || kind=ship
   case "$kind" in ship|scout|secondmate) ;; *) return 0 ;; esac
@@ -182,7 +206,12 @@ recover_one() {  # <meta> <id>
   backend=$FM_BACKEND_VALIDATED_BACKEND
   target=$FM_BACKEND_VALIDATED_TARGET
   case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
-  [ "$(fm_backend_agent_state "$backend" "$target")" = alive ] || return 0
+  state=$(settled_agent_state "$backend" "$target")
+  if [ "$state" = unreadable ]; then
+    echo "RESTORED_WORKER: $id: its endpoint stayed unreadable for ${SETTLE}s, so it was not checked"
+    return 0
+  fi
+  [ "$state" = alive ] || return 0
   cause=$(restored_cause "$backend" "$target" "$wt_real") || return 0
   drift=${cause%%$'\t'*}
   cause=${cause#*$'\t'}

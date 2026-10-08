@@ -46,10 +46,16 @@ cleanup_all() {
 trap cleanup_all EXIT
 
 # A `tmux` shim on PATH so every bare `tmux` call reaches the private socket
-# and never touches the host's real sessions.
+# and never touches the host's real sessions. While $LAB/inventory-broken
+# exists, its window inventory fails the way a server mid-restart answers, which
+# the classifier reads as `unreadable`.
 mkdir -p "$LAB/shim" "$LAB/bin" "$LAB/user-home"
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = list-windows ] && [ -e "$LAB/inventory-broken" ]; then
+  echo 'lost server' >&2
+  exit 1
+fi
 exec "$REAL_TMUX" -u -L "$SOCKET" "\$@"
 SH
 chmod +x "$LAB/shim/tmux"
@@ -325,6 +331,36 @@ case "$OUT" in
   *"$OK_ID"*) fail "a relaunched worker is flagged again: $OUT" ;;
 esac
 pass "a gate-parked worker is relaunched in its worktree with the restart explained, and is healthy afterwards"
+
+# --- an endpoint that is not readable yet --------------------------------
+#
+# Right after a resume Herdr reports the agent as unknown for a moment, and
+# after a reboot the primary resumes together with its workers. The sweep keeps
+# re-reading an unreadable endpoint for its settle window and goes on once it
+# reads definitely; one that never does is reported rather than passed over.
+new_task settle wt "$LAB/imports-gate.txt"
+: > "$LAB/inventory-broken"
+[ "$(fm_backend_agent_state tmux "$SESSION:fm-settle")" = unreadable ] \
+  || fail "the broken inventory does not read unreadable, so the settle cases prove nothing"
+FM_RESTORED_RECOVER_SETTLE=20 FM_RESTORED_RECOVER_SETTLE_POLL=0.3 run_recover --dry-run > "$LAB/settle.out" &
+SETTLE_PID=$!
+sleep 1.5
+rm -f "$LAB/inventory-broken"
+wait "$SETTLE_PID"
+grep -Fqx "RESTORED_WORKER: settle: was parked on the Claude external CLAUDE.md imports prompt; not relaunched (dry run)" "$LAB/settle.out" \
+  || fail "a gate-parked worker that became readable inside the settle window was not flagged; got:
+$(cat "$LAB/settle.out")"
+pass "an endpoint that turns readable inside the settle window is still checked"
+
+: > "$LAB/inventory-broken"
+OUT=$(FM_RESTORED_RECOVER_SETTLE=1 FM_RESTORED_RECOVER_SETTLE_POLL=0.3 run_recover --dry-run)
+rm -f "$LAB/inventory-broken"
+case "$OUT" in
+  *"RESTORED_WORKER: settle: its endpoint stayed unreadable for 1s, so it was not checked"*) : ;;
+  *) fail "an endpoint that never became readable should be reported, got:
+$OUT" ;;
+esac
+pass "an endpoint that stays unreadable past the settle window is reported as not checked"
 
 # --- the detached, separately bounded job ------------------------------
 #
