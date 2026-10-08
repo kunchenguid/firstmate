@@ -1,7 +1,7 @@
 # Antigravity CLI
 
-Antigravity's `agy` TUI, verified end to end on 2026-09-10 with agy 1.2.0 on Linux through the Herdr backend.
-Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no agy wake protocol.
+Antigravity's `agy` TUI, verified end to end on Linux through the Herdr and tmux backends.
+Verified as a PRIMARY supervisor, SECONDMATE, and CREWMATE/SCOUT adapter.
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
 ## Operating facts
@@ -10,9 +10,9 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 |---|---|
 | Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
-| Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
+| Busy state | Semantic busy wiring via `$WT/.agents/hooks.json` (`PreInvocation` marks busy, `Stop` marks idle); on Herdr the native `working` status classifies busy, and elsewhere the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
-| Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
+| Turn end | Worktree `Stop` hook touches `state/<id>.turn-ended` and transitions busy state to `idle`. Completion also arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
 | Exit | `/quit`, one Enter; the process exits. |
 | Interrupt | Single `Escape`, which prints the Interrupted row and leaves an idle composer with no repollution, so no clear key follows. |
 | Skill | No verified slash-skill form; use natural language. |
@@ -44,9 +44,18 @@ No environment marker is promoted: `AGENT=1` observed on a live TUI is an inheri
 
 ## Worker busy state and turn end
 
-`../../../../../bin/fm-spawn.sh` arms no busy generation for agy and writes no sidecar, exactly because no writer could ever clear a seeded record.
-`fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
-Teardown removes nothing agy-specific because the spawn leaves nothing behind.
+`bin/fm-spawn.sh` arms a per-task busy generation for agy workers and writes semantic lifecycle hooks into `$WT/.agents/hooks.json`.
+The `PreInvocation` hook runs `bin/fm-busy-event.sh apply <state> <id> busy` to record the active turn and emits `{}`.
+The `Stop` hook touches `state/<id>.turn-ended`, runs `bin/fm-busy-event.sh apply <state> <id> idle` to transition the task to idle, and emits `{"decision":"allow"}`.
+If the project worktree already contains `.agents/hooks.json`, `bin/fm-spawn.sh` merges `fm-crew-busy` into the existing configuration rather than overwriting it, and excludes `.agents/hooks.json` from git tracking.
+On teardown (`bin/fm-teardown.sh`) or relaunch (`bin/fm-control-lib.sh`), `fm-crew-busy` is safely pruned while preserving any pre-existing hooks.
+On Herdr, the native `working` and `idle` status acts as a verified backend authority, and `fm_busy_agy_tail_busy` (`esc to cancel`) provides a rendered-tail fallback.
+
+## Secondmate integration
+
+Supported as a persistent secondmate adapter.
+`bin/fm-agy-trust.sh --secondmate-home <home> <id>` validates the secondmate home marker (`.fm-secondmate-home`) and pre-registers the home directory in `~/.gemini/antigravity-cli/settings.json` under `trustedWorkspaces`.
+Secondmate homes supervise their fleets using the same Stop hook park model as the primary supervisor (`docs/supervision-protocols/agy.md`).
 
 ## Delegation tools and PreToolUse guard
 

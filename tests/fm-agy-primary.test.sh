@@ -59,14 +59,16 @@ CURSOR_PAYLOAD='{"session_id":"sess-cursor","cursor_version":"2026.08.11-e8db854
 
 install_scripts() {
   local dir=$1 f
-  mkdir -p "$dir/bin"
+  mkdir -p "$dir/bin" "$dir/docs"
   for f in fm-turnend-guard-agy.sh fm-turnend-guard.sh fm-hook-host-lib.sh \
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh \
+           fm-path-lib.sh fm-classify-lib.sh fm-timeout-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
-           fm-gate-refuse-lib.sh; do
-    cp "$ROOT/bin/$f" "$dir/bin/$f"
+           fm-gate-refuse-lib.sh fm-supervision-engine-lib.sh; do
+    [ -f "$ROOT/bin/$f" ] && cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
+  cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir"/bin/*.sh
 }
 
@@ -354,6 +356,27 @@ test_park_supersession_stands_down() {
   pass "fm-turnend-guard-agy: superseded park stands down without emitting duplicate wake"
 }
 
+test_hooks_json_commands_execute_cleanly() {
+  local stop_cmd pretool_cmd out rc=0
+  stop_cmd=$(jq -r '."supervision-guard".Stop[0].command' "$ROOT/.agents/hooks.json")
+  pretool_cmd=$(jq -r '."subagent-guard".PreToolUse[0].hooks[0].command' "$ROOT/.agents/hooks.json")
+
+  [ -n "$stop_cmd" ] && [ "$stop_cmd" != "null" ] || fail "hooks.json must declare Stop command"
+  [ -n "$pretool_cmd" ] && [ "$pretool_cmd" != "null" ] || fail "hooks.json must declare PreToolUse command"
+
+  # Stop hook with non-model stop should allow and exit 0 without failing
+  out=$(printf '{"conversationId":"test","executionNum":1,"terminationReason":"error"}' | (cd "$ROOT" && eval "$stop_cmd")) || rc=$?
+  [ "$rc" -eq 0 ] || fail "Stop command must exit 0, got $rc: $out"
+  [ "$(printf '%s' "$out" | jq -r '.decision')" = "allow" ] || fail "Stop command must emit allow, got: $out"
+
+  # PreToolUse with non-delegation tool should allow and exit 0
+  rc=0
+  out=$(printf '{"toolCall":{"name":"run_command"}}' | (cd "$ROOT" && eval "$pretool_cmd")) || rc=$?
+  [ "$rc" -eq 0 ] || fail "PreToolUse command on non-delegation tool must exit 0, got $rc: $out"
+
+  pass "hooks.json: Stop and PreToolUse commands execute cleanly with valid decisions"
+}
+
 test_turnend_guard_supports_agy_flag
 test_park_inert_when_not_primary
 test_park_inert_on_foreign_host
@@ -364,3 +387,5 @@ test_park_delivers_actionable_wake
 test_park_delivers_repair_followup_and_bounds_budget
 test_park_enforces_loop_ceiling
 test_park_supersession_stands_down
+test_hooks_json_commands_execute_cleanly
+
