@@ -19,6 +19,9 @@ Observed result:
 
 ```text
 ok - prelaunch: capabilities are read-only and expose a frozen closure plus exact fresh profiles
+ok - prelaunch: profile launch_env equals the advertised allowlisted capability object
+ok - prelaunch: unsafe fleet inventories fail the strict idleness proof
+ok - prelaunch: guard-write refuses only reservations, not enrollment-ineligible primaries
 ok - prelaunch: reservation validation, write guard, token binding and release are enforced
 ok - prelaunch: pinned preflight/update are local-only, count SHA movement, and disable Git hooks
 ok - prelaunch: filters, dirty state and wrong branches refuse without checkout mutation
@@ -31,7 +34,7 @@ ok - prelaunch: only the authenticated genuine child atomically exchanges into t
 ```
 
 The suite uses the executable JSON interface, local Git objects, a disabled-hook sentinel, concurrent launchers, process death, PID-generation tampering, physical-path aliases, an attached child that outlives its launcher, and a harness-shaped process that invokes the real `fm-lock.sh` handoff.
-It also proves that live or ambiguous dotfiles publication state blocks reservation and that dangling session/reservation lock symlinks fail closed.
+It also proves that live or ambiguous dotfiles publication state blocks reservation, that dangling session/reservation lock symlinks and unreadable fleet-inventory entries fail closed, that `guard-write` leaves explicit updates of unenrolled or enrollment-ineligible primaries alone, and that `profile` returns exactly the allowlisted `launch_env` object `capabilities` advertises.
 The companion dotfiles suite owns network budget, committed portable-object validation, backup/publication failure recovery, whole-pull evidence, and exactly-one-child assertions.
 Combined disposable-home acceptance must run both suites against the same committed Firstmate closure before enrollment.
 Real supported harness launches remain an opt-in acceptance obligation and must record the exact vendor command, version, child-visible sentinel, and handoff result; no native lifecycle evidence was fabricated by this portable run.
