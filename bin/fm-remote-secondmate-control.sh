@@ -16,8 +16,11 @@
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
+# Append --herdr-session <owned-fm-lab-name> for isolated validation.
+# Omission retains fm-remote; empty or other explicit names refuse.
+#
 # Remote placement ends here, but the second-mate agent always runs on the
-# Herdr backend in the dedicated fm-remote session, so launch refuses any other
+# Herdr backend in the selected remote session, so launch refuses any other
 # selection rather than reading this home's config/backend. The interactive
 # default session remains for the user's work.
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
@@ -95,6 +98,17 @@ TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 REMOTE_HERDR_SESSION=fm-remote
+if [ "$#" -ge 2 ]; then
+  session_flag_index=$(($# - 1))
+  if [ "${!session_flag_index}" = --herdr-session ]; then
+    REMOTE_HERDR_SESSION=${!#}
+    if ! [[ "$REMOTE_HERDR_SESSION" =~ ^fm-lab-[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+      printf 'error: invalid remote Herdr lab session: %s; expected an owned fm-lab-* name\n' "$REMOTE_HERDR_SESSION" >&2
+      exit 1
+    fi
+    set -- "${@:1:$#-2}"
+  fi
+fi
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }

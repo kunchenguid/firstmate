@@ -21,7 +21,8 @@ Firstmate does not support placing an individual worker remotely or failing a re
 
 ## Where the remote agent runs
 
-The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session.
+The remote second-mate agent itself runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session by default.
+For isolated validation, the host controller supports an explicit owned lab session; its [`header`](../bin/fm-remote-secondmate-control.sh) owns the input and allowed names.
 Every path that provisions or launches one refuses a host that is not ready for it.
 
 - `fm-remote` is reserved for remote fleet work and must not be used for personal work.
