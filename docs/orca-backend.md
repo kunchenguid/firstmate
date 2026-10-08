@@ -42,17 +42,13 @@ worktree=<absolute Orca worktree path>
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by cleanup, and by send while the recorded terminal handle is live.
-A send or send-key whose recorded handle is stale resolves the live pane from that `window=` alias at send time and does not rewrite the record.
-Orca does not accept the alias as `--terminal`; the native selector is `orca terminal list --worktree name:<window>`, which must return exactly one live pane.
-A window that cannot be resolved keeps today's failed send, including the doorbell refusal that names the recorded terminal and leaves the re-ring in place.
-The mechanic is owned by `bin/backends/orca.sh`.
+A hand restart can replace the terminal handle while preserving `window=`, the Orca worktree name.
+After Orca rejects a send or send-key because the recorded handle is stale or not writable, Firstmate retries through the native recorded-worktree name selector without editing metadata.
+Resolution requires exactly one usable live pane in a non-truncated result; a missing or ambiguous window preserves the original failure and never falls back to a global terminal-title search.
+Healthy handles keep the same command sequence, and unrelated failures do not trigger retargeting.
+For an inbox steer, a failed doorbell leaves the durable record available for the watcher's re-ring policy in [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh).
+[`bin/backends/orca.sh`](../bin/backends/orca.sh) owns the exact selector, rejection classification, and retry mechanics.
 Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
-
-Because a hand restart issues a fresh terminal handle while `window=` (the Orca worktree name) stays stable, a recorded `terminal=` can go stale and refuse every send.
-The submit and send-key cores therefore re-resolve `window=` at send time through Orca's native `orca terminal list --worktree name:<window>` selector and deliver to the live handle Orca reports now.
-Resolution is read-only against `state/<id>.meta` - producer-owned fields are never written - and runs only after Orca rejects a send with an endpoint-identity error, so a healthy terminal keeps its exact recorded command sequence and a rejected write can never duplicate text.
-Whenever the window cannot be resolved, the recorded-handle failure surfaces unchanged: the steer stays durably recorded with the doorbell refusal, and the watcher's re-ring ladder owns delivery from there.
-[`bin/backends/orca.sh`](../bin/backends/orca.sh) owns the exact mechanics.
 
 ## Current lifecycle and safety
 
@@ -61,7 +57,9 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 
 `fm-peek.sh` reads with `orca terminal read`.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
+Replacement panes showing a blocking dialog refuse text and Enter; an explicit Ctrl-C remains available.
 After resolving a replacement pane, an inbox ring defers if its composer is unreadable or unproven, holds other input, or shows delivery-busy state; a proven pending own doorbell is submitted without appending another copy.
+Draft and busy deferral applies to inbox rings; explicit typed text and Enter retain their existing semantics.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.

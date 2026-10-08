@@ -1903,7 +1903,7 @@ result.runtime.state=ready
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
 
-Send-time window resolution was verified on 2026-09-22 against the Orca 1.4.206 runtime with a window that had been restarted by hand: the recorded `term_*` handle read back `result.terminal.status=exited`, and every `orca terminal send` on it failed with `error.code=terminal_not_writable`, while the same worktree's live terminal was a different `term_*` handle.
+Restart-error and worktree-selector behavior were observed on 2026-09-22 against the Orca 1.4.206 runtime with a window that had been restarted by hand: the recorded `term_*` handle read back `result.terminal.status=exited`, and every `orca terminal send` on it failed with `error.code=terminal_not_writable`, while the same worktree's live terminal was a different `term_*` handle.
 
 ```sh
 orca terminal list --worktree name:<window> --json
@@ -1918,13 +1918,13 @@ tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, stale-window delivery, and path-matched release refusal.
+The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
 On 2026-10-08, Orca CLI 1.4.222 did not accept a window title as a terminal handle.
 `orca terminal show --terminal title:fm-android-compare-slice3 --json`, the same call with `name:` and `window:` prefixes, and the bare title all exited 1 with `error.code=terminal_handle_stale`.
 `orca terminal list --worktree name:fm-sparkdash-deploy-macnode --json` returned the one live terminal whose handle matched that task's recorded `terminal=`, and `name:fm-does-not-exist-probe` exited 1 with `selector_not_found`.
-That name selector is the native window target the send path uses when the recorded handle is stale.
-`tests/fm-backend-orca.test.sh` pins the fake-CLI delivery and the unchanged healthy-handle path.
+The current send-time contract is owned by [`orca-backend.md`](../orca-backend.md#task-shape-and-metadata).
+`tests/fm-backend-orca.test.sh` pins fake-CLI delivery for both restart errors, unchanged healthy-handle commands, missing and ambiguous selector refusal, replacement-dialog guards, inbox draft and busy deferral, exact-own-doorbell retries, and explicit typed and key semantics.
 
 ## cmux
 

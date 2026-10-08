@@ -337,18 +337,20 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
-# budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# other than our own doorbell (the watcher re-rings later), 2 the backend send
-# failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
+# budget. Composer verdicts remain advisory.
+# Returns 0 rang, 1 deferred by composer or replacement-endpoint protection
+# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
+# the endpoint is positively dead or missing (nothing typed; recovery owns the
+# record). No return value is delivery proof; the
 # acknowledgement move is the only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict can defer,
+# The recorded-target pre-check is narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
+# A retargeted Orca ring must instead reauthorize input against the replacement
+# screen; bin/backends/orca.sh's fm_backend_orca_check_replacement owns that gate.
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
@@ -393,8 +395,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" 2 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
+  # Only explicit deferral or send failure changes the ring status; composer
+  # verdicts (empty, pending, unknown, ...) remain advisory, never proof.
   case "$verdict" in
     inbox-deferred) return 1 ;;
     send-failed) return 2 ;;

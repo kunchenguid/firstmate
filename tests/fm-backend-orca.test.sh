@@ -1489,7 +1489,8 @@ test_fm_send_doorbell_and_key_reach_live_window_when_terminal_stale() {
   printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/2.out"
   printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminals":[{"handle":"term-live-9","writable":true,"connected":true}]}}\n' > "$RESP/4.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/5.out"
+  # Replacement inbox input requires a positively identified empty composer.
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/5.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/6.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/7.out"
   printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/8.out"
@@ -1766,7 +1767,7 @@ test_fm_send_doorbell_reaches_live_window_and_missing_window_rering() {
   orca_stale_json > "$RESP/2.out"
   orca_stale_json > "$RESP/3.out"
   orca_live_list_json "term-live-ring" "fm-$id" > "$RESP/4.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/5.out"
   printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/6.out"
   printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/7.out"
   printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/8.out"
