@@ -2283,13 +2283,7 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
-    if [ "$code" = "agent_not_found" ]; then
-      case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
-        agent|other) printf 'live'; return 0 ;;
-        shell) printf 'no-agent'; return 0 ;;
-      esac
-    fi
-    printf 'unknown'
+    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
     return 0
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
