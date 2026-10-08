@@ -79,6 +79,26 @@ describe("supervision notes", () => {
     ]);
   });
 
+  test("the registry is read beside the home even when FM_STATE_OVERRIDE moves the state directory", async ($, on) => {
+    const state = "/elsewhere/state";
+    const { files, journal } = world(on, { env: { FM_STATE_OVERRIDE: state } });
+    files.set(
+      `${HOME}/data/secondmates.md`,
+      "- fm-icon - Writes (home: /h/w; scope: writing; projects: book; icon: 🎙️; added 2026-10-07)\n",
+    );
+    files.set(
+      `${state}/.branch-outcomes-tail.jsonl`,
+      tail([
+        { seq: 1, task: "fm-icon", verdict: "routine", summary: "worker healthy" },
+        { seq: 2, task: "fm-icon", verdict: "captain", summary: "PR ready" },
+      ]),
+    );
+    files.set(`${state}/.branch-outcomes-cursor`, "0\n");
+    files.set(`${state}/.branch-outcomes-processed`, "0\n");
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual(["🎙️ fm-icon: worker healthy", "⚓🎙️ [seq 2] fm-icon: PR ready"]);
+  });
+
   test("session start replays unprocessed captain rows and unread visible routine rows with Calm off", async ($, on) => {
     const { files, journal } = world(on);
     files.set(TAIL, tail(history));

@@ -31,9 +31,19 @@ export type OutcomeRow = {
   readonly silent: boolean;
 };
 
+/** The Firstmate home, resolved as the Pi extension resolves it. */
+export function firstmateHomeDirectory(env: FirstmateStateEnvironment, pluginRoot: string): string {
+  return env.FM_HOME || env.FM_ROOT_OVERRIDE || calmCodeRootFromPluginRoot(pluginRoot);
+}
+
 /** The home's state directory, resolved as the Pi extension resolves it. */
 export function firstmateStateDirectory(env: FirstmateStateEnvironment, pluginRoot: string): string {
-  return env.FM_STATE_OVERRIDE || `${env.FM_HOME || env.FM_ROOT_OVERRIDE || calmCodeRootFromPluginRoot(pluginRoot)}/state`;
+  return env.FM_STATE_OVERRIDE || `${firstmateHomeDirectory(env, pluginRoot)}/state`;
+}
+
+/** The second-mate registry, always beside the home rather than the (overridable) state directory. */
+export function secondmateRegistryPath(env: FirstmateStateEnvironment, pluginRoot: string): string {
+  return `${firstmateHomeDirectory(env, pluginRoot)}/data/secondmates.md`;
 }
 
 function parseOutcomeRow(value: unknown): OutcomeRow | undefined {

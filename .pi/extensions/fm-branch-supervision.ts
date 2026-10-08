@@ -76,7 +76,7 @@
 // its deliberate limits.
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
@@ -166,21 +166,37 @@ const SECONDMATE_REGISTRY = `${fmHome}/data/secondmates.md`;
 const MERGE_NOTE_BOAT = "⛵";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 
-// A registered second mate's optional `icon:` glyph (bin/fm-secondmate-registry-lib.sh owns
-// the grammar), read per note so a registry edit shows without a restart; mirrors
-// .claude/mods/firstmate-calm/lib/fm-branch-notes.ts.
-function secondmateIcon(task: string): string | undefined {
-  let text: string;
+// Each registered second mate's optional `icon:` glyph (bin/fm-secondmate-registry-lib.sh
+// owns the grammar); mirrors .claude/mods/firstmate-calm/lib/fm-branch-notes.ts. The map is
+// re-parsed only when the registry's mtime or size changes, so a registry edit shows without
+// a restart while a repaint costs one stat rather than one read per rendered note.
+let secondmateIconsCache: { key: string; icons: ReadonlyMap<string, string> } | undefined;
+function secondmateIcons(): ReadonlyMap<string, string> {
+  let key: string;
+  try {
+    const stat = statSync(SECONDMATE_REGISTRY);
+    key = `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    secondmateIconsCache = undefined;
+    return new Map();
+  }
+  if (secondmateIconsCache?.key === key) return secondmateIconsCache.icons;
+  const icons = new Map<string, string>();
+  let text = "";
   try {
     text = readFileSync(SECONDMATE_REGISTRY, "utf8");
   } catch {
-    return undefined;
+    return icons;
   }
   for (const line of text.split("\n")) {
     const match = /^- ([A-Za-z0-9._-]+) - .+;\s*projects:\s*[^;)]*;\s*icon:\s*([^;)]*?)\s*;\s*added\s+\d{4}-\d{2}-\d{2}\)\s*$/.exec(line);
-    if (match && match[1] === task && match[2] !== "") return match[2];
+    if (match && match[2] !== "") icons.set(match[1]!, match[2]!);
   }
-  return undefined;
+  secondmateIconsCache = { key, icons };
+  return icons;
+}
+function secondmateIcon(task: string): string | undefined {
+  return secondmateIcons().get(task);
 }
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 // The processing half of the captain-outcome contract. The visible entry

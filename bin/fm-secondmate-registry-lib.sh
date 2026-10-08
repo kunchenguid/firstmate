@@ -94,6 +94,11 @@ secondmate_registry_line_for_id() {
   secondmate_registry_parse_line "$SECONDMATE_REGISTRY_LINE"
 }
 
+# The `icon: <glyph>; ` field a writer splices before `added`, or nothing when there is no icon.
+secondmate_registry_icon_field() {
+  [ -z "$1" ] || printf 'icon: %s; ' "$1"
+}
+
 secondmate_registry_field() {
   local reg=$1 id=$2 key=$3
   secondmate_registry_line_for_id "$reg" "$id" || return 1
