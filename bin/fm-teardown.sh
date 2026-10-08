@@ -3533,7 +3533,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot child_seat_gen
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot child_seat_gen child_pane_dead
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3570,9 +3570,26 @@ cleanup_firstmate_home_children() {
       elif [ "$child_backend" = tmux ]; then
         # Child records carry no socket identity. Even a successful close can
         # address a same-named window on another server instead of this child.
-        echo "error: child $child_id has no recorded tmux socket ownership; tear it down from its owning home $home on its owning server, then retry secondmate teardown" >&2
-        endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0
-        return 1
+        if [ "$FORCE" != "--force" ]; then
+          echo "error: child $child_id has no recorded tmux socket ownership; tear it down from its owning home on its owning server, then retry secondmate teardown" >&2
+          endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0
+          return 1
+        fi
+        # Explicit --force is the authorization to close the recorded window on
+        # this server, so that close runs here. Success is never claimed while
+        # the child survives: the recorded endpoint is read back after the
+        # close, and a pane that reports itself live, or a target this cleanup
+        # cannot address, names the survivor and stops this cleanup.
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
+          || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
+        child_pane_dead=$(tmux display-message -p -t "$child_t" '#{pane_dead}' 2>/dev/null) \
+          || child_pane_dead=unreachable
+        # An empty or unreadable pane state proves nothing about this child, so
+        # it is treated as a survivor alongside a pane that reports itself live.
+        if [ -z "$child_pane_dead" ] || [ "$child_pane_dead" = 0 ] || [ "$child_pane_dead" = unreachable ]; then
+          echo "error: child $child_id survives as a live or unaddressable endpoint at its recorded tmux target $child_t; close it from its owning home on its owning server, then retry secondmate teardown" >&2
+          return 1
+        fi
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
