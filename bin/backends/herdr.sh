@@ -2809,10 +2809,16 @@ fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-labe
 # provably entered that worktree. Attachment changes no label, focus, endpoint,
 # journal, or lifecycle authority; a workspace that fails the exact checks
 # below stays in its flat row with one warning, and Firstmate never renames,
-# closes, moves, retries, or adopts anything on its behalf. Cleanup is
-# unchanged because Herdr removes an emptied linked child through the same
-# pane-death path and never touches the checkout on disk.
-# docs/herdr-backend.md "Presentation spaces" owns the operator contract.
+# moves, or re-focuses anything on its behalf. Its one removal is the fresh,
+# still childless repo parent a spawn created but could not order its task
+# ahead of (fm_backend_herdr_projection_repo_parent_close_fresh), retried by
+# the next spawn on that repository when refused
+# (fm_backend_herdr_projection_repo_parent_retry). Cleanup closes a task pane
+# before it reaps that pane's root shell and returns the leased worktree the
+# shell sits in (bin/fm-teardown.sh).
+# docs/herdr-backend.md "Presentation spaces" owns the operator contract,
+# including both rules under "Repository worktree groups" and "Cleanup and
+# focus safety".
 
 # Single owner of the home-label and repo-parent label grammars, read by both
 # the shell helpers and the jq layout predicates below. A home label is exactly
@@ -2852,12 +2858,14 @@ fm_backend_herdr_projection_repo_parent_label() {  # <home-label> <repo-name>
 # every child Herdr could otherwise elect as the repository's group source.
 # On success the same id is also left in FM_BACKEND_HERDR_REPO_PARENT_ID, and
 # FM_BACKEND_HERDR_REPO_PARENT_CREATED holds that id only when this very call
-# created the parent (empty for an adopted one), so a caller running the
-# function in its own shell can hand exactly the parent it created to
-# fm_backend_herdr_projection_repo_parent_close_fresh when the task's ordering
-# move does not land; FM_BACKEND_HERDR_REPO_PARENT_LABEL carries the exact
-# label that call resolved, which the per-home retry record below stores with
-# a parent that could not be removed.
+# created the parent (empty for an adopted one), even when the call then
+# returns 1 because it could not verify the focus restore after that create,
+# so a caller running the function in its own shell can hand exactly the
+# parent it created to fm_backend_herdr_projection_repo_parent_close_fresh
+# when the task's ordering move does not land;
+# FM_BACKEND_HERDR_REPO_PARENT_LABEL carries the exact label that call
+# resolved, which the per-home retry record below stores with a parent that
+# could not be removed.
 # The repository name and root come from Herdr's own `worktree list --cwd`
 # read, and <clone> must be that repository's root, so grouping is never
 # attempted from inside a nested or foreign checkout.
@@ -2983,18 +2991,19 @@ EOF
     echo "warning: herdr repo grouping could not create the '$label' parent space; leaving this task's space flat" >&2
     return 1
   fi
+  created=$(printf '%s' "$out" | jq -er '.result.workspace.workspace_id | select(type == "string" and length > 0)' 2>/dev/null) || created=
+  # shellcheck disable=SC2034  # the spawn consumes the created-here marker
+  FM_BACKEND_HERDR_REPO_PARENT_CREATED=$created
   fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "repo parent create" || {
     echo "warning: herdr repo grouping created '$label' but could not verify exact active focus; leaving this task's space flat" >&2
     return 1
   }
-  created=$(printf '%s' "$out" | jq -er '.result.workspace.workspace_id | select(type == "string" and length > 0)' 2>/dev/null) || {
+  [ -n "$created" ] || {
     echo "warning: herdr repo grouping got an incomplete create response for '$label'; leaving this task's space flat" >&2
     return 1
   }
   # shellcheck disable=SC2034  # the spawn consumes the resolved parent id
   FM_BACKEND_HERDR_REPO_PARENT_ID=$created
-  # shellcheck disable=SC2034  # the spawn consumes the created-here marker
-  FM_BACKEND_HERDR_REPO_PARENT_CREATED=$created
   printf '%s' "$created"
 }
 
@@ -3030,11 +3039,13 @@ EOF
 # The optional fourth argument is the recorded clone realpath and switches on
 # the strict retry mode for a parent an EARLIER spawn left standing, where the
 # captain may since have used it: Herdr must still name the parent as its own
-# group source at that clone, the optional fifth argument (the recorded seeded
-# pane) must still be the one pane, and that pane must hold a provably lone
-# idle shell, otherwise the refusal is lasting (status 2); the pane then leaves
-# only through the pane-death path (FM_BACKEND_HERDR_CLOSE_DEATH_ONLY), never
-# the plain explicit close, and a non-death plan is also lasting.
+# group source at that clone, otherwise the refusal is status 3, lasting too
+# but for a workspace the ordinary parent ensure passes over as well; the
+# optional fifth argument (the recorded seeded pane) must still be the one
+# pane, and that pane must hold a provably lone idle shell, otherwise the
+# refusal is lasting (status 2); the pane then leaves only through the
+# pane-death path (FM_BACKEND_HERDR_CLOSE_DEATH_ONLY), never the plain explicit
+# close, and a non-death plan is also lasting.
 fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id> [<which-parent> [<clone-realpath> [<seeded-pane>]]]
   local session=$1 parent=$2 what=${3:-it just created} strict_clone=${4:-} want_pane=${5:-}
   local group source open_ids list others tabs panes pane presence root root_real
@@ -3051,7 +3062,7 @@ fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
     root_real=$(cd "$root" 2>/dev/null && pwd -P) || root_real=$root
     if [ "$source" != "$parent" ] || [ "$root_real" != "$strict_clone" ]; then
       echo "warning: herdr repo grouping left the parent $parent $what in place because Herdr no longer reports it as the group source of the recorded clone" >&2
-      return 2
+      return 3
     fi
   fi
   if [ "$source" = "$parent" ]; then
@@ -3192,8 +3203,11 @@ fm_backend_herdr_projection_repo_parent_retry_forget() {  # <state> <session> <p
 # same focus-preserving pane path); success forgets the record and says so
 # once. A lasting refusal (close_fresh status 2) forgets the record with one
 # warning and returns 0 so the ordinary parent ensure adopts that exact parent;
-# a transient refusal warns once more, keeps the record for the spawn after
-# this one, and returns 1 so the caller keeps this task flat too.
+# a parent Herdr no longer reports as the recorded clone's group source
+# (status 3) is forgotten the same way, but that ensure passes over it, so the
+# warning says it is not adopted; a transient refusal warns once more, keeps
+# the record for the spawn after this one, and returns 1 so the caller keeps
+# this task flat too.
 fm_backend_herdr_projection_repo_parent_retry() {  # <state> <session> <clone>
   local state=$1 session=$2 clone=$3 entry parent label seeded_pane list count live_label reason status clone_real
   entry=$(fm_backend_herdr_projection_repo_parent_retry_lookup "$state" "$session" "$clone") || entry=
@@ -3232,9 +3246,13 @@ EOF
     status=$?
   fi
   reason=$(printf '%s' "${reason#warning: herdr repo grouping }" | tr '\n' ' ')
-  if [ "$status" -eq 2 ]; then
+  if [ "$status" -eq 2 ] || [ "$status" -eq 3 ]; then
     fm_backend_herdr_projection_repo_parent_retry_forget "$state" "$session" "$parent" || true
-    echo "warning: herdr repo grouping ${reason}; leaving it standing and adopting it" >&2
+    if [ "$status" -eq 2 ]; then
+      echo "warning: herdr repo grouping ${reason}; leaving it standing and adopting it" >&2
+    else
+      echo "warning: herdr repo grouping ${reason}; forgetting it, and it is not adopted because the parent lookup passes over it as well, so another '$label' parent may be created beside it" >&2
+    fi
     return 0
   fi
   [ -n "$reason" ] || reason="could not remove the parent $parent an earlier spawn left standing"

@@ -4418,16 +4418,13 @@ else
             # has provably entered the leased task worktree, still under
             # this lock.
             if fm_backend_herdr_worktree_group_capable "$HERDR_SES"; then
-              if fm_backend_herdr_projection_repo_parent_retry "$STATE" "$HERDR_SES" "$PROJ_ABS" \
-                && fm_backend_herdr_projection_repo_parent_ensure \
+              if fm_backend_herdr_projection_repo_parent_retry "$STATE" "$HERDR_SES" "$PROJ_ABS"; then
+                if fm_backend_herdr_projection_repo_parent_ensure \
                   "$HERDR_SES" "$PROJ_ABS" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" >/dev/null; then
-                HERDR_REPO_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_REPO_PARENT_ID
+                  HERDR_REPO_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_REPO_PARENT_ID
+                fi
                 HERDR_REPO_PARENT_CREATED=$FM_BACKEND_HERDR_REPO_PARENT_CREATED
                 HERDR_REPO_PARENT_LABEL=$FM_BACKEND_HERDR_REPO_PARENT_LABEL
-              else
-                HERDR_REPO_PARENT_WORKSPACE_ID=""
-                HERDR_REPO_PARENT_CREATED=""
-                HERDR_REPO_PARENT_LABEL=""
               fi
             else
               case $? in
@@ -4470,7 +4467,6 @@ else
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" \
               "$HERDR_GROUP_ORDER_KEY"
             if [ -n "$HERDR_REPO_PARENT_CREATED" ] \
-              && [ "$HERDR_REPO_PARENT_CREATED" = "$HERDR_REPO_PARENT_WORKSPACE_ID" ] \
               && [ "${FM_BACKEND_HERDR_PROJECTION_ORDER_PLACED:-0}" != 1 ]; then
               # A fresh repo parent joins its home block only once its first
               # child attaches, and that ordering move is what puts the child
@@ -5169,8 +5165,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
     fi
     SPAWN_WT_EXPECTED_REAL=$(real_path_or_raw "$SPAWN_HERDR_ENTRY_WT")
-    lease_cd_path=${SPAWN_HERDR_ENTRY_WT//\'/\'\\\'\'}
-    spawn_send_text_line "$WT_TARGET" "cd -- '$lease_cd_path'" || {
+    spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$SPAWN_HERDR_ENTRY_WT")" || {
       echo "error: could not tell task $ID's pane to enter its worktree '$SPAWN_HERDR_ENTRY_WT'; inspect window $T" >&2
       exit 1
     }

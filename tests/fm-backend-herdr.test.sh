@@ -4022,28 +4022,37 @@ SH
   # The ensure call tells the spawn, in the same shell, which parent it
   # resolved and whether this very call created it, so the spawn can tell a
   # fresh parent from an adopted one without a second read or any journal.
+  # A create whose focus restore cannot be verified still fails, so no parent
+  # id is handed on for the attach, yet it still reports the exact parent it
+  # created, which the spawn's not-placed removal acts on.
   local clone clone_real ensure_case
   clone="$TMP_ROOT/repo-fresh-clone"; mkdir -p "$clone"; clone_real=$(cd "$clone" && pwd -P)
-  for ensure_case in create adopt; do
+  for ensure_case in create adopt create-unverified-focus; do
     dir="$TMP_ROOT/repo-fresh-ensure-$ensure_case"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
     jq -cn --arg root "$clone_real" '{"result":{"source":{"source_workspace_id":"w1","repo_root":$root,"repo_name":"foo"},"worktrees":[{"path":$root,"open_workspace_id":"w1"}]}}' > "$resp/1.out"
-    if [ "$ensure_case" = create ]; then
-      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"}]}}' > "$resp/2.out"
-      printf '%s\n' '{"result":{"workspace":{"workspace_id":"wF","label":"foo"}}}' > "$resp/3.out"
-    else
+    if [ "$ensure_case" = adopt ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wP","label":"foo","focused":false}]}}' > "$resp/2.out"
       jq -cn --arg root "$clone_real" '{"result":{"source":{"source_workspace_id":"wP","source_checkout_path":$root,"repo_root":$root,"repo_name":"foo"},"worktrees":[]}}' > "$resp/3.out"
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"}]}}' > "$resp/2.out"
+      printf '%s\n' '{"result":{"workspace":{"workspace_id":"wF","label":"foo"}}}' > "$resp/3.out"
     fi
     fb=$(make_herdr_fakebin "$dir")
     out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_move_capable() { return 0; }; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_repo_parent_ensure fmtest "$1" firstmate w1 >/dev/null || exit $?; printf "created=%s id=%s" "${FM_BACKEND_HERDR_REPO_PARENT_CREATED-unset}" "${FM_BACKEND_HERDR_REPO_PARENT_ID-unset}"' "$ROOT" "$clone" 2>"$dir/err")
-    status=$?
-    [ "$status" -eq 0 ] || fail "repo parent ensure ($ensure_case) failed: $(cat "$dir/err")"
-    if [ "$ensure_case" = create ]; then
-      [ "$out" = "created=wF id=wF" ] || fail "a fresh repo parent create reported '$out', expected 'created=wF id=wF'"
-    else
-      [ "$out" = "created= id=wP" ] || fail "an adopted repo parent reported '$out', expected 'created= id=wP'"
-    fi
+      ENSURE_RESTORE_STATUS=$([ "$ensure_case" = create-unverified-focus ] && echo 1 || echo 0) \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_move_capable() { return 0; }; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return "$ENSURE_RESTORE_STATUS"; }; fm_backend_herdr_projection_repo_parent_ensure fmtest "$1" firstmate w1 >/dev/null; printf "status=%s created=%s id=%s" "$?" "${FM_BACKEND_HERDR_REPO_PARENT_CREATED-unset}" "${FM_BACKEND_HERDR_REPO_PARENT_ID-unset}"' "$ROOT" "$clone" 2>"$dir/err")
+    case "$ensure_case" in
+      create)
+        [ "$out" = "status=0 created=wF id=wF" ] || fail "a fresh repo parent create reported '$out', expected 'status=0 created=wF id=wF': $(cat "$dir/err")"
+        ;;
+      adopt)
+        [ "$out" = "status=0 created= id=wP" ] || fail "an adopted repo parent reported '$out', expected 'status=0 created= id=wP': $(cat "$dir/err")"
+        ;;
+      *)
+        [ "$out" = "status=1 created=wF id=" ] || fail "a fresh repo parent create with an unverified focus restore reported '$out', expected 'status=1 created=wF id='"
+        assert_contains "$(cat "$dir/err")" "created 'foo' but could not verify exact active focus" "an unverified focus restore after the create did not warn"
+        ;;
+    esac
   done
 
   # The spawn then removes only the exact parent it created, only while that
@@ -4348,8 +4357,9 @@ SH
 
   # The captain may have used the parent since: a busy pane, a different
   # pane, or a group source at another checkout is a lasting refusal that
-  # forgets the record with one warning, returns 0 so the ordinary ensure
-  # adopts the parent, and closes nothing.
+  # forgets the record with one warning, returns 0, and closes nothing. The
+  # ordinary ensure adopts a busy or re-paned parent but passes over one whose
+  # group source moved, so that warning says the parent is not adopted.
   local wt_moved panes_other busy_case
   wt_moved='{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/elsewhere","repo_root":"/tmp/elsewhere","repo_name":"foo"},"worktrees":[{"path":"/tmp/elsewhere","open_workspace_id":"wF"}]}}'
   panes_other='{"result":{"panes":[{"pane_id":"wF:t1:p9","tab_id":"wF:t1","workspace_id":"wF"}]}}'
@@ -4369,7 +4379,12 @@ SH
     status=$?
     [ "$status" -eq 0 ] || fail "a used parent ($busy_case) did not return 0 (status $status): $out"
     [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "a used parent ($busy_case) did not warn exactly once: $out"
-    assert_contains "$out" "adopting it" "a used parent ($busy_case) did not say the parent is adopted: $out"
+    if [ "$busy_case" = moved-clone ]; then
+      assert_contains "$out" "it is not adopted" "a parent whose group source moved did not say it is not adopted: $out"
+      assert_not_contains "$out" "adopting it" "a parent whose group source moved still claimed it is adopted: $out"
+    else
+      assert_contains "$out" "leaving it standing and adopting it" "a used parent ($busy_case) did not say the parent is adopted: $out"
+    fi
     assert_not_contains "$(cat "$log")" $'close' "a used parent ($busy_case) closed something"
     assert_not_contains "$(cat "$RETRY_STUB_LOG")" "death" "a used parent ($busy_case) reached the death close"
     [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
