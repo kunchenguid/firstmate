@@ -468,6 +468,7 @@ case "\$subcmd" in
       writer="\$state_dir/\$task_id.polytoken-busy.sh"
       [ -f "\$writer" ] && POLYTOKEN_HOOK_EVENT=pre_user_prompt "\$writer" || true
     fi
+    [ -n "\${PTFAKE_ENV_LOG:-}" ] && env >"\$PTFAKE_ENV_LOG"
     printf 'session_id=0czfake-echo port=49999\n'
     exit 0
     ;;
@@ -683,14 +684,16 @@ case "${1:-}" in
       case "$literal" in
         # The staged launch file is sourced for real, so the fake polytoken
         # actually runs, fires the generated busy writer exactly as the
-        # daemon's hook would, and logs its own argv for the launch-content
-        # assertions.
+        # daemon's hook would, and logs its own argv and environment for the
+        # launch-content assertions. The pane shell is seeded with inherited
+        # foreign markers so the launch boundary's clearing is observable.
         ". '"*)
           launch=${literal#". '"}
           launch=${launch%"'"}
           [ -f "$launch" ] || exit 0
           cat "$launch" >>"${PTFAKE_LAUNCH_LINE_LOG:?}"
-          bash -c "$(cat "$launch")" >>"${PTFAKE_LAUNCH_STDOUT:-/dev/null}" 2>&1 || true
+          CLAUDECODE=1 ORCA_X=1 FM_FOO=1 FM_TASK_ID=seeded-task FM_TASK_INBOX=seeded-inbox \
+            bash -c "$(cat "$launch")" >>"${PTFAKE_LAUNCH_STDOUT:-/dev/null}" 2>&1 || true
           ;;
       esac
       exit 0
@@ -732,6 +735,7 @@ run_polytoken_spawn() {
     PTFAKE_PANE_PATH="$wt" \
     PTFAKE_LAUNCH_LINE_LOG="$case_dir/launch-line.log" \
     PTFAKE_LAUNCH_STDOUT="$case_dir/launch-stdout.log" \
+    PTFAKE_ENV_LOG="$case_dir/polytoken-env.log" \
     PTFAKE_NO_HOOK="${PTFAKE_NO_HOOK:-0}" \
     FM_POLYTOKEN_READY_POLLS="${FM_POLYTOKEN_READY_POLLS:-40}" \
     FM_POLYTOKEN_POLL_INTERVAL="${FM_POLYTOKEN_POLL_INTERVAL:-0.1}" \
@@ -740,7 +744,7 @@ run_polytoken_spawn() {
 }
 
 test_polytoken_launch_carries_the_hybrid_contract() {
-  local id rec out rc launch raw meta cfg
+  local id rec out rc launch raw meta cfg envlog
   id="pt-launch-z1-$$"
   rec=$(make_polytoken_spawn_case launch "$id")
   read_polytoken_spawn_record "$rec"
@@ -755,12 +759,13 @@ test_polytoken_launch_carries_the_hybrid_contract() {
   launch=$(cat "$CASE_DIR/launch.log")
   assert_contains "$raw" "--model 'zai/glm-5.3-flash(low)'" \
     "the launch line must carry the composed model reference"
-  assert_contains "$raw" "env -u CLAUDECODE" \
-    "the launch must clear the inherited launcher marker"
-  assert_contains "$raw" "ORCA_" \
-    "the launch must run the foreign ORCA_/FM_ clearing loop"
-  assert_contains "$raw" "FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION" \
-    "the clearing loop must keep the launch-owned names"
+  envlog="$CASE_DIR/polytoken-env.log"
+  [ -s "$envlog" ] || fail "the fake polytoken must have recorded its launch environment"
+  ! grep -q '^CLAUDECODE=' "$envlog" || fail "the launch must clear the inherited launcher marker"
+  ! grep -q '^ORCA_X=' "$envlog" || fail "the launch must clear inherited ORCA_ markers"
+  ! grep -q '^FM_FOO=' "$envlog" || fail "the launch must clear inherited FM_ markers"
+  grep -qx 'FM_TASK_ID=seeded-task' "$envlog" || fail "the launch must keep the launch-owned FM_TASK_ID"
+  grep -qx "FM_TASK_INBOX=.*/$id\.inbox" "$envlog" || fail "the launch must keep its own FM_TASK_INBOX export"
   assert_not_contains "$raw" "--accept-license-terms" \
     "the launch must never auto-accept the license terms"
   assert_not_contains "$raw" "__POLYTOKENBIN__" "the launch left its binary placeholder unsubstituted"
