@@ -166,7 +166,7 @@ SH
 # The poll runs from a sidecar, so it is driven directly with the validated
 # identity it would have been armed with.
 test_poll_reads_the_pull_request_at_its_host() {
-  local log="$TMP_ROOT/poll.log" out
+  local log="$TMP_ROOT/poll.log" out longhost longlabel
   cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s|%s\n' "${GH_HOST-unset}" "$*" >> "$FM_TEST_AT_LOG"
@@ -196,6 +196,22 @@ SH
     github https://GHE.example.com/o/r/pull/7 GHE.example.com o/r 7)
   [ -z "$out" ] && [ ! -s "$log" ] \
     || fail "a non-canonical host must not be polled: $out $(cat "$log")"
+
+  : > "$log"
+  out=$(FM_TEST_AT_LOG="$log" PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-pr-poll.sh" --validated \
+    github https://-ghe.example.com/o/r/pull/7 -ghe.example.com o/r 7)
+  [ -z "$out" ] && [ ! -s "$log" ] \
+    || fail "a host with a leading-hyphen label must not be polled: $out $(cat "$log")"
+  out=$(FM_TEST_AT_LOG="$log" PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-pr-poll.sh" --validated \
+    github https://ghe-.example.com/o/r/pull/7 ghe-.example.com o/r 7)
+  [ -z "$out" ] && [ ! -s "$log" ] \
+    || fail "a host with a trailing-hyphen label must not be polled: $out $(cat "$log")"
+  longlabel=$(printf 'a%.0s' {1..64})
+  longhost=$longlabel.example.com
+  out=$(FM_TEST_AT_LOG="$log" PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-pr-poll.sh" --validated \
+    github "https://$longhost/o/r/pull/7" "$longhost" o/r 7)
+  [ -z "$out" ] && [ ! -s "$log" ] \
+    || fail "a host with an over-long label must not be polled: $out $(cat "$log")"
   pass "the merge poll reads a pull request at its own host and refuses an inconsistent record"
 }
 

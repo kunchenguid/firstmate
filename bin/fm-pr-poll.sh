@@ -59,6 +59,17 @@ case "$provider" in
     case "$host" in
       .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
     esac
+    rest=$host
+    while [ -n "$rest" ]; do
+      case "$rest" in
+        *.*) label=${rest%%.*}; rest=${rest#*.} ;;
+        *) label=$rest; rest= ;;
+      esac
+      [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || exit 0
+      case "$label" in
+        -*|*-) exit 0 ;;
+      esac
+    done
     owner=${path%%/*}
     repo=${path#*/}
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
