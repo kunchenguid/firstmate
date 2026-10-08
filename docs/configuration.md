@@ -13,6 +13,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| A GitHub host other than github.com | [GitHub host](#github-host-fm_github_host) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -2335,6 +2336,25 @@ The two read files use different parsing rules:
 
 `FM_VOICE_RELAY` and `FM_VOICE_PYTHON` belong to the laptop rather than to a home, so they have no config file: `bin/fm-voice-client.py` requires the relay path as a flag or that variable and carries no default path.
 
+## GitHub host (FM_GITHUB_HOST)
+
+Firstmate works with pull requests on github.com and on any other GitHub host, such as a self-hosted GitHub Enterprise instance.
+A pull request URL carries its host, so `https://ghe.example.com/<owner>/<repo>/pull/<n>` is read, polled, merged, and cleaned up against `ghe.example.com` with no setting.
+Every `gh` and `gh-axi` call for that pull request is addressed at its host, and a pull request on github.com is addressed exactly as before.
+The host is accepted as a lowercase DNS name with no port, user information, or trailing dot, and it is part of the pull request's recorded identity, so the same `<owner>/<repo>/pull/<n>` on two hosts never shares a record.
+
+### Default host
+
+Where a host must be assumed because none is given, such as a pull request known only by its number, Firstmate uses `FM_GITHUB_HOST`.
+When it is unset, Firstmate follows `GH_HOST`, which is how `gh` itself selects a host, and otherwise uses `github.com`.
+An invalid value is refused rather than passed on to `gh`.
+Set it in the environment Firstmate runs in, for example `export FM_GITHUB_HOST=ghe.example.com`.
+
+### Backlog links
+
+The backlog tool links only a github.com or Forgejo pull request.
+A pull request on another GitHub host is recorded on the closed backlog item as a note carrying its URL, the same way a Gerrit change is.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -2349,6 +2369,7 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
+FM_GITHUB_HOST=github.com   # GitHub host assumed where none can be read from a pull request URL; see "GitHub host"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 FM_TASK_INBOX=          # internal: absolute path of the task's steering inbox (state/<id>.inbox) that fm-spawn.sh exports into every ship, scout, and secondmate launch, never set by hand; the steering doorbell names "$FM_TASK_INBOX"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)

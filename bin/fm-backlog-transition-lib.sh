@@ -516,12 +516,23 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
-# tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change URL is recorded on the row as a
-# note instead. The subshell keeps the parse from overwriting a caller's
-# FM_PR_* identity.
-fm_backlog_pr_is_gerrit_change() {  # <url>
-  ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
+# tasks-axi takes a --pr link only as a canonical github.com or Forgejo pull
+# request and refuses anything else, so a Gerrit change URL or a pull request on
+# another GitHub host is recorded on the row as a note instead. The subshell
+# keeps the parse from overwriting a caller's FM_PR_* identity.
+fm_backlog_pr_link_is_note_only() {  # <url>
+  ( fm_pr_url_parse "$1" \
+    && { [ "$FM_PR_PROVIDER" = gerrit ] \
+      || { [ "$FM_PR_PROVIDER" = github ] && [ "$FM_PR_HOST" != github.com ]; }; } )
+}
+
+# The note text for such a link: the artifact kind followed by its URL.
+fm_backlog_pr_link_note() {  # <url>
+  if ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] ); then
+    printf 'Gerrit change %s' "$1"
+  else
+    printf 'PR %s' "$1"
+  fi
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
@@ -529,9 +540,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   local -a done_args=()
   shift 2
   for arg in "$@"; do
-    if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
+    if [ "$previous_arg" = --pr ] && fm_backlog_pr_link_is_note_only "$arg"; then
       done_args[${#done_args[@]}-1]=--note
-      done_args+=("Gerrit change $arg")
+      done_args+=("$(fm_backlog_pr_link_note "$arg")")
     else
       done_args+=("$arg")
     fi
@@ -543,7 +554,7 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) ! fm_backlog_pr_is_gerrit_change "$value" ;;
+    --pr) ! fm_backlog_pr_link_is_note_only "$value" ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -579,7 +590,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
           deliverable="${deliverable:+$deliverable; }PR $arg"
           row_args=(--pr "$arg")
         else
-          deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
+          deliverable="${deliverable:+$deliverable; }$(fm_backlog_pr_link_note "$arg")"
         fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;

@@ -415,10 +415,7 @@ INVALID_URLS=(
   'https://github.com/o/r/pull/1/files'
   'https://github.com/o/r/pull/1?q=x'
   'https://github.com/o/r/pull/1#f'
-  'https://github.com.evil/o/r/pull/1'
-  'https://evilgithub.com/o/r/pull/1'
   'https://gıthub.com/o/r/pull/1'
-  'https://xn--gthub-3va.com/o/r/pull/1'
   'http://github.com/o/r/pull/1'
   'ssh://github.com/o/r/pull/1'
   'git://github.com/o/r/pull/1'
@@ -525,6 +522,15 @@ EOF
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
   [ "$FM_PR_PATH" = a/b ] || fail "parser returned wrong GitHub project path"
+  # A host that merely resembles github.com is another host and keeps its own
+  # name, so it can never be taken for github.com or share its identity.
+  for row in https://github.com.example.org/o/r/pull/1 https://example-github.com/o/r/pull/1; do
+    fm_pr_url_parse "$row" || fail "parser rejected a pull request URL on another GitHub host"
+    [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag another host's pull request URL as github"
+    [ "$FM_PR_HOST" = "$(printf '%s' "${row#https://}" | cut -d/ -f1)" ] \
+      || fail "parser changed another GitHub host's name"
+    [ "$FM_PR_HOST" != github.com ] || fail "parser took another host for github.com"
+  done
   for row in "${INVALID_URLS[@]}"; do
     ! fm_pr_url_parse "$row" || fail "parser accepted a rejected raw-byte URL class"
   done
