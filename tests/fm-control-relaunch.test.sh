@@ -673,6 +673,32 @@ test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer() {
   pass "fm-control relaunch: a refused relaunch onto polytoken keeps the project's own hook layer"
 }
 
+test_relaunch_from_a_raw_polytoken_launch_keeps_the_project_layers() {
+  local dir out
+  dir=$(new_case polytokenrawprior rl46)
+  add_ship_task "$dir" rl46 polytoken
+  # A raw-launched polytoken task never had firstmate wiring, so the tracked
+  # project hook layer and an untracked facet it did not generate both belong
+  # to the project and must outlive the prior-wiring retirement.
+  mkdir -p "$dir/wt/.polytoken/facets"
+  printf '[{"name":"project-own","event":"stop","handler":{"bash":"/bin/true"}}]\n' \
+    > "$dir/wt/.polytoken/hooks.json"
+  git -C "$dir/wt" add .polytoken/hooks.json
+  git -C "$dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project hook layer"
+  printf -- '---\nname: firstmate-worker\n---\nproject facet\n' \
+    > "$dir/wt/.polytoken/facets/firstmate-worker.md"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl46 --relaunch --harness claude)
+  assert_contains "$out" "spawned rl46 harness=claude" "the relaunch off polytoken should complete"
+  assert_contains "$(cat "$dir/wt/.polytoken/hooks.json" 2>/dev/null)" "project-own" \
+    "retiring the prior polytoken wiring must keep the project's tracked hook layer"
+  assert_contains "$(cat "$dir/wt/.polytoken/facets/firstmate-worker.md" 2>/dev/null)" "project facet" \
+    "retiring the prior polytoken wiring must keep a facet firstmate did not generate"
+  [ -z "$(git -C "$dir/wt" status --porcelain -- .polytoken/hooks.json)" ] \
+    || fail "the tracked project hook layer must be left unmodified"
+  pass "fm-spawn --relaunch: retiring a raw polytoken launch's wiring keeps the project's own layers"
+}
+
 test_harness_switch_does_not_carry_the_old_profile_axes() {
   local dir out rc
   dir=$(new_case profile rl5)
@@ -2524,6 +2550,7 @@ test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer
+test_relaunch_from_a_raw_polytoken_launch_keeps_the_project_layers
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
