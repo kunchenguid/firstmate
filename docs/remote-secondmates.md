@@ -56,6 +56,17 @@ mkdir -p ~/.local/bin
 ln -s /absolute/path/to/firstmate/bin/fm-remote-entrypoint.sh ~/.local/bin/fm-remote-entrypoint.sh
 ```
 
+`~/.local/bin` is on that `PATH` only when the account's shell startup adds it for non-interactive commands.
+A stock Debian account does not: its `~/.profile` adds `~/.local/bin` only for login shells, and its `~/.bashrc` returns early for the non-interactive command SSH runs, so `fm-on.sh` cannot find the entrypoint there.
+On such an account, link the entrypoint into a system directory that is already on that `PATH`, such as `/usr/local/bin`:
+
+```sh
+sudo ln -s /absolute/path/to/firstmate/bin/fm-remote-entrypoint.sh /usr/local/bin/fm-remote-entrypoint.sh
+```
+
+Confirm the result from the parent with `ssh <ssh-alias> command -v fm-remote-entrypoint.sh`.
+The doctor's `entrypoint-link` check still looks only at `~/.local/bin`, so keep that link too; `--fix` recreates it when it is absent.
+
 The entrypoint accepts encoded argv for genuine executable `bin/fm-*.sh` files only.
 It never accepts a shell command string.
 
@@ -224,7 +235,17 @@ Check any host against it directly:
 bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh
 ```
 
-That run is read-only.
+That form resolves only a route a remote record already names, so it cannot reach a host before the host is seeded.
+To check or repair such a host, name the SSH alias with the absolute remote code root and the remote `FM_HOME` it will use:
+
+```sh
+bin/fm-on.sh --root <remote-root> --home <remote-home> <ssh-alias> fm-remote-doctor.sh [--fix]
+```
+
+That explicit route never consults the registry and runs only `fm-remote-doctor.sh`.
+The remote entrypoint applies its usual root and home rules, so the home's parent directory must already exist.
+
+That run is read-only unless it passes `--fix`.
 It takes these steps:
 
 1. It prints the exact `PATH` its own entrypoint launch produced.
@@ -292,6 +313,8 @@ The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.
 `--fix` also takes these actions:
 
 - It starts the same workers directly on Linux.
+  Linux has no launch agent, so the remote job worker and the Herdr server it starts there do not survive a reboot.
+  After a reboot, the next routed command restarts the worker, but the Herdr server and every second mate in it stay down until `--fix` runs again, either by hand or through the readiness gate of the next second-mate launch or relaunch.
 - It recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent.
 - It creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target.
   It stops after one harness satisfies the at-least-one requirement, which is the harness line of the [required remote tools](#required-remote-tools).
