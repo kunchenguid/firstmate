@@ -251,13 +251,23 @@ EOF
 # (a project hook that negates a global hook by name fails daemon startup -
 # verified by the scout), so this file only registers firstmate's own three
 # events and negates nothing.
-fm_polytoken_write_hooks() {  # <worktree> <busy-script>
-  local wt=$1 script=$2 hooks
-  hooks=$(fm_polytoken_hooks_file "$wt") || return 1
+# fm_polytoken_require_hooks_free: refuse a worktree that already carries a
+# `.polytoken/hooks.json` - a project's own hook layer is never firstmate's to
+# clobber. The arm runs this before writing any wiring, so a refusal leaves the
+# worktree and state untouched.
+fm_polytoken_require_hooks_free() {  # <worktree>
+  local hooks
+  hooks=$(fm_polytoken_hooks_file "$1") || return 1
   if [ -e "$hooks" ] || [ -L "$hooks" ]; then
     echo "error: $hooks already exists; a project's own polytoken hook layer is not firstmate's to clobber, so this task cannot be launched on polytoken into this worktree. Select another harness for this task." >&2
     return 1
   fi
+}
+
+fm_polytoken_write_hooks() {  # <worktree> <busy-script>
+  local wt=$1 script=$2 hooks
+  fm_polytoken_require_hooks_free "$wt" || return 1
+  hooks=$(fm_polytoken_hooks_file "$wt") || return 1
   mkdir -p "$(dirname "$hooks")" || return 1
   local jscript
   jscript=$(fm_polytoken_json_escape "$script")

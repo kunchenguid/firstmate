@@ -5197,7 +5197,8 @@ EOF
     # Gated on the canonical template like gemini and devin, because a raw
     # launch command never carries this wiring's flags or cwd contract.
     if [ "$RAW_LAUNCH" -eq 0 ]; then
-      if ! fm_polytoken_write_config "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
+      if ! fm_polytoken_require_hooks_free "$WT" \
+        || ! fm_polytoken_write_config "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
         || ! fm_polytoken_write_facet "$WT" "$STATE_REAL/$ID.inbox" \
         || ! fm_polytoken_write_busy_script "$FM_ROOT" "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" \
         || ! fm_polytoken_write_hooks "$WT" "$(fm_polytoken_busy_script "$STATE_REAL" "$ID")"; then

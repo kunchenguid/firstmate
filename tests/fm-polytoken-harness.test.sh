@@ -901,6 +901,14 @@ test_polytoken_existing_project_hook_layer_refuses() {
     "the refusal must name the project's own hook layer"
   assert_contains "$(cat "$WT_DIR/.polytoken/hooks.json")" "project-own" \
     "the refusal must leave the project's own hook layer untouched"
+  assert_absent "$WT_DIR/.polytoken/facets/firstmate-worker.md" \
+    "the refusal must not leave a generated worker facet in the worktree"
+  assert_absent "$HOME_DIR/state/$id.polytoken-busy.sh" \
+    "the refusal must not leave a generated busy writer in state"
+  assert_absent "$HOME_DIR/state/$id.polytoken-config" \
+    "the refusal must not leave a mirrored config dir in state"
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
+    || fail "the refusal must leave the worktree clean: $(git -C "$WT_DIR" status --porcelain)"
   pass "fm-spawn: a project's own polytoken hook layer is refused, not clobbered"
 }
 
