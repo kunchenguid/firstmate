@@ -6,7 +6,7 @@
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
-#   fm-remote-secondmate-control.sh wedge-state <id> <window-secs> <baseline|judge>
+#   fm-remote-secondmate-control.sh wedge-state <id> <window-secs> <baseline|judge> <max-gap-secs>
 #   fm-remote-secondmate-control.sh wedge-recover <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh key <id> <key>
@@ -143,18 +143,20 @@ state_value() { # <id>; prints recovery-grade state
 # counter, derive a pid, or deliver a signal across hosts. Both run where the
 # pane actually is, over the transport the route already uses, and report back.
 #
-# The parent passes the window because the POLICY is the parent's: this host's
-# own config file belongs to a different home and must not govern a mate the
-# parent supervises.
-cmd_wedge_state() { # <id> <window-secs> <baseline|judge>
-  local id=$1 window=$2 mode=$3
+# The parent passes the window and the largest observed-sample gap because the
+# POLICY is the parent's: this host's own config file belongs to a different
+# home and must not govern a mate the parent supervises, and only the parent's
+# watcher knows the cadence it samples on.
+cmd_wedge_state() { # <id> <window-secs> <baseline|judge> <max-gap-secs>
+  local id=$1 window=$2 mode=$3 max_gap=$4
   validate_id "$id"
   validate_home "$id"
   case "$window" in ''|*[!0-9]*|0) die "wedge window must be a positive whole number of seconds" ;; esac
   case "$mode" in baseline|judge) ;; *) die "wedge mode must be baseline or judge" ;; esac
+  case "$max_gap" in ''|*[!0-9]*|0) die "wedge sample gap must be a positive whole number of seconds" ;; esac
   remote_endpoint_require "$id"
   mkdir -p "$CONTROL_STATE"
-  fm_herdr_wedge_classify "$CONTROL_STATE" "$id" "$REMOTE_ENDPOINT_TARGET" "$window" "$mode"
+  FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS=$max_gap fm_herdr_wedge_classify "$CONTROL_STATE" "$id" "$REMOTE_ENDPOINT_TARGET" "$window" "$mode"
 }
 
 # Capture first, then kill, then report both: the parent records the evidence
@@ -488,7 +490,7 @@ case "${1:-}" in
   relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
-  wedge-state) shift; [ "$#" -eq 3 ] || usage; cmd_wedge_state "$@" ;;
+  wedge-state) shift; [ "$#" -eq 4 ] || usage; cmd_wedge_state "$@" ;;
   wedge-recover) shift; [ "$#" -eq 1 ] || usage; cmd_wedge_recover "$@" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;

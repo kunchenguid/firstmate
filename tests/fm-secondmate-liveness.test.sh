@@ -798,6 +798,11 @@ wedge_reap_pids() {
 
 trap 'wedge_reap_pids; fm_test_cleanup' EXIT
 
+# The agent-named stand-in every process-level wedge case runs under a harness
+# name. Empty when no stand-in survives a foreign name on this host, in which
+# case those cases skip with a reason rather than fail.
+WEDGE_STANDIN=$(fm_agent_standin "$TMP_ROOT/wedge-standin") || WEDGE_STANDIN=''
+
 # make_wedge_herdr <dir>: a fake `herdr` answering the read-only calls the wedge
 # path makes. Unlike the ordered-response fakes elsewhere, this one is keyed by
 # subcommand and re-read on every call, because the classifier is deliberately
@@ -854,16 +859,20 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# make_wedge_ps <dir>: a `ps` shim for the two unreadable-signal cases. It
-# passes everything through to the real `ps` unless told to fail one specific
-# read, so the fixture can blind exactly one signal and leave the others intact.
+# make_wedge_ps <dir>: a `ps` shim that passes everything through to the real
+# `ps` unless told to fail one specific read, or to answer the CPU-time column
+# with FM_FAKE_PS_CPUTIME verbatim. That lets a fixture blind exactly one signal,
+# or speak another platform's cputime format, and leave the others intact.
 make_wedge_ps() {
   local dir=$1
   mkdir -p "$dir/psbin"
   cat > "$dir/psbin/ps" <<SH
 #!/usr/bin/env bash
 case " \$* " in
-  *" cputime= "*|*"cputime="*) [ -z "\${FM_FAKE_PS_FAIL_CPUTIME:-}" ] || exit 1 ;;
+  *" cputime= "*|*"cputime="*)
+    [ -z "\${FM_FAKE_PS_FAIL_CPUTIME:-}" ] || exit 1
+    [ -z "\${FM_FAKE_PS_CPUTIME:-}" ] || { printf '%s\\n' "\$FM_FAKE_PS_CPUTIME"; exit 0; }
+    ;;
 esac
 case " \$* " in
   *"-axo"*) [ -z "\${FM_FAKE_PS_FAIL_TABLE:-}" ] || exit 1 ;;
@@ -880,6 +889,8 @@ SH
 # The agent is a symlink to a real long-running binary so the kernel records
 # `claude` as the executable identity, which is what fm-agent-process-lib.sh
 # classifies on; copying a platform binary would fail code signing on macOS.
+# Every sleeping stand-in is WEDGE_STANDIN, never the host `sleep`, because a
+# multicall `sleep` exits at once under a foreign name.
 # The pane shell runs a second command after the agent so it outlives it, which
 # is what makes "the shell survived" a real assertion about the kill's scope.
 #
@@ -891,13 +902,14 @@ SH
 # Echoes "<shell-pid> <agent-pid>".
 attach_wedge_agent() {  # <dir> <kind>
   local dir=$1 kind=$2 sleep_bin bash_bin lab shell_pid agent_pid i=0 comm body
+  [ -n "$WEDGE_STANDIN" ] || fail "attach_wedge_agent needs an agent stand-in"
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   bash_bin=$(command -v bash) || fail "bash not found"
   lab="$dir/agentbin"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/toolcmd"
-  ln -sf "$sleep_bin" "$lab/mcp-server-fs"
+  ln -sf "$WEDGE_STANDIN" "$lab/toolcmd"
+  ln -sf "$WEDGE_STANDIN" "$lab/mcp-server-fs"
   case "$kind" in
-    frozen) ln -sf "$sleep_bin" "$lab/claude"; body="'$lab/claude' 300" ;;
+    frozen) ln -sf "$WEDGE_STANDIN" "$lab/claude"; body="'$lab/claude' 300" ;;
     tool-child)
       ln -sf "$bash_bin" "$lab/claude"
       # The trailing `:` stops bash exec-optimizing the single command away, so
@@ -916,6 +928,7 @@ attach_wedge_agent() {  # <dir> <kind>
   esac
   sh -c "$body; '$sleep_bin' 300" >/dev/null 2>&1 &
   shell_pid=$!
+  disown "$shell_pid" 2>/dev/null || true
   wedge_track_pid "$shell_pid"
   while [ "$i" -lt 200 ]; do
     for agent_pid in $(pgrep -P "$shell_pid" 2>/dev/null); do
@@ -1067,6 +1080,107 @@ test_wedge_unobserved_gap_restarts_the_window() {
   pass "wedge: an unobserved gap (suspend or clock jump) restarts the window instead of killing live work"
 }
 
+test_wedge_sample_gap_follows_a_slow_watcher_cadence() {
+  local dir state out record
+  dir="$TMP_ROOT/wedge-slow-cadence"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
+  record="$state/.secondmate-wedge-sm1"
+
+  # A home ticking every 600 seconds samples 600 seconds apart by design. With
+  # the fixed 300-second limit every one of those gaps would restart the window,
+  # so a frozen mate could never be recovered there.
+  wedge_classify "$dir" "$state" 600 judge FM_SECONDMATE_LIVENESS_SECS=600 >/dev/null
+  awk -F '\t' -v OFS='\t' '{ $6 = $6 - 700; $7 = $7 - 650; print }' "$record" > "$record.aged" \
+    && mv "$record.aged" "$record"
+  out=$(wedge_classify "$dir" "$state" 600 judge FM_SECONDMATE_LIVENESS_SECS=600)
+  [ "$out" = wedged ] \
+    || fail "one ordinary tick of a slow cadence must count as observed time, got '$out'"
+
+  # The control: the same gap at the default cadence is not observed time.
+  wedge_classify "$dir" "$state" 600 baseline >/dev/null
+  awk -F '\t' -v OFS='\t' '{ $6 = $6 - 700; $7 = $7 - 650; print }' "$record" > "$record.aged" \
+    && mv "$record.aged" "$record"
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = progressing ] \
+    || fail "a 650s gap at the default cadence must restart the window, got '$out'"
+  pass "wedge: the observed-sample gap widens with a slow watcher cadence instead of disabling recovery"
+}
+
+test_wedge_cpu_time_parses_both_platform_formats() {
+  local dir psbin raw want out
+  dir="$TMP_ROOT/wedge-cputime-formats"
+  psbin=$(make_wedge_ps "$dir")
+  # The real shapes `ps -o cputime=` prints: BSD/macOS `[HH:]MM:SS.CC` and Linux
+  # procps `[DD-]HH:MM:SS`, each in centiseconds.
+  while read -r raw want; do
+    # shellcheck disable=SC2016 # positional params expand in the child shell.
+    out=$(env FM_HERDR_PS_BIN="$psbin" FM_FAKE_PS_CPUTIME="$raw" bash -c '
+        . "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_cpu_centiseconds "$1"' "$ROOT" "$$") \
+      || fail "cputime '$raw' should parse"
+    [ "$out" = "$want" ] || fail "cputime '$raw' should be $want centiseconds, got '$out'"
+  done <<'EOF'
+0:12.34 1234
+125:03.45 750345
+1:02:03.45 372345
+00:00:00 0
+1-02:03:04 9378400
+EOF
+  for raw in garbage 12 0:12.3 1:2:3:4 12.34 ':' '-1:00'; do
+    # shellcheck disable=SC2016 # positional params expand in the child shell.
+    if out=$(env FM_HERDR_PS_BIN="$psbin" FM_FAKE_PS_CPUTIME="$raw" bash -c '
+        . "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_cpu_centiseconds "$1"' "$ROOT" "$$"); then
+      fail "cputime '$raw' must not parse, got '$out'"
+    fi
+  done
+  pass "wedge: CPU time parses both the macOS and the Linux cputime format, and refuses anything else"
+}
+
+test_wedge_macos_cpu_time_drives_the_verdict() {
+  local dir state out psbin
+  dir="$TMP_ROOT/wedge-cputime-bsd"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
+  psbin=$(make_wedge_ps "$dir")
+
+  out=$(wedge_classify "$dir" "$state" 600 judge FM_HERDR_PS_BIN="$psbin" FM_FAKE_PS_CPUTIME=0:12.34)
+  [ "$out" = progressing ] || fail "the first macOS-format sample should start the window, got '$out'"
+  # One centisecond of CPU: a whole-second reading would miss it entirely.
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge FM_HERDR_PS_BIN="$psbin" FM_FAKE_PS_CPUTIME=0:12.35)
+  [ "$out" = progressing ] \
+    || fail "a growing macOS-format CPU time must keep a frozen-countered mate alive, got '$out'"
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge FM_HERDR_PS_BIN="$psbin" FM_FAKE_PS_CPUTIME=0:12.35)
+  [ "$out" = wedged ] || fail "an unchanged macOS-format CPU time must still wedge, got '$out'"
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge FM_HERDR_PS_BIN="$psbin" FM_FAKE_PS_CPUTIME=garbage)
+  [ "$out" = unreadable ] || fail "an unparseable CPU time must yield no verdict, got '$out'"
+  pass "wedge: a macOS-format CPU time reading drives the verdict instead of reading unreadable"
+}
+
+test_wedge_legacy_cpu_record_restarts_the_window() {
+  local dir state out record
+  dir="$TMP_ROOT/wedge-legacy-record"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
+  record="$state/.secondmate-wedge-sm1"
+
+  wedge_classify "$dir" "$state" 600 judge >/dev/null
+  # A record from before the CPU field carried its unit: the bare number must
+  # never compare equal to a fresh reading, even when the digits match.
+  awk -F '\t' -v OFS='\t' '{ sub(/cs$/, "", $5); print }' "$record" > "$record.old" \
+    && mv "$record.old" "$record"
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = progressing ] \
+    || fail "a CPU field in an older unit must restart the window, got '$out'"
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = wedged ] || fail "the rewritten record should wedge on the next window, got '$out'"
+  pass "wedge: a recorded CPU sample in an older unit restarts the window rather than reading unchanged"
+}
+
 test_wedge_requires_the_whole_window_to_elapse() {
   local dir state out
   dir="$TMP_ROOT/wedge-window"; state="$dir/state"
@@ -1204,8 +1318,7 @@ test_wedge_window_config_has_a_floor_and_an_off_switch() {
 # agent-named process OUTSIDE that subtree (a sibling pane's agent, or the
 # session server). Echoes "<shell-pid> <agent-pid> <outsider-pid>".
 make_wedge_subtree() {
-  local dir=$1 sleep_bin lab shell_pid agent_pid outsider_pid
-  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  local dir=$1 lab shell_pid agent_pid outsider_pid
   read -r shell_pid agent_pid <<< "$(attach_wedge_agent "$dir" frozen)"
   lab="$dir/agentbin"
   "$lab/claude" 300 >/dev/null 2>&1 &
@@ -1398,20 +1511,28 @@ test_wedge_relaunch_is_bounded_by_the_existing_attempt_ledger() {
   pass "wedge: wedged relaunches consume the existing bounded attempt budget, so a misdetection cannot kill-loop"
 }
 
-test_wedge_progress_on_any_signal_keeps_the_mate_alive
-test_wedge_cpu_time_growth_keeps_the_mate_alive
-test_wedge_live_tool_child_keeps_the_mate_alive
-test_wedge_mcp_server_child_alone_still_wedges
-test_wedge_unobserved_gap_restarts_the_window
-test_wedge_requires_the_whole_window_to_elapse
-test_wedge_never_fires_for_an_idle_done_or_blocked_agent
-test_wedge_unreadable_signals_never_authorize_a_kill
-test_wedge_session_start_mode_only_rebases_the_window
+test_wedge_cpu_time_parses_both_platform_formats
 test_wedge_window_config_has_a_floor_and_an_off_switch
-test_wedge_kill_reaches_only_the_panes_own_agent_process
-test_wedge_recovery_captures_evidence_before_killing_and_ledgers_it
 test_wedge_recovery_refuses_when_no_agent_pid_can_be_attributed
-test_wedge_probe_reports_relaunchable_only_on_the_watcher_tick
 test_wedge_relaunch_is_bounded_by_the_existing_attempt_ledger
+if [ -n "$WEDGE_STANDIN" ]; then
+  test_wedge_progress_on_any_signal_keeps_the_mate_alive
+  test_wedge_cpu_time_growth_keeps_the_mate_alive
+  test_wedge_live_tool_child_keeps_the_mate_alive
+  test_wedge_mcp_server_child_alone_still_wedges
+  test_wedge_unobserved_gap_restarts_the_window
+  test_wedge_sample_gap_follows_a_slow_watcher_cadence
+  test_wedge_macos_cpu_time_drives_the_verdict
+  test_wedge_legacy_cpu_record_restarts_the_window
+  test_wedge_requires_the_whole_window_to_elapse
+  test_wedge_never_fires_for_an_idle_done_or_blocked_agent
+  test_wedge_unreadable_signals_never_authorize_a_kill
+  test_wedge_session_start_mode_only_rebases_the_window
+  test_wedge_kill_reaches_only_the_panes_own_agent_process
+  test_wedge_recovery_captures_evidence_before_killing_and_ledgers_it
+  test_wedge_probe_reports_relaunchable_only_on_the_watcher_tick
+else
+  echo "skip: no agent stand-in survives a foreign name on this host (process-level wedge cases)"
+fi
 
 echo "# all fm-secondmate-liveness tests passed"

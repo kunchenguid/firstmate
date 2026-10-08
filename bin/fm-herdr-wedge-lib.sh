@@ -87,7 +87,11 @@ FM_HERDR_WEDGE_SAMPLE_SECS=10
 # a jumped clock freezes the agent's counters without the agent being wedged.
 # Five minutes is several watcher ticks at the default 60-second cadence, so an
 # ordinary slow or skipped tick never restarts the window, while a sleep does.
+# fm_herdr_wedge_max_sample_gap widens it for a slower watcher cadence.
 FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS=${FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS:-300}
+# How many watcher ticks a sample gap may span before it stops counting as
+# observed time, whatever the cadence.
+FM_HERDR_WEDGE_GAP_TICKS=5
 
 # Every Herdr read here goes through the adapter's own CLI wrapper and target
 # parser (client selection, session routing, protocol-mismatch retry), rather
@@ -134,6 +138,21 @@ fm_herdr_wedge_window() {  # <config-dir>
   printf '%s\n' "$value"
 }
 
+# fm_herdr_wedge_max_sample_gap: the effective largest observed-sample gap in
+# seconds - the larger of FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS and
+# FM_HERDR_WEDGE_GAP_TICKS ticks of FM_SECONDMATE_LIVENESS_SECS when that cadence
+# is set. A fixed limit at or below the tick interval would restart every window
+# and silently disable wedge recovery for a home with a slow cadence.
+fm_herdr_wedge_max_sample_gap() {
+  local gap=$FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS tick=${FM_SECONDMATE_LIVENESS_SECS:-}
+  case "$gap" in ''|*[!0-9]*|0) gap=300 ;; esac
+  case "$tick" in
+    ''|*[!0-9]*|0) ;;
+    *) [ $((tick * FM_HERDR_WEDGE_GAP_TICKS)) -le "$gap" ] || gap=$((tick * FM_HERDR_WEDGE_GAP_TICKS)) ;;
+  esac
+  printf '%s\n' "$gap"
+}
+
 # fm_herdr_wedge_counters <session> <pane>: the one read of this pane's agent
 # status and both progress counters, printed as
 # "<agent_status>\t<state_change_seq>\t<max_offset_from_bottom>".
@@ -170,8 +189,8 @@ fm_herdr_wedge_record_path() {  # <state-dir> <id>
   printf '%s/.secondmate-wedge-%s\n' "$1" "$2"
 }
 
-# fm_herdr_wedge_cpu_seconds <pid...>: the agent's total consumed CPU time in
-# whole seconds, summed over its pids.
+# fm_herdr_wedge_cpu_centiseconds <pid...>: the agent's total consumed CPU time
+# in centiseconds, summed over its pids.
 #
 # A frozen agent consumes no CPU - the incident's process sat at 0% with the
 # timer stopped - while an agent waiting on a long model response or driving a
@@ -179,12 +198,15 @@ fm_herdr_wedge_record_path() {  # <state-dir> <id>
 # rendered counters cannot fake, and it is the one that separates a deadlock
 # from a legitimately quiet turn.
 #
-# `cputime` is the one accumulated-CPU column both supported platforms spell the
-# same way (macOS natively, Linux as an alias for `time`), formatted
-# `[[dd-]hh:]mm:ss`. Fails (nonzero, no output) when any pid's column cannot be
-# read or parsed, which callers must treat as "cannot judge", never as zero.
-fm_herdr_wedge_cpu_seconds() {  # <pid...>
-  local ps_bin=${FM_HERDR_PS_BIN:-ps} pid raw total=0 secs
+# Both supported platforms name the accumulated-CPU column `cputime`, but they
+# FORMAT it differently: BSD/macOS prints `[HH:]MM:SS.CC` (for example `0:12.34`)
+# and Linux procps prints `[DD-]HH:MM:SS`. Both are parsed, to centiseconds
+# rather than whole seconds, so an agent accumulating under a second of CPU
+# between samples on macOS still reads as moving. Fails (nonzero, no output)
+# when any pid's column cannot be read or parsed, which callers must treat as
+# "cannot judge", never as zero.
+fm_herdr_wedge_cpu_centiseconds() {  # <pid...>
+  local ps_bin=${FM_HERDR_PS_BIN:-ps} pid raw total=0 cs
   [ "$#" -gt 0 ] || return 1
   command -v "$ps_bin" >/dev/null 2>&1 || return 1
   for pid in "$@"; do
@@ -192,21 +214,23 @@ fm_herdr_wedge_cpu_seconds() {  # <pid...>
     raw=$(LC_ALL=C "$ps_bin" -p "$pid" -o cputime= 2>/dev/null) || return 1
     raw=${raw//[[:space:]]/}
     [ -n "$raw" ] || return 1
-    secs=$(printf '%s\n' "$raw" | awk -F '[:-]' '
+    cs=$(printf '%s\n' "$raw" | awk '
       {
-        n = NF
-        if (n < 2 || n > 4) exit 1
+        v = $0; days = 0; frac = 0
+        if (v ~ /^[0-9]+-/) { days = substr(v, 1, index(v, "-") - 1); v = substr(v, index(v, "-") + 1) }
+        if (v ~ /\.[0-9][0-9]$/) { frac = substr(v, length(v) - 1); v = substr(v, 1, length(v) - 3) }
+        n = split(v, f, ":")
+        if (n < 2 || n > 3) exit 1
         s = 0
         for (i = 1; i <= n; i++) {
-          if ($i !~ /^[0-9]+$/) exit 1
-          s = s * 60 + $i
+          if (f[i] !~ /^[0-9]+$/) exit 1
+          s = s * 60 + f[i]
         }
         # A leading day field multiplies by 24 hours, not by 60.
-        if (n == 4) s = (($1 * 24 + $2) * 60 + $3) * 60 + $4
-        print s
+        printf "%d\n", ((days * 86400) + s) * 100 + frac
       }') || return 1
-    case "$secs" in ''|*[!0-9]*) return 1 ;; esac
-    total=$((total + secs))
+    case "$cs" in ''|*[!0-9]*) return 1 ;; esac
+    total=$((total + cs))
   done
   printf '%s\n' "$total"
 }
@@ -302,8 +326,8 @@ EOF
 # the gap, and the agent's counters cannot have moved while it was frozen by the
 # OS either. Judging `now - since` there would SIGKILL live work. So the record
 # also carries the previous sample's own epoch, and a gap between consecutive
-# samples larger than FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS restarts the window
-# instead of being counted as time this detector actually watched.
+# samples larger than fm_herdr_wedge_max_sample_gap restarts the window instead
+# of being counted as time this detector actually watched.
 #
 # Every unreadable signal leaves the recorded sample untouched and yields
 # `unreadable`: a transient failure neither restarts the window nor advances it,
@@ -311,7 +335,7 @@ EOF
 fm_herdr_wedge_classify() {  # <state-dir> <id> <target> <window-secs> <baseline|judge>
   local state_dir=$1 id=$2 target=$3 window=$4 mode=$5
   local record session pane counters status seq offset now since restart=0
-  local pids cpu work
+  local pids cpu work max_gap
   local prev_target prev_status prev_seq prev_offset prev_cpu prev_since prev_seen
   case "$window" in ''|*[!0-9]*|0) return 1 ;; esac
   fm_herdr_wedge_require_adapter || { printf 'unreadable\n'; return 0; }
@@ -336,10 +360,14 @@ fm_herdr_wedge_classify() {  # <state-dir> <id> <target> <window-secs> <baseline
     return 0
   fi
   # shellcheck disable=SC2086 # The pid list is newline-separated digits by construction.
-  if ! cpu=$(fm_herdr_wedge_cpu_seconds $pids); then
+  if ! cpu=$(fm_herdr_wedge_cpu_centiseconds $pids); then
     printf 'unreadable\n'
     return 0
   fi
+  # The unit rides in the stored value, so a record written in any other unit
+  # never compares equal and restarts the window instead.
+  cpu="${cpu}cs"
+  max_gap=$(fm_herdr_wedge_max_sample_gap)
   now=$(date +%s)
   since=$now
   if [ "$mode" != baseline ] && [ -f "$record" ] && [ ! -L "$record" ]; then
@@ -350,7 +378,7 @@ fm_herdr_wedge_classify() {  # <state-dir> <id> <target> <window-secs> <baseline
       && [ "${prev_cpu:-}" = "$cpu" ]; then
       case "${prev_seen:-}" in
         ''|*[!0-9]*) restart=1 ;;
-        *) [ $((now - prev_seen)) -le "$FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS" ] || restart=1 ;;
+        *) [ $((now - prev_seen)) -le "$max_gap" ] || restart=1 ;;
       esac
       if [ "$restart" -eq 0 ]; then
         case "${prev_since:-}" in

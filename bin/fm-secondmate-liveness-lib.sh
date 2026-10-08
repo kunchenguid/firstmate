@@ -239,16 +239,18 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
         fi
         # The progress probe runs on the mate's OWN host, through the same
         # transport: the parent never reads a counter or signals a pid across
-        # hosts. The parent still owns the POLICY - its own config resolves the
-        # window and passes it, so a remote mate is not governed by whatever
-        # another home's config file on that host happens to say. A transport
+        # hosts. The parent still owns the POLICY - its own config and cadence
+        # resolve the window and the largest observed-sample gap and pass them,
+        # so a remote mate is not governed by whatever another home's config
+        # file on that host happens to say. A transport
         # failure leaves the mate alive, exactly like every other inconclusive
         # remote read.
         wedge_window=$(fm_herdr_wedge_window "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}")
         if [ "$wedge_window" != off ]; then
           case "$mode" in full) wedge_mode=baseline ;; *) wedge_mode=judge ;; esac
           if out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh \
-            wedge-state "$id" "$wedge_window" "$wedge_mode" < /dev/null 2>/dev/null); then
+            wedge-state "$id" "$wedge_window" "$wedge_mode" "$(fm_herdr_wedge_max_sample_gap)" \
+            < /dev/null 2>/dev/null); then
             FM_SM_LIVE_WEDGE=$(printf '%s\n' "$out" | tail -1)
           else
             FM_SM_LIVE_WEDGE=unreadable
