@@ -1333,7 +1333,7 @@ SH
   marker="firstmate:$id:${sha:0:16}"
   printf '%s\t%s\terror\t%s\n' "$SESSION_ID" "$marker" "$marker" >"$home/sessions.tsv"
   provider=$(jq -cn --arg marker "$marker" \
-    '{region:"sg",identity:"user",session_marker:$marker,session_id:"70001",task_id:"80001",
+    '{region:"sg",identity:"user",session_marker:$marker,session_id:null,task_id:null,
       agent_id:"9001",agent_name:"iDA Test",model:"ida-research-test",provider_status:null}')
   FM_HOME="$home" bash -c '
     . "$1/bin/fm-remote-agent-lib.sh"
@@ -1362,7 +1362,8 @@ SH
   [ "$results:$wakes:$artifacts" = 1:1:1 ] \
     || fail "first unavailable observation did not retain exactly one durable notification: results=$results wakes=$wakes artifacts=$artifacts"
   observation=$(find "$home/state/procevent-inbox" -name "$source.1.result" -print -quit)
-  jq -e '.terminal==false and .provider_status==null and .error_class=="recorded-task-status-unavailable"' \
+  jq -e '.kind=="reconcile" and .terminal==false and .provider_status==null
+    and .error_class=="recorded-task-status-unavailable"' \
     "$observation" >/dev/null || fail "fixture did not reproduce the exact missing-status observation"
 
   sleep_log="$home/unavailable-sleeps"; sleep_release="$home/unavailable-release"; : >"$sleep_log"
@@ -1376,7 +1377,7 @@ SH
   while [ ! -s "$sleep_log" ] && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
   [ "$tries" -gt 0 ] || fail "equal unavailable observation did not enter bounded coalescing"
   [ "$(ida_result_count "$home" "$source")" -eq 1 ] \
-    || fail "equal unavailable observation created a duplicate capture"
+    || fail "the reconcile-to-session origin transition created a duplicate capture"
 
   run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" retire "$source" >/dev/null \
     || fail "unavailable-repeat restart cleanup failed"

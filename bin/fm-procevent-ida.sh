@@ -564,7 +564,10 @@ nonterminal_observation_repeatable() { # <observation>
 }
 
 observations_semantically_equal() { # <older> <newer>
-  jq -s -e '((.[0] | del(.observed_at)) == (.[1] | del(.observed_at)))' "$1" "$2" >/dev/null 2>&1
+  # `kind` records which read path produced the observation (submission,
+  # reconcile, or the now-bound session), not provider progress. Once the
+  # exact provider identity is bound, that origin-only transition is silent.
+  jq -s -e '((.[0] | del(.observed_at,.kind)) == (.[1] | del(.observed_at,.kind)))' "$1" "$2" >/dev/null 2>&1
 }
 
 state_semantic_signature() { # <state-file>

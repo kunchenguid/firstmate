@@ -324,7 +324,7 @@ function validIdaResultWake(
     for (const [stateKey, observationKey] of [["session_id", "session_id"], ["task_id", "task_id_remote"]] as const) {
       const recorded = stringField(providerState, stateKey);
       const observed = stringField(observation, observationKey);
-      if (recorded && observed && recorded !== observed) return null;
+      if (!recorded || !observed || recorded !== observed) return null;
     }
     return { task, trigger: payload };
   } catch {

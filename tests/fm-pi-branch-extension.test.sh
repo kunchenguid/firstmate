@@ -5264,6 +5264,16 @@ writeCapture("1", observation(), "aime\n");
 assertMainFallback("mismatched captured adapter", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
 writeCapture("1");
 
+const unboundState = JSON.parse(readFileSync(`${state}/remote-tasks/${task}/state.json`, "utf8"));
+unboundState.provider_state.session_id = null;
+unboundState.provider_state.task_id = null;
+privateWrite(`${state}/remote-tasks/${task}/state.json`, JSON.stringify(unboundState));
+const unboundObservation = JSON.parse(observation());
+unboundObservation.session_id = null;
+unboundObservation.task_id_remote = null;
+writeCapture("1", JSON.stringify(unboundObservation));
+assertMainFallback("unbound provider identity", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
+
 unlinkSync(`${state}/procevent-inbox/${source}.1.result`);
 symlinkSync(`${state}/procevent-inbox/${source}.2.result`, `${state}/procevent-inbox/${source}.1.result`);
 assertMainFallback("symlinked captured result", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
