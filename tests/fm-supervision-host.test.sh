@@ -309,6 +309,8 @@ test_engine_resolution_uses_only_path_or_the_active_nvm_bin() {
   mkdir -p "$nvm_bin" "$direct_bin" "$restricted" "$dir/config"
   ln -s "$(command -v jq)" "$restricted/jq"
   ln -s "$(command -v perl)" "$restricted/perl"
+  ln -s "$(command -v bash)" "$restricted/bash"
+  ln -s "$(command -v dirname)" "$restricted/dirname"
   printf '#!/bin/sh\nexit 0\n' > "$dir/nvm-claude"
   printf '#!/bin/sh\nexit 0\n' > "$nvm_bin/node"
   printf '#!/bin/sh\nexit 0\n' > "$direct_bin/claude"
@@ -318,7 +320,7 @@ test_engine_resolution_uses_only_path_or_the_active_nvm_bin() {
   out=$(FM_SUPERVISION_ENGINE_CLAUDE_BIN='' NVM_BIN="$nvm_bin" PATH="$restricted" /bin/bash -c '
     set -u
     . "$1"
-    fm_supervision_host_attended_ready "$2" claude
+    fm_supervision_host_attended_ready "$2" claude || { printf "%s\n" "$FM_SUPERVISION_HOST_UNREADY"; exit 1; }
     fm_supervision_engine_bin claude
     command -v node
   ' _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/config") || fail "the active NVM bin did not make the host ready with Claude and its Node: $out"
