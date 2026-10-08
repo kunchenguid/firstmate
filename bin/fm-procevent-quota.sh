@@ -17,7 +17,10 @@
 #            registered through `bin/fm-procevent.sh register`.
 # poll       The blocking child the generic runner executes; never run this
 #            directly in a conversational turn. It polls `quota-axi --json`
-#            until quota drops below the threshold or an error stops the watch.
+#            until quota drops below the threshold, invalid quota data stops
+#            the watch, or three consecutive transient command failures stop
+#            it. Missing or incompatible tools stop it immediately, and a
+#            successful read resets the command-failure streak.
 # classify   Print the captured outcome class: low, exhausted, error, or unknown.
 # terminal   Every quota poll is terminal because the source fires at most once.
 # source-id  Print the canonical source id.
@@ -27,6 +30,11 @@
 # The canonical source id is `quota` for the aggregate tracked provider.
 # A provider named with --provider sets the tracked provider and the source id
 # becomes `quota-<provider>`.
+#
+# Snapshots may be quota-axi schema 5 or 6 (bin/fm-quota-axi-lib.sh owns the
+# validator). Both watches read every matching account row independently,
+# without combining quotas. A --provider watch restricts those rows to the
+# requested provider; details preserve each row's accountKey when present.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +55,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 DEFAULT_INTERVAL=60
 DEFAULT_THRESHOLD=10
+# Consecutive transient quota-axi read failures before poll goes terminal.
+# Missing and incompatible tools bypass this budget. No config knob on purpose.
+MAX_CONSECUTIVE_READ_FAILURES=3
 
 SOURCE_ID_BASE=quota
 
@@ -93,16 +104,43 @@ valid_percent() {
 }
 
 # quota_json [timeout]
-# Run `quota-axi --json` bounded by the given timeout. A missing or incompatible
-# quota-axi is an error condition, not a signal to fire.
+# Run `quota-axi --json` bounded by the given timeout.
+# Exit status: 0 prints JSON; 1 timed out; 2 missing; 3 incompatible; 4 other failure.
+# A missing or incompatible quota-axi is an error condition, not a signal to fire.
+# Callers tolerate a bounded streak of 1/4 before going terminal; 2/3 stay distinct.
+# Each path probes --version once, validates that captured text through
+# fm_quota_axi_version_compatible, then probes --json once.
+# A slow or failing probe stays 1/4; "incompatible" is reserved for an actual
+# unsupported or unparseable version string.
 quota_json() {
-  local timeout=${1:-} output
+  local timeout=${1:-} output rc=0
+  if ! command -v quota-axi >/dev/null 2>&1; then
+    return 2
+  fi
   if [ -n "$timeout" ]; then
-    fm_quota_axi_compatible "$timeout" >/dev/null 2>&1 || return 2
-    output=$(fm_run_timed "$timeout" quota-axi --json 2>/dev/null </dev/null) || return 2
+    rc=0
+    output=$(fm_run_timed "$timeout" quota-axi --version 2>/dev/null </dev/null) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if fm_timed_out "$rc"; then
+        return 1
+      fi
+      return 4
+    fi
+    fm_quota_axi_version_compatible "$output" || return 3
+    rc=0
+    output=$(fm_run_timed "$timeout" quota-axi --json 2>/dev/null </dev/null) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if fm_timed_out "$rc"; then
+        return 1
+      fi
+      return 4
+    fi
   else
-    fm_quota_axi_compatible >/dev/null 2>&1 || return 2
-    output=$(quota-axi --json 2>/dev/null </dev/null) || return 2
+    rc=0
+    output=$(quota-axi --version 2>/dev/null </dev/null) || rc=$?
+    [ "$rc" -eq 0 ] || return 4
+    fm_quota_axi_version_compatible "$output" || return 3
+    output=$(quota-axi --json 2>/dev/null </dev/null) || return 4
   fi
   printf '%s\n' "$output"
 }
@@ -122,19 +160,10 @@ condition_status() {
       elif any($known[]; .effectivePercentRemaining < ($threshold | tonumber)) then "low"
       else "healthy"
       end;
-    if (.providers | type) != "array" then "error"
-    elif $provider == "" then
-      if (.providers | length) == 0 then "healthy"
-      elif ([.providers[]?.quotaSemantics.effectiveAvailability[]?] | length) == 0 then "healthy"
-      else classify([.providers[]?.quotaSemantics.effectiveAvailability[]?])
-      end
-    else
-      ([.providers[]? | select(.provider == $provider)] | first) as $p |
-      if ($p // null) == null then "error"
-      elif ($p.quotaSemantics.effectiveAvailability | length) == 0 and
-           ($p.quotaSemantics.status == "unknown" or $p.quotaSemantics.status == "partial") then "healthy"
-      else classify($p.quotaSemantics.effectiveAvailability // [])
-      end
+    .providers |= map(select($provider == "" or .provider == $provider)) |
+    if (.providers | length) == 0 and $provider != "" then "error"
+    elif ([.providers[]?.quotaSemantics.effectiveAvailability[]?] | length) == 0 then "healthy"
+    else classify([.providers[]?.quotaSemantics.effectiveAvailability[]?])
     end
   ' 2>/dev/null || printf 'error\n'
 }
@@ -151,23 +180,18 @@ details() {
       elif ($known | length) > 0 then ($known | min_by(.effectivePercentRemaining))
       else null
       end;
-    if $provider == "" then
+    [.providers[]? | select($provider == "" or .provider == $provider) |
+      {provider}
+      + (if has("accountKey") then {accountKey} else {} end)
+      + {best: best_detail(.quotaSemantics.effectiveAvailability // [])}
+    ] as $summary |
+    if $provider == "" or ($summary | length) > 1 then
       {
-        provider: "aggregate",
-        summary: [
-          (.providers[]? |
-            { provider: .provider,
-              best: best_detail(.quotaSemantics.effectiveAvailability // [])
-            }
-          )
-        ]
+        provider: (if $provider == "" then "aggregate" else $provider end),
+        summary: $summary
       }
     else
-      (.providers[]? | select(.provider == $provider)) as $p |
-      {
-        provider: $provider,
-        best: best_detail($p.quotaSemantics.effectiveAvailability // [])
-      }
+      $summary[0] // {provider: $provider, best: null}
     end
   ' 2>/dev/null
 }
@@ -218,16 +242,30 @@ cmd_poll() {
   valid_percent "$threshold" || die "--threshold needs a percent 0-100"
   [ -z "$timeout" ] || positive_int "$timeout" || die "--timeout needs a positive integer"
   resolve_provider "$PROVIDER"
-  local json detail status polls=0
+  local json detail status polls=0 consecutive_failures=0 read_rc detail_msg
   while :; do
     polls=$((polls + 1))
-    if ! json=$(quota_json "${timeout:-}"); then
+    json=$(quota_json "${timeout:-}") && read_rc=0 || read_rc=$?
+    if [ "$read_rc" -ne 0 ]; then
+      consecutive_failures=$((consecutive_failures + 1))
+      if [ "$read_rc" -ne 2 ] && [ "$read_rc" -ne 3 ] && \
+         [ "$consecutive_failures" -lt "$MAX_CONSECUTIVE_READ_FAILURES" ]; then
+        sleep "$interval"
+        continue
+      fi
+      case "$read_rc" in
+        1) detail_msg="${consecutive_failures} consecutive read failures; last quota-axi read timed out" ;;
+        2) detail_msg="quota-axi is missing" ;;
+        3) detail_msg="quota-axi is incompatible" ;;
+        *) detail_msg="${consecutive_failures} consecutive read failures; last quota-axi read failed" ;;
+      esac
       printf 'quota: %s\n' "$CANONICAL_SOURCE_ID"
       printf 'status: error\n'
-      printf 'detail: quota-axi --json failed or quota-axi is missing/incompatible\n'
+      printf 'detail: %s\n' "$detail_msg"
       printf 'condition_polls: %s\n' "$polls"
       exit 0
     fi
+    consecutive_failures=0
     status=$(condition_status "$json" "$PROVIDER" "$threshold")
     case "$status" in
       healthy) sleep "$interval"; continue ;;

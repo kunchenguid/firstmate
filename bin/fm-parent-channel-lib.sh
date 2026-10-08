@@ -40,10 +40,9 @@
 # The parent watcher classifies lines there exactly as it classifies any
 # crewmate's status stream, so a captain-relevant line becomes a parent wake.
 #
-# Lines follow the charter's "<state> [key=<slug>]: <note>" shape and are
-# appended at most once by exact content, so a retried publication cannot
-# duplicate a delivered event. An existing destination must be a regular,
-# non-symlinked file; a missing one is created with its directory.
+# Line syntax and retry equivalence are owned by fm-classify-lib.sh.
+# An existing destination must be a regular, non-symlinked file; a missing one
+# is created with its directory.
 #
 # Return codes, shared by every entry point that resolves the channel:
 #   0  resolved, or appended / already present
@@ -56,9 +55,11 @@
 #
 # Sourced by the publishers above and by tests. No side effects on source.
 
-_FM_PARENT_CHANNEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_FM_PARENT_CHANNEL_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$_FM_PARENT_CHANNEL_LIB_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_PARENT_CHANNEL_LIB_DIR/fm-classify-lib.sh"
 
 # shellcheck disable=SC2034 # Output globals read by sourcing callers.
 FM_PARENT_CHANNEL_ID=
@@ -122,13 +123,36 @@ fm_parent_channel_destination() {  # <home> <state>
   esac
 }
 
+# The outbound parent-channel status path that lives INSIDE <state>, printed,
+# when <home> is a remote mate; non-zero for a main home, a local mate, or an
+# unusable identity or binding. Only the remote route resolves the channel into
+# the mate's own state dir, so parent-replies.status there is the mate's parent
+# channel rather than a self-home task status file: a home's own status scans
+# and decision folds exclude exactly this resolved path (the same special case
+# fm-pending-reply-lib.sh's wrong-home detection applies). A local mate's
+# channel lives in the parent home's state/<id>.status, which the parent's
+# scans must keep classifying, so only the remote route resolves here.
+fm_parent_channel_outbound_status() {  # <home> <state>
+  local home=$1 state=$2 destination rc=0
+  destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  # The substitution above ran the resolver in a subshell, so its route global
+  # died with it; resolve once more in this shell (stdout discarded, the same
+  # shape fm-pending-reply-lib.sh's wrong-home detection uses) so the route
+  # check reads the resolver's own verdict rather than re-deriving it.
+  fm_parent_channel_destination "$home" "$state" >/dev/null || return 1
+  [ "$FM_PARENT_CHANNEL_ROUTE" = remote ] || return 1
+  printf '%s\n' "$destination"
+}
+
 # Fold <text> onto one bounded line, so a note copied from a child ledger or a
 # hold reason cannot break the channel's line framing.
 fm_parent_channel_clean_note() {  # <text>
   printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
 }
 
-# Append <line> to <path> unless that exact line is already there.
+# Append <line> once, using fm-classify-lib.sh's retry contract. Time-insensitive:
+# the caller declaring a new event is the one that stamps it.
 fm_parent_channel_append_once() {  # <path> <line>
   local path=$1 line=$2
   if [ -e "$path" ] || [ -L "$path" ]; then
@@ -136,7 +160,7 @@ fm_parent_channel_append_once() {  # <path> <line>
   else
     mkdir -p "$(dirname "$path")" || return 1
   fi
-  if grep -Fqx -- "$line" "$path" 2>/dev/null; then
+  if status_event_recorded "$path" "$line"; then
     return 0
   fi
   printf '%s\n' "$line" >> "$path"
@@ -147,5 +171,5 @@ fm_parent_channel_report() {  # <home> <state> <line>
   local home=$1 state=$2 line=$3 destination rc=0
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
-  fm_parent_channel_append_once "$destination" "$line" || return 4
+  fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || return 4
 }

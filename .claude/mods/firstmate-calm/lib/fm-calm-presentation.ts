@@ -5,10 +5,15 @@
 // a mid-turn working note, and which transcript rows Calm hides. It shares Pi Calm's
 // broad presentation boundary: genuine user prompts, genuine agent responses, and
 // working activity stay visible; tool rows, tool groups, classified working notes, and
-// canonically classified operational user rows hide. docs/calm.md owns the exact
+// canonically classified operational user rows hide, including a record-backed doorbell
+// once the caller has read the record it names. docs/calm.md owns the exact
 // captain-facing contract and docs/configuration.md
 // the persisted preference schema. Everything here is pure so tests run it under Node.
-import { classifyFirstmateOperationalText } from "./fm-operational-input.ts";
+import {
+  classifyFirstmateOperationalText,
+  firstmateOperationalDoorbellPath,
+  firstmateOperationalRecordKind,
+} from "./fm-operational-input.ts";
 import {
   CALM_PRESERVE_MIN_CHARS,
   calmTextIsSubstantive,
@@ -135,4 +140,18 @@ export function classifyRestoredTranscript(rows: readonly CalmSessionRow[]): {
 /** Whether a user row's text is a canonically classified Firstmate operational input. */
 export function userTextIsOperational(text: string): boolean {
   return classifyFirstmateOperationalText(text) !== undefined;
+}
+
+/**
+ * The record a user row names when its text is a record-backed operational doorbell,
+ * the carrier for harnesses that strip U+2063 from submitted prompts. The doorbell text
+ * alone proves nothing; `recordIsOperational` decides from the record's content.
+ */
+export function userTextOperationalRecord(text: string): string | undefined {
+  return firstmateOperationalDoorbellPath(text);
+}
+
+/** Whether a doorbell's record, as read (undefined when unreadable), holds a current envelope. */
+export function recordIsOperational(content: string | undefined): boolean {
+  return content !== undefined && firstmateOperationalRecordKind(content) !== undefined;
 }

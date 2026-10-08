@@ -2,7 +2,7 @@
 # Lavish adapter for the generic process-to-event runner.
 #
 # Usage:
-#   fm-procevent-lavish.sh arm <artifact.html>
+#   fm-procevent-lavish.sh arm <artifact.html> [--for <task-id>] [--agent-reply-file <path>]
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
@@ -11,16 +11,20 @@
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
-#   fm-procevent-lavish.sh poll <artifact.html>
+#   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
+#   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
-#            waiting, missing, or unknown.
+#            waiting, disconnected, missing, or unknown.
 # read       Print a structured presentation of one already-captured result so a
 #            handler consumes every queued item without grepping the raw file.
 #            It is read-only over the capture: it does not arm, poll, or change
-#            what Lavish delivered. The session-ending freeform message
-#            (tag=message) is its own labeled field, printed first and distinct
-#            from per-element annotations. Declared and presented item counts,
+#            what Lavish delivered. The freeform message (tag=message) is its
+#            own labeled field, printed first and distinct from per-element
+#            annotations; it is labeled SESSION-ENDING MESSAGE, and counted as
+#            session_ending_message_count, only when the session ended, and is
+#            otherwise CAPTAIN MESSAGE and captain_message_count. Declared and
+#            presented item counts,
 #            plus a completeness verdict, follow before all annotations so a
 #            partial read is obvious. Each annotation retains its element uid,
 #            selector, tag, and text. A non-choice freeform comment (`prompt`)
@@ -33,7 +37,17 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below.
+#            transient interruption described below. A staged reply still
+#            present when it starts is posted before the long-poll: through
+#            `lavish-axi reply` when supported, otherwise through the legacy
+#            best-effort `poll --agent-reply` path.
+# deliver-reply
+#            Run by `fm-procevent.sh register-task` under the source lock, only
+#            after the task is eligible to own the board, with the listener argv
+#            it is about to publish. Exit 0 once Lavish accepts the staged reply,
+#            3 when the installed Lavish is a confirmed older release without
+#            synchronous reply so the listener keeps the legacy path, and any
+#            other status when the reply failed or the version is unknown.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -42,14 +56,17 @@
 #            record and never announce; any other exit publishes the wake. This
 #            is the generic no-op contract bin/fm-procevent.sh calls, and the
 #            only place Lavish's notion of "nothing was said" is decided.
+#            Task-owned terminal rounds bypass generic silence so their owner
+#            receives the stop-and-conclude instruction.
 #
 # AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
 # Closing a review surface that carried nothing is the single most common Lavish
 # result: the captain reads a board, says nothing, and closes it. Announcing that
 # put a wake in front of the handler whose entire content was that nothing
-# happened. `silent` therefore holds one narrow, positively-determined shape -
+# happened. `silent` therefore holds two narrow, positively-determined shapes -
 # a session this adapter classifies `ended` that carries no queued content block
-# at all - and every other result stays announced.
+# at all, or `browser_disconnected`, which carries no answer while the session
+# remains open - and every other result stays announced.
 #
 # Deliberately narrow, in both directions. A `Send & End` close carrying the
 # captain's actual answer arrives as `status: feedback` with `session_ended`, so
@@ -66,6 +83,17 @@
 # and how to read a completed result. Ownership, durable capture, publication,
 # and restart recovery all belong to bin/fm-procevent.sh.
 #
+# The published poll vocabulary includes feedback, ended, waiting, and
+# browser_disconnected. A waiting result from this no-timeout poll means a
+# second poller was present; it is not a normal idle round. browser_disconnected
+# means the session remains open and is handled as a silent reconnect wait.
+# Before each poll attempt, resolve the artifact's saved URL from Lavish's own
+# session store (LAVISH_AXI_STATE_DIR/state.json, default ~/.lavish-axi/state.json)
+# and use its host and port. Opening the board writes that URL; polling does not.
+# This is a routing lookup before the blocking call, not presence polling or a
+# second route record. Ambient/configured addresses must not retarget a reply.
+# An unreadable or missing session stops before the staged reply is consumed.
+#
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
 # `<task-id>\t<answer>\t<label>` lines, and stops there. It maps nothing to a
@@ -80,12 +108,10 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
-#   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
-# and that command "long-polls indefinitely" server-side. The adapter therefore
-# runs the plain blocking form with no timeout flag, so results arrive as real
-# server-side events. It adds no periodic discovery, no timer fallback, and no
-# dependency on any unreleased capability.
+# It wraps the published `lavish-axi poll` and `lavish-axi reply` interfaces,
+# verified against 0.1.80. `poll` long-polls indefinitely; `reply` exits only
+# after the server confirms acceptance. Older compatible versions retain the
+# legacy poll-with-reply path, without the synchronous handoff guarantee.
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
@@ -124,7 +150,58 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
+
+apply_session_host() {  # <artifact>
+  local endpoint
+  endpoint=$(perl -MJSON::PP -MCwd=realpath -MEncode=decode,FB_CROAK -e '
+    use strict;
+    use warnings;
+    my ($path, $artifact) = @ARGV;
+    my $real = realpath($artifact) // die "cannot resolve board artifact\n";
+    $real = decode("UTF-8", $real, FB_CROAK);
+    open my $file, "<", $path or die "cannot read Lavish session store\n";
+    -f $file or die "Lavish session store is not a regular file\n";
+    local $/;
+    my $state = eval { decode_json(<$file>) };
+    !$@ or die "invalid Lavish session store\n";
+    ref($state) eq "HASH" && ref($state->{sessions}) eq "HASH"
+      or die "invalid Lavish session store\n";
+    my @sessions = grep {
+      ref($_) eq "HASH" && defined($_->{file}) && $_->{file} eq $real
+    } values %{$state->{sessions}};
+    @sessions == 1 or die "board must have one saved Lavish session\n";
+    my $url = $sessions[0]->{url} // "";
+    $url =~ m{\Ahttp://(\[[0-9a-fA-F:]+\]|[A-Za-z0-9._-]+):([0-9]+)/session/[0-9a-f]{16}(?:\?[^\s#]*)?\z}
+      or die "invalid saved Lavish session URL\n";
+    my ($host, $port) = ($1, $2);
+    $host =~ s/^\[|\]$//g;
+    $host ne "0.0.0.0" && $host ne "::" && $port >= 1 && $port <= 65535
+      or die "invalid saved Lavish server address\n";
+    print "$host\n$port\n";
+  ' "${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json" "$1") \
+    || die "cannot resolve the board server from its Lavish session: $1"
+  LAVISH_AXI_HOST=${endpoint%$'\n'*}
+  LAVISH_AXI_PORT=${endpoint##*$'\n'}
+  export LAVISH_AXI_HOST LAVISH_AXI_PORT
+}
+
+lavish_reply_compatible() {
+  local status=0
+  "$FM_ROOT/bin/fm-bootstrap.sh" lavish-reply-compatible >/dev/null 2>&1 || status=$?
+  case "$status" in
+    0|1) return "$status" ;;
+  esac
+  die "cannot confirm a supported lavish-axi version, so the staged reply was not posted; retry once \`lavish-axi --version\` reports a supported release"
+}
+
+post_lavish_reply() {  # <artifact> <reply-file>
+  local output
+  if ! output=$(lavish-axi reply "$1" --agent-reply-file "$2" 2>&1); then
+    [ -n "$output" ] || output="lavish-axi reply exited nonzero"
+    die "Lavish did not accept the staged reply: $output"
+  fi
+}
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -144,22 +221,78 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact='' task='' reply_file='' id real owner listening
+  local -a listener=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --for)
+        [ "$#" -ge 2 ] || usage
+        task=$2
+        shift 2
+        ;;
+      --agent-reply-file)
+        [ "$#" -ge 2 ] || usage
+        reply_file=$2
+        shift 2
+        ;;
+      --*) usage ;;
+      *)
+        [ -z "$artifact" ] || usage
+        artifact=$1
+        shift
+        ;;
+    esac
+  done
   [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
+  [ -z "$reply_file" ] || [ -n "$task" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
-  # This adapter's own listener command, which runs the plain blocking form with
-  # no --timeout-ms so completion is a server event, and absorbs only the exact
-  # transient interruption. Registering raw poll output is what let that
-  # interruption reach the runner as a captured result.
-  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
-    -- "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" || exit 1
+  listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
+  [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
+  if [ -n "$task" ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
+      "${listener[@]}" || exit 1
+  else
+    # This adapter's own listener command, which runs the plain blocking form
+    # with no --timeout-ms so completion is a server event, and absorbs only
+    # the exact transient interruption.
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
+      -- "${listener[@]}" || exit 1
+  fi
+  # Registration is not a running listener. Readiness is the process-event
+  # owner's evidence for this generation; a miss retires a source that never
+  # started so arm does not leave it registered.
+  listening=0
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id" || listening=$?
+  if [ "$listening" -eq 3 ]; then
+    printf 'still-listening: %s\n' "$id"
+    printf 'artifact: %s\n' "$real"
+    [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
+    printf 'note: an earlier listener is still live and serving this board; this registration takes effect only after the source is retired and armed again\n'
+    exit 0
+  fi
+  if [ "$listening" -ne 0 ]; then
+    owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
+      | awk -v id="$id" '$1 == id { print $3; exit }')
+    case "$owner" in
+      live|orphaned|task:*/listening|task:*/round-open) ;;
+      *) FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true ;;
+    esac
+    exit 1
+  fi
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
+  [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
+}
+
+cmd_deliver_reply() {
+  [ "$#" -eq 4 ] && [ "$1" = poll ] && [ "$3" = --agent-reply-file ] || usage
+  lavish_reply_compatible || exit 3
+  apply_session_host "$2"
+  post_lavish_reply "$2" "$4"
 }
 
 cmd_retire() {
@@ -261,9 +394,14 @@ poll_iteration_floor_wait() {
 
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
-  local pipeline_status
+  local pipeline_status reply_file=''
+  local reply_text='' reply_pending=0
   [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
+  if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
+    reply_file=$3
+  elif [ "$#" -ne 1 ]; then
+    usage
+  fi
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
@@ -281,8 +419,31 @@ cmd_poll() {
   done
   while :; do
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
+      || die "artifact is no longer a readable file: $artifact"
+    apply_session_host "$artifact"
+    # Newer Lavish builds expose a one-shot reply command whose success is the
+    # server's acceptance receipt. Consume the staged file only after that
+    # confirmation; older compatible builds retain the published poll reply
+    # behavior and its best-effort delivery boundary.
+    if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
+      if lavish_reply_compatible; then
+        post_lavish_reply "$artifact" "$reply_file"
+        rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+      else
+        reply_text=$(cat -- "$reply_file") \
+          || die "cannot read agent reply file: $reply_file"
+        rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+        reply_pending=1
+      fi
+    fi
+    if [ "$reply_pending" -eq 1 ]; then
+      lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"
+    else
+      lavish-axi poll "$artifact" | poll_response_filter "$response"
+    fi
     pipeline_status=("${PIPESTATUS[@]}")
+    reply_pending=0
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
     case "$filter_rc" in
@@ -325,9 +486,10 @@ cmd_classify() {
   [ -f "$file" ] || die "result file does not exist: $file"
   status=$(session_field "$file" status)
   case "$status" in
-    feedback) printf 'feedback\n'; return 0 ;;
-    ended)    printf 'ended\n'; return 0 ;;
-    waiting)  printf 'waiting\n'; return 0 ;;
+    feedback)            printf 'feedback\n'; return 0 ;;
+    ended)               printf 'ended\n'; return 0 ;;
+    waiting)             printf 'waiting\n'; return 0 ;;
+    browser_disconnected) printf 'disconnected\n'; return 0 ;;
   esac
   error_message=$(awk 'NR == 1 && /^error:[[:space:]]*/ { sub(/^error:[[:space:]]*/, ""); print }' "$file")
   error_code=$(awk '
@@ -401,6 +563,7 @@ cmd_silent() {
   local file=${1-} content_rc
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  [ "$(cmd_classify "$file")" = disconnected ] && return 0
   [ "$(cmd_classify "$file")" = ended ] || return 1
   result_has_queued_content "$file"
   content_rc=$?
@@ -537,9 +700,9 @@ cmd_answers() { cmd_choice_rows answers "$@"; }
 cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 
 # Present one already-captured result for a handler. Body lines are prefixed
-# so a captain-supplied string cannot forge a section label. The session-ending
-# message is printed before the count line and before any annotation, because
-# that is the field a truncated grep of the raw capture historically dropped.
+# so a captain-supplied string cannot forge a section label. A freeform message
+# is printed before the count line and before any annotation, because that is
+# the field a truncated grep of the raw capture historically dropped.
 # A non-choice annotation that carries a freeform `prompt` prints that comment
 # as its own field; a selector must not hide the typed words, even when the
 # comment matches the captured element text. Choice rows keep Context data
@@ -622,16 +785,18 @@ cmd_read() {
       return if !@lines || (@lines == 1 && $lines[0] eq "");
       print "| $_\n" for @lines;
     }
+    my $ended = $session_ended =~ /^(?:true|True|TRUE)$/;
     if (@messages) {
-      print "SESSION-ENDING MESSAGE\n";
+      my $message_label = $ended ? "SESSION-ENDING MESSAGE" : "CAPTAIN MESSAGE";
+      print "$message_label\n";
       for my $i (0 .. $#messages) {
-        print "SESSION-ENDING MESSAGE PART ", ($i + 1), " of ", scalar(@messages), "\n" if @messages > 1;
+        print "$message_label PART ", ($i + 1), " of ", scalar(@messages), "\n" if @messages > 1;
         my $body = defined $messages[$i]{prompt} && length $messages[$i]{prompt}
           ? $messages[$i]{prompt}
           : (defined $messages[$i]{text} ? $messages[$i]{text} : "");
         emit_body($body);
       }
-      print "END SESSION-ENDING MESSAGE\n";
+      print "END $message_label\n";
     } else {
       print "SESSION-ENDING MESSAGE: (none)\n";
     }
@@ -643,7 +808,8 @@ cmd_read() {
     print "lifecycle: $lifecycle\n";
     print "session_ended: ", (length $session_ended ? $session_ended : "(unset)"), "\n";
     print "annotation_count: ", scalar(@annotations), "\n";
-    print "session_ending_message_count: ", scalar(@messages), "\n";
+    my $message_count_key = $ended ? "session_ending_message_count" : "captain_message_count";
+    print "$message_count_key: ", scalar(@messages), "\n";
     print "\n";
     if (@annotations) {
       print "ANNOTATIONS\n";
@@ -679,6 +845,7 @@ case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
+  deliver-reply) shift; cmd_deliver_reply "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;

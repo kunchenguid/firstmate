@@ -279,7 +279,52 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+# A host whose `sleep` is a multicall coreutils (uutils on Ubuntu 26.04) refuses
+# to run under a foreign name, so a harness-named symlink to it never becomes a
+# live process. The fake `sleep` below models that refusal on any host, which
+# keeps this case meaningful where CI's own `sleep` is single-purpose.
+test_agent_standin_survives_a_multicall_sleep() (
+  local dir="$TMP_ROOT/standin" fakebin real_sleep standin pid
+  real_sleep=$(command -v sleep) || fail "sleep not found"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+case "\${0##*/}" in
+  sleep) exec "$real_sleep" "\$@" ;;
+  *) echo "Requested utility \${0##*/} does not match executable name" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/sleep"
+  ln -s "$fakebin/sleep" "$dir/pi"
+  "$fakebin/sleep" 0 || fail "the fake multicall sleep must run under its own name"
+  if "$dir/pi" 0 2>/dev/null; then
+    fail "the fake multicall sleep must refuse a harness name, or this case proves nothing"
+  fi
+
+  if standin=$(PATH="$fakebin:$(fm_test_base_path_sans "$PATH" cc gcc)" fm_agent_standin "$dir/nocc"); then
+    fail "without a compiler, a multicall sleep must not be offered as a stand-in, got '$standin'"
+  fi
+  assert_absent "$dir/nocc/standin" "a refused stand-in must not be left behind"
+
+  if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+    echo "skip: no C compiler, so the compiled stand-in half of the multicall case cannot run"
+    pass "agent stand-in: a multicall sleep is refused rather than offered as a stand-in"
+    exit 0
+  fi
+  standin=$(PATH="$fakebin:$PATH" fm_agent_standin "$dir/cc") \
+    || fail "with a compiler, a multicall host sleep must still yield a stand-in"
+  ln -s "$standin" "$dir/cc/pi"
+  "$dir/cc/pi" 60 &
+  pid=$!
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "the stand-in must stay alive under a harness name"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "agent stand-in: a multicall sleep is refused, and the compiled stand-in survives a harness name"
+)
+
 test_git_config_isolation || fail "Git fixture config isolation"
+test_agent_standin_survives_a_multicall_sleep || fail "agent stand-in multicall case"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers

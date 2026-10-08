@@ -29,7 +29,8 @@ set -u
 
 # This suite states the markers it means to test in every case. Drop the ambient
 # ones so a verdict never depends on which harness launched the suite.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
+  FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
@@ -715,7 +716,86 @@ SH
   pass "equal-depth descent ties prefer the comm-strength leaf regardless of spawn order"
 }
 
-# --- 7. Session start's supervision protocol follows the corrected verdict ---
+# --- 7. A supervision branch resolves the primary's harness, not its own -----
+
+# A supervision branch running as its own process under another harness sees
+# its own harness in both evidence layers: a Pi engine under a Claude primary
+# carries PI_CODING_AGENT and a pi ancestor. Left alone, an absent or "default"
+# crew or secondmate config would then dispatch workers on Pi. The primary's
+# pin must win while the branch actor is set, and only then.
+pin_probe() {  # <named-executable> <home> <verb> [VAR=VAL ...]
+  local bin=$1 home=$2 verb=$3
+  shift 3
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_SUPERVISION_ACTOR \
+    -u FM_SUPERVISION_PRIMARY_HARNESS FM_HOME="$home" "$@" \
+    "$bin" -c "r=\$(\"$HARNESS\" $verb 2>\"$home/stderr\"); rc=\$?; printf '%s|%s' \"\$r\" \"\$rc\""
+}
+
+test_supervision_branch_resolves_the_primary_pin() {
+  local dir home bin verb got
+  dir="$TMP_ROOT/primary-pin"
+  home="$dir/home"
+  mkdir -p "$home/config"
+  bin=$(named_bin "$dir/pi-tree" pi)
+
+  # Without the pin the branch reads as its own engine, which is the hazard.
+  for verb in '' crew secondmate; do
+    got=$(pin_probe "$bin" "$home" "$verb" PI_CODING_AGENT=true FM_SUPERVISION_ACTOR=branch)
+    [ "$got" = 'pi|0' ] \
+      || fail "an unpinned branch under a Pi engine resolved '${verb:-own}' as '$got', expected pi (the hazard is not live)"
+  done
+
+  for verb in '' crew secondmate; do
+    got=$(pin_probe "$bin" "$home" "$verb" PI_CODING_AGENT=true \
+      FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude)
+    [ "$got" = 'claude|0' ] \
+      || fail "a pinned branch resolved '${verb:-own}' as '$got', expected the primary's claude"
+  done
+  printf 'default\n' > "$home/config/crew-harness"
+  got=$(pin_probe "$bin" "$home" crew PI_CODING_AGENT=true \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude)
+  [ "$got" = 'claude|0' ] || fail "a pinned branch resolved a default crew config as '$got', expected claude"
+
+  # An explicit crew config is still the captain's choice, pin or no pin.
+  printf 'codex\n' > "$home/config/crew-harness"
+  got=$(pin_probe "$bin" "$home" crew PI_CODING_AGENT=true \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude)
+  [ "$got" = 'codex|0' ] || fail "the pin overrode an explicit crew config: '$got'"
+  rm -f "$home/config/crew-harness"
+
+  # Main, or no actor at all, ignores the pin.
+  got=$(pin_probe "$bin" "$home" '' PI_CODING_AGENT=true FM_SUPERVISION_PRIMARY_HARNESS=claude)
+  [ "$got" = 'pi|0' ] || fail "an unmarked process honored the branch-only pin: '$got'"
+  got=$(pin_probe "$bin" "$home" '' PI_CODING_AGENT=true \
+    FM_SUPERVISION_ACTOR=main FM_SUPERVISION_PRIMARY_HARNESS=claude)
+  [ "$got" = 'pi|0' ] || fail "the main actor honored the branch-only pin: '$got'"
+
+  # The ancestry evidence verb reports evidence only and never consults it.
+  got=$(pin_probe "$bin" "$home" ancestry PI_CODING_AGENT=true \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude)
+  [ "$got" = 'comm pi|0' ] || fail "the ancestry verb consulted the pin: '$got'"
+  pass "a supervision branch resolves own, crew, and secondmate to the primary's pinned harness"
+}
+
+test_supervision_branch_refuses_an_unknown_primary_pin() {
+  local dir home bin verb got
+  dir="$TMP_ROOT/primary-pin-bad"
+  home="$dir/home"
+  mkdir -p "$home/config"
+  bin=$(named_bin "$dir/pi-tree" pi)
+  for verb in '' crew secondmate; do
+    got=$(pin_probe "$bin" "$home" "$verb" PI_CODING_AGENT=true \
+      FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=unknown)
+    [ "$got" = '|2' ] \
+      || fail "an unknown pin resolved '${verb:-own}' as '$got', expected a refusal with nothing on stdout"
+    assert_contains "$(cat "$home/stderr")" "FM_SUPERVISION_PRIMARY_HARNESS='unknown' names no known harness" \
+      "the refusal did not name the bad pin"
+  done
+  pass "a supervision branch refuses to resolve a harness from a pin that names none"
+}
+
+# --- 8. Session start's supervision protocol follows the corrected verdict ---
 
 # The consequence the captain actually hit: the wrong verdict emitted Claude's
 # Stop-owned protocol to a Codex primary, so every turn end was blocked for
@@ -758,4 +838,6 @@ test_descent_probe_reaches_a_strength_the_top_of_session_cannot
 test_descent_probe_ignores_a_sibling_branch_the_walk_cannot_reach
 test_descent_probe_tolerates_an_args_only_foreign_verdict_at_the_deepest_vantage
 test_descent_probe_prefers_comm_strength_when_deepest_leaves_tie
+test_supervision_branch_resolves_the_primary_pin
+test_supervision_branch_refuses_an_unknown_primary_pin
 test_supervision_protocol_follows_corrected_verdict

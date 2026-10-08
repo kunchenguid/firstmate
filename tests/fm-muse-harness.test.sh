@@ -88,6 +88,13 @@ case "${1:-}" in
     prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
+        case "$arg" in
+          ". '"*"'")
+            staged=${arg#". '"}
+            staged=${staged%"'"}
+            [ ! -f "$staged" ] || arg=$(cat "$staged")
+            ;;
+        esac
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
         if [ "${FM_FAKE_EXECUTE_MUSE_LAUNCH:-}" = 1 ]; then
           case "$arg" in
