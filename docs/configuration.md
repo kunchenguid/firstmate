@@ -543,7 +543,20 @@ Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, r
 ## Wedged secondmate recovery (config/secondmate-wedge-window)
 
 A Herdr-backed secondmate agent can stay running and registered while it has stopped making progress, which every liveness classifier reads as healthy.
-The watcher's secondmate liveness tick therefore samples two Herdr progress counters per mate and, when neither has moved for the whole configured window while the agent still reports `working`, captures non-destructive evidence, SIGKILLs only that pane's agent process, relaunches through the ordinary guarded path, and raises the wedge alarm.
+The watcher's secondmate liveness tick therefore samples each mate and, when every signal below has stayed frozen for the whole configured window while the agent still reports `working`, captures non-destructive evidence, SIGKILLs only that pane's agent process, relaunches through the ordinary guarded path, and raises the wedge alarm.
+
+Three independent signals must all agree before a kill, because each one alone has a legitimate quiet case:
+
+| Signal | Why it is not enough on its own |
+| --- | --- |
+| Both Herdr progress counters unchanged | A long model response produces no new scrollback either |
+| The agent's consumed CPU time unchanged | A frozen process burns none, but a thinking or tool-driving one keeps accumulating it |
+| No live child process other than the agent's own MCP servers | A long Bash command or a subagent is a live child; the frozen process in the incident had none at all |
+
+The window is counted as observed time, not wall-clock age.
+A gap between two consecutive samples longer than `FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS` (default 300 seconds, several ticks at the default cadence) restarts the window instead of being judged, because a suspended machine or a jumped clock freezes a healthy agent's signals without it being wedged.
+
+Any signal that cannot be read yields no verdict at all, so a vendor shape change or an unreadable process table can only disable recovery, never authorize a kill.
 
 The optional local, gitignored `config/secondmate-wedge-window` sets that no-progress window in whole seconds.
 An absent file means 900 seconds.
@@ -2479,6 +2492,7 @@ FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each regist
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds bounding one watcher-driven relaunch, so a wedged spawn cannot stall the poll; zero or invalid values use 120
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600
+FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS=300   # largest gap between two consecutive wedge samples that still counts as observed time; past it the no-progress window restarts instead of being judged, because a suspended machine or a jumped clock freezes a healthy agent's signals without it being wedged; several ticks at the default 60s cadence
 FM_HERDR_WEDGE_CAPTURE_TIMEOUT_SECS=45   # seconds bounding each non-destructive evidence command (`sample`, `lsof`, `eu-stack`) the wedged-secondmate recovery runs before killing the frozen agent, so a capture cannot stall the watcher tick; an abandoned command is recorded in the evidence file and never blocks the recovery
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it

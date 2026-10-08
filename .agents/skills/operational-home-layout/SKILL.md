@@ -121,7 +121,7 @@ state/               runtime records and signals; gitignored
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
   .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .dead-reported-* .writing-* .waiting-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .secondmate-liveness-tick .secondmate-liveness-*.lock*   watcher internals; never touch
   .secondmate-relaunch-<id> .secondmate-relaunch-bound-<id>   durable relaunch history and parked-bound state; never touch (bin/fm-secondmate-liveness-lib.sh owns the ledger contract)
-  .secondmate-wedge-<id>   last sampled herdr progress counters for the no-progress window; runtime state, never touch (bin/fm-herdr-wedge-lib.sh owns it)
+  .secondmate-wedge-<id>   last sampled herdr progress counters, agent CPU time, window start, and sample epoch for the no-progress window; runtime state, never touch (bin/fm-herdr-wedge-lib.sh owns it)
   .wedge-sample-<id>-<epoch>.txt   non-destructive evidence captured from a frozen secondmate agent before it was killed; the relaunch ledger points at it, and teardown deliberately leaves it behind
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it

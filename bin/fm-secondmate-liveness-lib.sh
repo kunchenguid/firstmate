@@ -31,15 +31,18 @@
 # running and registered but which has stopped making progress classifies
 # `alive` above, correctly and permanently, so it fell through every recovery
 # path and needed a human SIGKILL. When the backend classifier says `alive`,
-# this library asks bin/fm-herdr-wedge-lib.sh - which owns the progress
-# counters, the configurable no-progress window, the evidence capture, and the
-# agent-only kill - whether that liveness is real. A `wedged` verdict is
-# relaunchable; every other wedge verdict (`progressing`, `not-working`,
-# `baseline`, `unreadable`) leaves the mate alive and untouched.
+# this library asks bin/fm-herdr-wedge-lib.sh - which owns the progress signals,
+# the configurable no-progress window, the evidence capture, and the agent-only
+# kill - whether that liveness is real. A `wedged` verdict is relaunchable;
+# every other wedge verdict (`progressing`, `not-working`, `baseline`,
+# `unreadable`) leaves the mate alive and untouched.
 #
 # Unlike `dead`, recovery from `wedged` kills a LIVE process, so three limits
-# apply and all three are deliberate. The no-progress window must elapse with
-# neither counter moving. Non-destructive evidence is captured BEFORE the kill
+# apply and all three are deliberate. The no-progress window must elapse, as
+# observed time, with every signal that library reads frozen - both herdr
+# progress counters, the agent's consumed CPU time, and the absence of any live
+# non-MCP child process - because each one alone has a legitimate quiet case.
+# Non-destructive evidence is captured BEFORE the kill
 # and recorded in the ledger, because the three freezes that motivated this left
 # no sample and so no proven mechanism. The caller's existing relaunch bound
 # applies unchanged, so even a systematically mis-detecting probe cannot
@@ -476,6 +479,21 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
       FM_SM_LIVE_RC=1
       return 1
     }
+    # The recovery above kills only the agent, so the pane survives as a bare
+    # shell - and the spawn below creates a NEW pane rather than reusing it,
+    # exactly as it does for a `dead` endpoint. Close the agent-free pane here
+    # for the same reason that branch does, or every local wedge recovery would
+    # leak a husk pane. This stays inside "SIGKILL only that pane's agent
+    # process": nothing is running in the pane any more, and no session server
+    # or sibling pane is touched. A remote route needs nothing here - its own
+    # host-local launch path already removes a confirmed agent-less endpoint
+    # before relaunching.
+    if [ -z "$(fm_meta_get "$meta" remote_host)" ]; then
+      backend=$(fm_backend_of_meta "$meta")
+      target=$(fm_backend_target_of_meta "$meta")
+      [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
+      [ -z "$target" ] || fm_backend_kill "$backend" "$target" 2>/dev/null || true
+    fi
   fi
   local rc=0
   if [ -n "$timeout" ]; then

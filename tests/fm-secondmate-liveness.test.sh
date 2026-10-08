@@ -746,21 +746,27 @@ test_remote_poll_probe_unreachable_preserves_route
 # --- wedged secondmate: detection, capture, kill scope, and bound ------------
 # bin/fm-herdr-wedge-lib.sh adds the one liveness state the backend classifier
 # cannot express: a Herdr-backed agent whose process is running and registered
-# but which has stopped making progress. It reads two independent Herdr progress
-# counters (state_change_seq from `agent get`, scroll.max_offset_from_bottom
-# from `pane list`), and only declares `wedged` when BOTH are unchanged across
-# the configured window while agent_status is still `working`.
+# but which has stopped making progress.
+#
+# A wedged verdict needs three independent signals to agree, because each one
+# alone has a legitimate quiet case: both Herdr progress counters unchanged
+# (a long model response produces no new scrollback either), consumed CPU time
+# unchanged (a frozen process burns none, a working one keeps accumulating it),
+# and no live non-MCP child process (a long Bash command or subagent is a live
+# child; the frozen process in the incident had none at all).
 #
 # The guarantees under test:
-#   - a working pane that advances EITHER counter stays alive, so a slow model
-#     response or a long Bash command is never killed;
-#   - a working pane that advances neither becomes wedged once the window has
-#     actually elapsed, and not before;
+#   - a working pane that advances ANY of those signals stays alive;
+#   - a working pane that advances none becomes wedged once the window has
+#     actually elapsed as observed time, and not before;
+#   - a gap between samples larger than the detector could have watched - a
+#     suspended machine, a jumped clock - restarts the window instead of being
+#     judged, so waking up does not kill live work;
 #   - an idle, done, or blocked agent is never a wedge candidate;
-#   - an unreadable counter yields `unreadable`, never `wedged`, so a vendor
-#     shape change can only disable recovery, not cause a kill;
-#   - the session-start sweep only re-bases the window (`baseline`); the
-#     watcher's continuous poll is the sole producer of a wedged verdict;
+#   - any unreadable signal yields `unreadable`, never `wedged`, so a vendor
+#     shape change or an unreadable process table can only disable recovery;
+#   - the session-start sweep only re-bases the window; the watcher's continuous
+#     poll is the sole producer of a wedged verdict;
 #   - the configured window has a floor and an `off` switch;
 #   - evidence is captured BEFORE the kill and recorded in the relaunch ledger;
 #   - the kill reaches only the pane's own agent process - never the pane shell,
@@ -768,10 +774,34 @@ test_remote_poll_probe_unreachable_preserves_route
 #   - a wedged relaunch feeds the SAME attempt ledger the watcher's existing
 #     relaunch bound counts, so a mis-detecting probe cannot kill-loop a mate.
 
-# make_wedge_herdr <dir>: a fake `herdr` answering the three read-only calls the
-# wedge path makes. Unlike the ordered-response fakes elsewhere, this one is
-# keyed by subcommand and re-read on every call, because the classifier is
-# deliberately called repeatedly across simulated watcher ticks.
+# Fixture processes are real and long-lived, so they are tracked and reaped on
+# exit rather than relying on each case's own teardown: a case that fails early
+# would otherwise leave a `sleep 300` (or a busy loop) behind for the rest of
+# the suite. tests/lib.sh owns the directory cleanup, so this trap chains to it.
+WEDGE_PID_FILE="$TMP_ROOT/.wedge-pids"
+: > "$WEDGE_PID_FILE"
+
+wedge_track_pid() {  # <pid>
+  printf '%s\n' "$1" >> "$WEDGE_PID_FILE"
+}
+
+wedge_reap_pids() {
+  local p
+  [ -f "$WEDGE_PID_FILE" ] || return 0
+  while read -r p; do
+    [ -n "$p" ] || continue
+    pkill -P "$p" 2>/dev/null || true
+    kill -KILL "$p" 2>/dev/null || true
+  done < "$WEDGE_PID_FILE"
+  : > "$WEDGE_PID_FILE"
+}
+
+trap 'wedge_reap_pids; fm_test_cleanup' EXIT
+
+# make_wedge_herdr <dir>: a fake `herdr` answering the read-only calls the wedge
+# path makes. Unlike the ordered-response fakes elsewhere, this one is keyed by
+# subcommand and re-read on every call, because the classifier is deliberately
+# called repeatedly across simulated watcher ticks.
 #
 # Files under <dir>: `status`, `seq`, `offset` drive `agent get` and
 # `pane list`; `procinfo.json` is the `pane process-info` body; `fail-agent`
@@ -824,12 +854,91 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# wedge_classify <dir> <state-dir> <window> <mode>: one classifier sample, run
-# through the real adapter CLI wrapper exactly as production does.
+# make_wedge_ps <dir>: a `ps` shim for the two unreadable-signal cases. It
+# passes everything through to the real `ps` unless told to fail one specific
+# read, so the fixture can blind exactly one signal and leave the others intact.
+make_wedge_ps() {
+  local dir=$1
+  mkdir -p "$dir/psbin"
+  cat > "$dir/psbin/ps" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" cputime= "*|*"cputime="*) [ -z "\${FM_FAKE_PS_FAIL_CPUTIME:-}" ] || exit 1 ;;
+esac
+case " \$* " in
+  *"-axo"*) [ -z "\${FM_FAKE_PS_FAIL_TABLE:-}" ] || exit 1 ;;
+esac
+exec $(command -v ps) "\$@"
+SH
+  chmod +x "$dir/psbin/ps"
+  printf '%s\n' "$dir/psbin/ps"
+}
+
+# attach_wedge_agent <dir> <frozen|tool-child|mcp-child|cpu-burn>: a REAL
+# process shape for the pane, and the matching `pane process-info` body.
+#
+# The agent is a symlink to a real long-running binary so the kernel records
+# `claude` as the executable identity, which is what fm-agent-process-lib.sh
+# classifies on; copying a platform binary would fail code signing on macOS.
+# The pane shell runs a second command after the agent so it outlives it, which
+# is what makes "the shell survived" a real assertion about the kill's scope.
+#
+#   frozen      the incident's shape: an agent burning no CPU with no children
+#   tool-child  a healthy agent running a long, quiet tool command
+#   mcp-child   an agent whose only child is one of its own MCP servers
+#   cpu-burn    a healthy agent consuming CPU with nothing on screen
+#
+# Echoes "<shell-pid> <agent-pid>".
+attach_wedge_agent() {  # <dir> <kind>
+  local dir=$1 kind=$2 sleep_bin bash_bin lab shell_pid agent_pid i=0 comm body
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  bash_bin=$(command -v bash) || fail "bash not found"
+  lab="$dir/agentbin"; mkdir -p "$lab"
+  ln -sf "$sleep_bin" "$lab/toolcmd"
+  ln -sf "$sleep_bin" "$lab/mcp-server-fs"
+  case "$kind" in
+    frozen) ln -sf "$sleep_bin" "$lab/claude"; body="'$lab/claude' 300" ;;
+    tool-child)
+      ln -sf "$bash_bin" "$lab/claude"
+      # The trailing `:` stops bash exec-optimizing the single command away, so
+      # the agent really has a child.
+      body="'$lab/claude' -c \"'$lab/toolcmd' 300; :\""
+      ;;
+    mcp-child)
+      ln -sf "$bash_bin" "$lab/claude"
+      body="'$lab/claude' -c \"'$lab/mcp-server-fs' 300; :\""
+      ;;
+    cpu-burn)
+      ln -sf "$bash_bin" "$lab/claude"
+      body="'$lab/claude' -c 'while :; do :; done'"
+      ;;
+    *) fail "unknown wedge agent kind: $kind" ;;
+  esac
+  sh -c "$body; '$sleep_bin' 300" >/dev/null 2>&1 &
+  shell_pid=$!
+  wedge_track_pid "$shell_pid"
+  while [ "$i" -lt 200 ]; do
+    for agent_pid in $(pgrep -P "$shell_pid" 2>/dev/null); do
+      comm=$(LC_ALL=C ps -p "$agent_pid" -o comm= 2>/dev/null)
+      case "${comm##*/}" in claude) break 2 ;; esac
+    done
+    agent_pid=''
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -n "${agent_pid:-}" ] || fail "the $kind fixture never started its agent child"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"claude","argv0":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' \
+    "$shell_pid" "$agent_pid" "$agent_pid" > "$dir/procinfo.json"
+  printf '%s %s\n' "$shell_pid" "$agent_pid"
+}
+
+# wedge_classify <dir> <state-dir> <window> <mode> [env...]: one classifier
+# sample, run through the real adapter CLI wrapper exactly as production does.
 wedge_classify() {
   local dir=$1 state=$2 window=$3 mode=$4 fakebin="$1/fakebin"
+  shift 4
   # shellcheck disable=SC2016 # positional params expand in the child shell.
-  env PATH="$fakebin:$BASE_PATH" FM_FAKE_WEDGE_DIR="$dir" FM_HOME="$state/.." \
+  env PATH="$fakebin:$BASE_PATH" FM_FAKE_WEDGE_DIR="$dir" FM_HOME="$state/.." "$@" \
     bash -c '
       . "$0/bin/fm-backend.sh"
       . "$0/bin/fm-herdr-wedge-lib.sh"
@@ -837,53 +946,144 @@ wedge_classify() {
     ' "$ROOT" "$state" "$window" "$mode"
 }
 
-test_wedge_progress_on_either_counter_keeps_the_mate_alive() {
+# wedge_age_window <state-dir> <secs>: push the recorded window start back by
+# <secs> while leaving the last-sample epoch where it is, which is exactly the
+# steady state a continuously sampling watcher produces. Ageing both fields
+# would instead simulate the unobserved gap the suspend case covers.
+wedge_age_window() {  # <state-dir> <secs>
+  local record="$1/.secondmate-wedge-sm1"
+  awk -F '\t' -v OFS='\t' -v back="$2" '{ $6 = $6 - back; print }' "$record" > "$record.aged" \
+    && mv "$record.aged" "$record"
+}
+
+test_wedge_progress_on_any_signal_keeps_the_mate_alive() {
   local dir state out
   dir="$TMP_ROOT/wedge-progressing"; state="$dir/state"
   make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
 
-  # First sample only establishes the baseline.
-  out=$(wedge_classify "$dir" "$state" 1 judge)
+  out=$(wedge_classify "$dir" "$state" 600 judge)
   [ "$out" = progressing ] || fail "the first sample should start the window, got '$out'"
-  sleep 2
 
   # state_change_seq advanced; the scroll counter did not. Either one moving is
   # progress, and this is the case a false positive would kill real work in: a
   # long model response produces no new scrollback.
   printf '101\n' > "$dir/seq"
-  out=$(wedge_classify "$dir" "$state" 1 judge)
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
   [ "$out" = progressing ] || fail "an advancing state_change_seq must read progressing, got '$out'"
-  sleep 2
 
   # The mirror case: scrollback grew while the status sequence did not.
   printf '501\n' > "$dir/offset"
-  out=$(wedge_classify "$dir" "$state" 1 judge)
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
   [ "$out" = progressing ] || fail "an advancing scroll counter must read progressing, got '$out'"
 
   # And the divergence that proves the window is really being measured: with
-  # both counters frozen the very same fixture goes wedged.
-  sleep 2
-  out=$(wedge_classify "$dir" "$state" 1 judge)
-  [ "$out" = wedged ] || fail "the control case must wedge once neither counter moves, got '$out'"
+  # every signal frozen the very same fixture goes wedged.
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = wedged ] || fail "the control case must wedge once no signal moves, got '$out'"
   pass "wedge: a working pane advancing either progress counter is never wedged"
+}
+
+test_wedge_cpu_time_growth_keeps_the_mate_alive() {
+  local dir state out
+  dir="$TMP_ROOT/wedge-cpu"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  # A healthy agent that is thinking rather than printing: no new scrollback and
+  # no status change, but it is consuming CPU the whole time.
+  attach_wedge_agent "$dir" cpu-burn >/dev/null
+
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = progressing ] || fail "the first sample should start the window, got '$out'"
+  # Let the busy loop accumulate at least one more whole second of CPU time.
+  sleep 2
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = progressing ] \
+    || fail "rising CPU time must keep a quiet agent alive even past the window, got '$out'"
+  pass "wedge: a working pane whose CPU time rises is never wedged, however quiet its output"
+}
+
+test_wedge_live_tool_child_keeps_the_mate_alive() {
+  local dir state out
+  dir="$TMP_ROOT/wedge-toolchild"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  # A healthy agent blocked waiting on one long, quiet tool command: its own
+  # counters are frozen and it burns no CPU while it waits, so the live child is
+  # the only thing that tells it apart from the incident's frozen process.
+  attach_wedge_agent "$dir" tool-child >/dev/null
+
+  wedge_classify "$dir" "$state" 600 judge >/dev/null
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = progressing ] \
+    || fail "a live non-MCP child must keep a quiet agent alive past the window, got '$out'"
+  pass "wedge: a working pane running a long quiet tool command is never wedged"
+}
+
+test_wedge_mcp_server_child_alone_still_wedges() {
+  local dir state out
+  dir="$TMP_ROOT/wedge-mcpchild"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  # The divergence that keeps the previous case honest: the SAME shape, with the
+  # child being one of the agent's own MCP servers rather than tool work. An MCP
+  # server lives for the whole session, so it is not evidence of progress.
+  attach_wedge_agent "$dir" mcp-child >/dev/null
+
+  wedge_classify "$dir" "$state" 600 judge >/dev/null
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = wedged ] \
+    || fail "a frozen agent whose only child is its own MCP server must still wedge, got '$out'"
+  pass "wedge: an MCP server child is not mistaken for live work, so the frozen shape still wedges"
+}
+
+test_wedge_unobserved_gap_restarts_the_window() {
+  local dir state out record
+  dir="$TMP_ROOT/wedge-suspend"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
+  record="$state/.secondmate-wedge-sm1"
+
+  wedge_classify "$dir" "$state" 600 judge >/dev/null
+  # The suspend shape: the machine slept, so BOTH the window start and the last
+  # sample this detector actually took are far in the past. The agent's counters
+  # cannot have moved while it was frozen by the OS either, so wall-clock age
+  # would read as wedged - and SIGKILL live work.
+  awk -F '\t' -v OFS='\t' '{ $6 = $6 - 1800; $7 = $7 - 1800; print }' "$record" > "$record.aged" \
+    && mv "$record.aged" "$record"
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = progressing ] \
+    || fail "a gap larger than the detector could have watched must restart the window, got '$out'"
+
+  # Not vacuous: the identical fixture, with the window aged but the sampling
+  # continuous, does wedge.
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
+  [ "$out" = wedged ] \
+    || fail "continuously observed frozen time must still wedge, got '$out'"
+  pass "wedge: an unobserved gap (suspend or clock jump) restarts the window instead of killing live work"
 }
 
 test_wedge_requires_the_whole_window_to_elapse() {
   local dir state out
   dir="$TMP_ROOT/wedge-window"; state="$dir/state"
   make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
 
   out=$(wedge_classify "$dir" "$state" 3600 judge)
   [ "$out" = progressing ] || fail "baseline sample should read progressing, got '$out'"
-  sleep 2
-  # Frozen counters, but nowhere near a generous window: still alive. This is
-  # the guard that keeps an ordinary long-running turn safe.
+  # Frozen on every signal, but nowhere near a generous window: still alive.
+  wedge_age_window "$state" 120
   out=$(wedge_classify "$dir" "$state" 3600 judge)
   [ "$out" = progressing ] \
-    || fail "frozen counters inside a generous window must stay progressing, got '$out'"
+    || fail "a frozen agent inside a generous window must stay progressing, got '$out'"
 
-  out=$(wedge_classify "$dir" "$state" 1 judge)
-  [ "$out" = wedged ] || fail "frozen counters past the window must read wedged, got '$out'"
+  wedge_age_window "$state" 3600
+  out=$(wedge_classify "$dir" "$state" 3600 judge)
+  [ "$out" = wedged ] || fail "a frozen agent past the window must read wedged, got '$out'"
   pass "wedge: a wedged verdict needs the configured no-progress window to elapse in full"
 }
 
@@ -891,13 +1091,14 @@ test_wedge_never_fires_for_an_idle_done_or_blocked_agent() {
   local dir state out status
   dir="$TMP_ROOT/wedge-not-working"; state="$dir/state"
   make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
 
   for status in idle 'done' blocked; do
     printf 'working\n' > "$dir/status"
-    wedge_classify "$dir" "$state" 1 judge >/dev/null
-    sleep 2
+    wedge_classify "$dir" "$state" 600 judge >/dev/null
+    wedge_age_window "$state" 601
     printf '%s\n' "$status" > "$dir/status"
-    out=$(wedge_classify "$dir" "$state" 1 judge)
+    out=$(wedge_classify "$dir" "$state" 600 judge)
     [ "$out" = not-working ] \
       || fail "a '$status' agent must never be a wedge candidate, got '$out'"
     [ ! -e "$state/.secondmate-wedge-sm1" ] \
@@ -906,43 +1107,64 @@ test_wedge_never_fires_for_an_idle_done_or_blocked_agent() {
   pass "wedge: an idle, done, or blocked agent is never treated as wedged"
 }
 
-test_wedge_unreadable_counters_never_authorize_a_kill() {
-  local dir state out marker
+test_wedge_unreadable_signals_never_authorize_a_kill() {
+  local dir state out marker psbin
   dir="$TMP_ROOT/wedge-unreadable"; state="$dir/state"
   make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
+  psbin=$(make_wedge_ps "$dir")
 
   # Establish a frozen window first, so every case below WOULD read wedged if
-  # the counters were readable - that is what makes these assertions meaningful
+  # its signal were readable - that is what makes these assertions meaningful
   # rather than vacuous.
-  wedge_classify "$dir" "$state" 1 judge >/dev/null
-  sleep 2
-  [ "$(wedge_classify "$dir" "$state" 1 judge)" = wedged ] \
+  wedge_classify "$dir" "$state" 600 judge >/dev/null
+  wedge_age_window "$state" 601
+  [ "$(wedge_classify "$dir" "$state" 600 judge)" = wedged ] \
     || fail "the fixture did not reach a wedged verdict, so the unreadable cases prove nothing"
 
+  # A renamed or unreadable herdr counter.
   for marker in fail-agent fail-panes drop-seq drop-offset; do
     : > "$dir/$marker"
-    out=$(wedge_classify "$dir" "$state" 1 judge)
+    wedge_age_window "$state" 601
+    out=$(wedge_classify "$dir" "$state" 600 judge)
     [ "$out" = unreadable ] \
       || fail "with '$marker' the verdict must be unreadable, never a kill authorization, got '$out'"
     rm -f "$dir/$marker"
   done
 
-  out=$(wedge_classify "$dir" "$state" 1 judge)
+  # An unreadable CPU-time column, which is the signal that separates a frozen
+  # process from a thinking one.
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge \
+    FM_HERDR_PS_BIN="$psbin" FM_FAKE_PS_FAIL_CPUTIME=1)
+  [ "$out" = unreadable ] \
+    || fail "an unreadable CPU time must never wedge, got '$out'"
+
+  # An unreadable process table, which is where the live-child signal comes from.
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge \
+    FM_HERDR_PS_BIN="$psbin" FM_FAKE_PS_FAIL_TABLE=1)
+  [ "$out" = unreadable ] \
+    || fail "an unreadable process table must never wedge, got '$out'"
+
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 judge)
   [ "$out" = wedged ] || fail "the readable fixture should wedge again after the unreadable cases, got '$out'"
-  pass "wedge: an unreadable or renamed progress counter disables recovery instead of authorizing a kill"
+  pass "wedge: an unreadable counter, CPU time, or process table disables recovery instead of authorizing a kill"
 }
 
 test_wedge_session_start_mode_only_rebases_the_window() {
   local dir state out
   dir="$TMP_ROOT/wedge-baseline"; state="$dir/state"
   make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+  attach_wedge_agent "$dir" frozen >/dev/null
 
-  wedge_classify "$dir" "$state" 1 judge >/dev/null
-  sleep 2
-  out=$(wedge_classify "$dir" "$state" 1 baseline)
+  wedge_classify "$dir" "$state" 600 judge >/dev/null
+  wedge_age_window "$state" 601
+  out=$(wedge_classify "$dir" "$state" 600 baseline)
   [ "$out" = baseline ] || fail "the session-start sweep must only re-base, got '$out'"
   # The re-base really moved the window: an immediate judging sample is clean.
-  out=$(wedge_classify "$dir" "$state" 1 judge)
+  out=$(wedge_classify "$dir" "$state" 600 judge)
   [ "$out" = progressing ] \
     || fail "a re-based window must restart the clock rather than wedging at once, got '$out'"
   pass "wedge: the session-start sweep re-bases the window and never produces a verdict"
@@ -957,7 +1179,7 @@ test_wedge_window_config_has_a_floor_and_an_off_switch() {
 
   printf 'off\n' > "$cfg/secondmate-wedge-window"
   out=$(bash -c '. "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_window "$1"' "$ROOT" "$cfg")
-  [ "$out" = off ] || fail "'off' should disable wedge detection, got '$out'"
+  [ "$out" = off ] || fail "an off window should disable wedge detection, got '$out'"
 
   printf '1800\n' > "$cfg/secondmate-wedge-window"
   out=$(bash -c '. "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_window "$1"' "$ROOT" "$cfg")
@@ -981,32 +1203,14 @@ test_wedge_window_config_has_a_floor_and_an_off_switch() {
 # a shell whose child is an agent-named process (the pane), plus an identical
 # agent-named process OUTSIDE that subtree (a sibling pane's agent, or the
 # session server). Echoes "<shell-pid> <agent-pid> <outsider-pid>".
-#
-# A symlink to a real long-running binary makes the kernel record `claude` as
-# the executable identity, which is what fm-agent-process-lib.sh classifies on;
-# copying a platform binary would fail code signing on macOS.
 make_wedge_subtree() {
-  local dir=$1 sleep_bin lab shell_pid agent_pid outsider_pid i=0
+  local dir=$1 sleep_bin lab shell_pid agent_pid outsider_pid
   sleep_bin=$(command -v sleep) || fail "sleep not found"
-  lab="$dir/agentbin"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/claude"
-  # Both fixtures detach from this function's stdout: a long-lived background
-  # process that inherits it would hold a capturing caller's pipe open for its
-  # whole lifetime.
-  # The pane shell outlives its agent child (it runs a second, non-agent-named
-  # command afterwards), so "the shell survived" is a real assertion about the
-  # kill's scope rather than an artifact of the shell exiting with its child.
-  sh -c "'$lab/claude' 300; '$sleep_bin' 300" >/dev/null 2>&1 &
-  shell_pid=$!
+  read -r shell_pid agent_pid <<< "$(attach_wedge_agent "$dir" frozen)"
+  lab="$dir/agentbin"
   "$lab/claude" 300 >/dev/null 2>&1 &
   outsider_pid=$!
-  while [ "$i" -lt 100 ]; do
-    agent_pid=$(pgrep -P "$shell_pid" 2>/dev/null | head -1)
-    [ -z "$agent_pid" ] || break
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ -n "${agent_pid:-}" ] || fail "the fixture pane shell never started its agent child"
+  wedge_track_pid "$outsider_pid"
   printf '%s %s %s\n' "$shell_pid" "$agent_pid" "$outsider_pid"
 }
 
@@ -1015,8 +1219,6 @@ test_wedge_kill_reaches_only_the_panes_own_agent_process() {
   dir="$TMP_ROOT/wedge-kill-scope"
   make_wedge_herdr "$dir" >/dev/null
   read -r shell_pid agent_pid outsider_pid <<< "$(make_wedge_subtree "$dir")"
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"claude","argv0":"claude","argv":["claude"],"cmdline":"claude 300"}]}}}\n' \
-    "$shell_pid" "$agent_pid" "$agent_pid" > "$dir/procinfo.json"
 
   # Attribution first: only the in-pane agent is ever a candidate.
   # shellcheck disable=SC2016 # positional params expand in the child shell.
@@ -1038,9 +1240,6 @@ test_wedge_kill_reaches_only_the_panes_own_agent_process() {
     || fail "the pane's own shell was killed; that closes the pane instead of recovering the agent"
   kill -0 "$outsider_pid" 2>/dev/null \
     || fail "an agent-named process OUTSIDE the pane subtree was killed - a sibling pane or the session server would be lost"
-
-  kill "$shell_pid" "$outsider_pid" 2>/dev/null || true
-  pkill -P "$shell_pid" 2>/dev/null || true
   pass "wedge: SIGKILL reaches only the pane's own agent pid, never its shell or a process outside the subtree"
 }
 
@@ -1049,8 +1248,6 @@ test_wedge_recovery_captures_evidence_before_killing_and_ledgers_it() {
   dir="$TMP_ROOT/wedge-capture"; state="$dir/state"
   make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state" "$dir/home/config"
   read -r shell_pid agent_pid outsider_pid <<< "$(make_wedge_subtree "$dir")"
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"claude","argv0":"claude","argv":["claude"],"cmdline":"claude 300"}]}}}\n' \
-    "$shell_pid" "$agent_pid" "$agent_pid" > "$dir/procinfo.json"
   printf 'window=fmtest:w1:p2\nkind=secondmate\nharness=claude\nbackend=herdr\nherdr_session=fmtest\nhome=%s\n' \
     "$dir/mate" > "$state/sm1.meta"
 
@@ -1082,12 +1279,12 @@ test_wedge_recovery_captures_evidence_before_killing_and_ledgers_it() {
 
   sleep 0.5
   kill -0 "$agent_pid" 2>/dev/null && fail "the wedged agent survived recovery"
+  # The recovery primitive itself must still leave the pane shell alive; closing
+  # the now agent-free pane belongs to the relaunch path, not here.
   kill -0 "$shell_pid" 2>/dev/null || fail "recovery killed the pane shell"
   kill -0 "$outsider_pid" 2>/dev/null || fail "recovery killed a process outside the pane subtree"
   [ ! -e "$state/.secondmate-wedge-sm1" ] \
     || fail "the recovered mate kept the frozen agent's progress sample instead of starting clean"
-
-  kill "$shell_pid" "$outsider_pid" 2>/dev/null || true
   pass "wedge: recovery captures live-process evidence before the kill and records its path in the ledger"
 }
 
@@ -1123,8 +1320,6 @@ test_wedge_probe_reports_relaunchable_only_on_the_watcher_tick() {
   dir="$TMP_ROOT/wedge-probe"; state="$dir/state"
   make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state" "$dir/home/config"
   read -r shell_pid agent_pid outsider_pid <<< "$(make_wedge_subtree "$dir")"
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"claude","argv0":"claude","argv":["claude"],"cmdline":"claude 300"}]}}}\n' \
-    "$shell_pid" "$agent_pid" "$agent_pid" > "$dir/procinfo.json"
   printf 'window=fmtest:w1:p2\nkind=secondmate\nharness=claude\nbackend=herdr\nherdr_session=fmtest\nhome=%s\n' \
     "$dir/mate" > "$state/sm1.meta"
   printf '600\n' > "$dir/home/config/secondmate-wedge-window"
@@ -1144,21 +1339,14 @@ test_wedge_probe_reports_relaunchable_only_on_the_watcher_tick() {
   [ "$out" = 'alive|alive|0|progressing' ] \
     || fail "the first poll should only start the window and leave the mate alive, got '$out'"
 
-  # Age the recorded sample past the configured window without waiting it out:
-  # the record's own `since` field is the clock the classifier reads.
-  awk -F '\t' -v OFS='\t' '{ $5 = $5 - 601; print }' "$state/.secondmate-wedge-sm1" \
-    > "$state/.secondmate-wedge-sm1.aged" \
-    && mv "$state/.secondmate-wedge-sm1.aged" "$state/.secondmate-wedge-sm1"
-
+  wedge_age_window "$state" 601
   out=$(probe poll)
   [ "$out" = 'relaunchable|wedged|wedged|wedged' ] \
     || fail "a frozen working pane past the window should be relaunchable as wedged, got '$out'"
 
   # The same aged record under the session-start sweep is only re-based, never
   # acted on - a sweep sample cannot tell a frozen agent from an unobserved one.
-  awk -F '\t' -v OFS='\t' '{ $5 = $5 - 601; print }' "$state/.secondmate-wedge-sm1" \
-    > "$state/.secondmate-wedge-sm1.aged" \
-    && mv "$state/.secondmate-wedge-sm1.aged" "$state/.secondmate-wedge-sm1"
+  wedge_age_window "$state" 601
   out=$(probe full)
   [ "$out" = 'alive|alive|0|baseline' ] \
     || fail "the session-start sweep must leave a frozen mate alive and re-based, got '$out'"
@@ -1167,10 +1355,7 @@ test_wedge_probe_reports_relaunchable_only_on_the_watcher_tick() {
   printf 'off\n' > "$dir/home/config/secondmate-wedge-window"
   out=$(probe poll)
   [ "$out" = 'alive|alive|0|' ] \
-    || fail "config/secondmate-wedge-window=off must disable wedge detection, got '$out'"
-
-  kill "$shell_pid" "$outsider_pid" 2>/dev/null || true
-  pkill -P "$shell_pid" 2>/dev/null || true
+    || fail "an off wedge window must disable wedge detection, got '$out'"
   pass "probe: a wedged herdr secondmate is relaunchable on the watcher tick only, and an off window disables it"
 }
 
@@ -1213,10 +1398,14 @@ test_wedge_relaunch_is_bounded_by_the_existing_attempt_ledger() {
   pass "wedge: wedged relaunches consume the existing bounded attempt budget, so a misdetection cannot kill-loop"
 }
 
-test_wedge_progress_on_either_counter_keeps_the_mate_alive
+test_wedge_progress_on_any_signal_keeps_the_mate_alive
+test_wedge_cpu_time_growth_keeps_the_mate_alive
+test_wedge_live_tool_child_keeps_the_mate_alive
+test_wedge_mcp_server_child_alone_still_wedges
+test_wedge_unobserved_gap_restarts_the_window
 test_wedge_requires_the_whole_window_to_elapse
 test_wedge_never_fires_for_an_idle_done_or_blocked_agent
-test_wedge_unreadable_counters_never_authorize_a_kill
+test_wedge_unreadable_signals_never_authorize_a_kill
 test_wedge_session_start_mode_only_rebases_the_window
 test_wedge_window_config_has_a_floor_and_an_off_switch
 test_wedge_kill_reaches_only_the_panes_own_agent_process

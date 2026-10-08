@@ -81,6 +81,13 @@ FM_HERDR_WEDGE_CAPTURE_TIMEOUT_SECS=${FM_HERDR_WEDGE_CAPTURE_TIMEOUT_SECS:-45}
 # How long `sample` profiles a wedged process for. Short enough to stay inside
 # the capture bound, long enough to show a stack that is not moving.
 FM_HERDR_WEDGE_SAMPLE_SECS=10
+# The largest gap between two consecutive samples that still counts as observed
+# time. Past it the window restarts rather than being judged, because the
+# detector cannot vouch for a stretch it did not watch - a suspended machine or
+# a jumped clock freezes the agent's counters without the agent being wedged.
+# Five minutes is several watcher ticks at the default 60-second cadence, so an
+# ordinary slow or skipped tick never restarts the window, while a sleep does.
+FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS=${FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS:-300}
 
 # Every Herdr read here goes through the adapter's own CLI wrapper and target
 # parser (client selection, session routing, protocol-mismatch retry), rather
@@ -163,32 +170,149 @@ fm_herdr_wedge_record_path() {  # <state-dir> <id>
   printf '%s/.secondmate-wedge-%s\n' "$1" "$2"
 }
 
+# fm_herdr_wedge_cpu_seconds <pid...>: the agent's total consumed CPU time in
+# whole seconds, summed over its pids.
+#
+# A frozen agent consumes no CPU - the incident's process sat at 0% with the
+# timer stopped - while an agent waiting on a long model response or driving a
+# long tool call keeps accumulating it. So CPU time is a progress signal the
+# rendered counters cannot fake, and it is the one that separates a deadlock
+# from a legitimately quiet turn.
+#
+# `cputime` is the one accumulated-CPU column both supported platforms spell the
+# same way (macOS natively, Linux as an alias for `time`), formatted
+# `[[dd-]hh:]mm:ss`. Fails (nonzero, no output) when any pid's column cannot be
+# read or parsed, which callers must treat as "cannot judge", never as zero.
+fm_herdr_wedge_cpu_seconds() {  # <pid...>
+  local ps_bin=${FM_HERDR_PS_BIN:-ps} pid raw total=0 secs
+  [ "$#" -gt 0 ] || return 1
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  for pid in "$@"; do
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    raw=$(LC_ALL=C "$ps_bin" -p "$pid" -o cputime= 2>/dev/null) || return 1
+    raw=${raw//[[:space:]]/}
+    [ -n "$raw" ] || return 1
+    secs=$(printf '%s\n' "$raw" | awk -F '[:-]' '
+      {
+        n = NF
+        if (n < 2 || n > 4) exit 1
+        s = 0
+        for (i = 1; i <= n; i++) {
+          if ($i !~ /^[0-9]+$/) exit 1
+          s = s * 60 + $i
+        }
+        # A leading day field multiplies by 24 hours, not by 60.
+        if (n == 4) s = (($1 * 24 + $2) * 60 + $3) * 60 + $4
+        print s
+      }') || return 1
+    case "$secs" in ''|*[!0-9]*) return 1 ;; esac
+    total=$((total + secs))
+  done
+  printf '%s\n' "$total"
+}
+
+# fm_herdr_wedge_process_is_mcp <comm> <args>: whether this child process is one
+# of the harness's own MCP servers rather than work it is doing right now.
+#
+# MCP servers are long-lived children that exist for the whole session, so their
+# presence says nothing about whether the agent is making progress; a tool
+# process does. The match is on the MCP wire-protocol vocabulary that appears in
+# a server's own command line, and it is deliberately narrow: anything this
+# cannot positively identify as an MCP server counts as live work, which refuses
+# the kill rather than authorizing it.
+fm_herdr_wedge_process_is_mcp() {  # <comm> <args>
+  local comm=${1:-} args=${2:-} probe
+  probe=$(printf '%s %s' "$comm" "$args" | tr '[:upper:]' '[:lower:]')
+  case "$probe" in
+    *mcp-server*|*mcp_server*|*mcp-remote*|*modelcontextprotocol*|*model-context-protocol*) return 0 ;;
+    *' mcp '*|*' --mcp'*|*' mcp-'*|*'/mcp'*|mcp*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_herdr_wedge_live_work <pane-shell-agent-pid...>: whether the agent is
+# currently running work of its own, as `busy` or `idle`.
+#
+# `busy` means at least one live descendant of an agent pid is not an MCP
+# server - a Bash tool command, a subagent, a build. A genuinely frozen agent
+# has none: the incident's process had no children at all. Fails (nonzero) when
+# the process table cannot be read, so an unreadable answer can never be
+# mistaken for `idle`.
+fm_herdr_wedge_live_work() {  # <pid...>
+  local rows pid child comm
+  [ "$#" -gt 0 ] || return 1
+  rows=$(fm_agent_process_table) || return 1
+  for pid in "$@"; do
+    fm_agent_process_table_has_pid "$rows" "$pid" || return 1
+  done
+  for pid in "$@"; do
+    while IFS=$'\t' read -r child comm; do
+      [ -n "$child" ] || continue
+      # An agent pid nested under another agent pid is the harness itself, not
+      # work it is doing.
+      case " $* " in *" $child "*) continue ;; esac
+      if ! fm_herdr_wedge_process_is_mcp "$comm" \
+        "$(LC_ALL=C "${FM_HERDR_PS_BIN:-ps}" -p "$child" -o args= 2>/dev/null)"; then
+        printf 'busy\n'
+        return 0
+      fi
+    done <<EOF
+$(fm_agent_process_descendant_rows "$rows" "$pid")
+EOF
+  done
+  printf 'idle\n'
+}
+
 # fm_herdr_wedge_classify <state-dir> <id> <target> <window-secs> <baseline|judge>
 #
 # Sample this endpoint's progress and print one verdict:
 #
-#   progressing - working, but a counter moved since the recorded sample, or
-#                 this is the first sample, so the window restarts now
-#   wedged      - working with BOTH counters unchanged for at least
-#                 <window-secs>
+#   progressing - working, but something moved since the recorded sample, or the
+#                 window could not be measured as continuously observed time, so
+#                 the window restarts now
+#   wedged      - working, with both counters AND consumed CPU time unchanged for
+#                 at least <window-secs> of observed time, and no live work of
+#                 the agent's own
 #   not-working - the agent is idle, done, or blocked: never a wedge candidate,
 #                 and any recorded sample is dropped so the next working stretch
 #                 starts clean
 #   baseline    - <baseline> mode: the sample was recorded without judging it
-#   unreadable  - the counters could not be read in the required shape
+#   unreadable  - a required signal could not be read in the required shape
+#
+# Three independent things must all say "frozen" before the verdict is `wedged`,
+# because each one alone has a legitimate quiet case:
+#
+#   both herdr progress counters unchanged   a long model response produces no
+#                                            new scrollback either
+#   consumed CPU time unchanged              a frozen process burns none; an
+#                                            agent waiting on a response or
+#                                            driving a tool keeps accumulating it
+#   no live non-MCP child process            a long Bash command or subagent is
+#                                            a live child; a frozen agent had
+#                                            none at all
 #
 # <baseline> mode exists for the session-start sweep. A single sweep sample
-# cannot establish no-progress over a window, and a record left over from before
-# a shutdown or a laptop suspend says nothing about whether the agent was frozen
-# or merely unobserved - so session start re-bases the window and the watcher
-# tick, which samples continuously, is the only producer of a wedged verdict.
+# cannot establish no-progress over a window, so session start re-bases the
+# window and the watcher tick, which samples continuously, is the only producer
+# of a wedged verdict.
 #
-# An unreadable read deliberately leaves the recorded sample untouched: a
-# transient API failure neither restarts the window nor advances it.
+# The window must be OBSERVED time, not wall-clock age. The session-start
+# re-base alone does not give that: a long-running watcher that was suspended
+# with the machine, or whose clock jumped, wakes up holding a sample from before
+# the gap, and the agent's counters cannot have moved while it was frozen by the
+# OS either. Judging `now - since` there would SIGKILL live work. So the record
+# also carries the previous sample's own epoch, and a gap between consecutive
+# samples larger than FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS restarts the window
+# instead of being counted as time this detector actually watched.
+#
+# Every unreadable signal leaves the recorded sample untouched and yields
+# `unreadable`: a transient failure neither restarts the window nor advances it,
+# and never authorizes a kill.
 fm_herdr_wedge_classify() {  # <state-dir> <id> <target> <window-secs> <baseline|judge>
   local state_dir=$1 id=$2 target=$3 window=$4 mode=$5
-  local record session pane counters status seq offset now since
-  local prev_target prev_status prev_seq prev_offset prev_since
+  local record session pane counters status seq offset now since restart=0
+  local pids cpu work
+  local prev_target prev_status prev_seq prev_offset prev_cpu prev_since prev_seen
   case "$window" in ''|*[!0-9]*|0) return 1 ;; esac
   fm_herdr_wedge_require_adapter || { printf 'unreadable\n'; return 0; }
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable\n'; return 0; }
@@ -205,24 +329,54 @@ fm_herdr_wedge_classify() {  # <state-dir> <id> <target> <window-secs> <baseline
     printf 'not-working\n'
     return 0
   fi
+  # CPU time is sampled on this same tick cadence, at the window start and at
+  # every tick after it, so the comparison below spans the whole window.
+  if ! pids=$(fm_herdr_wedge_agent_pids "$session" "$pane"); then
+    printf 'unreadable\n'
+    return 0
+  fi
+  # shellcheck disable=SC2086 # The pid list is newline-separated digits by construction.
+  if ! cpu=$(fm_herdr_wedge_cpu_seconds $pids); then
+    printf 'unreadable\n'
+    return 0
+  fi
   now=$(date +%s)
   since=$now
   if [ "$mode" != baseline ] && [ -f "$record" ] && [ ! -L "$record" ]; then
-    IFS=$'\t' read -r prev_target prev_status prev_seq prev_offset prev_since < "$record" 2>/dev/null || true
+    IFS=$'\t' read -r prev_target prev_status prev_seq prev_offset prev_cpu prev_since prev_seen \
+      < "$record" 2>/dev/null || true
     if [ "${prev_target:-}" = "$target" ] && [ "${prev_status:-}" = working ] \
-      && [ "${prev_seq:-}" = "$seq" ] && [ "${prev_offset:-}" = "$offset" ]; then
-      case "${prev_since:-}" in
-        ''|*[!0-9]*) ;;
-        *) since=$prev_since ;;
+      && [ "${prev_seq:-}" = "$seq" ] && [ "${prev_offset:-}" = "$offset" ] \
+      && [ "${prev_cpu:-}" = "$cpu" ]; then
+      case "${prev_seen:-}" in
+        ''|*[!0-9]*) restart=1 ;;
+        *) [ $((now - prev_seen)) -le "$FM_HERDR_WEDGE_MAX_SAMPLE_GAP_SECS" ] || restart=1 ;;
       esac
+      if [ "$restart" -eq 0 ]; then
+        case "${prev_since:-}" in
+          ''|*[!0-9]*) ;;
+          *) since=$prev_since ;;
+        esac
+      fi
     fi
   fi
-  printf '%s\t%s\t%s\t%s\t%s\n' "$target" "$status" "$seq" "$offset" "$since" > "$record" 2>/dev/null \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$target" "$status" "$seq" "$offset" "$cpu" "$since" "$now" > "$record" 2>/dev/null \
     || { printf 'unreadable\n'; return 0; }
   [ "$mode" != baseline ] || { printf 'baseline\n'; return 0; }
   if [ "$since" -ne "$now" ] && [ $((now - since)) -ge "$window" ]; then
-    printf 'wedged\n'
-    return 0
+    # Last gate before authorizing a kill: a long, quiet tool call looks exactly
+    # like a freeze on every signal above, and is told apart only by the live
+    # child process doing that work.
+    # shellcheck disable=SC2086 # Same: deliberate word splitting of the pid list.
+    if ! work=$(fm_herdr_wedge_live_work $pids); then
+      printf 'unreadable\n'
+      return 0
+    fi
+    if [ "$work" = idle ]; then
+      printf 'wedged\n'
+      return 0
+    fi
   fi
   printf 'progressing\n'
 }
