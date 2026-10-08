@@ -28,9 +28,11 @@
 #     lsof on macOS), so a command the agent runs elsewhere never counts; the
 #     endpoint's foreground path stands in only when no pid's can be read.
 # A drifted endpoint is relaunched only on Herdr, whose relaunch moves the pane
-# back into the worktree, and, with no startup gate on screen, only while Herdr
-# reads the agent idle, so a working turn is never interrupted; elsewhere it is
-# reported rather than stopped.
+# back into the worktree, and, with no startup gate on screen, only once Herdr
+# reads the agent idle, so a working turn is never interrupted: a verdict that
+# reads unknown is re-read like an unreadable endpoint below, and one that never
+# settles idle is reported rather than relaunched. Elsewhere a drifted endpoint
+# is reported rather than stopped.
 # The relaunch owns everything else: the checkpoint that proves the worktree and
 # its unlanded work are intact, stopping the old agent without answering any
 # gate, entering the recorded worktree, and launching the replacement there
@@ -55,6 +57,7 @@
 #   BOOTSTRAP_INFO: worker <id> was <cause>; relaunched in its recorded worktree <path>
 #   RESTORED_WORKER: <id>: was <cause>; relaunch failed: <first error line>
 #   RESTORED_WORKER: <id>: was <cause>; not relaunched: a <backend> relaunch cannot move its endpoint back into <path>
+#   RESTORED_WORKER: <id>: was <cause>; not relaunched: its agent read <busy|unknown>, not idle
 #   RESTORED_WORKER: <id>: was <cause>; not relaunched (dry run)
 #   RESTORED_WORKER: <id>: its endpoint stayed unreadable for <n>s, so it was not checked
 #   RESTORED_WORKER: sweep: <why the sweep itself did not run or finish>
@@ -142,15 +145,16 @@ outside_worktree() {  # <seen> <worktree-real>
   return 0
 }
 
-# settled_agent_state <backend> <target>: the agent-state verdict, re-read while
-# it stays `unreadable` until it settles or SETTLE seconds have passed.
-settled_agent_state() {  # <backend> <target>
-  local state start
+# settled <unsettled> <reader...>: the reader's verdict, re-read while it stays
+# <unsettled> until it settles or SETTLE seconds have passed.
+settled() {  # <unsettled> <reader...>
+  local unsettled=$1 state start
+  shift
   start=$(date +%s)
-  state=$(fm_backend_agent_state "$1" "$2")
-  while [ "$state" = unreadable ] && [ $(($(date +%s) - start)) -lt "$SETTLE" ]; do
+  state=$("$@")
+  while [ "$state" = "$unsettled" ] && [ $(($(date +%s) - start)) -lt "$SETTLE" ]; do
     sleep "$SETTLE_POLL"
-    state=$(fm_backend_agent_state "$1" "$2")
+    state=$("$@")
   done
   printf '%s' "$state"
 }
@@ -189,9 +193,11 @@ drifted() {  # <backend> <target> <worktree-real>
 }
 
 # restored_cause <backend> <target> <worktree-real>: why this alive agent needs
-# a relaunch, as "<drifted 0|1><TAB><cause>", or nothing.
+# a relaunch, as "<drifted 0|1><TAB><cause>", or nothing. A drifted Herdr agent
+# with no gate on screen is relaunched only once its busy verdict settles idle;
+# otherwise the first field is that verdict instead.
 restored_cause() {  # <backend> <target> <worktree-real>
-  local backend=$1 target=$2 wt_real=$3 screen gate seen
+  local backend=$1 target=$2 wt_real=$3 screen gate seen busy
   gate=
   if fm_backend_visible_capture_supported "$backend" \
     && screen=$(fm_backend_visible_capture "$backend" "$target" 2>/dev/null); then
@@ -201,8 +207,10 @@ restored_cause() {  # <backend> <target> <worktree-real>
     if [ -n "$gate" ]; then
       printf '1\tparked on the %s in %s instead of its recorded worktree' "$gate" "$seen"
     else
-      [ "$backend" != herdr ] || [ "$(fm_backend_busy_state "$backend" "$target")" = idle ] || return 1
-      printf '1\trunning in %s instead of its recorded worktree' "$seen"
+      busy=1
+      [ "$backend" != herdr ] || busy=$(settled unknown fm_backend_busy_state "$backend" "$target")
+      [ "$busy" != idle ] || busy=1
+      printf '%s\trunning in %s instead of its recorded worktree' "$busy" "$seen"
     fi
   elif [ -n "$gate" ]; then
     printf '0\tparked on the %s' "$gate"
@@ -233,7 +241,7 @@ recover_one() {  # <meta> <id>
   backend=$FM_BACKEND_VALIDATED_BACKEND
   target=$FM_BACKEND_VALIDATED_TARGET
   case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
-  state=$(settled_agent_state "$backend" "$target")
+  state=$(settled unreadable fm_backend_agent_state "$backend" "$target")
   if [ "$state" = unreadable ]; then
     echo "RESTORED_WORKER: $id: its endpoint stayed unreadable for ${SETTLE}s, so it was not checked"
     return 0
@@ -243,6 +251,13 @@ recover_one() {  # <meta> <id>
   drift=${cause%%$'\t'*}
   cause=${cause#*$'\t'}
   [ -n "$cause" ] || return 0
+  case "$drift" in
+    0|1) ;;
+    *)
+      echo "RESTORED_WORKER: $id: was $cause; not relaunched: its agent read $drift, not idle"
+      return 0
+      ;;
+  esac
   if [ "$DRY_RUN" = 1 ]; then
     echo "RESTORED_WORKER: $id: was $cause; not relaunched (dry run)"
     return 0
