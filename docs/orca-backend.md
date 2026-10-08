@@ -85,7 +85,11 @@ An unconfirmed delivery retains durable work and a protected successor for inspe
 
 Installation uses the checked-out template's tracked `.codex/hooks.json` and `bin/` files, with the normal Codex hook trust flow.
 Keep the hook, adapter and generation-aware watcher libraries from the same checked-out template revision; strict watcher health also binds to the exact code path.
+Before attempting a turn end, verify that the Stop hook actually loaded by Codex uses the same installed code root as the continuation owner's watcher.
+An owner's ready result does not prove this: a guard loaded from another code root rejects that watcher even when both revisions are identical and the beacon is fresh.
+The guard must evaluate the real primary home; pointing its root at an exempt task worktree does not establish Stop integration.
 From the actual lock-owning Orca primary, `python3 bin/fm-codex-orca-continuation.py ensure --home "$FM_HOME"` is the smallest update/readiness entry point; it reuses a verified owner and refuses an incompatible live binding.
+Installation and Codex hook trust or reload must precede the attended native acceptance test; the readiness command does not install or reload hooks.
 Global dotfile distribution is separate from this project-scoped installation.
 The [runtime verification record](verification/runtime-backends.md#orca) distinguishes portable behavior tests from live vendor lifecycle evidence.
 

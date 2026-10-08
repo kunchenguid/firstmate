@@ -1930,6 +1930,12 @@ The twenty cases cover repeated successor-before-notify handoff and ACK replay, 
 External inbox cases use the public note command and cover repeated cycles, interrupted ACK/duplicate observation, predecessor-close append, rejection/owner replacement, endpoint replacement, preservation of an attached peer and root ACK/new append before delivery confirmation.
 The attached-peer case verifies a new successor arm against the same peer watcher; its ordinary close then transfers watcher ownership before the next notification.
 Each owner-bearing fixture checks that its owner, arm and transport processes and watcher lock are absent after cleanup.
+The later loaded-guard regression passed separately in 3.324s and exercises two installed code paths against one actual fixture owner, including dead-watcher and second-stop controls:
+
+```sh
+FM_ORCA_TEST_CASE=ContinuationTests.test_loaded_guard_requires_the_owner_watcher_code_path bin/fm-test-run.sh tests/fm-codex-orca-continuation.test.sh
+```
+
 Linux portability is supported by the local process/flock implementation but has not been driven live here.
 
 The token-free installed Codex hook-feature guard passed on codex-cli 0.161.0:
@@ -1943,7 +1949,14 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=5394
 ```
 
 That proves the existing worker hook-disable posture, not primary continuation.
-Actual Orca 1.4.222/Codex 0.161.0 adapter final-to-wake acceptance and the installed Stop integration remain NOT_RUN.
+The attended native attempt on Orca 1.4.222 on 2026-10-08 was NOT_PASS: after the assistant final, the actually loaded generic Stop guard blocked because its installed watcher path differed from the candidate owner's watcher path.
+No native task-completion event or subsequent accepted idle wake was established before bounded recovery.
+The installed Codex CLI version above does not identify the version of that already-running primary session.
+An isolated counterfactual kept the primary home and live watcher identity constant: identical guard code blocked with a mismatched watcher path and allowed with the coherent path; after watcher cleanup, a fresh beacon alone still blocked.
+The existing second-stop safety allowed without repairing continuity.
+The later candidate transport timeout is a separate unresolved observation; it does not explain the earlier Stop rejection.
+Before another attended test, install a coherent hook/adapter/watcher code root and prove Codex loaded that hook with real-primary scoping.
+Owner readiness, assistant final output and transport receipts alone do not establish native turn end or continuity.
 The read-only opt-in guard requires native final/completion/new-task events from two actual cycles and correlates them with exact receipts from one currently verified owner:
 
 ```sh

@@ -424,6 +424,35 @@ class ContinuationTests(unittest.TestCase):
         f.wait(lambda: len(f.sends()) >= 1, "restart did not deliver")
         self.assertTrue(all(x["healthy"] for x in f.sends()))
 
+    def test_loaded_guard_requires_the_owner_watcher_code_path(self):
+        code = TMP / (self._testMethodName + "-code")
+        shutil.copytree(ROOT / "bin", code / "bin", symlinks=True)
+        shutil.copytree(ROOT / "docs/supervision-protocols", code / "docs/supervision-protocols")
+        f = self.fixture(code=code)
+        f.ensure()
+        self.assertTrue(json.loads(f.call("status").stdout)["ready"])
+        # Both guards must evaluate the disposable primary, rather than taking
+        # the task-worktree exemption. Only their expected watcher path differs.
+        env = dict(f.env, FM_ROOT_OVERRIDE=str(f.home))
+
+        def guard(source, active=False):
+            return subprocess.run(["bash", str(source / "bin/fm-turnend-guard.sh")],
+                                  env=env, capture_output=True, text=True, timeout=5,
+                                  input=json.dumps({"stop_hook_active": active}))
+
+        mismatched = guard(ROOT)
+        self.assertEqual(mismatched.returncode, 2, mismatched.stderr)
+        self.assertIn("TURN WOULD END BLIND", mismatched.stderr)
+        coherent = guard(code)
+        self.assertEqual(coherent.returncode, 0, coherent.stderr)
+        f.close()
+        (f.home / "state/.last-watcher-beat").touch()
+        dead = guard(code)
+        self.assertEqual(dead.returncode, 2, dead.stderr)
+        self.assertIn("TURN WOULD END BLIND", dead.stderr)
+        self.assertEqual(guard(code, active=True).returncode, 0)
+        self.assertFalse((f.home / "state/.watch.lock").exists())
+
     def test_owner_death_during_input_does_not_fresh_resend(self):
         f = self.fixture(mode="timeout")
         old = f.ensure(); f.trigger()
