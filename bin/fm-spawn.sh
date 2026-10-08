@@ -3140,6 +3140,10 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
+  [ -n "$PROJ" ] || {
+    echo "error: no project directory supplied for $KIND $ID" >&2
+    exit 1
+  }
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
