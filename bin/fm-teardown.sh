@@ -365,11 +365,11 @@ retire_busy_state() {
 # presentation manifest and all per-consumer markers move atomically with the
 # log. Callers must already hold the task metadata lock; this keeps steering
 # writers and task-id reuse outside the cleanup window.
-retire_task_runtime_state() {  # <state-dir> <task-id> [busy-generation]
-  local state_dir=$1 id=$2 busy_gen=${3:-}
+retire_task_runtime_state() {  # <state-dir> <task-id> [busy-generation] [status-retirement-mode] [status-lock-mode]
+  local state_dir=$1 id=$2 busy_gen=${3:-} status_mode=${4:---require-settled} status_lock_mode=${5:-}
   fm_task_inbox_retirement_guard "$state_dir" "$id" || return 1
   retire_busy_state "$state_dir" "$id" "$busy_gen" || return 1
-  status_retire_presentation_task "$state_dir" "$id" --require-settled || return 1
+  status_retire_presentation_task "$state_dir" "$id" "$status_mode" "$status_lock_mode" || return 1
   rm -f "$state_dir/$id.turn-ended" "$state_dir/$id.progress" \
     "$state_dir/$id.pi-ext.ts" "$state_dir/$id.busy-session" \
     "$state_dir/$id.herdr-presentation" \
@@ -395,15 +395,15 @@ retire_task_runtime_state() {  # <state-dir> <task-id> [busy-generation]
 teardown_completed_task() (
   local meta="$STATE/$ID.meta" lock copy project session pane presence other disposition=returned-or-already-absent facts
   local COPY_DISPOSITION COPY_REASON binding
-  local WT PROJ KIND MODE PR_URL dirty generation backlog_status=0 captain_status=0 captain_out marker
-  local copy_lock='' copy_lock_held=0
+  local WT PROJ KIND MODE PR_URL dirty generation completion status_check status_require backlog_status=0 captain_status=0 captain_out marker
+  local copy_lock='' copy_lock_held=0 status_lock='' status_lock_held=0
   local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
   local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-task-handoff.sh" retirement-check "$ID" || exit 1
   lock=$(fm_meta_lock_path "$meta") || exit 1
   fm_lock_acquire_wait "$lock"
-  trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi' EXIT
+  trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi; if [ "$status_lock_held" = 1 ]; then fm_lock_release "$status_lock"; fi' EXIT
   fm_backend_validate_task_endpoint "$meta" "$ID" || exit 1
   [ -z "$ENDPOINT_EXPECTED_GEN" ] || [ "$(fm_meta_get "$meta" spawn_gen)" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
   fm_task_inbox_retirement_guard "$STATE" "$ID" || exit 1
@@ -416,7 +416,14 @@ teardown_completed_task() (
   copy=$(fm_backend_meta_exact_value "$meta" worktree) || exit 1
   project=$(fm_backend_meta_exact_value "$meta" project) || exit 1
   generation=$(fm_meta_get "$meta" spawn_gen)
-  fm_cleanup_completion_guard "$ID" "$generation" || exit $?
+  completion=$(fm_cleanup_completion_mode "$ID" "$generation") || exit $?
+  if [ "$completion" = archived ]; then
+    status_check=--check-archived
+    status_require=--require-archived
+  else
+    status_check=--check-settled
+    status_require=--require-settled
+  fi
   fm_cleanup_delivery_guard "$ID" "$generation" "$meta" || exit $?
   validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
   MODE=$(fm_meta_get "$meta" mode)
@@ -437,6 +444,17 @@ teardown_completed_task() (
     present|dead) ;;
     *) echo 'REFUSED: exact endpoint cannot be resolved' >&2; exit 1 ;;
   esac
+  if [ -n "${FM_SHORT_CLEANUP_RECOVERY:-}" ] && [ "$presence" != dead ]; then
+    echo 'REFUSED: cleanup recovery requires the exact endpoint to remain absent' >&2
+    exit 1
+  fi
+  # Hold presentation serialization from admission through final retirement:
+  # a later append must become a fresh log after cleanup, never an unreceipted
+  # post-effect refusal inside this operation.
+  status_lock="$STATE/.status-presentation-lock"
+  fm_lock_acquire_wait "$status_lock" || exit 1
+  status_lock_held=1
+  status_retire_presentation_task "$STATE" "$ID" "$status_check" --already-locked || exit 1
   # Every admission and identity check above is read-only. Record the exact
   # owner effect only now, before the first endpoint or bookkeeping mutation.
   fm_short_owner_effect || exit 1
@@ -484,11 +502,11 @@ teardown_completed_task() (
   else
     teardown_endpoint_receipt directory_return confirmed copy-already-absent || exit 1
   fi
-  teardown_completed_bookkeeping "$meta" "$generation" "$disposition"
+  teardown_completed_bookkeeping "$meta" "$generation" "$disposition" "$status_require" --already-locked
 
 )
 teardown_completed_bookkeeping() {
-  local meta=$1 generation=$2 disposition=$3 facts marker captain_out captain_status=0 backlog_status=0 busy_gen
+  local meta=$1 generation=$2 disposition=$3 status_mode=${4:---require-settled} status_lock_mode=${5:-} facts marker captain_out captain_status=0 backlog_status=0 busy_gen
   local KIND MODE PR_URL WT PROJ
   local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
   local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
@@ -508,7 +526,7 @@ teardown_completed_bookkeeping() {
   remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
   busy_gen=$(fm_meta_get "$meta" busy_gen)
   [ -n "$busy_gen" ] || busy_gen=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
-  retire_task_runtime_state "$STATE" "$ID" "$busy_gen" || exit 1
+  retire_task_runtime_state "$STATE" "$ID" "$busy_gen" "$status_mode" "$status_lock_mode" || exit 1
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     if ! fm_backlog_meta_spawn_gen "$meta" "$STATE"; then
       echo "error: completed cleanup could not bind $ID's backlog transition to its task generation ($FM_BACKLOG_TRANSITION_ERROR)" >&2

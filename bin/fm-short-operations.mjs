@@ -224,7 +224,7 @@ export function operationReceipts(dir) {
       if(receipt.settlement==='dead-owner-legacy-cleanup-preflight-readback' &&
          (receipt.state!=='refused'||receipt.evidence?.reason!=='legacy cleanup acceptance preflight refused before owner effects'||receipt.evidence?.taskBindingUnchanged!==true||!['present','dead'].includes(receipt.evidence?.endpointState))) fail('malformed legacy cleanup preflight settlement');
       if(receipt.settlement==='dead-owner-cleanup-preflight-readback' &&
-         (receipt.state!=='refused'||receipt.effectExecutor!==undefined||receipt.evidence?.reason!=='cleanup acceptance preflight refused before owner effects'||receipt.evidence?.taskBindingUnchanged!==true||!['present','dead'].includes(receipt.evidence?.endpointState))) fail('malformed cleanup preflight settlement');
+         (receipt.state!=='refused'||receipt.effectExecutor!==undefined||!['cleanup acceptance preflight refused before owner effects','cleanup status preflight refused before owner effects'].includes(receipt.evidence?.reason)||receipt.evidence?.taskBindingUnchanged!==true||!['present','dead'].includes(receipt.evidence?.endpointState))) fail('malformed cleanup preflight settlement');
     }
     if(receipt.state==='completed') {
       const e=receipt.evidence;
@@ -301,8 +301,11 @@ function cleanupPreflightReadback(home,root,request,started,index,step,binding,i
   const refusals=new Set([
     `REFUSED: compact task ${step.task} is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup\n`,
     `REFUSED: task ${step.task} is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup\n`,
+    `REFUSED: task ${step.task} has an open status decision; preserving its presentation state\n`,
   ]);
   if(output.stdout!==''||!refusals.has(output.stderr)||typeof output.error!=='string') return null;
+  const statusRefusal=output.stderr.includes('has an open status decision');
+  if(effect&&statusRefusal)return null;
   let presence;
   try {
     presence=execFileSync('bash',['-c',
@@ -318,7 +321,7 @@ function cleanupPreflightReadback(home,root,request,started,index,step,binding,i
      !equal(read(path.join(dir,`operation-${index}.intent.json`)),intent)||
      (effect?!equal(read(path.join(dir,`operation-${index}.effect.json`)),effect):exists(path.join(dir,`operation-${index}.effect.json`)))||
      fs.readFileSync(outputFile,'utf8')!==outputBytes||exists(cleanupFile)||!equal(metadata(home,step.task,true),binding)) fail('legacy cleanup preflight evidence changed during readback');
-  return {reason:effect?'legacy cleanup acceptance preflight refused before owner effects':'cleanup acceptance preflight refused before owner effects',taskBindingUnchanged:true,endpointState:presence};
+  return {reason:statusRefusal?'cleanup status preflight refused before owner effects':effect?'legacy cleanup acceptance preflight refused before owner effects':'cleanup acceptance preflight refused before owner effects',taskBindingUnchanged:true,endpointState:presence};
 }
 
 function settleCleanupLocked(home,request,started,index,step) {
@@ -359,6 +362,135 @@ function settleCleanupLocked(home,request,started,index,step) {
   }
   if(!effect)return null;
   return null;
+}
+
+// MAIN may finish exact remaining bookkeeping when an archived historical
+// attempt has the legacy runner-owned effect marker and status refusal while
+// independent current owner evidence proves its endpoint absent and copy
+// retained. The original attempt remains failed and immutable; this path never
+// classifies an effect-bearing attempt as no-effect.
+function archivedStatusCleanupOperationContext(home,id,index) {
+  primaryOwner(home);
+  if(process.env.FM_SUPERVISION_ACTOR&&process.env.FM_SUPERVISION_ACTOR!=='main') fail('cleanup recovery belongs to MAIN');
+  if(fs.realpathSync(home)!==home||!/^short-[a-f0-9]{64}$/.test(id??'')) fail('invalid cleanup recovery home/job');
+  const dir=path.join(home,'state/short-agents',id),request=read(path.join(dir,'request.json'));
+  if(![1,2].includes(request.version)||request.id!==id||id!=='short-'+createHash('sha256').update(request.input?.key??'').digest('hex')) fail('cleanup recovery request identity changed');
+  const operations=validateOperations(request.input?.operations),step=operations?.steps?.[index],binding=request.operationBindings?.[index];
+  if(!Number.isSafeInteger(index)||index<0||request.operationBindings?.length!==operations?.steps?.length||step?.action!=='cleanup'||binding?.backend!=='herdr'||!binding.spawn_gen||binding.endpoint_task_id!==step.task) fail('cleanup recovery step/task/generation changed');
+  const started=read(path.join(dir,'started.json')),result=read(path.join(dir,'result.json'));
+  const intent=read(path.join(dir,`operation-${index}.intent.json`)),effect=read(path.join(dir,`operation-${index}.effect.json`));
+  if(started.nonce!==request.nonce||started.pid!==started.identity?.pid) fail('cleanup recovery runner identity changed');
+  recordedProcessIdentity(started.identity,'cleanup runner');recordedProcessIdentity(effect.owner,'cleanup executor');
+  if(sameLiveProcess(started.identity)||sameLiveProcess(effect.owner)||!equal(started.identity,effect.owner)) fail('cleanup recovery requires the dead original executor');
+  if(result.id!==id||!['blocked','cancelled','timeout','interrupted','budget'].includes(result.state)||result.evidence!==dir||!Number.isSafeInteger(result.finishedAt)) fail('cleanup recovery requires the preserved unsuccessful result');
+  fields(intent,['nonce','index','step','at']);fields(effect,['id','nonce','index','owner','at']);
+  if(intent.nonce!==request.nonce||intent.index!==index||!equal(intent.step,step)||effect.id!==id||effect.nonce!==request.nonce||effect.index!==index) fail('cleanup recovery effect identity changed');
+  if(![request.acceptedAt,started.at,intent.at,effect.at].every(Number.isSafeInteger)||!(request.acceptedAt<=started.at&&started.at<=intent.at&&intent.at<=effect.at&&effect.at<=result.finishedAt)) fail('cleanup recovery chronology changed');
+  const output=read(path.join(dir,`operation-${index}.output.json`));fields(output,['stdout','stderr','error']);
+  if(output.stdout!==''||output.stderr!==`REFUSED: task ${step.task} has an open status decision; preserving its presentation state\n`||typeof output.error!=='string') fail('cleanup recovery is not the exact status-presentation refusal');
+  const marker=resource(home,step),expected={home,id,nonce:request.nonce,index,target:marker.target},receiptFile=path.join(dir,`operation-${index}.receipt.json`);
+  if(exists(marker.file)&&!equal(read(marker.file),expected)) fail('cleanup recovery reservation identity changed');
+  if(!exists(marker.file)&&!exists(receiptFile)) fail('cleanup recovery reservation is missing');
+  for(const name of fs.readdirSync('/proc').filter(value=>/^\d+$/.test(value))) {
+    const pid=Number(name);if(pid===process.pid)continue;
+    try {
+      if(fs.statSync(`/proc/${pid}`).uid!==process.getuid())continue;
+      const identity=processIdentity(pid);
+      let environment;
+      try {environment=fs.readFileSync(`/proc/${pid}/environ`,'utf8').split('\0');}
+      catch(error) {if(error.code==='EACCES')continue;throw error;}
+      if(environment.includes(`FM_SHORT_TASK=${id}`)&&sameLiveProcess(identity)) fail(`cleanup recovery has a live executor/child (${pid})`);
+    } catch(error) {if(!['ENOENT','ESRCH'].includes(error.code)&&!error.message.includes('zombie'))throw error;}
+  }
+  return {home,id,index,dir,request,started,step,binding,marker,expected,receiptFile};
+}
+
+function archivedStatusCleanupContext(home,id,index,operation=archivedStatusCleanupOperationContext(home,id,index)) {
+  const {dir,request,started,step,binding,marker,expected,receiptFile}=operation;
+  if(!exists(path.join(home,'state',step.task+'.meta'))||!equal(metadata(home,step.task,true),binding)) fail('cleanup recovery task binding changed');
+  const task=read(path.join(home,'data',step.task,'task.json'));
+  if(task.id!==step.task||task.state!=='archived'||task.hold?.kind==='captain') fail('cleanup recovery requires the exact non-captain archived task');
+  const cleanup=read(path.join(home,'state',step.task+'.cleanup.json')),copyBinding=cleanup.copy_binding;
+  if(cleanup.schema!=='fm-task-cleanup.v1'||cleanup.task_id!==step.task||cleanup.spawn_gen!==binding.spawn_gen||cleanup.completion!==undefined||
+     cleanup.phases?.pane_close?.state!=='confirmed'||cleanup.phases?.directory_return?.state!=='retained'||
+     copyBinding?.home!==home||copyBinding.task!==step.task||copyBinding.spawn_gen!==binding.spawn_gen||
+     copyBinding.copy?.path!==binding.worktree||copyBinding.project?.path!==binding.project) fail('cleanup recovery partial owner evidence changed');
+  for(const [value,saved,label] of [[binding.worktree,copyBinding.copy,'copy'],[binding.project,copyBinding.project,'project']]) {
+    const current=fs.statSync(fs.realpathSync(value)),gitDir=fs.realpathSync(git(value,'rev-parse','--path-format=absolute','--git-common-dir')),gitStat=fs.statSync(gitDir);
+    if(current.dev!==saved.device||current.ino!==saved.inode||gitDir!==saved.git?.path||gitStat.dev!==saved.git?.device||gitStat.ino!==saved.git?.inode) fail(`cleanup recovery ${label}/Git identity changed`);
+  }
+  const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),meta=path.join(home,'state',step.task+'.meta');
+  let presence;
+  try {
+    presence=execFileSync('bash',['-c','. "$1"; fm_backend_validate_task_endpoint "$2" "$3" >/dev/null && fm_backend_source herdr && session=$(fm_backend_meta_exact_value "$2" herdr_session) && pane=$(fm_backend_meta_exact_value "$2" herdr_pane_id) && fm_backend_herdr_pane_presence_state "$session" "$pane"',
+      'cleanup-recovery',path.join(root,'bin/fm-backend.sh'),meta,step.task],{encoding:'utf8',env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state')},stdio:['ignore','pipe','pipe']}).trim();
+  } catch(error) {fail(String(error.stderr??'').trim()||'cleanup recovery endpoint readback refused');}
+  if(presence!=='dead') fail('cleanup recovery requires the already absent exact endpoint');
+  return {home,id,index,dir,request,started,step,binding,marker,expected,receiptFile};
+}
+
+function cleanupRecoveryLocks(context) {
+  const locks=[path.join(context.dir,'reconcile.lock'),context.marker.file+'.lock'];
+  const holders=locks.map(file=>{
+    const owner=fs.realpathSync(file);
+    if(!fs.lstatSync(owner).isDirectory()||path.dirname(owner)!==path.dirname(file)||(owner!==file&&!owner.startsWith(file+'.owner.'))) fail('cleanup recovery serialization is missing');
+    return Number(fs.readFileSync(path.join(file,'pid'),'utf8').trim());
+  });
+  if(holders[0]!==holders[1]||!Number.isSafeInteger(holders[0])||holders[0]<=1) fail('cleanup recovery serialization owner changed');
+  for(let pid=process.pid,n=0;pid>1&&n<16;n++) {if(pid===holders[0])return;pid=processIdentity(pid).parent;}
+  fail('cleanup recovery serialization belongs to another owner');
+}
+
+export function verifyCleanupRecoveryOwner(task,generation) {
+  const home=fs.realpathSync(process.env.FM_HOME),id=process.env.FM_SHORT_CLEANUP_RECOVERY,index=Number(process.env.FM_SHORT_CLEANUP_STEP);
+  const context=archivedStatusCleanupContext(home,id,index);cleanupRecoveryLocks(context);
+  if(context.step.task!==task||context.binding.spawn_gen!==generation) fail('cleanup recovery owner target changed');
+  const caller=fs.readFileSync(`/proc/${process.ppid}/cmdline`,'utf8').split('\0').filter(Boolean);
+  const script=path.join(path.dirname(fileURLToPath(import.meta.url)),'fm-teardown.sh');
+  if(!caller.includes(script)||!caller.includes(task)||!caller.includes('--expect-spawn-gen')||!caller.includes(generation)) fail('cleanup recovery caller is not its guarded owner');
+  return context;
+}
+
+function settleArchivedStatusCleanupLocked(home,id,index) {
+  const operation=archivedStatusCleanupOperationContext(home,id,index),root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));cleanupRecoveryLocks(operation);
+  const prior=operationReceipts(operation.dir).find(value=>value.index===index);
+  if(prior) {
+    if(prior.action!=='cleanup'||prior.state!=='completed'||prior.settlement!=='dead-owner-cleanup-readback') fail('cleanup recovery already has a different receipt');
+    return finishArchivedStatusCleanup(operation,prior);
+  }
+  // A retry may arrive after teardown archived its exact completion receipt but
+  // before this owner published the ShortTask receipt. Consume that readback
+  // before requiring active metadata or partial cleanup evidence.
+  const completed=settleCleanupLocked(home,operation.request,operation.started,index,operation.step);
+  if(completed) {
+    if(completed.state!=='completed'||completed.settlement!=='dead-owner-cleanup-readback') fail('cleanup recovery already has a different settlement');
+    return finishArchivedStatusCleanup(operation,completed);
+  }
+  const v=archivedStatusCleanupContext(home,id,index,operation);
+  execFileSync('bash',[path.join(root,'bin/fm-teardown.sh'),v.step.task,'--expect-spawn-gen',v.binding.spawn_gen],{
+    encoding:'utf8',cwd:root,env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state'),FM_DATA_OVERRIDE:path.join(home,'data'),FM_CONFIG_OVERRIDE:path.join(home,'config'),FM_SUPERVISION_ACTOR:'main',FM_SHORT_CLEANUP_RECOVERY:id,FM_SHORT_CLEANUP_STEP:String(index),FM_SHORT_CLEANUP_GENERATION:v.binding.spawn_gen},timeout:60000,stdio:['ignore','pipe','pipe']});
+  const receipt=settleCleanupLocked(home,v.request,v.started,index,v.step);
+  if(!receipt||receipt.state!=='completed'||receipt.settlement!=='dead-owner-cleanup-readback') fail('cleanup recovery has no exact completed owner readback');
+  return finishArchivedStatusCleanup(v,receipt);
+}
+
+function finishArchivedStatusCleanup(v,receipt) {
+  const result=read(path.join(v.dir,'result.json'));
+  if(result.id!==v.id||!['blocked','cancelled','timeout','interrupted','budget'].includes(result.state)||result.evidence!==v.dir||!Number.isSafeInteger(result.finishedAt)) fail('cleanup recovery requires the preserved unsuccessful result');
+  if(exists(v.marker.file)) {if(!equal(read(v.marker.file),v.expected)) fail('cleanup recovery reservation changed after settlement');fs.unlinkSync(v.marker.file);}
+  return {id:v.id,index:v.index,state:'completed',action:'cleanup',settlement:receipt.settlement,evidence:receipt.evidence,result:result.state};
+}
+
+export function settleArchivedStatusCleanup(home,id,index) {
+  primaryOwner(home);
+  if(fs.realpathSync(home)!==home||!/^short-[a-f0-9]{64}$/.test(id??'')||!Number.isSafeInteger(index)||index<0) fail('invalid cleanup recovery home/job/step');
+  const dir=path.join(home,'state/short-agents',id);
+  const request=read(path.join(dir,'request.json')),step=request.input?.operations?.steps?.[index];
+  if(step?.action!=='cleanup') fail('cleanup recovery index is not a cleanup step');
+  const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),lock=resource(home,step).file+'.lock',script=fileURLToPath(import.meta.url);
+  const output=execFileSync('bash',['-c','. "$1"; fm_lock_acquire_wait_bounded "$2" 5 || exit 1; trap \'fm_lock_release "$2"; fm_lock_release "$3"\' EXIT; fm_lock_acquire_wait_bounded "$3" 5 || exit 1; "$4" "$5" _settle-archived-status-cleanup-locked "$6" "$7" "$8"',
+    'cleanup-settle',path.join(root,'bin/fm-wake-lib.sh'),path.join(dir,'reconcile.lock'),lock,process.execPath,script,home,id,String(index)],{encoding:'utf8',env:{...process.env,FM_HOME:home,FM_STATE_OVERRIDE:path.join(home,'state'),FM_DATA_OVERRIDE:path.join(home,'data')}});
+  return JSON.parse(output);
 }
 
 function settleMergeLocked(home,root,id,index,expectedMergeCommit) {
@@ -555,7 +687,9 @@ if(process.argv[1] && fs.realpathSync(process.argv[1])===fs.realpathSync(fileURL
   try {
     const [command,action,...args]=process.argv.slice(2);
     if(command==='reconcile') reconcileLocked(action,JSON.parse(fs.readFileSync(0,'utf8')));
+    else if(command==='_settle-archived-status-cleanup-locked') console.log(JSON.stringify(settleArchivedStatusCleanupLocked(action,args[0],Number(args[1]))));
     else if(command==='_settle-merge-locked') console.log(JSON.stringify(settleMergeLocked(action,args[0],args[1],Number(args[2]),args[3])));
+    else if(command==='verify-cleanup-recovery') verifyCleanupRecoveryOwner(action,args[0]);
     else if(command==='verify') verifyOwner(action,args);
     else if(command==='effect') {
       const v=verifyOwner(action,args);

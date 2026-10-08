@@ -1180,9 +1180,9 @@ status_presentation_marker_commit() {
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
 
-status_retire_presentation_task() {  # <state> <task-id> [--require-settled|--check-settled]
-  local state=$1 task=$2 mode=${3:-} lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
-  local status_file="$1/$2.status" size presented open
+status_retire_presentation_task() {  # <state> <task-id> [mode] [--already-locked]
+  local state=$1 task=$2 mode=${3:-} lock_mode=${4:-} lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
+  local status_file="$1/$2.status" size presented open record hold_set hold_epoch status_mtime current_pid lock_pid own_lock=1
   local signal_marker heartbeat_marker daemon_marker
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -1221,46 +1221,82 @@ EOF
     fi
   fi
 
-  fm_lock_acquire_wait "$lock" || return 1
-  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ]; } \
+  if [ "$lock_mode" = --already-locked ]; then
+    fm_current_pid current_pid || return 1
+    lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$current_pid" ] || {
+      echo "REFUSED: task $task status retirement does not own its presentation lock" >&2
+      return 1
+    }
+    own_lock=0
+  else
+    [ -z "$lock_mode" ] || return 1
+    fm_lock_acquire_wait "$lock" || return 1
+  fi
+  if [ "$mode" = --require-archived ] || [ "$mode" = --check-archived ]; then
+    record="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}/$task/task.json"
+    if [ ! -f "$record" ] || [ -L "$record" ] || ! jq -e --arg task "$task" '
+      .id == $task and .state == "archived" and
+      (.hold == null or .hold.kind != "captain") and
+      (.blocked_by | type == "array" and length == 0)
+    ' "$record" >/dev/null 2>&1; then
+      echo "REFUSED: task $task lacks an exact non-captain archived disposition; preserving its presentation state" >&2
+      [ "$own_lock" = 0 ] || fm_lock_release "$lock"
+      return 1
+    fi
+  fi
+  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ] \
+      || [ "$mode" = --require-archived ] || [ "$mode" = --check-archived ]; } \
     && [ ! -e "$status_file" ] && [ ! -L "$status_file" ] \
     && { [ -e "$state/.$task.open-decisions-cursor" ] \
       || [ -L "$state/.$task.open-decisions-cursor" ]; }; then
     echo "REFUSED: task $task status is missing while its decision cursor remains; preserving its presentation state" >&2
-    fm_lock_release "$lock"
+    [ "$own_lock" = 0 ] || fm_lock_release "$lock"
     return 1
   fi
-  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ]; } \
+  if { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ] \
+      || [ "$mode" = --require-archived ] || [ "$mode" = --check-archived ]; } \
     && { [ -e "$status_file" ] || [ -L "$status_file" ]; }; then
     if [ ! -f "$status_file" ] || [ ! -r "$status_file" ] || [ -L "$status_file" ]; then
       echo "REFUSED: task $task status is unsafe; preserving its presentation state" >&2
-      fm_lock_release "$lock"
+      [ "$own_lock" = 0 ] || fm_lock_release "$lock"
       return 1
     fi
     open=$(status_open_decisions "$status_file") || {
       echo "REFUSED: task $task decisions are unreadable; preserving its presentation state" >&2
-      fm_lock_release "$lock"
+      [ "$own_lock" = 0 ] || fm_lock_release "$lock"
       return 1
     }
-    if [ -n "$open" ]; then
+    if [ -n "$open" ] && { [ "$mode" = --require-settled ] || [ "$mode" = --check-settled ]; }; then
       echo "REFUSED: task $task has an open status decision; preserving its presentation state" >&2
-      fm_lock_release "$lock"
+      [ "$own_lock" = 0 ] || fm_lock_release "$lock"
       return 1
     fi
     size=$(_fm_status_file_size "$status_file") || {
       echo "REFUSED: task $task status size is unreadable; preserving its presentation state" >&2
-      fm_lock_release "$lock"
+      [ "$own_lock" = 0 ] || fm_lock_release "$lock"
       return 1
     }
     presented=$(status_presentation_cursor_offset "$status_file") || {
       echo "REFUSED: task $task presentation cursor is unreadable; preserving its presentation state" >&2
-      fm_lock_release "$lock"
+      [ "$own_lock" = 0 ] || fm_lock_release "$lock"
       return 1
     }
     if [ "$presented" != "$size" ]; then
       echo "REFUSED: task $task has unread status bytes; preserving its presentation state" >&2
-      fm_lock_release "$lock"
+      [ "$own_lock" = 0 ] || fm_lock_release "$lock"
       return 1
+    fi
+    if [ -n "$open" ] && { [ "$mode" = --require-archived ] || [ "$mode" = --check-archived ]; }; then
+      hold_set=$(jq -er 'select(.hold.kind == "blocker") | .hold.set' "$record" 2>/dev/null || true)
+      hold_epoch=$(fm_utc_iso_to_epoch "$hold_set" 2>/dev/null || true)
+      status_mtime=$(_fm_status_file_mtime "$status_file" 2>/dev/null || true)
+      if [ -z "$hold_epoch" ] || [ -z "$status_mtime" ] || [ "$status_mtime" -ge "$hold_epoch" ] \
+        || ! printf '%s\n' "$open" | awk -F '\t' 'NF && $2 != "blocked" { exit 1 }'; then
+        echo "REFUSED: task $task open status is not a presented blocker proven to predate its archived disposition" >&2
+        [ "$own_lock" = 0 ] || fm_lock_release "$lock"
+        return 1
+      fi
     fi
   fi
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
@@ -1283,18 +1319,18 @@ EOF
       done <<EOF
 $data
 EOF
-      if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ]; then
+      if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ] && [ "$mode" != --check-archived ]; then
         mv -f "$tmp" "$manifest" || rc=1
       fi
       [ "$rc" -eq 0 ] || rm -f "$tmp"
-      [ "$mode" != --check-settled ] || rm -f "$tmp"
+      if [ "$mode" = --check-settled ] || [ "$mode" = --check-archived ]; then rm -f "$tmp"; fi
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ]; then
+  if [ "$rc" -eq 0 ] && [ "$mode" != --check-settled ] && [ "$mode" != --check-archived ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
       "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
   fi
-  fm_lock_release "$lock" || rc=1
+  if [ "$own_lock" != 0 ]; then fm_lock_release "$lock" || rc=1; fi
   return "$rc"
 }
 
