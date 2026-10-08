@@ -108,7 +108,7 @@ fm_tmux_composer_caps() {
 # Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
 # live shape owner.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm owner= status
+  local target=$1 tty pgid tpgid comm owner='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)

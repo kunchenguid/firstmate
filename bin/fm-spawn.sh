@@ -4497,7 +4497,10 @@ polytoken_wait_for_ready() {
         "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")" \
         "$WT") || discovered=
       if [ -n "$discovered" ]; then
-        IFS=$'\t' read -r POLYTOKEN_SESSION_ID POLYTOKEN_SESSION_PORT POLYTOKEN_SESSION_CREDENTIAL <<EOF
+        # The listing row carries a fourth field (the daemon pid); a trailing
+        # throwaway variable consumes it so it is never glued onto the
+        # credential path the control verbs address.
+        IFS=$'\t' read -r POLYTOKEN_SESSION_ID POLYTOKEN_SESSION_PORT POLYTOKEN_SESSION_CREDENTIAL _ <<EOF
 $discovered
 EOF
       fi

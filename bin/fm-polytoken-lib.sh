@@ -382,11 +382,14 @@ fm_polytoken_rest_json() {  # <method> <port> <credential-token> <path> [json-bo
 
 # fm_polytoken_turn_settled: GET /sync's `turn` is null (no turn running).
 # This is the typed turn-ended postcondition the interrupt verb waits on.
+# `.turn` (not `.turn // empty`) is deliberate: jq prints JSON null as the
+# string `null`, while the `// empty` alternative collapses a null turn into
+# an empty string that could never match.
 fm_polytoken_turn_settled() {  # <port> <credential-token>
   local port=$1 token=$2 sync
   sync=$(fm_polytoken_rest_json GET "$port" "$token" /sync) || return 1
   command -v jq >/dev/null 2>&1 || return 1
-  [ "$(printf '%s' "$sync" | jq -r '.turn // empty' 2>/dev/null)" = null ]
+  [ "$(printf '%s' "$sync" | jq -r '.turn' 2>/dev/null)" = null ]
 }
 
 # fm_polytoken_interrupt: the verified interrupt verb. POST /turn/cancel

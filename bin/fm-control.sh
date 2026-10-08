@@ -534,7 +534,7 @@ interrupt_cancel_claim() {
 # claim, and the busy close written here because a cancelled turn emits no
 # stop hook (verified live).
 deliver_interrupt() {
-  local cancel devin_gen= port cred token gen
+  local cancel devin_gen='' port cred token gen
   if [ "$(fm_control_interrupt_transport "$HARNESS")" = rest ]; then
     port=$(fm_meta_get "$META" polytoken_port)
     cred=$(fm_meta_get "$META" polytoken_credential)
