@@ -391,9 +391,10 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
 # The per-task wiring artifacts a harness leaves behind, so a relaunch that
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook
-# pointing at a retired generation. Prints zero or more absolute paths, one per
-# line: worktree-resident hook files and firstmate-owned state tokens only,
-# never a harness's own managed config.
+# pointing at a retired generation. Teardown's worktree return reads the same
+# table for the recorded harness, skipping any path git tracks. Prints zero or
+# more absolute paths, one per line: worktree-resident hook files and
+# firstmate-owned state tokens only, never a harness's own managed config.
 fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   local harness=${1-} wt=${2-} state=${3-} id=${4-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
