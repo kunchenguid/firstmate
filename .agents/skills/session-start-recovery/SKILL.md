@@ -36,7 +36,7 @@ The locked startup inactive-outcome scan joins that worker so a slow local curre
    The closing reminder points back to the emitted supervision block and preserves only the lock, afk, Relay, and read-once reminders.
 
 Bootstrap detects first, asks for consent, and installs or upgrades only after the captain approves in the current session.
-Do not dispatch until the required launch tools are present and authentication is good for each registered supported forge; presentation availability follows `bootstrap-diagnostics` and does not block nonvisual work.
+Do not dispatch until the required launch tools are present and bootstrap authentication checks pass for every registered GitHub or GitLab project; other forge bindings follow their provider-specific delivery prerequisites. Presentation availability follows `bootstrap-diagnostics` and does not block nonvisual work.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.

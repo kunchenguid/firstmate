@@ -12,7 +12,7 @@ metadata:
 
 Handle each printed line as below, before dispatching work that depends on it.
 The line formats themselves are owned by `bin/fm-bootstrap.sh`'s header; this playbook owns the response to actionable lines.
-The session-start rules in `session-start-recovery` and the inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then install or upgrade - never change a tool the captain has not approved in this session - and no work is dispatched until the tools it needs are present and authentication is good for each registered supported forge.
+The session-start rules in `session-start-recovery` and the inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then install or upgrade - never change a tool the captain has not approved in this session - and no work is dispatched until the tools it needs are present and bootstrap authentication checks pass for every registered GitHub or GitLab project; other forge bindings follow their provider-specific delivery prerequisites.
 When any diagnostic needs captain attention, report the plain consequence and requested action using `AGENTS.md` section 9's captain-facing translation contract; do not name the diagnostic label unless the captain needs to paste it into a command or issue.
 
 - `MISSING: <tool> (install: <command>)` - the tool is absent; list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
@@ -32,8 +32,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
 - `NEEDS_GH_AUTH` - first confirm the configured host is reachable and the failure is not a transient network problem; this check also covers a missing CLI, so do not re-authenticate valid credentials on network evidence alone. Then ask the captain to run `! gh auth login` (interactive; you cannot run it for them). If a hostname follows the line, preserve it exactly: ask for `! gh auth login --hostname <host>` so GitHub Enterprise credentials are repaired on the failing host.
 - `NEEDS_GLAB_AUTH: <host>` - first confirm the configured host is reachable and the failure is not a transient network problem; then ask the captain to run `! glab auth login --hostname <host>` (interactive; you cannot run it for them).
-- `FORGE_UNSUPPORTED: <project> (host: <host|unresolved>)` - the registered project has an origin outside the configured GitHub/GitLab provider boundary, so do not dispatch forge-dependent work for it.
-  Confirm the remote is correct, or add the host to the matching `FM_GITHUB_HOSTS` or `FM_GITLAB_HOSTS` list, then rerun session start.
+- `FORGE_UNSUPPORTED: <project> (host: <host|unresolved>)` - the registered project has an origin outside the configured GitHub/GitLab provider boundary, or its explicit forge binding is malformed, so do not dispatch forge-dependent work for it.
+  If the host is already in the matching `FM_GITHUB_HOSTS` or `FM_GITLAB_HOSTS` list, correct or remove the malformed `forge=` binding in `data/projects.md`; otherwise confirm the remote is correct or add the host to the matching list, then rerun session start.
   This diagnostic comes from local origin classification, not network reachability. If a configured forge cannot be reached or its credentials are invalid, follow the corresponding `NEEDS_GH_AUTH` or `NEEDS_GLAB_AUTH` remediation instead.
 - `NETWORK_CHECKS: <what did not complete>; rerun <command>` - the deferred network stage itself could not finish, so the checks it names are simply unknown, not failed.
   Rerun the printed command; it is idempotent and re-derives every finding.
