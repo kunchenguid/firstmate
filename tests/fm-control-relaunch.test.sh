@@ -51,6 +51,9 @@ relaunch_cleanup() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  # A spawned task's published state/<id>.git-hooks is read-only by contract,
+  # so restore write permission before removing the root or every case leaks.
+  chmod -R u+w "$TMP_ROOT" 2>/dev/null || true
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
