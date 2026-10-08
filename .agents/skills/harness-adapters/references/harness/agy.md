@@ -8,7 +8,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 
 | Fact | Value |
 |---|---|
-| Binary | Absolute `agy` from `PATH`, refused if absent; native Linux is a Go executable. Windows/WSL may expose a PE `agy.exe` through a symlink named `agy`; Herdr still reports foreground name `agy`, while Linux `/proc` shows the interop `/init` command. |
+| Binary | Absolute `agy` from `PATH`, refused if absent; native Linux is a Go executable; Windows/WSL may expose a PE `agy.exe` through a symlink named `agy`; Herdr still reports foreground name `agy`, while Linux `/proc` shows the interop `/init` command. |
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
 | Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
@@ -27,16 +27,17 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 
 A new task path can stop on `Do you trust the contents of this project?` with `Yes, I trust this folder` preselected; an unanswered dialog was observed redirecting work into agy's scratch directory on native 1.2.0.
 Do not assume every 1.3.1 prompt presents the dialog, or that launch flags prove workspace trust.
-Pre-registration is the verified way to avoid the dialog, rather than depending on launch flags: `../../../../../bin/fm-spawn.sh` passes its selected executable to `../../../../../bin/fm-agy-trust.sh`, which owns profile/path resolution, linked-worktree scope, and atomic preservation of unrelated settings.
-Native agy reads the Linux home store; Windows agy under WSL reads `%USERPROFILE%\.gemini\antigravity-cli\settings.json` and trusts the Windows/UNC form of the worktree, so writing Linux `~/.gemini` does not prove that executable trusts the folder.
+`../../../../../bin/fm-spawn.sh` passes its selected executable to `../../../../../bin/fm-agy-trust.sh`, whose header owns profile/path resolution, linked-worktree scope, and settings preservation.
+`../../../../../docs/verification/agy.md` records native-Linux dialog suppression and the limits of the Windows/WSL evidence; do not treat successful registration alone as proof of a no-dialog Windows launch.
 The post-launch readiness gate is the backstop: it answers a dialog that renders anyway with a single Enter, then requires a busy verdict (Herdr's native `working` status or the pinned `esc to cancel` row) before the spawn reports success, and on a path that was not pre-registered it never counts a busy verdict as ready until the dialog has been answered, because Herdr's native verdict can precede the dialog.
 A pane whose brief cannot be confirmed to run in the worktree fails the spawn, records the failure in the task status, and closes the endpoint.
 Never steer into a pane still showing the dialog; a spawn that reported success has already cleared it.
 
 ## Credential precondition
 
-A verified agy worker ran under a signed-in Google account with no key export and no dialog.
-The unauthenticated failure mode was not observed, so treat any auth prompt or refusal as a credential blocker under `../../../../../AGENTS.md` section 9, fix the environment, and retire the endpoint rather than typing into it.
+A verified native-Linux agy worker ran under a signed-in Google account with no key export and no dialog.
+Treat any auth prompt or refusal as a credential blocker under `../../../../../AGENTS.md` section 9, fix the environment, and retire the endpoint rather than typing into it.
+`../../../../../docs/verification/agy.md` owns the platform-specific authentication evidence and limits.
 
 ## Detection
 

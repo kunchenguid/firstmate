@@ -8,23 +8,22 @@
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
 #   [agy-bin]   selected executable; required to resolve Windows agy under WSL
-# Native launches use HOME. A selected PE executable uses the Windows
-# USERPROFILE store and wslpath-translated worktree paths, not the Linux store.
+# Native launches (including an omitted agy-bin) use
+# ${HOME}/.gemini/antigravity-cli/settings.json and Linux worktree paths.
+# A selected PE executable uses %USERPROFILE%\.gemini\antigravity-cli\settings.json
+# and wslpath-translated Windows/UNC worktree paths, not the Linux store.
 # Resolve cmd.exe from PATH, then the conventional C:\Windows\System32 path
-# through wslpath; refuse registration if Windows home cannot be proven within
-# 5 seconds, leaving the spawn's dialog backstop in charge.
+# through wslpath; bound the USERPROFILE probe to 5 seconds and refuse an
+# unprovable Windows home, leaving the spawn's dialog backstop in charge.
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
 # WHY THIS EXISTS. agy 1.2.0 gates a folder it has never seen behind
 # "Do you trust the contents of this project?" and no launch flag suppresses
 # it (`agy --help` lists none). Answering appends the folder to the
-# `trustedWorkspaces` array of ${HOME}/.gemini/antigravity-cli/settings.json,
-# and agy honours an entry written there ahead of launch: verified live under a
-# throwaway HOME, a pre-registered folder launched straight into its turn while
-# an unregistered sibling parked on the dialog (docs/verification/agy.md). agy
-# compares the pane's LOGICAL working directory, not its resolved path (a
-# symlinked cwd with only the real path registered still parked), so both the
-# logical path and its resolved form are recorded when they differ.
+# `trustedWorkspaces` array of the selected profile's settings store.
+# Native-Linux dialog suppression and logical-cwd comparison were verified
+# live; docs/verification/agy.md owns that evidence and the Windows limits.
+# Both the logical path and its resolved form are recorded when they differ.
 #
 # bin/fm-spawn.sh keeps a post-launch gate as the backstop: it answers the
 # dialog if one renders anyway and never counts a busy turn as ready on a path
@@ -116,6 +115,8 @@ if [ "$AGY_FORMAT" = windows ]; then
   [ -n "${CMD_BIN:-}" ] && [ -x "$CMD_BIN" ] || refuse "Windows agy requires cmd.exe to resolve its USERPROFILE"
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$(dirname "${BASH_SOURCE[0]}")/fm-timeout-lib.sh"
+  # Read the environment listing in UTF-16LE rather than expanding the value
+  # into a command: profile names may contain Unicode or cmd metacharacters.
   WIN_HOME=$(
     set -o pipefail
     fm_run_timed 5 "$CMD_BIN" /d /u /c 'set USERPROFILE' </dev/null 2>/dev/null |

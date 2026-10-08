@@ -39,7 +39,7 @@ The brief submitted itself with no extra Enter, the turn ran, and the reply rend
 A second launch into the same directory answered a fresh prompt the same way, so the shape is repeatable, not a first-run accident.
 The footer rendered `Gemini 3.8 Flash · low`, proving both flags were accepted together.
 
-## Trust dialog: pre-registered before launch, gated on a busy turn as the backstop
+## Native-Linux 1.2.0 trust dialog: pre-registration and readiness backstop
 
 A first launch in a fresh worktree shows this dialog:
 
@@ -164,13 +164,15 @@ Windows child-tool ancestry and marker behavior were not refreshed; the environm
 
 The normal Windows profile reads `%USERPROFILE%\.gemini\antigravity-cli\settings.json`, not Linux `~/.gemini`, and stores trusted Linux folders as Windows UNC paths returned by `wslpath -w`.
 A Linux-store-only registration did not dismiss a plain-interactive trust dialog.
-The selected-executable helper now determines the correct store before claiming registration, retains the linked-worktree scope check before probing Windows, and refuses an unprovable Windows home rather than registering in the wrong profile.
-The portable suite checks native-home behavior, a bare symlink to a PE executable, the System32 fallback when `cmd.exe` is not on PATH, UNC trust paths, unrelated-key preservation, and refusal without writing either store.
+`bin/fm-agy-trust.sh` owns the selected-executable registration contract.
+`tests/fm-agy-harness.test.sh` covers native-home behavior, a bare symlink to a PE executable, the System32 fallback when `cmd.exe` is not on PATH, accented and ampersand-containing Windows profile names, UNC trust paths, unrelated-key preservation, and refusal without writing either store.
 Native Linux 1.2.x was not rerun for this refresh; its existing portable launch, trust, busy, and steering regressions still pass.
 
 ## What is still unproven
 
-The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
+Windows dialog suppression was not independently reproduced in the isolated validation profile: the launch stopped at authentication.
+The captain reported a Gemini 3.8 Flash worker reaching a working state in a fresh worktree without a dialog on 2026-10-08 using this trust change; that supporting observation is not an isolated reproduction.
+Native-Linux unauthenticated behavior remains unverified; any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
 No primary or secondmate behavior was built or tested, and none is claimed.
