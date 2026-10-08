@@ -114,6 +114,20 @@ exec /bin/sh
 SH
 chmod +x "$LAB/stubborn-pane.sh"
 
+# A gate whose TERM tears it down without stopping the agent: a second agent
+# process that does die on TERM clears the screen when it goes, while the
+# foreground agent ignores TERM and so outlives it until KILL.
+cat > "$LAB/fading-gate-pane.sh" <<SH
+#!/bin/sh
+clear
+cat "\$1"
+( "$LAB/bin/claude" 600 </dev/null; clear ) &
+trap '' TERM
+"$LAB/bin/claude" 600 </dev/null
+exec /bin/sh
+SH
+chmod +x "$LAB/fading-gate-pane.sh"
+
 "$REAL_TMUX" -u -L "$SOCKET" new-session -d -s "$SESSION" -n idle -x 200 -y 50 -c "$LAB" -- /bin/sh \
   || fail "could not start the private tmux server"
 
@@ -244,6 +258,17 @@ case "$OUT" in
 esac
 pass "fm-control exit stays idempotent once the gate-parked agent is gone"
 
+PANE_WRAPPER="$LAB/fading-gate-pane.sh" new_task fading wt "$LAB/imports-gate.txt"
+OUT=$(run_control fading exit) || fail "exit should KILL an agent whose TERM closed its gate but did not stop it: $OUT"
+case "$OUT" in
+  *stopped-at-startup-gate*) : ;;
+  *) fail "exit on a gate TERM closed should report stopped-at-startup-gate, got: $OUT" ;;
+esac
+[ "$(fm_backend_agent_state tmux "$SESSION:fm-fading")" = dead ] \
+  || fail "the agent whose gate TERM closed is still running after exit"
+tmux kill-window -t "$SESSION:fm-fading"
+pass "fm-control exit sends KILL to a gate-parked agent that TERM did not stop, even once the gate is gone"
+
 # --- recovery outcome ----------------------------------------------------
 #
 # Neither a drifted tmux endpoint nor a relaunch that cannot complete may cost
@@ -312,7 +337,9 @@ done
 rm -f "$LAB/home/state/"*.meta "$LAB/home/state/.wake-queue"
 new_task quick proj "$LAB/composer.txt"
 PANE_WRAPPER="$LAB/stubborn-pane.sh" new_task slow wt "$LAB/imports-gate.txt"
-RESULTS="$LAB/home/state/.restored-recover.results"
+results_files() {
+  ls -1t "$LAB/home/state/.restored-recover.results."* 2>/dev/null
+}
 SWEEP_LOCK="$LAB/home/state/.restored-recover.lock"
 set -m
 (
@@ -334,7 +361,12 @@ kill -KILL -- "-$LAUNCHER" 2>/dev/null || fail "could not kill the launcher's pr
 wait "$LAUNCHER" 2>/dev/null
 
 i=0
-while ! grep -q '^RESTORED_WORKER: quick: ' "$RESULTS" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+RESULTS=
+while ! grep -q '^RESTORED_WORKER: quick: ' "$RESULTS" 2>/dev/null && [ "$i" -lt 50 ]; do
+  sleep 0.1
+  i=$((i + 1))
+  RESULTS=$(results_files | sed -n 1p)
+done
 grep -Fqx "RESTORED_WORKER: quick: was running in $LAB/quick/proj instead of its recorded worktree; not relaunched: a tmux relaunch cannot move its endpoint back into $LAB/quick/wt" "$RESULTS" \
   || fail "the quick worker's line was never published; results:
 $(cat "$RESULTS" 2>/dev/null)"
@@ -352,6 +384,36 @@ $(cat "$RESULTS")"
   || fail "actionable results should enqueue exactly one restored-workers wake; queue:
 $(cat "$LAB/home/state/.wake-queue" 2>/dev/null)"
 pass "the job honors its own bound, records that it expired, and raises one wake for actionable results"
+
+# A later job writes its own results file and never rewrites the one an
+# earlier wake names, and only the newest five results files are kept.
+FIRST_RESULTS=$RESULTS
+tmux kill-window -t "$SESSION:fm-slow"
+rm -f "$LAB/home/state/slow.meta"
+run_job() {
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    FM_HOME="$LAB/home" HOME="$LAB/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_RESTORED_RECOVER_RECHECK=0.2 "$RECOVER" --job
+}
+run_job || fail "a second job exited nonzero"
+SECOND_RESULTS=$(results_files | sed -n 1p)
+[ "$SECOND_RESULTS" != "$FIRST_RESULTS" ] || fail "the second job reused the first job's results file"
+grep -Fq 'RESTORED_WORKER: sweep: stopped by its 3s bound' "$FIRST_RESULTS" \
+  || fail "the second job rewrote the results file the first wake names:
+$(cat "$FIRST_RESULTS" 2>/dev/null)"
+grep -q '^RESTORED_WORKER: quick: ' "$SECOND_RESULTS" \
+  || fail "the second job's results file lacks its own line:
+$(cat "$SECOND_RESULTS" 2>/dev/null)"
+tail -n 1 "$LAB/home/state/.wake-queue" | grep -Fq "read $SECOND_RESULTS" \
+  || fail "the second job's wake does not name its own results file; queue:
+$(cat "$LAB/home/state/.wake-queue")"
+for i in 1 2 3 4 5; do run_job || fail "job $i exited nonzero"; done
+[ "$(results_files | wc -l | tr -d ' ')" = 5 ] \
+  || fail "only the newest five results files should be kept, found:
+$(results_files)"
+[ ! -e "$FIRST_RESULTS" ] || fail "the oldest results file was not pruned"
+pass "each job publishes to its own results file, named in its wake, and old results files are pruned"
 
 OUT=$(env -u FM_HOME "$RECOVER" 2>&1) && fail "the sweep must refuse without an explicit home: $OUT"
 pass "the sweep refuses without an explicit home"

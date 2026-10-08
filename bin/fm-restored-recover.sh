@@ -60,11 +60,13 @@
 # would leave the worker with no agent, so the job runs outside that stage's
 # process group and deadline, under its own bound FM_RESTORED_RECOVER_TIMEOUT
 # (default 300s, sized for fm-control's TERM and KILL waits plus its launch
-# wait, all relaunches running concurrently). The job writes each line to
-# state/.restored-recover.results as it is settled, appends a
-# `RESTORED_WORKER: sweep:` line if its bound expired, and enqueues one
-# `check: restored-workers` wake naming that file whenever any line there is
-# actionable (anything but BOOTSTRAP_INFO); a clean sweep stays silent.
+# wait, all relaunches running concurrently). Each job writes its own results
+# file, state/.restored-recover.results.<UTC timestamp>.<job pid>, line by line
+# as each worker is settled, appends a `RESTORED_WORKER: sweep:` line if its
+# bound expired, and enqueues one `check: restored-workers` wake naming that
+# exact file whenever any line there is actionable (anything but
+# BOOTSTRAP_INFO); a clean sweep stays silent. A later job never rewrites an
+# earlier job's file; only the newest five results files are kept.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,7 +106,8 @@ RECHECK_DELAY=${FM_RESTORED_RECOVER_RECHECK:-1}
 TIMEOUT=${FM_RESTORED_RECOVER_TIMEOUT:-300}
 case "$TIMEOUT" in ''|*[!0-9]*|0) TIMEOUT=300 ;; esac
 SWEEP_LOCK="$STATE/.restored-recover.lock"
-RESULTS="$STATE/.restored-recover.results"
+RESULTS_PREFIX="$STATE/.restored-recover.results."
+RESULTS_KEEP=5
 
 real_dir() {  # <path>
   (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P)
@@ -252,7 +255,11 @@ case "$MODE" in
   job)
     fm_lock_try_acquire "$SWEEP_LOCK" || exit 0
     trap 'fm_lock_release "$SWEEP_LOCK" 2>/dev/null || true' EXIT
+    RESULTS="$RESULTS_PREFIX$(date -u +%Y%m%dT%H%M%SZ).$$"
     : > "$RESULTS" || exit 1
+    # shellcheck disable=SC2012
+    ls -1t "$RESULTS_PREFIX"* 2>/dev/null | tail -n "+$((RESULTS_KEEP + 1))" \
+      | while IFS= read -r old; do rm -f -- "$old"; done
     rc=0
     fm_run_timed "$TIMEOUT" "$0" --sweep-held >> "$RESULTS" 2>/dev/null || rc=$?
     if fm_timed_out "$rc"; then

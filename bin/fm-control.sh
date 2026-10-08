@@ -433,16 +433,27 @@ startup_gate() {
 # typed; the gate holds no turn and no composer text, so ending the harness
 # process loses nothing the worktree or the harness's own session store does not
 # keep. Only the verified harness processes in the endpoint's foreground group
-# are signalled, and only while the gate is still on screen: TERM first, then
-# KILL once if TERM did not stop it within the exit wait.
+# are signalled: TERM only while the gate is still on screen, then KILL once
+# if TERM did not stop it within the exit wait. TERM may already have torn the
+# gate down, so KILL needs only the attributed processes and an agent that
+# still reads alive.
 stop_at_startup_gate() {  # <gate>
   local gate=$1 pids pid sig state
   for sig in TERM KILL; do
-    startup_gate >/dev/null \
-      || die "task $ID's $gate closed before it could be stopped; nothing was signalled. Retry '$VERB'"
+    if [ "$sig" = TERM ]; then
+      startup_gate >/dev/null \
+        || die "task $ID's $gate closed before it could be stopped; nothing was signalled. Retry '$VERB'"
+    else
+      state=$(agent_state)
+      [ "$state" = alive ] \
+        || die "task $ID was parked on the $gate and its $HARNESS process was sent TERM, after which the agent reads '$state' rather than alive, so KILL was not sent. Retry '$VERB'"
+    fi
     pids=$(fm_backend_agent_pids "$BACKEND" "$T" 2>/dev/null) || pids=
-    [ -n "$pids" ] \
-      || die "task $ID is parked on the $gate, but no $HARNESS process could be attributed to its endpoint, so nothing was signalled"
+    if [ -z "$pids" ] && [ "$sig" = TERM ]; then
+      die "task $ID is parked on the $gate, but no $HARNESS process could be attributed to its endpoint, so nothing was signalled"
+    elif [ -z "$pids" ]; then
+      die "task $ID was parked on the $gate and its $HARNESS process was sent TERM, but no $HARNESS process could be attributed to its endpoint afterwards, so KILL was not sent. Retry '$VERB'"
+    fi
     for pid in $pids; do
       kill "-$sig" "$pid" 2>/dev/null || true
     done
