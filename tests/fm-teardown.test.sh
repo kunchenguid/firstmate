@@ -1000,11 +1000,12 @@ SH
   done
 }
 
-# Teardown of a task whose only landed signal is its merged PR, run with a clean
-# GH_HOST and with FM_GITHUB_HOST set only when <default-host> is given.
-# Args: name [recorded-pr-url [default-host]]. Echoes the case dir.
+# Teardown of a task whose only landed signal is its merged PR, run with
+# FM_GITHUB_HOST set only when <default-host> is given and GH_HOST set only when
+# <ambient-gh-host> is given.
+# Args: name [recorded-pr-url [default-host [ambient-gh-host]]]. Echoes the case dir.
 run_unlanded_teardown_at_default_host() {
-  local name=$1 pr_url=${2-} default_host=${3-} case_dir pr_head rc=0
+  local name=$1 pr_url=${2-} default_host=${3-} ambient_gh_host=${4-} case_dir pr_head rc=0
   case_dir=$(make_case "$name")
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
@@ -1016,6 +1017,7 @@ run_unlanded_teardown_at_default_host() {
   (
     unset GH_HOST FM_GITHUB_HOST
     [ -z "$default_host" ] || export FM_GITHUB_HOST=$default_host
+    [ -z "$ambient_gh_host" ] || export GH_HOST=$ambient_gh_host
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   ) || rc=$?
   printf '%s\n' "$rc" > "$case_dir/rc"
@@ -1036,6 +1038,29 @@ test_bare_number_and_branch_lookups_reach_gh_at_the_default_host() {
   assert_contains "$log" 'unset|gh-axi pr list' "the branch lookup must leave github.com untouched"
   assert_contains "$log" 'unset|gh pr view 7' "the bare-number lookup must leave github.com untouched"
   pass "teardown's branch and bare-number lookups reach gh at FM_GITHUB_HOST, and github.com otherwise"
+}
+
+test_exported_gh_host_never_breaks_the_default_host_lookup() {
+  local case_dir log value n=0
+  for value in ghe.example.com GHE.example.com ghe.example.com:8443; do
+    n=$((n + 1))
+    case_dir=$(run_unlanded_teardown_at_default_host "ambient-gh-host-$n" "" "" "$value")
+    expect_code 0 "$(cat "$case_dir/rc")" \
+      "an exported GH_HOST of $value must not stop teardown finding the merged PR"
+    log=$(cat "$case_dir/gh-host.log")
+    assert_contains "$log" "$value|gh-axi pr list" \
+      "the branch lookup must leave gh's own GH_HOST of $value untouched"
+    assert_contains "$log" "$value|gh pr view 7" \
+      "the bare-number lookup must leave gh's own GH_HOST of $value untouched"
+  done
+
+  case_dir=$(run_unlanded_teardown_at_default_host ambient-gh-host-and-default \
+    "" git.example.org ghe.example.com:8443)
+  expect_code 0 "$(cat "$case_dir/rc")" "FM_GITHUB_HOST must still win over an exported GH_HOST"
+  log=$(cat "$case_dir/gh-host.log")
+  assert_contains "$log" 'git.example.org|gh-axi pr list' "the branch lookup did not use FM_GITHUB_HOST"
+  assert_contains "$log" 'git.example.org|gh pr view 7' "the bare-number lookup did not use FM_GITHUB_HOST"
+  pass "an exported GH_HOST never breaks the teardown lookups, and FM_GITHUB_HOST still wins"
 }
 
 test_recorded_pr_url_names_its_own_host_not_the_default() {
@@ -4788,6 +4813,7 @@ test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_bare_number_and_branch_lookups_reach_gh_at_the_default_host
+test_exported_gh_host_never_breaks_the_default_host_lookup
 test_recorded_pr_url_names_its_own_host_not_the_default
 test_recorded_gerrit_change_never_selects_its_host_for_gh
 test_squash_merged_pr_allows_replayed_unpushed_patch

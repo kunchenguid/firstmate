@@ -149,11 +149,12 @@ fm_pr_github_host_valid() {
 }
 
 # The GitHub host to assume where none can be read from a URL, such as a pull
-# request known only by number. FM_GITHUB_HOST overrides it; otherwise gh's own
-# GH_HOST selection is honored, and github.com is the default. A value that is
-# not a valid host is refused rather than passed on to gh.
+# request known only by number: FM_GITHUB_HOST, else github.com. GH_HOST is never
+# read here; github.com is left untouched by fm_gh_at, so gh keeps honoring its
+# own GH_HOST selection. A value that is not a valid host is refused rather than
+# passed on to gh.
 fm_github_default_host() {
-  local host=${FM_GITHUB_HOST:-${GH_HOST:-github.com}}
+  local host=${FM_GITHUB_HOST:-github.com}
   fm_pr_github_host_valid "$host" || return 1
   printf '%s\n' "$host"
 }

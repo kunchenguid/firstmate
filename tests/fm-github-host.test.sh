@@ -88,18 +88,28 @@ test_default_host_rule() {
   local out
   out=$(bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh")
   assert_equals github.com "$out" "the default host must be github.com"
-  out=$(GH_HOST=ghe.example.com bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh")
-  assert_equals ghe.example.com "$out" "gh's own GH_HOST selection must be honored"
-  out=$(GH_HOST=ghe.example.com FM_GITHUB_HOST=git.example.org \
-    bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh")
-  assert_equals git.example.org "$out" "FM_GITHUB_HOST must win over GH_HOST"
-  out=$(FM_GITHUB_HOST=github.com GH_HOST=ghe.example.com \
-    bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh")
-  assert_equals github.com "$out" "FM_GITHUB_HOST=github.com must win too"
+  out=$(FM_GITHUB_HOST=git.example.org bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh")
+  assert_equals git.example.org "$out" "FM_GITHUB_HOST must override the default"
+  out=$(FM_GITHUB_HOST=github.com bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh")
+  assert_equals github.com "$out" "FM_GITHUB_HOST=github.com must be accepted"
   if FM_GITHUB_HOST='bad host/x' bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh" >/dev/null 2>&1; then
     fail "an invalid FM_GITHUB_HOST was passed on instead of refused"
   fi
-  pass "the default host is github.com, overridable with FM_GITHUB_HOST, and GH_HOST is honored"
+  pass "the default host is github.com and overridable with FM_GITHUB_HOST"
+}
+
+test_default_host_ignores_ambient_gh_host() {
+  local value out
+  for value in ghe.example.com GHE.example.com ghe.example.com:8443 'bad host/x'; do
+    out=$(GH_HOST=$value bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh") \
+      || fail "an exported GH_HOST of '$value' broke the default host lookup"
+    assert_equals github.com "$out" "an exported GH_HOST of '$value' must not change the default host"
+    out=$(GH_HOST=$value FM_GITHUB_HOST=git.example.org \
+      bash -c '. "$1"; fm_github_default_host' _ "$ROOT/bin/fm-pr-lib.sh") \
+      || fail "an exported GH_HOST of '$value' broke the FM_GITHUB_HOST lookup"
+    assert_equals git.example.org "$out" "FM_GITHUB_HOST must win over an exported GH_HOST of '$value'"
+  done
+  pass "the default host never reads an exported GH_HOST, whatever its form"
 }
 
 test_gh_at_selects_the_host_for_one_command() {
@@ -193,6 +203,7 @@ test_parser_accepts_any_github_host
 test_parser_refuses_malformed_urls_on_every_host
 test_parser_keeps_other_providers_apart
 test_default_host_rule
+test_default_host_ignores_ambient_gh_host
 test_gh_at_selects_the_host_for_one_command
 test_read_record_targets_the_host
 test_poll_reads_the_pull_request_at_its_host

@@ -2346,7 +2346,8 @@ The host is accepted as a lowercase DNS name with no port, user information, or 
 ### Default host
 
 Where a host must be assumed because none is given, such as a pull request known only by its number, Firstmate uses `FM_GITHUB_HOST`.
-When it is unset, Firstmate follows `GH_HOST`, which is how `gh` itself selects a host, and otherwise uses `github.com`.
+When it is unset, Firstmate uses `github.com`, which it leaves to `gh` to select as it always has, so an exported `GH_HOST` keeps its usual meaning there.
+Firstmate itself never reads `GH_HOST`.
 An invalid value is refused rather than passed on to `gh`.
 Set it in the environment Firstmate runs in, for example `export FM_GITHUB_HOST=ghe.example.com`.
 
