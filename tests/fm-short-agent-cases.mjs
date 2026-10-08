@@ -16,8 +16,17 @@ fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"@earendil-works/pi-co
 fs.mkdirSync(path.join(pkg,'dist/core'));
 fs.writeFileSync(path.join(pkg,'dist/core/http-dispatcher.js'),'export function configureHttpDispatcher() {}');
 fs.writeFileSync(path.join(pkg, 'dist/index.js'), `
+import { execFile as execFileCallback } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFile = promisify(execFileCallback);
 ${pluginFixture(pkg)}
 export const createExtensionRuntime = () => ({});
+export function createBashToolDefinition(cwd) { return {name:'bash',label:'bash',description:'Execute Bash in the configured cwd.',parameters:{type:'object',properties:{command:{type:'string'},timeout:{type:'number'}},required:['command'],additionalProperties:false},async execute(_id,args){
+ if(args.command==='uncertain-write') { await execFile('bash',['-c','printf x >> uncertain.txt'],{cwd}); throw Error('fixture lost command completion'); }
+ if(args.command==='cancel-write') { await execFile('bash',['-c','printf c >> cancelled.txt'],{cwd}); await new Promise((_resolve,reject)=>arguments[2].addEventListener('abort',()=>reject(Error('aborted')),{once:true})); }
+ try { const result=await execFile('bash',['-c',args.command],{cwd}); return {content:[{type:'text',text:result.stdout||'(no output)'}],details:undefined,structuredContent:{output:result.stdout,exit_code:0,wall_time_seconds:0,truncated:false}}; }
+ catch(error) { return {content:[{type:'text',text:(error.stdout||'')+(error.stderr||'')+'Command exited with code '+(error.code||1)}],details:undefined,structuredContent:{output:(error.stdout||'')+(error.stderr||''),exit_code:Number(error.code)||1,wall_time_seconds:0,truncated:false},isError:true}; }
+}};}
 export const ModelRuntime = { create: async () => ({provider:{},getProvider(){return this.provider;},getAvailable: async () => [{provider:'fixture',id:'fixture'}],streamSimple:async (_m,_c,opts)=> {
  if(Object.hasOwn(opts,'maxTokens')) throw Error('application output cap still present');
  if(_c.transport) await opts.fetch('https://unused.invalid');
@@ -26,12 +35,12 @@ export const ModelRuntime = { create: async () => ({provider:{},getProvider(){re
 export const SessionManager = {inMemory: () => ({getBranch:()=>[]})};
 export const SettingsManager = {inMemory: x => ({...x,getCacheWarmingMode:()=>x.cacheWarming})};
 export async function createAgentSession(o) {
- if(o.tools.join() !== 'read_material' || o.resourceLoader.getAgentsFiles().agentsFiles.length || o.resourceLoader.getExtensions().extensions.length!==1) throw Error('isolation violated');
+ if(!['read_material','read_material,bash'].includes(o.tools.join()) || o.resourceLoader.getAgentsFiles().agentsFiles.length || o.resourceLoader.getExtensions().extensions.length!==1) throw Error('isolation violated');
  if(o.settingsManager.getCacheWarmingMode() !== 'off') throw Error('cache warming enabled');
- const messages=[], subscribers=[];let answer='answer 42 m1';
- return {session:{ messages, systemPrompt:o.resourceLoader.getSystemPrompt(), getActiveToolNames:()=>o.tools,async bindExtensions(options){if(process.env.FM_FIXTURE_BIND_ERROR)options.onError({event:'session_start',error:'fixture'});o.modelRuntime.provider={};},
+ const messages=[], subscribers=[],controller=new AbortController();let answer='answer 42 m1';
+ return {session:{ messages, systemPrompt:o.resourceLoader.getSystemPrompt(), getActiveToolNames:()=>o.tools,setActiveToolsByName(){},async bindExtensions(options){if(process.env.FM_FIXTURE_BIND_ERROR)options.onError({event:'session_start',error:'fixture'});o.modelRuntime.provider={};},
 
- subscribe: cb=>subscribers.push(cb),dispose(){},getLastAssistantText:()=>answer,
+ subscribe: cb=>subscribers.push(cb),dispose(){controller.abort();},getLastAssistantText:()=>answer,
  async prompt(prompt){
   const goal=JSON.parse(prompt).goal;
   if(goal==='crash') process.exit(19);
@@ -49,9 +58,11 @@ export async function createAgentSession(o) {
   await o.modelRuntime.streamSimple({}, {}, {});
   if(goal==='modelbudget') await o.modelRuntime.streamSimple({}, {}, {});
   if(goal==='toolbudget') {for(let i=0;i<4;i++) await o.customTools[0].execute('a',{material:'m1'});}
+  if(goal==='bash-fixture') {const bash=o.customTools.find(tool=>tool.name==='bash');await bash.execute('b1',{command:'printf changed > value.txt'},controller.signal);const verified=await bash.execute('b2',{command:'cat value.txt'},controller.signal);answer='Verified final content: '+verified.structuredContent.output;}
+  if(goal==='bash-uncertain') {const bash=o.customTools.find(tool=>tool.name==='bash');await bash.execute('b1',{command:'uncertain-write'},controller.signal);}
+  if(goal==='bash-cancel') {const bash=o.customTools.find(tool=>tool.name==='bash');await bash.execute('b1',{command:'cancel-write'},controller.signal);}
   if(goal.startsWith('large-output')) answer='x'.repeat(4096);
-  const result=await o.customTools[0].execute('a',{material:'m1'});
-  if(!result.content[0].text.includes('42')) throw Error('fixture missing');
+  if(JSON.parse(prompt).materials.length) {const result=await o.customTools[0].execute('a',{material:'m1'});if(!result.content[0].text.includes('42')) throw Error('fixture missing');}
   const message={role:'assistant',stopReason:'stop',content:[{type:'text',text:'42'}]};messages.push(message);
   for(const cb of subscribers) cb({type:'message_end',message});
  }}};
@@ -132,6 +143,34 @@ assert.equal(new ShortAgents(home,root).status(crash.id).state,'interrupted');
 const lost=service.submit(request('lost'),false);const lostDir=service.dir(lost.id);
 fs.writeFileSync(path.join(lostDir,'heartbeat'),'old');fs.utimesSync(path.join(lostDir,'heartbeat'),new Date(0),new Date(0));
 assert.equal(fresh.status(lost.id).state,'interrupted');
+fs.mkdirSync(path.join(home,'state'),{recursive:true});fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
+const bashDir=path.join(tmp,'bash-fixture');fs.mkdirSync(bashDir);fs.writeFileSync(path.join(bashDir,'value.txt'),'original');
+const bashGrant={authority:'write and verify this disposable fixture only',cwd:bashDir,scope:'Replace value.txt with changed and read it back',exclusions:['No access outside this fixture','No deletion, merge, sync, cleanup, credential use, security change, or service restart'],expiresAt:Date.now()+60000};
+const bashTask=service.submit({key:'bash-fixture',goal:'bash-fixture',acceptance:'Write changed to value.txt, then verify its final contents with a separate Bash readback.',provider:'fixture',model:'fixture',materials:[],bash:bashGrant});
+const bashResult=await until(bashTask.id,'completed');assert.equal(fs.readFileSync(path.join(bashDir,'value.txt'),'utf8'),'changed');
+assert.deepEqual(bashResult.bash.map(({index,state,exitCode})=>({index,state,exitCode})),[{index:0,state:'completed',exitCode:0},{index:1,state:'completed',exitCode:0}]);
+const bashStored=JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'request.json')));assert.deepEqual(bashStored.input.bash,bashGrant);
+const bashContext=JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'context.json')));assert.deepEqual(bashContext.tools,['read_material','bash']);assert.deepEqual(JSON.parse(bashContext.prompt).bash,bashGrant);assert.equal(bashContext.parentMessages,0);
+assert.equal(JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'bash-0.receipt.json'))).output.output,'');
+assert.equal(JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'bash-1.receipt.json'))).output.output,'changed');
+await service.notify(bashTask.id);const bashOutcome=fs.readFileSync(path.join(home,'state/branch-outcomes.jsonl'),'utf8').trim().split('\n').map(JSON.parse).find(row=>row.task===bashTask.id);assert.match(bashOutcome.summary,/Verified Bash command receipts: 2/);
+assert.throws(()=>service.submit({...bashStored.input,bash:{...bashGrant,scope:'a broader scope'}}),/different request/);
+const retryDir=path.join(tmp,'bash-retry');fs.mkdirSync(retryDir);const retryInput={...request('bash-retry'),bash:{...bashGrant,cwd:retryDir,expiresAt:Date.now()+10}};const retryTask=service.submit(retryInput,false);fs.rmSync(retryDir,{recursive:true});await wait(20);
+assert.equal(service.submit(retryInput).id,retryTask.id,'identical retry survives grant expiry and cwd removal');assert.throws(()=>service.submit({...retryInput,bash:{...retryInput.bash,scope:'changed'}}),/different request/);
+assert.throws(()=>service.submit({...request('bash-root'),bash:{...bashGrant,cwd:'/'}}),/non-root canonical/);
+assert.throws(()=>service.submit({...request('bash-no-exclusions'),bash:{...bashGrant,exclusions:[]}}),/exclusions/);
+assert.throws(()=>service.submit({...request('bash-expired'),bash:{...bashGrant,expiresAt:1}}),/expired/);
+assert.throws(()=>service.submit({...request('bash-mixed'),bash:bashGrant,operations:{authority:'fixture',expiresAt:Date.now()+60000,steps:[{action:'sync',project:bashDir}]}}),/cannot be combined/);
+const replacedDir=path.join(tmp,'bash-replaced'),replacement=path.join(tmp,'bash-replacement');fs.mkdirSync(replacedDir);fs.mkdirSync(replacement);
+const reboundInput={key:'bash-rebound',goal:'bash-fixture',acceptance:'Refuse a changed cwd identity.',provider:'fixture',model:'fixture',materials:[],bash:{...bashGrant,cwd:replacedDir,expiresAt:Date.now()+60000}};
+const rebound=service.submit(reboundInput,false);fs.renameSync(replacedDir,replacedDir+'-old');fs.symlinkSync(replacement,replacedDir);execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',home,rebound.id]);const reboundResult=service.status(rebound.id);assert.equal(reboundResult.state,'blocked');assert.match(reboundResult.summary,/working directory identity changed/);assert.deepEqual(reboundResult.bash,[]);
+const uncertainInput={key:'bash-uncertain',goal:'bash-uncertain',acceptance:'Preserve uncertain effect evidence.',provider:'fixture',model:'fixture',materials:[],bash:{...bashGrant,expiresAt:Date.now()+60000}};
+const uncertain=service.submit(uncertainInput);
+const uncertainResult=await until(uncertain.id,'blocked');assert.equal(fs.readFileSync(path.join(bashDir,'uncertain.txt'),'utf8'),'x');assert.equal(uncertainResult.bash[0].state,'uncertain');assert.match(uncertainResult.summary,/effects are uncertain and were not replayed/);
+const uncertainAt=uncertainResult.finishedAt;assert.equal(service.submit(uncertainInput).finishedAt,uncertainAt);execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',home,uncertain.id]);assert.equal(fs.readFileSync(path.join(bashDir,'uncertain.txt'),'utf8'),'x','restart does not replay uncertain write');
+const cancelInput={key:'bash-cancel',goal:'bash-cancel',acceptance:'Preserve cancellation evidence.',provider:'fixture',model:'fixture',materials:[],bash:{...bashGrant,expiresAt:Date.now()+60000}};
+const cancelling=service.submit(cancelInput);for(let n=0;n<200&&!fs.existsSync(path.join(service.dir(cancelling.id),'bash-0.intent.json'));n++)await wait(20);assert.ok(fs.existsSync(path.join(service.dir(cancelling.id),'bash-0.intent.json')));service.cancel(cancelling.id);await wait(500);
+const cancelledBash=service.status(cancelling.id);assert.equal(cancelledBash.state,'cancelled');assert.equal(cancelledBash.bash[0].state,'uncertain');assert.equal(fs.readFileSync(path.join(bashDir,'cancelled.txt'),'utf8'),'c');assert.equal(service.submit(cancelInput).finishedAt,cancelledBash.finishedAt,'cancelled write is not replayed');execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',home,cancelling.id]);assert.equal(fs.readFileSync(path.join(bashDir,'cancelled.txt'),'utf8'),'c','restart does not replay cancelled write');
 // A duplicate child cannot claim an already-started job or replace its result.
 execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',home,accepted.id]);
 assert.equal(fresh.status(accepted.id).finishedAt,done.finishedAt);

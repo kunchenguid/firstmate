@@ -1,9 +1,9 @@
 # Run a short task while continuing the conversation
 
-A Pi primary can submit a small analysis or an explicitly authorized operation chain, receive an ID immediately, and continue the conversation while an independent Pi process works.
-Both use `fm_short_submit`, the same independent lifecycle, and the normal supervision outcome channel.
+A Pi primary can submit a small analysis, an explicitly authorized operation chain, or finite per-task Bash work, receive an ID immediately, and continue the conversation while an independent Pi process works.
+All three use `fm_short_submit`, the same independent lifecycle, and the normal supervision outcome channel.
 Each submission has its own context; unrelated tasks do not share a conversation.
-Ordinary ship/scout dispatch is unchanged.
+Work that needs a sustained code branch, complete project test cycle, or PR delivery remains an ordinary ship or scout.
 
 ## Enable and submit
 
@@ -38,7 +38,45 @@ An identical retry returns the same task and original snapshots; changed argumen
 For compatibility, the CLI accepts the former `budget` object and ignores its four legacy fields when comparing or storing a new request.
 The Pi tool no longer exposes that object.
 The CLI equivalent is `FM_HOME=/absolute/home node bin/fm-short-agent.mjs submit request.json`.
-Operation submission and cancellation enforce primary ownership in the service as well as the Pi tool.
+Operation and Bash submission and cancellation enforce primary ownership in the service as well as the Pi tool and currently require Linux `/proc` process identity.
+
+## Grant Bash for finite work
+
+Omitting `bash` preserves snapshot-only analysis and exposes no live shell or filesystem tool.
+Use a Bash grant only for independent, bounded work that can finish and verify its postcondition in one short session, such as inspecting an exact temporary directory or changing and reading back one disposable fixture.
+MAIN must state its existing authority, the exact canonical working directory, the concrete task scope, explicit exclusions, and a near-term expiry:
+
+```json
+{
+  "key": "rewrite-disposable-fixture-1",
+  "goal": "Replace value.txt with the requested value and verify it by reading the file back.",
+  "acceptance": "Report the final observed contents after a separate Bash readback command.",
+  "materials": [],
+  "bash": {
+    "authority": "Authorized to update this disposable test fixture only",
+    "cwd": "/tmp/exact-disposable-fixture",
+    "scope": "Write value.txt and read value.txt back",
+    "exclusions": [
+      "No access outside this directory",
+      "No deletion, merge, sync, task cleanup, credential use, security change, or service restart"
+    ],
+    "expiresAt": 1800000000000
+  }
+}
+```
+
+The child gets Pi's native `bash` tool with the approved directory as its working directory and no Pi session environment variables.
+The model executes commands and decides its next command from prior results in the same independent session; MAIN does not proxy individual commands.
+After a write, the child instructions require a separate readback command before success.
+Each command writes an intent before execution and a receipt with exit status and captured output afterward, while an interrupted or thrown command is retained as uncertain rather than replayed.
+Do not grant background or detached processes because they can outlive the finite child session.
+Duplicate submission keys still require the complete normalized request, including the Bash grant, to be identical and never relaunch a started task.
+
+The working directory, scope, and exclusions are immutable authorization evidence, but arbitrary Bash is not an operating-system sandbox: shell syntax and prose do not mechanically confine every path or effect.
+Grant Bash only when the selected model can be trusted to follow the narrow scope, and use an ordinary task or an existing guarded operation owner when mechanical confinement or an owned lifecycle is required.
+The Bash surface must not bypass merge approval, fleet sync, task resource cleanup, discard, credential, security, or shared-service restart owners.
+Do not combine `bash` and `operations` in one submission.
+Pi truncates model-facing Bash output to its native limit, and the durable receipt retains the native structured output, which is currently capped at 1 MiB; commands whose verification depends on more output must write and read back a bounded task-local artifact instead.
 
 ## Grant a specific operation chain
 
@@ -121,29 +159,34 @@ The first terminal result wins, so a late provider response cannot replace cance
 
 Every child gets `read_material`, which accepts only a material ID and a selected byte slice of the captured snapshot.
 Only an explicitly granted operation task also gets the argument-free `run_operations` tool.
-Neither tool accepts shell commands, new paths, expanded grants, or arbitrary recovery choices.
+Only an explicitly granted Bash task gets Pi's native `bash` tool in its recorded working directory.
+Without that grant, neither `bash` nor any other live filesystem tool is available.
+`read_material` and `run_operations` do not accept shell commands, new paths, expanded grants, or arbitrary recovery choices.
 The child receives no parent messages, context files, skills, prompt templates, or arbitrary extensions.
 The sole extension exception is the explicitly loaded `pi-openai-codex-compat` package under the original Pi agent directory's `npm/node_modules`.
 The child verifies the exact package identity and entrypoint, records the installed version, and fails closed on missing, mismatched, capability-deficient, or failed initialization; it never installs packages.
 [`bin/fm-short-plugin.mjs`](../bin/fm-short-plugin.mjs) owns this supported SDK loader path, its resource override, and the fixed child-only plugin settings.
 All plugin shell, filesystem and network tool registrations and management commands are removed before session construction; unexpected tool registrations refuse initialization.
+The Bash mode adds only the installed SDK's native `bash` definition after that removal and records the resulting active tool list.
 Plugin config and installation identity use the child directory, while the already initialized model runtime retains its original authentication source.
 No global settings, installed package or parent session is changed.
 
 Capture rejects directories, symlink paths, hardlinks, common credential locations, and recognizable credential content.
 Select sanitized evidence: detecting every secret in ordinary prose is outside this boundary.
 The trusted Pi runtime retains provider authentication and network access.
-These are enforced model-tool and action-owner boundaries, not an operating-system sandbox against arbitrary code running as the same user.
+Snapshot and fixed-operation modes are enforced model-tool and action-owner boundaries.
+The optional Bash grant runs arbitrary shell code as the same operating-system user and therefore relies on the immutable task authorization and model compliance for path and effect scope.
 
 Firstmate applies no short-task wall-clock limit, tool-call limit, provider-request limit, captured-input size limit, output-token reservation, or streamed-output size limit.
 The selected provider and model still enforce their own context, request, and output limits; a provider length stop is recorded as `blocked` with that distinction rather than reported as a Firstmate budget failure.
 Cancellation of an already active provider request can take a short time and cannot guarantee exact billing.
+Cancellation of an active Bash command asks Pi to terminate its process tree, but an effect may already have happened; the pre-execution intent and an uncertain receipt remain authoritative, and neither cancellation nor restart retries that command.
 Automatic compaction and cache warming are disabled, including the plugin threshold override.
 SSE uses zero transport retries, and each model stream may issue only one HTTP request, so plugin-internal retries cannot replay an uncertain request.
 [`bin/fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help` own the request schema and compatibility behavior.
 
 Reloading MAIN leaves children running and reconciles results when the extension starts again.
-A stale heartbeat produces `completed` only when every operation has a verified completed receipt; otherwise it produces `interrupted`.
+A stale heartbeat produces `completed` only when every fixed operation has a verified completed receipt; otherwise it produces `interrupted`.
 Neither path replays work.
 Historical v1 requests retain their legacy budget object for immutable evidence, but status and recovery ignore it; an unstarted stale request becomes `interrupted`, and an existing terminal `timeout` or `budget` result remains readable without execution.
 For operations, intent is persisted before calling the owner and a receipt requires authoritative postcondition readback.
@@ -165,12 +208,12 @@ The CLI `reconcile` retries missing notifications and reconciles ordinary receip
 
 ## Verify the installed path
 
-Run `bin/fm-test-run.sh tests/fm-short-agent.test.sh tests/fm-short-operations.test.sh tests/fm-pi-primary-types.test.sh` for uncapped input, output, duration and call behavior plus lifecycle, permission, isolated Git/forge effects, replay, and SDK checks.
+Run `bin/fm-test-run.sh tests/fm-short-agent.test.sh tests/fm-short-operations.test.sh tests/fm-pi-primary-types.test.sh` for uncapped input, output, duration and call behavior plus snapshot-only isolation, per-task Bash command and readback evidence, lifecycle, permission, isolated Git/forge effects, replay, and SDK checks.
 Run `bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh` for inline and bounded-reference notification delivery, explicit full-result loading, acknowledgement evidence, and recovery across compaction and session replacement.
 The operation suite doubles the model and forge; it does not perform an external merge.
 Set `FM_SHORT_INSTALL_LIVE=1` for its optional verified ShellCheck install into a temporary directory.
 Run `FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` for cleanup through a generated named Herdr lab and its default-session safety tripwire.
 For the real-model guard, run `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
-It loads the candidate extension, submits both task types, verifies a real fast-forward of a disposable local clone, and checks that another parent prompt completes while each child runs.
-It also reproduces a connection refusal using only child-process proxy variables, verifies that both task types stop before any operation, and checks the initialized SDK settings and extension isolation.
+It loads the candidate extension, submits all three task modes, verifies a harmless Bash write and separate readback in a disposable fixture plus a real fast-forward of a disposable local clone, and checks that another parent prompt completes while each child runs.
+It also reproduces a connection refusal using only child-process proxy variables, verifies that all three modes stop before any operation or Bash command, and checks the initialized SDK settings and extension isolation.
 [Runtime verification](verification/runtime-backends.md#pi-headless-short-tasks) records the current measured evidence and its limits.
