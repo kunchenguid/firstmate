@@ -264,9 +264,23 @@ fm_polytoken_require_hooks_free() {  # <worktree>
   fi
 }
 
+# fm_polytoken_require_handler_path: refuse a busy-script path carrying
+# whitespace. The hook handler is a bare program path and its splitting rules
+# are unverified (a `<script> <arg>` handler drops the argument), so a spaced
+# state dir would name a truncated program and error every turn.
+fm_polytoken_require_handler_path() {  # <busy-script>
+  case "$1" in
+    *[[:space:]]*)
+      echo "error: the polytoken busy writer path '$1' contains whitespace; a polytoken hook handler is a bare program path, so this state dir cannot carry polytoken wiring. Move the firstmate state dir to a path without whitespace or select another harness for this task." >&2
+      return 1
+      ;;
+  esac
+}
+
 fm_polytoken_write_hooks() {  # <worktree> <busy-script>
   local wt=$1 script=$2 hooks
   fm_polytoken_require_hooks_free "$wt" || return 1
+  fm_polytoken_require_handler_path "$script" || return 1
   hooks=$(fm_polytoken_hooks_file "$wt") || return 1
   mkdir -p "$(dirname "$hooks")" || return 1
   local jscript
@@ -428,4 +442,17 @@ fm_polytoken_interrupt() {  # <port> <credential-token> [wait-secs]
     elapsed=$(awk -v e="$elapsed" -v s="$step" 'BEGIN{printf "%.3f", e + s}')
   done
   return 1
+}
+
+# fm_polytoken_interrupt_close: the busy close a cancelled turn never emits.
+# Written only when the busy record still reads exactly as it did before the
+# cancel: a prompt queued behind the cancelled turn may submit at the pause
+# and reopen the record, and that live turn must not be overwritten idle.
+fm_polytoken_interrupt_close() {  # <bin-dir> <state-dir> <id> <record-before-cancel>
+  local bin=$1 state=$2 id=$3 before=$4 gen after
+  gen=$(fm_busy_current_gen "$state" "$id" 2>/dev/null) || return 0
+  after=$(fm_busy_record_read "$state" "$id" 2>/dev/null) || true
+  [ "$after" = "$before" ] || return 0
+  "$bin/fm-busy-event.sh" apply "$state" "$id" idle \
+    --gen "$gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
 }

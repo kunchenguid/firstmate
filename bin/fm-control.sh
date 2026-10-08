@@ -534,7 +534,7 @@ interrupt_cancel_claim() {
 # claim, and the busy close written here because a cancelled turn emits no
 # stop hook (verified live).
 deliver_interrupt() {
-  local cancel devin_gen='' port cred token gen
+  local cancel devin_gen='' port cred token before
   if [ "$(fm_control_interrupt_transport "$HARNESS")" = rest ]; then
     port=$(fm_meta_get "$META" polytoken_port)
     cred=$(fm_meta_get "$META" polytoken_credential)
@@ -543,18 +543,16 @@ deliver_interrupt() {
     fi
     token=$(fm_polytoken_credential_token "$cred") || token=
     [ -n "$token" ] || die "task $ID's polytoken credential at $cred is missing or unreadable, so the session cannot be interrupted through its daemon; the session has likely ended. Reconcile the task or relaunch it"
+    before=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || true
     cancel=$(fm_polytoken_interrupt "$port" "$token" "$SETTLE_WAIT") \
       || die "task $ID's polytoken turn cancel was not acknowledged on port $port within ${SETTLE_WAIT}s; the interrupt status is unknown, so no further control action is safe here"
     INTERRUPT_ARMED=yes
     INTERRUPT_HAZARD=none
     # A cancelled turn emits no stop hook (verified live), so the close the
     # hooks would have written lands here: the settled turn is the typed
-    # proof this incarnation is no longer busy.
-    gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
-    if [ -n "$gen" ]; then
-      "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle \
-        --gen "$gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
-    fi
+    # proof this incarnation is no longer busy, unless a queued prompt has
+    # already reopened the record since the snapshot taken before the cancel.
+    fm_polytoken_interrupt_close "$SCRIPT_DIR" "$STATE" "$ID" "$before"
     printf '%s' "$cancel"
     return 0
   fi

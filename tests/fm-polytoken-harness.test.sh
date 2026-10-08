@@ -427,6 +427,14 @@ console.log("ok")' "$hooks" >/dev/null \
   rc=$?
   [ "$rc" -ne 0 ] || fail "an existing project hook layer must refuse the arm"
   assert_contains "$out" "not firstmate's to clobber" "the refusal must name the ownership boundary"
+  # A whitespace-bearing writer path would be split by the handler, so it is
+  # refused rather than written.
+  rm -f "$hooks"
+  out=$(fm_polytoken_write_hooks "$case_dir/wt" "$case_dir/state dir/task.polytoken-busy.sh" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a whitespace-bearing busy writer path must refuse the arm"
+  assert_contains "$out" "contains whitespace" "the refusal must name the whitespace"
+  assert_absent "$hooks" "a refused handler path must not leave a hook layer"
   pass "fm-polytoken-lib: the hook layer binds the three events and refuses to clobber"
 }
 
@@ -634,6 +642,32 @@ test_polytoken_rest_interrupt_settles_the_turn() {
   pass "fm-polytoken-lib: the REST interrupt reports cancelled, not-running, and refuses unauthorized"
 }
 
+test_polytoken_interrupt_close_spares_a_reopened_turn() {
+  local rec state id before out
+  rec=$(make_wiring_case interruptclose)
+  state="$rec/state"
+  id=task
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null \
+    || fail "the busy contract must arm"
+  # A prompt queued behind the cancelled turn submits at the pause and reopens
+  # the record; the close must not overwrite that live turn.
+  before=$(fm_busy_record_read "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
+    --source polytoken-hook --event pre-user-prompt >/dev/null \
+    || fail "the queued prompt's open must apply"
+  fm_polytoken_interrupt_close "$ROOT/bin" "$state" "$id" "$before"
+  out=$(fm_busy_record_read "$state" "$id")
+  assert_contains "$out" "busy polytoken-hook pre-user-prompt" \
+    "a record reopened after the cancel must stay busy, got '$out'"
+  # An unchanged record is the cancelled turn itself, so the close lands.
+  before=$(fm_busy_record_read "$state" "$id")
+  fm_polytoken_interrupt_close "$ROOT/bin" "$state" "$id" "$before"
+  out=$(fm_busy_record_read "$state" "$id")
+  assert_contains "$out" "idle fm-interrupt interrupt" \
+    "an unchanged record must close idle after the cancel, got '$out'"
+  pass "fm-polytoken-lib: the interrupt close spares a turn reopened after the cancel"
+}
+
 test_polytoken_turn_settled_reads_the_typed_sync_verdict() {
   local dir rec port pid token
   rec=$(make_wiring_case sync)
@@ -741,7 +775,7 @@ run_polytoken_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
   HOME="$home" XDG_CONFIG_HOME="$home/.config" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="${PTFAKE_STATE_DIR:-$home/state}" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     PTFAKE_LOG="$case_dir/launch.log" \
@@ -926,6 +960,30 @@ test_polytoken_existing_project_hook_layer_refuses() {
   pass "fm-spawn: a project's own polytoken hook layer is refused, not clobbered"
 }
 
+test_polytoken_whitespace_state_dir_refuses() {
+  local id rec out rc spaced
+  id="pt-wsstate-z8-$$"
+  rec=$(make_polytoken_spawn_case wsstate "$id")
+  read_polytoken_spawn_record "$rec"
+  spaced="$CASE_DIR/state dir"
+  mkdir -p "$spaced"
+  rc=0
+  out=$(PTFAKE_STATE_DIR="$spaced" run_polytoken_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model zai/glm-5.3-flash) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn whose state dir carries whitespace should refuse"
+  assert_contains "$out" "contains whitespace" \
+    "the refusal must name the whitespace in the busy writer path"
+  assert_absent "$WT_DIR/.polytoken/hooks.json" \
+    "the refusal must not leave a hook layer in the worktree"
+  assert_absent "$WT_DIR/.polytoken/facets/firstmate-worker.md" \
+    "the refusal must not leave a generated worker facet in the worktree"
+  assert_absent "$spaced/$id.polytoken-busy.sh" \
+    "the refusal must not leave a generated busy writer in state"
+  assert_absent "$spaced/$id.polytoken-config" \
+    "the refusal must not leave a mirrored config dir in state"
+  pass "fm-spawn: a whitespace-bearing state dir refuses polytoken wiring before writing any"
+}
+
 test_polytoken_readiness_failure_fails_loudly_and_cleans_up() {
   local id rec out rc status tmux_calls
   id="pt-noready-z6-$$"
@@ -996,11 +1054,13 @@ test_polytoken_write_hooks_binds_the_three_events
 test_polytoken_model_ref_composes_and_refuses
 test_polytoken_model_ref_unreachable_listing_launches_unvalidated
 test_polytoken_rest_interrupt_settles_the_turn
+test_polytoken_interrupt_close_spares_a_reopened_turn
 test_polytoken_turn_settled_reads_the_typed_sync_verdict
 test_polytoken_launch_carries_the_hybrid_contract
 test_polytoken_effort_recorded_but_omitted_when_unlisted
 test_polytoken_unlisted_model_refuses_before_pane_creation
 test_polytoken_secondmate_is_refused
 test_polytoken_existing_project_hook_layer_refuses
+test_polytoken_whitespace_state_dir_refuses
 test_polytoken_readiness_failure_fails_loudly_and_cleans_up
 test_polytoken_spawn_arms_the_busy_contract
