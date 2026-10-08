@@ -433,10 +433,18 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # busy generation), the generated no-argv busy writer the hooks reference,
     # and the per-task config and sessions roots, which are DIRECTORIES and
     # therefore ride fm_control_harness_wiring_dirs below rather than this
-    # file table.
+    # file table. The worktree layers are the project's own discovery paths,
+    # so each is named only while it carries this task's generated content
+    # (the hooks reference this task's busy writer, the facet this task's
+    # inbox); a project's own hook layer or facet is never firstmate's to
+    # retire.
     polytoken)
-      printf '%s\n' "$wt/.polytoken/hooks.json"
-      printf '%s\n' "$wt/.polytoken/facets/firstmate-worker.md"
+      if grep -qsF "/$id.polytoken-busy.sh" "$wt/.polytoken/hooks.json"; then
+        printf '%s\n' "$wt/.polytoken/hooks.json"
+      fi
+      if grep -qsF "/$id.inbox" "$wt/.polytoken/facets/firstmate-worker.md"; then
+        printf '%s\n' "$wt/.polytoken/facets/firstmate-worker.md"
+      fi
       printf '%s\n' "$state/$id.polytoken-busy.sh"
       ;;
   esac
