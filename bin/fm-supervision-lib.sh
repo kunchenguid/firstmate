@@ -111,6 +111,7 @@ fm_supervision_inventory_snapshot() {  # <state-dir>
       && [ -r "$state/procevent" ] && [ -x "$state/procevent" ] || return 1
   fi
   listing=$(
+    set -o pipefail
     for path in "$state"/*.meta "$state"/*.check.sh "$state"/*.check-trust \
       "$state"/procevent/*.source "$state/.wake-queue"; do
       [ -e "$path" ] || [ -L "$path" ] || continue

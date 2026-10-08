@@ -88,6 +88,84 @@ test_capabilities_are_read_only_and_explicit() {
   pass "prelaunch: capabilities are read-only and expose a frozen closure plus exact fresh profiles"
 }
 
+test_profile_launch_env_matches_capabilities() {
+  local home fakebin caps out harness expected
+  home=$(new_home launch-env)
+  fakebin="$TMP_ROOT/launch-env-bin"
+  mkdir -p "$fakebin"
+  fm_fake_version_tool "$fakebin" claude FM_FAKE_CLAUDE_VERSION '1.0.0 (Claude Code)'
+  fm_fake_version_tool "$fakebin" pi-signed FM_FAKE_PI_SIGNED_VERSION 'pi-signed 1.0.0'
+  fm_fake_version_tool "$fakebin" omp FM_FAKE_OMP_VERSION 'omp 1.0.0'
+  caps=$(FM_PI_HARNESS=forged FM_OMP_HARNESS=forged PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    run_pre "$home" capabilities) || fail "capabilities refused the launch-env fixture: $caps"
+  for harness in claude pi-signed omp; do
+    case "$harness" in
+      pi-signed) expected='{"FM_PI_HARNESS":"pi-signed"}' ;;
+      omp) expected='{"FM_OMP_HARNESS":"omp"}' ;;
+      *) expected='{}' ;;
+    esac
+    out=$(FM_PI_HARNESS=forged FM_OMP_HARNESS=forged PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+      bash "$PRELAUNCH" profile --home "$home" --harness "$harness" --) \
+      || fail "profile refused advertised harness $harness: $out"
+    jq -en --argjson caps "$caps" --argjson out "$out" --argjson expected "$expected" --arg h "$harness" '
+      $out.status == "fresh"
+      and $caps.profiles[$h].launch_env == $expected
+      and $out.launch_env == $expected
+    ' >/dev/null || fail "profile launch_env for $harness diverged from capabilities or its allowlist: $out"
+  done
+  pass "prelaunch: profile launch_env equals the advertised allowlisted capability object"
+}
+
+test_strict_inventory_errors_refuse_reservation() {
+  local home out
+  home=$(new_home dangling-inventory)
+  mkdir -p "$home/state"
+  ln -s "$TMP_ROOT/missing-meta-target" "$home/state/w1.meta"
+  if reserve_main "$home" "$TOKEN_A" >/dev/null 2>&1; then
+    fail "a dangling fleet metadata symlink was treated as a proven idle home"
+  fi
+  [ ! -e "$home/state/.prelaunch-reservation" ] \
+    || fail "an unreadable inventory left a reservation behind"
+  rm -f "$home/state/w1.meta"
+  mkdir -p "$home/state/procevent"
+  ln -s "$TMP_ROOT/missing-source-target" "$home/state/procevent/w1.source"
+  if reserve_main "$home" "$TOKEN_A" >/dev/null 2>&1; then
+    fail "a dangling procevent source symlink was treated as a proven idle home"
+  fi
+  rm -f "$home/state/procevent/w1.source"
+  out=$(reserve_main "$home" "$TOKEN_A") || fail "a clean inventory refused reservation: $out"
+  release_main "$home" "$TOKEN_A" >/dev/null || fail "release of the clean inventory reservation failed"
+  pass "prelaunch: unsafe fleet inventories fail the strict idleness proof"
+}
+
+test_guard_write_admits_ineligible_unreserved_primaries() {
+  local home base linked out
+  home=$(new_home no-origin)
+  git -C "$home" remote remove origin
+  out=$(run_pre "$home" guard-write) || fail "guard-write refused an unreserved home without origin: $out"
+  assert_contains "$out" '"status":"clear"' "an ineligible unreserved home should stay clear"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-update.sh" 2>&1) \
+    || fail "the explicit updater refused an unreserved home without origin: $out"
+  mkdir -p "$TMP_ROOT/outside-data"
+  ln -s "$TMP_ROOT/outside-data" "$home/data"
+  out=$(run_pre "$home" guard-write) || fail "guard-write refused an unreserved home with symlinked data: $out"
+  assert_contains "$out" '"status":"clear"' "a symlinked data home without a reservation should stay clear"
+  mkdir -p "$home/state"
+  printf 'not-a-reservation\n' > "$home/state/.prelaunch-reservation"
+  if run_pre "$home" guard-write >/dev/null 2>&1; then
+    fail "an ineligible home with a reservation record failed open for a writer"
+  fi
+  if FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-update.sh" >/dev/null 2>&1; then
+    fail "the explicit updater crossed an ambiguous reservation on an ineligible home"
+  fi
+  base=$(new_home guard-linked-base)
+  linked="$TMP_ROOT/guard-linked-worker"
+  git -C "$base" worktree add -q --detach "$linked" HEAD
+  out=$(run_pre "$linked" guard-write) || fail "guard-write refused an unreserved linked worktree: $out"
+  assert_contains "$out" '"status":"clear"' "an unreserved linked worktree should stay clear"
+  pass "prelaunch: guard-write refuses only reservations, not enrollment-ineligible primaries"
+}
+
 test_attached_child_survives_parent_death_as_occupancy() {
   local home ready info stop launcher child owner clear=0 fakebin result
   home=$(new_home parent-death)
@@ -518,6 +596,9 @@ test_native_child_handoff_and_foreign_refusal() {
 }
 
 test_capabilities_are_read_only_and_explicit
+test_profile_launch_env_matches_capabilities
+test_strict_inventory_errors_refuse_reservation
+test_guard_write_admits_ineligible_unreserved_primaries
 test_reservation_validation_guard_and_release
 test_pinned_update_preflight_and_no_candidate_execution
 test_filter_dirty_branch_and_divergence_refuse_without_mutation

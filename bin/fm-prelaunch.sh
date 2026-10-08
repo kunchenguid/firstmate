@@ -182,8 +182,6 @@ prelaunch_scope_check() {
   done
 }
 
-prelaunch_scope_check
-
 json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
     | tr '\n\r\t' '   '
@@ -197,6 +195,18 @@ json_base() {  # <status>
   printf '{"version":1,"home":"%s","status":"%s"' \
     "$(json_escape "$HOME_PHYSICAL")" "$(json_escape "$1")"
 }
+
+# An explicit writer needs only proof that no reservation exists.  Reservation
+# creation itself requires the enrollment scope below, so a home without a
+# record keeps its existing write authority even when it cannot enroll.
+if [ "$ACTION" = guard-write ] && [ ! -e "$STATE/$FM_PRELAUNCH_RESERVATION_FILE" ] \
+  && [ ! -L "$STATE/$FM_PRELAUNCH_RESERVATION_FILE" ]; then
+  json_base clear
+  printf '}\n'
+  exit 0
+fi
+
+prelaunch_scope_check
 
 file_link_count() {  # <file>
   if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
@@ -251,6 +261,7 @@ profile_add() {  # <name> <stable-binary> <version-marker> [launch-env-json]
   if [ -n "${PROFILE_REQUEST:-}" ] && [ "$PROFILE_REQUEST" = "$name" ]; then
     PROFILE_BINARY=$real
     PROFILE_VERSION=$version
+    PROFILE_LAUNCH_ENV=$launch_env
   fi
 }
 
@@ -259,6 +270,7 @@ build_profiles() {
   PROFILES_JSON=
   PROFILE_BINARY=
   PROFILE_VERSION=
+  PROFILE_LAUNCH_ENV=
   PROFILE_REQUEST=${PROFILE_REQUEST:-}
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -309,8 +321,8 @@ profile() {
   build_profiles
   [ -n "$PROFILE_BINARY" ] || die "requested harness is not installed with a verified version"
   json_base fresh
-  printf ',"binary":"%s","harness_version":"%s","argv":[]}\n' \
-    "$(json_escape "$PROFILE_BINARY")" "$(json_escape "$PROFILE_VERSION")"
+  printf ',"binary":"%s","harness_version":"%s","argv":[],"launch_env":%s}\n' \
+    "$(json_escape "$PROFILE_BINARY")" "$(json_escape "$PROFILE_VERSION")" "$PROFILE_LAUNCH_ENV"
 }
 
 case "$ACTION" in
