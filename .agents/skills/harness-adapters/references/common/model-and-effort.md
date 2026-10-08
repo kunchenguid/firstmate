@@ -16,6 +16,7 @@ Use `low` for well-understood work with an explicit bounded path and `xhigh` for
 Choose intermediate levels as complexity, uncertainty, blast radius, or open-ended reasoning rises.
 If an adapter lacks `xhigh`, cap at its highest supported non-`max` level rather than silently omitting the intent.
 Never select `max` through this fallback; only an explicit per-task or standing captain preference permits it.
+Do not add model-specific versions of this effort policy.
 
 The explicit native `ultra` value follows the model-scoped refusal contract in `../../../bin/fm-harness.sh validate-native-effort`; it is never silently omitted or mapped to a Pi level.
 For other values, if requested effort is outside the adapter's accepted set, the spawn records `effort=` in task metadata but emits no effort flag.
