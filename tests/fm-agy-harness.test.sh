@@ -394,6 +394,76 @@ test_agy_trust_registers_the_logical_and_resolved_worktree_paths() {
   pass "fm-agy-trust.sh: registers the logical and resolved worktree paths and preserves the store"
 }
 
+test_agy_windows_trust_uses_the_selected_binary_profile_and_native_paths() {
+  local rec fakebin winhome store linuxstore before out rc link minimal tool
+  rec=$(make_agy_trust_case windows)
+  read_agy_trust_case "$rec"
+  fakebin="$CASE_DIR/bin"; winhome="$CASE_DIR/windows home"
+  mkdir -p "$fakebin" "$winhome/.gemini/antigravity-cli" "$HOME_DIR/.gemini/antigravity-cli"
+  store="$winhome/.gemini/antigravity-cli/settings.json"
+  linuxstore="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  printf '%s\n' '{"model":"keep me","trustedWorkspaces":["C:\\\\already-trusted"],"custom":{"a":true}}' > "$store"
+  printf '%s\n' '{"untouched":true}' > "$linuxstore"
+  before=$(cat "$linuxstore")
+  link="$CASE_DIR/wt-link"
+  ln -s "$WT_DIR" "$link"
+  # A PE selected via a symlink named agy, not an .exe suffix.
+  printf 'MZfixture\n' > "$fakebin/native.exe"
+  ln -s "$fakebin/native.exe" "$fakebin/agy"
+  cat > "$fakebin/cmd.exe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AGY_CMD_LOG"
+printf '%s\r\n' "${AGY_WIN_PROFILE:-C:\\Users\\Probe Name}"
+SH
+  cat > "$fakebin/wslpath" <<'SH'
+#!/usr/bin/env bash
+case "$1:$2" in
+  '-u:C:\Users\Probe Name') printf '%s\n' "$AGY_WIN_HOME" ;;
+  '-u:C:\Windows\System32\cmd.exe') printf '%s\n' "$AGY_SYSTEM32_CMD" ;;
+  -w:*) [ "${AGY_WSLPATH_FAIL:-0}" = 1 ] && exit 1; printf '\\\\wsl.localhost\\Ubuntu%s\n' "${2//\//\\}" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/cmd.exe" "$fakebin/wslpath"
+  out=$(HOME="$HOME_DIR" AGY_WIN_HOME="$winhome" AGY_CMD_LOG="$CASE_DIR/cmd.log" PATH="$fakebin:$PATH" \
+    "$TRUST" "$link" "$PROJ_DIR" "$fakebin/agy" 2>&1) || fail "selected Windows agy trust failed: $out"
+  assert_agy_trusted "$store" "\\\\wsl.localhost\\Ubuntu${WT_DIR//\//\\}" "Windows agy's resolved UNC path was not registered in its profile"
+  assert_agy_trusted "$store" "\\\\wsl.localhost\\Ubuntu${link//\//\\}" "Windows agy's logical UNC path was not registered"
+  assert_agy_trusted "$store" 'C:\\already-trusted' "Windows registration dropped an existing trust entry"
+  [ "$(agy_store_value "$store" model)" = '"keep me"' ] || fail "Windows registration dropped another key"
+  [ "$(agy_store_value "$store" custom)" = '{"a":true}' ] || fail "Windows registration dropped nested settings"
+  [ "$(cat "$linuxstore")" = "$before" ] || fail "Windows agy must not write the Linux settings store"
+  assert_contains "$(cat "$CASE_DIR/cmd.log")" '/d /c echo %USERPROFILE%' "Windows home probe must disable cmd AutoRun"
+  before=$(cat "$store")
+  rc=0
+  out=$(HOME="$HOME_DIR" AGY_WSLPATH_FAIL=1 AGY_WIN_HOME="$winhome" AGY_CMD_LOG="$CASE_DIR/cmd.log" PATH="$fakebin:$PATH" \
+    "$TRUST" "$WT_DIR" "$PROJ_DIR" "$fakebin/agy" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an untranslatable Windows worktree must refuse"
+  [ "$(cat "$store")" = "$before" ] || fail "a failed Windows translation rewrote settings"
+  rc=0
+  out=$(HOME="$HOME_DIR" AGY_WIN_PROFILE='%USERPROFILE%' AGY_WIN_HOME="$winhome" AGY_CMD_LOG="$CASE_DIR/cmd.log" PATH="$fakebin:$PATH" \
+    "$TRUST" "$WT_DIR" "$PROJ_DIR" "$fakebin/agy" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unproven Windows home must refuse instead of registering Linux trust"
+  assert_contains "$out" 'absolute Windows USERPROFILE' "unproven Windows home refusal lacked its reason"
+  : > "$CASE_DIR/cmd.log"
+  rc=0
+  out=$(HOME="$HOME_DIR" AGY_WIN_HOME="$winhome" AGY_CMD_LOG="$CASE_DIR/cmd.log" PATH="$fakebin:$PATH" \
+    "$TRUST" "$PROJ_DIR" "$PROJ_DIR" "$fakebin/agy" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Windows registration must still refuse the primary checkout"
+  [ ! -s "$CASE_DIR/cmd.log" ] || fail "Windows home must not even be probed before the worktree scope test"
+  # Hide all real cmd.exe installations, retaining only the tools this helper
+  # uses. This exercises the fallback even on hosts with cmd.exe on PATH.
+  minimal="$CASE_DIR/minimal-bin"; mkdir -p "$minimal"
+  for tool in bash node git dirname mkdir mktemp cat rm sleep timeout gtimeout perl; do
+    command -v "$tool" >/dev/null 2>&1 && ln -s "$(command -v "$tool")" "$minimal/$tool"
+  done
+  ln -s "$fakebin/wslpath" "$minimal/wslpath"
+  out=$(HOME="$HOME_DIR" AGY_WIN_HOME="$winhome" AGY_SYSTEM32_CMD="$fakebin/cmd.exe" AGY_CMD_LOG="$CASE_DIR/cmd.log" PATH="$minimal" \
+    "$TRUST" "$link" "$PROJ_DIR" "$fakebin/agy" 2>&1) || fail "System32 fallback must work without cmd.exe on PATH: $out"
+  [ "$(cat "$store")" = "$before" ] || fail "repeat registration must be idempotent and preserve every entry"
+  pass "fm-agy-trust: Windows binary selects its Windows profile and paths without weakening scope or changing Linux settings"
+}
+
 test_agy_trust_creates_a_missing_store() {
   local rec store out
   rec=$(make_agy_trust_case nostore)
@@ -907,6 +977,7 @@ test_agy_unreachable_listing_launches_unvalidated
 test_agy_hung_listing_is_cut_off_and_launches
 test_agy_zero_model_timeout_is_clamped_to_the_default_bound
 test_agy_trust_registers_the_logical_and_resolved_worktree_paths
+test_agy_windows_trust_uses_the_selected_binary_profile_and_native_paths
 test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog

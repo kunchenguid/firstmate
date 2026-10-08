@@ -153,6 +153,21 @@ Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker
 Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
+## Windows/WSL 1.3.1 refresh
+
+Verified on 2026-10-08 with the installed Windows `agy.exe` (1.3.1), launched from its Linux `agy` symlink on WSL Ubuntu.
+The selected binary has PE `MZ` bytes, not the native Linux ELF format; `%LOCALAPPDATA%\agy\bin\agy.exe` is its Windows installation shape.
+Herdr 0.9.3 / protocol 22 reported foreground name `agy`; Linux `/proc/<pid>/cmdline` began with the WSL interop `/init`, so the earlier native-Linux argv observation does not describe this variant.
+The UI retained `esc to cancel`, `? for shortcuts`, the `>` row between solid rules, and `Interrupted · What should Antigravity CLI do instead?`.
+No busy or interrupt signature change was needed.
+Windows child-tool ancestry and marker behavior were not refreshed; the environment observations above remain native-Linux evidence.
+
+The normal Windows profile reads `%USERPROFILE%\.gemini\antigravity-cli\settings.json`, not Linux `~/.gemini`, and stores trusted Linux folders as Windows UNC paths returned by `wslpath -w`.
+A Linux-store-only registration did not dismiss a plain-interactive trust dialog.
+The selected-executable helper now determines the correct store before claiming registration, retains the linked-worktree scope check before probing Windows, and refuses an unprovable Windows home rather than registering in the wrong profile.
+The portable suite checks native-home behavior, a bare symlink to a PE executable, the System32 fallback when `cmd.exe` is not on PATH, UNC trust paths, unrelated-key preservation, and refusal without writing either store.
+Native Linux 1.2.x was not rerun for this refresh; its existing portable launch, trust, busy, and steering regressions still pass.
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.

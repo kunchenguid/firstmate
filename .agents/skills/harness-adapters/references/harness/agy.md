@@ -8,7 +8,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 
 | Fact | Value |
 |---|---|
-| Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
+| Binary | Absolute `agy` from `PATH`, refused if absent; native Linux is a Go executable. Windows/WSL may expose a PE `agy.exe` through a symlink named `agy`; Herdr still reports foreground name `agy`, while Linux `/proc` shows the interop `/init` command. |
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
 | Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
@@ -25,8 +25,10 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 
 ## Trust, and where the decision persists
 
-Every task worktree is a path agy has never seen, so an unregistered launch stops on `Do you trust the contents of this project?` with the safe choice `Yes, I trust this folder` preselected, and an unanswered dialog sends the turn into agy's scratch directory instead of the worktree.
-There is no launch flag that suppresses the dialog, but agy honours a `trustedWorkspaces` entry in the captain's own `~/.gemini/antigravity-cli/settings.json` written ahead of launch (verified live), so `../../../../../bin/fm-spawn.sh` pre-registers the worktree through `../../../../../bin/fm-agy-trust.sh` before launch, the claude shape: the helper refuses anything but a linked worktree of the spawning project, records both the logical pane path and its resolved form because agy compares the logical cwd, and preserves every other key in the store.
+A new task path can stop on `Do you trust the contents of this project?` with `Yes, I trust this folder` preselected; an unanswered dialog was observed redirecting work into agy's scratch directory on native 1.2.0.
+Do not assume every 1.3.1 prompt presents the dialog, or that launch flags prove workspace trust.
+Pre-registration is the verified way to avoid the dialog, rather than depending on launch flags: `../../../../../bin/fm-spawn.sh` passes its selected executable to `../../../../../bin/fm-agy-trust.sh`, which owns profile/path resolution, linked-worktree scope, and atomic preservation of unrelated settings.
+Native agy reads the Linux home store; Windows agy under WSL reads `%USERPROFILE%\.gemini\antigravity-cli\settings.json` and trusts the Windows/UNC form of the worktree, so writing Linux `~/.gemini` does not prove that executable trusts the folder.
 The post-launch readiness gate is the backstop: it answers a dialog that renders anyway with a single Enter, then requires a busy verdict (Herdr's native `working` status or the pinned `esc to cancel` row) before the spawn reports success, and on a path that was not pre-registered it never counts a busy verdict as ready until the dialog has been answered, because Herdr's native verdict can precede the dialog.
 A pane whose brief cannot be confirmed to run in the worktree fails the spawn, records the failure in the task status, and closes the endpoint.
 Never steer into a pane still showing the dialog; a spawn that reported success has already cleared it.

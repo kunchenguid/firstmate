@@ -4,9 +4,15 @@
 # reaches its brief in the worktree instead of parking on the folder-trust
 # dialog and running its turn in agy's own scratch directory.
 #
-# Usage: fm-agy-trust.sh <worktree> <project>
+# Usage: fm-agy-trust.sh <worktree> <project> [agy-bin]
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
+#   [agy-bin]   selected executable; required to resolve Windows agy under WSL
+# Native launches use HOME. A selected PE executable uses the Windows
+# USERPROFILE store and wslpath-translated worktree paths, not the Linux store.
+# Resolve cmd.exe from PATH, then the conventional C:\Windows\System32 path
+# through wslpath; refuse registration if Windows home cannot be proven within
+# 5 seconds, leaving the spawn's dialog backstop in charge.
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
 # WHY THIS EXISTS. agy 1.2.0 gates a folder it has never seen behind
@@ -39,9 +45,10 @@ unset CDPATH \
   GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
   GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
 
-[ "$#" -eq 2 ] || { echo "usage: fm-agy-trust.sh <worktree> <project>" >&2; exit 2; }
+[ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo "usage: fm-agy-trust.sh <worktree> <project> [agy-bin]" >&2; exit 2; }
 WT_ARG=$1
 PROJ_ARG=$2
+AGY_BIN=${3:-}
 
 refuse() { echo "error: refusing to pre-register agy trust: $1" >&2; exit 1; }
 
@@ -86,7 +93,45 @@ PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
 
 command -v node >/dev/null 2>&1 || refuse "node is required to record workspace trust and was not found on PATH"
 
-STORE_DIR="$HOME_REAL/.gemini/antigravity-cli"
+TRUST_PATHS=("$WT_LOGICAL" "$WT_REAL")
+STORE_HOME=$HOME_REAL
+# Inspect the executable format, never its suffix or symlink name: PATH may
+# expose a Windows agy.exe as the bare word agy. Keep the git scope test above
+# on Linux paths before translating anything or touching either profile.
+AGY_FORMAT=native
+if [ -n "$AGY_BIN" ]; then
+  AGY_FORMAT=$(node - "$AGY_BIN" <<'NODE'
+const fs = require('node:fs');
+const fd = fs.openSync(process.argv[2], 'r');
+const magic = Buffer.alloc(2);
+const n = fs.readSync(fd, magic, 0, 2, 0);
+fs.closeSync(fd);
+console.log(n === 2 && magic.toString('ascii') === 'MZ' ? 'windows' : 'native');
+NODE
+  ) || refuse "could not inspect the selected agy executable"
+fi
+if [ "$AGY_FORMAT" = windows ]; then
+  command -v wslpath >/dev/null 2>&1 || refuse "Windows agy requires wslpath to locate its settings store"
+  CMD_BIN=$(command -v cmd.exe 2>/dev/null) || CMD_BIN=$(wslpath -u 'C:\Windows\System32\cmd.exe' 2>/dev/null) || true
+  [ -n "${CMD_BIN:-}" ] && [ -x "$CMD_BIN" ] || refuse "Windows agy requires cmd.exe to resolve its USERPROFILE"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-timeout-lib.sh"
+  WIN_HOME=$(fm_run_timed 5 "$CMD_BIN" /d /c 'echo %USERPROFILE%' </dev/null 2>/dev/null) \
+    || refuse "could not resolve Windows agy's USERPROFILE within 5 seconds"
+  WIN_HOME=${WIN_HOME//$'\r'/}
+  case "$WIN_HOME" in
+    [a-zA-Z]:\\* | \\\\*) ;;
+    *) refuse "cmd.exe did not return an absolute Windows USERPROFILE" ;;
+  esac
+  STORE_HOME=$(wslpath -u "$WIN_HOME" 2>/dev/null) || refuse "could not translate Windows agy's USERPROFILE"
+  STORE_HOME=$(real_dir "$STORE_HOME") || refuse "Windows agy's USERPROFILE is not an accessible directory"
+  WIN_LOGICAL=$(wslpath -w "$WT_LOGICAL" 2>/dev/null) || refuse "could not translate the logical worktree path for Windows agy"
+  WIN_REAL=$(wslpath -w "$WT_REAL" 2>/dev/null) || refuse "could not translate the resolved worktree path for Windows agy"
+  [ -n "$WIN_LOGICAL" ] && [ -n "$WIN_REAL" ] || refuse "wslpath returned an empty Windows worktree path"
+  TRUST_PATHS=("$WIN_LOGICAL" "$WIN_REAL")
+fi
+
+STORE_DIR="$STORE_HOME/.gemini/antigravity-cli"
 mkdir -p "$STORE_DIR" 2>/dev/null || true
 STORE_DIR_REAL=$(real_dir "$STORE_DIR") || true
 [ -n "$STORE_DIR_REAL" ] || refuse "agy settings directory '$STORE_DIR' does not exist and could not be created"
@@ -106,7 +151,7 @@ fi
 # after it, the bin/fm-claude-trust.sh shape: agy itself rewrites this file
 # when a worker answers a dialog or changes a setting, so a store that moved
 # under us is retried once and then refused rather than clobbered.
-if ! node - "$STORE" "$WT_LOGICAL" "$WT_REAL" <<'NODE'
+if ! node - "$STORE" "${TRUST_PATHS[@]}" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
