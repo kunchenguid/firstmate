@@ -77,3 +77,44 @@ expect_code 1 "$rc" "lab metadata cannot authorize a shared-session target"
 cmp -s "$META" "$TMP_ROOT/before.meta" || fail "target mismatch changed the endpoint record"
 assert_absent "$FM_TEST_HERDR_LOG" "target mismatch accessed Herdr"
 pass "lab selection refuses targets outside the selected session"
+
+# Check the parent wrapper's encoded SSH request, then publish a host-confirmed
+# generation. Ordinary routes must retain their existing argument list.
+PARENT_HOME="$TMP_ROOT/parent"
+mkdir -p "$PARENT_HOME/data" "$PARENT_HOME/state" "$PARENT_HOME/config"
+printf -- '- lab - synthetic (host: remote-lab; root: /srv/fm; home: /srv/lab; scope: test; projects: none; added 2026-10-07)\n' \
+  > "$PARENT_HOME/data/secondmates.md"
+cat > "$FAKEBIN/ssh" <<'PY'
+#!/usr/bin/env python3
+import base64
+import os
+import sys
+
+args = sys.argv[1:]
+while args[0] == '-o':
+    args = args[2:]
+assert args.pop(0) == '--'
+assert args[:2] == ['remote-lab', 'fm-remote-entrypoint.sh']
+request = base64.b64decode(args[5]).decode().rstrip('\0').split('\0')
+expected = ['fm-remote-secondmate-control.sh', 'relaunch', 'lab', 'claude', '-', '-', '--expect-generation', 'host.previous']
+session = os.environ['FM_TEST_REMOTE_SESSION']
+if session.startswith('fm-lab-'):
+    expected += ['--herdr-session', session]
+assert request == expected, (request, expected)
+print('schema=fm-remote-secondmate-control.v1\nharness=claude\nmodel=\neffort=\nspawn_gen=host.confirmed')
+PY
+chmod +x "$FAKEBIN/ssh"
+for recorded_session in "$session" fm-remote; do
+  fm_write_meta "$PARENT_HOME/state/lab.meta" \
+    "window=remote:lab" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "remote_host=remote-lab" "remote_root=/srv/fm" "home=/srv/lab" \
+    "remote_herdr_session=$recorded_session" "remote_spawn_gen=host.previous"
+  out=$(env FM_HOME="$PARENT_HOME" FM_SSH_BIN="$FAKEBIN/ssh" \
+    FM_TEST_REMOTE_SESSION="$recorded_session" \
+    bash "$ROOT/bin/fm-remote-secondmate-relaunch.sh" lab claude - - \
+    --expect-generation host.previous 2>&1); rc=$?
+  expect_code 0 "$rc" "parent must forward only recorded lab sessions: $out"
+  assert_grep 'remote_spawn_gen=host.confirmed' "$PARENT_HOME/state/lab.meta" \
+    "parent must publish the confirmed generation"
+done
+pass "parent forwards recorded lab sessions and preserves ordinary arguments"
