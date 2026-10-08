@@ -700,11 +700,11 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its selected remote session, never the shared session or a sibling's workspace or panes.
+Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`, never the shared session or a sibling's workspace or panes.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
-Cleanup releases the ledger's nonterminal generations before discarding their recovery routes or containing homes.
-An accounting failure preserves those routes and homes for reconciliation.
+The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns counted-generation retention during retirement.
+If accounting fails after host retirement, the primary retains its route and local records for reconciliation; the remote home may already be removed.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 
 No generic remote delete or write surface exists:

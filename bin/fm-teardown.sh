@@ -190,9 +190,12 @@
 # is the approved discard path that prevalidates child removal targets, locks each
 # descendant home's task set before enumeration, and holds those locks through
 # child cleanup. Contention refuses the complete forced teardown before child
-# mutation. Tmux children must first be torn down from their owning home and
-# server: their records lack socket identity, so parent cleanup cannot safely
-# close them even when a same-named window is visible. Cleanup retains
+# mutation. Tmux child records lack socket identity, so parent cleanup refuses
+# without --force. Forced cleanup closes the recorded target on the addressed
+# server and requires a readable pane-dead verdict afterward; a live or
+# unaddressable child must be torn down from its owning home and server.
+# The fleet seat owner separately verifies each generation's bound route
+# before releasing it (bin/fm-fleet-seats.sh). Cleanup retains
 # counted seat generations and their recovery routes when an
 # endpoint close fails; --force cannot bypass that accounting refusal.
 # Local and remote retirement serialize their destructive phase with
