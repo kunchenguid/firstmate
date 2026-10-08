@@ -1409,6 +1409,50 @@ SH
   [ "$result" = github.com ] || fail "included SSH alias must resolve to its canonical host, got: $result"
   [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
 
+  case_dir="$TMP_ROOT/forge-ssh-global-hostname"
+  config_dir="$case_dir/home/.ssh"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$config_dir" "$fakebin"
+  cat > "$config_dir/config" <<'EOF'
+HostName github-global.example
+Host global-github-work
+EOF
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+config=$(mktemp)
+trap 'rm -f "$config"' EXIT
+cat > "$config"
+target=${!#}
+exec "$FM_REAL_SSH_BIN" -G -F "$config" -- "$target"
+SH
+  chmod +x "$fakebin/ssh"
+  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github-global.example \
+    FM_REAL_SSH_BIN="$real_ssh" \
+    bash -c '. "$1"; fm_forge_resolve_host git@global-github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = github-global.example ] || fail "global SSH HostName must resolve to its canonical host, got: $result"
+
+  case_dir="$TMP_ROOT/forge-ssh-match-hostname"
+  config_dir="$case_dir/home/.ssh"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$config_dir" "$fakebin"
+  cat > "$config_dir/config" <<'EOF'
+Match host github-match-work
+  HostName github-match.example
+EOF
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+config=$(mktemp)
+trap 'rm -f "$config"' EXIT
+cat > "$config"
+target=${!#}
+exec "$FM_REAL_SSH_BIN" -G -F "$config" -- "$target"
+SH
+  chmod +x "$fakebin/ssh"
+  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github-match.example \
+    FM_REAL_SSH_BIN="$real_ssh" \
+    bash -c '. "$1"; fm_forge_resolve_host git@github-match-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = github-match.example ] || fail "safe Match host HostName must resolve to its canonical host, got: $result"
+
   case_dir="$TMP_ROOT/forge-ssh-tilde-include"
   config_dir="$case_dir/home/.ssh"
   fakebin="$case_dir/fakebin"

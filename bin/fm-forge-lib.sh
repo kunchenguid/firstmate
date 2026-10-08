@@ -110,9 +110,6 @@ fm_forge_safe_ssh_config_file() {
         [ "$match_safe" -eq 1 ] && printf '%s\n' "$line"
         ;;
       hostname)
-        if [ "$in_host" -ne 1 ]; then
-          continue
-        fi
         if [ "$in_match" -ne 0 ] && [ "$match_safe" -ne 1 ]; then
           continue
         fi
