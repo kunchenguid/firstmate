@@ -1590,6 +1590,68 @@ fm_pr_merge_watch_retire() {  # <state> <id>
   fm_pr_merge_watch_remove "$state" "$id"
 }
 
+# The full removal of a task's PR-check artifacts, shared by task cleanup
+# (bin/fm-teardown.sh) and a fresh spawn retiring a kept merge watch
+# (bin/fm-spawn.sh). The preflight refuses any unsafe artifact before anything
+# is removed; a pending retirement receipt finishes its own removal first.
+fm_pr_poll_artifacts_removal_valid() {  # <state> <id>
+  local state_dir=$1 id=$2 state_device artifact has_artifact=0
+  fm_task_id_path_safe "$id" || return 0
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
+      || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
+        && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
+    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
+    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
+      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
+      return 1
+    }
+  fi
+}
+
+fm_pr_poll_artifacts_remove() {  # <state> <id> <template>
+  local state_dir=$1 id=$2 template=$3
+  fm_pr_poll_artifacts_removal_valid "$state_dir" "$id" || return 1
+  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$template" || return 1
+  fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
+  fm_pr_poll_closed_notified_remove "$state_dir" "$id" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
+}
+
+# Retires a kept merge watch whose PR is not terminal, for a fresh task taking
+# over its id: the poll artifacts go first, then fm_pr_merge_watch_retire drops
+# the markers and the record last, so a crash between them leaves only an
+# orphan record fm_pr_merge_watch_prune_orphans sweeps. On success and on a
+# failed removal FM_PR_WATCH_URL names the watched PR; it is empty only when the
+# record itself is invalid.
+fm_pr_merge_watch_release() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3
+  fm_pr_merge_watch_valid "$state" "$id" || return 1
+  fm_pr_poll_artifacts_remove "$state" "$id" "$template" || return 1
+  fm_pr_merge_watch_retire "$state" "$id"
+}
+
 # A merge-watch record whose check is gone is crash residue of a half-finished
 # watch retirement, never a live watch: the poll the record bound is already
 # retired, so the record itself is what is swept.

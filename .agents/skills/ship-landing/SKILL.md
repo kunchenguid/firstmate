@@ -27,6 +27,7 @@ After successful teardown, record completion, retain only the configured recent 
 Cleaning up a ship task whose recorded PR is still open leaves a home-owned merge watch on that PR, so nothing needs to keep the task to learn the outcome.
 A later `check: merge landed:` or `check: PR closed without merging:` wake naming a cleaned-up task is that watch firing; record it against the backlog item the same way a live task's merge is recorded.
 A live ship task's poll stays silent when its PR closes unmerged; the closed wake only ever comes from a kept watch.
+Dispatching a fresh task under the same id retires the watch and prints its PR URL; the new worker continues on that PR and re-arms it with `bin/fm-pr-check.sh <id> <url>` when it reports.
 If a future edit to `bin/fm-pr-poll.sh` makes the watcher's check stale, re-arm the watch with `bin/fm-pr-check.sh <id> <url>`; it binds to the watch record when no task meta remains.
 
 A secondmate is persistent and an empty queue is healthy.

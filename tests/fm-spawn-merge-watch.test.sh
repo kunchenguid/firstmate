@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # tests/fm-spawn-merge-watch.test.sh - a fresh spawn on a task id that still
-# carries a kept merge watch (state/<id>.merge-watch, bin/fm-pr-lib.sh) adopts
-# the watch into the new task, and refuses with a real remedy whenever the
-# adoption cannot be proven safe. Drives bin/fm-spawn.sh end to end against a
-# fake tmux and a real isolated git worktree.
+# carries a kept merge watch (state/<id>.merge-watch, bin/fm-pr-lib.sh) retires
+# the watch and its poll, names the watched PR for the new worker, and refuses
+# with a real remedy whenever the watch cannot be retired cleanly. Drives
+# bin/fm-spawn.sh end to end against a fake tmux and a real isolated git
+# worktree.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-trace-context-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
@@ -88,71 +87,73 @@ run_spawn() {
 assert_watch_untouched() {  # <label>
   fm_pr_merge_watch_valid "$CASE_HOME/state" "$CASE_ID" \
     || fail "$1 damaged the merge-watch record"
+  [ -e "$CASE_HOME/state/$CASE_ID.check.sh" ] || fail "$1 removed the armed check"
   [ ! -e "$CASE_HOME/state/$CASE_ID.meta" ] || fail "$1 created task metadata"
 }
 
 # The re-dispatch this exists for: the captain asks for changes on a PR whose
 # worker was already cleaned up, and the home dispatches the same ticket id.
-# Trace context is on so the carrier recorded after publication is covered too:
-# it must not land after pr= and break the poll binding.
-test_ship_spawn_adopts_a_kept_merge_watch() {
-  local out status meta
-  make_case adopt
+test_spawn_retires_a_kept_merge_watch() {
+  local out status meta artifact
+  make_case retire
   seed_kept_watch
-  : > "$CASE_HOME/config/trace-context"
-  FM_TRACE_CONTEXT=on fm_trace_context_session_start \
-    "$CASE_HOME/config" "$CASE_HOME/state/.trace-context-effective"
-
-  out=$(SPAWN_TRACE_CONTEXT=on run_spawn --mode no-mistakes --yolo off)
-  status=$?
-  expect_code 0 "$status" "spawn on an id with a kept merge watch should adopt it: $out"
-  assert_contains "$out" "merge watch adopted: $URL" "spawn did not report the adopted watch"
-  assert_contains "$out" "spawned $CASE_ID" "spawn did not report success"
-  meta="$CASE_HOME/state/$CASE_ID.meta"
-  [ "$(grep -c '^pr=' "$meta")" = 1 ] || fail "adopted task meta does not carry exactly one pr="
-  grep -qx "pr=$URL" "$meta" || fail "adopted task meta does not record the watched PR"
-  grep -q '^traceparent=' "$meta" || fail "enabled spawn did not record its trace carrier"
-  [ ! -e "$CASE_HOME/state/$CASE_ID.merge-watch" ] \
-    || fail "adopted spawn left the merge-watch record behind"
-  fm_pr_poll_artifacts_valid "$CASE_HOME/state" "$CASE_ID" "$POLL" \
-    || fail "the armed poll no longer validates under the adopting task"
-  [ "$FM_PR_META_URL" = "$URL" ] || fail "the poll is not bound through the new task meta"
-  pass "a fresh ship spawn adopts a kept merge watch and keeps its poll armed and bound"
-}
-
-test_scout_spawn_refuses_a_kept_merge_watch() {
-  local out status
-  make_case scout
-  seed_kept_watch
-
-  out=$(run_spawn --scout)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a scout spawn took over an id with a kept merge watch: $out"
-  assert_contains "$out" "state/$CASE_ID.merge-watch" "refusal did not name the merge-watch record"
-  assert_contains "$out" "$URL" "refusal did not name the watched PR"
-  assert_contains "$out" "different task id" "refusal did not name a remedy"
-  assert_watch_untouched "the refused scout spawn"
-  fm_pr_poll_artifacts_valid "$CASE_HOME/state" "$CASE_ID" "$POLL" \
-    || fail "the refused scout spawn damaged the armed poll"
-  pass "a scout spawn refuses an id with a kept merge watch and leaves the watch intact"
-}
-
-test_ship_spawn_refuses_a_watch_without_a_valid_poll() {
-  local out status
-  make_case nopoll
-  seed_kept_watch no-poll
+  fm_pr_url_parse "$URL" || fail "merge-watch fixture URL was unparseable"
+  fm_pr_poll_merge_mark_notified "$CASE_HOME/state" "$CASE_ID" "$FM_PR_PROVIDER" \
+    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+    || fail "could not seed the merge-notified marker"
 
   out=$(run_spawn --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "a spawn adopted a merge watch with no armed poll: $out"
-  assert_contains "$out" "bin/fm-pr-check.sh $CASE_ID $URL" \
-    "refusal did not name the re-arm remedy"
-  assert_watch_untouched "the refused unarmed adoption"
-  pass "a ship spawn refuses to adopt a merge watch whose poll is not validly armed"
+  expect_code 0 "$status" "spawn on an id with a kept merge watch should retire it: $out"
+  assert_contains "$out" "merge watch retired: $URL" "spawn did not name the retired watch's PR"
+  assert_contains "$out" "bin/fm-pr-check.sh $CASE_ID $URL" "spawn did not name the re-arm step"
+  assert_contains "$out" "spawned $CASE_ID" "spawn did not report success"
+  meta="$CASE_HOME/state/$CASE_ID.meta"
+  [ -f "$meta" ] || fail "spawn did not publish the task record"
+  ! grep -q '^pr=' "$meta" || fail "the new task record carries pr= at birth"
+  for artifact in merge-watch check.sh pr-poll pr-poll-registration pr-poll-retirement \
+    pr-poll-merge-notified pr-poll-closed-notified; do
+    [ ! -e "$CASE_HOME/state/$CASE_ID.$artifact" ] \
+      || fail "retiring the merge watch left state/$CASE_ID.$artifact behind"
+  done
+  pass "a fresh spawn retires a kept merge watch, names its PR, and never records pr= at birth"
 }
 
-test_ship_spawn_adopts_a_kept_merge_watch
-test_scout_spawn_refuses_a_kept_merge_watch
-test_ship_spawn_refuses_a_watch_without_a_valid_poll
+test_spawn_refuses_a_watch_it_cannot_retire_cleanly() {
+  local out status
+  make_case unsafe
+  seed_kept_watch
+  ln "$CASE_HOME/state/$CASE_ID.check.sh" "$CASE_HOME/check-link" \
+    || fail "could not hard-link the armed check"
+
+  out=$(run_spawn --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn proceeded past a merge watch it could not retire: $out"
+  assert_contains "$out" "$URL" "refusal did not name the watched PR"
+  assert_contains "$out" "different task id" "refusal did not name a remedy"
+  assert_watch_untouched "the refused spawn"
+  pass "a spawn refuses an id whose merge watch cannot be retired cleanly and leaves the watch intact"
+}
+
+test_spawn_refuses_an_unreadable_watch_record() {
+  local out status
+  make_case unreadable
+  seed_kept_watch
+  printf 'not-a-merge-watch\n' > "$CASE_HOME/state/$CASE_ID.merge-watch"
+
+  out=$(run_spawn --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn proceeded past an unreadable merge-watch record: $out"
+  assert_contains "$out" "state/$CASE_ID.merge-watch" "refusal did not name the merge-watch record"
+  assert_contains "$out" "different task id" "refusal did not name a remedy"
+  [ -e "$CASE_HOME/state/$CASE_ID.merge-watch" ] || fail "the refused spawn removed the record"
+  [ -e "$CASE_HOME/state/$CASE_ID.check.sh" ] || fail "the refused spawn removed the armed check"
+  [ ! -e "$CASE_HOME/state/$CASE_ID.meta" ] || fail "the refused spawn created task metadata"
+  pass "a spawn refuses an id whose merge-watch record is unreadable and touches nothing"
+}
+
+test_spawn_retires_a_kept_merge_watch
+test_spawn_refuses_a_watch_it_cannot_retire_cleanly
+test_spawn_refuses_an_unreadable_watch_record
 
 echo "# all fm-spawn-merge-watch tests passed"
