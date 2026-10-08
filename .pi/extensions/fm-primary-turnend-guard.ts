@@ -541,6 +541,9 @@ export default function (pi: ExtensionAPI) {
   registerSessionstartExitListener();
 
   pi.on?.("session_start", (event, ctx) => {
+    // This extension is also loaded by Pi secondmates for shared turn-end
+    // protections, but primary session-start is owned by the primary home only.
+    if (process.env.FM_ROLE === "secondmate") return;
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"

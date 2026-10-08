@@ -3014,6 +3014,25 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_secondmate_home_does_not_receive_primary_startup_nudge() {
+  local world root home fakebin mate out
+  world=$(new_world secondmate-startup-nudge)
+  IFS='|' read -r root home fakebin <<< "$world"
+  mate="$TMP_ROOT/secondmate-startup-home"
+  mkdir -p "$mate/state" "$mate/bin"
+  printf '%s\n' quant-researcher > "$mate/.fm-secondmate-home"
+  cp "$root/AGENTS.md" "$mate/AGENTS.md" 2>/dev/null || :
+  out=$(FM_HOME="$mate" FM_ROOT_OVERRIDE="$root" FM_STATE_OVERRIDE="$mate/state" \
+    bash "$ROOT/bin/fm-sessionstart-nudge.sh")
+  [ -z "$out" ] || fail "secondmate home received primary startup nudge: $out"
+  out=$(FM_HOME="$mate" FM_ROOT_OVERRIDE="$root" FM_STATE_OVERRIDE="$mate/state" \
+    bash "$ROOT/bin/fm-sessionstart-run.sh" --source startup)
+  [ -z "$out" ] || fail "secondmate home ran primary startup flow: $out"
+  [ ! -e "$mate/state/.lock" ] || fail "secondmate primary startup created a session lock"
+  pass "secondmate home marker suppresses primary session-start nudge and startup flow"
+}
+
+test_secondmate_home_does_not_receive_primary_startup_nudge
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
