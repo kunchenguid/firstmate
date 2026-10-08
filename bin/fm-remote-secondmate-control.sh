@@ -16,12 +16,16 @@
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
+# Append --herdr-session <owned-fm-lab-name> for isolated validation.
+# Omission retains fm-remote; empty or other explicit names refuse.
+#
 # Remote placement ends here, but the second-mate agent runs only on a
 # session-provider backend whose server survives every SSH disconnection that
-# supervises it: herdr in the dedicated fm-remote session, or rex in this
-# home's own 2ndmate-<id>-<hash> session on the host's personal rex server.
-# Launch refuses any other selection rather than reading this home's
-# config/backend. The user's interactive sessions remain for the user's work.
+# supervises it: herdr in the dedicated fm-remote session (or the selected
+# owned lab session), or rex in this home's own 2ndmate-<id>-<hash> session on
+# the host's personal rex server. Launch refuses any other selection rather
+# than reading this home's config/backend. The user's interactive sessions
+# remain for the user's work.
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
 # The home's own workers keep their ordinary backend selection.
 # bin/fm-remote-doctor.sh owns that host's readiness for the selected backend.
@@ -101,6 +105,17 @@ REMOTE_HERDR_SESSION=fm-remote
 # cannot repair while it answers, so nothing this control plane runs may start
 # one: bin/fm-remote-doctor.sh --fix alone starts the persistent server.
 export FM_BACKEND_REX_NO_AUTOSTART=1
+if [ "$#" -ge 2 ]; then
+  session_flag_index=$(($# - 1))
+  if [ "${!session_flag_index}" = --herdr-session ]; then
+    REMOTE_HERDR_SESSION=${!#}
+    if ! [[ "$REMOTE_HERDR_SESSION" =~ ^fm-lab-[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+      printf 'error: invalid remote Herdr lab session: %s; expected an owned fm-lab-* name\n' "$REMOTE_HERDR_SESSION" >&2
+      exit 1
+    fi
+    set -- "${@:1:$#-2}"
+  fi
+fi
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
