@@ -1293,6 +1293,18 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
+    unknown)
+      case "$BUSY_VERDICT" in
+        *' permission-prompt')
+          # A worker frozen at a permission dialog needs firstmate, so report it
+          # as a named blocker with its start time rather than a bare unknown.
+          since=$(sed -n 's/.* ts=\([0-9][0-9]*\).*/\1/p' "$STATE/$ID.busy-state" 2>/dev/null | tail -1)
+          since=${since:+ since $(date -r "$since" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$since" '+%Y-%m-%d %H:%M' 2>/dev/null)}
+          emit blocked pane "waiting at a permission prompt$since (${BUSY_VERDICT#unknown }); inspect the pane and approve or deny"
+          ;;
+      esac
+      emit unknown pane "harness state unavailable ($BUSY_VERDICT)"
+      ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
 fi

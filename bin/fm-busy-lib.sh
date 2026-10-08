@@ -1077,10 +1077,15 @@ fm_busy_classify_semantic() {  # <backend> <target> <harness> <id> <state-dir> [
     r_state=${out%% *}
     out=${out#* }
     r_source=${out%% *}
+    r_event=${out#* }; r_event=${r_event%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
       if [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
         && printf '%s' "$tail40" | fm_busy_launch_prompt_parked "$harness"; then
         printf 'unknown launch-prompt'
+      elif [ "$r_state" = unknown ] && [ "$r_event" = permission-prompt ]; then
+        # The hook recorded an open permission dialog; keep that fact so readers
+        # can name the wait instead of reporting a bare unknown.
+        printf 'unknown %s permission-prompt' "$r_source"
       else
         printf '%s %s' "$r_state" "$r_source"
       fi

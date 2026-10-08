@@ -2446,6 +2446,31 @@ test_moved_remote_branch_without_named_head_is_blocked() {
   pass "moved remote branch without the named head is current-state blocked"
 }
 
+# (f2) an open permission dialog recorded by the Claude hook -> a named blocker
+test_permission_prompt_reads_as_named_blocker() {
+  reset_fakes
+  local d; d=$(new_case permprompt)
+  make_repo_on_branch "$d/wt" fm/feat-p
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p.meta" "window=fm:fm-feat-p" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-p)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-p busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-p unknown --gen "$gen" \
+    --source claude-hook --event permission-prompt
+  local out; out=$(run_crew_state "$d" feat-p)
+  assert_contains "$out" "state: blocked" "an open permission dialog is a blocker, not unknown"
+  assert_contains "$out" "waiting at a permission prompt since" "the blocker names the dialog and when it opened"
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-p busy --gen "$gen" \
+    --source claude-hook --event post-tool-use --only-if-event permission-prompt
+  out=$(run_crew_state "$d" feat-p)
+  assert_contains "$out" "state: working" "an answered dialog returns to working"
+  pass "an open permission dialog reads as a named blocker and clears once answered"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -5579,6 +5604,7 @@ test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
+test_permission_prompt_reads_as_named_blocker
 test_no_run_launch_prompt_parked_is_not_working
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
