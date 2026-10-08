@@ -255,6 +255,7 @@ add_task() {
 run_control() {
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_BROWSER_HELPER_STATE_OVERRIDE="$dir/browser-state" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
@@ -1171,6 +1172,59 @@ $cases
 EOF
   pass "fm-control-lib: only a runtime's own recorded session has a relaunch resume form"
 }
+
+test_exit_reaps_owned_browser_helpers() (
+  local dir state out rc owned other terminal pid i
+  local -a pids=()
+  trap 'for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done' EXIT
+  for state in alive dead; do
+    dir=$(new_case "browser-exit-$state")
+    add_task "$dir" t1 claude
+    [ "$state" != alive ] || alive_as "$dir" claude
+    mkdir -p "$dir/browser-state/sessions/other" "$dir/outside" "$dir/proc"
+    printf 'uncommitted work\n' > "$dir/wt-t1/preserved.txt"
+    cp "$dir/home/state/t1.meta" "$dir/meta-before"
+    cat > "$dir/chrome-devtools-axi-bridge" <<'PL'
+#!/usr/bin/perl
+sleep 300;
+PL
+    chmod +x "$dir/chrome-devtools-axi-bridge"
+    (cd "$dir/outside" && exec "$dir/chrome-devtools-axi-bridge") &
+    owned=$!; pids+=("$owned")
+    (cd "$dir/outside" && exec "$dir/chrome-devtools-axi-bridge") &
+    other=$!; pids+=("$other")
+    (cd "$dir/wt-t1" && exec /bin/sleep 300) &
+    terminal=$!; pids+=("$terminal")
+    mkdir -p "$dir/proc/$owned" "$dir/proc/$other"
+    printf 'PWD=%s\0' "$dir/wt-t1" > "$dir/proc/$owned/environ"
+    printf 'PWD=%s\0' "$dir/outside" > "$dir/proc/$other/environ"
+    printf '{"pid":%s}\n' "$owned" > "$dir/browser-state/bridge.pid"
+    printf '{"pid":%s}\n' "$other" > "$dir/browser-state/sessions/other/bridge.pid"
+    for i in $(seq 1 50); do
+      ps -p "$owned" -o command= | grep -q chrome-devtools-axi-bridge && break
+      /bin/sleep 0.02
+    done
+    kill -0 "$owned" && kill -0 "$other" && kill -0 "$terminal" \
+      || fail "browser exit fixture processes are not alive"
+    rm "$dir/fakebin/sleep"
+    out=$(FM_PROC_ROOT_OVERRIDE="$dir/proc" run_control "$dir" t1 exit); rc=$?
+    expect_code 0 "$rc" "browser cleanup failed for $state agent: $out"
+    if kill -0 "$owned" 2>/dev/null; then
+      fail "owned browser helper survived $state worker exit"
+    fi
+    kill -0 "$other" && kill -0 "$terminal" \
+      || fail "exit killed an unrelated helper or preserved terminal process"
+    [ "$(cat "$dir/wt-t1/preserved.txt")" = 'uncommitted work' ] \
+      || fail "exit lost uncommitted work"
+    cmp -s "$dir/meta-before" "$dir/home/state/t1.meta" \
+      || fail "exit changed the task record"
+    [ "$(cat "$dir/fake/command")" = zsh ] || fail "worker did not stop"
+    run_control "$dir" t1 exit >/dev/null || fail "repeated exit failed"
+  done
+  pass "exit reaps owned bridges for active and stopped workers while preserving work and other processes"
+)
+
+test_exit_reaps_owned_browser_helpers || exit $?
 
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key

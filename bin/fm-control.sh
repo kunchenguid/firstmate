@@ -173,6 +173,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+. "$SCRIPT_DIR/fm-task-process-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -635,6 +636,13 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
+  local result TASK_PROCESS_SCOPE=browser
+  result=$(do_exit_agent) || return $?
+  reap_task_worktree_processes browser "$WT" "$(fm_meta_get "$META" tasktmp)" || return $?
+  printf '%s' "$result"
+}
+
+do_exit_agent() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
   require_state_verified_backend exit
   state=$(agent_state)
