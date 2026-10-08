@@ -3567,11 +3567,16 @@ elif [ "$KIND" = executor ]; then
   # relaunch reuses it rather than asking again, and a relaunch without it
   # re-checks the posture as it stands now.
   PROJ_NAME=$(basename "$PROJ_ABS")
-  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
+  if ! STANDING_POSTURE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null) ||
+    [ -z "${STANDING_POSTURE%% *}" ]; then
+    "$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" >/dev/null || true
+    echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
+    exit 1
+  fi
+  STANDING_MODE=${STANDING_POSTURE%% *}
   [ "$ACCEPT_DIRECT_PR" -eq 0 ] || POSTURE_CONSENT=direct-PR
   if [ "$STANDING_MODE" = no-mistakes-prod-only ] ||
-    { [ -n "$STANDING_MODE" ] &&
-      [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; }; then
+    [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     if [ "$POSTURE_CONSENT" != direct-PR ]; then
       echo "error: $ID cannot launch: an executor delivers direct-PR, below the standing posture $STANDING_MODE for $PROJ_NAME, and dropping below the captain's standing posture needs the captain's word; on a present captain instruction for this task, spawn again with --accept-direct-pr, otherwise dispatch a no-mistakes ship task" >&2
       exit 1

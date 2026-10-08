@@ -19,7 +19,9 @@
 #   (f) the posture guard: a project whose standing posture is stricter than
 #       direct-PR (no-mistakes, no-mistakes-prod-only, or unregistered) refuses
 #       without --accept-direct-pr and records posture_consent=direct-PR with
-#       it; a direct-PR project spawns silently. Every other case registers the
+#       it; a direct-PR project spawns silently; a registry entry the parser
+#       refuses (a malformed forge binding) refuses the executor, consent or
+#       not, and surfaces the parser's refusal. Every other case registers the
 #       fixture project as direct-PR so the guard stays out of its way.
 #   (g) a fresh spawn resets a stale fm/<id> left by an earlier partial
 #       failure onto the freshened base, and refuses with git's own words
@@ -250,7 +252,7 @@ test_raw_command_receives_brief_as_final_argument() {
 }
 
 test_posture_guard() {
-  local rec id out rc meta posture
+  local rec id out rc meta posture consent
   for posture in no-mistakes no-mistakes-prod-only unregistered; do
     id=exec-pos-$posture
     rec=$(make_case "posture-$posture"); read_case "$rec"
@@ -279,6 +281,19 @@ test_posture_guard() {
   expect_code 0 "$rc" "a direct-PR project spawns cleanly: $out"
   assert_not_contains "$out" 'notice:' "no notice when the standing posture is already direct-PR"
   assert_no_grep 'posture_consent=' "$HOME_DIR/state/$id.meta" "no consent is recorded where none was needed"
+  id=exec-pos-malformed
+  rec=$(make_case posture-malformed); read_case "$rec"
+  printf '%s\n' '- project [no-mistakes forge=gerit] - fixture (added 2026-07-01)' > "$HOME_DIR/data/projects.md"
+  executor_brief "$HOME_DIR" "$id" 2
+  meta="$HOME_DIR/state/$id.meta"
+  for consent in "" --accept-direct-pr; do
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --executor --issue 2 --yolo off $consent --harness opencode); rc=$?
+    expect_code 1 "$rc" "an unresolvable posture must refuse the executor (${consent:-no consent}): $out"
+    assert_contains "$out" 'refused: unknown forge "gerit"' "the parser's own refusal is surfaced (${consent:-no consent})"
+    assert_contains "$out" "error: $id cannot launch: the registry entry for project does not resolve to a delivery posture" "the spawn names the unresolved posture (${consent:-no consent})"
+    [ ! -e "$meta" ] || fail "an unresolved posture must publish no record (${consent:-no consent})"
+    [ -z "$(cat "$LAUNCH_LOG")" ] || fail "an unresolved posture must launch nothing (${consent:-no consent})"
+  done
   pass "an executor below a stricter standing posture refuses without --accept-direct-pr and records the consent with it"
 }
 
