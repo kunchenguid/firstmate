@@ -159,6 +159,16 @@ fm_forge_registered_binding() {
   return 2
 }
 
+fm_forge_clone_root() {
+  local checkout=${1:-} proj_top proj_abs
+
+  [ -d "$checkout" ] || return 1
+  proj_top=$(git -C "$checkout" rev-parse --show-toplevel 2>/dev/null) || return 1
+  printf '%s\n' "$proj_top"
+  proj_abs=$(cd "$checkout" && pwd -P) || return 2
+  [ "$proj_top" -ef "$proj_abs" ] || return 2
+}
+
 fm_forge_detect_provider() {
   local checkout=${1:-} remote_url raw_host host binding
 
@@ -349,6 +359,7 @@ fm_forge_scan_registered_projects() {
   [ -n "$projects_dir" ] && [ -d "$projects_dir" ] || return 0
   for entry in "$projects_dir"/*/; do
     [ -e "$entry" ] || continue
+    fm_forge_clone_root "$entry" >/dev/null 2>&1 || continue
     project_id=$(basename "$entry")
     provider=$(fm_forge_detect_provider "$entry")
     host=""

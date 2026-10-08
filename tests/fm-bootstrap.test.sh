@@ -1128,6 +1128,18 @@ test_forge_provider_bootstrap_contracts() {
   [ "$out" = "FORGE_UNSUPPORTED: malformed (host: github.com)" ] \
     || fail "malformed forge binding must fail closed instead of inferring GitHub, got: $out"
 
+  case_dir="$TMP_ROOT/forge-nested-directory"
+  project="$case_dir/home/projects/not-a-clone"
+  mkdir -p "$project/nested" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$case_dir/home" init -q
+  git -C "$case_dir/home" remote add origin https://github.com/example/parent.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "nested directories must not inherit parent forge requirements, got: $out"
+
   case_dir="$TMP_ROOT/forge-https-ignores-ssh-config"
   project="$case_dir/home/projects/github-project"
   mkdir -p "$project" "$case_dir/home/config"
