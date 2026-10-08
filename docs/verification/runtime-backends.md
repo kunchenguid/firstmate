@@ -1796,6 +1796,7 @@ BOOTSTRAP_INFO: worker rr was running in /tmp/fm-reboot-repro.txr7dT/proj instea
 ```
 
 After each relaunch the pane's `cwd` and `foreground_cwd` were the worktree, a second sweep printed nothing, and the next saved layout recorded the worktree, so the following restart resumes there.
+`tests/fm-restored-recover-herdr-smoke.test.sh` pins, against the real binary in an isolated lab session, that drift with no startup gate on screen relaunches only an idle agent and reports a busy or never-settled one instead.
 No macOS host was available, so the restart was not run there; the detection reads only the backend's own working-directory and viewport answers and `ps`, through the same helpers on both hosts.
 
 ### Stale agent registration
