@@ -129,6 +129,22 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/c4-modeling/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/c4-modeling/references/smoke-tests.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/c4-modeling/references/sources.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/c4-modeling/references/templates.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/captain-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
