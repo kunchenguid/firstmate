@@ -1474,6 +1474,29 @@ test_terminal_generations_and_removed_aliases() {
   pass "terminal generations never revive and removed aliases refuse"
 }
 
+test_nested_remote_serve_uses_registry_owner() {
+  local out
+  make_remote_fleet nested-remote-owner 2
+  sed -n '/^- theshop /p' "$R_ROOT/data/secondmates.md" > "$R_LOCAL/data/secondmates.md"
+  sed -i '/^- theshop /d' "$R_ROOT/data/secondmates.md"
+  cat > "$R_ROOT/direct-entrypoint" <<'SH'
+#!/usr/bin/env bash
+root=$(printf '%s' "$2" | base64 -d)
+home=$(printf '%s' "$3" | base64 -d)
+mapfile -d '' -t argv < <(printf '%s' "$4" | base64 -d)
+exec env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE \
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/${argv[0]}" "${argv[@]:1}"
+SH
+  chmod +x "$R_ROOT/direct-entrypoint"
+  out=$(env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    FM_HOME="$R_ROOT" FM_SSH_BIN="$R_SSH" FM_FAKE_REMOTE_ENTRYPOINT="$R_ROOT/direct-entrypoint" \
+    "$SEATS" serve-remotes 2>&1)
+  assert_contains "$out" "served theshop" "nested remote was not served through its registry owner"
+  new_holder
+  reserve "$R_LOCAL" local-worker pool-model-a >/dev/null || fail "nested remote certificate blocked admission"
+  pass "nested remote delivery uses its registry owner and shared root accounting"
+}
+
 test_serve_delivery_releases_fleet_lock() {
   local base="$TMP_ROOT/serve-lock" out
   make_remote_fleet serve-lock 2
@@ -1750,3 +1773,5 @@ test_terminal_holders_survive_opt_out_readmission
 test_bounded_reconciliation_progresses_past_uncertain_holders
 
 test_legacy_routes_support_recovery_and_retain_invalid_endpoints
+
+test_nested_remote_serve_uses_registry_owner

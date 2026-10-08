@@ -859,6 +859,7 @@ make_pooled_world() {
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 D="$w/endpoint"
+[ ! -f "\$D/require-socket" ] || [ "\${TMUX:-}" = "\$D/socket,0,0" ] || { printf 'wrong socket\\n' >> "\$D/wrong-socket"; exit 1; }
 case "\$1" in
   list-windows) [ ! -f "\$D/inventory-broken" ] || { echo 'lost server' >&2; exit 1; }; cat "\$D/windows" ;;
   display-message) case "\$*" in *socket_path*) printf '%s\\n' "\$D/socket" ;; *pane_current_command*) cat "\$D/command" ;; *) printf 'fakepane\\n' ;; esac ;;
@@ -963,6 +964,22 @@ test_recovery_reclaims_exactly_the_probed_dead_generation() {
   grep -q "/.secondmate-liveness-sm1.lock|" "$W/spawn.log" \
     || fail "the replacement launch did not inherit the episode carrier: $(cat "$W/spawn.log")"
   pass "recovery reclaims exactly the probed dead generation and relaunches inside its episode"
+}
+
+test_recovery_uses_the_recorded_socket() {
+  local out
+  make_pooled_world pooled-owning-socket
+  pooled_meta g1
+  pooled_dispatch g1
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
+  printf 'bash\n' > "$W/endpoint/command"
+  : > "$W/endpoint/require-socket"
+  out=$(TMUX="$W/unrelated/socket,0,0" pooled_recover)
+  assert_equals '0|relaunchable|' "$out" "owning socket recovery failed"
+  assert_absent "$W/endpoint/wrong-socket" "recovery touched the ambient server"
+  assert_equals '' "$(cat "$W/endpoint/windows")" "the owned dead endpoint survived"
+  pass "recovery probes and closes only the generation's owning socket"
 }
 
 test_recovery_abandons_a_verdict_whose_generation_changed() {
@@ -1108,3 +1125,5 @@ test_recovery_adopts_current_ledger_generation
 test_recovery_distinguishes_missing_and_unreadable_endpoints
 
 test_recovery_does_not_kill_a_late_confirmed_start
+
+test_recovery_uses_the_recorded_socket
