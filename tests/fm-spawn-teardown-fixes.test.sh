@@ -30,7 +30,7 @@ test_spawn_no_project_arg_does_not_crash_with_unbound_variable() {
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
-    "$SPAWN" nope-no-proj-z1 2>&1)
+    "$SPAWN" nope-no-proj-z1 --scout 2>&1)
   status=$?
   set -e
 
@@ -55,20 +55,21 @@ test_spawn_bare_project_name_resolves_through_projects_dir() {
   home="$TMP_ROOT/bare-name-home"
   projects="$TMP_ROOT/bare-name-projects"
   mkdir -p "$home/data" "$projects/myrepo"
+  git -C "$projects/myrepo" init -q || fail "bare-name: could not initialize project fixture"
 
   set +e
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE="$projects" FM_CONFIG_OVERRIDE='' \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
-    "$SPAWN" nope-bare-z2 myrepo 2>&1)
+    "$SPAWN" nope-bare-z2 myrepo --scout 2>&1)
   status=$?
   set -e
 
   [ "$status" -ne 0 ] || fail "bare-name: spawn should fail (no brief)"
   # With the fix, the brief lookup must use the path under $projects, not the bare name.
   expected_brief="$home/data/nope-bare-z2/brief.md"
-  printf '%s\n' "$out" | grep -F "no brief at $expected_brief" >/dev/null \
-    || fail "bare-name: expected 'no brief at $expected_brief', got: $out"
+  printf '%s\n' "$out" | grep -F "no brief at inaccessible data path $expected_brief" >/dev/null \
+    || fail "bare-name: expected 'no brief at inaccessible data path $expected_brief', got: $out"
   # Must not have tried to resolve 'myrepo' from cwd (the literal bare name).
   printf '%s\n' "$out" | grep -E "cd: myrepo|No such file.*myrepo" >/dev/null \
     && fail "bare-name: spawn tried to cd into bare project name 'myrepo' from cwd (fix regressed)"
@@ -82,19 +83,20 @@ test_spawn_already_pathed_project_arg_passes_through() {
   projects="$TMP_ROOT/pathed-projects"
   dir="$TMP_ROOT/explicit-dir/myrepo"
   mkdir -p "$home/data" "$projects" "$dir"
+  git -C "$dir" init -q || fail "pathed: could not initialize project fixture"
 
   set +e
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE="$projects" FM_CONFIG_OVERRIDE='' \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
-    "$SPAWN" nope-pathed-z3 "$dir" 2>&1)
+    "$SPAWN" nope-pathed-z3 "$dir" --scout 2>&1)
   status=$?
   set -e
 
   [ "$status" -ne 0 ] || fail "pathed: spawn should fail (no brief)"
   expected_brief="$home/data/nope-pathed-z3/brief.md"
-  printf '%s\n' "$out" | grep -F "no brief at $expected_brief" >/dev/null \
-    || fail "pathed: expected 'no brief at $expected_brief', got: $out"
+  printf '%s\n' "$out" | grep -F "no brief at inaccessible data path $expected_brief" >/dev/null \
+    || fail "pathed: expected 'no brief at inaccessible data path $expected_brief', got: $out"
   pass "absolute path project arg is passed through unchanged (fix 2 - */* branch)"
 }
 
@@ -105,7 +107,7 @@ make_teardown_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -146,17 +148,23 @@ SH
 write_teardown_meta() {
   local case_dir=$1
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=local-only"
+    "mode=local-only" \
+    "spawn_gen=teardown-fixes-test-task-x1"
 }
 
 run_teardown() {
   local case_dir=$1; shift
+  # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
+  # home's backlog item itself; without it $DATA would resolve to the real
+  # repo's own home and a test could mutate live records.
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
