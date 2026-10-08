@@ -297,8 +297,8 @@ test_claude_permission_prompt_hooks_record_and_clear_unknown() {
 
   run_claude_hook "$settings" Notification || fail "Notification hook command failed"
   out=$(classify claude "$id" "$state")
-  [ "$out" = "unknown claude-hook" ] \
-    || fail "a worker parked at a permission prompt must not read busy, got '$out'"
+  [ "$out" = "unknown claude-hook permission-prompt" ] \
+    || fail "a worker parked at a permission prompt must read unknown and name the open dialog, got '$out'"
 
   run_claude_hook "$settings" PostToolUse || fail "PostToolUse hook command failed"
   out=$(classify claude "$id" "$state")
