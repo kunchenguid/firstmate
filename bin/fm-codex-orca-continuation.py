@@ -33,9 +33,9 @@ An episode is recorded only once its preconditions hold and transport begins.
 A turn-started, handling-confirmed generation that later reopens as downtime
 without ACK is re-presented exactly once; ensure refuses after that.
 A run refused before it owns its lifetime marks its launching record failed.
-ensure waits, within its bound, for a live matching owner that is re-arming
-or whose own transport is in flight. An arm is a handling successor only after
-a predecessor arm or a recorded presentation of the current generation.
+ensure waits, within its bound, only for a live matching owner that is
+re-arming; launched and reused owners pass the same delivery checks. An arm is
+a handling successor only after a predecessor arm or a verified live takeover.
 An exited/degraded owner leaves durable wakes and explicit failure evidence.
 Restart may take over only its recorded, still identity-matching arm through
 fm-watch-arm.sh; it never signals a foreign watcher or another session.
@@ -304,26 +304,12 @@ class Adapter:
         if alive:
             if old.get("binding") != binding:
                 raise Refused("live owner has another primary/runtime binding; no adoption")
-            while True:
-                episode = old.get("episode", {})
-                ready = self.ready(old)
-                if ready and not (episode.get("phase") == "sending"
-                                  and episode.get("owner_generation") == old.get("generation")):
-                    break
+            while not self.ready(old):
                 if old.get("phase") not in ("arming", "ready") or time.monotonic() >= end - 2:
-                    if not ready:
-                        raise Refused("existing owner is not ready; inspect its failure/receipt before retrying")
-                    break
+                    raise Refused("existing owner is not ready; inspect its failure/receipt before retrying")
                 time.sleep(0.2)
                 old = self.read(self.record_path)
-            generation = episode.get("generation", "")
-            token = self.recovery()
-            if episode.get("phase") in ("sending", "delivery-unknown", "delivery-rejected"):
-                if token not in ("acked:handling:" + generation, "acked:downtime:" + generation):
-                    raise Refused("delivery is unconfirmed; inspect exact receipt and drain durable work, no fresh resend")
-            if self.reopened(episode, token) and not self.replayable(episode, token):
-                raise Refused("presented generation reopened without ACK and is not re-presentable; drain and acknowledge it")
-            return self.with_bootstrap(old)
+            return self.confirmed(old)
         if old.get("phase") == "launching":
             raise Refused("bootstrap is already pending; inspect, do not create another terminal")
         generation = uuid.uuid4().hex
@@ -359,11 +345,22 @@ class Adapter:
             if current.get("generation") != generation:
                 raise Refused("owner generation superseded during bootstrap")
             if self.ready(current):
-                return self.with_bootstrap(current)
+                return self.confirmed(current)
             if current.get("phase") in ("failed", "stopped"):
                 raise Refused("owner did not become ready: " + current.get("error", "stopped"))
             time.sleep(0.1)
         raise Refused("owner readiness unconfirmed at bounded bootstrap deadline")
+
+    def confirmed(self, record):
+        episode = record.get("episode", {})
+        generation = episode.get("generation", "")
+        token = self.recovery()
+        if episode.get("phase") in ("sending", "delivery-unknown", "delivery-rejected"):
+            if token not in ("acked:handling:" + generation, "acked:downtime:" + generation):
+                raise Refused("delivery is unconfirmed; inspect exact receipt and drain durable work, no fresh resend")
+        if self.reopened(episode, token) and not self.replayable(episode, token):
+            raise Refused("presented generation reopened without ACK and is not re-presentable; drain and acknowledge it")
+        return self.with_bootstrap(record)
 
     def with_bootstrap(self, record):
         result = dict(record)
@@ -405,11 +402,11 @@ class Adapter:
                     raise Refused("recorded transport did not stop at recovery deadline")
         self.publish(transport=None)
 
-    def start_arm(self, predecessor=None, takeover=None, handling=False):
+    def start_arm(self, predecessor=None, takeover=None):
         env = dict(self.env)
         env.pop("FM_WATCH_HANDLING_SUCCESSOR", None)
         env.pop("FM_WATCH_PREDECESSOR_ARM_PID", None)
-        if handling:
+        if takeover:
             env["FM_WATCH_HANDLING_SUCCESSOR"] = "1"
         if predecessor:
             env["FM_WATCH_PREDECESSOR_ARM_PID"] = str(predecessor)
@@ -451,12 +448,12 @@ class Adapter:
             output.close()
         self.arm_files.remove(output)
 
-    def protected_arm(self, predecessor=None, takeover=None, handling=False):
+    def protected_arm(self, predecessor=None, takeover=None):
         # A take-over can race a real actionable close and return that reason
         # instead of starting a watcher. Preserve its queue, then establish the
         # successor before any input; never notify against that closing arm.
         for _ in range(3):
-            if self.start_arm(predecessor=predecessor, takeover=takeover, handling=handling):
+            if self.start_arm(predecessor=predecessor, takeover=takeover):
                 return
             predecessor = self.arm.pid
             self.retire_arm(self.arm, self.arm_file)
@@ -625,8 +622,7 @@ class Adapter:
             takeover = previous.get("pid") if previous.get("identity") and self.identity(previous.get("pid")) == previous["identity"] else None
             try:
                 self.recover_transport()
-                presented = (self.record.get("episode") or {}).get("generation")
-                self.protected_arm(takeover=takeover, handling=presented == self.recovery().split(":")[-1])
+                self.protected_arm(takeover=takeover)
                 token = self.recovery()
                 if token.startswith(("pending:", "announced:")):
                     self.deliver(token.split(":")[-1])

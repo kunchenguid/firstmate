@@ -27,6 +27,9 @@ if a[:2]==['terminal','show']:
  marker=h/'state/.watcher-down'; rec=h/'state/.codex-orca-continuation.json'
  if mode=='show-fails-announced' and marker.exists() and marker.read_text().startswith('announced:downtime:'):
   print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
+ if (h/'hold-show').exists() and marker.exists() and marker.read_text().startswith('announced:downtime:'):
+  deadline=time.monotonic()+4
+  while (h/'hold-show').exists() and time.monotonic()<deadline: time.sleep(.05)
  if mode=='show-fails-launching' and rec.exists() and json.loads(rec.read_text()).get('phase')=='launching':
   print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
  print(json.dumps({'ok':True,'result':{'terminal':{'handle':'term-primary','incarnationId':inc,'worktreeId':'repo::'+str(h),'connected':True,'writable':True,'orphaned':False,'agentIdentity':'codex'}},'_meta':{'runtimeId':runtime}}))
@@ -109,6 +112,12 @@ class Fixture:
         if not result.get("owner_pid"):
             raise AssertionError("ensure did not establish an owner: " + p.stdout)
         return result
+
+    def relaunch(self, previous):
+        p = self.call("ensure", "--seconds", "90")
+        self.wait(lambda: self.record().get("generation") != previous and json.loads(self.call("status").stdout)["ready"],
+                  "replacement owner did not become ready: " + p.stderr)
+        return p
 
     def sends(self):
         p = self.home / "sends"
@@ -278,9 +287,7 @@ class ContinuationTests(unittest.TestCase):
         f.drain()
         os.kill(old["owner_pid"], signal.SIGKILL)
         f.wait(lambda: not json.loads(f.call("status").stdout)["ready"], "owner death not detected")
-        new = f.ensure()
-        self.assertNotEqual(new["generation"], old["generation"])
-        f.trigger()
+        f.relaunch(old["generation"])
         f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("replay_of"),
                "restarted owner never re-presented the interrupted generation")
         self.assertEqual(f.record()["episode"]["generation"], generation)
@@ -295,8 +302,12 @@ class ContinuationTests(unittest.TestCase):
         f.wait(lambda: f.record().get("phase") == "failed", "before-send refusal was not surfaced")
         self.assertEqual(f.sends(), [])
         self.assertNotIn("episode", f.record())
+        failed = f.record()["generation"]
+        owner = f.record()["owner_pid"]
+        f.wait(lambda: subprocess.run(["ps", "-p", str(owner)], capture_output=True).returncode != 0,
+               "failed owner did not finish cleanup")
         (f.home / "mode").write_text("started")
-        f.ensure()
+        f.relaunch(failed)
         f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("phase") == "turn-started",
                "durable wake was never presented after a before-send refusal")
         self.assertTrue(f.sends()[0]["healthy"])
@@ -326,9 +337,10 @@ class ContinuationTests(unittest.TestCase):
         arm.chmod(0o700)
         f = self.fixture(code=code)
         first = f.ensure()
-        (f.home / "slow-arm").touch(); f.trigger()
+        (f.home / "slow-arm").touch(); (f.home / "hold-show").touch(); f.trigger()
         f.wait(lambda: f.record().get("phase") == "arming", "owner never entered its re-arm window")
         p = f.call("ensure")
+        (f.home / "hold-show").unlink()
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(json.loads(p.stdout)["owner_pid"], first["owner_pid"])
         f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("phase") == "turn-started",
@@ -345,8 +357,7 @@ class ContinuationTests(unittest.TestCase):
         self.assertNotEqual(f.call("ensure").returncode, 0)
         os.kill(first["owner_pid"], signal.SIGKILL)
         f.wait(lambda: not json.loads(f.call("status").stdout)["ready"], "dead external owner remained ready")
-        replacement = f.ensure()
-        self.assertNotEqual(replacement["generation"], first["generation"])
+        self.assertNotEqual(f.relaunch(first["generation"]).returncode, 0)
         time.sleep(2.6)
         self.assertEqual(len(f.sends()), 1)
         self.assertEqual(f.record()["episode"]["generation"], generation)
@@ -555,8 +566,7 @@ class ContinuationTests(unittest.TestCase):
         transport = f.record()["transport"]
         os.kill(old["owner_pid"], signal.SIGKILL)
         f.wait(lambda: not json.loads(f.call("status").stdout)["ready"], "owner death not detected")
-        new = f.ensure()
-        self.assertNotEqual(new["generation"], old["generation"])
+        self.assertNotEqual(f.relaunch(old["generation"]).returncode, 0)
         time.sleep(1)
         self.assertEqual(len(f.sends()), 1)
         self.assertEqual(f.record()["episode"]["phase"], "sending")

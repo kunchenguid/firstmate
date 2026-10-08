@@ -1930,6 +1930,8 @@ The twenty cases cover repeated successor-before-notify handoff and ACK replay, 
 External inbox cases use the public note command and cover repeated cycles, interrupted ACK/duplicate observation, predecessor-close append, rejection/owner replacement, endpoint replacement, preservation of an attached peer and root ACK/new append before delivery confirmation.
 The attached-peer case verifies a new successor arm against the same peer watcher; its ordinary close then transfers watcher ownership before the next notification.
 Each owner-bearing fixture checks that its owner, arm and transport processes and watcher lock are absent after cleanup.
+That recorded run predates five later cases: ended and restarted interrupted-handling re-presentation, a before-send refusal, a failed confirmed bootstrap and ensure during a live owner's re-arm.
+The suite now defines 26 cases; their current count and outcome belong to the pipeline Test evidence, not this record.
 The later loaded-guard regression passed separately in 3.324s and exercises two installed code paths against one actual fixture owner, including dead-watcher and second-stop controls:
 
 ```sh

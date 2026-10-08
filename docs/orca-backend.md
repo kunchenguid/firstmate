@@ -82,6 +82,7 @@ The adapter accepts no remote-pairing selectors or endpoint-adoption operation.
 A changed primary PID/birth/runtime/incarnation fails explicitly without rebinding.
 Input acceptance remains distinct from a started model turn, and only the CLI's exact reported retry identity permits a bounded retry of the same payload.
 An unconfirmed delivery retains durable work and a protected successor for inspection rather than creating a fresh request on silence.
+A confirmed turn-started generation whose handling later reopens without ACK is re-presented exactly once; ensure then refuses until root drains and acknowledges it.
 
 Installation uses the checked-out template's tracked `.codex/hooks.json` and `bin/` files, with the normal Codex hook trust flow.
 Keep the hook, adapter and generation-aware watcher libraries from the same checked-out template revision; strict watcher health also binds to the exact code path.

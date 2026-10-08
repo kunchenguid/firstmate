@@ -10,6 +10,7 @@ When this verified primary owns supervision and away mode is not active:
    The owner establishes the singleton handling successor before notification and leaves fleet decisions and queue consumption to this session.
 5. Inspect `python3 __FM_ORCA_OWNER_SH__ status --home __FM_HOME_SH__` when ensure reports failure or unconfirmed delivery.
    Input acceptance alone does not prove a new turn; never create a fresh resend on silence or adopt a different terminal.
+   A confirmed turn-started generation whose handling reopens without ACK is re-presented once; after that, ensure refuses until you drain and acknowledge it.
 6. The Orca-scoped Stop integration ensures readiness before running the existing turn-end guard.
    Failure is explicit and the generic second-stop safeguard remains intact.
 
