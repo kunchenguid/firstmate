@@ -6,6 +6,8 @@
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
+#   fm-remote-secondmate-control.sh wedge-state <id> <window-secs> <baseline|judge>
+#   fm-remote-secondmate-control.sh wedge-recover <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
@@ -69,9 +71,11 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-herdr-wedge-lib.sh
+. "$SCRIPT_DIR/fm-herdr-wedge-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
 validate_home() { # <id> [allow-absent]
@@ -129,6 +133,51 @@ state_value() { # <id>; prints recovery-grade state
     return 0
   fi
   fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
+}
+
+# The host-local halves of the parent's wedged-secondmate recovery
+# (bin/fm-secondmate-liveness-lib.sh owns the state contract and the decision;
+# bin/fm-herdr-wedge-lib.sh owns the counters, the capture, and the kill).
+#
+# They exist as verbs here for one reason: the parent must never read a progress
+# counter, derive a pid, or deliver a signal across hosts. Both run where the
+# pane actually is, over the transport the route already uses, and report back.
+#
+# The parent passes the window because the POLICY is the parent's: this host's
+# own config file belongs to a different home and must not govern a mate the
+# parent supervises.
+cmd_wedge_state() { # <id> <window-secs> <baseline|judge>
+  local id=$1 window=$2 mode=$3
+  validate_id "$id"
+  validate_home "$id"
+  case "$window" in ''|*[!0-9]*|0) die "wedge window must be a positive whole number of seconds" ;; esac
+  case "$mode" in baseline|judge) ;; *) die "wedge mode must be baseline or judge" ;; esac
+  remote_endpoint_require "$id"
+  mkdir -p "$CONTROL_STATE"
+  fm_herdr_wedge_classify "$CONTROL_STATE" "$id" "$REMOTE_ENDPOINT_TARGET" "$window" "$mode"
+}
+
+# Capture first, then kill, then report both: the parent records the evidence
+# path in its own ledger and names the killed pids in its alarm, so a recovery
+# that happened on another host is still visible and still diagnosable here.
+cmd_wedge_recover() { # <id>
+  local id=$1 pids capture killed
+  validate_id "$id"
+  validate_home "$id"
+  remote_endpoint_require "$id"
+  fm_backend_herdr_parse_target "$REMOTE_ENDPOINT_TARGET" \
+    || die "remote endpoint target '$REMOTE_ENDPOINT_TARGET' is unparseable"
+  pids=$(fm_herdr_wedge_agent_pids "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") \
+    || die "no attributable agent process in $REMOTE_ENDPOINT_TARGET; nothing killed"
+  mkdir -p "$CONTROL_STATE"
+  # shellcheck disable=SC2086 # The pid list is newline-separated digits by construction.
+  capture=$(fm_herdr_wedge_capture "$CONTROL_STATE" "$id" $pids) || capture=''
+  # shellcheck disable=SC2086 # Same: deliberate word splitting of the pid list.
+  killed=$(fm_herdr_wedge_kill_agent "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" $pids) \
+    || die "the wedged agent in $REMOTE_ENDPOINT_TARGET could not be killed${capture:+ (evidence at $capture)}"
+  fm_herdr_wedge_clear "$CONTROL_STATE" "$id"
+  printf 'capture=%s\n' "${capture:-unrecorded}"
+  printf 'killed=%s\n' "$(printf '%s' "$killed" | tr '\n' ' ')"
 }
 
 print_route() { # <id>
@@ -439,6 +488,8 @@ case "${1:-}" in
   relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
+  wedge-state) shift; [ "$#" -eq 3 ] || usage; cmd_wedge_state "$@" ;;
+  wedge-recover) shift; [ "$#" -eq 1 ] || usage; cmd_wedge_recover "$@" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;

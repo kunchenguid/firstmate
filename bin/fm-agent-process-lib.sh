@@ -114,3 +114,64 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     printf 'other'
   fi
 }
+
+# fm_agent_process_table: the raw process table every pane-scoped liveness and
+# recovery decision is attributed against, as "pid ppid comm" rows. One owner so
+# the `ps` selection and the FM_HERDR_PS_BIN test seam cannot drift between the
+# probe that proves a pane agent-free and the recovery that kills its agent.
+# Fails (nonzero, no output) when `ps` is absent or unreadable.
+fm_agent_process_table() {
+  local ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null
+}
+
+# fm_agent_process_table_has_pid <rows> <pid>: whether the table positively
+# contains <pid>. A table that does not contain the pane's own shell is not
+# evidence about its descendants - it is an unreadable table - so callers gate
+# on this before drawing any conclusion from an empty descendant set.
+fm_agent_process_table_has_pid() {  # <rows> <pid>
+  printf '%s\n' "$1" | awk -v want="$2" '$1 == want { found = 1 } END { exit(found ? 0 : 1) }'
+}
+
+# fm_agent_process_descendant_rows <rows> <pid>: every transitive descendant of
+# <pid> in <rows>, as "<pid>\t<comm>" lines, excluding <pid> itself. The walk is
+# transitive because the crew and secondmate pane shapes nest shells (a
+# `treehouse get` shell under the pane's top shell), so a harness can sit several
+# levels below the pane shell; and it is bounded to that subtree, which is what
+# makes a kill derived from it incapable of reaching the session server, a
+# sibling pane, or another task's worker.
+fm_agent_process_descendant_rows() {  # <rows> <pid>
+  printf '%s\n' "$1" | awk -v shell="$2" '
+  {
+    pid[NR] = $1; ppid[NR] = $2
+    line = $0
+    sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
+    comm[NR] = line
+  }
+  END {
+    want[shell] = 1
+    changed = 1
+    while (changed) {
+      changed = 0
+      for (n = 1; n <= NR; n++) {
+        if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
+      }
+    }
+    for (n = 1; n <= NR; n++) {
+      if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\n", pid[n], comm[n]
+    }
+  }'
+}
+
+# fm_agent_process_pid_classify <pid> <comm>: classify one live pid from the
+# process table, reading its full argv for the identity surfaces
+# fm_agent_process_classify needs. Prints agent|shell|other, or nothing
+# (nonzero) when the process is already gone.
+fm_agent_process_pid_classify() {  # <pid> <comm>
+  local pid=$1 comm=$2 ps_bin=${FM_HERDR_PS_BIN:-ps} args argv0
+  args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || return 1
+  args=${args#"${args%%[![:space:]]*}"}
+  argv0=${args%%[[:space:]]*}
+  fm_agent_process_classify "$comm" "$argv0" "$args" "$pid"
+}

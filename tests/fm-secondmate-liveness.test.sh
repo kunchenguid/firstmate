@@ -641,6 +641,17 @@ SH
   printf '%s\n' "$w"
 }
 
+# remote_verbs <ssh-log>: the control verb each logged remote call asked for.
+# bin/fm-on.sh base64-encodes the NUL-separated remote argv, so the verb is the
+# second field of the decoded last wire argument.
+remote_verbs() {  # <ssh-log>
+  local blob
+  while read -r blob; do
+    [ -n "$blob" ] || continue
+    printf '%s' "$blob" | base64 -d 2>/dev/null | tr '\0' '\n' | sed -n '2p'
+  done < <(awk 'NF { print $NF }' "$1")
+}
+
 # probe_remote <w> <mode> [env...] -> "<status>|<state>|<kill>|<cause>|<where>|<reason>"
 probe_remote() {
   local w=$1 mode=$2; shift 2
@@ -683,9 +694,19 @@ test_remote_poll_probe_maps_states() {
   [ "$out" = 'skipped|bogus|0|||remote endpoint returned an invalid state' ] \
     || fail "an invalid remote reply must preserve the endpoint, got: $out"
 
-  [ "$(wc -l < "$w/ssh.log" | tr -d ' ')" -eq 6 ] \
-    || fail "each poll-mode probe should spend exactly one remote state call: $(cat "$w/ssh.log")"
-  pass "poll probe: remote states map to the same contract as local, one call each"
+  # Six probes, seven calls: every verdict costs exactly one remote state call,
+  # and the `alive` one spends a second to ask the mate's own host whether that
+  # liveness is real (the wedge probe). An inconclusive or dead reading never
+  # pays for the extra read.
+  [ "$(wc -l < "$w/ssh.log" | tr -d ' ')" -eq 7 ] \
+    || fail "each poll-mode probe should spend one remote state call, plus one wedge probe on the alive reading: $(cat "$w/ssh.log")"
+  # The transport base64-encodes the remote argv, so the verb is read back by
+  # decoding it rather than by matching the wire line.
+  [ "$(remote_verbs "$w/ssh.log" | grep -c '^wedge-state$')" -eq 1 ] \
+    || fail "only the alive reading should spend a wedge probe: $(remote_verbs "$w/ssh.log")"
+  [ "$(remote_verbs "$w/ssh.log" | grep -c '^state$')" -eq 6 ] \
+    || fail "every probe should still spend exactly one state call: $(remote_verbs "$w/ssh.log")"
+  pass "poll probe: remote states map to the same contract as local, one call each plus the alive wedge probe"
 }
 
 test_remote_poll_probe_unreachable_preserves_route() {
@@ -721,5 +742,487 @@ test_sweep_skips_mate_whose_liveness_lock_is_held
 test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
+
+# --- wedged secondmate: detection, capture, kill scope, and bound ------------
+# bin/fm-herdr-wedge-lib.sh adds the one liveness state the backend classifier
+# cannot express: a Herdr-backed agent whose process is running and registered
+# but which has stopped making progress. It reads two independent Herdr progress
+# counters (state_change_seq from `agent get`, scroll.max_offset_from_bottom
+# from `pane list`), and only declares `wedged` when BOTH are unchanged across
+# the configured window while agent_status is still `working`.
+#
+# The guarantees under test:
+#   - a working pane that advances EITHER counter stays alive, so a slow model
+#     response or a long Bash command is never killed;
+#   - a working pane that advances neither becomes wedged once the window has
+#     actually elapsed, and not before;
+#   - an idle, done, or blocked agent is never a wedge candidate;
+#   - an unreadable counter yields `unreadable`, never `wedged`, so a vendor
+#     shape change can only disable recovery, not cause a kill;
+#   - the session-start sweep only re-bases the window (`baseline`); the
+#     watcher's continuous poll is the sole producer of a wedged verdict;
+#   - the configured window has a floor and an `off` switch;
+#   - evidence is captured BEFORE the kill and recorded in the relaunch ledger;
+#   - the kill reaches only the pane's own agent process - never the pane shell,
+#     never an agent-named process outside the pane's subtree;
+#   - a wedged relaunch feeds the SAME attempt ledger the watcher's existing
+#     relaunch bound counts, so a mis-detecting probe cannot kill-loop a mate.
+
+# make_wedge_herdr <dir>: a fake `herdr` answering the three read-only calls the
+# wedge path makes. Unlike the ordered-response fakes elsewhere, this one is
+# keyed by subcommand and re-read on every call, because the classifier is
+# deliberately called repeatedly across simulated watcher ticks.
+#
+# Files under <dir>: `status`, `seq`, `offset` drive `agent get` and
+# `pane list`; `procinfo.json` is the `pane process-info` body; `fail-agent`
+# and `fail-panes` make those reads fail; `drop-seq` and `drop-offset` omit one
+# counter, which is how a vendor rename is simulated.
+make_wedge_herdr() {
+  local dir=$1 fakebin
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  printf 'working\n' > "$dir/status"
+  printf '100\n' > "$dir/seq"
+  printf '500\n' > "$dir/offset"
+  printf '{}\n' > "$dir/procinfo.json"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+d=${FM_FAKE_WEDGE_DIR:?}
+printf '%s\n' "$*" >> "$d/calls.log"
+case "${1:-} ${2:-}" in
+  "agent get")
+    [ ! -e "$d/fail-agent" ] || exit 1
+    if [ -e "$d/drop-seq" ]; then
+      printf '{"result":{"agent":{"agent":"claude","agent_status":"%s"}}}\n' "$(cat "$d/status")"
+    else
+      printf '{"result":{"agent":{"agent":"claude","agent_status":"%s","state_change_seq":%s}}}\n' \
+        "$(cat "$d/status")" "$(cat "$d/seq")"
+    fi
+    ;;
+  "pane list")
+    [ ! -e "$d/fail-panes" ] || exit 1
+    # A sibling pane is listed first and carries its own scroll counter, so a
+    # read that matched by position instead of pane_id would see the wrong one.
+    if [ -e "$d/drop-offset" ]; then
+      printf '{"result":{"panes":[{"pane_id":"w9:p9","scroll":{"max_offset_from_bottom":7}},{"pane_id":"w1:p2"}]}}\n'
+    else
+      printf '{"result":{"panes":[{"pane_id":"w9:p9","scroll":{"max_offset_from_bottom":7}},{"pane_id":"w1:p2","scroll":{"max_offset_from_bottom":%s}}]}}\n' \
+        "$(cat "$d/offset")"
+    fi
+    ;;
+  "pane get")
+    # The pane structurally exists, so the ordinary backend classifier reaches
+    # `live`/`alive` and the wedge probe is the thing under test.
+    printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n'
+    ;;
+  "pane process-info") cat "$d/procinfo.json" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+  printf '%s\n' "$fakebin"
+}
+
+# wedge_classify <dir> <state-dir> <window> <mode>: one classifier sample, run
+# through the real adapter CLI wrapper exactly as production does.
+wedge_classify() {
+  local dir=$1 state=$2 window=$3 mode=$4 fakebin="$1/fakebin"
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  env PATH="$fakebin:$BASE_PATH" FM_FAKE_WEDGE_DIR="$dir" FM_HOME="$state/.." \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      . "$0/bin/fm-herdr-wedge-lib.sh"
+      fm_herdr_wedge_classify "$1" sm1 fmtest:w1:p2 "$2" "$3"
+    ' "$ROOT" "$state" "$window" "$mode"
+}
+
+test_wedge_progress_on_either_counter_keeps_the_mate_alive() {
+  local dir state out
+  dir="$TMP_ROOT/wedge-progressing"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+
+  # First sample only establishes the baseline.
+  out=$(wedge_classify "$dir" "$state" 1 judge)
+  [ "$out" = progressing ] || fail "the first sample should start the window, got '$out'"
+  sleep 2
+
+  # state_change_seq advanced; the scroll counter did not. Either one moving is
+  # progress, and this is the case a false positive would kill real work in: a
+  # long model response produces no new scrollback.
+  printf '101\n' > "$dir/seq"
+  out=$(wedge_classify "$dir" "$state" 1 judge)
+  [ "$out" = progressing ] || fail "an advancing state_change_seq must read progressing, got '$out'"
+  sleep 2
+
+  # The mirror case: scrollback grew while the status sequence did not.
+  printf '501\n' > "$dir/offset"
+  out=$(wedge_classify "$dir" "$state" 1 judge)
+  [ "$out" = progressing ] || fail "an advancing scroll counter must read progressing, got '$out'"
+
+  # And the divergence that proves the window is really being measured: with
+  # both counters frozen the very same fixture goes wedged.
+  sleep 2
+  out=$(wedge_classify "$dir" "$state" 1 judge)
+  [ "$out" = wedged ] || fail "the control case must wedge once neither counter moves, got '$out'"
+  pass "wedge: a working pane advancing either progress counter is never wedged"
+}
+
+test_wedge_requires_the_whole_window_to_elapse() {
+  local dir state out
+  dir="$TMP_ROOT/wedge-window"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+
+  out=$(wedge_classify "$dir" "$state" 3600 judge)
+  [ "$out" = progressing ] || fail "baseline sample should read progressing, got '$out'"
+  sleep 2
+  # Frozen counters, but nowhere near a generous window: still alive. This is
+  # the guard that keeps an ordinary long-running turn safe.
+  out=$(wedge_classify "$dir" "$state" 3600 judge)
+  [ "$out" = progressing ] \
+    || fail "frozen counters inside a generous window must stay progressing, got '$out'"
+
+  out=$(wedge_classify "$dir" "$state" 1 judge)
+  [ "$out" = wedged ] || fail "frozen counters past the window must read wedged, got '$out'"
+  pass "wedge: a wedged verdict needs the configured no-progress window to elapse in full"
+}
+
+test_wedge_never_fires_for_an_idle_done_or_blocked_agent() {
+  local dir state out status
+  dir="$TMP_ROOT/wedge-not-working"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+
+  for status in idle 'done' blocked; do
+    printf 'working\n' > "$dir/status"
+    wedge_classify "$dir" "$state" 1 judge >/dev/null
+    sleep 2
+    printf '%s\n' "$status" > "$dir/status"
+    out=$(wedge_classify "$dir" "$state" 1 judge)
+    [ "$out" = not-working ] \
+      || fail "a '$status' agent must never be a wedge candidate, got '$out'"
+    [ ! -e "$state/.secondmate-wedge-sm1" ] \
+      || fail "a '$status' agent should drop its recorded sample so the next working stretch starts clean"
+  done
+  pass "wedge: an idle, done, or blocked agent is never treated as wedged"
+}
+
+test_wedge_unreadable_counters_never_authorize_a_kill() {
+  local dir state out marker
+  dir="$TMP_ROOT/wedge-unreadable"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+
+  # Establish a frozen window first, so every case below WOULD read wedged if
+  # the counters were readable - that is what makes these assertions meaningful
+  # rather than vacuous.
+  wedge_classify "$dir" "$state" 1 judge >/dev/null
+  sleep 2
+  [ "$(wedge_classify "$dir" "$state" 1 judge)" = wedged ] \
+    || fail "the fixture did not reach a wedged verdict, so the unreadable cases prove nothing"
+
+  for marker in fail-agent fail-panes drop-seq drop-offset; do
+    : > "$dir/$marker"
+    out=$(wedge_classify "$dir" "$state" 1 judge)
+    [ "$out" = unreadable ] \
+      || fail "with '$marker' the verdict must be unreadable, never a kill authorization, got '$out'"
+    rm -f "$dir/$marker"
+  done
+
+  out=$(wedge_classify "$dir" "$state" 1 judge)
+  [ "$out" = wedged ] || fail "the readable fixture should wedge again after the unreadable cases, got '$out'"
+  pass "wedge: an unreadable or renamed progress counter disables recovery instead of authorizing a kill"
+}
+
+test_wedge_session_start_mode_only_rebases_the_window() {
+  local dir state out
+  dir="$TMP_ROOT/wedge-baseline"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state"
+
+  wedge_classify "$dir" "$state" 1 judge >/dev/null
+  sleep 2
+  out=$(wedge_classify "$dir" "$state" 1 baseline)
+  [ "$out" = baseline ] || fail "the session-start sweep must only re-base, got '$out'"
+  # The re-base really moved the window: an immediate judging sample is clean.
+  out=$(wedge_classify "$dir" "$state" 1 judge)
+  [ "$out" = progressing ] \
+    || fail "a re-based window must restart the clock rather than wedging at once, got '$out'"
+  pass "wedge: the session-start sweep re-bases the window and never produces a verdict"
+}
+
+test_wedge_window_config_has_a_floor_and_an_off_switch() {
+  local cfg out
+  cfg="$TMP_ROOT/wedge-config"; mkdir -p "$cfg"
+
+  out=$(bash -c '. "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_window "$1"' "$ROOT" "$cfg")
+  [ "$out" = 900 ] || fail "an unconfigured home should use the 900s default window, got '$out'"
+
+  printf 'off\n' > "$cfg/secondmate-wedge-window"
+  out=$(bash -c '. "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_window "$1"' "$ROOT" "$cfg")
+  [ "$out" = off ] || fail "'off' should disable wedge detection, got '$out'"
+
+  printf '1800\n' > "$cfg/secondmate-wedge-window"
+  out=$(bash -c '. "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_window "$1"' "$ROOT" "$cfg")
+  [ "$out" = 1800 ] || fail "a configured window at or above the floor should be honored, got '$out'"
+
+  # Below the floor a hair-trigger kill is refused rather than honored.
+  printf '30\n' > "$cfg/secondmate-wedge-window"
+  out=$(bash -c '. "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_window "$1" 2>/dev/null' "$ROOT" "$cfg")
+  [ "$out" = 900 ] || fail "a sub-floor window must fall back to the default, got '$out'"
+  assert_contains \
+    "$(bash -c '. "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_window "$1" 2>&1 >/dev/null' "$ROOT" "$cfg")" \
+    "below the 600s floor" "a sub-floor window must say so rather than fall back silently"
+
+  printf 'soon\n' > "$cfg/secondmate-wedge-window"
+  out=$(bash -c '. "$0/bin/fm-herdr-wedge-lib.sh"; fm_herdr_wedge_window "$1" 2>/dev/null' "$ROOT" "$cfg")
+  [ "$out" = 900 ] || fail "an unparseable window must fall back to the default, got '$out'"
+  pass "wedge: the configured no-progress window honors a floor, an off switch, and warns on a typo"
+}
+
+# make_wedge_subtree <dir>: a real process shape to attribute a kill against -
+# a shell whose child is an agent-named process (the pane), plus an identical
+# agent-named process OUTSIDE that subtree (a sibling pane's agent, or the
+# session server). Echoes "<shell-pid> <agent-pid> <outsider-pid>".
+#
+# A symlink to a real long-running binary makes the kernel record `claude` as
+# the executable identity, which is what fm-agent-process-lib.sh classifies on;
+# copying a platform binary would fail code signing on macOS.
+make_wedge_subtree() {
+  local dir=$1 sleep_bin lab shell_pid agent_pid outsider_pid i=0
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  lab="$dir/agentbin"; mkdir -p "$lab"
+  ln -sf "$sleep_bin" "$lab/claude"
+  # Both fixtures detach from this function's stdout: a long-lived background
+  # process that inherits it would hold a capturing caller's pipe open for its
+  # whole lifetime.
+  # The pane shell outlives its agent child (it runs a second, non-agent-named
+  # command afterwards), so "the shell survived" is a real assertion about the
+  # kill's scope rather than an artifact of the shell exiting with its child.
+  sh -c "'$lab/claude' 300; '$sleep_bin' 300" >/dev/null 2>&1 &
+  shell_pid=$!
+  "$lab/claude" 300 >/dev/null 2>&1 &
+  outsider_pid=$!
+  while [ "$i" -lt 100 ]; do
+    agent_pid=$(pgrep -P "$shell_pid" 2>/dev/null | head -1)
+    [ -z "$agent_pid" ] || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -n "${agent_pid:-}" ] || fail "the fixture pane shell never started its agent child"
+  printf '%s %s %s\n' "$shell_pid" "$agent_pid" "$outsider_pid"
+}
+
+test_wedge_kill_reaches_only_the_panes_own_agent_process() {
+  local dir out shell_pid agent_pid outsider_pid killed
+  dir="$TMP_ROOT/wedge-kill-scope"
+  make_wedge_herdr "$dir" >/dev/null
+  read -r shell_pid agent_pid outsider_pid <<< "$(make_wedge_subtree "$dir")"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"claude","argv0":"claude","argv":["claude"],"cmdline":"claude 300"}]}}}\n' \
+    "$shell_pid" "$agent_pid" "$agent_pid" > "$dir/procinfo.json"
+
+  # Attribution first: only the in-pane agent is ever a candidate.
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(env PATH="$dir/fakebin:$BASE_PATH" FM_FAKE_WEDGE_DIR="$dir" bash -c '
+      . "$0/bin/fm-backend.sh"; . "$0/bin/fm-herdr-wedge-lib.sh"
+      fm_herdr_wedge_agent_pids fmtest w1:p2' "$ROOT")
+  [ "$out" = "$agent_pid" ] \
+    || fail "the kill candidates should be exactly the in-pane agent ($agent_pid), got '$out'"
+
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  killed=$(env PATH="$dir/fakebin:$BASE_PATH" FM_FAKE_WEDGE_DIR="$dir" bash -c '
+      . "$0/bin/fm-backend.sh"; . "$0/bin/fm-herdr-wedge-lib.sh"
+      fm_herdr_wedge_kill_agent fmtest w1:p2 "$1" "$2" "$3"' \
+    "$ROOT" "$agent_pid" "$shell_pid" "$outsider_pid")
+  [ "$killed" = "$agent_pid" ] || fail "only the in-pane agent should be killed, got '$killed'"
+  sleep 0.5
+  kill -0 "$agent_pid" 2>/dev/null && fail "the wedged in-pane agent survived the kill"
+  kill -0 "$shell_pid" 2>/dev/null \
+    || fail "the pane's own shell was killed; that closes the pane instead of recovering the agent"
+  kill -0 "$outsider_pid" 2>/dev/null \
+    || fail "an agent-named process OUTSIDE the pane subtree was killed - a sibling pane or the session server would be lost"
+
+  kill "$shell_pid" "$outsider_pid" 2>/dev/null || true
+  pkill -P "$shell_pid" 2>/dev/null || true
+  pass "wedge: SIGKILL reaches only the pane's own agent pid, never its shell or a process outside the subtree"
+}
+
+test_wedge_recovery_captures_evidence_before_killing_and_ledgers_it() {
+  local dir state out shell_pid agent_pid outsider_pid capture ledger rc
+  dir="$TMP_ROOT/wedge-capture"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state" "$dir/home/config"
+  read -r shell_pid agent_pid outsider_pid <<< "$(make_wedge_subtree "$dir")"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"claude","argv0":"claude","argv":["claude"],"cmdline":"claude 300"}]}}}\n' \
+    "$shell_pid" "$agent_pid" "$agent_pid" > "$dir/procinfo.json"
+  printf 'window=fmtest:w1:p2\nkind=secondmate\nharness=claude\nbackend=herdr\nherdr_session=fmtest\nhome=%s\n' \
+    "$dir/mate" > "$state/sm1.meta"
+
+  rc=0
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(env PATH="$dir/fakebin:$BASE_PATH" FM_FAKE_WEDGE_DIR="$dir" STATE="$state" \
+    FM_HOME="$dir/home" bash -c '
+      . "$0/bin/fm-secondmate-liveness-lib.sh"
+      fm_secondmate_liveness_wedge_recover "$1" sm1 || exit 1
+      printf "%s\n" "$FM_SM_LIVE_WEDGE_CAPTURE"
+    ' "$ROOT" "$state/sm1.meta") || rc=$?
+  [ "$rc" -eq 0 ] || fail "wedge recovery failed on a well-formed fixture: $out"
+  capture=$out
+  [ -s "$capture" ] || fail "no evidence file was written at '$capture'"
+  assert_grep "$agent_pid" "$capture" "the evidence does not name the wedged agent pid"
+  # The ordering proof: every evidence source here can only answer for a LIVE
+  # process. A capture taken after the SIGKILL would have recorded the failure
+  # marker instead - `(unreadable)` on Linux, a non-zero `sample` exit on macOS.
+  assert_no_grep '(unreadable)' "$capture" \
+    "the evidence was gathered after the kill: the live-process read failed"
+  assert_no_grep 'sample exited' "$capture" \
+    "the evidence was gathered after the kill: sample could not attach"
+  grep -Eq 'State:|Analysis of sampling|Call graph' "$capture" \
+    || fail "the evidence holds no live-process reading, so capture-before-kill is unproven: $(head -40 "$capture")"
+
+  ledger="$state/.secondmate-relaunch-sm1"
+  assert_grep "wedge-capture" "$ledger" "the relaunch ledger does not record the capture"
+  assert_grep "$capture" "$ledger" "the relaunch ledger does not point at the evidence path"
+
+  sleep 0.5
+  kill -0 "$agent_pid" 2>/dev/null && fail "the wedged agent survived recovery"
+  kill -0 "$shell_pid" 2>/dev/null || fail "recovery killed the pane shell"
+  kill -0 "$outsider_pid" 2>/dev/null || fail "recovery killed a process outside the pane subtree"
+  [ ! -e "$state/.secondmate-wedge-sm1" ] \
+    || fail "the recovered mate kept the frozen agent's progress sample instead of starting clean"
+
+  kill "$shell_pid" "$outsider_pid" 2>/dev/null || true
+  pass "wedge: recovery captures live-process evidence before the kill and records its path in the ledger"
+}
+
+test_wedge_recovery_refuses_when_no_agent_pid_can_be_attributed() {
+  local dir state out rc
+  dir="$TMP_ROOT/wedge-no-pid"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state" "$dir/home/config"
+  # process-info describes a different pane: nothing here may be killed.
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w8:p8","shell_pid":1,"foreground_processes":[]}}}\n' \
+    > "$dir/procinfo.json"
+  printf 'window=fmtest:w1:p2\nkind=secondmate\nharness=claude\nbackend=herdr\nherdr_session=fmtest\nhome=%s\n' \
+    "$dir/mate" > "$state/sm1.meta"
+
+  rc=0
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(env PATH="$dir/fakebin:$BASE_PATH" FM_FAKE_WEDGE_DIR="$dir" STATE="$state" \
+    FM_HOME="$dir/home" bash -c '
+      . "$0/bin/fm-secondmate-liveness-lib.sh"
+      fm_secondmate_liveness_wedge_recover "$1" sm1 && exit 0
+      printf "%s\n" "$FM_SM_LIVE_REASON"
+      exit 1
+    ' "$ROOT" "$state/sm1.meta") || rc=$?
+  [ "$rc" -eq 1 ] || fail "recovery must refuse when no agent pid can be attributed"
+  assert_contains "$out" "no attributable agent process to kill" \
+    "the refusal should name why nothing was killed"
+  assert_contains "$out" "endpoint left running" \
+    "the refusal should state that the endpoint was preserved"
+  pass "wedge: an unattributable agent process refuses the kill and preserves the endpoint"
+}
+
+test_wedge_probe_reports_relaunchable_only_on_the_watcher_tick() {
+  local dir state out shell_pid agent_pid outsider_pid
+  dir="$TMP_ROOT/wedge-probe"; state="$dir/state"
+  make_wedge_herdr "$dir" >/dev/null; mkdir -p "$state" "$dir/home/config"
+  read -r shell_pid agent_pid outsider_pid <<< "$(make_wedge_subtree "$dir")"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"claude","argv0":"claude","argv":["claude"],"cmdline":"claude 300"}]}}}\n' \
+    "$shell_pid" "$agent_pid" "$agent_pid" > "$dir/procinfo.json"
+  printf 'window=fmtest:w1:p2\nkind=secondmate\nharness=claude\nbackend=herdr\nherdr_session=fmtest\nhome=%s\n' \
+    "$dir/mate" > "$state/sm1.meta"
+  printf '600\n' > "$dir/home/config/secondmate-wedge-window"
+
+  probe() {  # <mode>
+    # shellcheck disable=SC2016 # positional params expand in the child shell.
+    env PATH="$dir/fakebin:$BASE_PATH" FM_FAKE_WEDGE_DIR="$dir" STATE="$state" \
+      FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" bash -c '
+        . "$0/bin/fm-secondmate-liveness-lib.sh"
+        fm_secondmate_liveness_probe "$1" sm1 "$2"
+        printf "%s|%s|%s|%s\n" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_STATE" \
+          "$FM_SM_LIVE_KILL" "$FM_SM_LIVE_WEDGE"
+      ' "$ROOT" "$state/sm1.meta" "$1"
+  }
+
+  out=$(probe poll)
+  [ "$out" = 'alive|alive|0|progressing' ] \
+    || fail "the first poll should only start the window and leave the mate alive, got '$out'"
+
+  # Age the recorded sample past the configured window without waiting it out:
+  # the record's own `since` field is the clock the classifier reads.
+  awk -F '\t' -v OFS='\t' '{ $5 = $5 - 601; print }' "$state/.secondmate-wedge-sm1" \
+    > "$state/.secondmate-wedge-sm1.aged" \
+    && mv "$state/.secondmate-wedge-sm1.aged" "$state/.secondmate-wedge-sm1"
+
+  out=$(probe poll)
+  [ "$out" = 'relaunchable|wedged|wedged|wedged' ] \
+    || fail "a frozen working pane past the window should be relaunchable as wedged, got '$out'"
+
+  # The same aged record under the session-start sweep is only re-based, never
+  # acted on - a sweep sample cannot tell a frozen agent from an unobserved one.
+  awk -F '\t' -v OFS='\t' '{ $5 = $5 - 601; print }' "$state/.secondmate-wedge-sm1" \
+    > "$state/.secondmate-wedge-sm1.aged" \
+    && mv "$state/.secondmate-wedge-sm1.aged" "$state/.secondmate-wedge-sm1"
+  out=$(probe full)
+  [ "$out" = 'alive|alive|0|baseline' ] \
+    || fail "the session-start sweep must leave a frozen mate alive and re-based, got '$out'"
+
+  # An `off` window opts the home out entirely: no counter is even read.
+  printf 'off\n' > "$dir/home/config/secondmate-wedge-window"
+  out=$(probe poll)
+  [ "$out" = 'alive|alive|0|' ] \
+    || fail "config/secondmate-wedge-window=off must disable wedge detection, got '$out'"
+
+  kill "$shell_pid" "$outsider_pid" 2>/dev/null || true
+  pkill -P "$shell_pid" 2>/dev/null || true
+  pass "probe: a wedged herdr secondmate is relaunchable on the watcher tick only, and an off window disables it"
+}
+
+test_wedge_relaunch_is_bounded_by_the_existing_attempt_ledger() {
+  local dir state ledger attempts now
+  dir="$TMP_ROOT/wedge-bound"; state="$dir/state"
+  mkdir -p "$state"
+  ledger="$state/.secondmate-relaunch-sm1"
+  now=$(date +%s)
+
+  # A wedged recovery records its attempt in the SAME ledger bin/fm-watch.sh's
+  # relaunch bound counts, so a mis-detecting probe is capped exactly like a
+  # mate that keeps dying. Seed the bound's own default budget
+  # (FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3 inside
+  # FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600) and confirm the counter the watcher
+  # parks on has been reached.
+  {
+    printf '%s\tattempt\n' "$((now - 10))"
+    printf '%s\twedge-capture\t%s/.wedge-sample-sm1-1\n' "$((now - 10))" "$state"
+    printf '%s\tattempt\n' "$((now - 8))"
+    printf '%s\tattempt\n' "$((now - 6))"
+  } > "$ledger"
+
+  attempts=$(STATE="$state" bash -c \
+    '. "$0/bin/fm-secondmate-liveness-lib.sh"; fm_secondmate_liveness_recent_attempts sm1 3600' "$ROOT")
+  [ "$attempts" -eq 3 ] \
+    || fail "wedged attempts must count toward the shared relaunch bound at the watcher's parking threshold, got '$attempts'"
+
+  # The capture rows are records, not attempts: they must never inflate the
+  # budget and park a mate early.
+  [ "$(awk -F '\t' '$2 == "wedge-capture"' "$ledger" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "the capture row was not preserved in the ledger"
+
+  # A live rearm restores the full budget for a wedged mate too, since the bound
+  # counts only attempts after the last `rearmed` row.
+  printf '%s\trearmed\n' "$now" >> "$ledger"
+  attempts=$(STATE="$state" bash -c \
+    '. "$0/bin/fm-secondmate-liveness-lib.sh"; fm_secondmate_liveness_recent_attempts sm1 3600' "$ROOT")
+  [ "$attempts" -eq 0 ] || fail "a rearm should restore the wedged mate's full budget, got '$attempts'"
+  pass "wedge: wedged relaunches consume the existing bounded attempt budget, so a misdetection cannot kill-loop"
+}
+
+test_wedge_progress_on_either_counter_keeps_the_mate_alive
+test_wedge_requires_the_whole_window_to_elapse
+test_wedge_never_fires_for_an_idle_done_or_blocked_agent
+test_wedge_unreadable_counters_never_authorize_a_kill
+test_wedge_session_start_mode_only_rebases_the_window
+test_wedge_window_config_has_a_floor_and_an_off_switch
+test_wedge_kill_reaches_only_the_panes_own_agent_process
+test_wedge_recovery_captures_evidence_before_killing_and_ledgers_it
+test_wedge_recovery_refuses_when_no_agent_pid_can_be_attributed
+test_wedge_probe_reports_relaunchable_only_on_the_watcher_tick
+test_wedge_relaunch_is_bounded_by_the_existing_attempt_ledger
 
 echo "# all fm-secondmate-liveness tests passed"

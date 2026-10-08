@@ -12,7 +12,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
-| Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) and [wedged secondmate recovery](#wedged-secondmate-recovery-configsecondmate-wedge-window) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -455,6 +455,10 @@ The comment above that function in `bin/fm-backend.sh` is the single owner of it
 
 The compatibility helper `fm_backend_agent_alive` continues to collapse those detailed results to `alive`, `dead`, or `unknown` for older callers.
 
+For Herdr-backed secondmates only, the liveness path adds one further state on top of that classifier: `wedged`, an agent whose process is running and registered but has stopped making progress.
+The header of `bin/fm-secondmate-liveness-lib.sh` owns that state and its recovery authorization, and `bin/fm-herdr-wedge-lib.sh` owns the progress signal, the evidence capture, and the agent-only kill.
+See "Wedged secondmate recovery" below for the setting that governs it.
+
 ### Dependency and socket checks
 
 - A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
@@ -536,10 +540,29 @@ Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_
 
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
-## Away-mode wedge alarm channels (config/wedge-alarm)
+## Wedged secondmate recovery (config/secondmate-wedge-window)
 
-When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
-Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
+A Herdr-backed secondmate agent can stay running and registered while it has stopped making progress, which every liveness classifier reads as healthy.
+The watcher's secondmate liveness tick therefore samples two Herdr progress counters per mate and, when neither has moved for the whole configured window while the agent still reports `working`, captures non-destructive evidence, SIGKILLs only that pane's agent process, relaunches through the ordinary guarded path, and raises the wedge alarm.
+
+The optional local, gitignored `config/secondmate-wedge-window` sets that no-progress window in whole seconds.
+An absent file means 900 seconds.
+`off` disables wedge detection for this home entirely, leaving every other liveness behavior unchanged.
+
+A value below the 600-second floor, or an unparseable one, warns and falls back to the default.
+The floor exists because an agent legitimately sits at `working` with no output during a slow model response or a long shell command, and the cost of deciding wrongly is a SIGKILL of live work; a short window is refused rather than honored.
+
+Two further limits are not configurable, deliberately.
+The recorded progress sample is only re-based at session start, so the continuously sampling watcher tick is the sole producer of a verdict.
+A wedged relaunch consumes the same bounded attempt budget as any other relaunch (`FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS` within `FM_SECONDMATE_LIVENESS_WINDOW_SECS`), so a mis-detecting probe cannot kill-loop a healthy mate.
+
+For a mate on a remote host, the counters, the capture, and the kill all run on that host through the existing control transport; the window is still resolved from the supervising home's own config and passed across.
+The header of `bin/fm-herdr-wedge-lib.sh` owns the detection, capture, and kill mechanics, and [`wedge-alarm.md`](wedge-alarm.md) owns the alarm the recovery raises.
+
+## Wedge alarm channels (config/wedge-alarm)
+
+When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm; the wedged-secondmate recovery above raises the same alarm whenever it kills and relaunches a frozen mate.
+Beyond each caller's durable marker and the away-mode tmux status-line flash, the alarm attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
 
 ### Channels and overrides
 
@@ -547,9 +570,9 @@ Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-li
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
 
 Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
-An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
+An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedge is never silent, and each caller bounds how often it can repeat after a genuine one.
 
-A missing or failing channel logs and falls through to the next, never crashing the daemon.
+A missing or failing channel logs and falls through to the next, never crashing its caller.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
@@ -2456,6 +2479,7 @@ FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each regist
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds bounding one watcher-driven relaunch, so a wedged spawn cannot stall the poll; zero or invalid values use 120
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600
+FM_HERDR_WEDGE_CAPTURE_TIMEOUT_SECS=45   # seconds bounding each non-destructive evidence command (`sample`, `lsof`, `eu-stack`) the wedged-secondmate recovery runs before killing the frozen agent, so a capture cannot stall the watcher tick; an abandoned command is recorded in the evidence file and never blocks the recovery
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
@@ -2487,7 +2511,7 @@ FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing cla
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
-FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
+FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; tests/lib.sh defaults it to "discard" for every suite, and the daemon does the same when sourced, so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
