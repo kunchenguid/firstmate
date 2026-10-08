@@ -432,7 +432,7 @@ The primary then takes these steps:
 3. It transfers the inherited-material allowlist.
 4. It asks the remote host to launch on Herdr in `fm-remote`.
 
-All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
+Ordinary remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it; isolated validation uses the [session selection contract](#where-the-remote-agent-runs).
 
 ### Refused and unsupported launches
 
@@ -680,7 +680,7 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`.
+It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its selected remote session.
 It never stops the shared session or removes a sibling secondmate's workspace or panes.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 Cleanup releases the ledger's nonterminal generations before discarding their recovery routes or containing homes.
@@ -689,7 +689,7 @@ An accounting failure preserves those routes and homes for reconciliation.
 
 No generic remote delete or write surface exists:
 
-- Remote writes are confined to inherited allowlist files and backlog handoff scratch files.
+- Remote file transfers are confined to inherited allowlist files and backlog handoff scratch files; lifecycle commands own their operational records.
 - Remote home removal is reachable only through guarded secondmate retirement.
 
 ## Verification

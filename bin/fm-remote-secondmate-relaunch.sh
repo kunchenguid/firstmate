@@ -27,6 +27,8 @@
 # untouched and releases only its own candidate, and an unknown outcome keeps
 # the candidate counted for reconciliation. Nothing is ever cancelled by task
 # id alone.
+# A recorded remote_herdr_session matching fm-lab-* is forwarded to the host
+# controller for isolated validation; ordinary routes keep its default session.
 #
 # --expect-generation refuses (exit 6, nothing touched) when this record now
 # names another launch generation, so a restart whose persistence belonged to an

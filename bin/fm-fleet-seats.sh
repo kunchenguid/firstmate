@@ -105,8 +105,9 @@
 #     marker. A counter or issuer that cannot be reconciled with existing
 #     certificates refuses rather than restarting the sequence.
 #   - under the remote's own lock, serve refuses an epoch lower than its
-#     highest applied one and replays an exact same-epoch/digest response
-#     without granting anything, stores the delivered policy, rejects stale
+#     highest applied one and replays a same-epoch response only when both the
+#     policy digest and effective pool allowances match, without granting
+#     anything, stores the delivered policy, rejects stale
 #     requests, grants waiting requests in arrival order within the allowance
 #     (a request from a holder already counted in that pool is one slot),
 #     creating the granted holder record, and prints one JSON certificate

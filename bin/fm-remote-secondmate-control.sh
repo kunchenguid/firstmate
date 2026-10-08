@@ -41,7 +41,8 @@
 # agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
 # Retirement closes only this secondmate's panes or workspace and never
-# stops fm-remote or removes a sibling secondmate's workspace or panes.
+# stops the selected remote session or removes a sibling secondmate's workspace
+# or panes.
 #
 # Relaunch is not a second lifecycle implementation: it runs the ORDINARY local
 # control plane here, because from this host the mate is a plain local
@@ -71,8 +72,9 @@
 # or foreign receipt is unknown, never a refusal). While this home has seat
 # pools, a launch or relaunch without a verified parent reservation refuses
 # before touching anything: the parent wrapper must account for it. Each
-# operation keeps its own receipt and an immutable .seat-reservation.<gen> holder record
-# received from fm-on's ledger-verified input. Losing its mutable receipt is
+# operation keeps its own receipt and an immutable .seat-reservation.<gen>
+# payload received from fm-on's ledger-verified input: the holder schema, task,
+# and only the matching incarnation. Losing its mutable receipt is
 # unknown and never permits opening another episode for that token.
 # An `existing` receipt binds its request token to the actual generation it observed, so
 # disposition and predecessor readiness resolve evidence through that binding,

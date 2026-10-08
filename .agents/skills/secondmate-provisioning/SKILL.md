@@ -229,7 +229,7 @@ That plane refuses a remotely placed secondmate by name, because its agent runs 
 Move a REMOTE one with `bin/fm-remote-secondmate-relaunch.sh <id> <harness> <model|default|-> <effort|default|->`, which runs that same control-plane relaunch on its host and then republishes this primary's own route metadata from the identity the host confirmed; pass the profile explicitly and use `default` for an absent pin, because `config/secondmate-harness` is not inherited and the copy on that host belongs to a different home ([`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md)).
 The [remote relaunch contract](../../../docs/remote-secondmates.md#relaunch-a-live-remote-second-mate) owns why direct host relaunch is refused with seat pools and otherwise leaves the primary's route stale.
 A successful update requests a restart of every live mate of both placements, including one already on the target commit; the `/updatefirstmate` skill owns that pass, and `bin/fm-secondmate-restart.sh` owns its persist gate and failure vocabulary.
-A legacy remote mate without `remote_spawn_gen` stays nudge-only until one manual relaunch records its generation, as described in the [remote relaunch contract](../../../docs/remote-secondmates.md#relaunch-a-live-remote-second-mate).
+The [remote relaunch contract](../../../docs/remote-secondmates.md#relaunch-a-live-remote-second-mate) owns the legacy generation prerequisite for a clean update restart.
 
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.
