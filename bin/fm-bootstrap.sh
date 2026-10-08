@@ -1064,9 +1064,7 @@ crew_dispatch_validate() {
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   else
-    # Gemini is a verified crewmate/scout adapter (it is intentionally not a
-    # primary or secondmate harness), so keep it in the static dispatch list.
-    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","gemini","agy","muse","rovo","omp","devin"]'
+    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
   fi
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
@@ -1076,7 +1074,7 @@ crew_dispatch_validate() {
       elif ($e | type) != "string" then false
       elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and ($m == "gpt-5.6-luna" or $m == "gpt-6-luna")))
+      elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and $m == "gpt-5.6-luna"))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "agy" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
