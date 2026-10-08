@@ -452,7 +452,7 @@ Without an explicit backend, a later launch or liveness recovery preserves the p
 An existing endpoint on a different backend is refused rather than migrated.
 Placement is per backend:
 
-- Herdr: all remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
+- Herdr: ordinary remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it; isolated validation uses the [session selection contract](#where-the-remote-agent-runs).
 - Rex: each remote secondmate home gets its own `2ndmate-<id>-<hash>` session on the host's persistent personal rex server, the same placement rule a local secondmate home uses.
 
 ### Refused and unsupported launches
@@ -701,7 +701,7 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`, never the shared session or a sibling's workspace or panes.
+Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its selected remote session, never the shared session or a sibling's workspace or panes.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 Cleanup releases the ledger's nonterminal generations before discarding their recovery routes or containing homes.
@@ -710,7 +710,7 @@ An accounting failure preserves those routes and homes for reconciliation.
 
 No generic remote delete or write surface exists:
 
-- Remote writes are confined to inherited allowlist files and backlog handoff scratch files.
+- Remote file transfers are confined to inherited allowlist files and backlog handoff scratch files; lifecycle commands own their operational records.
 - Remote home removal is reachable only through guarded secondmate retirement.
 
 ## Verification
