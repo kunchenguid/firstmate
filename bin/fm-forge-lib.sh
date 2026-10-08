@@ -153,10 +153,13 @@ fm_forge_registered_binding() {
   root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
   home=${FM_HOME:-$root}
   data=${FM_DATA_OVERRIDE:-$home/data}
-  forge=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
-    "$root/bin/fm-project-mode.sh" --forge "$project_id" 2>/dev/null) || return 1
-  [ "$forge" = gerrit ] || return 1
-  printf '%s\n' "$forge"
+  if forge=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    "$root/bin/fm-project-mode.sh" --forge "$project_id" 2>/dev/null); then
+    [ "$forge" = gerrit ] || return 1
+    printf '%s\n' "$forge"
+    return 0
+  fi
+  return 2
 }
 
 fm_forge_detect_provider() {
@@ -174,10 +177,15 @@ fm_forge_detect_provider() {
     echo "local"
     return 0
   }
-  binding=$(fm_forge_registered_binding "$(basename "$checkout")" || true)
-  if [ "$binding" = gerrit ]; then
-    echo gerrit
+  if binding=$(fm_forge_registered_binding "$(basename "$checkout")"); then
+    echo "$binding"
     return 0
+  else
+    binding_status=$?
+    if [ "$binding_status" -eq 2 ]; then
+      echo unknown
+      return 0
+    fi
   fi
   case "$remote_url" in
     file://*|git+file://*|/*|./*|../*|[[:alpha:]]:[/\\]*)

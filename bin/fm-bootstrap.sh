@@ -247,20 +247,21 @@ esac
 local_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != only ]; }
 network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
 
-FORGE_UNSUPPORTED_REPORTED=0
+FORGE_UNSUPPORTED_REPORTED_PROJECTS=""
 forge_report_unsupported() {
   local unsupported=0
   while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
     [ -n "${_proj_provider:-}" ] || continue
     if [ "$_proj_provider" = unknown ]; then
       unsupported=1
-      if [ "$FORGE_UNSUPPORTED_REPORTED" -eq 0 ]; then
+      if ! printf '%s\n' "$FORGE_UNSUPPORTED_REPORTED_PROJECTS" \
+        | grep -F -x -q -- "$_proj_id"; then
         echo "FORGE_UNSUPPORTED: $_proj_id (host: ${_proj_host:-unresolved})"
+        FORGE_UNSUPPORTED_REPORTED_PROJECTS="${FORGE_UNSUPPORTED_REPORTED_PROJECTS}${_proj_id}"$'\n'
       fi
     fi
   done <<< "$FORGE_PROJECTS"
   if [ "$unsupported" -eq 1 ]; then
-    FORGE_UNSUPPORTED_REPORTED=1
     return 1
   fi
   return 0
@@ -947,8 +948,10 @@ COMMON_TOOLS="node git no-mistakes chrome-devtools-axi tasks-axi quota-axi"
 FORGE_PROJECTS_RAW=$(fm_forge_scan_registered_projects "$PROJECTS")
 FORGE_PROJECTS=$(while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
   [ -n "${_proj_provider:-}" ] || continue
-  _proj_mode=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$_proj_id" 2>/dev/null || true)
-  [ "${_proj_mode%% *}" = local-only ] && continue
+  if _proj_mode=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-project-mode.sh" "$_proj_id" 2>/dev/null); then
+    [ "${_proj_mode%% *}" = local-only ] && continue
+  fi
   printf '%s\t%s\t%s\n' "$_proj_id" "$_proj_provider" "${_proj_host:-}"
 done <<< "$FORGE_PROJECTS_RAW")
 FORGE_PROVIDERS_SEEN=$(printf '%s\n' "$FORGE_PROJECTS" | awk -F '\t' 'NF >= 2 {print $2}' | sort -u)

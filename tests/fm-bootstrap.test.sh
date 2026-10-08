@@ -1082,7 +1082,7 @@ SH
 
 
 test_forge_provider_bootstrap_contracts() {
-  local case_dir fakebin out project before after
+  local case_dir fakebin out project project_two before after
 
   case_dir="$TMP_ROOT/forge-unknown"
   project="$case_dir/home/projects/mystery"
@@ -1090,6 +1090,10 @@ test_forge_provider_bootstrap_contracts() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   git -C "$project" init -q
   git -C "$project" remote add origin https://code.example/team/project.git
+  project_two="$case_dir/home/projects/mystery-two"
+  mkdir -p "$project_two"
+  git -C "$project_two" init -q
+  git -C "$project_two" remote add origin https://other.example/team/project.git
   before="$case_dir/unknown-before"
   after="$case_dir/unknown-after"
   snapshot_clone_state "$project" "$before"
@@ -1097,9 +1101,27 @@ test_forge_provider_bootstrap_contracts() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   snapshot_clone_state "$project" "$after"
-  [ "$out" = "FORGE_UNSUPPORTED: mystery (host: code.example)" ] \
-    || fail "unknown forge must fail closed with its project and host, got: $out"
+  assert_contains "$out" "FORGE_UNSUPPORTED: mystery (host: code.example)" \
+    "the first unsupported project must retain its diagnostic"
+  assert_contains "$out" "FORGE_UNSUPPORTED: mystery-two (host: other.example)" \
+    "the second unsupported project must retain its diagnostic"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "unsupported projects must be reported once each, got: $out"
   cmp -s "$before" "$after" || fail "bootstrap mutated an unsupported-origin clone"
+
+  case_dir="$TMP_ROOT/forge-malformed-binding"
+  project="$case_dir/home/projects/malformed"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- malformed [no-mistakes forge=gitub] - malformed binding (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: malformed (host: github.com)" ] \
+    || fail "malformed forge binding must fail closed instead of inferring GitHub, got: $out"
 
   case_dir="$TMP_ROOT/forge-https-ignores-ssh-config"
   project="$case_dir/home/projects/github-project"
@@ -1259,10 +1281,15 @@ test_forge_provider_explicit_gerrit_binding() {
   git -C "$project" remote add origin ssh://review.example:29418/team/project
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/gh" "$fakebin/gh-axi"
-  fm_fake_exit0 "$fakebin" gerrit-axi jq
+  fm_fake_exit0 "$fakebin" jq
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "explicit Gerrit binding must select Gerrit tooling without auth or unsupported diagnostics, got: $out"
+  assert_contains "$out" "MISSING: gerrit-axi (install: npm install -g gerrit-axi)" \
+    "explicit Gerrit binding must require gerrit-axi"
+  fm_fake_exit0 "$fakebin" gerrit-axi
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "explicit Gerrit binding must avoid GitHub auth and unsupported diagnostics, got: $out"
   pass "bootstrap honors explicit Gerrit provider bindings"
 }
 
@@ -1275,21 +1302,28 @@ test_forge_host_trailing_dot_is_canonicalized() {
   git -C "$project" init -q
   git -C "$project" remote add origin https://github.com./example/project.git
   fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
 [ "${1:-}" = auth ] && [ "${2:-}" = status ] \
   && [ "${4:-}" = github.com ] && exit 0
 exit 1
 SH
   chmod +x "$fakebin/gh"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "a trailing-dot GitHub host must use canonical auth policy, got: $out"
+  [ "$(cat "$calls")" = "auth status --hostname github.com" ] \
+    || fail "a trailing-dot GitHub host must authenticate against github.com, got: $(cat "$calls")"
 
+  : > "$calls"
   git -C "$project" remote set-url origin https://github.com..../example/project.git
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "repeated trailing-dot GitHub host labels must use canonical auth policy, got: $out"
+  [ "$(cat "$calls")" = "auth status --hostname github.com" ] \
+    || fail "repeated trailing-dot GitHub host labels must authenticate against github.com, got: $(cat "$calls")"
   pass "bootstrap canonicalizes trailing-dot forge hosts"
 }
 
@@ -1303,16 +1337,21 @@ test_forge_configured_host_trailing_dot_is_canonicalized() {
   git -C "$project" remote add origin https://gitlab.example./team/project.git
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  calls="$case_dir/glab.calls"
   cat > "$fakebin/glab" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GLAB_CALLS:?}"
 [ "${1:-}" = auth ] && [ "${2:-}" = status ] \
   && [ "${4:-}" = gitlab.example ] && exit 0
 exit 1
 SH
   chmod +x "$fakebin/glab"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_GITLAB_HOSTS=gitlab.example. FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_GITLAB_HOSTS=gitlab.example. FM_FAKE_GLAB_CALLS="$calls" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "a configured trailing-dot GitLab host must use canonical auth policy, got: $out"
+  [ "$(cat "$calls")" = "auth status --hostname gitlab.example" ] \
+    || fail "a configured trailing-dot GitLab host must authenticate against gitlab.example, got: $(cat "$calls")"
   pass "bootstrap canonicalizes configured trailing-dot forge hosts"
 }
 
