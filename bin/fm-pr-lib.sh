@@ -1263,6 +1263,41 @@ FIELDS
   FM_PR_RECORD_MERGED=$merged
 }
 
+# The status of one Forgejo pull request, the read bin/fm-crew-state.sh bounds
+# for a terminal passed run's PR detail. tea addresses an instance only by
+# login name, so the login whose URL's host part is <host> is resolved from
+# `tea logins list --output csv` (fm_pr_forgejo_tea_login) and a host no login
+# pins refuses rather than read tea's default instance. The pull request is
+# then read as tea's JSON record and classified by fm_pr_forgejo_tea_pull_state
+# ("merged" only for hasMerged true, else the record's own state), so
+# FM_PR_RECORD_STATE carries that classification and FM_PR_RECORD_MERGED is
+# true only for "merged". Returns 1 when tea or jq is missing, the login list
+# or pull read fails, or the record does not parse, so the caller reports an
+# honest unknown instead of a guessed state.
+fm_pr_forgejo_read_record() {  # <host> <path> <number>
+  local host=$1 path=$2 number=$3 logins login json state merged=false
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  command -v tea >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  logins=$(tea logins list --output csv 2>/dev/null) || return 1
+  login=$(fm_pr_forgejo_tea_login "$logins" "$host") || return 1
+  if ! json=$(tea pulls "$number" --repo "$path" --login "$login" --output json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  state=$(fm_pr_forgejo_tea_pull_state "$json")
+  [ -n "$state" ] || return 1
+  [ "$state" != merged ] || merged=true
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
 # gerrit-axi resolves its server from the current directory's origin remote
 # first, so the host is passed explicitly from the parsed identity and a read
 # outside a clone still reaches the right server. A change number is

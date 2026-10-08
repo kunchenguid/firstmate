@@ -196,6 +196,35 @@ case "${1:-}" in
 esac
 exit 1
 SH
+  cat > "$fb/tea" <<'SH'
+#!/usr/bin/env bash
+set -u
+# Plain tea, reproducing the real CLI's contract: output on stdout and exit 0
+# on success, a non-zero exit with no stdout on failure. Its defaults answer
+# one default login whose URL is codeberg.org and one open unmerged pull
+# request, the record shape fm-pr-lib.sh's forgejo read resolves its login
+# from and classifies.
+case "${1:-}" in
+  logins)
+    [ "${2:-}" = list ] || exit 2
+    [ -z "${FM_FAKE_TEA_READ_LOG:-}" ] || printf 'logins list --output csv\n' >> "$FM_FAKE_TEA_READ_LOG"
+    [ "${FM_FAKE_TEA_READ_FAIL:-0}" = 1 ] && exit 1
+    printf 'Name,URL,SSHHost,User,Default\n'
+    printf 'main,%s,ssh.example,user,true\n' "${FM_FAKE_TEA_LOGIN_URL:-https://codeberg.org}"
+    exit 0 ;;
+  pulls)
+    [ -z "${FM_FAKE_TEA_READ_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TEA_READ_LOG"
+    [ "${FM_FAKE_TEA_READ_FAIL:-0}" = 1 ] && exit 1
+    [ "${FM_FAKE_TEA_PULL_MISSING:-0}" = 1 ] && exit 1
+    case " $* " in
+      *' --output json '*)
+        printf '{"state":"%s","hasMerged":%s}\n' "${FM_FAKE_TEA_STATE:-open}" "${FM_FAKE_TEA_MERGED:-false}"
+        exit 0 ;;
+    esac
+    exit 2 ;;
+esac
+exit 2
+SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -276,7 +305,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/gh" "$fb/gh-axi" "$fb/glab" "$fb/gerrit-axi" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/gh" "$fb/gh-axi" "$fb/glab" "$fb/gerrit-axi" "$fb/tea" "$fb/tmux" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -351,6 +380,12 @@ reset_fakes() {
   FM_FAKE_GERRIT_URL_JSON=
   FM_FAKE_GERRIT_READ_FAIL=0
   FM_FAKE_GERRIT_READ_LOG=
+  FM_FAKE_TEA_STATE=open
+  FM_FAKE_TEA_MERGED=false
+  FM_FAKE_TEA_READ_FAIL=0
+  FM_FAKE_TEA_PULL_MISSING=0
+  FM_FAKE_TEA_READ_LOG=
+  FM_FAKE_TEA_LOGIN_URL=https://codeberg.org
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
@@ -360,6 +395,7 @@ reset_fakes() {
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
   export FM_FAKE_GERRIT_STATUS FM_FAKE_GERRIT_CHANGE FM_FAKE_GERRIT_URL_JSON
   export FM_FAKE_GERRIT_READ_FAIL FM_FAKE_GERRIT_READ_LOG
+  export FM_FAKE_TEA_STATE FM_FAKE_TEA_MERGED FM_FAKE_TEA_READ_FAIL FM_FAKE_TEA_PULL_MISSING FM_FAKE_TEA_READ_LOG FM_FAKE_TEA_LOGIN_URL
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
 }
 
@@ -1598,6 +1634,73 @@ test_terminal_passed_with_failed_gitlab_read_reports_unknown() {
   assert_contains "$out" "run passed: PR state unknown (unreadable)" "failed GitLab read is honest unknown"
   assert_not_contains "$out" "PR merged" "failed GitLab read must not be reported merged"
   pass "terminal passed run handles failed GitLab read"
+}
+
+test_terminal_passed_with_open_forgejo_pr_does_not_claim_merged() {
+  reset_fakes
+  local d read_log out
+  d=$(new_case passed-open-forgejo-pr)
+  make_repo_on_branch "$d/wt" fm/feat-dforgejoopen
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dforgejoopen.meta" "window=fm:fm-feat-dforgejoopen" \
+    "worktree=$d/wt" "kind=ship" "pr=https://codeberg.org/org/team/repo/pulls/12"
+  read_log="$d/tea-read.log"
+  : > "$read_log"
+  FM_FAKE_TEA_READ_LOG=$read_log
+  FM_FAKE_TEA_STATE=open
+  FM_FAKE_TEA_MERGED=false
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dforgejoopen https://codeberg.org/org/team/repo/pulls/12)"
+  out=$(run_crew_state "$d" feat-dforgejoopen)
+  assert_contains "$out" "run passed: PR open" "open Forgejo PR state is named"
+  assert_not_contains "$out" "PR merged" "open Forgejo PR must not be reported merged"
+  assert_grep 'pulls 12 --repo org/team/repo --login main --output json' "$read_log" \
+    "Forgejo PR read addresses the whole nested path through the host-pinned login"
+  pass "terminal passed run reads open Forgejo PR state"
+}
+
+test_terminal_passed_with_merged_forgejo_pr_reports_merged() {
+  reset_fakes
+  local d out
+  d=$(new_case passed-merged-forgejo-pr)
+  make_repo_on_branch "$d/wt" fm/feat-dforgejomerged
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dforgejomerged.meta" "window=fm:fm-feat-dforgejomerged" \
+    "worktree=$d/wt" "kind=ship" "pr=https://codeberg.org/org/repo/pulls/13"
+  # A merged Forgejo pull request can still report state closed, so only
+  # hasMerged proves the merge; closed without it is this report's closed.
+  FM_FAKE_TEA_STATE=closed
+  FM_FAKE_TEA_MERGED=true
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dforgejomerged https://codeberg.org/org/repo/pulls/13)"
+  out=$(run_crew_state "$d" feat-dforgejomerged)
+  assert_contains "$out" "run passed: PR merged" "merged Forgejo PR is reported merged off hasMerged, not state"
+  FM_FAKE_TEA_MERGED=false
+  out=$(run_crew_state "$d" feat-dforgejomerged)
+  assert_contains "$out" "run passed: PR closed" "closed unmerged Forgejo PR is reported closed"
+  assert_not_contains "$out" "PR merged" "closed unmerged Forgejo PR must not be reported merged"
+  pass "terminal passed run reads merged and closed Forgejo PR state"
+}
+
+test_terminal_passed_with_failed_forgejo_read_reports_unknown() {
+  reset_fakes
+  local d out
+  d=$(new_case passed-unreadable-forgejo-pr)
+  make_repo_on_branch "$d/wt" fm/feat-dforgejounknown
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dforgejounknown.meta" "window=fm:fm-feat-dforgejounknown" \
+    "worktree=$d/wt" "kind=ship" "pr=https://codeberg.org/org/repo/pulls/14"
+  FM_FAKE_TEA_READ_FAIL=1
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dforgejounknown https://codeberg.org/org/repo/pulls/14)"
+  out=$(run_crew_state "$d" feat-dforgejounknown)
+  assert_contains "$out" "run passed: PR state unknown (unreadable)" "failed Forgejo read is honest unknown"
+  assert_not_contains "$out" "PR merged" "failed Forgejo read must not be reported merged"
+  # A tea login pinned to another host never names this instance, so the read
+  # stays unknown rather than query tea's default login.
+  FM_FAKE_TEA_READ_FAIL=0
+  FM_FAKE_TEA_LOGIN_URL=https://elsewhere.example
+  out=$(run_crew_state "$d" feat-dforgejounknown)
+  assert_contains "$out" "run passed: PR state unknown (unreadable)" "unpinned host is honest unknown"
+  assert_not_contains "$out" "PR merged" "unpinned host must not be reported merged"
+  pass "terminal passed run handles failed and unpinned Forgejo reads"
 }
 
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged() {
@@ -5554,6 +5657,9 @@ test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
 test_terminal_passed_with_failed_gitlab_read_reports_unknown
+test_terminal_passed_with_open_forgejo_pr_does_not_claim_merged
+test_terminal_passed_with_merged_forgejo_pr_reports_merged
+test_terminal_passed_with_failed_forgejo_read_reports_unknown
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged
 test_terminal_passed_with_merged_gerrit_change_reports_merged
 test_terminal_passed_with_unreadable_gerrit_change_reports_unknown
