@@ -5,14 +5,16 @@
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
 # "path" is the full project path, which is owner/repository on GitHub, an
-# arbitrarily nested group/subgroup/project namespace on GitLab, and an
-# arbitrarily nested project name on Gerrit, where "number" is the change
-# number. A GitLab or Gerrit project can sit at any depth, so no
-# owner/repository pair can address one and the sidecar carries the whole path
-# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
-# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
-# from the stored URL and refuses any record whose parts do not reconstruct that
-# exact URL.
+# arbitrarily nested group/subgroup/project namespace on GitLab, an
+# owner/repository pair that can nest inside organization subgroups on
+# Forgejo, and an arbitrarily nested project name on Gerrit, where "number"
+# is the change number. A GitLab or Gerrit project can sit at any depth and a
+# Forgejo one can nest, so no fixed owner/repository pair addresses every
+# project and the sidecar carries the whole path instead. All three also run
+# on self-hosted instances, and Gerrit runs nowhere else, so the host is part
+# of that identity rather than a constant. Every consumer re-derives the
+# identity from the stored URL and refuses any record whose parts do not
+# reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -115,8 +117,9 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# GitLab and Gerrit both serve self-hosted instances, so the host is part of the
-# identity rather than a constant. It is accepted only as a lowercase DNS name
+# GitLab, Forgejo, and Gerrit all serve self-hosted instances, so the host is
+# part of the identity rather than a constant. It is accepted only as a
+# lowercase DNS name
 # with no userinfo, port, or trailing dot, which keeps one canonical spelling per
 # change. github.com is refused here even though its shape is otherwise valid:
 # it is GitHub's own host and never another forge's instance, so a URL like
@@ -162,6 +165,33 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# A Forgejo project path is owner/repository and can also nest inside
+# organization subgroups, so at least two segments and no fixed depth,
+# exactly like a GitLab namespace. A leading hyphen is refused because the
+# path is what names the project to the tea CLI, where a leading hyphen reads
+# as an option instead, and a ".git" suffix is refused because Forgejo strips
+# it on clone URLs and the stripped name is the canonical one. A ".atom"
+# suffix is refused for the same reason as GitLab's: it is a feed suffix
+# rather than a project spelling, so accepting it could only arm a watch on
+# a URL an instance will not serve.
+fm_pr_forgejo_path_valid() {
+  local path=${1-} segment
+  local LC_ALL=C
+  local -a segments
+  [ "${#path}" -ge 3 ] && [ "${#path}" -le 1024 ] || return 1
+  case "$path" in
+    /*|*/|*//*) return 1 ;;
+  esac
+  IFS=/ read -ra segments <<< "$path"
+  [ "${#segments[@]}" -ge 2 ] && [ "${#segments[@]}" -le 20 ] || return 1
+  for segment in "${segments[@]}"; do
+    [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
+    case "$segment" in
+      .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+  done
+}
+
 # A Gerrit project name is itself a path at no fixed depth, and it needs no
 # enclosing group, so a single segment is canonical here where GitLab needs at
 # least two. Gerrit reserves no route segment inside the name, so nothing
@@ -188,16 +218,17 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
-# Parse a canonical pull request, merge request, or Gerrit change URL into the
-# provider-tagged identity. Validation is strict and per provider: the GitHub
-# username and repository rules are unchanged, and GitLab and Gerrit each get
-# their own namespace rules rather than a loosened GitHub rule.
+# Parse a canonical pull request, merge request, Forgejo pull request, or
+# Gerrit change URL into the provider-tagged identity. Validation is strict
+# and per provider: the GitHub username and repository rules are unchanged,
+# and GitLab, Forgejo, and Gerrit each get their own namespace rules rather
+# than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab or gerrit
-# URL leaves them empty, and those paths address the project by FM_PR_HOST and
-# FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
-# host.
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab, forgejo,
+# or gerrit URL leaves them empty, and those paths address the project by
+# FM_PR_HOST and FM_PR_PATH instead, so a change on any instance resolves
+# without a hardcoded host.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -234,6 +265,27 @@ fm_pr_url_parse() {
     fm_pr_forge_host_valid "$host" || return 1
     fm_pr_gitlab_path_valid "$path" || return 1
     FM_PR_PROVIDER=gitlab
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # A Forgejo pull request URL is https://<host>/<path>/pulls/<n>, where the
+  # project path is owner/repository and can nest inside organization
+  # subgroups, so it is captured whole and never flattened into an
+  # owner/repository pair, following the GitLab precedent. The path class
+  # contains every character of "pulls", so this match is greedy to the last
+  # "/pulls/": an earlier separator lands inside the captured path, and
+  # because the number is always the URL's last segment that greedy split is
+  # the canonical one at every nesting depth.
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/pulls/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_forge_host_valid "$host" || return 1
+    fm_pr_forgejo_path_valid "$path" || return 1
+    FM_PR_PROVIDER=forgejo
     FM_PR_URL=$raw
     FM_PR_HOST=$host
     FM_PR_PATH=$path

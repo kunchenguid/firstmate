@@ -367,6 +367,28 @@ INVALID_URLS=(
   'http://gerrit.example/c/proj/+/1'
   'https://github.com/c/proj/+/1'
   'https://gerrit.example/c/proj/+/1 '
+  'https://forgejo.example/o/r/pulls/0'
+  'https://forgejo.example/o/r/pulls/01'
+  'https://forgejo.example/o/r/pulls/1/'
+  'https://forgejo.example/o/r/pulls/1?x=1'
+  'https://forgejo.example/o/r/pulls/1#f'
+  'https://forgejo.example/o/r/pulls/1/files'
+  'https://forgejo.example/o/r/pull/1'
+  'https://forgejo.example/o//pulls/1'
+  'https://forgejo.example/o/-r/pulls/1'
+  'https://forgejo.example/o/r.git/pulls/1'
+  'https://forgejo.example/o/r.atom/pulls/1'
+  'https://forgejo.example/o/./pulls/1'
+  'https://forgejo.example/o/../pulls/1'
+  'https://forgejo.example/repo/pulls/1'
+  'https://forgejo.example/o/r/pulls/1/2'
+  'https://Forgejo.example/o/r/pulls/1'
+  'https://forgejo.example:3000/o/r/pulls/1'
+  'https://user@forgejo.example/o/r/pulls/1'
+  'https://.forgejo.example/o/r/pulls/1'
+  'https://forgejo.example./o/r/pulls/1'
+  'http://forgejo.example/o/r/pulls/1'
+  'https://github.com/o/r/pulls/1'
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -520,6 +542,28 @@ https://review.internal/c/group/apps/console/+/4201|review.internal|group/apps/c
 https://gerrit.example/c/proj/+/1|gerrit.example|proj|1
 https://gerrit.example.co.uk/c/a/b/c/d/+/42|gerrit.example.co.uk|a/b/c/d|42
 https://review.internal/c/All-Projects/+/123456|review.internal|All-Projects|123456
+EOF
+  # A Forgejo project is owner/repository and can nest inside organization
+  # subgroups, so the whole path is the identity and is never flattened into
+  # an owner/repository pair that cannot address a nested one. A repo named
+  # "pulls" proves the greedy split lands on the last "/pulls/", which is the
+  # canonical URL because the number is its last segment.
+  while IFS='|' read -r url host path number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Forgejo pull request URL"
+    [ "$FM_PR_PROVIDER" = forgejo ] || fail "parser did not tag a Forgejo pull request URL as forgejo"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Forgejo pull request URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Forgejo host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Forgejo project path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Forgejo pull request number"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for a Forgejo pull request URL"
+  done <<'EOF'
+https://codeberg.org/owner/repo/pulls/1|codeberg.org|owner/repo|1
+https://git.example.com/org/team/repo/pulls/42|git.example.com|org/team/repo|42
+https://forgejo.internal.co.uk/a/b/c/d/pulls/123456|forgejo.internal.co.uk|a/b/c/d|123456
+https://git.example.com/o/r.name-x_1/pulls/7|git.example.com|o/r.name-x_1|7
+https://git.example.com/o/pulls/pulls/3|git.example.com|o/pulls|3
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
