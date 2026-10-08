@@ -4,9 +4,9 @@
 #
 # A generated local record ends with this explicit structured suffix:
 #   (home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
-# Either form may carry an optional `icon: <glyph>;` field between projects and added.
 # A remote record adds its host placement before the existing fields:
 #   (host: ...; root: ...; home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
+# Either form may carry an optional `icon: <glyph>;` field between projects and added.
 # Summary text and scope text are natural language and may contain parentheses
 # and semicolons, so field boundaries are anchored to the suffix markers rather
 # than to the first incidental punctuation.
