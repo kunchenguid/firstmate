@@ -1065,6 +1065,10 @@ apply_pending_retained_artifact() {  # <task-id>
         RETAINED_CLOSE_ARGS=(--note "Gerrit change ${args[1]}")
         return 0
       fi
+      if [ "${args[0]}" = --pr ] && fm_backlog_pr_is_nested_forgejo "${args[1]-}"; then
+        RETAINED_CLOSE_ARGS=(--note "PR ${args[1]}")
+        return 0
+      fi
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
       fm_backlog_mutate "$DATA" update "$id" "${args[@]}" \
         || { report_retained_artifact_failure "$id" "$marker"; return 1; }

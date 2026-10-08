@@ -2069,6 +2069,46 @@ SH
   pass "session start replays a recorded Gerrit close with its change URL as a note"
 }
 
+test_recovery_replays_a_nested_forgejo_close_with_its_pr_url_as_a_note() {
+  local case_dir id out real_tasks_axi forgejo_url=https://codeberg.org/org/team/repo/pulls/12
+  id=atomic-heal-forgejo-b9
+  case_dir=$(make_home heal-pending-forgejo-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The record a cleanup stages before its final act: the nested Forgejo pull
+  # request URL as a --pr link tasks-axi would refuse outright.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-forgejo\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$forgejo_url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+  # Pin the refusal tasks-axi applies to a --pr link beyond its canonical
+  # GitHub and flat-Forgejo shapes, so this case keeps reproducing whatever the
+  # installed release accepts.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://(github\.com/[^/]+/[^/]+/pull/[0-9]+|[a-z0-9.-]+/[^/]+/[^/]+/pulls/[0-9]+)\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded nested-Forgejo close at $(row_state "$case_dir" "$id"): $out"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"PR $forgejo_url\"" >/dev/null \
+    || fail "the replayed nested-Forgejo close did not record its PR URL as a note"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed nested-Forgejo close left its record behind"
+  pass "session start replays a recorded nested-Forgejo close with its PR URL as a note"
+}
+
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   local case_dir id marker out
   id=atomic-heal-done-backfill-b9
@@ -3096,6 +3136,7 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
+test_recovery_replays_a_nested_forgejo_close_with_its_pr_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning

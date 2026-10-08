@@ -524,6 +524,19 @@ fm_backlog_pr_is_gerrit_change() {  # <url>
   ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
 }
 
+# A Forgejo pull request under a nested org path parses canonically for watching
+# and merging, but tasks-axi's --pr link accepts only the flat <owner>/<repo>
+# shape, so such a URL is recorded on the row as a note exactly like a Gerrit
+# change URL instead of letting the close be refused. The subshell keeps the
+# parse from overwriting a caller's FM_PR_* identity.
+fm_backlog_pr_is_nested_forgejo() {  # <url>
+  (
+    fm_pr_url_parse "$1" \
+      && [ "$FM_PR_PROVIDER" = forgejo ] \
+      && case "$FM_PR_PATH" in */*/*) true ;; *) false ;; esac
+  )
+}
+
 fm_backlog_done() {  # <data-dir> <id> [flag...]
   local data=$1 id=$2 arg previous_arg=''
   local -a done_args=()
@@ -532,6 +545,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
     if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
       done_args[${#done_args[@]}-1]=--note
       done_args+=("Gerrit change $arg")
+    elif [ "$previous_arg" = --pr ] && fm_backlog_pr_is_nested_forgejo "$arg"; then
+      done_args[${#done_args[@]}-1]=--note
+      done_args+=("PR $arg")
     else
       done_args+=("$arg")
     fi
@@ -543,7 +559,10 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) ! fm_backlog_pr_is_gerrit_change "$value" ;;
+    --pr)
+      ! fm_backlog_pr_is_gerrit_change "$value" \
+        && ! fm_backlog_pr_is_nested_forgejo "$value"
+      ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -578,8 +597,10 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
           deliverable="${deliverable:+$deliverable; }PR $arg"
           row_args=(--pr "$arg")
-        else
+        elif fm_backlog_pr_is_gerrit_change "$arg"; then
           deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
+        else
+          deliverable="${deliverable:+$deliverable; }PR $arg"
         fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
