@@ -42,6 +42,7 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (q6) bare-number/branch lookup at FM_GITHUB_HOST, recorded URL at its own host
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -983,6 +984,81 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
     "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+}
+
+# Wrap the gh and gh-axi stubs so each call logs the GH_HOST it ran with.
+log_gh_host_for_stubs() {
+  local case_dir=$1 tool
+  for tool in gh gh-axi; do
+    mv "$case_dir/fakebin/$tool" "$case_dir/fakebin/$tool.real"
+    cat > "$case_dir/fakebin/$tool" <<SH
+#!/usr/bin/env bash
+printf '%s|%s\\n' "\${GH_HOST-unset}" "$tool \$*" >> "$case_dir/gh-host.log"
+exec "$case_dir/fakebin/$tool.real" "\$@"
+SH
+    chmod +x "$case_dir/fakebin/$tool"
+  done
+}
+
+# Teardown of a task whose only landed signal is its merged PR, run with a clean
+# GH_HOST and with FM_GITHUB_HOST set only when <default-host> is given.
+# Args: name [recorded-pr-url [default-host]]. Echoes the case dir.
+run_unlanded_teardown_at_default_host() {
+  local name=$1 pr_url=${2-} default_host=${3-} case_dir pr_head rc=0
+  case_dir=$(make_case "$name")
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  [ -z "$pr_url" ] || printf 'pr=%s\n' "$pr_url" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  log_gh_host_for_stubs "$case_dir"
+  : > "$case_dir/gh-host.log"
+  (
+    unset GH_HOST FM_GITHUB_HOST
+    [ -z "$default_host" ] || export FM_GITHUB_HOST=$default_host
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  ) || rc=$?
+  printf '%s\n' "$rc" > "$case_dir/rc"
+  printf '%s\n' "$case_dir"
+}
+
+test_bare_number_and_branch_lookups_reach_gh_at_the_default_host() {
+  local case_dir log
+  case_dir=$(run_unlanded_teardown_at_default_host default-host-set "" ghe.example.com)
+  expect_code 0 "$(cat "$case_dir/rc")" "default-host-set: teardown should succeed through the merged PR"
+  log=$(cat "$case_dir/gh-host.log")
+  assert_contains "$log" 'ghe.example.com|gh-axi pr list' "the branch lookup did not reach gh-axi at FM_GITHUB_HOST"
+  assert_contains "$log" 'ghe.example.com|gh pr view 7' "the bare-number lookup did not reach gh at FM_GITHUB_HOST"
+
+  case_dir=$(run_unlanded_teardown_at_default_host default-host-unset)
+  expect_code 0 "$(cat "$case_dir/rc")" "default-host-unset: teardown should succeed through the merged PR"
+  log=$(cat "$case_dir/gh-host.log")
+  assert_contains "$log" 'unset|gh-axi pr list' "the branch lookup must leave github.com untouched"
+  assert_contains "$log" 'unset|gh pr view 7' "the bare-number lookup must leave github.com untouched"
+  pass "teardown's branch and bare-number lookups reach gh at FM_GITHUB_HOST, and github.com otherwise"
+}
+
+test_recorded_pr_url_names_its_own_host_not_the_default() {
+  local case_dir log
+  case_dir=$(run_unlanded_teardown_at_default_host recorded-url-host \
+    https://git.example.org/example/repo/pull/7 ghe.example.com)
+  expect_code 0 "$(cat "$case_dir/rc")" "recorded-url-host: teardown should succeed through the merged PR"
+  log=$(cat "$case_dir/gh-host.log")
+  assert_contains "$log" 'git.example.org|gh pr view https://git.example.org/example/repo/pull/7' \
+    "a recorded GitHub URL must be read at its own host"
+  assert_not_contains "$log" 'ghe.example.com|gh pr view' "the default host must not replace a recorded URL's host"
+  pass "teardown reads a recorded pull request at its own host"
+}
+
+test_recorded_gerrit_change_never_selects_its_host_for_gh() {
+  local case_dir log
+  case_dir=$(run_unlanded_teardown_at_default_host recorded-gerrit-host \
+    https://gerrit.example.org/c/project/+/12)
+  log=$(cat "$case_dir/gh-host.log")
+  assert_contains "$log" 'gh pr view https://gerrit.example.org/c/project/+/12' \
+    "the recorded change was never looked up"
+  assert_not_contains "$log" 'gerrit.example.org|' "a Gerrit host must never be selected as the GitHub host"
+  pass "teardown never selects a non-GitHub forge's host for gh"
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
@@ -4711,6 +4787,9 @@ test_teardown_retains_v1_journal_when_workspace_query_ambiguous
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+test_bare_number_and_branch_lookups_reach_gh_at_the_default_host
+test_recorded_pr_url_names_its_own_host_not_the_default
+test_recorded_gerrit_change_never_selects_its_host_for_gh
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows

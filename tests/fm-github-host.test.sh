@@ -124,9 +124,9 @@ SH
     . "$1"
     fm_gh_at github.com gh api a
   ' _ "$ROOT/bin/fm-pr-lib.sh"
-  assert_equals 'github.com|api a' "$(cat "$log")" \
-    "an ambient GH_HOST must not redirect a github.com address"
-  pass "the host is selected for the one command and github.com is never redirected"
+  assert_equals 'ghe.example.com|api a' "$(cat "$log")" \
+    "a github.com address must leave gh's own host selection untouched"
+  pass "the host is selected for the one command and github.com is left untouched"
 }
 
 test_read_record_targets_the_host() {
@@ -145,15 +145,12 @@ SH
   ' _ "$ROOT/bin/fm-pr-lib.sh") || fail "the record read failed"
   assert_equals "MERGED true" "$out" "the record was not read"
   assert_contains "$(cat "$log")" 'ghe.example.com|api graphql' "the record read did not target the host"
-
   : > "$log"
-  FM_TEST_AT_LOG="$log" FM_GITHUB_HOST=git.example.org PATH="$FAKEBIN:$PATH" bash -c '
-    . "$1"
-    fm_pr_github_read_record o r 7
-  ' _ "$ROOT/bin/fm-pr-lib.sh" || fail "the default-host record read failed"
-  assert_contains "$(cat "$log")" 'git.example.org|api graphql' \
-    "an omitted host must come from FM_GITHUB_HOST"
-  pass "the pull request record is read at the given host, or the default host when none is given"
+  if FM_TEST_AT_LOG="$log" PATH="$FAKEBIN:$PATH" bash -c '. "$1"; fm_pr_github_read_record o r 7' _ "$ROOT/bin/fm-pr-lib.sh"; then
+    fail "a record read without a host must be refused"
+  fi
+  [ ! -s "$log" ] || fail "a record read without a host reached gh: $(cat "$log")"
+  pass "the pull request record is read at the given host"
 }
 
 # The poll runs from a sidecar, so it is driven directly with the validated

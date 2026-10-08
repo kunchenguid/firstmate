@@ -160,13 +160,12 @@ fm_github_default_host() {
 
 # Run a gh or gh-axi command addressed at <host>. gh selects its host for every
 # subcommand, api and graphql included, from GH_HOST, so it is set for that one
-# command only. github.com needs no selection and leaves the command untouched
-# unless GH_HOST is already set to something else, which would otherwise
-# redirect an owner/repository address to the wrong host.
+# command only. github.com needs no selection and always leaves the command
+# untouched.
 fm_gh_at() {  # <host> <command> [args...]
   local host=$1
   shift
-  if [ "$host" = github.com ] && [ -z "${GH_HOST:-}" ]; then
+  if [ "$host" = github.com ]; then
     "$@"
   else
     GH_HOST=$host "$@"
@@ -1027,10 +1026,9 @@ fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number> <host>
   esac
 }
 
-# The host is optional and defaults to fm_github_default_host.
-fm_pr_github_read_record() {  # <owner> <repo> <number> [host]
+fm_pr_github_read_record() {  # <owner> <repo> <number> <host>
   local host=${4-}
-  [ -n "$host" ] || host=$(fm_github_default_host) || return 1
+  [ -n "$host" ] || return 1
   if command -v gh >/dev/null 2>&1 && fm_pr_github_read_record_with_gh "$1" "$2" "$3" "$host"; then
     return 0
   fi

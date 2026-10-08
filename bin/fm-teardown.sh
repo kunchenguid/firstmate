@@ -1549,8 +1549,8 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  # A recorded URL names its own host; a bare number falls back to the default.
-  host=$(fm_pr_url_parse "$target" && printf '%s' "$FM_PR_HOST") || host=$(fm_github_default_host) || return 1
+  # A recorded GitHub URL names its own host; anything else falls back to the default.
+  host=$(fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = github ] && printf '%s' "$FM_PR_HOST") || host=$(fm_github_default_host) || return 1
   view=$(cd "$WT" && fm_gh_at "$host" gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}

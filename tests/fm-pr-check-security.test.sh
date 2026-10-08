@@ -669,6 +669,42 @@ test_draft_pull_request_is_not_armed() {
   pass "arming refuses a draft pull request, naming it, and arms a ready or unreadable one"
 }
 
+# Finishing a crash-left retirement receipt parses the receipt's own pull
+# request URL, so the host the new pull request is read at must be the one
+# parsed from the URL being armed rather than whatever that recovery left behind.
+test_rearming_after_a_receipt_for_another_host_reads_the_new_host() {
+  local dir state log
+  dir=$(make_case rearm-receipt-other-host)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://git.example.org/o/r/pull/18
+  seed_canonical_poll "$dir" task-a https://git.example.org/o/r/pull/18
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "could not snapshot the receipt fixture"
+  fm_pr_poll_retirement_publish "$state" task-a "$POLL" merged \
+    || fail "could not publish the receipt fixture"
+  mv "$dir/fakebin/gh" "$dir/fakebin/gh.real"
+  cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s|%s\\n' "\${GH_HOST-unset}" "\$*" >> "$dir/gh-host.log"
+exec "$dir/fakebin/gh.real" "\$@"
+SH
+  chmod +x "$dir/fakebin/gh"
+  : > "$dir/gh-host.log"
+
+  (
+    unset GH_HOST
+    run_check_entry "$dir" task-a https://ghe.example.com/o/r/pull/7 \
+      > "$dir/stdout" 2> "$dir/stderr"
+  ) || fail "re-arming on another host failed: $(cat "$dir/stderr")"
+  log=$(cat "$dir/gh-host.log")
+  assert_contains "$log" 'ghe.example.com|pr view https://ghe.example.com/o/r/pull/7 --json isDraft' \
+    "the draft state was not read at the pull request's own host"
+  assert_contains "$log" 'ghe.example.com|pr view https://ghe.example.com/o/r/pull/7 --json headRefOid' \
+    "the head was not read at the pull request's own host"
+  assert_not_contains "$log" 'git.example.org|' "a recovered receipt's host leaked into the new pull request's reads"
+  pass "re-arming after a retirement receipt for another host reads the new pull request at its own host"
+}
+
 # A secondmate is a persistent worker, not a delivery lane: it never owns a
 # pull request of its own. A URL relayed onto its status channel belongs to a
 # task in the mate's own home, which arms its own watch, so arming one here is
@@ -3471,6 +3507,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
+test_rearming_after_a_receipt_for_another_host_reads_the_new_host
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
