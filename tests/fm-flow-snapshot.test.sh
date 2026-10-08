@@ -374,9 +374,9 @@ assert_equals "1790000000" "$(printf '%s' "$CLOCK_DOC" | jq -r '.generated_epoch
   "the one clock knob sets the epoch stamp"
 assert_equals "2026-09-21T14:13:20Z" "$(printf '%s' "$CLOCK_DOC" | jq -r '.generated')" \
   "and the ISO stamp beside it is the same instant, derived from it"
-assert_equals "2026-09-21T14:13:20Z" \
-  "$(printf '%s' "$CLOCK_DOC" | jq -r '[.agents[]][0].collection.at')" \
-  "every stamp in the document comes from that one instant"
+assert_equals "ok,reason" \
+  "$(printf '%s' "$CLOCK_DOC" | jq -r '[.agents[]][0].collection | keys_unsorted | join(",")')" \
+  "and no record repeats that instant, so no stamp can disagree with it"
 
 # --- liveness is the only membership test -----------------------------------
 

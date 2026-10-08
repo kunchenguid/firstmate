@@ -33,11 +33,10 @@
 #     worker: {harness,model,effort}. A field the record does not state, or
 #       states as the `default` the harness resolved, is null.
 #     pr: {url,number}, both null when no pull request is recorded.
-#     collection: {ok,reason,source,at,epoch} - whether this agent's pipeline
-#       read succeeded, and when it was made. ok false means this agent's step
-#       list could not be established, so steps and active_steps are empty; run
-#       may still carry the id and status the overview attributed, when it was
-#       the per-run read that failed.
+#     collection: {ok,reason} - whether this agent's pipeline read succeeded.
+#       ok false means this agent's step list could not be established, so
+#       steps and active_steps are empty; run may still carry the id and status
+#       the overview attributed, when it was the per-run read that failed.
 #     run: {present,id,status,error,head} - the no-mistakes run attributed to
 #       this task's branch. error is the run's OWN recorded error and is empty
 #       unless the read succeeded; a failed read's own first line is in
@@ -561,6 +560,7 @@ agent_json() {  # <task-json>
       collect_ok=false
       collect_reason='could not allocate a buffer for the run read'
       run_id=''
+      run_status=''
     fi
   fi
   if [ -n "$run_id" ]; then
@@ -656,8 +656,6 @@ agent_json() {  # <task-json>
     --arg run_error "$run_error" \
     --arg run_head "$run_head" \
     --arg collect_reason "$collect_reason" \
-    --arg now_iso "$NOW_ISO" \
-    --argjson now_epoch "$NOW_EPOCH" \
     --argjson endpoint_alive "$endpoint_alive" \
     --argjson collect_ok "$collect_ok" \
     --argjson pr_num "$pr_num" \
@@ -679,8 +677,7 @@ agent_json() {  # <task-json>
         effort:(if $w_effort == "" then null else $w_effort end)
       },
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
-      collection:{ok:$collect_ok, reason:$collect_reason, source:"axi",
-                  at:$now_iso, epoch:$now_epoch},
+      collection:{ok:$collect_ok, reason:$collect_reason},
       run:{
         present:($run_id != ""),
         id:$run_id, status:$run_status,
@@ -715,8 +712,6 @@ compact_json() {  # <task-json>
     --arg w_model "$FM_ROW_MODEL" \
     --arg w_effort "$FM_ROW_EFFORT" \
     --arg pr_url "$FM_ROW_PR_URL" \
-    --arg now_iso "$NOW_ISO" \
-    --argjson now_epoch "$NOW_EPOCH" \
     --argjson endpoint_alive "$FM_ROW_ENDPOINT_ALIVE" \
     --argjson state "$state" \
     --argjson pr_num "$FM_ROW_PR_NUMBER" \
@@ -733,8 +728,7 @@ compact_json() {  # <task-json>
         effort:(if $w_effort == "" then null else $w_effort end)
       },
       pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
-      collection:{ok:true, reason:"this worker runs no pipeline", source:"",
-                  at:$now_iso, epoch:$now_epoch},
+      collection:{ok:true, reason:"this worker runs no pipeline"},
       run:{present:false, id:"", status:"", error:"", head:""},
       steps:[],
       active_steps:[],
