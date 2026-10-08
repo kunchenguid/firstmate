@@ -5,10 +5,10 @@
       "use": {
         "harness": "pi",
         "model": "gpt-6-luna",
-        "effort": "max",
+        "effort": "high",
         "provider": "codex"
       },
-      "why": "Errand verification runs on Luna with maximum thinking; Astra is kept for difficult investigation and planning."
+      "why": "Errand verification and browser chores run on Luna high; Astra is kept for difficult investigation and planning."
     },
     {
       "when": "Moderately difficult engineering work below the difficult-investigation tier: a bounded root-cause diagnosis with a known reproduction path, a non-trivial fix that needs judgement but no cross-cutting redesign, ordinary module or interface design, or a review whose scope and method are already fixed.",
@@ -34,17 +34,17 @@
       "when": "Implementation and routine execution with a sufficiently established design: bounded coding changes, tests, routine code-adjacent documentation such as README updates, inline comments and changelog entries, repetitive data collection, and straightforward fixes that do not require architectural decisions or difficult investigation.",
       "use": {
         "harness": "pi",
-        "model": "gpt-5.6-terra",
-        "effort": "low",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
         "provider": "codex"
       },
-      "why": "Routine implementation runs on Terra low; reclassify instead of silently widening this tier when the work turns out to need architecture or difficult investigation."
+      "why": "Routine coding runs on Sol 6.1 medium; reclassify instead of silently widening this tier when the work turns out to need architecture or difficult investigation."
     }
   ],
   "default": {
     "harness": "pi",
-    "model": "gpt-5.6-terra",
-    "effort": "low",
+    "model": "gpt-6.1-sol",
+    "effort": "medium",
     "provider": "codex"
   }
 }
