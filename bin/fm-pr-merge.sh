@@ -2,7 +2,8 @@
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
-# addressed through gh by the derived owner and repository; a GitLab merge
+# addressed through gh by the derived owner and repository at the pull request's
+# own host, github.com or any other GitHub host; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded. A Gerrit change
 # is refused outright: that adapter is read-only, and the refusal at the parse
