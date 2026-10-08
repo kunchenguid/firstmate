@@ -3,6 +3,7 @@
 
 Usage: fm-codex-orca-continuation.py context|ensure|status --home HOME
        fm-codex-orca-continuation.py run --home HOME --generation TOKEN
+       fm-codex-orca-continuation.py abandon-launch --home HOME --generation TOKEN
        [--code-root ROOT] [--seconds N]
 
 ensure requires the current Codex ancestor to own HOME/state/.lock and an
@@ -19,7 +20,13 @@ arm against the existing singleton. Root alone drains/ACKs.
 fm-codex-orca-stop.sh owns the Stop integration
 and always calls the unchanged generic guard in the original Bash ancestry.
 status is read-only and reports readiness, binding and last delivery outcome.
-context verifies the current primary/Orca binding without launching or writing.
+context verifies the current primary/Orca binding without launching or writing;
+it exits 3 when not applicable and 1 when an in-scope binding is unverified,
+which the renderer and Stop integration both treat as fail-closed Orca mode.
+abandon-launch resolves only the named pending launching generation as failed,
+after proving no owner lock, owner process or owner terminal (titled with that
+generation) exists in a complete terminal list that includes the primary; any
+live or unknown state refuses. It retains the list as an abandon receipt.
 
 State: .codex-orca-continuation.json binds owner PID/birth/generation, primary
 PID/birth, exact target, child arm and last episode. Two kernel flock files
@@ -31,14 +38,19 @@ never authorizes a fresh resend: only a returned --retry-request ID permits
 one bounded exact retry. Ambiguity survives owner restart without fresh input.
 An episode is recorded only once its preconditions hold and transport begins.
 A turn-started, handling-confirmed generation that later reopens as downtime
-without ACK is re-presented exactly once; ensure refuses after that.
+without ACK is re-presented exactly once, keeping the prior episode as
+replay_prior; ensure refuses after that. Delivery re-reads the recovery marker
+and never presents an acknowledged or superseded generation. A relaunch for
+the same primary keeps its episode even if the CLI path or code root changed.
 A run refused before it owns its lifetime marks its launching record failed.
 ensure waits, within its bound, only for a live matching owner that is
 re-arming; launched and reused owners pass the same delivery checks, and no
-replacement launches over an unresolved prior episode. Unavailable Orca or
+replacement launches over an unresolved prior episode; a later recovery
+generation proves that episode's generation was acknowledged. Unavailable Orca or
 supervision-status observation is retained, not treated as an identity change
 or as supervision no longer needed, until delivery needs it. An arm is
-a handling successor only after a predecessor arm or a verified live takeover.
+a handling successor only after a verified predecessor arm; take-over keeps the
+arm interface's own semantics.
 An exited/degraded owner leaves durable wakes and explicit failure evidence.
 Restart may take over only its recorded, still identity-matching arm through
 fm-watch-arm.sh; it never signals a foreign watcher or another session.
@@ -320,14 +332,18 @@ class Adapter:
                 old = self.read(self.record_path)
             return self.confirmed(old)
         if old.get("phase") == "launching":
-            raise Refused("bootstrap is already pending; inspect, do not create another terminal")
-        if old.get("binding") == binding:
+            raise Refused("bootstrap generation " + str(old.get("generation")) + " is already pending; inspect status, "
+                          "then use abandon-launch for that generation only once its owner is gone")
+        same_primary = all((old.get("binding") or {}).get(k) == binding[k]
+                           for k in ("session_pid", "session_identity", "target"))
+        if same_primary:
             self.confirmed(old)
         generation = uuid.uuid4().hex
         self.record = dict(old, binding=binding, generation=generation, owner_pid=None,
                            owner_identity=None, phase="launching", previous_arm=old.get("arm"))
-        if old.get("binding") != binding:
+        if not same_primary:
             self.record.pop("episode", None)
+        if old.get("binding") != binding:
             self.record["previous_arm"] = None
         self.publish()
         command = shlex.join(["env", "FM_HOME=" + str(self.home), "NO_COLOR=1", "CLICOLOR=0",
@@ -336,7 +352,8 @@ class Adapter:
                               "--home", str(self.home), "--code-root", str(self.code),
                               "--generation", generation] + (["--seconds", str(self.args.seconds)] if self.args.seconds else []))
         rc, raw, err = self.command([cli, "terminal", "create", "--worktree", "id:" + target["worktreeId"],
-                                    "--title", "Firstmate Codex continuation", "--command", command, "--json"], timeout=5)
+                                    "--title", "Firstmate Codex continuation " + generation, "--command", command,
+                                    "--json"], timeout=5)
         self.receipts.mkdir(mode=0o700, exist_ok=True)
         receipt = {"generation": generation, "exit": rc, "stdout": raw, "stderr": err}
         self.atomic(self.receipts / (generation + ".bootstrap.json"), receipt)
@@ -367,11 +384,43 @@ class Adapter:
         generation = episode.get("generation", "")
         token = self.recovery()
         if episode.get("phase") in ("sending", "delivery-unknown", "delivery-rejected"):
-            if token not in ("acked:handling:" + generation, "acked:downtime:" + generation):
+            if token.split(":")[-1] == generation and not token.startswith("acked:"):
                 raise Refused("delivery is unconfirmed; inspect exact receipt and drain durable work, no fresh resend")
         if self.reopened(episode, token) and not self.replayable(episode, token):
             raise Refused("presented generation reopened without ACK and is not re-presentable; drain and acknowledge it")
         return self.with_bootstrap(record)
+
+    def abandon_launch(self):
+        current = self.context()
+        if not current:
+            raise Refused("abandon-launch requires the verified lock-owning Orca/Codex primary")
+        with self.lock("bootstrap", wait=2), self.lock("owner"):
+            record = self.read(self.record_path)
+            generation = self.args.generation
+            if not generation or record.get("phase") != "launching" or record.get("generation") != generation:
+                raise Refused("abandon-launch requires the exact pending launching generation")
+            rc, out, _ = self.command(["ps", "-axo", "pid=,args="])
+            if rc or any(" run " in line and "--generation " + generation in line
+                         for line in out.splitlines() if line.split(None, 1)[0] != str(os.getpid())):
+                raise Refused("owner process for this generation may be live; no abandonment")
+            rc, raw, err = self.command([current["cli"], "terminal", "list", "--json"])
+            try:
+                terminals = json.loads(raw)["result"]["terminals"] if rc == 0 else None
+                handles = {t["handle"] for t in terminals}
+                titles = [t.get("title") or "" for t in terminals]
+            except (ValueError, KeyError, TypeError) as e:
+                raise Refused("owner terminal absence unproven: terminal list unreadable") from e
+            if current["target"]["handle"] not in handles:
+                raise Refused("owner terminal absence unproven: terminal list is incomplete")
+            owner_terminal = self.read(self.receipts / (generation + ".bootstrap.json")).get("owner_terminal")
+            if owner_terminal in handles or any(generation in title for title in titles):
+                raise Refused("owner terminal for this generation is live; close or inspect it, no abandonment")
+            self.receipts.mkdir(mode=0o700, exist_ok=True)
+            self.atomic(self.receipts / (generation + ".abandon.json"),
+                        {"generation": generation, "terminals": raw, "at": time.time()})
+            self.record = record
+            self.publish(phase="failed", error="launch abandoned after proven owner absence")
+        return self.with_bootstrap(self.record)
 
     def with_bootstrap(self, record):
         result = dict(record)
@@ -417,8 +466,6 @@ class Adapter:
         env = dict(self.env)
         env.pop("FM_WATCH_HANDLING_SUCCESSOR", None)
         env.pop("FM_WATCH_PREDECESSOR_ARM_PID", None)
-        if takeover:
-            env["FM_WATCH_HANDLING_SUCCESSOR"] = "1"
         if predecessor:
             env["FM_WATCH_PREDECESSOR_ARM_PID"] = str(predecessor)
         self.arm_file = tempfile.TemporaryFile(mode="w+t")
@@ -512,19 +559,22 @@ class Adapter:
         return self.reopened(episode, token) and episode.get("phase") == "turn-started" and not episode.get("replay_of")
 
     def deliver(self, generation):
-        episode = self.record.get("episode", {})
-        replay_of = None
-        if episode.get("generation") == generation:
+        token = self.recovery()
+        if not token.startswith(("pending:", "announced:")) or token.split(":")[-1] != generation:
+            return
+        prior = self.record.get("episode", {})
+        if prior.get("generation") == generation:
             # Sending/unknown persists across death: never invent a new request.
-            if not self.replayable(episode, self.recovery()):
+            if not self.replayable(prior, token):
                 return
-            replay_of = episode.get("request_id")
+        else:
+            prior = None
         payload = "watcher: Orca/Codex wake generation=" + generation + ". Drain queued wakes, handle them, and acknowledge the exact presented generation. The continuation owner protects the successor."
         episode = {"generation": generation, "payload": payload, "phase": "sending", "attempts": [],
                    "owner_generation": self.record["generation"], "owner_pid": self.record["owner_pid"],
                    "owner_identity": self.record["owner_identity"], "binding": self.record["binding"]}
-        if replay_of:
-            episode["replay_of"] = replay_of
+        if prior:
+            episode.update(replay_of=prior.get("request_id"), replay_prior=prior)
         b = self.record["binding"]
         retry = None
         for attempt in range(2):
@@ -578,7 +628,7 @@ class Adapter:
         self.receipts.mkdir(mode=0o700, exist_ok=True)
         self.atomic(self.receipts / (generation + ".json"), episode)
         retained = sorted((p for p in self.receipts.glob("*.json") if not p.is_symlink()
-                           and not p.name.endswith((".bootstrap.json", ".cleanup.json"))
+                           and not p.name.endswith((".bootstrap.json", ".cleanup.json", ".abandon.json"))
                            and re.fullmatch(r"[A-Za-z0-9._-]+\.json", p.name)), key=lambda p: p.stat().st_mtime)
         for p in retained[:-64]:
             p.unlink()
@@ -660,12 +710,10 @@ class Adapter:
                             raise Refused("arm closed without an actionable wake: " + raw[-1500:])
                         predecessor = self.arm.pid
                         self.retire_arm(self.arm, self.arm_file)
-                        token = self.recovery()
-                        generation = token.split(":")[-1]
-                        if not re.fullmatch(r"[A-Za-z0-9._-]+", generation):
-                            raise Refused("actionable close has no recovery generation")
                         self.protected_arm(predecessor=predecessor)
-                        self.deliver(generation)
+                        token = self.recovery()
+                        if token.startswith(("pending:", "announced:")):
+                            self.deliver(token.split(":")[-1])
                     time.sleep(0.2)
                 self.publish(phase="stopped", error="bounded test ended" if self.deadline else "supervision no longer needed")
             except Exception as e:
@@ -687,7 +735,7 @@ class Adapter:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("mode", choices=("context", "ensure", "run", "status"))
+    parser.add_argument("mode", choices=("context", "ensure", "run", "status", "abandon-launch"))
     parser.add_argument("--home", required=True)
     parser.add_argument("--code-root")
     parser.add_argument("--generation")
@@ -707,10 +755,12 @@ def main():
         elif args.mode == "context":
             result = adapter.context()
             if result is None:
-                return 1
+                return 3
         elif args.mode == "status":
             result = adapter.with_bootstrap(adapter.read(adapter.record_path))
             result["ready"] = adapter.ready(result) if result else False
+        elif args.mode == "abandon-launch":
+            result = adapter.abandon_launch()
         else:
             result = adapter.ensure()
     except (Refused, OSError, ValueError, KeyError) as e:

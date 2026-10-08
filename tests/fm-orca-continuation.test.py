@@ -24,6 +24,7 @@ mode=(h/'mode').read_text().strip() if (h/'mode').exists() else 'started'
 runtime='runtime-moved' if mode=='runtime-moved' else 'runtime-1'
 inc='incarnation-moved' if mode=='incarnation-moved' else 'incarnation-1'
 if a[:2]==['terminal','show']:
+ shown=a[a.index('--terminal')+1] if '--terminal' in a else 'term-primary'
  marker=h/'state/.watcher-down'; rec=h/'state/.codex-orca-continuation.json'
  if mode=='show-fails-announced' and marker.exists() and marker.read_text().startswith('announced:downtime:'):
   print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
@@ -35,11 +36,20 @@ if a[:2]==['terminal','show']:
   while (h/'hold-show').exists() and time.monotonic()<deadline: time.sleep(.05)
  if mode=='show-fails-launching' and rec.exists() and json.loads(rec.read_text()).get('phase')=='launching':
   print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
- print(json.dumps({'ok':True,'result':{'terminal':{'handle':'term-primary','incarnationId':inc,'worktreeId':'repo::'+str(h),'connected':True,'writable':True,'orphaned':False,'agentIdentity':'codex'}},'_meta':{'runtimeId':runtime}}))
+ print(json.dumps({'ok':True,'result':{'terminal':{'handle':shown,'incarnationId':inc,'worktreeId':'repo::'+str(h),'connected':True,'writable':True,'orphaned':False,'agentIdentity':'claude' if mode=='not-codex' else 'codex'}},'_meta':{'runtimeId':runtime}}))
+elif a[:2]==['terminal','list']:
+ if mode=='list-fails':
+  print('fixture terminal list unavailable',file=sys.stderr);sys.exit(1)
+ rows=[json.loads(x) for x in (h/'terminals').read_text().splitlines()] if (h/'terminals').exists() else []
+ primary=[] if mode=='list-missing-primary' else [{'handle':os.environ.get('ORCA_TERMINAL_HANDLE','term-primary'),'title':'Codex'}]
+ print(json.dumps({'ok':True,'result':{'terminals':primary+rows}}))
 elif a[:2]==['terminal','create']:
  with (h/'creates').open('a') as f: f.write('create\n')
  if mode=='create-ambiguous':
   print('fixture creation receipt unavailable',file=sys.stderr);sys.exit(1)
+ with (h/'terminals').open('a') as f: f.write(json.dumps({'handle':'term-owner','title':a[a.index('--title')+1]})+'\n')
+ if mode=='create-error-created':
+  print('fixture creation receipt unavailable after create',file=sys.stderr);sys.exit(1)
  with (h/'owner.log').open('a') as out:
   p=subprocess.Popen(['bash','-c',a[a.index('--command')+1]],stdin=subprocess.DEVNULL,stdout=out,stderr=out,start_new_session=True)
  (h/'app-pid').write_text(str(p.pid))
@@ -56,7 +66,7 @@ elif a[:2]==['terminal','send']:
   while not (h/'release-send').exists() and time.monotonic()<deadline: time.sleep(.05)
  if mode=='reject':
   print(json.dumps({'ok':False,'error':{'message':'fixture rejection'}}));sys.exit(1)
- if mode=='ambiguous' and not retry:
+ if mode=='ambiguous-always' or (mode=='ambiguous' and not retry):
   print(json.dumps({'ok':False,'warnings':['resume exact command with --retry-request request-stable']}));sys.exit(1)
  stages=['input_accepted'] if mode=='accepted' else ['input_accepted','turn_started']
  print(json.dumps({'ok':True,'result':{'send':{'handle':'wrong-handle' if mode=='receipt-handle' else 'term-primary','accepted':True,'prompt':{'requestId':'' if mode=='receipt-request' else ('request-stable' if retry else 'request-'+str(time.time_ns())),'processIncarnation':'wrong-incarnation' if mode=='receipt-incarnation' else inc,'provider':'old-host' if mode=='receipt-provider' else 'codex','stages':stages}}},'_meta':{'runtimeId':'wrong-runtime' if mode=='receipt-runtime' else runtime}}))
@@ -269,6 +279,7 @@ class ContinuationTests(unittest.TestCase):
         f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("handling_confirmed"),
                "first wake was not delivered and confirmed")
         generation = f.record()["episode"]["generation"]
+        original = f.record()["episode"]
         # The handling turn presents the rows and ends without its ACK.
         self.assertIn("continuity regression wake", f.drain().stdout)
         f.trigger()
@@ -279,6 +290,13 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(f.record()["episode"]["phase"], "turn-started")
         self.assertEqual(f.sends()[1]["payload"], f.sends()[0]["payload"])
         self.assertTrue(f.sends()[1]["healthy"])
+        prior = f.record()["episode"]["replay_prior"]
+        self.assertEqual(prior["request_id"], original["request_id"])
+        self.assertEqual(prior["stages"], original["stages"])
+        self.assertTrue(prior["handling_confirmed"])
+        self.assertEqual(prior["attempts"][0]["submitted_at"], original["attempts"][0]["submitted_at"])
+        receipt = json.loads((f.home / "state/.codex-orca-continuation" / (generation + ".json")).read_text())
+        self.assertEqual(receipt["replay_prior"]["request_id"], original["request_id"])
         f.drain()
         f.trigger()
         f.wait(lambda: f.call("ensure").returncode != 0, "exhausted re-presentation was not surfaced")
@@ -412,6 +430,179 @@ class ContinuationTests(unittest.TestCase):
                "owner did not survive a transient terminal-show failure")
         f.ack()
 
+    def test_ack_then_new_generation_keeps_live_owner_reusable(self):
+        f = self.fixture(mode="reject")
+        first = f.ensure()
+        f.note("external rejected before acknowledgement")
+        f.wait(lambda: f.record().get("episode", {}).get("phase") == "delivery-rejected", "rejection missing")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        f.ack()
+        (f.home / "show-unavailable").touch()
+        f.note("fresh append after acknowledgement")
+        time.sleep(2.6)
+        self.assertEqual(f.record()["episode"]["phase"], "delivery-rejected")
+        p = f.call("ensure")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["owner_pid"], first["owner_pid"])
+        self.assertEqual(len(f.sends()), 1)
+        (f.home / "show-unavailable").unlink()
+        (f.home / "mode").write_text("started")
+        f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "fresh generation after acknowledgement was not delivered")
+        f.ack()
+
+    def test_dead_owner_relaunches_after_ack_and_fresh_append(self):
+        f = self.fixture(mode="reject")
+        first = f.ensure(); f.trigger()
+        f.wait(lambda: f.record().get("episode", {}).get("phase") == "delivery-rejected", "rejection missing")
+        generation = f.record()["episode"]["generation"]
+        os.kill(first["owner_pid"], signal.SIGTERM)
+        f.wait(lambda: subprocess.run(["ps", "-p", str(first["owner_pid"])], capture_output=True).returncode != 0,
+               "terminated owner did not finish cleanup")
+        f.ack()
+        f.note("fresh append after acknowledging an ambiguous delivery")
+        (f.home / "mode").write_text("started")
+        f.relaunch(first["generation"])
+        f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "fresh generation was not delivered after relaunch")
+        self.assertNotEqual(f.record()["episode"]["generation"], generation)
+        self.assertTrue(f.sends()[-1]["healthy"])
+        f.ack()
+
+    def test_unverified_in_scope_binding_fails_closed_everywhere(self):
+        f = self.fixture(mode="not-codex")
+        rendered = subprocess.run(["bash", str(ROOT / "bin/fm-supervision-instructions.sh"), "--harness", "codex"],
+                                  env=f.env, capture_output=True, text=True, check=True)
+        self.assertIn("Mode: Codex with an Orca-owned continuation", rendered.stdout)
+        self.assertIn("Orca continuation: binding unverified (refusing unverified Orca terminal", rendered.stdout)
+        self.assertNotIn("fm-watch-checkpoint.sh", rendered.stdout)
+        self.assertEqual(f.call("context").returncode, 1)
+        ensure = f.call("ensure")
+        self.assertEqual(ensure.returncode, 1)
+        self.assertIn("refusing unverified Orca terminal", ensure.stderr)
+        env = dict(f.env); env.pop("ORCA_TERMINAL_HANDLE")
+        self.assertEqual(f.call("context", env=env).returncode, 3)
+        foreground = subprocess.run(["bash", str(ROOT / "bin/fm-supervision-instructions.sh"), "--harness", "codex"],
+                                    env=env, capture_output=True, text=True, check=True)
+        self.assertNotIn("Mode: Codex with an Orca-owned continuation", foreground.stdout)
+        self.assertIn("fm-watch-checkpoint.sh", foreground.stdout)
+        self.assertFalse((f.home / "creates").exists())
+
+    def test_abandon_launch_requires_proven_owner_absence(self):
+        f = self.fixture(mode="create-ambiguous")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        generation = f.record()["generation"]
+        self.assertEqual(f.record()["phase"], "launching")
+        pending = f.call("ensure")
+        self.assertIn(generation, pending.stderr)
+        self.assertIn("abandon-launch", pending.stderr)
+        wrong = f.call("abandon-launch", "--generation", "not-" + generation)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertIn("exact pending launching generation", wrong.stderr)
+        (f.home / "mode").write_text("list-fails")
+        unknown = f.call("abandon-launch", "--generation", generation)
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("terminal list unreadable", unknown.stderr)
+        self.assertEqual(f.record()["phase"], "launching")
+        (f.home / "mode").write_text("list-missing-primary")
+        incomplete = f.call("abandon-launch", "--generation", generation)
+        self.assertNotEqual(incomplete.returncode, 0)
+        self.assertIn("terminal list is incomplete", incomplete.stderr)
+        self.assertEqual(f.record()["phase"], "launching")
+        (f.home / "mode").write_text("create-ambiguous")
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "run", "--generation", generation])
+        try:
+            live = f.call("abandon-launch", "--generation", generation)
+            self.assertNotEqual(live.returncode, 0)
+            self.assertIn("may be live", live.stderr)
+            self.assertEqual(f.record()["phase"], "launching")
+        finally:
+            owner.kill()
+            owner.wait()
+        (f.home / "mode").write_text("create-ambiguous")
+        absent = f.call("abandon-launch", "--generation", generation)
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        self.assertEqual(f.record()["phase"], "failed")
+        self.assertTrue((f.home / "state/.codex-orca-continuation" / (generation + ".abandon.json")).exists())
+        self.assertTrue((f.home / "state/.codex-orca-continuation" / (generation + ".bootstrap.json")).exists())
+        (f.home / "mode").write_text("started")
+        f.ensure()
+        self.assertEqual((f.home / "creates").read_text().count("create"), 2)
+
+    def test_abandon_launch_after_primary_moves_terminal(self):
+        f = self.fixture(mode="create-ambiguous")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        generation = f.record()["generation"]
+        moved = dict(f.env, ORCA_TERMINAL_HANDLE="term-primary-moved")
+        self.assertIn("already pending", f.call("ensure", env=moved).stderr)
+        p = f.call("abandon-launch", "--generation", generation, env=moved)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(f.record()["phase"], "failed")
+
+    def test_abandon_launch_refuses_live_owner_terminal(self):
+        f = self.fixture(mode="create-error-created")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        generation = f.record()["generation"]
+        live = f.call("abandon-launch", "--generation", generation)
+        self.assertNotEqual(live.returncode, 0)
+        self.assertIn("is live", live.stderr)
+        self.assertEqual(f.record()["phase"], "launching")
+        (f.home / "terminals").write_text("")
+        closed = f.call("abandon-launch", "--generation", generation)
+        self.assertEqual(closed.returncode, 0, closed.stderr)
+        self.assertEqual(f.record()["phase"], "failed")
+
+    def test_exact_retry_is_bounded_to_one(self):
+        f = self.fixture(mode="ambiguous-always")
+        f.ensure(); f.trigger()
+        f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("phase") in ("delivery-rejected", "delivery-unknown"),
+               "bounded exact retry did not settle")
+        time.sleep(2.6)
+        rows = f.sends()
+        self.assertEqual(len(rows), 2)
+        self.assertIsNone(rows[0]["retry"])
+        self.assertEqual(rows[1]["retry"], "request-stable")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+
+    def test_ack_during_successor_startup_is_never_presented(self):
+        code = TMP / (self._testMethodName + "-code")
+        (code / "bin").mkdir(parents=True)
+        for source in (ROOT / "bin").iterdir():
+            if source.name != "fm-watch-arm.sh":
+                (code / "bin" / source.name).symlink_to(source, target_is_directory=source.is_dir())
+        arm = code / "bin/fm-watch-arm.sh"
+        arm.write_text('#!/usr/bin/env bash\nif [ -f "$FM_HOME/slow-arm" ] && [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then sleep 4; fi\n'
+                       + (ROOT / "bin/fm-watch-arm.sh").read_text())
+        arm.chmod(0o700)
+        f = self.fixture(code=code)
+        f.ensure()
+        (f.home / "slow-arm").touch(); f.trigger()
+        f.wait(lambda: f.record().get("phase") == "arming", "owner never entered its re-arm window")
+        f.ack()
+        f.wait(lambda: f.record().get("phase") == "ready", "successor did not become ready")
+        time.sleep(2.6)
+        self.assertEqual(f.sends(), [])
+
+    def test_same_primary_code_root_change_keeps_ambiguous_episode(self):
+        code = TMP / (self._testMethodName + "-code")
+        shutil.copytree(ROOT / "bin", code / "bin", symlinks=True)
+        shutil.copytree(ROOT / "docs/supervision-protocols", code / "docs/supervision-protocols")
+        f = self.fixture(mode="reject")
+        first = f.ensure(); f.trigger()
+        f.wait(lambda: f.record().get("episode", {}).get("phase") == "delivery-rejected", "rejection missing")
+        os.kill(first["owner_pid"], signal.SIGTERM)
+        f.wait(lambda: subprocess.run(["ps", "-p", str(first["owner_pid"])], capture_output=True).returncode != 0,
+               "terminated owner did not finish cleanup")
+        (f.home / "mode").write_text("started")
+        p = subprocess.run([sys.executable, str(code / "bin/fm-codex-orca-continuation.py"), "ensure", "--home", str(f.home),
+                            "--code-root", str(code)], env=f.env, capture_output=True, text=True, timeout=25)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("delivery is unconfirmed", p.stderr)
+        time.sleep(2.6)
+        self.assertEqual((f.home / "creates").read_text().count("create"), 1)
+        self.assertEqual(len(f.sends()), 1)
+        self.assertEqual(f.record()["episode"]["phase"], "delivery-rejected")
+
     def test_external_inbox_during_predecessor_close(self):
         f = self.fixture()
         check = f.home / "state/probe.check.sh"
@@ -538,11 +729,20 @@ class ContinuationTests(unittest.TestCase):
     def test_worker_foreign_lock_and_away_are_inapplicable(self):
         f = self.fixture()
         original = (f.home / "state/.lock").read_text()
+        def foreground():
+            self.assertEqual(f.call("context").returncode, 3)
+            out = subprocess.run(["bash", str(ROOT / "bin/fm-supervision-instructions.sh"), "--harness", "codex"],
+                                 env=f.env, capture_output=True, text=True, check=True).stdout
+            self.assertNotIn("Mode: Codex with an Orca-owned continuation", out)
+            self.assertNotIn("Orca continuation:", out)
+            self.assertIn("fm-watch-checkpoint.sh", out)
         (f.home / "state/.lock").write_text(str(os.getpid()))
         self.assertFalse(json.loads(f.call("ensure").stdout)["applicable"])
+        foreground()
         (f.home / "state/.lock").write_text(original)
         (f.home / "state/.afk").touch()
         self.assertFalse(json.loads(f.call("ensure").stdout)["applicable"])
+        foreground()
         self.assertFalse((f.home / "creates").exists())
 
     def test_stop_preserves_second_stop_and_other_backend(self):

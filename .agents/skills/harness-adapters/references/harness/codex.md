@@ -40,15 +40,16 @@ This is why `$no-mistakes` reaches a Codex worker instead of being consumed by t
 
 ## Primary integration
 
-The primary integration was verified on 2026-07-08 with codex-cli 0.142.1.
-The firstmate primary's `.codex/hooks.json` registers [`fm-codex-orca-stop.sh`](../../../../../bin/fm-codex-orca-stop.sh), which ensures a verified Orca owner when applicable and passes the original payload to the shared guard.
+The direct turn-end guard hook was verified on 2026-07-08 with codex-cli 0.142.1.
+The firstmate primary's `.codex/hooks.json` now registers [`fm-codex-orca-stop.sh`](../../../../../bin/fm-codex-orca-stop.sh), which ensures a verified Orca owner when applicable and passes the original payload to the shared guard; an installation without that script keeps the direct guard.
+That Orca ensure step has portable fixture coverage only; its attended native acceptance is recorded as NOT_PASS in [`runtime-backends.md`](../../../../../docs/verification/runtime-backends.md).
 Codex Stop hooks preserve exit status 2 and stderr to block, and expose `stop_hook_active` for the same one-block loop safety used by the guard's default mode.
 
 The Stop payload includes `cwd`, but the tracked hook does not use it to choose the guard executable.
 Codex runs the Stop command with process PWD set to the hook-loaded project root, while no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 The tracked hook anchors to `pwd -P`, verifies that root is Firstmate-shaped and hook-bearing, and then invokes the guard with the original payload.
 
-[`fm-supervision-instructions.sh`](../../../../../bin/fm-supervision-instructions.sh) selects the verified [Orca-owned continuation](../../../../../docs/supervision-protocols/codex-orca.md) or the existing [foreground checkpoint protocol](../../../../../docs/supervision-protocols/codex.md).
+[`fm-supervision-instructions.sh`](../../../../../bin/fm-supervision-instructions.sh) selects, for a verified Orca primary, the [Orca-owned continuation](../../../../../docs/supervision-protocols/codex-orca.md) or the existing [foreground checkpoint protocol](../../../../../docs/supervision-protocols/codex.md).
 Codex cannot reason while a foreground tool call is running, so the checkpoint is deliberately foreground and bounded to return control regularly for user messages and queued notifications.
 In a home with `config/supervision-host` and no `config/supervision-host-off` the checkpoint runs the supervision host instead of the watcher, with Claude's print mode as its headless engine, and holds for at least an hour while away; [`supervision-host.md`](../../../../../docs/supervision-host.md) owns the host and that bound.
 Codex's PreToolUse watcher-arm seatbelt blocks directly through its project hook.

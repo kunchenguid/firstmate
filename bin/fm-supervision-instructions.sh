@@ -121,12 +121,18 @@ esac
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 ORCA_CODEX=0
+ORCA_REFUSAL=
 if [ "$HARNESS" = codex ] && [ "$READ_ONLY" -eq 0 ] && [ "$AFK" -eq 0 ] \
   && [ -z "$HOST_SNIPPET" ] && [ -n "${ORCA_TERMINAL_HANDLE:-}" ] \
-  && command -v python3 >/dev/null 2>&1 \
-  && python3 "$SCRIPT_DIR/fm-codex-orca-continuation.py" context --home "$FM_HOME" --code-root "$FM_ROOT" >/dev/null 2>&1; then
-  ORCA_CODEX=1
-  SNIPPET="$DOC_DIR/codex-orca.md"
+  && command -v python3 >/dev/null 2>&1; then
+  orca_status=0
+  ORCA_REFUSAL=$(python3 "$SCRIPT_DIR/fm-codex-orca-continuation.py" context --home "$FM_HOME" --code-root "$FM_ROOT" 2>&1 >/dev/null) || orca_status=$?
+  case "$orca_status" in
+    0) ORCA_CODEX=1; ORCA_REFUSAL= ;;
+    1) ORCA_CODEX=1; ORCA_REFUSAL=${ORCA_REFUSAL#continuation: } ;;
+    *) ORCA_REFUSAL= ;;
+  esac
+  [ "$ORCA_CODEX" -eq 0 ] || SNIPPET="$DOC_DIR/codex-orca.md"
 fi
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
@@ -287,6 +293,9 @@ if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
+fi
+if [ -n "$ORCA_REFUSAL" ]; then
+  printf '%s%s%s\n' '- Orca continuation: binding unverified (' "$ORCA_REFUSAL" '); ensure and the Stop integration refuse until it verifies. Do not fall back to a foreground checkpoint.'
 fi
 if [ -n "$HOST_SNIPPET" ]; then
   printf '%s\n' '- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block).'

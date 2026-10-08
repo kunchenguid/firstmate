@@ -11,6 +11,8 @@ When this verified primary owns supervision and away mode is not active:
 5. Inspect `python3 __FM_ORCA_OWNER_SH__ status --home __FM_HOME_SH__` when ensure reports failure or unconfirmed delivery.
    Input acceptance alone does not prove a new turn; never create a fresh resend on silence or adopt a different terminal.
    A confirmed turn-started generation whose handling reopens without ACK is re-presented once; after that, ensure refuses until you drain and acknowledge it.
+   An unverifiable binding for this in-scope primary fails closed: resolve it rather than falling back to a foreground checkpoint.
+   A pending bootstrap that never produced an owner is cleared only by `python3 __FM_ORCA_OWNER_SH__ abandon-launch --home __FM_HOME_SH__ --generation <pending-generation>`, which refuses while that generation's owner lock, process or terminal is live or unknown.
 6. The Orca-scoped Stop integration ensures readiness before running the existing turn-end guard.
    Failure is explicit and the generic second-stop safeguard remains intact.
 
