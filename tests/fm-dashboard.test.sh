@@ -18,11 +18,13 @@ cat > "$FIXTURE" <<'EOF'
   {"state":"in_flight","structured":true,"id":"ship-task","title":"Ship Task","repo":"alpha","kind":"ship"},
   {"state":"queued","structured":true,"id":"queued-task","title":"Queued Task","repo":"beta","kind":"scout","blocked_by":"ship-task","captain_actionable":false},
   {"state":"queued","structured":true,"id":"held-task","title":"Pick API shape","repo":"beta","kind":"ship","captain_actionable":true,"hold_reason":"choose REST or gRPC"},
+  {"state":"in_flight","structured":true,"id":"paused-task","title":"Paused Task","repo":"alpha","kind":"ship","captain_actionable":true,"hold_reason":"needs budget call"},
   {"state":"done","structured":true,"id":"new-done","title":"New Done","repo":"alpha","kind":"ship","pr_url":"https://github.com/o/r/pull/7"},
   {"state":"done","structured":true,"id":"old-done","title":"Old Done","repo":"alpha","kind":"ship","pr_url":"https://github.com/o/r/pull/1"}]},
  "tasks":[
   {"id":"pr-task","kind":"ship","mode":"no-mistakes","project":"alpha","current_state":{"state":"done","detail":"checks green"},"pr":{"url":"https://github.com/o/r/pull/9"},"hints":{"pending_decision":false},"backlog":{"title":"PR Task","repo":"alpha"}},
   {"id":"ship-task","kind":"ship","mode":"direct-PR","project":"alpha","current_state":{"state":"working","detail":"run-step review"},"pr":{"url":null},"hints":{"pending_decision":false},"backlog":{"title":"Ship Task","repo":"alpha"}},
+  {"id":"paused-task","kind":"ship","mode":"direct-PR","project":"alpha","current_state":{"state":"paused","detail":"awaiting go"},"pr":{"url":null},"hints":{"pending_decision":false},"backlog":{"title":"Paused Task","repo":"alpha"}},
   {"id":"ask-task","kind":"scout","mode":"scout","project":"gamma","current_state":{"state":"blocked","detail":""},"pr":{"url":null},"hints":{"pending_decision":true},"backlog":null}]}
 EOF
 
@@ -37,7 +39,7 @@ test_wide_board_lays_columns_side_by_side() {
   local out
   out=$(COLUMNS=160 "$DASH" --once --snapshot "$FIXTURE")
   assert_contains "$out" "flagship" "header names the fleet"
-  assert_contains "$out" "1 under sail · 1 in the hold · 3 awaiting the captain · 2 made port" "header summarises counts"
+  assert_contains "$out" "1 under sail · 1 in the hold · 4 awaiting the captain · 2 made port" "header summarises counts"
   assert_contains "$out" "logged 2026-10-08T12:00:00Z" "header shows the refresh timestamp"
   assert_not_contains "$out" "q to quit" "--once frame has no quit hint"
   printf '%s\n' "$out" | grep -q 'QUEUED .* IN FLIGHT .* WAITING ON CAPTAIN .* DONE' \
@@ -60,6 +62,9 @@ test_narrow_board_stacks_and_places_cards() {
   assert_equals "WAITING ON CAPTAIN" "$(section_of "$out" "https://github.com/o/r/pull/9")" "ready PR shows its link"
   assert_equals "WAITING ON CAPTAIN" "$(section_of "$out" "ask-task")" "open decision waits on the captain"
   assert_equals "WAITING ON CAPTAIN" "$(section_of "$out" "held: choose REST or gRPC")" "captain hold shows its reason"
+  assert_equals "WAITING ON CAPTAIN" "$(section_of "$out" "held: needs budget call")" "held in-flight task waits on the captain with its reason"
+  assert_equals "WAITING ON CAPTAIN" "$(section_of "$out" "⚑ paused - awaiting go")" "held task keeps its live state"
+  assert_equals "1" "$(printf '%s\n' "$out" | grep -c 'paused-task ─')" "held task with a live worker shows once"
   assert_equals "DONE" "$(section_of "$out" "new-done")" "done card column"
   pass "narrow board stacks columns and files every card in its column"
 }

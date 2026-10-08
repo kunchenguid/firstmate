@@ -99,8 +99,11 @@ RENDER='
 
   (.tasks // []) as $tasks
   | (.backlog.records // []) as $records
+  | ($records | map(select(.state != "done" and .captain_actionable == true and (.id // "") != ""))) as $held
+  | ($held | map(.id)) as $held_ids
   | ($tasks | map(select(.hints.pending_decision == true
-      or (.current_state.state == "done" and .pr.url != null)))) as $task_waits
+      or (.current_state.state == "done" and .pr.url != null)
+      or (.id as $id | $held_ids | index($id))))) as $task_waits
   | ($task_waits | map(.id)) as $wait_ids
   | ($records | map(select(.state != "done" and .captain_actionable == true and ((.id // "") as $id | $wait_ids | index($id) | not)))) as $holds
   | [
@@ -110,7 +113,9 @@ RENDER='
       {name: "IN FLIGHT", motto: "under sail", style: "32",
        cards: [$tasks[] | select(.id as $id | $wait_ids | index($id) | not) | task_card(.; null)]},
       {name: "WAITING ON CAPTAIN", motto: "the captain'"'"'s call", style: "35",
-       cards: ([$task_waits[] | task_card(.; if .hints.pending_decision == true then "decision needed" else "PR ready for review" end)]
+       cards: ([$task_waits[] | task_card(.; if .hints.pending_decision == true then "decision needed"
+           elif .current_state.state == "done" and .pr.url != null then "PR ready for review"
+           else "held: " + (.id as $id | $held[] | select(.id == $id) | .hold_reason // "decision") end)]
          + [$holds[] | record_card(.; "held: " + (.hold_reason // "decision"))])},
       {name: "DONE", motto: "made port", style: "33",
        cards: ([$records[] | select(.state == "done")] | .[:$done_max] | map(record_card(.; null)))}
