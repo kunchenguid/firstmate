@@ -558,7 +558,10 @@ rest_stub_start() {  # <dir> -> prints "port pid"
 import json, os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-TURN = {"mode": os.environ.get("PTFAKE_STUB_MODE", "busy")}
+import subprocess
+
+TURN = {"mode": os.environ.get("PTFAKE_STUB_MODE", "busy"),
+        "reopen": os.environ.get("PTFAKE_STUB_REOPEN_AFTER", "")}
 
 class H(BaseHTTPRequestHandler):
     def _body(self):
@@ -581,6 +584,11 @@ class H(BaseHTTPRequestHandler):
             self._send(401, {"error": "unauthorized"})
             return
         if self.path == "/sync":
+            if TURN["mode"] == "idle" and TURN["reopen"] != "":
+                left = int(TURN["reopen"])
+                if left <= 0:
+                    TURN["mode"] = "busy"
+                TURN["reopen"] = str(left - 1)
             turn = None if TURN["mode"] == "idle" else {"generation": 1, "phase": "starting"}
             self._send(200, {"turn": turn})
             return
@@ -596,6 +604,9 @@ class H(BaseHTTPRequestHandler):
                 self._send(409, {"error": "no turn in flight"})
                 return
             TURN["mode"] = "idle"
+            hook = os.environ.get("PTFAKE_STUB_ON_CANCEL")
+            if hook:
+                subprocess.run(hook, shell=True, check=False)
             self._send(200, {"status": "cancel_requested", "generation": 1})
             return
         self._send(404, {"error": "no route"})
@@ -642,38 +653,43 @@ test_polytoken_rest_interrupt_settles_the_turn() {
   pass "fm-polytoken-lib: the REST interrupt reports cancelled, not-running, and refuses unauthorized"
 }
 
+interrupt_task_case() {  # <name> <event-written-during-cancel> [reopen-after] -> prints the final record
+  local name=$1 event=$2 reopen=${3:-} dir state hook port pid out
+  dir=$(make_wiring_case "interrupttask-$name")
+  state="$dir/state"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" task >/dev/null || fail "the busy contract must arm"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" task busy --current-gen \
+    --source polytoken-hook --event pre-model-turn >/dev/null || fail "the running turn's open must apply"
+  printf -v hook '%q apply %q task busy --current-gen --source polytoken-hook --event %q' \
+    "$ROOT/bin/fm-busy-event.sh" "$state" "$event"
+  PTFAKE_STUB_ON_CANCEL="$hook" PTFAKE_STUB_REOPEN_AFTER="$reopen" \
+    rest_stub_start "$dir" > "$dir/handle" || fail "the REST stub must start"
+  read -r port pid < "$dir/handle"
+  out=$(fm_polytoken_interrupt_task "$ROOT/bin" "$state" task "$port" stub-token 8) \
+    || fail "the interrupt must be acknowledged"
+  kill "$pid" 2>/dev/null || true
+  [ "$out" = cancelled ] || fail "a settled cancel must report cancelled, got '$out'"
+  fm_busy_record_read "$state" task
+}
+
 test_polytoken_interrupt_close_spares_a_reopened_turn() {
-  local rec state id settled out
-  rec=$(make_wiring_case interruptclose)
-  state="$rec/state"
-  id=task
-  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null \
-    || fail "the busy contract must arm"
-  # The cancelled turn's own pre_model_turn rewrites land before the settle,
-  # so the snapshot taken once it settles already carries them and the close
-  # still lands.
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
-    --source polytoken-hook --event pre-model-turn >/dev/null \
-    || fail "the mid-turn open must apply"
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
-    --source polytoken-hook --event pre-model-turn >/dev/null \
-    || fail "the mid-turn rewrite must apply"
-  settled=$(fm_busy_record_read "$state" "$id")
-  fm_polytoken_interrupt_close "$ROOT/bin" "$state" "$id" "$settled"
-  out=$(fm_busy_record_read "$state" "$id")
+  local out
+  # The cancelled turn's own pre_model_turn rewrite lands inside the cancel
+  # window; the close still lands.
+  out=$(interrupt_task_case midturn pre-model-turn)
   assert_contains "$out" "idle fm-interrupt interrupt" \
-    "a record rewritten mid-turn before the cancel must still close idle, got '$out'"
-  # A prompt queued behind the cancelled turn submits at the pause and reopens
-  # the record after the settle; the close must not overwrite that live turn.
-  settled=$(fm_busy_record_read "$state" "$id")
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
-    --source polytoken-hook --event pre-user-prompt >/dev/null \
-    || fail "the queued prompt's open must apply"
-  fm_polytoken_interrupt_close "$ROOT/bin" "$state" "$id" "$settled"
-  out=$(fm_busy_record_read "$state" "$id")
+    "a record rewritten mid-turn during the cancel must still close idle, got '$out'"
+  # A prompt queued behind the cancelled turn submits at the pause, inside the
+  # window before the settle is observed; that live turn must not be closed.
+  out=$(interrupt_task_case queued pre-user-prompt)
   assert_contains "$out" "busy polytoken-hook pre-user-prompt" \
-    "a busy write after the settle must be kept, got '$out'"
-  pass "fm-polytoken-lib: the interrupt close lands after mid-turn rewrites and spares a turn reopened after the settle"
+    "a turn reopened during the cancel window must stay busy, got '$out'"
+  # A turn running again by the time of the write skips the close even when
+  # the record carries no new pre_user_prompt.
+  out=$(interrupt_task_case resumed pre-model-turn 1)
+  assert_contains "$out" "busy polytoken-hook pre-model-turn" \
+    "a turn running at the write must not be closed, got '$out'"
+  pass "fm-polytoken-lib: the interrupt close lands after mid-turn rewrites and spares a reopened or running turn"
 }
 
 test_polytoken_turn_settled_reads_the_typed_sync_verdict() {

@@ -444,16 +444,29 @@ fm_polytoken_interrupt() {  # <port> <credential-token> [wait-secs]
   return 1
 }
 
-# fm_polytoken_interrupt_close: the busy close a cancelled turn never emits.
-# Written only when the busy record still reads exactly as it did once the
-# cancel settled: the cancelled turn's own mid-turn rewrites all land before
-# that snapshot, while a prompt queued behind it may submit at the pause and
-# reopen the record, and that live turn must not be overwritten idle.
-fm_polytoken_interrupt_close() {  # <bin-dir> <state-dir> <id> <record-once-settled>
-  local bin=$1 state=$2 id=$3 settled=$4 gen now
+# fm_polytoken_interrupt_task: the interrupt verb plus the busy close a
+# cancelled turn never emits. The record is snapshotted before the cancel; the
+# close is skipped when a pre_user_prompt has since reopened the record (a
+# prompt queued behind the cancelled turn submitted at the pause), while the
+# cancelled turn's own mid-turn pre_model_turn rewrites still close. GET /sync
+# is re-read right before the write, and a running turn skips the close.
+# Prints the fm_polytoken_interrupt outcome; returns nonzero as it does.
+fm_polytoken_interrupt_task() {  # <bin-dir> <state-dir> <id> <port> <credential-token> [wait-secs]
+  local bin=$1 state=$2 id=$3 port=$4 token=$5 wait=${6:-10}
+  local before now cancel gen before_seq now_event now_seq _s _src
+  before=$(fm_busy_record_read "$state" "$id" 2>/dev/null) || before=
+  cancel=$(fm_polytoken_interrupt "$port" "$token" "$wait") || return 1
+  printf '%s' "$cancel"
   gen=$(fm_busy_current_gen "$state" "$id" 2>/dev/null) || return 0
-  now=$(fm_busy_record_read "$state" "$id" 2>/dev/null) || true
-  [ "$now" = "$settled" ] || return 0
+  read -r _s _src _s before_seq <<<"$before"
+  now=$(fm_busy_record_read "$state" "$id" 2>/dev/null) || now=
+  read -r _s _src now_event now_seq <<<"$now"
+  case "$before_seq" in ''|*[!0-9]*) before_seq=0 ;; esac
+  case "$now_seq" in ''|*[!0-9]*) now_seq=0 ;; esac
+  if [ "$now_event" = pre-user-prompt ] && [ "$now_seq" -gt "$before_seq" ]; then
+    return 0
+  fi
+  fm_polytoken_turn_settled "$port" "$token" || return 0
   "$bin/fm-busy-event.sh" apply "$state" "$id" idle \
     --gen "$gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
 }
