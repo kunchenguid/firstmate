@@ -541,7 +541,7 @@ if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
 fi
 
 # Pre-merge conditions for a GitLab merge request, read from live MR and project
-# views. Sets FM_PR_MERGE_HEAD to the verified head on success and
+# API responses. Sets FM_PR_MERGE_HEAD to the verified head on success and
 # returns non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
@@ -555,7 +555,11 @@ gitlab_verify_mergeable() {
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
   # operator's configured default.
-  if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
+  # mr view normalizes missing/null draft to false and omitted head_pipeline
+  # to null. Read raw API JSON so unreadable safety fields remain refusals.
+  if ! project_id=$(jq -rn --arg path "$FM_PR_PATH" '$path | @uri') \
+    || ! json=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$project_id/merge_requests/$PR_NUMBER" \
+      --hostname "$FM_PR_HOST" --repo "$PROJECT_URL" 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
@@ -620,8 +624,7 @@ FIELDS
   fi
 
   if [ "$pipeline_present" = false ]; then
-    if ! project_id=$(jq -rn --arg path "$FM_PR_PATH" '$path | @uri') \
-      || ! project_json=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$project_id" \
+    if ! project_json=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$project_id" \
         --hostname "$FM_PR_HOST" --repo "$PROJECT_URL" 2>/dev/null) \
       || ! pipeline_required=$(printf '%s' "$project_json" | jq -er '
         if type == "object" and (.only_allow_merge_if_pipeline_succeeds | type) == "boolean"

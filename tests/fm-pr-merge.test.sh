@@ -346,7 +346,7 @@ SH
 
 # glab mock recording every invocation together with the GITLAB_HOST it was
 # given, so a test can prove the instance came from the URL. `mr view` answers
-# from the case's JSON payload; marker files in the case dir drive the failure
+# from the case's JSON payload with glab's typed-field defaults; marker files drive failure
 # modes, so no test has to leak environment into a shared runner.
 add_glab_mock() {
   local case_dir=$1
@@ -363,8 +363,18 @@ case "${1:-} ${2:-}" in
     if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ] && [ ! -e "$case_dir/glab-auto-queued" ]; then
       cat "$case_dir/mr-post.json"
     else
-      cat "$FM_TEST_GLAB_JSON"
+      # glab 1.114.0 loses null/missing draft and omitted pipeline fields in
+      # mr view. The raw API preserves them for the stricter merge guard.
+      jq 'if type == "object" then
+        .draft = (if .draft == null then false else .draft end) |
+        .head_pipeline = .head_pipeline
+        else . end' "$FM_TEST_GLAB_JSON"
     fi
+    exit 0
+    ;;
+  "api projects/"*"/merge_requests/"*)
+    [ ! -e "$case_dir/glab-view-fails" ] || exit 1
+    cat "$FM_TEST_GLAB_JSON"
     exit 0
     ;;
   "api projects/"*)
@@ -1975,7 +1985,7 @@ test_gitlab_url_resolves_and_merges() {
   expect_code 0 "$rc" "gitlab-merges: a well-formed merge request URL should merge, not error"
   assert_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" \
     "gitlab-merges: pr= was not recorded before merging"
-  assert_grep "GITLAB_HOST=$MR_HOST mr view 7 -R $MR_PROJECT_URL -F json" "$case_dir/glab.log" \
+  assert_grep "GITLAB_HOST=$MR_HOST api projects/group%2Fsubgroup%2Fproject/merge_requests/7 --hostname $MR_HOST --repo $MR_PROJECT_URL" "$case_dir/glab.log" \
     "gitlab-merges: the pre-merge state was not read from the project URL"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "gitlab-merges: a merge request reached the GitHub CLI"
   pass "fm-pr-merge merges a GitLab merge request through glab instead of refusing it"
@@ -2041,7 +2051,7 @@ test_gitlab_host_comes_from_the_url() {
   set -e
 
   expect_code 0 "$rc" "gitlab-host-from-url: a self-hosted merge request should merge"
-  assert_grep "GITLAB_HOST=$host mr view 31 -R $project_url -F json" "$case_dir/glab.log" \
+  assert_grep "GITLAB_HOST=$host api projects/deep%2Fnested%2Fgroup%2Fproject/merge_requests/31 --hostname $host --repo $project_url" "$case_dir/glab.log" \
     "gitlab-host-from-url: the read did not use the host from the URL"
   assert_grep "GITLAB_HOST=$host mr merge 31 -R $project_url" "$case_dir/glab.log" \
     "gitlab-host-from-url: the merge did not use the host from the URL"
