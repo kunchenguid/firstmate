@@ -25,6 +25,10 @@ prime_cursor() {  # <state> <status-file>
     || fail "bootstrap drain failed while priming the unread cursor"
 }
 
+backdate_status() {  # <status-file>; make a blocker provably older than its hold
+  python3 -c 'import os,sys,time; value=time.time()-2; os.utime(sys.argv[1], (value, value))' "$1"
+}
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both() {
   local dir state out status
   dir=$(make_case incident-buried-note)
@@ -336,10 +340,11 @@ test_archived_retirement_makes_only_presented_non_captain_task_decisions_moot() 
 
   id=archived-blocker
   register_task_fixture "$state" "$id"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" \
-    hold "$id" --kind blocker --reason 'obsolete external dependency' >/dev/null
   prime_cursor "$state" "$state/$id.status"
   printf 'blocked [key=obsolete]: external dependency unavailable\n' >> "$state/$id.status"
+  backdate_status "$state/$id.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" \
+    hold "$id" --kind blocker --reason 'obsolete external dependency' >/dev/null
   append_wake "$state" signal "$id.status" "signal: $id.status" || fail 'archived blocker signal failed'
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" archive "$id" >/dev/null
@@ -349,6 +354,29 @@ test_archived_retirement_makes_only_presented_non_captain_task_decisions_moot() 
     status_retire_presentation_task "$2" "$3" --require-archived
   ' _ "$ROOT" "$state" "$id" || fail 'explicit archive did not retire a presented obsolete task blocker'
   assert_absent "$state/$id.status" 'archived obsolete status history was retained'
+
+  id=archived-late-blocker
+  register_task_fixture "$state" "$id"
+  prime_cursor "$state" "$state/$id.status"
+  printf 'blocked [key=obsolete]: old task-local dependency\n' >> "$state/$id.status"
+  backdate_status "$state/$id.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" \
+    hold "$id" --kind blocker --reason 'obsolete external dependency' >/dev/null
+  append_wake "$state" signal "$id.status" "signal: $id.status" || fail 'old archived blocker signal failed'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" archive "$id" >/dev/null
+  printf 'blocked [key=late]: active decision appended after archive\n' >> "$state/$id.status"
+  append_wake "$state" signal "$id.status" "signal: $id.status" || fail 'late archived blocker signal failed'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$2" "$3" --require-archived
+  ' _ "$ROOT" "$state" "$id" 2>"$err"; then
+    fail 'archived retirement erased a decision appended after archive'
+  fi
+  assert_grep 'not a presented blocker proven to predate' "$err" 'post-archive decision refusal was not explicit'
+  assert_present "$state/$id.status" 'post-archive decision refusal removed status history'
 
   for id in active-decision archived-captain; do
     register_task_fixture "$state" "$id"
@@ -375,6 +403,9 @@ test_archived_retirement_makes_only_presented_non_captain_task_decisions_moot() 
   register_task_fixture "$state" "$id"
   prime_cursor "$state" "$state/$id.status"
   printf 'blocked [key=obsolete]: presented blocker\n' >> "$state/$id.status"
+  backdate_status "$state/$id.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" \
+    hold "$id" --kind blocker --reason 'obsolete external dependency' >/dev/null
   append_wake "$state" signal "$id.status" "signal: $id.status" || fail 'archived unread signal failed'
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null
   printf 'note: unread archival context\n' >> "$state/$id.status"
@@ -412,45 +443,34 @@ test_settled_retirement_refuses_orphan_decision_cursor() {
 }
 
 test_status_append_serializes_with_retirement() {
-  local dir state status reader trigger i
+  local dir state status trigger
   dir=$(make_case append-retire-race)
   state="$dir/state"
   status="$state/racing.status"
   register_task_fixture "$state" "racing"
   trigger="$dir/append-started"
   prime_cursor "$state" "$status"
-  reader="$dir/size-reader"
-  cat >"$reader" <<'SH'
-#!/usr/bin/env bash
-count_file=${FM_STATUS_RACE_COUNT:?}
-count=$(cat "$count_file" 2>/dev/null || printf 0)
-count=$((count + 1))
-printf '%s\n' "$count" >"$count_file"
-if [ "$count" -eq 2 ]; then
-  FM_STATE_OVERRIDE=${FM_STATUS_RACE_STATE:?} \
-    "${FM_STATUS_RACE_ROOT:?}/bin/fm-status-append.sh" racing \
-      'note: concurrent append survives retirement' \
-      > /dev/null 2>"${FM_STATUS_RACE_TRIGGER:?}.err" &
-  : >"${FM_STATUS_RACE_TRIGGER:?}"
-  sleep 0.2
-fi
-wc -c <"$1"
-SH
-  chmod +x "$reader"
-  : >"$dir/count"
-
-  FM_STATUS_SIZE_READER="$reader" FM_STATUS_RACE_COUNT="$dir/count" \
-    FM_STATUS_RACE_STATE="$state" FM_STATUS_RACE_ROOT="$ROOT" FM_STATUS_RACE_TRIGGER="$trigger" \
-    FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
+  FM_HOME="${state%/state}" FM_STATE_OVERRIDE="$state" bash -c '
+      set -u
       . "$1/bin/fm-wake-lib.sh"
       . "$1/bin/fm-classify-lib.sh"
-      status_retire_presentation_task "$2" racing --require-settled
-    ' _ "$ROOT" "$state" || fail 'retirement failed while a serialized writer waited'
-  i=0
-  while ! grep -F 'concurrent append survives retirement' "$status" >/dev/null 2>&1 && [ "$i" -lt 100 ]; do
-    sleep 0.02
-    i=$((i + 1))
-  done
+      lock="$2/.status-presentation-lock"
+      fm_lock_acquire_wait "$lock"
+      trap '\''fm_lock_release "$lock"'\'' EXIT
+      status_retire_presentation_task "$2" racing --check-settled --already-locked
+      (
+        : >"$3"
+        FM_STATE_OVERRIDE="$2" "$1/bin/fm-status-append.sh" racing \
+          "note: concurrent append survives retirement"
+      ) & writer=$!
+      while [ ! -e "$3" ]; do kill -0 "$writer" 2>/dev/null || exit 1; done
+      kill -0 "$writer" 2>/dev/null || exit 1
+      ! grep -F "concurrent append survives retirement" "$2/racing.status" >/dev/null 2>&1
+      status_retire_presentation_task "$2" racing --require-settled --already-locked
+      fm_lock_release "$lock"
+      trap - EXIT
+      wait "$writer"
+    ' _ "$ROOT" "$state" "$trigger" || fail 'retirement failed while a serialized writer waited across admission and mutation'
   assert_present "$trigger" 'race fixture did not reach the append window'
   assert_grep 'concurrent append survives retirement' "$status" \
     'serialized append was lost when retirement removed the prior status log'

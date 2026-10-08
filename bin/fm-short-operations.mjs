@@ -368,7 +368,7 @@ function settleCleanupLocked(home,request,started,index,step) {
 // that already closed its bound endpoint and retained its copy before a status
 // presentation refusal. The original attempt remains failed and immutable;
 // this path never classifies an effect-bearing attempt as no-effect.
-function archivedStatusCleanupContext(home,id,index) {
+function archivedStatusCleanupOperationContext(home,id,index) {
   primaryOwner(home);
   if(process.env.FM_SUPERVISION_ACTOR&&process.env.FM_SUPERVISION_ACTOR!=='main') fail('cleanup recovery belongs to MAIN');
   if(fs.realpathSync(home)!==home||!/^short-[a-f0-9]{64}$/.test(id??'')) fail('invalid cleanup recovery home/job');
@@ -390,6 +390,22 @@ function archivedStatusCleanupContext(home,id,index) {
   const marker=resource(home,step),expected={home,id,nonce:request.nonce,index,target:marker.target},receiptFile=path.join(dir,`operation-${index}.receipt.json`);
   if(exists(marker.file)&&!equal(read(marker.file),expected)) fail('cleanup recovery reservation identity changed');
   if(!exists(marker.file)&&!exists(receiptFile)) fail('cleanup recovery reservation is missing');
+  for(const name of fs.readdirSync('/proc').filter(value=>/^\d+$/.test(value))) {
+    const pid=Number(name);if(pid===process.pid)continue;
+    try {
+      if(fs.statSync(`/proc/${pid}`).uid!==process.getuid())continue;
+      const identity=processIdentity(pid);
+      let environment;
+      try {environment=fs.readFileSync(`/proc/${pid}/environ`,'utf8').split('\0');}
+      catch(error) {if(error.code==='EACCES')continue;throw error;}
+      if(environment.includes(`FM_SHORT_TASK=${id}`)&&sameLiveProcess(identity)) fail(`cleanup recovery has a live executor/child (${pid})`);
+    } catch(error) {if(!['ENOENT','ESRCH'].includes(error.code)&&!error.message.includes('zombie'))throw error;}
+  }
+  return {home,id,index,dir,request,started,step,binding,marker,expected,receiptFile};
+}
+
+function archivedStatusCleanupContext(home,id,index,operation=archivedStatusCleanupOperationContext(home,id,index)) {
+  const {dir,request,started,step,binding,marker,expected,receiptFile}=operation;
   if(!exists(path.join(home,'state',step.task+'.meta'))||!equal(metadata(home,step.task,true),binding)) fail('cleanup recovery task binding changed');
   const task=read(path.join(home,'data',step.task,'task.json'));
   if(task.id!==step.task||task.state!=='archived'||task.hold?.kind==='captain') fail('cleanup recovery requires the exact non-captain archived task');
@@ -409,17 +425,6 @@ function archivedStatusCleanupContext(home,id,index) {
       'cleanup-recovery',path.join(root,'bin/fm-backend.sh'),meta,step.task],{encoding:'utf8',env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state')},stdio:['ignore','pipe','pipe']}).trim();
   } catch(error) {fail(String(error.stderr??'').trim()||'cleanup recovery endpoint readback refused');}
   if(presence!=='dead') fail('cleanup recovery requires the already absent exact endpoint');
-  for(const name of fs.readdirSync('/proc').filter(value=>/^\d+$/.test(value))) {
-    const pid=Number(name);if(pid===process.pid)continue;
-    try {
-      if(fs.statSync(`/proc/${pid}`).uid!==process.getuid())continue;
-      const identity=processIdentity(pid);
-      let environment;
-      try {environment=fs.readFileSync(`/proc/${pid}/environ`,'utf8').split('\0');}
-      catch(error) {if(error.code==='EACCES')continue;throw error;}
-      if(environment.includes(`FM_SHORT_TASK=${id}`)&&sameLiveProcess(identity)) fail(`cleanup recovery has a live executor/child (${pid})`);
-    } catch(error) {if(!['ENOENT','ESRCH'].includes(error.code)&&!error.message.includes('zombie'))throw error;}
-  }
   return {home,id,index,dir,request,started,step,binding,marker,expected,receiptFile};
 }
 
@@ -446,25 +451,39 @@ export function verifyCleanupRecoveryOwner(task,generation) {
 }
 
 function settleArchivedStatusCleanupLocked(home,id,index) {
-  const v=archivedStatusCleanupContext(home,id,index),root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));cleanupRecoveryLocks(v);
+  const operation=archivedStatusCleanupOperationContext(home,id,index),root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));cleanupRecoveryLocks(operation);
+  const prior=operationReceipts(operation.dir).find(value=>value.index===index);
+  if(prior) {
+    if(prior.action!=='cleanup'||prior.state!=='completed'||prior.settlement!=='dead-owner-cleanup-readback') fail('cleanup recovery already has a different receipt');
+    return finishArchivedStatusCleanup(operation,prior);
+  }
+  // A retry may arrive after teardown archived its exact completion receipt but
+  // before this owner published the ShortTask receipt. Consume that readback
+  // before requiring active metadata or partial cleanup evidence.
+  const completed=settleCleanupLocked(home,operation.request,operation.started,index,operation.step);
+  if(completed) {
+    if(completed.state!=='completed'||completed.settlement!=='dead-owner-cleanup-readback') fail('cleanup recovery already has a different settlement');
+    return finishArchivedStatusCleanup(operation,completed);
+  }
+  const v=archivedStatusCleanupContext(home,id,index,operation);
   execFileSync('bash',[path.join(root,'bin/fm-teardown.sh'),v.step.task,'--expect-spawn-gen',v.binding.spawn_gen],{
     encoding:'utf8',cwd:root,env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state'),FM_DATA_OVERRIDE:path.join(home,'data'),FM_CONFIG_OVERRIDE:path.join(home,'config'),FM_SUPERVISION_ACTOR:'main',FM_SHORT_CLEANUP_RECOVERY:id,FM_SHORT_CLEANUP_STEP:String(index),FM_SHORT_CLEANUP_GENERATION:v.binding.spawn_gen},timeout:60000,stdio:['ignore','pipe','pipe']});
   const receipt=settleCleanupLocked(home,v.request,v.started,index,v.step);
   if(!receipt||receipt.state!=='completed'||receipt.settlement!=='dead-owner-cleanup-readback') fail('cleanup recovery has no exact completed owner readback');
+  return finishArchivedStatusCleanup(v,receipt);
+}
+
+function finishArchivedStatusCleanup(v,receipt) {
+  const result=read(path.join(v.dir,'result.json'));
+  if(result.id!==v.id||!['blocked','cancelled','timeout','interrupted','budget'].includes(result.state)||result.evidence!==v.dir||!Number.isSafeInteger(result.finishedAt)) fail('cleanup recovery requires the preserved unsuccessful result');
   if(exists(v.marker.file)) {if(!equal(read(v.marker.file),v.expected)) fail('cleanup recovery reservation changed after settlement');fs.unlinkSync(v.marker.file);}
-  return {id,index,state:'completed',action:'cleanup',settlement:receipt.settlement,evidence:receipt.evidence,result:read(path.join(v.dir,'result.json')).state};
+  return {id:v.id,index:v.index,state:'completed',action:'cleanup',settlement:receipt.settlement,evidence:receipt.evidence,result:result.state};
 }
 
 export function settleArchivedStatusCleanup(home,id,index) {
   primaryOwner(home);
   if(fs.realpathSync(home)!==home||!/^short-[a-f0-9]{64}$/.test(id??'')||!Number.isSafeInteger(index)||index<0) fail('invalid cleanup recovery home/job/step');
-  const dir=path.join(home,'state/short-agents',id),receipts=operationReceipts(dir),prior=receipts.find(value=>value.index===index);
-  if(prior) {
-    if(prior.action!=='cleanup'||prior.state!=='completed'||prior.settlement!=='dead-owner-cleanup-readback') fail('cleanup recovery already has a different receipt');
-    const result=read(path.join(dir,'result.json'));
-    if(result.id!==id||!['blocked','cancelled','timeout','interrupted','budget'].includes(result.state)||result.evidence!==dir||!Number.isSafeInteger(result.finishedAt)) fail('cleanup recovery requires the preserved unsuccessful result');
-    return {id,index,state:'completed',action:'cleanup',settlement:prior.settlement,evidence:prior.evidence,result:result.state};
-  }
+  const dir=path.join(home,'state/short-agents',id);
   const request=read(path.join(dir,'request.json')),step=request.input?.operations?.steps?.[index];
   if(step?.action!=='cleanup') fail('cleanup recovery index is not a cleanup step');
   const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),lock=resource(home,step).file+'.lock',script=fileURLToPath(import.meta.url);

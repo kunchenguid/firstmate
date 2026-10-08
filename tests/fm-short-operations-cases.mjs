@@ -539,9 +539,10 @@ try {
   const archivedMetaPath=path.join(replayState,archivedTask+'.meta');
   fs.writeFileSync(archivedMetaPath,`kind=scout\nmode=local-only\nspawn_gen=${archivedGeneration}\nwindow=fixture:${archivedEndpoint.root_pane.pane_id}\nendpoint_task_id=${archivedTask}\nworktree=${archivedCopy}\nproject=${replayProject}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=${archivedEndpoint.workspace.workspace_id}\nherdr_tab_id=${archivedEndpoint.tab.tab_id}\nherdr_pane_id=${archivedEndpoint.root_pane.pane_id}\n`);
   addCompactTask(archivedTask,'Archived cleanup status refusal',replayEnv);
-  canonicalTasks(replayEnv,'hold',archivedTask,'--kind','blocker','--reason','obsolete task-local dependency');
   execFileSync('bash',[path.join(root,'bin/fm-status-append.sh'),archivedTask,'working: preparing obsolete dependency'],{env:replayEnv});
   execFileSync('bash',[path.join(root,'bin/fm-status-append.sh'),archivedTask,'blocked: [key=obsolete] old dependency is no longer needed'],{env:replayEnv});
+  const archivedStatusPath=path.join(replayState,archivedTask+'.status'),oldStatusTime=new Date(Date.now()-2000);fs.utimesSync(archivedStatusPath,oldStatusTime,oldStatusTime);
+  canonicalTasks(replayEnv,'hold',archivedTask,'--kind','blocker','--reason','obsolete task-local dependency');
   execFileSync('bash',[path.join(root,'bin/fm-wake-drain.sh')],{env:replayEnv,stdio:'ignore'});
   execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-classify-lib.sh"; snapshot=$(status_presentation_snapshot "$STATE" "$2") && acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "\n$2\n") && status_commit_presentation_snapshot "$STATE" "$acknowledged"','fixture',root,archivedTask],{env:replayEnv});
   canonicalTasks(replayEnv,'archive',archivedTask,'--note','explicitly obsolete');
@@ -575,6 +576,14 @@ try {
   const archivedSettled=archivedCli();
   assert.equal(archivedSettled.state,'completed');assert.equal(archivedSettled.result,'blocked');assert.equal(archivedSettled.settlement,'dead-owner-cleanup-readback');
   assert.deepEqual(archivedCli(),archivedSettled,'repeated archived cleanup settlement did not converge');
+  const archivedReceiptPath=path.join(archivedDir,'operation-0.receipt.json'),archivedReceiptBytes=fs.readFileSync(archivedReceiptPath,'utf8');
+  fs.unlinkSync(archivedReceiptPath);fs.writeFileSync(archivedReservation.file,JSON.stringify({home:replayHome,id:archivedSubmission.id,nonce:archivedRequest.nonce,index:0,target:archivedReservation.target}));
+  assert.deepEqual(archivedCli(),archivedSettled,'retry after teardown completion did not reconstruct the exact owner receipt');
+  fs.writeFileSync(archivedReservation.file,JSON.stringify({home:replayHome,id:archivedSubmission.id,nonce:archivedRequest.nonce,index:0,target:archivedReservation.target}));
+  assert.deepEqual(archivedCli(),archivedSettled,'retry after receipt publication did not converge');
+  assert.ok(!fs.existsSync(archivedReservation.file),'idempotent archived recovery retained its exact reservation');
+  assert.notEqual(fs.readFileSync(archivedReceiptPath,'utf8'),'','retry did not republish the cleanup receipt');
+  assert.notEqual(archivedReceiptBytes,'','initial cleanup receipt was empty');
   fs.writeFileSync(path.join(archivedDir,'result.json'),JSON.stringify({...JSON.parse(archivedResultBytes),state:'completed'}));assert.throws(archivedCli,/preserved unsuccessful result/);fs.writeFileSync(path.join(archivedDir,'result.json'),archivedResultBytes);
   assert.equal(fs.readFileSync(path.join(archivedDir,'result.json'),'utf8'),archivedResultBytes,'recovery rewrote the original failed result');
   assert.ok(!fs.existsSync(archivedReservation.file),'completed archived recovery retained its exact reservation');

@@ -205,7 +205,8 @@ The reservation remains held until the existing cleanup owner supplies exact com
 One narrower historical crash window is supported by `FM_HOME=/absolute/home node bin/fm-short-agent.mjs settle-cleanup <short-id> <step-index>`: an explicitly archived, non-captain-held task whose dead exact cleanup executor already recorded its effect, closed the bound endpoint, retained the identity-matched copy, and then received the exact status-presentation refusal before completing bookkeeping.
 The command requires the original unsuccessful result, request, nonce, step, generation, effect identity, matching reservation, partial cleanup receipt, absent endpoint, unchanged copy and Git identities, and fully presented status history.
 It invokes the existing teardown owner only for the idempotent remaining bookkeeping, publishes completion from that owner's exact readback, preserves the original failed result and retained copy/report, and releases the matching reservation.
-Repeated settlement returns the same receipt; a live executor, present or changed endpoint, active task, captain hold, unread status, changed identity, or any other refusal leaves the reservation intact.
+Retries also consume an already archived exact cleanup completion if interruption happened before ShortTask receipt publication, and release a matching reservation left after receipt publication.
+Repeated settlement returns the same outcome; a live executor, present or changed endpoint, active task, later decision append, captain hold, unread status, changed identity, or any other refusal leaves the reservation intact.
 A changed candidate, identity, or grant likewise leaves the reservation intact and stops new writes.
 The CLI `reconcile` retries missing notifications and reconciles ordinary receipts without inventing recovery authority.
 [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs) owns the action schema and durable receipt mechanics.
