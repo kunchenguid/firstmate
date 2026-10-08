@@ -119,6 +119,33 @@ test_spawn_retires_a_kept_merge_watch() {
   pass "a fresh spawn retires a kept merge watch, names its PR, and never records pr= at birth"
 }
 
+# A spawn refused before its task record is published - here by a pending
+# backlog close - must leave the kept watch exactly as it was: nothing else
+# would notice the PR merging once no worker exists to re-arm the poll.
+test_spawn_refused_before_publish_keeps_the_watch() {
+  local out status
+  make_case refused
+  seed_kept_watch
+  fm_pr_url_parse "$URL" || fail "merge-watch fixture URL was unparseable"
+  fm_pr_poll_merge_mark_notified "$CASE_HOME/state" "$CASE_ID" "$FM_PR_PROVIDER" \
+    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+    || fail "could not seed the merge-notified marker"
+  : > "$CASE_HOME/state/$CASE_ID.backlog-close"
+
+  out=$(run_spawn --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn with a pending backlog close was not refused: $out"
+  assert_contains "$out" "pending authoritative backlog close" "spawn was refused for an unexpected reason"
+  assert_not_contains "$out" "merge watch retired" "a refused spawn reported retiring the watch"
+  assert_watch_untouched "the spawn refused before publish"
+  fm_pr_poll_artifacts_valid "$CASE_HOME/state" "$CASE_ID" "$POLL" \
+    || fail "the spawn refused before publish damaged the armed poll"
+  [ "$FM_PR_META_URL" = "$URL" ] || fail "the armed poll no longer binds the watched PR"
+  [ -e "$CASE_HOME/state/$CASE_ID.pr-poll-merge-notified" ] \
+    || fail "the spawn refused before publish removed the merge-notified marker"
+  pass "a spawn refused before its record is published leaves the kept watch, poll and markers intact"
+}
+
 test_spawn_refuses_a_watch_it_cannot_retire_cleanly() {
   local out status
   make_case unsafe
@@ -153,6 +180,7 @@ test_spawn_refuses_an_unreadable_watch_record() {
 }
 
 test_spawn_retires_a_kept_merge_watch
+test_spawn_refused_before_publish_keeps_the_watch
 test_spawn_refuses_a_watch_it_cannot_retire_cleanly
 test_spawn_refuses_an_unreadable_watch_record
 

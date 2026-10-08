@@ -1591,22 +1591,17 @@ fm_task_id_creation_valid "$ID" || {
   exit 2
 }
 # A kept merge watch (bin/fm-pr-lib.sh owns the record) outlives the task meta
-# it replaced. A fresh spawn on that id retires it before creating any endpoint
-# or task record, under the per-task control lock the watcher polls it under,
-# taken ahead of the meta lock in the order teardown takes them. The new record
-# never carries pr= at birth: the watched PR is printed instead, so the
-# re-dispatched worker continues on it and re-arms the poll through
-# bin/fm-pr-check.sh when it reports. A watch that cannot be retired cleanly
-# refuses the spawn, naming a remedy.
+# it replaced. A fresh spawn on that id retires it at the last point before its
+# own task record is published, under the per-task meta lock that publish
+# holds, so a spawn refused at any earlier step leaves the watch binding its
+# poll untouched. The new record never carries pr= at birth: the watched PR is
+# printed instead, so the re-dispatched worker continues on it and re-arms the
+# poll through bin/fm-pr-check.sh when it reports. A watch that cannot be
+# retired cleanly refuses the spawn, naming a remedy.
 spawn_retire_merge_watch() {
   local status=0
-  SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
-  fm_lock_acquire_wait "$SPAWN_CONTROL_LOCK" || exit 1
-  SPAWN_CONTROL_LOCK_HELD=1
   FM_PR_WATCH_URL=
   fm_pr_merge_watch_release "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || status=1
-  SPAWN_CONTROL_LOCK_HELD=0
-  fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   if [ "$status" -eq 0 ]; then
     echo "merge watch retired: $FM_PR_WATCH_URL - continue on that PR and re-arm it with bin/fm-pr-check.sh $ID $FM_PR_WATCH_URL"
   elif [ -z "$FM_PR_WATCH_URL" ]; then
@@ -3693,9 +3688,6 @@ else
   fi
 fi
 
-if [ "$RELAUNCH" -eq 0 ] && { [ -e "$STATE/$ID.merge-watch" ] || [ -L "$STATE/$ID.merge-watch" ]; }; then
-  spawn_retire_merge_watch
-fi
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
@@ -5172,6 +5164,9 @@ preserve_relaunch_meta() {
   exit 1
 }
 if [ "$RELAUNCH" -eq 0 ]; then
+  if [ -e "$STATE/$ID.merge-watch" ] || [ -L "$STATE/$ID.merge-watch" ]; then
+    spawn_retire_merge_watch
+  fi
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
