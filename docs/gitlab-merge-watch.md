@@ -205,7 +205,7 @@ $ echo $?
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
 The watch poll reads glab's field output without `jq`; [configuration.md](configuration.md#toolchain) owns the additional prerequisites for registered GitLab projects.
-Merge verification reads the MR with `glab mr view -F json` and, only when its head pipeline is absent, the project's pipeline requirement with `glab api`.
+The raw API reads used for merge verification are owned by [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh), including its `gitlab_verify_mergeable` function.
 The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
 
 `tests/fm-pr-merge.test.sh` covers current pipeline and project-requirement cases through the executable merge interface.
