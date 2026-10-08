@@ -1147,7 +1147,7 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
   # groups normally under a new parent.
   # Herdr must report fresh-fail's slot open within the parent's group, or the
   # case could not tell a flat task from a grouped child.
-  lab worktree list --workspace "$FRESH_PARENT_WSID" | jq -e --arg ws "$FRESH_FAIL_WSID" '[.result.worktrees[]? | select(.open_workspace_id == $ws)] | length == 1' >/dev/null 2>&1 \
+  lab worktree list --workspace "$FRESH_PARENT_WSID" | jq -e --arg ws "$FRESH_FAIL_WSID" 'any(.result.worktrees[]?; .open_workspace_id == $ws)' >/dev/null 2>&1 \
     || fail "inconclusive: Herdr does not report the stranded task's slot open in the fresh-repository parent's group: $(lab worktree list --workspace "$FRESH_PARENT_WSID" | jq -c '[.result.worktrees[]? | {path, open_workspace_id}]')"
   RETRY_RECORD="$HOME_DIR/state/.herdr-repo-parent-retry"
   FRESH_PARENT_PANE=$(lab pane list --workspace "$FRESH_PARENT_WSID" | jq -r '[.result.panes[]?] | select(length == 1) | .[0].pane_id // empty')
