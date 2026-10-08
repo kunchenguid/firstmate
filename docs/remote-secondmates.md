@@ -431,7 +431,7 @@ The primary then takes these steps:
 3. It transfers the inherited-material allowlist.
 4. It asks the remote host to launch on Herdr in `fm-remote`.
 
-Ordinary remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it; isolated validation uses the [session selection contract](#where-the-remote-agent-runs).
+Remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 
 ### Refused and unsupported launches
 

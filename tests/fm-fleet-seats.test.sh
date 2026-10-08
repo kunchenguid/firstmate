@@ -1681,20 +1681,23 @@ project=$home"
       assert_equals true "$(seats "$home" show sm | jq 'any(.incarnations[]; .route.placement == "local" and .route.spawn_gen == .generation and .route.target == "firstmate:fm-sm")')" "import discarded the exact local route"
       printf 'fm-sm\n' > "$base/tmux/endpoint/windows"
       printf 'claude\n' > "$base/tmux/endpoint/command"
-      PATH="$fakebin:$PATH" seats "$home" confirm sm --generation legacy-gen >/dev/null || fail "confirming a live legacy endpoint"
+      out=$(PATH="$fakebin:$PATH" seats "$home" confirm sm --generation legacy-gen 2>&1)
+      expect_code 3 "$?" "legacy confirmation without socket identity: $out"
       printf 'bash\n' > "$base/tmux/endpoint/command"
-      out=$(PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation legacy-gen 2>&1) || fail "legacy supervisor recovery: $out"
-      assert_equals reclaimed "$(lifecycle_of "$home" sm legacy-gen)" "a proven-dead legacy supervisor could not recover"
-      reserve "$home" other pool-model-a >/dev/null || fail "legacy recovery did not return its seat"
+      out=$(PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation legacy-gen 2>&1)
+      expect_code 3 "$?" "legacy recovery without socket identity: $out"
+      assert_equals reserved "$(lifecycle_of "$home" sm legacy-gen)" "unproven legacy ownership freed its seat"
+      out=$(reserve "$home" other pool-model-a 2>&1)
+      expect_code 4 "$?" "legacy recovery returned unverified capacity: $out"
     fi
   done
-  pass "validated legacy routes confirm and recover, while invalid endpoint evidence stays counted"
+  pass "legacy routes without socket ownership and invalid endpoints stay counted"
 }
 
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done

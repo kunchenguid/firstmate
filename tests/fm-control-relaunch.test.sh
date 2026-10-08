@@ -107,6 +107,7 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
+        *socket_path*) printf '%s/socket\n' "$D"; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
@@ -3019,9 +3020,11 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
-test_relaunch_off_opencode_removes_tracked_wiring
-test_exit_and_relaunch_remove_the_dialog_file
-test_exit_removes_the_dialog_file_before_releasing_the_lock
+if [ "$#" -eq 0 ]; then
+  test_relaunch_off_opencode_removes_tracked_wiring
+  test_exit_and_relaunch_remove_the_dialog_file
+  test_exit_removes_the_dialog_file_before_releasing_the_lock
+fi
 # --- fleet seats across the relaunch transaction ----------------------------
 # bin/fm-fleet-seats.sh owns the transitions; these drive them through the
 # real control plane and launch owner.
@@ -3074,6 +3077,7 @@ test_same_pool_relaunch_keeps_one_seat_through_the_handoff() {
   out=$(run_control "$dir" rl51 relaunch --model pool-model-a --note "same pool"); rc=$?
   expect_code 0 "$rc" "a same-pool relaunch at full capacity"$'\n'"$out"
   gen=$(meta_field "$dir" rl51 spawn_gen)
+  assert_equals "$dir/fake/socket" "$(case_seats "$dir" show rl51 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .route.socket_path')" "replacement did not record the fixture's owning socket"
   [ "$(journal_field "$dir" rl51 seat_generation)" = "$gen" ] \
     || fail "the journal did not record the replacement's seat generation"
   [ "$(journal_field "$dir" rl51 seat_previous_generation)" = g-old ] \
@@ -3332,8 +3336,8 @@ test_fractional_supervisor_startup_timeout_retains_the_launch() {
   pass "fractional supervisor startup timeouts retain the exact submitted generation and route"
 }
 
-test_legacy_predecessors_relaunch_through_the_control_plane() {
-  local dir kind old st name out rc gen
+test_legacy_predecessors_remain_counted_without_socket_identity() {
+  local dir kind old st name out rc
   for kind in ship scout secondmate; do
     dir=$(new_case "legacy-$kind" rl66)
     mkdir -p "$dir/home/config"
@@ -3350,14 +3354,20 @@ test_legacy_predecessors_relaunch_through_the_control_plane() {
     name=$(printf '%s\t%s' "$st" rl66 | cksum | tr -s ' ' '-' | cut -d- -f1-2)
     mkdir -p "$st/fleet-seats/legacy"
     printf 'state=%s\ntask=rl66\nmodel=pool-model-a\npid=99999999\npid_identity=\n' "$st" > "$st/fleet-seats/legacy/$name.seat"
+    cp "$st/rl66.meta" "$dir/before.meta"
     out=$(run_control "$dir" rl66 relaunch --harness claude --model pool-model-a --note "resume imported predecessor"); rc=$?
-    expect_code 0 "$rc" "legacy $kind predecessor handoff: $out"
-    gen=$(meta_field "$dir" rl66 spawn_gen)
-    assert_equals released "$(case_seats "$dir" show rl66 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "legacy predecessor was not confirmed and released"
-    assert_equals confirmed "$(case_seats "$dir" show rl66 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" "replacement of a legacy predecessor did not confirm"
+    expect_code 1 "$rc" "legacy $kind predecessor without socket identity: $out"
+    assert_contains "$out" "could not record rl66's exact predecessor startup" "legacy refusal did not identify unverified startup"
+    cmp -s "$st/rl66.meta" "$dir/before.meta" || fail "legacy refusal changed the endpoint record"
+    assert_equals claude "$(cat "$dir/fake/command")" "legacy refusal stopped the agent"
+    assert_no_grep '/exit' "$dir/fake/literal" "legacy refusal sent the exit command"
+    assert_equals reserved "$(case_seats "$dir" show rl66 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "legacy predecessor lost its counted seat"
+    assert_equals false "$(case_seats "$dir" show rl66 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .startup_confirmed')" "legacy predecessor acquired unsupported startup evidence"
+    out=$(probe_seat "$dir" pool-model-a); rc=$?
+    expect_code 4 "$rc" "legacy refusal returned capacity: $out"
     assert_absent "$st/fleet-seats/legacy/$name.seat" "legacy record was not imported once"
   done
-  pass "legacy worker and supervisor routes support ordinary confirmation and control relaunch"
+  pass "legacy workers and supervisors remain counted without recorded socket ownership"
 }
 
 test_existing_host_generations_recover_through_observing_operations() {
@@ -3486,6 +3496,16 @@ test_control_terminalizes_all_observing_predecessor_receipts() {
 }
 
 
+if [ "$#" -gt 0 ]; then
+  for focused_test in "$@"; do
+    case "$focused_test" in
+      test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
+      *) fail "unknown focused test: $focused_test" ;;
+    esac
+  done
+  exit 0
+fi
+
 test_pooled_relaunch_reserves_its_destination_before_stopping
 test_same_pool_relaunch_keeps_one_seat_through_the_handoff
 test_relaunch_rollback_releases_only_an_undelivered_candidate
@@ -3587,7 +3607,7 @@ test_observed_predecessors_and_opt_out_successors
 test_standalone_relaunch_completes_the_predecessor_handoff
 
 test_fractional_supervisor_startup_timeout_retains_the_launch
-test_legacy_predecessors_relaunch_through_the_control_plane
+test_legacy_predecessors_remain_counted_without_socket_identity
 
 test_existing_host_generations_recover_through_observing_operations
 test_control_terminalizes_all_observing_predecessor_receipts

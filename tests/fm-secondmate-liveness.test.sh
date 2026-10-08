@@ -860,8 +860,8 @@ make_pooled_world() {
 #!/usr/bin/env bash
 D="$w/endpoint"
 case "\$1" in
-  list-windows) cat "\$D/windows" ;;
-  display-message) case "\$*" in *pane_current_command*) cat "\$D/command" ;; *) printf 'fakepane\\n' ;; esac ;;
+  list-windows) [ ! -f "\$D/inventory-broken" ] || { echo 'lost server' >&2; exit 1; }; cat "\$D/windows" ;;
+  display-message) case "\$*" in *socket_path*) printf '%s\\n' "\$D/socket" ;; *pane_current_command*) cat "\$D/command" ;; *) printf 'fakepane\\n' ;; esac ;;
   kill-window) : > "\$D/windows" ;;
 esac
 exit 0
@@ -1004,19 +1004,29 @@ test_recovery_adopts_current_ledger_generation() {
   pass "recovery adopts the current ledger generation when the parent names a terminal predecessor"
 }
 
-test_recovery_retains_confirmed_missing_generation() {
-  local out
-  make_pooled_world pooled-confirmed-missing
-  pooled_meta g1
-  pooled_dispatch g1
-  printf 'claude\n' > "$W/endpoint/command"
-  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
-  : > "$W/endpoint/windows"
-  out=$(pooled_recover)
-  assert_contains "$out" '1|skipped|' "unproven confirmed absence did not skip recovery"
-  assert_equals confirmed "$(pooled_lifecycle g1)" "unproven absence freed capacity"
-  assert_absent "$W/spawn.log" "unproven absence launched a replacement"
-  pass "liveness recovery consumes the absence-proof refusal before any replacement"
+test_recovery_distinguishes_missing_and_unreadable_endpoints() {
+  local out evidence
+  for evidence in missing unreadable; do
+    make_pooled_world "pooled-confirmed-$evidence"
+    pooled_meta g1
+    pooled_dispatch g1
+    printf 'claude\n' > "$W/endpoint/command"
+    pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
+    if [ "$evidence" = missing ]; then
+      : > "$W/endpoint/windows"
+      out=$(pooled_recover)
+      assert_equals '0|relaunchable|' "$out" "proven owning-socket absence did not permit recovery"
+      assert_equals reclaimed "$(pooled_lifecycle g1)" "proven destruction retained capacity"
+      assert_present "$W/spawn.log" "proven destruction did not launch a replacement"
+    else
+      : > "$W/endpoint/inventory-broken"
+      out=$(pooled_recover)
+      assert_contains "$out" 'probe|skipped|endpoint probe unreadable' "unreadable endpoint did not stop recovery: $out"
+      assert_equals confirmed "$(pooled_lifecycle g1)" "unreadable endpoint freed capacity"
+      assert_absent "$W/spawn.log" "unreadable endpoint launched a replacement"
+    fi
+  done
+  pass "liveness recovery distinguishes proven destruction from unreadable endpoint evidence"
 }
 
 test_recovery_does_not_kill_a_late_confirmed_start() {
@@ -1028,9 +1038,10 @@ test_recovery_does_not_kill_a_late_confirmed_start() {
 #!/usr/bin/env bash
 D="$W/endpoint"
 case "\$1" in
-  list-windows) cat "\$D/windows" ;;
+  list-windows) [ ! -f "\$D/inventory-broken" ] || { echo 'lost server' >&2; exit 1; }; cat "\$D/windows" ;;
   display-message)
     case "\$*" in
+      *socket_path*) printf '%s\n' "\$D/socket" ;;
       *pane_current_command*)
         n=0
         [ ! -f "\$D/reads" ] || n=\$(cat "\$D/reads")
@@ -1053,6 +1064,16 @@ SH
   assert_absent "$W/spawn.log" "recovery launched after confirmation rather than reclamation"
   pass "a late startup confirmation never authorizes destructive recovery"
 }
+
+if [ "$#" -gt 0 ]; then
+  for focused_test in "$@"; do
+    case "$focused_test" in
+      test_recovery_leaves_an_unconfirmed_launch_counted|test_recovery_reclaims_exactly_the_probed_dead_generation|test_recovery_abandons_a_verdict_whose_generation_changed|test_recovery_adopts_current_ledger_generation|test_recovery_distinguishes_missing_and_unreadable_endpoints|test_recovery_does_not_kill_a_late_confirmed_start) "$focused_test" ;;
+      *) fail "unknown focused test: $focused_test" ;;
+    esac
+  done
+  exit 0
+fi
 
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
@@ -1084,6 +1105,6 @@ test_recovery_abandons_a_verdict_whose_generation_changed
 echo "# all fm-secondmate-liveness tests passed"
 
 test_recovery_adopts_current_ledger_generation
-test_recovery_retains_confirmed_missing_generation
+test_recovery_distinguishes_missing_and_unreadable_endpoints
 
 test_recovery_does_not_kill_a_late_confirmed_start
