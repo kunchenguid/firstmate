@@ -34,7 +34,10 @@ A turn-started, handling-confirmed generation that later reopens as downtime
 without ACK is re-presented exactly once; ensure refuses after that.
 A run refused before it owns its lifetime marks its launching record failed.
 ensure waits, within its bound, only for a live matching owner that is
-re-arming; launched and reused owners pass the same delivery checks. An arm is
+re-arming; launched and reused owners pass the same delivery checks, and no
+replacement launches over an unresolved prior episode. Unavailable Orca or
+supervision-status observation is retained, not treated as an identity change
+or as supervision no longer needed, until delivery needs it. An arm is
 a handling successor only after a predecessor arm or a verified live takeover.
 An exited/degraded owner leaves durable wakes and explicit failure evidence.
 Restart may take over only its recorded, still identity-matching arm through
@@ -59,6 +62,10 @@ import uuid
 
 
 class Refused(RuntimeError):
+    pass
+
+
+class Unavailable(Refused):
     pass
 
 
@@ -154,8 +161,10 @@ class Adapter:
         return out.rstrip("\n").split("\t", 1) if rc == 0 else None
 
     def needed(self):
-        rc, _, _ = self.shell('. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervision-lib.sh"; fm_supervision_status "$STATE"; '
-                              '[ "$FM_SUP_NEEDED" = true ]', timeout=8)
+        rc, _, err = self.shell('. "$1/bin/fm-wake-lib.sh" || exit 2; . "$1/bin/fm-supervision-lib.sh" || exit 2; '
+                                'fm_supervision_status "$STATE" || exit 2; [ "$FM_SUP_NEEDED" = true ]', timeout=8)
+        if rc not in (0, 1):
+            raise Unavailable("supervision status unavailable: " + err.strip())
         return rc == 0
 
     def recovery(self):
@@ -237,7 +246,7 @@ class Adapter:
     def terminal(self, cli, handle):
         rc, raw, err = self.command([cli, "terminal", "show", "--terminal", handle, "--json"])
         if rc:
-            raise Refused("exact terminal identity unavailable: " + err.strip())
+            raise Unavailable("exact terminal identity unavailable: " + err.strip())
         try:
             value = json.loads(raw)
             t = value["result"]["terminal"]
@@ -312,6 +321,8 @@ class Adapter:
             return self.confirmed(old)
         if old.get("phase") == "launching":
             raise Refused("bootstrap is already pending; inspect, do not create another terminal")
+        if old.get("binding") == binding:
+            self.confirmed(old)
         generation = uuid.uuid4().hex
         self.record = dict(old, binding=binding, generation=generation, owner_pid=None,
                            owner_identity=None, phase="launching", previous_arm=old.get("arm"))
@@ -632,10 +643,14 @@ class Adapter:
                         break
                     self.still_owned()
                     if time.monotonic() - last_identity_check >= 2:
-                        self.target_valid()
-                        if not self.needed():
-                            break
-                        self.observe_external_queue()
+                        try:
+                            self.target_valid()
+                            if not self.needed():
+                                break
+                        except Unavailable as e:
+                            print("continuation: observation unavailable; watcher retained: " + str(e), flush=True)
+                        else:
+                            self.observe_external_queue()
                         last_identity_check = time.monotonic()
                     if self.arm.poll() is not None:
                         rc = self.arm.wait()

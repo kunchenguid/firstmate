@@ -28,6 +28,8 @@ if a[:2]==['terminal','show']:
  if mode=='show-fails-announced' and marker.exists() and marker.read_text().startswith('announced:downtime:'):
   print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
  owner=' run ' in subprocess.run(['ps','-p',str(os.getppid()),'-o','args='],capture_output=True,text=True).stdout
+ if owner and (h/'show-unavailable').exists():
+  print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
  if owner and (h/'hold-show').exists() and marker.exists() and marker.read_text().startswith('announced:downtime:'):
   deadline=time.monotonic()+4
   while (h/'hold-show').exists() and time.monotonic()<deadline: time.sleep(.05)
@@ -207,6 +209,11 @@ class ContinuationTests(unittest.TestCase):
             f.wait(lambda: len(f.sends()) == n + 1 and f.record().get("episode", {}).get("phase") == "turn-started", "wake was not delivered")
             row = f.sends()[-1]
             self.assertTrue(row["healthy"], "notification preceded verified successor")
+            argv = row["argv"]
+            self.assertEqual(argv[argv.index("--terminal") + 1], "term-primary")
+            self.assertIn("--enter", argv)
+            self.assertEqual(argv[argv.index("--wait-submit") + 1], "10")
+            self.assertNotIn("--retry-request", argv)
             self.assertNotEqual(row["watcher"], last_pid)
             last_pid = row["watcher"]
             p1 = subprocess.run(["bash", str(ROOT / "bin/fm-wake-drain.sh")], env=f.env, capture_output=True, text=True, check=True)
@@ -223,6 +230,7 @@ class ContinuationTests(unittest.TestCase):
         f = self.fixture(mode="accepted")
         f.ensure(); f.trigger()
         f.wait(lambda: f.record().get("episode", {}).get("phase") == "input-accepted-unproven", "accepted receipt missing")
+        time.sleep(2.6)
         self.assertEqual(len(f.sends()), 1)
         self.assertEqual(f.record()["episode"]["stages"], ["input_accepted"])
         self.assertTrue(f.call("status").returncode == 0)
@@ -358,7 +366,8 @@ class ContinuationTests(unittest.TestCase):
         self.assertNotEqual(f.call("ensure").returncode, 0)
         os.kill(first["owner_pid"], signal.SIGKILL)
         f.wait(lambda: not json.loads(f.call("status").stdout)["ready"], "dead external owner remained ready")
-        self.assertNotEqual(f.relaunch(first["generation"]).returncode, 0)
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        self.assertEqual((f.home / "creates").read_text().count("create"), 1)
         time.sleep(2.6)
         self.assertEqual(len(f.sends()), 1)
         self.assertEqual(f.record()["episode"]["generation"], generation)
@@ -371,6 +380,36 @@ class ContinuationTests(unittest.TestCase):
                "new external episode after ACK was not delivered")
         self.assertNotEqual(f.record()["episode"]["generation"], generation)
         self.assertTrue(f.sends()[-1]["healthy"])
+        f.ack()
+
+    def test_terminated_owner_never_relaunches_over_ambiguous_delivery(self):
+        f = self.fixture(mode="reject")
+        first = f.ensure(); f.trigger()
+        f.wait(lambda: f.record().get("episode", {}).get("phase") == "delivery-rejected", "rejection missing")
+        os.kill(first["owner_pid"], signal.SIGTERM)
+        f.wait(lambda: subprocess.run(["ps", "-p", str(first["owner_pid"])], capture_output=True).returncode != 0,
+               "terminated owner did not finish cleanup")
+        (f.home / "mode").write_text("started")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        time.sleep(2.6)
+        self.assertEqual((f.home / "creates").read_text().count("create"), 1)
+        self.assertEqual(len(f.sends()), 1)
+        f.ack()
+        self.assertEqual(f.relaunch(first["generation"]).returncode, 0)
+        time.sleep(2.6)
+        self.assertEqual(len(f.sends()), 1)
+
+    def test_transient_observation_failure_retains_owner(self):
+        f = self.fixture()
+        f.ensure()
+        (f.home / "show-unavailable").touch()
+        time.sleep(4.5)
+        self.assertEqual(f.record()["phase"], "ready")
+        self.assertTrue(json.loads(f.call("status").stdout)["ready"])
+        (f.home / "show-unavailable").unlink()
+        f.trigger()
+        f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "owner did not survive a transient terminal-show failure")
         f.ack()
 
     def test_external_inbox_during_predecessor_close(self):
@@ -473,6 +512,7 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(rows[0]["payload"], rows[1]["payload"])
         self.assertIsNone(rows[0]["retry"])
         self.assertEqual(rows[1]["retry"], "request-stable")
+        self.assertEqual(rows[1]["argv"][rows[1]["argv"].index("--retry-request") + 1], "request-stable")
         self.assertTrue(all(x["healthy"] for x in rows))
 
     def test_rejection_and_timeout_preserve_queue(self):
@@ -512,6 +552,7 @@ class ContinuationTests(unittest.TestCase):
         first = subprocess.run(["bash", str(ROOT / "bin/fm-codex-orca-stop.sh")], env=f.env, capture_output=True, text=True, input='{"stop_hook_active":false}')
         second = subprocess.run(["bash", str(ROOT / "bin/fm-codex-orca-stop.sh")], env=f.env, capture_output=True, text=True, input='{"stop_hook_active":true}')
         self.assertEqual(first.returncode, 2)
+        self.assertIn("Orca owner/delivery is unconfirmed", first.stderr)
         self.assertEqual(second.returncode, 0)
         both = subprocess.run(["bash", str(ROOT / "bin/fm-codex-orca-stop.sh")], env=f.env,
                               capture_output=True, text=True, input='{"stopHookActive":true,"stop_hook_active":false}')
@@ -524,9 +565,8 @@ class ContinuationTests(unittest.TestCase):
         old = f.ensure()
         os.kill(old["owner_pid"], signal.SIGKILL)
         f.wait(lambda: f.call("status").returncode == 0 and not json.loads(f.call("status").stdout)["ready"], "owner stayed live")
-        new = f.ensure()
-        self.assertNotEqual(new["owner_pid"], old["owner_pid"])
-        self.assertNotEqual(new["generation"], old["generation"])
+        f.relaunch(old["generation"])
+        self.assertNotEqual(f.record()["owner_pid"], old["owner_pid"])
         f.trigger()
         f.wait(lambda: len(f.sends()) >= 1, "restart did not deliver")
         self.assertTrue(all(x["healthy"] for x in f.sends()))
@@ -567,15 +607,16 @@ class ContinuationTests(unittest.TestCase):
         transport = f.record()["transport"]
         os.kill(old["owner_pid"], signal.SIGKILL)
         f.wait(lambda: not json.loads(f.call("status").stdout)["ready"], "owner death not detected")
-        self.assertNotEqual(f.relaunch(old["generation"]).returncode, 0)
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        self.assertEqual((f.home / "creates").read_text().count("create"), 1)
         time.sleep(1)
         self.assertEqual(len(f.sends()), 1)
         self.assertEqual(f.record()["episode"]["phase"], "sending")
+        f.ack()
+        self.assertEqual(f.relaunch(old["generation"]).returncode, 0)
         self.assertIsNone(f.record()["transport"])
         self.assertNotEqual(subprocess.run(["ps", "-p", str(transport["pid"])], capture_output=True).returncode, 0)
-        self.assertNotEqual(f.call("ensure").returncode, 0)
-        f.ack()
-        self.assertEqual(f.call("ensure").returncode, 0)
+        self.assertEqual(len(f.sends()), 1)
 
     def test_wrong_receipts_never_claim_turn_started(self):
         for mode in ("receipt-handle", "receipt-runtime", "receipt-incarnation", "receipt-provider", "receipt-request"):
@@ -617,6 +658,12 @@ class ContinuationTests(unittest.TestCase):
                                   env=f.env, capture_output=True, text=True, check=True)
         self.assertIn("Mode: Codex with an Orca-owned continuation", rendered.stdout)
         self.assertIn(shlex.quote(str(f.home)), rendered.stdout)
+        self.assertIn("then ensure that same owner. Do not start a competing checkpoint.", rendered.stdout)
+        self.assertNotIn("fm-watch-checkpoint.sh", rendered.stdout)
+        repair = subprocess.run(["bash", str(ROOT / "bin/fm-supervision-instructions.sh"), "--harness", "codex", "--repair-line"],
+                                env=f.env, capture_output=True, text=True, check=True)
+        self.assertIn(" ensure --home '" + str(f.home) + "'", repair.stdout)
+        self.assertNotIn("fm-watch-checkpoint.sh", repair.stdout)
         other = subprocess.run(["bash", str(ROOT / "bin/fm-supervision-instructions.sh"), "--harness", "pi"],
                                env=f.env, capture_output=True, text=True, check=True)
         self.assertNotIn("Orca-owned continuation", other.stdout)

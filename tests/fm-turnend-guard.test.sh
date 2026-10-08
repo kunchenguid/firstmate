@@ -960,6 +960,12 @@ EOF
   expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
   assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
   assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
+  cp "$ROOT/bin/fm-codex-orca-stop.sh" "$dir/bin/fm-codex-orca-stop.sh"
+  chmod +x "$dir/bin/fm-codex-orca-stop.sh"
+  out=$(printf '%s' "$payload" | (cd "$dir" && env -u ORCA_TERMINAL_HANDLE bash -c "$command") 2>&1); status=$?
+  expect_code 0 "$status" "codex hook Orca Stop glue must pass the guard result through outside Orca"
+  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook Orca Stop glue must call the hook-root guard"
+  assert_contains "$out" "$payload" "codex hook Orca Stop glue must pass the original payload to the guard"
   pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
 }
 
