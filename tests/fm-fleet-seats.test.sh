@@ -35,7 +35,9 @@ trap cleanup_holders EXIT
 
 new_holder() {  # start a fresh live holder process; sets LAST_HOLDER
   sleep 600 >/dev/null 2>&1 &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   HOLDER_PIDS="$HOLDER_PIDS $!"
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   LAST_HOLDER=$!
 }
 
@@ -138,6 +140,7 @@ owner_launch() {
       [ ! -f "$ready.then" ] || . "$ready.then" >> "$ready.out" 2>&1
       echo done > "$ready.done"
     ' _ "$id" "$gen" "$prev" "$kind" "$target" "$ready" &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   OWNER_PID=$!
   HOLDER_PIDS="$HOLDER_PIDS $OWNER_PID"
   for _ in $(seq 1 100); do
@@ -446,6 +449,7 @@ test_simultaneous_reservations_never_overbook() {
     home=$root
     [ $((i % 2)) -eq 0 ] || home=$mate
     ( reserve "$home" "race-$i" pool-model-a >"$dir/$i.out" 2>&1; echo $? > "$dir/$i.rc" ) &
+    # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
     racers="$racers $!"
   done
   # shellcheck disable=SC2086 # one pid per word
@@ -464,7 +468,9 @@ test_unreachable_or_malformed_authority_refuses() {
   pools "$root" 6
   bash -c '. "$1/bin/fm-wake-lib.sh" && fm_lock_try_acquire "$2" && : > "$3" && exec sleep 600' \
     _ "$ROOT" "$root/state/.fleet-seats.lock" "$base/locked" &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   HOLDER_PIDS="$HOLDER_PIDS $!"
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   blocker=$!
   for _ in $(seq 1 50); do
     [ -e "$base/locked" ] && break
@@ -590,6 +596,7 @@ remote_reserve_bg() {
   new_holder
   ( FM_FLEET_SEATS_TEST_REMOTE_WAIT="${FM_TEST_REMOTE_WAIT:-60}" reserve "$R_REMOTE" "$1" "$2" \
       > "$3.out" 2>&1; echo $? > "$3.rc" ) &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   BG_PID=$!
   for _ in $(seq 1 100); do
     [ -n "$(find "$R_REMOTE/state/fleet-seats" -name '*.req' 2>/dev/null)" ] && return 0
@@ -837,6 +844,7 @@ test_remote_and_local_contention_never_overbooks() {
     new_holder
     ( FM_FLEET_SEATS_TEST_REMOTE_WAIT=60 reserve "$R_REMOTE" "shop-$i" pool-model-a \
         > "$dir/shop-$i.out" 2>&1; echo $? > "$dir/shop-$i.rc" ) &
+    # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
     racers="$racers $!"
   done
   for _ in $(seq 1 100); do
@@ -845,11 +853,13 @@ test_remote_and_local_contention_never_overbooks() {
   done
   new_holder
   ( serve_remotes > "$dir/serve.out" 2>&1 ) &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   pid=$!
   for i in 1 2 3; do
     home=$R_ROOT
     [ "$i" -ne 2 ] || home=$R_LOCAL
     ( reserve "$home" "local-$i" pool-model-a > "$dir/local-$i.out" 2>&1; echo $? > "$dir/local-$i.rc" ) &
+    # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
     racers="$racers $!"
   done
   wait "$pid"
@@ -1127,6 +1137,7 @@ test_lifecycle_episode_excludes_stale_mutations() {
   bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" sm 0 \
       && printf "%s\n" "$FM_SUPERVISOR_LIFECYCLE_CARRIER" > "$3" && exec sleep 600' \
     _ "$ROOT" "$root/state" "$base/carrier" &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   blocker=$!
   HOLDER_PIDS="$HOLDER_PIDS $blocker"
   for _ in $(seq 1 50); do [ -s "$base/carrier" ] && break; sleep 0.1; done
@@ -1167,6 +1178,7 @@ test_collection_never_waits_on_task_locks() {
   task_record "$root" busy pool-model-a
   bash -c '. "$1/bin/fm-wake-lib.sh" && fm_lock_try_acquire "$2" && : > "$3" && exec sleep 600' \
     _ "$ROOT" "$root/state/.meta-busy.lock" "$base/locked" &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   blocker=$!
   HOLDER_PIDS="$HOLDER_PIDS $blocker"
   for _ in $(seq 1 50); do [ -e "$base/locked" ] && break; sleep 0.1; done
@@ -1476,6 +1488,7 @@ test_unpooled_grants_exist_before_certificate_publication() {
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     FM_HOME="$R_REMOTE" "$SEATS" reserve unpooled --generation "$gen" --harness pi \
     --model unpooled-model --holder-pid "$LAST_HOLDER" > "$base/client.out" 2>&1 &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   pid="$!"
   req=
   for n in $(seq 1 100); do
@@ -1510,6 +1523,7 @@ test_remote_descendants_use_one_authority() {
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     FM_HOME="$child" "$SEATS" reserve nested-worker --generation g-nested --harness pi \
     --model pool-model-a --holder-pid "$LAST_HOLDER" > "$base/client.out" 2>&1 &
+  # shellcheck disable=SC2031 # $! is read immediately after this spawn, so no stale-subshell read can occur
   pid="$!"
   for n in $(seq 1 100); do
     [ -z "$(ls "$R_REMOTE/state/fleet-seats/requests/"*.req 2>/dev/null)" ] || break
