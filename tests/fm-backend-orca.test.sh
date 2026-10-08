@@ -1978,6 +1978,148 @@ test_retargeted_dialog_blocks_text_and_enter_but_allows_interrupt() {
   pass "Orca retargeting: blocking dialogs refuse text and Enter while C-c stays available"
 }
 
+test_inbox_retarget_preserves_pending_content_and_explicit_input() {
+  local code mode state id rec bell before out expected events held drops busy
+  for code in terminal_handle_stale terminal_not_writable; do
+    for mode in initial-draft initial-own initial-busy initial-empty retry-draft retry-own retry-busy second-draft second-own second-busy rering-draft typed Enter C-c scope; do
+      orca_case "inbox-retarget-$code-$mode"
+      state="$CASE_DIR/state"
+      id=orcainboxdraft
+      write_orca_window_meta "$state" "$id" term-stale "$CASE_DIR/worktree"
+      before=$(cat "$state/$id.meta")
+      rec=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_write "$1" "$2" "durable steer" fire-and-forget' "$ROOT" "$state" "$id")
+      bell=$(bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_doorbell_line "$1"' "$ROOT" "$rec")
+      expected=0
+      drops=0
+      busy=unknown
+      held='human unfinished draft'
+      case "$mode" in
+        *-own) held=$bell ;;
+        *-busy) held=$bell; busy=busy; expected=1 ;;
+        initial-empty) held= ;;
+        *-draft) expected=1 ;;
+      esac
+      case "$mode" in initial-own|retry-own) drops=1 ;; esac
+      printf '%s' "$held" > "$CASE_DIR/composer"
+      printf '%s' "$bell" > "$CASE_DIR/old-composer"
+      printf '%s' "$drops" > "$CASE_DIR/drops"
+      : > "$CASE_DIR/inputs"
+      : > "$CASE_DIR/submitted"
+      cat > "$FB/orca" <<'JS'
+#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+const dir = process.env.FM_ORCA_TEST_DIR;
+const mode = process.env.FM_ORCA_TEST_MODE;
+const terminal = args[args.indexOf('--terminal') + 1];
+const enter = args.includes('--enter');
+fs.appendFileSync(process.env.FM_ORCA_LOG, ['orca', ...args].join('\x1f') + '\n');
+function reply(data) { process.stdout.write(JSON.stringify(data) + '\n'); }
+function stale() {
+  reply({ok:false, error:{code:process.env.FM_ORCA_TEST_CODE, message:process.env.FM_ORCA_TEST_CODE}});
+  process.exitCode = 1;
+}
+function accepted() { reply({ok:true, result:{send:{accepted:true}}}); }
+if (args[1] === 'list') {
+  reply({ok:true, result:{terminals:[{handle:'term-live', writable:true, connected:true}]}});
+} else if (args[1] === 'read') {
+  if (terminal === 'term-stale' && !/^(retry|second)-/.test(mode)) {
+    stale();
+  } else {
+    const body = fs.readFileSync(dir + (terminal === 'term-stale' ? '/old-composer' : '/composer'), 'utf8');
+    const rule = '─'.repeat(body.length + 4);
+    reply({ok:true, result:{terminal:{tail:['╭' + rule + '╮', '│ > ' + body + ' │', '╰' + rule + '╯']}}});
+  }
+} else if (args[1] === 'send') {
+  if (terminal === 'term-stale') {
+    if (mode.startsWith('second-') && enter && !fs.existsSync(dir + '/old-enter')) {
+      fs.writeFileSync(dir + '/old-enter', '1');
+      fs.appendFileSync(dir + '/inputs', 'old Enter\n');
+      accepted();
+    } else {
+      stale();
+    }
+  } else {
+    if (args.includes('--interrupt')) {
+      fs.appendFileSync(dir + '/inputs', 'live C-c\n');
+    } else if (enter) {
+      fs.appendFileSync(dir + '/inputs', 'live Enter\n');
+      const drops = Number(fs.readFileSync(dir + '/drops', 'utf8'));
+      if (drops > 0) {
+        fs.writeFileSync(dir + '/drops', String(drops - 1));
+      } else {
+        fs.writeFileSync(dir + '/submitted', fs.readFileSync(dir + '/composer', 'utf8'));
+        fs.writeFileSync(dir + '/composer', '');
+      }
+    } else {
+      const text = args[args.indexOf('--text') + 1];
+      fs.appendFileSync(dir + '/inputs', 'live text\n');
+      fs.appendFileSync(dir + '/composer', text);
+    }
+    accepted();
+  }
+} else {
+  process.exitCode = 1;
+}
+JS
+      chmod +x "$FB/orca"
+      out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_TEST_DIR="$CASE_DIR" \
+        FM_ORCA_TEST_MODE="$mode" FM_ORCA_TEST_CODE="$code" FM_ORCA_TEST_BUSY="$busy" \
+        FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
+        bash -c '. "$0/bin/fm-task-inbox-lib.sh";
+          fm_backend_busy_state() {
+            if [ "$2" = term-live ]; then printf "%s" "$FM_ORCA_TEST_BUSY"; else printf unknown; fi
+          }
+          rc=0
+          case "$1" in
+            typed)
+              verdict=$(fm_backend_send_text_submit orca term-stale "explicit steer" 2 0 0)
+              [ "$verdict" = empty ] || exit 1 ;;
+            Enter|C-c) fm_backend_send_key orca term-stale "$1" || rc=$? ;;
+            *)
+              fm_task_inbox_ring orca term-stale "$2" || rc=$?
+              case "$1" in
+                rering-draft)
+                  [ "$rc" -eq 1 ] || exit 1
+                  rc=0
+                  fm_task_inbox_ring orca term-stale "$2" || rc=$? ;;
+                scope)
+                  [ "$rc" -eq 1 ] || exit 1
+                  rc=0
+                  fm_backend_send_key orca term-stale Enter || rc=$? ;;
+              esac ;;
+          esac
+          printf "%s" "$rc"' "$ROOT" "$mode" "$rec" 2>"$CASE_DIR/err" ) \
+        || fail "$mode failed: $(cat "$CASE_DIR/err")"
+      [ "$out" = "$expected" ] || fail "$code $mode: expected ring status $expected, got '$out'"
+      events=$(cat "$CASE_DIR/inputs")
+      if [ "$expected" -eq 1 ]; then
+        assert_not_contains "$events" live "$mode sent replacement input despite pending content"
+        [ "$(cat "$CASE_DIR/composer")" = "$held" ] || fail "$mode changed the protected composer"
+        [ ! -s "$CASE_DIR/submitted" ] || fail "$mode submitted pending content"
+      else
+        case "$mode" in
+          typed) [ "$(cat "$CASE_DIR/submitted")" = "${held}explicit steer" ] || fail "explicit typed semantics changed" ;;
+          Enter|scope) [ "$(cat "$CASE_DIR/submitted")" = "$held" ] || fail "explicit Enter semantics changed" ;;
+          C-c) [ "$events" = 'live C-c' ] || fail "explicit C-c did not reach the live pane" ;;
+          *)
+            [ "$(cat "$CASE_DIR/submitted")" = "$bell" ] || fail "$mode did not submit exactly its own doorbell"
+            if [ "$mode" = initial-empty ]; then
+              assert_contains "$events" 'live text' "an empty live composer must receive the doorbell"
+            else
+              assert_not_contains "$events" 'live text' "$mode duplicated a pending own doorbell"
+            fi
+            [ ! -s "$CASE_DIR/composer" ] || fail "$mode left its doorbell pending"
+            ;;
+        esac
+      fi
+      [ -f "$rec" ] || fail "$mode removed the durable steer"
+      [ "$(cat "$state/$id.meta")" = "$before" ] || fail "$mode rewrote metadata"
+    done
+  done
+  pass "Orca inbox: replacement panes preserve drafts, busy deferrals, own-doorbell retries, and explicit input"
+}
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -2047,3 +2189,4 @@ test_fm_send_doorbell_reaches_live_window_and_missing_window_rering
 test_fm_send_key_uses_live_window
 test_send_stale_exit_status_still_resolves_window
 test_retargeted_dialog_blocks_text_and_enter_but_allows_interrupt
+test_inbox_retarget_preserves_pending_content_and_explicit_input
