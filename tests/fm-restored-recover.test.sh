@@ -134,7 +134,11 @@ chmod +x "$LAB/fading-gate-pane.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
-PATH="$LAB/shim:$PATH"
+# The stand-in is on PATH too: a pane's shell inherits the PATH of the tmux
+# client that created it, and a relaunch types a bare `claude` into that
+# reused shell, so without it a host with Claude Code installed would run the
+# real one there.
+PATH="$LAB/shim:$LAB/bin:$PATH"
 export PATH
 
 wait_for_state() {  # <target> <expected>
