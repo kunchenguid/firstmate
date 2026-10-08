@@ -94,12 +94,31 @@ fm_write_meta "$HOME_DIR/state/$ID.meta" \
   "herdr_workspace_id=$WORKSPACE_ID" "herdr_tab_id=$TAB_ID" "herdr_pane_id=$PANE_ID"
 
 # The agent is started from the primary checkout, which is where a restored
-# Herdr pane resumes it.
+# Herdr pane resumes it. The pane's shell finds an inert `claude` first on its
+# PATH, so a relaunch never starts the host's real Claude: it records its
+# launch and runs the stand-in under the harness's name.
 AGENT_BIN="$SCRATCH/agentbin"
-mkdir -p "$AGENT_BIN"
+FAKEBIN="$SCRATCH/fakebin"
+mkdir -p "$AGENT_BIN" "$FAKEBIN"
 ln -s "$STANDIN_BIN" "$AGENT_BIN/claude"
+cat > "$FAKEBIN/claude" <<SH
+#!/bin/sh
+pwd -P > "$SCRATCH/claude-launched"
+exec "$AGENT_BIN/claude" 900
+SH
+chmod +x "$FAKEBIN/claude"
 printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
+printf -v FAKEBIN_Q '%q' "$FAKEBIN"
 printf -v PROJ_Q '%q' "$PROJ"
+fm_backend_herdr_send_text_line "$TARGET" "export PATH=$FAKEBIN_Q:\$PATH" \
+  || fail "could not put the inert claude on the pane's PATH"
+printf -v RESOLVED_Q '%q' "$SCRATCH/claude-resolved"
+fm_backend_herdr_send_text_line "$TARGET" "command -v claude > $RESOLVED_Q" \
+  || fail "could not ask the pane's shell which claude it runs"
+i=0
+while [ ! -s "$SCRATCH/claude-resolved" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+[ "$(cat "$SCRATCH/claude-resolved" 2>/dev/null)" = "$FAKEBIN/claude" ] \
+  || fail "the pane's shell does not run the inert claude, so a relaunch could start the real one: $(cat "$SCRATCH/claude-resolved" 2>/dev/null)"
 fm_backend_herdr_send_text_line "$TARGET" "cd -- $PROJ_Q && $AGENT_Q 900" \
   || fail "could not start the agent-named process in the primary checkout"
 i=0
@@ -168,7 +187,20 @@ wait "$SETTLER"
 [ -e "$HOME_DIR/state/$ID.control-relaunch" ] \
   || fail "a drifted agent that settled idle was not relaunched, got:
 $OUT"
+# The stand-in draws no composer, so the relaunch may refuse to type the exit
+# command and launch nothing; whatever it does launch must be the inert claude,
+# in the recorded worktree.
 case "$OUT" in
-  *"not idle"*) fail "an agent that settled idle was reported as not idle: $OUT" ;;
+  "BOOTSTRAP_INFO: worker $ID was running in $PROJ_REAL instead of its recorded worktree; relaunched"*)
+    i=0
+    while [ ! -e "$SCRATCH/claude-launched" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    ;;
+  "RESTORED_WORKER: $ID: was running in $PROJ_REAL instead of its recorded worktree; relaunch failed: "*) : ;;
+  *) fail "an agent that settled idle should have been relaunched, got: $OUT" ;;
+esac
+[ ! -e "$SCRATCH/claude-launched" ] || [ "$(cat "$SCRATCH/claude-launched")" = "$(cd "$WT" && pwd -P)" ] \
+  || fail "the relaunch started the inert claude outside the recorded worktree: $(cat "$SCRATCH/claude-launched")"
+case "$OUT" in
+  BOOTSTRAP_INFO:*) [ -e "$SCRATCH/claude-launched" ] || fail "the relaunch reported success but did not start the inert claude: $OUT" ;;
 esac
 pass "real herdr: a busy state that settles idle inside the window leads to a relaunch"
