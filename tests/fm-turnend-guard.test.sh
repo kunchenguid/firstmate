@@ -972,7 +972,9 @@ test_codex_hook_routes_through_orca_stop_glue() {
   mark_codex_hook_root "$dir"
   expected_root=$(cd "$dir" && pwd -P)
   payload=$(jq -cn '{stop_hook_active:false}')
+  # shellcheck disable=SC2016 # $0 expands in the child stub at runtime.
   printf '#!/usr/bin/env bash\nprintf "glue=%%s\\n" "$0"\ncat\n' > "$dir/bin/fm-codex-orca-stop.sh"
+  # shellcheck disable=SC2016 # $0 and ${FM_TEST_GUARD_STATUS:-0} expand in the child stub at runtime.
   printf '#!/usr/bin/env bash\nprintf "guard=%%s\\n" "$0"\ncat\nexit "${FM_TEST_GUARD_STATUS:-0}"\n' > "$dir/bin/fm-turnend-guard.sh"
   chmod +x "$dir/bin/fm-codex-orca-stop.sh" "$dir/bin/fm-turnend-guard.sh"
   out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
