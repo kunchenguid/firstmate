@@ -156,7 +156,7 @@ fm_polytoken_shell_quote() {
 fm_polytoken_write_config() {  # <config-dir>
   local cfgdir=$1 source matcher replace
   source="$(fm_polytoken_global_config_dir)/config.yaml"
-  [ -f "$source" ] || [ -p "$source" ] || {
+  [ -f "$source" ] || {
     echo "error: polytoken global config '$source' is missing; a polytoken worker needs the operator's providers and credentials mirrored into its per-task config dir, and none exists to mirror" >&2
     return 1
   }
