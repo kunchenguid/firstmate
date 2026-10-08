@@ -1541,6 +1541,9 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    case "$path" in
+      "$wt"/*) git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue ;;
+    esac
     rm -f -- "$path" || return 1
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
@@ -4786,6 +4789,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
     exit 1
   }
+fi
+if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  fm_polytoken_require_hooks_free "$WT" || exit 1
+fi
+if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=1
   RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
@@ -5193,12 +5201,12 @@ EOF
     # would flap the record idle while a long tool call still runs. The
     # worktree files stay out of git's view so they never block teardown's
     # dirty check or leak into a commit; an existing `.polytoken/hooks.json`
-    # refuses the arm rather than clobbering a project's own hook layer.
+    # refused the spawn above, before any wiring or relaunch cleanup was armed,
+    # rather than clobbering a project's own hook layer.
     # Gated on the canonical template like gemini and devin, because a raw
     # launch command never carries this wiring's flags or cwd contract.
     if [ "$RAW_LAUNCH" -eq 0 ]; then
-      if ! fm_polytoken_require_hooks_free "$WT" \
-        || ! fm_polytoken_write_config "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
+      if ! fm_polytoken_write_config "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
         || ! fm_polytoken_write_facet "$WT" "$STATE_REAL/$ID.inbox" \
         || ! fm_polytoken_write_busy_script "$FM_ROOT" "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" \
         || ! fm_polytoken_write_hooks "$WT" "$(fm_polytoken_busy_script "$STATE_REAL" "$ID")"; then

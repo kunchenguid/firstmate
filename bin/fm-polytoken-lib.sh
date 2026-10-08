@@ -253,8 +253,8 @@ EOF
 # events and negates nothing.
 # fm_polytoken_require_hooks_free: refuse a worktree that already carries a
 # `.polytoken/hooks.json` - a project's own hook layer is never firstmate's to
-# clobber. The arm runs this before writing any wiring, so a refusal leaves the
-# worktree and state untouched.
+# clobber. fm-spawn runs this before writing any wiring or arming a relaunch's
+# abort cleanup, so a refusal leaves the worktree and state untouched.
 fm_polytoken_require_hooks_free() {  # <worktree>
   local hooks
   hooks=$(fm_polytoken_hooks_file "$1") || return 1
