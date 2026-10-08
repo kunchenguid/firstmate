@@ -612,7 +612,10 @@ test_sweep_noop_with_no_secondmate_meta() {
 
 # make_remote_probe_world <name>: a parent home carrying one remote-route
 # secondmate meta plus a fake ssh that logs every call and answers with
-# FM_FAKE_REMOTE_REPLY on FM_FAKE_REMOTE_RC.
+# FM_FAKE_REMOTE_REPLY on FM_FAKE_REMOTE_RC. A `wedge-state` or `wedge-recover`
+# call answers with FM_FAKE_WEDGE_REPLY (backslash escapes expanded) on
+# FM_FAKE_WEDGE_RC instead, when either is set, so one probe can read `alive`
+# from `state` and a separate verdict from the wedge verb.
 make_remote_probe_world() {
   local name=$1 w fakebin
   w="$TMP_ROOT/$name"
@@ -634,6 +637,15 @@ EOF
   cat > "$fakebin/ssh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_SSH_LOG:?}"
+verb=$(printf '%s' "${!#}" | base64 -d 2>/dev/null | tr '\0' '\n' | sed -n '2p')
+case "$verb" in
+  wedge-state|wedge-recover)
+    if [ -n "${FM_FAKE_WEDGE_REPLY:-}${FM_FAKE_WEDGE_RC:-}" ]; then
+      [ -z "${FM_FAKE_WEDGE_REPLY:-}" ] || printf '%b\n' "$FM_FAKE_WEDGE_REPLY"
+      exit "${FM_FAKE_WEDGE_RC:-0}"
+    fi
+    ;;
+esac
 [ -z "${FM_FAKE_REMOTE_REPLY:-}" ] || printf '%s\n' "$FM_FAKE_REMOTE_REPLY"
 exit "${FM_FAKE_REMOTE_RC:-0}"
 SH
@@ -723,6 +735,89 @@ test_remote_poll_probe_unreachable_preserves_route() {
   pass "poll probe: unreachable or inconclusive remote reads preserve the route"
 }
 
+# remote_wedge_tripwire <w>: stubs for every local tool a pid could be derived
+# or signalled with. Each logs to <w>/local-tools.log, so an empty log proves
+# the parent never read a pane, a process table, or sent a signal on its own
+# host: the remote mate's verdict and kill are its own host's business.
+remote_wedge_tripwire() {  # <w>
+  local w=$1 tool
+  for tool in herdr ps pgrep pkill kill lsof sample; do
+    cat > "$w/fakebin/$tool" <<SH
+#!/usr/bin/env bash
+printf '%s %s\\n' "$tool" "\$*" >> "$w/local-tools.log"
+exit 1
+SH
+    chmod +x "$w/fakebin/$tool"
+  done
+}
+
+test_remote_poll_probe_reports_a_wedged_mate_relaunchable() {
+  local w out
+  w=$(make_remote_probe_world probe-wedged)
+  remote_wedge_tripwire "$w"
+
+  out=$(probe_remote "$w" poll PATH="$w/fakebin:$PATH" FM_FAKE_REMOTE_REPLY=alive FM_FAKE_WEDGE_REPLY=wedged)
+  [ "$out" = 'relaunchable|wedged|wedged|remote agent wedged: running but no progress for at least 900s|host=lab-host|' ] \
+    || fail "a remote wedged verdict should make the mate relaunchable as wedged, got: $out"
+  [ "$(remote_verbs "$w/ssh.log" | tr '\n' ' ')" = 'state wedge-state ' ] \
+    || fail "the wedged probe should spend exactly one state and one wedge-state call: $(remote_verbs "$w/ssh.log")"
+
+  # An unreachable wedge probe is never a verdict: the alive mate stays alive.
+  : > "$w/ssh.log"
+  out=$(probe_remote "$w" poll PATH="$w/fakebin:$PATH" FM_FAKE_REMOTE_REPLY=alive FM_FAKE_WEDGE_RC=255)
+  [ "$out" = 'alive|alive|0|||' ] \
+    || fail "an unreachable wedge probe must leave the alive mate alone, got: $out"
+  [ ! -s "$w/local-tools.log" ] \
+    || fail "the parent touched a local process tool for a remote mate: $(cat "$w/local-tools.log")"
+  pass "poll probe: a remote wedged verdict is relaunchable as wedged, and an unreachable wedge probe is not"
+}
+
+# recover_remote <w> [env...] -> "<rc>|<capture>|<killed>|<reason>"
+recover_remote() {
+  local w=$1; shift
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  env STATE="$w/home/state" FM_HOME="$w/home" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_SSH_BIN="$w/fakebin/ssh" FM_FAKE_SSH_LOG="$w/ssh.log" PATH="$w/fakebin:$PATH" "$@" \
+    bash -c '
+      . "$0/bin/fm-secondmate-liveness-lib.sh"
+      rc=0
+      fm_secondmate_liveness_wedge_recover "$1" rsm1 || rc=$?
+      printf "%s|%s|%s|%s\n" "$rc" "${FM_SM_LIVE_WEDGE_CAPTURE:-}" \
+        "${FM_SM_LIVE_WEDGE_KILLED:-}" "${FM_SM_LIVE_REASON:-}"
+    ' "$ROOT" "$w/home/state/rsm1.meta"
+}
+
+test_remote_wedge_recover_runs_only_on_the_mates_own_host() {
+  local w out ledger
+  w=$(make_remote_probe_world recover-remote)
+  remote_wedge_tripwire "$w"
+  ledger="$w/home/state/.secondmate-relaunch-rsm1"
+
+  out=$(recover_remote "$w" FM_FAKE_WEDGE_REPLY='capture=/remote/rsm1-home/state/.wedge-sample-rsm1-1\nkilled=4242')
+  [ "$out" = '0|/remote/rsm1-home/state/.wedge-sample-rsm1-1|4242|' ] \
+    || fail "remote recovery should parse the remote capture path and killed pids, got: $out"
+  [ "$(awk -F '\t' '$2 == "wedge-capture" { print $3 }' "$ledger")" = /remote/rsm1-home/state/.wedge-sample-rsm1-1 ] \
+    || fail "remote recovery should record the remote capture path in the relaunch ledger: $(cat "$ledger" 2>/dev/null)"
+  [ "$(remote_verbs "$w/ssh.log" | tr '\n' ' ')" = 'wedge-recover ' ] \
+    || fail "remote recovery must be exactly one wedge-recover control call: $(remote_verbs "$w/ssh.log")"
+
+  : > "$w/ssh.log"
+  out=$(recover_remote "$w" FM_FAKE_WEDGE_REPLY='no attributable agent process' FM_FAKE_WEDGE_RC=1)
+  [ "$out" = '1|||wedged remote agent could not be recovered on lab-host: no attributable agent process; endpoint left running' ] \
+    || fail "a failing remote recovery must refuse and preserve the endpoint, got: $out"
+
+  out=$(recover_remote "$w" FM_FAKE_WEDGE_RC=255)
+  case "$out" in
+    '1|||wedged remote agent could not be recovered on lab-host: '*'; endpoint left running') ;;
+    *) fail "an unreachable host must refuse the recovery and preserve the endpoint, got: $out" ;;
+  esac
+  [ "$(awk -F '\t' '$2 == "wedge-capture"' "$ledger" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "a refused remote recovery must not record a capture: $(cat "$ledger")"
+  [ ! -s "$w/local-tools.log" ] \
+    || fail "the parent derived a pid or signalled locally for a remote mate: $(cat "$w/local-tools.log")"
+  pass "wedge recover: a remote mate is captured and killed only by its own host's control verb, and a failed call preserves it"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -742,6 +837,8 @@ test_sweep_skips_mate_whose_liveness_lock_is_held
 test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
+test_remote_poll_probe_reports_a_wedged_mate_relaunchable
+test_remote_wedge_recover_runs_only_on_the_mates_own_host
 
 # --- wedged secondmate: detection, capture, kill scope, and bound ------------
 # bin/fm-herdr-wedge-lib.sh adds the one liveness state the backend classifier
