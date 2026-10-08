@@ -2007,7 +2007,8 @@ if [ "$OUTPUT_MODE" = contribution-input ]; then
   contribution_tasks_json > "$CONTRIBUTION_TASKS_JSON_FILE" \
     || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
   jq -n --slurpfile backlog "$BACKLOG_JSON_FILE" --slurpfile tasks "$CONTRIBUTION_TASKS_JSON_FILE" \
-    '{backlog:$backlog[0],tasks:$tasks[0]}'
+    '{backlog:$backlog[0],tasks:$tasks[0]}' \
+    || { echo "fm-fleet-snapshot: contribution input assembly failed" >&2; exit 1; }
   exit 0
 fi
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }

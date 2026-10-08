@@ -167,17 +167,18 @@ done
 exec "$JQ_BIN" "\$@"
 SH
   chmod +x "$fakebin/jq"
+  # Many ordinary-size rows, as in a real backlog, keep the fixture portable to
+  # stock Bash 3.2 and BSD tools while the combined JSON still exceeds 64 KiB.
   {
     printf '## In flight\n\n## Queued\n'
-    LC_ALL=C tr '\\0' x < /dev/zero | head -c 100000
-    printf '\n\n## Done\n'
+    awk 'BEGIN { for (i = 1; i <= 600; i++) printf "- [ ] queued item %d: %s\n", i, "padding padding padding padding padding padding padding padding padding padding padding padding" }'
+    printf '\n## Done\n'
   } > "$home/data/backlog.md"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
     || fail "contribution input must transport a backlog larger than the jq argument budget"
   printf '%s' "$out" | jq -e '
-    .backlog.records | length == 1
-      and .[0].structured == false
-      and (.[0].raw | length == 100000)
+    (.backlog.records | length) == 600
+      and ([.backlog.records[].raw | length] | add) > 60000
   ' >/dev/null || fail "large contribution backlog changed while using file transport"
   pass "contribution input transports a large backlog through files"
 }
