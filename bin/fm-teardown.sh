@@ -276,14 +276,24 @@
 #     process group, so it survives reparented to init (observed 2026-08-03:
 #     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
 #     hours with no live task meta to attribute them to once teardown had
-#     already removed it). reap_task_worktree_processes finds every process
-#     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     already removed it). The same shape keeps a chrome-devtools-axi bridge
+#     alive: the CLI spawns it detached, the worker's exit reparents it to
+#     launchd, and the headless Chrome that chrome-devtools-mcp launches
+#     leaves that process group, so signalling the bridge alone leaves Chrome.
+#     reap_task_worktree_processes takes a process only when its current
+#     working directory is this task's own worktree or tasktmp (`lsof -a -d cwd`),
+#     or when chrome-devtools-axi's own bridge.pid still names that process,
+#     the process command is still the bridge, and that process's PWD or
+#     OLDPWD is this task's worktree or tasktmp. It then follows parent-to-child
+#     ancestry, including children that have called setsid or changed directory.
+#     It never selects a process by name. TERM, then KILL after a short grace
+#     period, goes to any survivor whose process identity still matches.
+#     FM_BROWSER_HELPER_STATE_OVERRIDE replaces ~/.chrome-devtools-axi as the
+#     directory that holds bridge.pid (named sessions live under sessions/<name>/).
+#     An empty override reads no pid files. Both directory roots are unique per
+#     task and never shared, and a recorded pid without this task's path is
+#     ignored, so another task, another home, or the operator's own Chrome is
+#     out of reach. Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -2140,6 +2150,7 @@ task_pid_list_contains() {  # <pid-list> <pid>
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
+  TASK_PIDS_FAIL_REASON="lsof"
   local dir dir_pids pids=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
@@ -2197,12 +2208,254 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
-# Reap every process rooted (by cwd) under this task's own worktree or tasktmp
-# - both unique per task and never shared - before either is removed. TERM
-# first, then KILL after a short grace period for anything still alive; a
-# process that exits on its own between the two passes is simply absent from
-# the recheck. A missing lsof uses the backend process-group fallback; an lsof
-# scan error refuses before destructive teardown.
+# Directory of chrome-devtools-axi bridge.pid files. The default session file
+# is bridge.pid; named sessions are sessions/<name>/bridge.pid. An empty
+# FM_BROWSER_HELPER_STATE_OVERRIDE disables the recorded-pid lookup.
+browser_helper_state_root() {
+  if [ -n "${FM_BROWSER_HELPER_STATE_OVERRIDE+x}" ]; then
+    printf '%s\n' "$FM_BROWSER_HELPER_STATE_OVERRIDE"
+    return 0
+  fi
+  if [ -z "${HOME:-}" ]; then
+    return 0
+  fi
+  printf '%s\n' "$HOME/.chrome-devtools-axi"
+}
+
+browser_helper_pid_from_file() {  # <file>
+  local file=$1 pid
+  [ -f "$file" ] || return 1
+  pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1) || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$pid"
+}
+
+# Print one environment value for a pid. Exit 0 with the value, 1 when the
+# process is readable but the key is absent, 2 when the environment cannot be
+# read. A readable FM_PROC_ROOT_OVERRIDE/<pid>/environ wins, which is how tests
+# pin the value; otherwise Linux /proc and a Darwin KERN_PROCARGS2 read.
+task_process_env_field() {  # <pid> <key>
+  local pid=$1 key=$2 proc_root file rc
+  case "$pid" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  case "$key" in
+    PWD|OLDPWD) ;;
+    *) return 2 ;;
+  esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  file=$proc_root/$pid/environ
+  if [ -r "$file" ]; then
+    rc=0
+    perl -e '
+      my ($path, $wanted) = @ARGV;
+      open my $fh, "<:raw", $path or exit 2;
+      local $/;
+      my $data = <$fh>;
+      close $fh;
+      my $prefix = $wanted . "=";
+      my $found;
+      foreach my $part (split /\0/, $data // "") {
+        if (index($part, $prefix) == 0) {
+          $found = substr($part, length($prefix));
+        }
+      }
+      if (defined $found) {
+        print $found;
+        exit 0;
+      }
+      exit 1;
+    ' "$file" "$key" || rc=$?
+    return "$rc"
+  fi
+  if [ "$(uname -s)" != Darwin ]; then
+    return 2
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 2
+  fi
+  rc=0
+  python3 -c '
+import ctypes
+import ctypes.util
+import sys
+pid = int(sys.argv[1])
+key = sys.argv[2].encode() + b"="
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+mib = (ctypes.c_int * 3)(1, 49, pid)
+size = ctypes.c_size_t(1 << 20)
+buf = ctypes.create_string_buffer(size.value)
+libc.sysctl.argtypes = [
+    ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+]
+if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+    sys.exit(2)
+found = None
+for part in buf.raw[:size.value].split(b"\x00"):
+    if part.startswith(key):
+        found = part[len(key):]
+if found is None:
+    sys.exit(1)
+sys.stdout.buffer.write(found)
+' "$pid" "$key" || rc=$?
+  return "$rc"
+}
+
+path_is_under_roots() {  # <path> <newline-separated canonical roots>
+  local path=$1 roots=$2 canon root
+  canon=$(canonical_existing_dir "$path") || return 1
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    case "$canon" in
+      "$root"|"$root"/*) return 0 ;;
+    esac
+  done <<EOF
+$roots
+EOF
+  return 1
+}
+
+# A recorded bridge pid is owned only when it is still the bridge and its own
+# PWD or OLDPWD is under this task. Already-cwd-owned pids are left to the
+# cwd scan. A recycled pid whose command is no longer the bridge is ignored.
+browser_helper_consider_pid_file() {  # <file> <cwd-pids> <roots>
+  local file=$1 cwd_pids=$2 roots=$3 pid cmd path field rc unread=0 saw_env=0
+  pid=$(browser_helper_pid_from_file "$file") || return 0
+  case "$pid" in
+    0|1|"$$") return 0 ;;
+  esac
+  if printf '%s\n' "$cwd_pids" | grep -Fxq "$pid"; then
+    return 0
+  fi
+  cmd=$(ps -p "$pid" -o command= 2>/dev/null) || return 0
+  case "$cmd" in
+    *chrome-devtools-axi-bridge*) ;;
+    *) return 0 ;;
+  esac
+  for field in PWD OLDPWD; do
+    rc=0
+    path=$(task_process_env_field "$pid" "$field") || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      saw_env=1
+      if path_is_under_roots "$path" "$roots"; then
+        printf '%s\n' "$pid"
+        return 0
+      fi
+    elif [ "$rc" -eq 2 ]; then
+      unread=$((unread + 1))
+    fi
+  done
+  if [ "$saw_env" -eq 0 ] && [ "$unread" -gt 0 ]; then
+    echo "warning: recorded browser-helper pid $pid could not be checked against this task directory; leaving it untouched" >&2
+  fi
+  return 0
+}
+
+browser_helper_owned_pids() {  # <cwd-pids> <canonical roots>
+  local cwd_pids=$1 roots=$2 root file
+  root=$(browser_helper_state_root) || return 0
+  [ -n "$root" ] && [ -d "$root" ] || return 0
+  if [ -f "$root/bridge.pid" ]; then
+    browser_helper_consider_pid_file "$root/bridge.pid" "$cwd_pids" "$roots"
+  fi
+  for file in "$root"/sessions/*/bridge.pid; do
+    [ -f "$file" ] || continue
+    browser_helper_consider_pid_file "$file" "$cwd_pids" "$roots"
+  done
+}
+
+# Seeds plus every descendant by parent pid. Does not walk upward, and never
+# emits pid 0, pid 1, or this process. A snapshot failure is a hard failure:
+# guessing ownership from a name is not a fallback.
+task_pids_with_descendants() {  # <newline-separated seeds>
+  local seeds=$1 snapshot
+  snapshot=$(ps -axo pid=,ppid= 2>/dev/null) || return 1
+  [ -n "$snapshot" ] || return 1
+  printf '%s\n---\n%s\n' "$seeds" "$snapshot" | awk -v self="$$" '
+    $0 == "---" { phase = 1; next }
+    phase == 0 {
+      if ($0 ~ /^[0-9]+$/) owned[$0] = 1
+      next
+    }
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      child[$2] = child[$2] " " $1
+    }
+    END {
+      nq = 0
+      for (p in owned) {
+        nq++
+        q[nq] = p
+      }
+      qi = 1
+      while (qi <= nq) {
+        p = q[qi]
+        qi++
+        n = split(child[p], kids, " ")
+        for (i = 1; i <= n; i++) {
+          k = kids[i]
+          if (k == "" || k == "0" || k == "1" || k == self) continue
+          if (!(k in owned)) {
+            owned[k] = 1
+            nq++
+            q[nq] = k
+          }
+        }
+      }
+      for (p in owned) {
+        if (p ~ /^[0-9]+$/ && p != "0" && p != "1" && p != self) print p
+      }
+    }
+  '
+}
+
+# Cwd-owned processes, recorded bridge pids proved by path, and their
+# descendants. TASK_PIDS_FAIL_REASON names which lookup failed.
+task_owned_pids() {  # <dir>...
+  local cwd_pids roots_canon="" dir canon recorded seeds expanded
+  TASK_PIDS=
+  TASK_PIDS_FAILED_DIR=
+  TASK_PIDS_FAIL_REASON="lsof"
+  if ! task_pids_under_roots "$@"; then
+    return 1
+  fi
+  cwd_pids=$TASK_PIDS
+  for dir in "$@"; do
+    [ -n "$dir" ] || continue
+    if ! canon=$(canonical_existing_dir "$dir"); then
+      continue
+    fi
+    roots_canon="${roots_canon}${canon}
+"
+  done
+  if ! recorded=$(browser_helper_owned_pids "$cwd_pids" "$roots_canon"); then
+    TASK_PIDS_FAIL_REASON="ps"
+    return 1
+  fi
+  seeds=$(printf '%s\n%s\n' "$cwd_pids" "$recorded" | grep -E '^[0-9]+$' | sort -un || true)
+  if [ -z "$seeds" ]; then
+    TASK_PIDS=
+    return 0
+  fi
+  if ! expanded=$(task_pids_with_descendants "$seeds"); then
+    TASK_PIDS_FAIL_REASON="ps"
+    if [ -z "$TASK_PIDS_FAILED_DIR" ]; then
+      TASK_PIDS_FAILED_DIR=${1:-<missing>}
+    fi
+    return 1
+  fi
+  TASK_PIDS=$(printf '%s\n' "$expanded" | grep -E '^[0-9]+$' | sort -un || true)
+}
+
+# Reap every process owned by this task's worktree or tasktmp before either is
+# removed. Ownership is the directory, a recorded bridge pid proved by that
+# directory, or ancestry from one of those processes. TERM first, then KILL
+# after a short grace period for anything still alive; a process that exits on
+# its own between the two passes is simply absent from the recheck. A missing
+# lsof uses the backend process-group fallback; a scan error refuses before
+# destructive teardown.
 reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
@@ -2212,8 +2465,8 @@ reap_task_worktree_processes() {  # <label> <dir>...
     return 0
   fi
   while [ "$pass" -le "$max_passes" ]; do
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    if ! task_owned_pids "$@"; then
+      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (${TASK_PIDS_FAIL_REASON:-lsof} failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
     fi
     pids=$TASK_PIDS
@@ -2223,8 +2476,8 @@ reap_task_worktree_processes() {  # <label> <dir>...
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       if ! identity=$(task_process_identity "$pid"); then
-        if ! task_pids_under_roots "$@"; then
-          echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+        if ! task_owned_pids "$@"; then
+          echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (${TASK_PIDS_FAIL_REASON:-lsof} failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
           return 1
         fi
         if task_pid_list_contains "$TASK_PIDS" "$pid"; then
@@ -2242,8 +2495,8 @@ EOF
       pass=$((pass + 1))
       continue
     fi
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    if ! task_owned_pids "$@"; then
+      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (${TASK_PIDS_FAIL_REASON:-lsof} failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
     fi
     current_pids=$TASK_PIDS
@@ -2257,8 +2510,8 @@ EOF
       fi
     done
     sleep 1
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    if ! task_owned_pids "$@"; then
+      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (${TASK_PIDS_FAIL_REASON:-lsof} failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
     fi
     current_pids=$TASK_PIDS
@@ -2275,8 +2528,8 @@ EOF
     done
     if [ "${#remaining_pids[@]}" -gt 0 ]; then
       echo "teardown: force-killing leaked $label process(es) for $ID: ${remaining_pids[*]}" >&2
-      if ! task_pids_under_roots "$@"; then
-        echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      if ! task_owned_pids "$@"; then
+        echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (${TASK_PIDS_FAIL_REASON:-lsof} failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
         return 1
       fi
       current_pids=$TASK_PIDS
@@ -2291,8 +2544,8 @@ EOF
     fi
     pass=$((pass + 1))
   done
-  if ! task_pids_under_roots "$@"; then
-    echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+  if ! task_owned_pids "$@"; then
+    echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (${TASK_PIDS_FAIL_REASON:-lsof} failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
     return 1
   fi
   [ -z "$TASK_PIDS" ] && return 0
