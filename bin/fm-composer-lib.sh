@@ -260,9 +260,8 @@ fm_composer_normalize_trim_var() {  # <varname>
 # live, Command Code 1.74.1 with COLORTERM=truecolor, which its launch pins; a
 # 256-colour terminal gets the untested 38;5;145 instead). Raising the fleet-wide
 # ceiling to reach it would over-strip other harnesses, so only a screen that the
-# backend's identity probe attributes to Command Code is read with
-# FM_COMPOSER_COMMANDCODE_GHOST_LUMA_MAX (default 160) in its place
-# (fm_composer_classify_screen).
+# backend's identity probe attributes to Command Code is read with a fixed
+# ceiling of 160 in its place (fm_composer_classify_screen).
 # The dim/faint and dark-foreground states are tracked together as "de-emphasis";
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
@@ -485,8 +484,8 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # fix bugs, or work on your code` as dim text after its `❭` glyph (verified
 # live, devin 3000.11.1). Command Code renders the anchored `Ask your question...`
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
-# bright for the default ghost ceiling, which FM_COMPOSER_COMMANDCODE_GHOST_LUMA_MAX
-# below owns. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# bright for the default ghost ceiling, so fm_composer_classify_screen reads its
+# screen with a raised one. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$'
 
@@ -1780,7 +1779,7 @@ EOF
   if [ "$has_identity" = 1 ]; then
     case "${identity%%$'\t'*}" in
       commandcode|cmd)
-        local FM_COMPOSER_GHOST_LUMA_MAX=${FM_COMPOSER_COMMANDCODE_GHOST_LUMA_MAX:-160}
+        local FM_COMPOSER_GHOST_LUMA_MAX=160
         ;;
     esac
   fi
