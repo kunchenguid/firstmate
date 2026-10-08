@@ -395,7 +395,7 @@ test_agy_trust_registers_the_logical_and_resolved_worktree_paths() {
 }
 
 test_agy_windows_trust_uses_the_selected_binary_profile_and_native_paths() {
-  local rec fakebin winhome store linuxstore before out rc link minimal tool
+  local rec fakebin winhome store linuxstore before out rc link minimal tool profile probe_path
   rec=$(make_agy_trust_case windows)
   read_agy_trust_case "$rec"
   fakebin="$CASE_DIR/bin"; winhome="$CASE_DIR/windows home"
@@ -413,12 +413,21 @@ test_agy_windows_trust_uses_the_selected_binary_profile_and_native_paths() {
   cat > "$fakebin/cmd.exe" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$AGY_CMD_LOG"
-printf '%s\r\n' "${AGY_WIN_PROFILE:-C:\\Users\\Probe Name}"
+case "$*" in
+  '/d /u /c set USERPROFILE')
+    node -e 'process.stdout.write(Buffer.from("USERPROFILE_EXTRA=C:\\wrong\r\nUSERPROFILE=" + (process.env.AGY_WIN_PROFILE || "C:\\Users\\Probe Name") + "\r\n", "utf16le"));' ;;
+  '/d /c echo %USERPROFILE%')
+    node -e 'const profile = (process.env.AGY_WIN_PROFILE || "C:\\Users\\Probe Name").split("&")[0]; process.stdout.write(Buffer.from(profile.replace(/é/g, "\u0082") + "\r\n", "latin1"));' ;;
+  *) exit 1 ;;
+esac
 SH
   cat > "$fakebin/wslpath" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = -u ] && [ "$2" = "${AGY_WIN_PROFILE:-C:\\Users\\Probe Name}" ]; then
+  printf '%s\n' "$AGY_WIN_HOME"
+  exit 0
+fi
 case "$1:$2" in
-  '-u:C:\Users\Probe Name') printf '%s\n' "$AGY_WIN_HOME" ;;
   '-u:C:\Windows\System32\cmd.exe') printf '%s\n' "$AGY_SYSTEM32_CMD" ;;
   -w:*) [ "${AGY_WSLPATH_FAIL:-0}" = 1 ] && exit 1; printf '\\\\wsl.localhost\\Ubuntu%s\n' "${2//\//\\}" ;;
   *) exit 1 ;;
@@ -433,7 +442,7 @@ SH
   [ "$(agy_store_value "$store" model)" = '"keep me"' ] || fail "Windows registration dropped another key"
   [ "$(agy_store_value "$store" custom)" = '{"a":true}' ] || fail "Windows registration dropped nested settings"
   [ "$(cat "$linuxstore")" = "$before" ] || fail "Windows agy must not write the Linux settings store"
-  assert_contains "$(cat "$CASE_DIR/cmd.log")" '/d /c echo %USERPROFILE%' "Windows home probe must disable cmd AutoRun"
+  assert_contains "$(cat "$CASE_DIR/cmd.log")" '/d' "Windows home probe must disable cmd AutoRun"
   before=$(cat "$store")
   rc=0
   out=$(HOME="$HOME_DIR" AGY_WSLPATH_FAIL=1 AGY_WIN_HOME="$winhome" AGY_CMD_LOG="$CASE_DIR/cmd.log" PATH="$fakebin:$PATH" \
@@ -461,6 +470,21 @@ SH
   out=$(HOME="$HOME_DIR" AGY_WIN_HOME="$winhome" AGY_SYSTEM32_CMD="$fakebin/cmd.exe" AGY_CMD_LOG="$CASE_DIR/cmd.log" PATH="$minimal" \
     "$TRUST" "$link" "$PROJ_DIR" "$fakebin/agy" 2>&1) || fail "System32 fallback must work without cmd.exe on PATH: $out"
   [ "$(cat "$store")" = "$before" ] || fail "repeat registration must be idempotent and preserve every entry"
+  for profile in 'C:\Users\René' 'C:\Users\Probe & Name' 'C:\Users\René & Name'; do
+    winhome="$CASE_DIR/profiles/${profile##*\\}"
+    store="$winhome/.gemini/antigravity-cli/settings.json"
+    mkdir -p "$(dirname "$store")"
+    for probe_path in "$fakebin:$PATH" "$minimal"; do
+      printf '%s\n' '{"model":"preserved","trustedWorkspaces":[]}' > "$store"
+      out=$(HOME="$HOME_DIR" AGY_WIN_PROFILE="$profile" AGY_WIN_HOME="$winhome" \
+        AGY_SYSTEM32_CMD="$fakebin/cmd.exe" AGY_CMD_LOG="$CASE_DIR/cmd.log" PATH="$probe_path" \
+        "$TRUST" "$link" "$PROJ_DIR" "$fakebin/agy" 2>&1) || fail "Windows profile '$profile' must register unchanged: $out"
+      assert_agy_trusted "$store" "\\\\wsl.localhost\\Ubuntu${WT_DIR//\//\\}" "Unicode/metacharacter profile lost the resolved Windows trust path"
+      assert_agy_trusted "$store" "\\\\wsl.localhost\\Ubuntu${link//\//\\}" "Unicode/metacharacter profile lost the logical Windows trust path"
+      [ "$(agy_store_value "$store" model)" = '"preserved"' ] || fail "Unicode/metacharacter profile registration lost settings"
+      [ "$(cat "$linuxstore")" = '{"untouched":true}' ] || fail "Unicode/metacharacter profile registration wrote the Linux store"
+    done
+  done
   pass "fm-agy-trust: Windows binary selects its Windows profile and paths without weakening scope or changing Linux settings"
 }
 

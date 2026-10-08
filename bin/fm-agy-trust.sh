@@ -116,9 +116,11 @@ if [ "$AGY_FORMAT" = windows ]; then
   [ -n "${CMD_BIN:-}" ] && [ -x "$CMD_BIN" ] || refuse "Windows agy requires cmd.exe to resolve its USERPROFILE"
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$(dirname "${BASH_SOURCE[0]}")/fm-timeout-lib.sh"
-  WIN_HOME=$(fm_run_timed 5 "$CMD_BIN" /d /c 'echo %USERPROFILE%' </dev/null 2>/dev/null) \
-    || refuse "could not resolve Windows agy's USERPROFILE within 5 seconds"
-  WIN_HOME=${WIN_HOME//$'\r'/}
+  WIN_HOME=$(
+    set -o pipefail
+    fm_run_timed 5 "$CMD_BIN" /d /u /c 'set USERPROFILE' </dev/null 2>/dev/null |
+      node -e 'const lines = require("node:fs").readFileSync(0).toString("utf16le").split(/\r?\n/); const profile = lines.find(line => /^USERPROFILE=/i.test(line)); if (profile === undefined) process.exit(1); process.stdout.write(profile.slice("USERPROFILE=".length));'
+  ) || refuse "could not resolve Windows agy's USERPROFILE within 5 seconds"
   case "$WIN_HOME" in
     [a-zA-Z]:\\* | \\\\*) ;;
     *) refuse "cmd.exe did not return an absolute Windows USERPROFILE" ;;
