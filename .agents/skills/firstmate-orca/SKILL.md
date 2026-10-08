@@ -70,6 +70,7 @@ For a messy Orca-backed task:
 1. Read `state/<id>.meta` and the relevant status tail first.
 2. Confirm the task is actually Orca-backed before using Orca-specific assumptions.
 3. Use the recorded `terminal=`, `orca_worktree_id=`, and `worktree=` as the task identity.
+   A stale `terminal=` is not a reason to edit the record: send and send-key resolve the live pane from `window=` themselves.
 4. Prefer firstmate helpers for peek, send, state, and teardown.
 5. Avoid raw deletion of Orca worktrees or manual branch cleanup.
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.

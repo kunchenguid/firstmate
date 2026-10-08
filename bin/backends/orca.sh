@@ -5,21 +5,12 @@
 # remains unsupported until Orca exposes a terminal-send primitive for it.
 #
 # Target string shape: the Orca terminal id accepted by `orca terminal ...`.
-#
-# Send-time window resolution (submit and send-key cores): a recorded terminal
-# id goes stale when a human restarts the window - Orca issues a fresh handle
-# while the worktree NAME recorded as `window=` in state/<id>.meta stays stable.
-# When Orca rejects a send on the recorded handle with an endpoint-identity
-# error, those cores re-resolve the recorded `window=` (read-only; meta fields
-# stay producer-owned and are never written) through Orca's own native selector
-# `orca terminal list --worktree name:<window>` and deliver to the live handle
-# Orca reports now. Resolution runs ONLY after such a rejection, so a healthy
-# terminal keeps today's exact command sequence, and an identity rejection
-# proves nothing was typed, so retrying on the live handle never duplicates
-# text. Any resolution failure - no state dir, no meta match, no window, an
-# unresolvable worktree, or the same handle back - falls back to TODAY's exact
-# behavior: the recorded-handle failure surfaces unchanged and the durable
-# doorbell recording plus the watcher re-ring ladder owns delivery from there.
+# Send and send-key keep that id when it is live, so a healthy record is unchanged.
+# A stale id is resolved at send time from the recorded window= alias, read-only:
+# Orca does not accept a window title as --terminal, and `terminal list
+# --worktree name:<window>` is the native selector because spawn stores that
+# same alias as the worktree display name. A unique live title match is only
+# the fallback. Nothing here rewrites meta. A miss keeps today's failed send.
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
@@ -180,6 +171,204 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
   printf '%s' "$terminal"
 }
 
+# fm_backend_orca_state_dir: the home whose meta names window= for a stale
+# terminal. FM_STATE_OVERRIDE wins, matching fm-send; otherwise FM_HOME/state.
+# Absent config means no resolution, which is today's failed send.
+fm_backend_orca_state_dir() {
+  if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    printf '%s' "$FM_STATE_OVERRIDE"
+    return 0
+  fi
+  if [ -n "${FM_HOME:-}" ] && [ -d "$FM_HOME/state" ]; then
+    printf '%s/state' "$FM_HOME"
+    return 0
+  fi
+  return 1
+}
+
+# Local reader so this adapter can resolve a window when sourced alone.
+# fm_meta_get in bin/fm-backend.sh is the shared owner when the dispatcher
+# has already loaded it; the two must keep the last-value rule.
+fm_backend_orca_meta_value() {  # <file> <key>
+  local file=$1 key=$2 line value=''
+  if type fm_meta_get >/dev/null 2>&1; then
+    value=$(fm_meta_get "$file" "$key")
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+    return 0
+  fi
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done < "$file"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# The window= alias recorded beside this terminal id, or failure when none
+# or more than one distinct alias claims it. Never writes the meta file.
+fm_backend_orca_window_for_terminal() {  # <terminal-id>
+  local state meta term window found=''
+  state=$(fm_backend_orca_state_dir) || return 1
+  [ -d "$state" ] || return 1
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    term=$(fm_backend_orca_meta_value "$meta" terminal) || continue
+    [ "$term" = "$1" ] || continue
+    window=$(fm_backend_orca_meta_value "$meta" window) || continue
+    if [ -n "$found" ] && [ "$found" != "$window" ]; then
+      return 1
+    fi
+    found=$window
+  done
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+fm_backend_orca_attempt() {  # orca argv... ; 0 on accepted JSON, else stored diagnostics
+  local out rc=0 errfile jok_err
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-orca-attempt.XXXXXX") || return 1
+  out=$("$@" 2>"$errfile") || rc=$?
+  FM_ORCA_LAST_STDOUT=$out
+  if [ "$rc" -eq 0 ]; then
+    jok_err=$(mktemp "${TMPDIR:-/tmp}/fm-orca-json.XXXXXX") || {
+      rm -f "$errfile"
+      return 1
+    }
+    if printf '%s' "$out" | fm_backend_orca_json_ok 2>"$jok_err"; then
+      rm -f "$errfile" "$jok_err"
+      FM_ORCA_LAST_STDERR=
+      FM_ORCA_LAST_RC=0
+      return 0
+    else
+      # An if whose condition fails is itself status 0, so the failure has to
+      # be read inside else or a stale handle looks accepted.
+      rc=$?
+    fi
+    FM_ORCA_LAST_STDERR=$(cat "$jok_err")
+    rm -f "$jok_err"
+  else
+    FM_ORCA_LAST_STDERR=$(cat "$errfile")
+  fi
+  rm -f "$errfile"
+  FM_ORCA_LAST_RC=$rc
+  return "$rc"
+}
+
+fm_backend_orca_json_is_stale() {
+  node -e '
+const fs = require("fs");
+const raw = fs.readFileSync(0, "utf8").trim();
+if (!raw) process.exit(1);
+let data;
+try { data = JSON.parse(raw); } catch (err) { process.exit(1); }
+if (data.ok !== false) process.exit(1);
+const err = data.error || {};
+const code = String(err.code || "");
+const msg = String(err.message || "");
+if (code === "terminal_handle_stale" || msg.indexOf("terminal_handle_stale") !== -1 || msg.indexOf("terminal handle stale") !== -1) {
+  process.exit(0);
+}
+process.exit(1);
+'
+}
+
+fm_backend_orca_last_stale() {
+  if printf '%s' "${FM_ORCA_LAST_STDOUT:-}" | fm_backend_orca_json_is_stale; then
+    return 0
+  fi
+  case "${FM_ORCA_LAST_STDERR:-}" in
+    *terminal_handle_stale*|*"terminal handle stale"*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_backend_orca_replay_last() {
+  if [ -n "${FM_ORCA_LAST_STDERR:-}" ]; then
+    printf '%s' "$FM_ORCA_LAST_STDERR" >&2
+  fi
+  return "${FM_ORCA_LAST_RC:-1}"
+}
+
+# Prints one replacement handle, or fails. Exit 2 from the picker means the
+# named workspace answered with more than one live pane: do not scan elsewhere.
+fm_backend_orca_pick_terminal() {  # <stale-id> <window> <named|title> ; JSON on stdin
+  node -e '
+const fs = require("fs");
+const stale = process.argv[1];
+const windowName = process.argv[2];
+const mode = process.argv[3];
+const raw = fs.readFileSync(0, "utf8").trim();
+function fail(code) { process.exit(code); }
+if (!raw) fail(1);
+let data;
+try { data = JSON.parse(raw); } catch (err) { fail(1); }
+if (!data || data.ok === false) fail(1);
+const result = data.result || {};
+if (result.truncated === true) fail(1);
+const terms = Array.isArray(result.terminals) ? result.terminals : [];
+function namesWindow(title) {
+  if (typeof title !== "string" || !windowName) return false;
+  if (title === windowName) return true;
+  return title.endsWith(" - " + windowName) || title.endsWith(" | " + windowName);
+}
+function usable(term) {
+  if (!term || typeof term.handle !== "string" || !term.handle) return false;
+  if (/[\s]/.test(term.handle) || term.handle === stale) return false;
+  if (term.orphaned === true || term.connected === false || term.writable === false) return false;
+  return true;
+}
+const live = terms.filter(usable);
+if (mode === "named") {
+  if (live.length === 1) {
+    process.stdout.write(live[0].handle);
+    process.exit(0);
+  }
+  const titled = live.filter(term => namesWindow(term.title));
+  if (titled.length === 1) {
+    process.stdout.write(titled[0].handle);
+    process.exit(0);
+  }
+  if (live.length > 1) fail(2);
+  fail(1);
+}
+const titled = live.filter(term => namesWindow(term.title));
+if (titled.length === 1) {
+  process.stdout.write(titled[0].handle);
+  process.exit(0);
+}
+fail(1);
+' "$1" "$2" "$3"
+}
+
+fm_backend_orca_resolve_live_terminal() {  # <stale-terminal-id>
+  local stale=$1 window named_json title_json handle pick_rc
+  window=$(fm_backend_orca_window_for_terminal "$stale") || return 1
+  case "$window" in
+    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  named_json=$(orca terminal list --worktree "name:$window" --limit 200 --json 2>/dev/null) || true
+  pick_rc=0
+  handle=$(printf '%s' "$named_json" | fm_backend_orca_pick_terminal "$stale" "$window" named) || pick_rc=$?
+  if [ "$pick_rc" -eq 0 ] && [ -n "$handle" ]; then
+    printf '%s' "$handle"
+    return 0
+  fi
+  if [ "$pick_rc" -eq 2 ]; then
+    return 1
+  fi
+  title_json=$(orca terminal list --limit 200 --json 2>/dev/null) || true
+  pick_rc=0
+  handle=$(printf '%s' "$title_json" | fm_backend_orca_pick_terminal "$stale" "$window" title) || pick_rc=$?
+  if [ "$pick_rc" -eq 0 ] && [ -n "$handle" ]; then
+    printf '%s' "$handle"
+    return 0
+  fi
+  return 1
+}
+
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>
   local terminal=$1 text=$2
   fm_backend_orca_tool_check || return 1
@@ -187,9 +376,29 @@ fm_backend_orca_send_text_line() {  # <terminal-id> <text>
 }
 
 fm_backend_orca_send_literal() {  # <terminal-id> <text>
-  local terminal=$1 text=$2
+  local terminal=$1 text=$2 live rc=0
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --json
+  FM_ORCA_RESOLVED_TERMINAL=
+  if fm_backend_orca_attempt orca terminal send --terminal "$terminal" --text "$text" --json; then
+    FM_ORCA_RESOLVED_TERMINAL=$terminal
+    return 0
+  else
+    rc=$?
+  fi
+  if fm_backend_orca_last_stale; then
+    live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
+    if [ -n "$live" ]; then
+      if fm_backend_orca_attempt orca terminal send --terminal "$live" --text "$text" --json; then
+        FM_ORCA_RESOLVED_TERMINAL=$live
+        return 0
+      else
+        fm_backend_orca_replay_last
+        return $?
+      fi
+    fi
+  fi
+  fm_backend_orca_replay_last
+  return "$rc"
 }
 
 fm_backend_orca_remove_worktree() {  # <worktree-id>
@@ -268,102 +477,49 @@ fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pe
   printf '%s' "$verdict"
 }
 
-# fm_backend_orca_recorded_window: <recorded-target> -> the stable `window=`
-# alias recorded for it in this home's task metadata. Read-only send-time
-# lookup through the owning helpers (bin/fm-backend.sh); it fails rather than
-# guesses when no state dir, no matching meta, or no window is available, and
-# it never writes a meta file.
-fm_backend_orca_recorded_window() {  # <recorded-target>
-  local target=$1 state meta window
-  [ -n "$target" ] || return 1
-  declare -F fm_backend_meta_for_window >/dev/null 2>&1 || return 1
-  declare -F fm_meta_get >/dev/null 2>&1 || return 1
-  state=${STATE:-${FM_STATE_OVERRIDE:-${FM_HOME:+$FM_HOME/state}}}
-  [ -n "$state" ] && [ -d "$state" ] || return 1
-  meta=$(fm_backend_meta_for_window "$target" "$state") || return 1
-  window=$(fm_meta_get "$meta" window)
-  [ -n "$window" ] || return 1
-  printf '%s' "$window"
-}
-
-# fm_backend_orca_live_terminal: <window> -> the live terminal handle Orca
-# reports for that worktree NOW, via Orca's native worktree selector
-# `name:<window>` (the recorded window= IS the Orca worktree name that
-# fm-spawn created). Prefers a writable connected pane; fails on an
-# unresolvable worktree, an empty terminal list, or a non-handle row. Its
-# stderr stays suppressed: a failed re-resolution must surface the original
-# recorded-handle failure, never a second confusing error.
-fm_backend_orca_live_terminal() {  # <window>
-  local out
-  [ -n "${1:-}" ] || return 1
-  fm_backend_orca_tool_check || return 1
-  out=$(orca terminal list --worktree "name:$1" --json 2>/dev/null) || return 1
-  printf '%s' "$out" | node -e '
-const fs = require("fs");
-let data;
-try {
-  data = JSON.parse(fs.readFileSync(0, "utf8"));
-} catch (err) {
-  process.exit(1);
-}
-if (data.ok === false) process.exit(1);
-const list = (data.result || {}).terminals;
-if (!Array.isArray(list) || list.length === 0) process.exit(1);
-function handle(v) {
-  if (typeof v === "string" || typeof v === "number") return String(v);
-  return "";
-}
-const pick = list.find((t) => t && t.writable === true && t.connected !== false)
-  || list.find((t) => t && t.writable === true)
-  || list.find((t) => t);
-const h = pick ? handle(pick.handle) : "";
-if (!h) process.exit(1);
-process.stdout.write(h);
-'
-}
-
-# fm_backend_orca_retarget: <recorded-target> <captured-failure> -> a live
-# handle to retry on, or fail. It engages ONLY for an endpoint-identity
-# rejection - the one class of failure that proves Orca refused the write (so
-# no text was typed) because the recorded handle is no longer the pane's - and
-# only when the window path returns a DIFFERENT live handle. Everything else,
-# including any resolution failure, returns 1 so the caller falls back to
-# today's exact recorded-handle failure and its durable re-ring doctrine.
-fm_backend_orca_retarget() {  # <recorded-target> <captured-failure>
-  local recorded=$1 err=$2 window live
-  case "$err" in
-    *terminal_handle_stale* | *terminal_not_writable* | *terminal_not_found*) ;;
-    *) return 1 ;;
-  esac
-  window=$(fm_backend_orca_recorded_window "$recorded") || return 1
-  live=$(fm_backend_orca_live_terminal "$window") || return 1
-  [ -n "$live" ] && [ "$live" != "$recorded" ] || return 1
-  printf '%s' "$live"
-}
-
-fm_backend_orca_send_key() {  # <terminal-id> <key>
-  local terminal=$1 key=$2 err='' rc=0 live
-  fm_backend_orca_tool_check || return 1
+fm_backend_orca_send_key_once() {  # <terminal-id> <key>
+  local terminal=$1 key=$2
   case "$key" in
-    C-c|ctrl+c|Ctrl-c|Ctrl-C) set -- --interrupt ;;
-    Enter|enter) set -- --text "" --enter ;;
+    C-c|ctrl+c|Ctrl-c|Ctrl-C)
+      fm_backend_orca_attempt orca terminal send --terminal "$terminal" --interrupt --json
+      ;;
+    Enter|enter)
+      fm_backend_orca_attempt orca terminal send --terminal "$terminal" --text "" --enter --json
+      ;;
     *)
       echo "error: unsupported Orca key '$key'" >&2
       return 1
       ;;
   esac
-  # Capture the failure instead of streaming it: on the success path the
-  # capture is empty and the byte path is today's exactly, while a captured
-  # identity failure earns one window re-resolution before the original
-  # stderr (and exit code) is replayed unchanged as the fallback.
-  rc=0
-  err=$(fm_backend_orca_run_json orca terminal send --terminal "$terminal" "$@" --json 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] && return 0
-  if live=$(fm_backend_orca_retarget "$terminal" "$err"); then
-    fm_backend_orca_run_json orca terminal send --terminal "$live" "$@" --json
-    return $?
+}
+
+fm_backend_orca_send_key() {  # <terminal-id> <key>
+  local terminal=$1 key=$2 live rc=0
+  fm_backend_orca_tool_check || return 1
+  case "$key" in
+    C-c|ctrl+c|Ctrl-c|Ctrl-C|Enter|enter) ;;
+    *)
+      echo "error: unsupported Orca key '$key'" >&2
+      return 1
+      ;;
+  esac
+  if fm_backend_orca_send_key_once "$terminal" "$key"; then
+    return 0
+  else
+    rc=$?
   fi
-  [ -z "$err" ] || printf '%s\n' "$err" >&2
+  if fm_backend_orca_last_stale; then
+    live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
+    if [ -n "$live" ]; then
+      if fm_backend_orca_send_key_once "$live" "$key"; then
+        return 0
+      else
+        fm_backend_orca_replay_last
+        return $?
+      fi
+    fi
+  fi
+  fm_backend_orca_replay_last
   return "$rc"
 }
 
@@ -371,31 +527,17 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # verify-and-retry-Enter loop (bin/fm-composer-lib.sh:
 # fm_composer_submit_retry_core) against the shared composer verdict, so a
 # slash-command popup placeholder fill gets the required second Enter without
-# duplicating text. The literal typing and every Enter and composer read after
-# it follow ONE target: when Orca rejects the typed literal on the recorded
-# handle with an endpoint-identity error, the window re-resolution replaces
-# that target once, and the retry types the text (still exactly once as far as
-# the pane is concerned - the rejected write typed nothing) and carries the
-# same live handle through Enter and verification. A rejected literal with no
-# working window path falls back to today's stderr plus send-failed.
+# duplicating text.
 fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 err='' rc=0 live
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 target
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
-  rc=0
-  err=$(fm_backend_orca_send_literal "$terminal" "$text" 2>&1) || rc=$?
-  if [ "$rc" -ne 0 ] && live=$(fm_backend_orca_retarget "$terminal" "$err"); then
-    terminal=$live
-    rc=0
-    err=$(fm_backend_orca_send_literal "$terminal" "$text" 2>&1) || rc=$?
-  fi
-  if [ "$rc" -ne 0 ]; then
-    [ -z "$err" ] || printf '%s\n' "$err" >&2
-    printf 'send-failed'
-    return 0
-  fi
+  # A stale recorded id is retried once through window= inside send_literal.
+  # Enter and the composer read then use that live id, still typing the text once.
+  fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
+  target=${FM_ORCA_RESOLVED_TERMINAL:-$terminal}
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
-    "$terminal" "$retries" "$sleep_s"
+    "$target" "$retries" "$sleep_s"
 }
 
 # fm_backend_orca_kill: close one recorded task terminal. A missing CLI is a
