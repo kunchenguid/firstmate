@@ -24,6 +24,11 @@ mode=(h/'mode').read_text().strip() if (h/'mode').exists() else 'started'
 runtime='runtime-moved' if mode=='runtime-moved' else 'runtime-1'
 inc='incarnation-moved' if mode=='incarnation-moved' else 'incarnation-1'
 if a[:2]==['terminal','show']:
+ marker=h/'state/.watcher-down'; rec=h/'state/.codex-orca-continuation.json'
+ if mode=='show-fails-announced' and marker.exists() and marker.read_text().startswith('announced:downtime:'):
+  print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
+ if mode=='show-fails-launching' and rec.exists() and json.loads(rec.read_text()).get('phase')=='launching':
+  print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
  print(json.dumps({'ok':True,'result':{'terminal':{'handle':'term-primary','incarnationId':inc,'worktreeId':'repo::'+str(h),'connected':True,'writable':True,'orphaned':False,'agentIdentity':'codex'}},'_meta':{'runtimeId':runtime}}))
 elif a[:2]==['terminal','create']:
  with (h/'creates').open('a') as f: f.write('create\n')
@@ -239,6 +244,96 @@ class ContinuationTests(unittest.TestCase):
             self.assertEqual((f.home / "state/.wake-queue").read_text(), "")
         self.assertNotEqual(generations[0], generations[1])
         self.assertEqual((f.home / "creates").read_text().count("create"), 1)
+
+    def test_interrupted_handling_turn_is_represented_once(self):
+        f = self.fixture()
+        f.ensure(); f.trigger()
+        f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("handling_confirmed"),
+               "first wake was not delivered and confirmed")
+        generation = f.record()["episode"]["generation"]
+        # The handling turn presents the rows and ends without its ACK.
+        self.assertIn("continuity regression wake", f.drain().stdout)
+        f.trigger()
+        f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("replay_of")
+               and f.record()["episode"].get("handling_confirmed"),
+               "reopened unacknowledged generation was not re-presented")
+        self.assertEqual(f.record()["episode"]["generation"], generation)
+        self.assertEqual(f.record()["episode"]["phase"], "turn-started")
+        self.assertEqual(f.sends()[1]["payload"], f.sends()[0]["payload"])
+        self.assertTrue(f.sends()[1]["healthy"])
+        f.drain()
+        f.trigger()
+        f.wait(lambda: f.call("ensure").returncode != 0, "exhausted re-presentation was not surfaced")
+        time.sleep(2.6)
+        self.assertEqual(len(f.sends()), 2)
+        f.ack()
+        self.assertEqual(f.call("ensure").returncode, 0)
+
+    def test_restarted_owner_represents_interrupted_handling_once(self):
+        f = self.fixture()
+        old = f.ensure(); f.trigger()
+        f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("handling_confirmed"),
+               "first wake was not delivered and confirmed")
+        generation = f.record()["episode"]["generation"]
+        f.drain()
+        os.kill(old["owner_pid"], signal.SIGKILL)
+        f.wait(lambda: not json.loads(f.call("status").stdout)["ready"], "owner death not detected")
+        new = f.ensure()
+        self.assertNotEqual(new["generation"], old["generation"])
+        f.trigger()
+        f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("replay_of"),
+               "restarted owner never re-presented the interrupted generation")
+        self.assertEqual(f.record()["episode"]["generation"], generation)
+        self.assertTrue(f.sends()[1]["healthy"])
+        time.sleep(2.6)
+        self.assertEqual(len(f.sends()), 2)
+        f.ack()
+
+    def test_before_send_refusal_records_no_unsent_episode(self):
+        f = self.fixture(mode="show-fails-announced")
+        f.ensure(); f.trigger()
+        f.wait(lambda: f.record().get("phase") == "failed", "before-send refusal was not surfaced")
+        self.assertEqual(f.sends(), [])
+        self.assertNotIn("episode", f.record())
+        (f.home / "mode").write_text("started")
+        f.ensure()
+        f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "durable wake was never presented after a before-send refusal")
+        self.assertTrue(f.sends()[0]["healthy"])
+        presented = f.drain()
+        self.assertIn("continuity regression wake", presented.stdout)
+        f.ack(presented)
+
+    def test_failed_confirmed_bootstrap_does_not_wedge_ensure(self):
+        f = self.fixture(mode="show-fails-launching")
+        p = f.call("ensure", "--seconds", "90")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(f.record()["phase"], "failed")
+        self.assertIsNone(f.record()["owner_pid"])
+        (f.home / "mode").write_text("started")
+        f.ensure()
+        self.assertEqual((f.home / "creates").read_text().count("create"), 2)
+
+    def test_ensure_waits_for_live_owner_rearm(self):
+        code = TMP / (self._testMethodName + "-code")
+        (code / "bin").mkdir(parents=True)
+        for source in (ROOT / "bin").iterdir():
+            if source.name != "fm-watch-arm.sh":
+                (code / "bin" / source.name).symlink_to(source, target_is_directory=source.is_dir())
+        arm = code / "bin/fm-watch-arm.sh"
+        arm.write_text('#!/usr/bin/env bash\nif [ -f "$FM_HOME/slow-arm" ] && [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then sleep 4; fi\n'
+                       + (ROOT / "bin/fm-watch-arm.sh").read_text())
+        arm.chmod(0o700)
+        f = self.fixture(code=code)
+        first = f.ensure()
+        (f.home / "slow-arm").touch(); f.trigger()
+        f.wait(lambda: f.record().get("phase") == "arming", "owner never entered its re-arm window")
+        p = f.call("ensure")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["owner_pid"], first["owner_pid"])
+        f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "re-armed wake was not delivered")
+        f.ack()
 
     def test_external_inbox_rejection_and_owner_replacement(self):
         f = self.fixture(mode="reject")
