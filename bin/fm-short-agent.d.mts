@@ -7,8 +7,9 @@ export interface ShortRequest {
     { action: 'merge'; task: string; url: string } |
     { action: 'cleanup'; task: string }
   )[] };
+  bash?: { expiresAt: number; authority: string; cwd: string; scope: string; exclusions: string[] };
 }
-export interface ShortResult { id: string; state: string; evidence: string; summary?: string }
+export interface ShortResult { id: string; state: string; evidence: string; summary?: string; bash?: { index: number; state: string; exitCode?: number }[] }
 export class ShortAgents {
   constructor(home: string, root?: string);
   submit(request: ShortRequest, launch?: boolean): ShortResult;

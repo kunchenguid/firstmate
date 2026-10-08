@@ -31,22 +31,34 @@ function successfulNotificationBinding(home, id) {
     const receipts = steps.map((step, index) => json(path.join(dir, `operation-${index}.receipt.json`)));
     if (receipts.some((receipt, index) => receipt.id !== id || receipt.nonce !== request.nonce ||
         receipt.index !== index || receipt.action !== receiptAction(steps[index]) || receipt.state !== 'completed')) return null;
+    const bashIntents = fs.readdirSync(dir).filter(name => /^bash-[0-9]+\.intent\.json$/.test(name)).sort((a, b) => Number(a.match(/[0-9]+/)[0]) - Number(b.match(/[0-9]+/)[0]));
+    const bashReceipts = request.input?.bash ? bashIntents.map((name, index) => {
+      const intent = json(path.join(dir, name));
+      const receipt = json(path.join(dir, name.replace('.intent.json', '.receipt.json')));
+      if (intent.nonce !== request.nonce || intent.index !== index || intent.cwd !== request.input.bash.cwd ||
+          receipt.nonce !== request.nonce || receipt.index !== index || receipt.command !== intent.command || receipt.cwd !== intent.cwd ||
+          !['completed', 'failed'].includes(receipt.state)) throw Error('invalid Bash receipt');
+      return receipt;
+    }) : [];
+    if (request.input?.bash && (!bashReceipts.length || !bashReceipts.some(receipt => receipt.state === 'completed'))) return null;
     const receiptText = receipts.length
       ? `\n\nVerified operation receipts:\n${receipts.map(receipt => JSON.stringify(receipt)).join('\n')}`
       : '';
+    const bashReceiptText = bashReceipts.length ? `\n\nVerified Bash command receipts: ${bashReceipts.length}; retained beside the durable result.` : '';
     if (withinCharacters(result.summary, SHORT_RESULT_INLINE_CHARACTERS)) {
       return {
         inline: true,
         summary: result.summary,
-        notification: `${id}: completed.\n\nResult:\n${result.summary}${receiptText}\n\nDurable result: ${dir}/result.json`,
+        notification: `${id}: completed.\n\nResult:\n${result.summary}${receiptText}${bashReceiptText}\n\nDurable result: ${dir}/result.json`,
       };
     }
     const reference = `state/short-agents/${id}/result.json`;
     const receiptNotice = receipts.length
       ? `\n\nVerified operation receipts: ${receipts.length}; retained beside the durable result.`
       : '';
+    const bashReceiptNotice = bashReceipts.length ? `\n\nVerified Bash command receipts: ${bashReceipts.length}; retained beside the durable result.` : '';
     const notification = `${id}: completed.\n\nResult exceeds the ${SHORT_RESULT_INLINE_CHARACTERS}-Unicode-character inline notification limit. ` +
-      `Load the complete unchanged result with fm_short_task action=result for this ShortTask.${receiptNotice}` +
+      `Load the complete unchanged result with fm_short_task action=result for this ShortTask.${receiptNotice}${bashReceiptNotice}` +
       `\n\nDurable result relative to FM_HOME: ${reference}`;
     if (!withinCharacters(notification, SHORT_RESULT_NOTICE_CHARACTERS)) return null;
     return { inline: false, summary: result.summary, notification };

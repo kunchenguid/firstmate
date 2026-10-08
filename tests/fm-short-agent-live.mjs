@@ -69,6 +69,17 @@ try {
     parentMessages:contextRecord.parentMessages,childTools:contextRecord.tools,parentSentinelExcluded:!context.includes(sentinel),journalSentinelExcluded:!journal.includes(sentinel),
     runtime:runtimeRecord,readEvents:journalRecords.filter(event=>event.type==='read').length,projectsCreated:fs.existsSync(path.join(home,'projects')),
     childFinishedAt:result.finishedAt,parentReplyAt,resultBytes:Buffer.byteLength(JSON.stringify(result)),contextBytes:Buffer.byteLength(context),journalBytes:Buffer.byteLength(journal),result};
+  const bashDir=path.join(home,'bash-fixture');fs.mkdirSync(bashDir);fs.writeFileSync(path.join(bashDir,'value.txt'),'original');
+  const bashInput={key:randomUUID(),goal:"Use Bash. First run exactly: printf 'changed' > value.txt . Then make a separate Bash call that runs exactly: cat value.txt . Report the observed final contents.",acceptance:'The first command changes value.txt and a separate second Bash command reads back exactly changed.',provider:model.provider,model:model.id,materials:[],bash:{authority:'authorized live test of one disposable fixture',cwd:bashDir,scope:'Replace value.txt with changed and read back value.txt',exclusions:['No access outside this fixture','No deletion, merge, sync, task cleanup, credential use, security change, or service restart'],expiresAt:Date.now()+120000}};
+  const bashBegan=Date.now();const bashSubmit=await session.getToolDefinition('fm_short_submit').execute('lab-bash',bashInput);const bashAccepted=JSON.parse(bashSubmit.content[0].text),bashReturned=Date.now();assert.equal(bashAccepted.state,'accepted');
+  await session.prompt('Reply exactly MAIN_BASH_RESPONSIVE. Do not use tools.');const bashReply=Date.now();assert.match(session.getLastAssistantText(),/MAIN_BASH_RESPONSIVE/);
+  let bashResult;for(let n=0;n<1300;n++){bashResult=service.status(bashAccepted.id);if(bashResult.finishedAt)break;await new Promise(r=>setTimeout(r,100));}
+  assert.equal(bashResult.state,'completed',JSON.stringify(bashResult));assert.ok(bashReply<bashResult.finishedAt,'parent replied before Bash child completed');assert.equal(fs.readFileSync(path.join(bashDir,'value.txt'),'utf8'),'changed');assert.ok(bashResult.bash.length>=2,JSON.stringify(bashResult));assert.ok(bashResult.bash.every(item=>item.state==='completed'));
+  const bashTaskDir=service.dir(bashAccepted.id),bashContext=JSON.parse(fs.readFileSync(path.join(bashTaskDir,'context.json'))),bashRuntime=JSON.parse(fs.readFileSync(path.join(bashTaskDir,'runtime.json'))),bashPlugin=JSON.parse(fs.readFileSync(path.join(bashTaskDir,'plugin-result.json')));
+  assert.deepEqual([...bashContext.tools].sort(),['bash','read_material']);assert.deepEqual([...bashRuntime.tools].sort(),['bash','read_material']);assert.deepEqual([...bashPlugin.tools].sort(),['bash','read_material']);assert.equal(bashContext.parentMessages,0);assert.ok(!JSON.stringify(bashContext).includes(sentinel));
+  const bashIntents=fs.readdirSync(bashTaskDir).filter(name=>/^bash-[0-9]+\.intent\.json$/.test(name)).sort();const bashReceipts=bashIntents.map(name=>JSON.parse(fs.readFileSync(path.join(bashTaskDir,name.replace('.intent.json','.receipt.json')))));
+  assert.ok(bashIntents.map(name=>JSON.parse(fs.readFileSync(path.join(bashTaskDir,name))).command).some(command=>command.includes('printf')));assert.ok(bashIntents.map(name=>JSON.parse(fs.readFileSync(path.join(bashTaskDir,name))).command).some(command=>command.trim()==='cat value.txt'));assert.ok(bashReceipts.some(receipt=>receipt.output?.output==='changed'));
+  evidence.bash={submitMs:bashReturned-bashBegan,parentReplyMs:bashReply-bashReturned,parentReplyAt:bashReply,childFinishedAt:bashResult.finishedAt,result:bashResult,context:bashContext,runtime:bashRuntime,receipts:bashReceipts};
   const git=(...args)=>execFileSync('git',args,{encoding:'utf8',stdio:['ignore','pipe','pipe'],env:{...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_AUTHOR_NAME:'test',GIT_AUTHOR_EMAIL:'test@example.invalid',GIT_COMMITTER_NAME:'test',GIT_COMMITTER_EMAIL:'test@example.invalid'}}).trim();
   const project=path.join(home,'sync-project'),remote=path.join(home,'remote.git'),seed=path.join(home,'seed');
   git('init','--bare','--initial-branch=main',remote);git('clone',remote,seed);
@@ -85,9 +96,10 @@ try {
   const failedTasks=[];
   try {
     for(const name of proxyNames) process.env[name]=/no_proxy/i.test(name)?'':'http://127.0.0.1:1';
-    for(const operations of [undefined,opInput.operations]) {
-      const input={...opInput,key:randomUUID(),...(operations?{operations}:{})};
-      if(!operations)delete input.operations;
+    for(const mode of ['snapshot','operations','bash']) {
+      const input={...opInput,key:randomUUID()};
+      if(mode!=='operations')delete input.operations;
+      if(mode==='bash')input.bash={...bashInput.bash,expiresAt:Date.now()+120000};
       failedTasks.push(service.submit(input));
     }
   } finally {
@@ -102,6 +114,7 @@ try {
     const transport=records.filter(e=>e.type==='transport_error');assert.ok(transport.some(e=>e.codes.includes('ECONNREFUSED')),JSON.stringify(transport));
     assert.ok(records.some(e=>e.message?.errorMessage==='fetch failed'));
     assert.ok(!fs.existsSync(path.join(failureDir,'operation-0.intent.json')));assert.ok(!fs.existsSync(path.join(failureDir,'operation-0.receipt.json')));
+    assert.ok(!fs.existsSync(path.join(failureDir,'bash-0.intent.json')));assert.ok(!fs.existsSync(path.join(failureDir,'bash-0.receipt.json')));
     evidence.transportCounterfactual.push({id:failed.id,result,transport});
   }
   assert.equal(git('-C',project,'rev-parse','HEAD'),beforeHead,'failed model requests made no clone change');

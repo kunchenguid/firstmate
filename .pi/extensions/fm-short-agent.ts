@@ -78,7 +78,7 @@ export default function (pi: ExtensionAPI) {
   pi.on('session_shutdown', () => { active = false; if (timer) clearInterval(timer); timer = undefined; });
   pi.registerTool({
     name: 'fm_short_submit', label: 'Submit short task',
-    description: 'Offload an analysis or explicitly authorized finite operation chain to an independent headless Pi session. Returns durable ID immediately. Defaults to openai-codex/gpt-5.6-luna; explicit authenticated overrides are preserved. Firstmate applies no task input, output, request, tool-call, or wall-clock budget; provider and model context limits still apply. Operations require concrete existing authority, exact targets and expiry; files are canonical explicit text snapshots. Reuse key only for identical retries. No terminal/worktree or parent history.',
+    description: 'Offload an independent analysis, explicitly authorized finite operation chain, or finite Bash task to an independent headless Pi session. Returns durable ID immediately. Defaults to openai-codex/gpt-5.6-luna; explicit authenticated overrides are preserved. Firstmate applies no task input, output, request, tool-call, or wall-clock budget; provider and model context limits still apply. Bash requires concrete existing authority, a canonical cwd, exact scope, exclusions and expiry; it is not a path sandbox and must not bypass existing merge, sync, cleanup, discard, credential, security, or restart owners. Files are canonical explicit text snapshots. Reuse key only for identical retries. No terminal/worktree or parent history.',
     parameters: Type.Object({ key: Type.String(), goal: Type.String(), acceptance: Type.String(), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()),
       operations: Type.Optional(Type.Object({ expiresAt: Type.Integer(), authority: Type.String(), steps: Type.Array(Type.Union([
         Type.Object({ action: Type.Literal('sync'), project: Type.String() }),
@@ -87,6 +87,7 @@ export default function (pi: ExtensionAPI) {
         Type.Object({ action: Type.Literal('merge'), task: Type.String(), url: Type.String() }),
         Type.Object({ action: Type.Literal('cleanup'), task: Type.String() }),
       ]), { minItems: 1, maxItems: 4 }) })),
+      bash: Type.Optional(Type.Object({ expiresAt: Type.Integer(), authority: Type.String(), cwd: Type.String(), scope: Type.String(), exclusions: Type.Array(Type.String(), { minItems: 1 }) })),
       materials: Type.Array(Type.String()),
     }),
     async execute(_id, args) {

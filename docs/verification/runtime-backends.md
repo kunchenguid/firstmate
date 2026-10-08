@@ -1213,6 +1213,20 @@ Herdr has no atomic compare-and-close transaction, so concurrent external mutati
 
 ## Pi headless short tasks
 
+On 2026-10-08 (Asia/Shanghai), Pi 1.1.0, Node v22.22.2, and `pi-openai-codex-compat` 0.0.21 passed the candidate ShortTask guard with authenticated `openai-codex/gpt-5.6-luna` for snapshot analysis, a per-task Bash grant, and a fixed operation chain.
+The Bash child received only `read_material` and Pi's native `bash`, excluded the parent sentinel and history, wrote `changed` to one file in an isolated disposable directory, then made a separate Bash call that read back exactly `changed`.
+Its two durable receipts recorded the exact commands, bound working directory, zero exit codes, and captured output; MAIN executed no child command and answered another model prompt before the child finished.
+Three proxy-isolated counterfactual submissions covered snapshot, fixed-operation, and Bash modes; each stopped after one failed provider request with zero tool calls and no operation or Bash intent.
+
+```text
+$ FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh
+installed plugin initialization, handler behavior and resource exclusion passed
+ok - real Pi short task stays independent while the parent accepts another prompt
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=17915
+```
+
+This proves the installed native tool integration and model-directed write/readback flow in a harmless fixture, not operating-system confinement of arbitrary Bash or permission to use it for unlisted lifecycle owners.
+
 On 2026-09-28, the portable exact-candidate suites passed after removing Firstmate's short-task input, output, request, tool-call, and wall-clock budgets while retaining operation grants, expiry, cancellation, process identity, durable receipts, and no replay.
 The lifecycle fixture submitted a request carrying all four legacy budget fields at values below the former minima and observed completion after the former wall deadline, across more tool calls, model requests, and streamed bytes than those fields allowed.
 It also captured five material entries including a file over 40,000 bytes, accepted goal and acceptance strings above the former limits, preserved a 4,096-character result through the public CLI, and verified that a stored v1 request remains readable without launching a duplicate child.
