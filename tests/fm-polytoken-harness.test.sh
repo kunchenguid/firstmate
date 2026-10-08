@@ -374,7 +374,7 @@ test_polytoken_busy_writer_dispatches_without_argv_and_never_fails() {
   # The unwired events must be inert, and the writer must tolerate being run
   # with no event at all (a hook error breaks the whole turn, verified live).
   POLYTOKEN_HOOK_EVENT=post_model_turn "$script" || fail "an unwired event must still exit 0"
-  POLYTOKEN_HOOK_EVENT= "$script" || fail "an empty event must still exit 0"
+  POLYTOKEN_HOOK_EVENT='' "$script" || fail "an empty event must still exit 0"
   "$script" || fail "a no-event invocation must still exit 0"
   out=$(fm_busy_record_read "$state_real" "$id")
   assert_contains "$out" "idle polytoken-hook" "the unwired events must not rewrite the record"
@@ -675,6 +675,7 @@ case "${1:-}" in
           launch=${literal#". '"}
           launch=${launch%"'"}
           [ -f "$launch" ] || exit 0
+          cat "$launch" >>"${PTFAKE_LAUNCH_LINE_LOG:?}"
           bash -c "$(cat "$launch")" >>"${PTFAKE_LAUNCH_STDOUT:-/dev/null}" 2>&1 || true
           ;;
       esac
@@ -689,9 +690,10 @@ SH
   chmod +x "$fakebin/tmux"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
+  : > "$case_dir/launch-line.log"
   : > "$case_dir/tmux-calls.log"
   : > "$case_dir/launch-stdout.log"
-  printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin" > "$case_dir/record"
+  printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin"
 }
 
 read_polytoken_spawn_record() {
@@ -714,6 +716,7 @@ run_polytoken_spawn() {
     PTFAKE_LOG="$case_dir/launch.log" \
     PTFAKE_TMUX_LOG="$case_dir/tmux-calls.log" \
     PTFAKE_PANE_PATH="$wt" \
+    PTFAKE_LAUNCH_LINE_LOG="$case_dir/launch-line.log" \
     PTFAKE_LAUNCH_STDOUT="$case_dir/launch-stdout.log" \
     PTFAKE_NO_HOOK="${PTFAKE_NO_HOOK:-0}" \
     FM_POLYTOKEN_READY_POLLS="${FM_POLYTOKEN_READY_POLLS:-40}" \
@@ -723,7 +726,7 @@ run_polytoken_spawn() {
 }
 
 test_polytoken_launch_carries_the_hybrid_contract() {
-  local id rec out rc launch meta cfg
+  local id rec out rc launch raw meta cfg
   id="pt-launch-z1-$$"
   rec=$(make_polytoken_spawn_case launch "$id")
   read_polytoken_spawn_record "$rec"
@@ -731,7 +734,24 @@ test_polytoken_launch_carries_the_hybrid_contract() {
     --model zai/glm-5.3-flash --effort low)
   rc=$?
   expect_code 0 "$rc" "polytoken spawn should succeed (output: $out)"
+  # The raw launch line (what the pane shell was told to run) carries the
+  # launch-boundary contract; the fake polytoken's argv (launch.log) carries
+  # what the command actually received after the shell consumed the quoting.
+  raw=$(cat "$CASE_DIR/launch-line.log")
   launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$raw" "--model 'zai/glm-5.3-flash(low)'" \
+    "the launch line must carry the composed model reference"
+  assert_contains "$raw" "env -u CLAUDECODE" \
+    "the launch must clear the inherited launcher marker"
+  assert_contains "$raw" "ORCA_" \
+    "the launch must run the foreign ORCA_/FM_ clearing loop"
+  assert_contains "$raw" "FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION" \
+    "the clearing loop must keep the launch-owned names"
+  assert_not_contains "$raw" "--accept-license-terms" \
+    "the launch must never auto-accept the license terms"
+  assert_not_contains "$raw" "__POLYTOKENBIN__" "the launch left its binary placeholder unsubstituted"
+  assert_not_contains "$raw" "__MODELFLAG__" "the launch left its model placeholder unsubstituted"
+  assert_not_contains "$raw" "__BRIEF__" "the launch left its brief placeholder unsubstituted"
   assert_contains "$launch" "--config-dir" "the launch must name the generated config dir"
   assert_contains "$launch" "$HOME_DIR/state/$id.polytoken-config" \
     "the launch must name this task's generated config dir"
@@ -742,18 +762,11 @@ test_polytoken_launch_carries_the_hybrid_contract() {
   assert_contains "$launch" "--facet firstmate-worker" "the launch must select the worker facet"
   assert_contains "$launch" "--facets-dir" "the launch must name the worktree facets dir"
   assert_contains "$launch" "$WT_DIR/.polytoken/facets" "the facets dir must be the worktree's project layer"
-  assert_contains "$launch" "--model 'zai/glm-5.3-flash(low)'" \
-    "the launch must carry the composed model reference"
+  assert_contains "$launch" "--model zai/glm-5.3-flash(low)" \
+    "the polytoken command must receive the composed model reference"
   assert_contains "$launch" "--prompt" "the launch must carry the brief via --prompt"
-  assert_not_contains "$launch" "--accept-license-terms" \
-    "the launch must never auto-accept the license terms"
-  assert_contains "$launch" "env -u CLAUDECODE" \
-    "the launch must clear the inherited launcher marker"
-  assert_contains "$launch" "ORCA_" \
-    "the launch must run the foreign ORCA_/FM_ clearing loop"
-  assert_not_contains "$launch" "__POLYTOKENBIN__" "the launch left its binary placeholder unsubstituted"
-  assert_not_contains "$launch" "__MODELFLAG__" "the launch left its model placeholder unsubstituted"
-  assert_not_contains "$launch" "__BRIEF__" "the launch left its brief placeholder unsubstituted"
+  assert_contains "$launch" "Exercise Polytoken dispatch" \
+    "the brief text must ride the --prompt argument"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'harness=polytoken' "$meta" "the meta did not record its harness"
   assert_grep 'model=zai/glm-5.3-flash' "$meta" "the meta did not record its model"
@@ -766,6 +779,18 @@ test_polytoken_launch_carries_the_hybrid_contract() {
     "$meta" "the meta did not record the config dir"
   assert_grep "polytoken_sessions_root=$HOME_DIR/state/$id.polytoken-sessions" \
     "$meta" "the meta did not record the sessions root"
+  # The session binding lines are exact whole lines: the sessions listing's
+  # @tsv row carries a fourth field (the daemon pid) that must never be glued
+  # onto the credential path the control verbs address.
+  awk -F= -v want="polytoken_credential=$HOME_DIR/state/$id.polytoken-sessions-v1/0czfake-echo/credential.json" \
+    '$0 == want { found=1 } END { exit !found }' "$meta" \
+    || fail "the credential binding must be the exact listing path, pid-free"
+  awk -F= -v want='polytoken_session=0czfake-echo' \
+    '$0 == want { found=1 } END { exit !found }' "$meta" \
+    || fail "the session binding must be the exact session id"
+  awk -F= -v want='polytoken_port=49999' \
+    '$0 == want { found=1 } END { exit !found }' "$meta" \
+    || fail "the port binding must be the exact port"
   # The generated wiring landed where the launch says it did.
   [ -f "$WT_DIR/.polytoken/hooks.json" ] || fail "the worktree hook layer was not written"
   [ -f "$WT_DIR/.polytoken/facets/firstmate-worker.md" ] || fail "the worker facet was not written"
@@ -777,7 +802,7 @@ test_polytoken_launch_carries_the_hybrid_contract() {
 }
 
 test_polytoken_effort_recorded_but_omitted_when_unlisted() {
-  local id rec out rc launch meta
+  local id rec out rc launch raw meta
   id="pt-xhigh-z2-$$"
   rec=$(make_polytoken_spawn_case xhigh "$id")
   read_polytoken_spawn_record "$rec"
@@ -786,9 +811,12 @@ test_polytoken_effort_recorded_but_omitted_when_unlisted() {
   rc=$?
   expect_code 0 "$rc" "a polytoken spawn with an effort outside the model's set should still succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_contains "$launch" "--model 'zai/glm-5.3-flash'" \
+  assert_contains "$launch" "--model zai/glm-5.3-flash" \
     "the launch must carry the bare reference for an unlisted effort"
   assert_not_contains "$launch" "(medium)" "the launch must not pass the unlisted effort variant"
+  raw=$(cat "$CASE_DIR/launch-line.log")
+  assert_contains "$raw" "--model 'zai/glm-5.3-flash'" \
+    "the raw launch line must carry the bare quoted reference"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'effort=medium' "$meta" "the meta must retain the omitted effort axis"
   pass "fm-spawn: polytoken omits an unlisted effort from the launch but records it"
@@ -805,7 +833,11 @@ test_polytoken_unlisted_model_refuses_before_pane_creation() {
   [ "$rc" -ne 0 ] || fail "an unlisted polytoken model should refuse the spawn"
   assert_contains "$out" "not listed by 'polytoken print models'" \
     "the refusal must name the listing it checked"
-  [ -s "$CASE_DIR/launch.log" ] && fail "an unlisted model created a launch command" || true
+  # The model-validation probe itself logs to the argv log, so the proof no
+  # launch happened is the raw launch line: it is written only when the pane
+  # actually sources the staged launch file.
+  [ ! -s "$CASE_DIR/launch-line.log" ] \
+    || fail "an unlisted model created a launch command"
   pass "fm-spawn: an unlisted polytoken model refuses before pane creation"
 }
 
@@ -831,9 +863,18 @@ test_polytoken_existing_project_hook_layer_refuses() {
   id="pt-ownhooks-z5-$$"
   rec=$(make_polytoken_spawn_case ownhooks "$id")
   read_polytoken_spawn_record "$rec"
-  mkdir -p "$WT_DIR/.polytoken"
+  # A project's own hook layer is tracked content on the project's default
+  # branch: the spawn freshens the pooled worktree to origin's default before
+  # arming, so the layer must ride that base to be present at arm time (an
+  # uncommitted or branch-local file is wiped by the refresh for every
+  # harness, which is the pooled-worktree contract, not a polytoken fact).
+  mkdir -p "$PROJ_DIR/.polytoken"
   printf '[{"name":"project-own","event":"stop","handler":{"bash":"/bin/true"}}]\n' \
-    > "$WT_DIR/.polytoken/hooks.json"
+    > "$PROJ_DIR/.polytoken/hooks.json"
+  git -C "$PROJ_DIR" add .polytoken/hooks.json
+  git -C "$PROJ_DIR" -c user.email=fixture@firstmate.test -c user.name=fixture \
+    commit -q -m "fixture: project polytoken hook layer"
+  git -C "$PROJ_DIR" push -q origin main
   rc=0
   out=$(run_polytoken_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "a spawn into a worktree with its own hook layer should refuse"

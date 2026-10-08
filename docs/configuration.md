@@ -772,6 +772,8 @@ devin is verified for crewmate and scout launches only; a secondmate is refused 
 
 Its private worker config disables Claude Code imports (including the captain's hooks) and, unless the home sets `config/keep-ai-trailers` (see "Commit attribution"), Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
 
+polytoken is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no primary supervision protocol; [its adapter reference](../.agents/skills/harness-adapters/references/harness/polytoken.md) and [polytoken verification](verification/polytoken.md) own the evidence. Its worker's unattended permission posture is the one thing no launch flag can carry: a project config.yaml fully replaces the operator's global config, so `fm-spawn.sh` generates a per-task config dir that mirrors the operator's global config with `default_permission_matcher` enforced to `bypass` (`bypass_plus` is preserved when the operator chose it). The first-start license dialog is a blocker by captain decision, never auto-accepted: fleet launches read the operator's existing acceptance through the real HOME, and a revision bump surfaces as a failed readiness gate, not a silent acceptance.
+
 ### Verification and primary supervision
 
 New harnesses get verified through a supervised trial task before joining the set.
