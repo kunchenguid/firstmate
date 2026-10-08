@@ -17,6 +17,7 @@ FM_POLYTOKEN_SIGNALS_LIVE=1 bash tests/fm-polytoken-signals-live-e2e.test.sh
 ```
 
 The credentialed guard runs the real binary on the cheap `zai/glm-5.3-flash(low)` model inside a throwaway HOME whose XDG config stages a copy of the operator's global config and whose data home stages a copy of the operator's existing license acceptance, so every daemon or TUI write - session trees, logs, even a TUI crash log - lands in the lab, never the operator's store.
+It drives the real Firstmate verbs on a private tmux server: the launch is `bin/fm-spawn.sh`'s generated polytoken command, the steer is `bin/fm-send.sh`, the interrupt, relaunch, and exit are `bin/fm-control.sh`, and liveness is the tmux backend's agent-state read; only worktree allocation uses a `treehouse` stand-in.
 The guard never passes `--accept-license-terms` and never answers the license dialog (the captain's 2026-10-07 decision makes it a blocker).
 Failures name the installed polytoken version.
 
@@ -26,16 +27,13 @@ On 2026-10-07 the refresh invocation completed with exit 0:
 
 ```text
 ok - polytoken 0.8.19: the live model catalog still lists the cheap low-effort reference
-ok - polytoken 0.8.19: the generated config and facet carry the real worker pane
-ok - polytoken 0.8.19: the generated hook opens the busy record on a real turn
-ok - polytoken 0.8.19: the real worker processed its launch prompt
-ok - polytoken 0.8.19: the stop hook closes the busy record on turn end
-ok - polytoken 0.8.19: the stop hook touches the turn-ended marker
-ok - polytoken 0.8.19: fm-harness.sh detects polytoken from a real tool subprocess
-ok - polytoken 0.8.19: the real busy row matches the pinned delivery signature
-ok - polytoken 0.8.19: the REST interrupt cancels and settles a real turn
-ok - polytoken 0.8.19: the cancelled turn renders its Canceled row
-ok - polytoken 0.8.19: /quit stops the real polytoken TUI
+ok - polytoken 0.8.19: fm-spawn's generated launch starts a bound, alive worker on the generated config and facet
+ok - polytoken 0.8.19: the brief ran and fm-harness.sh detects polytoken from a real tool subprocess
+ok - polytoken 0.8.19: the stop hook closes the busy record and touches the turn-ended marker
+ok - polytoken 0.8.19: fm-send steers a real turn that opens the busy record and renders the busy row
+ok - polytoken 0.8.19: fm-control interrupt cancels the real turn over REST and leaves the worker alive
+ok - polytoken 0.8.19: fm-control relaunch replaces the worker through the generated launch and rebinds its session
+ok - polytoken 0.8.19: fm-control exit stops the real worker and the backend reads it dead
 ```
 
 The portable regression (`tests/fm-polytoken-harness.test.sh`) passed all 25 cases the same day.
