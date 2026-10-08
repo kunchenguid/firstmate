@@ -660,6 +660,10 @@ test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer() {
   printf -- '---\nname: firstmate-worker\n---\nproject facet\n' \
     > "$dir/wt/.polytoken/facets/firstmate-worker.md"
   printf 'polytoken' > "$dir/fake/becomes"
+  # The arm resolves the polytoken binary before its hook-layer refusal, so a
+  # stub must stand in on hosts without the real CLI; it is never launched.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/polytoken"
+  chmod +x "$dir/fakebin/polytoken"
   out=$(run_control "$dir" rl45 relaunch --harness polytoken --note "switching runtime"); rc=$?
   [ "$rc" -ne 0 ] || fail "a relaunch onto polytoken over a project hook layer must refuse"$'\n'"$out"
   assert_contains "$out" "not firstmate's to clobber" \
