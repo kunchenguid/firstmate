@@ -60,7 +60,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
   # This pins the emitted agent interface; real-model interpretation is
   # verified in a credentialed development lab, outside deterministic CI.
   case "$out_a" in
-    *'Before reporting this step, run `bin/fm-branch-outcome.sh list --task <task-id>`'*"including captain outcomes MAIN has already acknowledged"*"even in a fresh conversation after a restart"*) ;;
+    *"Before reporting this step, run \`bin/fm-branch-outcome.sh list --task <task-id>\`"*"including captain outcomes MAIN has already acknowledged"*"even in a fresh conversation after a restart"*) ;;
     *) fail "branch prompt does not require durable completion history after a restart" ;;
   esac
   case "$out_a" in
