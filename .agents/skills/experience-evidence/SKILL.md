@@ -91,10 +91,15 @@ Search only skill front matter for a matching JIT trigger before deciding whethe
 
 ```bash
 experience_home=${FM_HOME:?FM_HOME must name the active Firstmate home}
+experience_root=${FM_ROOT_OVERRIDE:-$(git rev-parse --show-toplevel)}
 rg -n -F -i -- '<entity-or-mechanism>' "$experience_home/data/learnings.md"
-for skill_file in "$experience_home"/.agents/skills/*/SKILL.md; do
-  awk 'BEGIN { front=0 } /^---$/ { front++; next } front == 1 { print FILENAME ":" $0 } front >= 2 { exit }' "$skill_file"
-done | rg -F -i -- '<entity-or-mechanism>'
+for skills_dir in "$experience_root/.agents/skills" "$experience_home/.agents/skills"; do
+  [ -d "$skills_dir" ] || continue
+  for skill_file in "$skills_dir"/*/SKILL.md; do
+    [ -f "$skill_file" ] || continue
+    awk 'BEGIN { front=0 } /^---$/ { front++; next } front == 1 { print FILENAME ":" $0 } front >= 2 { exit }' "$skill_file"
+  done
+done | sort -u | rg -F -i -- '<entity-or-mechanism>'
 ```
 
 Load a matched skill normally.
@@ -102,28 +107,27 @@ Treat a promoted rule as a routing lead, then follow its provenance when the cur
 
 ### 2. Locate report candidates by two routes
 
-Search exact entities first.
-Then search tool surface plus symptom or work phase independently, because the useful mechanism may come from a different table, endpoint, or business object.
+Match exact entities first.
+Also match tool surface plus symptom or work phase, because the useful mechanism may come from a different table, endpoint, or business object.
+Filter candidate blocks by those keys before bounding the result list, so common words in unrelated report prose cannot hide a relevant candidate.
 
 ```bash
-rg -l -F -i -g report.md -- '<exact-entity>' "$experience_home/data" | sed -n '1,8p'
-rg -l -F -i -g report.md -- '<tool-surface>' "$experience_home/data" | sed -n '1,8p'
-rg -l -F -i -g report.md -- '<symptom-or-phase>' "$experience_home/data" | sed -n '1,8p'
-```
-
-Keep only reports that contain `schema: firstmate-experience-candidate.v1`, then inspect their candidate sections before reading full reports.
-
-```bash
+candidate_reports=$(
+rg -l -F -g report.md -- 'schema: firstmate-experience-candidate.v1' "$experience_home/data" |
 while IFS= read -r report; do
-  rg -q -F -- 'schema: firstmate-experience-candidate.v1' "$report" && printf '%s\n' "$report"
-done < <(
-  {
-    rg -l -F -i -g report.md -- '<exact-entity>' "$experience_home/data"
-    rg -l -F -i -g report.md -- '<tool-surface>' "$experience_home/data"
-    rg -l -F -i -g report.md -- '<symptom-or-phase>' "$experience_home/data"
-  } | sort -u | sed -n '1,12p'
+  candidate_block=$(awk 'found && /^## / { exit } /^## Reusable experience candidates$/ { found=1 } found { print }' "$report")
+  if printf '%s\n' "$candidate_block" | rg -q -F -i -- '<exact-entity>' || {
+    printf '%s\n' "$candidate_block" | rg -q -F -i -- '<tool-surface>' &&
+    printf '%s\n' "$candidate_block" | rg -q -F -i -- '<symptom-or-phase>'
+  }; then
+    printf '%s\n' "$report"
+  fi
+done | sed -n '1,12p'
 )
-awk 'found && /^## / { exit } /^## Reusable experience candidates$/ { found=1 } found { print }' data/<task-id>/report.md
+printf '%s\n' "$candidate_reports" | while IFS= read -r report; do
+  [ -n "$report" ] || continue
+  awk 'found && /^## / { exit } /^## Reusable experience candidates$/ { found=1 } found { print }' "$report"
+done
 ```
 
 Rank a candidate only after checking keys as conditions rather than treating them as similarity scores.
