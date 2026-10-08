@@ -46,6 +46,39 @@ const history: Row[] = [
 ];
 
 describe("supervision notes", () => {
+  test("a task with a registered second mate icon swaps the boat and follows the anchor, an icon-less task is unchanged", async ($, on) => {
+    const { files, journal } = world(on);
+    files.set(
+      `${HOME}/data/secondmates.md`,
+      [
+        "- fm-icon - Writes (the chapters) (home: /h/w; scope: writing; projects: book; icon: 🎙️; added 2026-10-07)",
+        "- fm-plain - Plain (home: /h/p; scope: plain; projects: x; added 2026-10-07)",
+        "- fm-remote - Far (host: h; root: /r; home: /h/r; scope: far; projects: y; icon: 🔬; added 2026-10-07)",
+        "",
+      ].join("\n"),
+    );
+    files.set(
+      TAIL,
+      tail([
+        { seq: 1, task: "fm-icon", verdict: "routine", summary: "worker healthy" },
+        { seq: 2, task: "fm-icon", verdict: "captain", summary: "PR ready" },
+        { seq: 3, task: "fm-plain", verdict: "routine", summary: "no icon" },
+        { seq: 4, task: "fm-plain", verdict: "captain", summary: "no icon either" },
+        { seq: 5, task: "fm-remote", verdict: "routine", summary: "remote mate" },
+        { seq: 6, task: "fm-unregistered", verdict: "routine", summary: "not a mate" },
+      ]),
+    );
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual([
+      "🎙️ fm-icon: worker healthy",
+      "⚓🎙️ [seq 2] fm-icon: PR ready",
+      "⛵ fm-plain: no icon",
+      "⚓ [seq 4] fm-plain: no icon either",
+      "🔬 fm-remote: remote mate",
+      "⛵ fm-unregistered: not a mate",
+    ]);
+  });
+
   test("session start replays unprocessed captain rows and unread visible routine rows with Calm off", async ($, on) => {
     const { files, journal } = world(on);
     files.set(TAIL, tail(history));

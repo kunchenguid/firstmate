@@ -68,6 +68,7 @@ import {
   firstmateStateDirectory,
   hostHealthNote,
   newOutcomeNotes,
+  parseSecondmateIcons,
   parseHostHealth,
   parseOutcomeMarker,
   parseOutcomeTail,
@@ -307,12 +308,14 @@ async function followTail($: EngineInterface, current: NotesState): Promise<void
   if (tail === undefined) return;
   current.tailStamp = tail.stamp;
   const rows = parseOutcomeTail(tail.text);
+  // The registry sits beside the state directory; it is read again per tail change so an edit shows without a restart.
+  const icons = parseSecondmateIcons(await readText($, `${current.state.replace(/\/[^/]*\/?$/, "")}/data/secondmates.md`));
   let lines: string[];
   if (current.lastSeen === undefined) {
-    lines = replayOutcomeNotes(rows, current.cursor, current.processed, current.shown);
+    lines = replayOutcomeNotes(rows, current.cursor, current.processed, current.shown, icons);
     current.lastSeen = rows[rows.length - 1]?.seq;
   } else {
-    const fresh = newOutcomeNotes(rows, current.lastSeen);
+    const fresh = newOutcomeNotes(rows, current.lastSeen, icons);
     lines = fresh.lines;
     current.lastSeen = fresh.lastSeen;
   }

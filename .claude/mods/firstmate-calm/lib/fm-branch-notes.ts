@@ -72,13 +72,27 @@ export function parseOutcomeMarker(text: string | undefined): number {
   return /^(0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : 0;
 }
 
+/** A registered second mate's id to its optional `icon:` glyph, from data/secondmates.md (bin/fm-secondmate-registry-lib.sh owns the grammar). */
+export type SecondmateIcons = ReadonlyMap<string, string>;
+
+/** The icons of the registry lines that carry one; any other line is skipped. */
+export function parseSecondmateIcons(text: string | undefined): Map<string, string> {
+  const icons = new Map<string, string>();
+  for (const line of (text ?? "").split("\n")) {
+    const match = /^- ([A-Za-z0-9._-]+) - .+;\s*projects:\s*[^;)]*;\s*icon:\s*([^;)]*?)\s*;\s*added\s+\d{4}-\d{2}-\d{2}\)\s*$/.exec(line);
+    if (match !== null && match[2] !== "") icons.set(match[1]!, match[2]!);
+  }
+  return icons;
+}
+
 /** Pi's transcript line for one row, on one line; a silent row has none. */
-export function outcomeNoteLine(row: OutcomeRow): string | undefined {
+export function outcomeNoteLine(row: OutcomeRow, icons?: SecondmateIcons): string | undefined {
   if (row.silent) return undefined;
   const summary = row.summary.replace(/\s*\n\s*/g, " ");
+  const icon = icons?.get(row.task);
   return row.verdict === "captain"
-    ? `${BRANCH_NOTE_ANCHOR} [seq ${row.seq}] ${row.task}: ${summary}`
-    : `${BRANCH_NOTE_BOAT} ${row.task}: ${summary}`;
+    ? `${BRANCH_NOTE_ANCHOR}${icon ?? ""} [seq ${row.seq}] ${row.task}: ${summary}`
+    : `${icon ?? BRANCH_NOTE_BOAT} ${row.task}: ${summary}`;
 }
 
 /**
@@ -93,12 +107,13 @@ export function replayOutcomeNotes(
   cursor: number,
   processed: number,
   shownThrough = 0,
+  icons?: SecondmateIcons,
 ): string[] {
   const shown = shownThrough > (rows[rows.length - 1]?.seq ?? 0) ? 0 : shownThrough;
   const due = rows.filter(
     (row) => row.seq > shown && (row.verdict === "captain" ? row.seq > processed : row.seq > cursor),
   );
-  const lines = due.map(outcomeNoteLine).filter((line): line is string => line !== undefined);
+  const lines = due.map((row) => outcomeNoteLine(row, icons)).filter((line): line is string => line !== undefined);
   if (lines.length <= BRANCH_NOTES_REPLAY_LIMIT) return lines;
   const omitted = lines.length - BRANCH_NOTES_REPLAY_LIMIT;
   return [
@@ -113,11 +128,15 @@ export function replayOutcomeNotes(
  * silently. A tail that ends below the anchor is a replaced store: re-anchor there
  * without replaying it.
  */
-export function newOutcomeNotes(rows: readonly OutcomeRow[], lastSeen: number): { lines: string[]; lastSeen: number } {
+export function newOutcomeNotes(
+  rows: readonly OutcomeRow[],
+  lastSeen: number,
+  icons?: SecondmateIcons,
+): { lines: string[]; lastSeen: number } {
   const last = rows.length === 0 ? lastSeen : rows[rows.length - 1]!.seq;
   if (last < lastSeen) return { lines: [], lastSeen: last };
   const fresh = rows.filter((row) => row.seq > lastSeen);
-  const lines = fresh.map(outcomeNoteLine).filter((line): line is string => line !== undefined);
+  const lines = fresh.map((row) => outcomeNoteLine(row, icons)).filter((line): line is string => line !== undefined);
   const missed = (fresh[0]?.seq ?? lastSeen + 1) - lastSeen - 1;
   if (missed > 0) {
     lines.unshift(

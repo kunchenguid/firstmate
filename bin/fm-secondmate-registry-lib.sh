@@ -4,6 +4,7 @@
 #
 # A generated local record ends with this explicit structured suffix:
 #   (home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
+# Either form may carry an optional `icon: <glyph>;` field between projects and added.
 # A remote record adds its host placement before the existing fields:
 #   (host: ...; root: ...; home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
 # Summary text and scope text are natural language and may contain parentheses
@@ -17,6 +18,7 @@ SECONDMATE_REGISTRY_ROOT=
 SECONDMATE_REGISTRY_HOME=
 SECONDMATE_REGISTRY_SCOPE=
 SECONDMATE_REGISTRY_PROJECTS=
+SECONDMATE_REGISTRY_ICON=
 SECONDMATE_REGISTRY_ADDED=
 SECONDMATE_REGISTRY_REMOTE=0
 SECONDMATE_REGISTRY_LINE=
@@ -33,8 +35,8 @@ secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.l
 
 secondmate_registry_parse_line() {
   local line=$1
-  local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
-  local remote_re='^- ([A-Za-z0-9._-]+) - (.+) \(host:[[:space:]]*([^;)]*);[[:space:]]*root:[[:space:]]*([^;)]*);[[:space:]]*home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
+  local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*(icon:[[:space:]]*([^;)]*);[[:space:]]*)?added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
+  local remote_re='^- ([A-Za-z0-9._-]+) - (.+) \(host:[[:space:]]*([^;)]*);[[:space:]]*root:[[:space:]]*([^;)]*);[[:space:]]*home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*(icon:[[:space:]]*([^;)]*);[[:space:]]*)?added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
   SECONDMATE_REGISTRY_ID=
   SECONDMATE_REGISTRY_SUMMARY=
   SECONDMATE_REGISTRY_HOST=
@@ -42,6 +44,7 @@ secondmate_registry_parse_line() {
   SECONDMATE_REGISTRY_HOME=
   SECONDMATE_REGISTRY_SCOPE=
   SECONDMATE_REGISTRY_PROJECTS=
+  SECONDMATE_REGISTRY_ICON=
   SECONDMATE_REGISTRY_ADDED=
   SECONDMATE_REGISTRY_REMOTE=0
   # Parse the legacy local form first so summary prose that happens to mention
@@ -52,7 +55,8 @@ secondmate_registry_parse_line() {
     SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[3]}
     SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[4]}
     SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[5]}
-    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[6]}
+    SECONDMATE_REGISTRY_ICON=${BASH_REMATCH[7]}
+    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[8]}
   elif [[ "$line" =~ $remote_re ]]; then
     SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
     SECONDMATE_REGISTRY_SUMMARY=${BASH_REMATCH[2]}
@@ -61,7 +65,8 @@ secondmate_registry_parse_line() {
     SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[5]}
     SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[6]}
     SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[7]}
-    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[8]}
+    SECONDMATE_REGISTRY_ICON=${BASH_REMATCH[9]}
+    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[10]}
     SECONDMATE_REGISTRY_REMOTE=1
   else
     return 1
@@ -98,6 +103,7 @@ secondmate_registry_field() {
     home) printf '%s\n' "$SECONDMATE_REGISTRY_HOME" ;;
     scope) printf '%s\n' "$SECONDMATE_REGISTRY_SCOPE" ;;
     projects) printf '%s\n' "$SECONDMATE_REGISTRY_PROJECTS" ;;
+    icon) printf '%s\n' "$SECONDMATE_REGISTRY_ICON" ;;
     remote) printf '%s\n' "$SECONDMATE_REGISTRY_REMOTE" ;;
     *) return 1 ;;
   esac
