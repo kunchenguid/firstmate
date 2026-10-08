@@ -451,6 +451,82 @@ class ContinuationTests(unittest.TestCase):
                "fresh generation after acknowledgement was not delivered")
         f.ack()
 
+    def test_unacked_append_after_ambiguous_delivery_sends_nothing_live(self):
+        f = self.fixture()
+        f.ensure()
+        f.note("ordinary acknowledged history")
+        f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "ordinary delivery missing")
+        f.ack()
+        self.assertTrue((f.home / "state/.watcher-down.acked").read_text().strip())
+        (f.home / "mode").write_text("reject")
+        f.note("external rejected before any acknowledgement")
+        f.wait(lambda: f.record().get("episode", {}).get("phase") == "delivery-rejected", "rejection missing")
+        generation = f.record()["episode"]["generation"]
+        f.note("routine append that supersedes the unacknowledged generation")
+        self.assertNotIn(generation, (f.home / "state/.watcher-down").read_text())
+        (f.home / "mode").write_text("started")
+        time.sleep(4.5)
+        self.assertEqual(len(f.sends()), 2)
+        self.assertEqual(f.record()["episode"]["generation"], generation)
+        refused = f.call("ensure")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("delivery is unconfirmed", refused.stderr)
+        f.ack()
+        self.assertEqual(f.call("ensure").returncode, 0)
+        f.note("fresh append after the superseding generation was acknowledged")
+        f.wait(lambda: len(f.sends()) == 3 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "fresh generation after acknowledgement was not delivered")
+        f.ack()
+
+    def test_unacked_append_and_unproven_evidence_never_relaunch(self):
+        f = self.fixture(mode="reject")
+        first = f.ensure(); f.trigger()
+        f.wait(lambda: f.record().get("episode", {}).get("phase") == "delivery-rejected", "rejection missing")
+        generation = f.record()["episode"]["generation"]
+        os.kill(first["owner_pid"], signal.SIGTERM)
+        f.wait(lambda: subprocess.run(["ps", "-p", str(first["owner_pid"])], capture_output=True).returncode != 0,
+               "terminated owner did not finish cleanup")
+        f.note("routine append over the unacknowledged ambiguous generation")
+        (f.home / "mode").write_text("started")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        time.sleep(2.6)
+        self.assertEqual((f.home / "creates").read_text().count("create"), 1)
+        self.assertEqual(len(f.sends()), 1)
+        f.ack()
+        superseding = (f.home / "state/.watcher-down").read_text().strip().split(":")[-1]
+        evidence = f.home / "state/.watcher-down.acked"
+        evidence.write_text("not acknowledgement evidence\n")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        evidence.unlink()
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        self.assertEqual((f.home / "creates").read_text().count("create"), 1)
+        self.assertEqual(f.record()["episode"]["generation"], generation)
+        self.assertEqual(f.record()["episode"]["phase"], "delivery-rejected")
+        self.assertTrue((f.home / "state/.codex-orca-continuation" / (generation + ".json")).exists())
+        subprocess.run(["bash", str(ROOT / "bin/fm-wake-drain.sh"), "--ack-through", "0", "--recovery-generation", superseding],
+                       env=f.env, check=True, capture_output=True)
+        f.relaunch(first["generation"])
+        time.sleep(2.6)
+        self.assertEqual(len(f.sends()), 1)
+
+    def test_changed_primary_binding_never_resolves_ambiguous_delivery(self):
+        f = self.fixture(mode="reject")
+        first = f.ensure(); f.trigger()
+        f.wait(lambda: f.record().get("episode", {}).get("phase") == "delivery-rejected", "rejection missing")
+        generation = f.record()["episode"]["generation"]
+        os.kill(first["owner_pid"], signal.SIGTERM)
+        f.wait(lambda: subprocess.run(["ps", "-p", str(first["owner_pid"])], capture_output=True).returncode != 0,
+               "terminated owner did not finish cleanup")
+        (f.home / "mode").write_text("incarnation-moved")
+        refused = f.call("ensure")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("delivery is unconfirmed", refused.stderr)
+        time.sleep(2.6)
+        self.assertEqual((f.home / "creates").read_text().count("create"), 1)
+        self.assertEqual(len(f.sends()), 1)
+        self.assertEqual(f.record()["episode"]["generation"], generation)
+
     def test_dead_owner_relaunches_after_ack_and_fresh_append(self):
         f = self.fixture(mode="reject")
         first = f.ensure(); f.trigger()
@@ -538,6 +614,18 @@ class ContinuationTests(unittest.TestCase):
         p = f.call("abandon-launch", "--generation", generation, env=moved)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(f.record()["phase"], "failed")
+
+    def test_late_owner_never_runs_an_abandoned_launch(self):
+        f = self.fixture(mode="create-ambiguous")
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        generation = f.record()["generation"]
+        self.assertEqual(f.call("abandon-launch", "--generation", generation).returncode, 0)
+        late = f.call("run", "--generation", generation, "--seconds", "2")
+        self.assertNotEqual(late.returncode, 0)
+        self.assertIn("no longer a pending launch", late.stderr)
+        self.assertEqual(f.record()["phase"], "failed")
+        self.assertIsNone(f.record()["owner_pid"])
+        self.assertFalse((f.home / "state/.watch.lock/pid").exists())
 
     def test_abandon_launch_refuses_live_owner_terminal(self):
         f = self.fixture(mode="create-error-created")

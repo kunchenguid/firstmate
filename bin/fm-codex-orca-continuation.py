@@ -45,8 +45,14 @@ the same primary keeps its episode even if the CLI path or code root changed.
 A run refused before it owns its lifetime marks its launching record failed.
 ensure waits, within its bound, only for a live matching owner that is
 re-arming; launched and reused owners pass the same delivery checks, and no
-replacement launches over an unresolved prior episode; a later recovery
-generation proves that episode's generation was acknowledged. Unavailable Orca or
+replacement launches over and no fresh input follows an unresolved prior
+episode, whatever the new binding. run starts only for its still-pending
+launching generation, never over an abandoned or failed one. A sending/unknown/rejected episode resolves only when the marker reads
+acked for its exact generation or the ACK owner's evidence
+(state/.watcher-down.acked) names that generation or an ACK whose queue
+sequence covers the highest row present when it was sent; a changed generation,
+binding or timeout alone never resolves it, and missing or malformed evidence
+keeps it unresolved. Unavailable Orca or
 supervision-status observation is retained, not treated as an identity change
 or as supervision no longer needed, until delivery needs it. An arm is
 a handling successor only after a verified predecessor arm; take-over keeps the
@@ -334,10 +340,9 @@ class Adapter:
         if old.get("phase") == "launching":
             raise Refused("bootstrap generation " + str(old.get("generation")) + " is already pending; inspect status, "
                           "then use abandon-launch for that generation only once its owner is gone")
+        self.confirmed(old)
         same_primary = all((old.get("binding") or {}).get(k) == binding[k]
                            for k in ("session_pid", "session_identity", "target"))
-        if same_primary:
-            self.confirmed(old)
         generation = uuid.uuid4().hex
         self.record = dict(old, binding=binding, generation=generation, owner_pid=None,
                            owner_identity=None, phase="launching", previous_arm=old.get("arm"))
@@ -379,13 +384,45 @@ class Adapter:
             time.sleep(0.1)
         raise Refused("owner readiness unconfirmed at bounded bootstrap deadline")
 
+    def unresolved(self, episode, token):
+        if episode.get("phase") not in ("sending", "delivery-unknown", "delivery-rejected"):
+            return False
+        generation = episode.get("generation", "")
+        if token in ("acked:handling:" + generation, "acked:downtime:" + generation):
+            return False
+        evidence = self.state / ".watcher-down.acked"
+        try:
+            if evidence.is_symlink():
+                return True
+            rows = [re.fullmatch(r"([A-Za-z0-9._-]+) ([0-9]+)", line) for line in evidence.read_text().splitlines()]
+        except OSError:
+            return True
+        if not all(rows):
+            return True
+        through = episode.get("through")
+        return not any(row.group(1) == generation or (isinstance(through, int) and int(row.group(2)) >= through)
+                       for row in rows)
+
+    def queued_through(self):
+        try:
+            queue = (self.state / ".wake-queue").read_text().splitlines()
+        except FileNotFoundError:
+            queue = []
+        seqs = [int(f[1]) for f in (line.split("\t") for line in queue) if len(f) >= 5 and f[1].isdigit()]
+        if seqs:
+            return max(seqs)
+        try:
+            return int((self.state / ".wake-queue.seq").read_text().strip()) + 1
+        except FileNotFoundError:
+            return 1
+        except ValueError:
+            return None
+
     def confirmed(self, record):
         episode = record.get("episode", {})
-        generation = episode.get("generation", "")
         token = self.recovery()
-        if episode.get("phase") in ("sending", "delivery-unknown", "delivery-rejected"):
-            if token.split(":")[-1] == generation and not token.startswith("acked:"):
-                raise Refused("delivery is unconfirmed; inspect exact receipt and drain durable work, no fresh resend")
+        if self.unresolved(episode, token):
+            raise Refused("delivery is unconfirmed; inspect exact receipt and drain durable work, no fresh resend")
         if self.reopened(episode, token) and not self.replayable(episode, token):
             raise Refused("presented generation reopened without ACK and is not re-presentable; drain and acknowledge it")
         return self.with_bootstrap(record)
@@ -526,6 +563,8 @@ class Adapter:
         episode = self.record.get("episode", {})
         if generation == episode.get("generation") and not self.replayable(episode, token):
             return
+        if self.unresolved(episode, token):
+            return
         self.target_valid()
         self.still_owned()
         health = self.healthy()
@@ -567,12 +606,15 @@ class Adapter:
             # Sending/unknown persists across death: never invent a new request.
             if not self.replayable(prior, token):
                 return
+        elif self.unresolved(prior, token):
+            return
         else:
             prior = None
         payload = "watcher: Orca/Codex wake generation=" + generation + ". Drain queued wakes, handle them, and acknowledge the exact presented generation. The continuation owner protects the successor."
         episode = {"generation": generation, "payload": payload, "phase": "sending", "attempts": [],
                    "owner_generation": self.record["generation"], "owner_pid": self.record["owner_pid"],
-                   "owner_identity": self.record["owner_identity"], "binding": self.record["binding"]}
+                   "owner_identity": self.record["owner_identity"], "binding": self.record["binding"],
+                   "through": self.queued_through()}
         if prior:
             episode.update(replay_of=prior.get("request_id"), replay_prior=prior)
         b = self.record["binding"]
@@ -669,6 +711,10 @@ class Adapter:
             try:
                 self.target_valid()
                 lifetime.enter_context(self.lock("owner"))
+                current = self.read(self.record_path)
+                if current.get("generation") != self.args.generation or current.get("phase") != "launching":
+                    raise Refused("run's bootstrap generation is no longer a pending launch")
+                self.record = current
                 self.owns_lifetime = True
                 self.publish(owner_pid=os.getpid(), owner_identity=self.identity(os.getpid()), phase="arming")
             except Exception as e:

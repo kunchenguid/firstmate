@@ -250,6 +250,8 @@ The acknowledgement retires the marker only when no rows remain after sequence-b
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, a watcher close during handling republishes the same generation as pending and forces one recovery turn even when no queue row remains, while the outstanding generation-bound acknowledgement stays valid.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
+Each retirement also appends one bounded `<generation> <queue sequence>` line to `state/.watcher-down.acked` (the newest 64 kept) after the marker reads acked; repeating the acknowledgement of an already-acked generation records it again.
+That evidence is what lets the [Orca/Codex continuation](supervision-protocols/codex-orca.md) tell an acknowledged ambiguous delivery from one whose generation was merely superseded by a later append; a missing or malformed file proves nothing, and failing to record it never undoes the acknowledgement.
 
 ## Per-actor acknowledgement
 
