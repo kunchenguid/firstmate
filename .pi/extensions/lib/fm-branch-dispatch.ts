@@ -615,6 +615,7 @@ export function idaResultRowsForWake(message: string, scope: UnreadWakeScope): s
   if (direct.length > 0) return direct.map((result) => result.row);
   const keys = surfacedProcessEventKeys(message);
   if (!keys) return [];
+  if (keys.some((key) => scope.mainOwnedRows.some((row) => row.kind === "check" && row.key === key))) return [];
   const matched = keys.flatMap((key) => scope.eligibleIdaResults.filter((result) => result.key === key));
   if (keys.some((key) => !matched.some((result) => result.key === key))) return [];
   return matched.map((result) => result.row);

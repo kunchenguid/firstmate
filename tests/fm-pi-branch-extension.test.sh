@@ -5239,6 +5239,13 @@ if (dispositionForWakeTrigger("check: process-event result captured: procevent:i
     "check-main-only") {
   throw new Error("an unbound surfaced capture became branch eligible");
 }
+privateWrite(`${state}/.main-eligible-rows`, "1\n");
+const claimedDuplicate = scopeForUnreadWake(state, false);
+if (dispositionForWakeTrigger(surfaced, claimedDuplicate).reason !== "check-main-only" ||
+    idaResultRowsForWake(surfaced, claimedDuplicate).length !== 0) {
+  throw new Error(`a duplicate surfaced capture escaped an existing MAIN claim: ${JSON.stringify(claimedDuplicate)}`);
+}
+unlinkSync(`${state}/.main-eligible-rows`);
 
 const assertMainFallback = (label, row) => {
   privateWrite(`${state}/.wake-queue`, `${row}\n1\t9\tsignal\ttask-a.status\tsignal: task-a.status\n`);
