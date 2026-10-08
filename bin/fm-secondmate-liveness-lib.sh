@@ -29,6 +29,10 @@
 # relaunching on inconclusive evidence could create a second endpoint beside a
 # live one - and an unreachable remote host is never evidence of death, so a
 # remote route is never replaced by a local endpoint.
+# For a tracked local tmux incarnation, the ledger's socket identity binds
+# both probes, the route comparison, and the endpoint close to its owning
+# server. A missing or non-absolute socket identity refuses recovery rather
+# than inspecting or closing a same-named window on the caller's server.
 #
 # Replacement relaunch goes through `bin/fm-spawn.sh <id> --secondmate` with
 # FM_SPAWN_NO_GUARD=1, the same guarded path every recovery uses. That path

@@ -2120,7 +2120,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - Its seat frees only when startup is confirmed and the agent later dies, or when that exact endpoint is proven destroyed; nothing is ever stopped to free a seat.
 - Supervisor recovery reclaims only the exact generation it probed, inside that mate's single lifecycle episode, so a stale death reading can never free a newer replacement.
 - Ambiguous liveness, a transport failure, or a timeout keeps the seat counted, including during forced cleanup.
-- New tmux dispatches record their socket identity; cleanup of a dispatched generation requires proof from its owning socket, and older generations without that identity remain counted.
+- New tmux dispatches record their socket identity; liveness recovery and cleanup use that owning socket, and older tracked generations without that identity remain counted and cannot authorize recovery.
 - Remote retirement releases a dispatched generation only with host destruction evidence matching its generation, home, backend, and target.
 - The startup wait accepts fractional `FM_CONTROL_LAUNCH_WAIT` and `FM_CONTROL_POLL` values, matching the control plane.
 - A v1 seat matching a task's model and generation keeps its validated endpoint route on import; missing route evidence leaves the imported seat counted and uncertain.
@@ -2138,7 +2138,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds outside the fleet lock, with certificate publication fenced by the pending epoch, and a pooled remote launch files a seat request in that host's remote root home and waits for that answer.
 - Each remote home and its local descendants share one host ledger, delivery path, and certificate, including pooled descendants that predate the declaration.
 - Unpooled remote approvals are recorded as holders before certificate publication, so a later policy change counts them immediately.
-- A remote secondmate's own seat belongs to the primary: an initial launch or relaunch reserves its generation at the primary before the host's launch or relaunch operation, and the host reports one outcome bound to that generation.
+- A remote secondmate's own seat is parent-owned in the shared root ledger: an initial launch or relaunch reserves its generation before the host's launch or relaunch operation, and the host reports one outcome bound to that generation.
 - A host refusal before launch releases only the new candidate and leaves the old agent's seat alone.
 - A confirmed start counts the model the host actually runs, reports any mismatch with the requested model, and survives a failed update of the primary's own record.
 - A lost reply or an unknown outcome keeps the candidate counted until the primary's watcher reads the host's outcome for that generation; a missing or mismatched receipt stays unknown and never permits the token to repeat lifecycle effects.
@@ -2167,7 +2167,8 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 
 **Delivery**
 
-The primary delivers its current declaration directly to remote secondmates, including an empty declaration after a pool is removed.
+The primary delivers its current declaration to every registered remote secondmate, including nested routes and an empty declaration after a pool is removed.
+Delivery and host-outcome reconciliation use the home whose registry owns the remote route, while accounting retains the shared root ledger and lock.
 An inherited copy identifies pools that must refuse before first delivery; it never grants a seat or acts as reservation authority.
 With no declaration and no existing holder ledger, reservation does not require `jq` or remote confirmation; previously recorded holders still require `jq` for generation tracking.
 

@@ -92,6 +92,10 @@
 #
 # REMOTE HOMES. The root's serve-remotes (run from the root's watcher) serves
 # each registered remote through bin/fm-on.sh outside the root lock:
+# Registry traversal retains each remote's registering home, including local
+# descendants. Serve and disposition calls use that home's fm-on context;
+# reconcile-remote accepts only its holder state directory. Ledger mutations,
+# serve epochs, pending markers, and certificates remain root-owned.
 #   - it allocates a serve epoch "<issuer>.<seq>" (a stable root issuer id plus
 #     a per-remote sequence persisted under the root lock), writes
 #     remote-<id>.pending carrying that epoch BEFORE the call - which
@@ -120,8 +124,8 @@
 #     model; pooled requests also require the grant. A timeout withdraws the
 #     request and refuses unless the grant landed first.
 #
-# REMOTE SUPERVISORS. A remote secondmate's own seat is parent-owned: the
-# parent reserves it at the root, dispatches it with a remote route carrying
+# REMOTE SUPERVISORS. A remote secondmate's own seat is parent-owned: its
+# registering home reserves it at the root, dispatches it with a remote route carrying
 # the host operation token, and applies the host's token-scoped disposition
 # with reconcile-remote. Host-side records under state/parent-route are
 # execution receipts, not counted holders (bin/fm-remote-secondmate-control.sh).
