@@ -2053,13 +2053,13 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-
 # as dead|present|unknown from its JSON body, never from process exit status.
 fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code pid
-  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
-  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1) || true
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null) || code=
   if [ -n "$code" ]; then
     [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
     return 0
   fi
-  pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+  pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null) || pid=
   [ "$pid" = "$pane_id" ] && printf 'present' || printf 'unknown'
 }
 
@@ -2190,7 +2190,8 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
     || { printf 'unreadable'; return 0; }
   while IFS=$'\t' read -r pid name; do
     [ -n "$pid" ] || continue
-    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
+    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || { printf 'unreadable'; return 0; }
+    [ -n "$args" ] || { printf 'unreadable'; return 0; }
     args=${args#"${args%%[![:space:]]*}"}
     argv0=${args%%[[:space:]]*}
     if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
@@ -2222,9 +2223,135 @@ EOF
   printf 'shell'
 }
 
+# Extract only the exact pane shell's subtree from a readable OS table.
+fm_backend_herdr_process_subtree_rows() { # <shell-pid> <ps rows>
+  printf '%s\n' "$2" | awk -v shell="$1" '
+    { pid[NR]=$1; ppid[NR]=$2; line=$0; sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line); name[NR]=line }
+    END {
+      want[shell]=1; changed=1
+      while (changed) {
+        changed=0
+        for (n=1; n<=NR; n++)
+          if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]]=1; changed=1 }
+      }
+      for (n=1; n<=NR; n++) if (pid[n] in want) printf "%s\t%s\n", pid[n], name[n]
+    }' | LC_ALL=C sort -n
+}
+
+# fm_backend_herdr_pane_process_snapshot: strict OS proof for a missing
+# registration and lifecycle transitions. Prints agent|shell|other|unreadable,
+# followed by TAB-separated PID/start-incarnation rows for recognized agents.
+# The exact pane's shell and every foreground PID must belong to the same
+# readable OS subtree. Registration, status labels and API process names alone
+# cannot prove an agent present or absent. Any unreadable descendant or a
+# contradictory foreground identity refuses rather than manufacturing death.
+# This also captures background/suspended agents below nested worker shells.
+fm_backend_herdr_pane_process_snapshot() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 info shell_pid rows owned foreground pid name args argv0
+  local ps_bin=${FM_HERDR_PS_BIN:-ps} start after verdict api_verdict api_name api_argv0 api_args
+  local agents='' others=0 shell_start
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \
+    || { printf 'unreadable\n'; return 0; }
+  printf '%s' "$info" | jq -e --arg pane "$pane_id" '
+    .error == null and .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.shell_pid | type == "number" and . > 1 and . == floor)
+    and (.result.process_info.foreground_processes | type == "array")
+    and ([.result.process_info.foreground_processes[].pid] | length == (unique | length))
+    and all(.result.process_info.foreground_processes[];
+      (.pid | type == "number" and . > 1 and . == floor)
+      and (.name == null or (.name | type) == "string")
+      and (.argv0 == null or (.argv0 | type) == "string")
+      and (.cmdline == null or (.cmdline | type) == "string")
+      and (.argv == null or ((.argv | type) == "array" and all(.argv[]; type == "string"))))
+  ' >/dev/null 2>&1 || { printf 'unreadable\n'; return 0; }
+  shell_pid=$(printf '%s' "$info" | jq -r '.result.process_info.shell_pid')
+  shell_start=$(fm_agent_process_start "$shell_pid" "$ps_bin") \
+    || { printf 'unreadable\n'; return 0; }
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) \
+    || { printf 'unreadable\n'; return 0; }
+  owned=$(fm_backend_herdr_process_subtree_rows "$shell_pid" "$rows")
+  printf '%s\n' "$owned" | awk -F '\t' -v shell="$shell_pid" '$1 == shell { found=1 } END { exit !found }' \
+    || { printf 'unreadable\n'; return 0; }
+  foreground=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[].pid')
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    printf '%s\n' "$owned" | awk -F '\t' -v pid="$pid" '$1 == pid { found=1 } END { exit !found }' \
+      || { printf 'unreadable\n'; return 0; }
+  done <<EOF
+$foreground
+EOF
+  while IFS=$'\t' read -r pid name; do
+    [ -n "$pid" ] || continue
+    start=$(fm_agent_process_start "$pid" "$ps_bin") \
+      || { printf 'unreadable\n'; return 0; }
+    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) \
+      || { printf 'unreadable\n'; return 0; }
+    args=${args#"${args%%[![:space:]]*}"}
+    [ -n "$args" ] || { printf 'unreadable\n'; return 0; }
+    argv0=${args%%[[:space:]]*}
+    verdict=$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")
+    after=$(fm_agent_process_start "$pid" "$ps_bin") \
+      || { printf 'unreadable\n'; return 0; }
+    [ "$start" = "$after" ] || { printf 'unreadable\n'; return 0; }
+    # If Herdr describes this foreground process, its identity must agree with
+    # the current OS read. Empty API identity fields add no evidence.
+    api_name=$(printf '%s' "$info" | jq -r --argjson pid "$pid" '.result.process_info.foreground_processes[] | select(.pid == $pid) | .name // empty')
+    api_argv0=$(printf '%s' "$info" | jq -r --argjson pid "$pid" '.result.process_info.foreground_processes[] | select(.pid == $pid) | (.argv[0] // .argv0 // empty)')
+    api_args=$(printf '%s' "$info" | jq -r --argjson pid "$pid" '.result.process_info.foreground_processes[] | select(.pid == $pid) | (.cmdline // ((.argv // []) | join(" ")) // empty)')
+    if [ -n "$api_name$api_argv0$api_args" ]; then
+      api_verdict=$(fm_agent_process_classify "$api_name" "$api_argv0" "$api_args" "$pid")
+      [ "$api_verdict" = "$verdict" ] || { printf 'unreadable\n'; return 0; }
+    fi
+    case "$verdict" in
+      agent) agents="${agents}${pid}"$'\t'"${start}"$'\n' ;;
+      shell) ;;
+      *) others=$((others + 1)) ;;
+    esac
+  done <<EOF
+$owned
+EOF
+  after=$(fm_agent_process_start "$shell_pid" "$ps_bin") \
+    || { printf 'unreadable\n'; return 0; }
+  [ "$after" = "$shell_start" ] || { printf 'unreadable\n'; return 0; }
+  # A child appeared/disappeared during the snapshot: do not turn a partial
+  # tree read into either a shell-only proof or a replacement checkpoint.
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) \
+    || { printf 'unreadable\n'; return 0; }
+  [ "$(fm_backend_herdr_process_subtree_rows "$shell_pid" "$rows")" = "$owned" ] \
+    || { printf 'unreadable\n'; return 0; }
+  if [ -n "$agents" ]; then
+    printf 'agent\n%s' "$agents"
+  elif [ "$others" -eq 0 ]; then
+    printf 'shell\n'
+  else
+    printf 'other\n'
+  fi
+}
+
+# fm_backend_herdr_process_incarnations_gone: independent stop proof for the
+# exact PID/start pairs captured before lifecycle input. A readable process
+# table proves disappearance; a reused PID with a different start is not the
+# old incarnation. Read failure is refusal, never disappearance.
+fm_backend_herdr_process_incarnations_gone() {  # <pid/start rows>
+  local originals=$1 ps_bin=${FM_HERDR_PS_BIN:-ps} rows pid start current
+  [ -n "$originals" ] || return 0
+  rows=$(LC_ALL=C "$ps_bin" -axo pid= 2>/dev/null) || return 1
+  [ -n "$rows" ] || return 1
+  while IFS=$'\t' read -r pid start; do
+    [ -n "$pid" ] && [ -n "$start" ] || return 1
+    if printf '%s\n' "$rows" | awk -v pid="$pid" '$1 == pid { found=1 } END { exit !found }'; then
+      current=$(fm_agent_process_start "$pid" "$ps_bin") || return 1
+      [ "$current" != "$start" ] || return 1
+    fi
+  done <<EOF
+$originals
+EOF
+}
+
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
 # dead|no-agent|stale-agent|live|unknown, from the JSON body of two read-only
-# calls plus, for a registered agent, the pane's process-level view - never
+# calls plus the pane's process-level view, including absent registration - never
 # from process exit status, since a business-logic "not found" response is a
 # normal, expected outcome here, not a call failure (real herdr 0.7.1 exits 1
 # for it; the canned-response test fakes exit 0; parsing only the JSON keeps
@@ -2236,14 +2363,8 @@ EOF
 #                 on a live server makes herdr immediately drop both the pane
 #                 and its tab from `pane get`/`tab list`).
 #   no-agent    - `pane get` succeeds (the pane structurally exists) but `agent
-#                 get` responds with error code agent_not_found: nothing is
-#                 registered in it - exactly what a herdr session-layout restore
-#                 produces (verified empirically: `session stop` + fresh `herdr
-#                 server` restart leaves the pane alive, agent_status "unknown",
-#                 agent get -> agent_not_found - docs/herdr-backend.md "ID
-#                 stability across a server restart"), and what a future
-#                 `resume_agents_on_restore = false` restore would produce too
-#                 (a plain shell, never an agent).
+#                 get` responds with agent_not_found AND the strict OS snapshot
+#                 proves shell-only. Missing registration alone proves nothing.
 #   stale-agent - `agent get` reports a registered agent_status (working, idle,
 #                 done, or blocked) but fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
@@ -2255,7 +2376,8 @@ EOF
 #                 running agent. No registered status outranks the process
 #                 view, because a killed mid-turn agent leaves `working`
 #                 behind just as a quit one leaves `idle`.
-#   live        - `agent get` succeeds with a registered agent_status and the
+#   live        - missing registration with a strict recognized OS agent, or
+#                 `agent get` succeeds with a registered agent_status and the
 #                 process-level view is `agent` or `other`: a harness process
 #                 is running, or something that is not a bare shell is, so the
 #                 registration keeps its authority. An idle or blocked agent
@@ -2271,7 +2393,7 @@ EOF
 #                 here, never toward closing - this is the conservative
 #                 backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+  local session=$1 pane_id=$2 out code presence status process
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -2280,13 +2402,26 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     esac
     return 0
   fi
-  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
-  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1) || true
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null) || code=
   if [ -n "$code" ]; then
-    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+    if [ "$code" != agent_not_found ]; then
+      printf 'unknown'
+      return 0
+    fi
+    printf '%s' "$out" | jq -e '.result == null and (.error.code | type) == "string"' >/dev/null 2>&1 \
+      || { printf 'unknown'; return 0; }
+    process=$(fm_backend_herdr_pane_process_snapshot "$session" "$pane_id")
+    case "${process%%$'\n'*}" in
+      agent) printf 'live' ;;
+      shell) printf 'no-agent' ;;
+      *) printf 'unknown' ;;
+    esac
     return 0
   fi
-  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  status=$(printf '%s' "$out" | jq -r --arg pane "$pane_id" '
+    select(.error == null and (.result.agent.pane_id == null or .result.agent.pane_id == $pane))
+    | .result.agent.agent_status // empty' 2>/dev/null) || status=
   case "$status" in
     working|idle|done|blocked) ;;
     *) printf 'unknown'; return 0 ;;
@@ -2390,10 +2525,9 @@ fm_backend_herdr_server_running_state() {  # <session>
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less pane is `dead` - whether nothing is registered or a
-# registration lingers over a shell-only pane (stale-agent, issue #4115) - a
-# registered agent with a live process is `alive`, and an unexpected or failed
-# API read is `unreadable`.
+# `no-agent` or `stale-agent` maps to `dead`, `live` maps to `alive`, and
+# `unknown` maps to `unreadable`, subject to the stopped-server exception below.
+# fm_backend_herdr_pane_agent_state owns the registration/process contract.
 #
 # One exception to that last case, and it is deliberately made HERE rather than
 # in the husk classifier: a read can fail because the recorded session's server

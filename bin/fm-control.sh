@@ -36,6 +36,10 @@
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
+#              On Herdr, the exact pre-action OS PID/start incarnations must
+#              also disappear and the remaining pane must be positively shell-
+#              only. A relaunch confirms recognized replacement processes, not
+#              merely a registered status or the original surviving process.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
@@ -375,6 +379,61 @@ agent_state() {
   fm_backend_agent_state "$BACKEND" "$T"
 }
 
+# Herdr lifecycle proof is independent of registration and survives endpoint
+# rebinds: the original PID/start pairs must be gone even outside the pane.
+HERDR_ORIGINAL_PROCESSES=
+HERDR_PROCESS_CHECKPOINTED=0
+checkpoint_herdr_processes() {
+  local snapshot state absence
+  [ "$BACKEND" = herdr ] || return 0
+  fm_backend_source herdr || die "task $ID's Herdr process adapter cannot be loaded"
+  [ "$HERDR_PROCESS_CHECKPOINTED" = 0 ] || return 0
+  state=$(agent_state)
+  # Resolve an unreachable session before taking the checkpoint, in the
+  # parent transaction too: do_exit runs in a subshell and cannot return its
+  # captured original processes to do_relaunch.
+  if [ "$state" = missing ]; then
+    absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+    state=${absence%%$'\t'*}
+    case "$state" in
+      gone) HERDR_PROCESS_CHECKPOINTED=1; return 0 ;;
+      alive|dead) ;;
+      *) die "task $ID's endpoint absence is unproven; refusing a lifecycle process checkpoint" ;;
+    esac
+  fi
+  fm_backend_herdr_parse_target "$T" || die "task $ID has no readable Herdr process target"
+  snapshot=$(fm_backend_herdr_pane_process_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  case "${snapshot%%$'\n'*}" in
+    agent)
+      [ "$state" = alive ] || die "task $ID's live OS process contradicts endpoint state '$state'; refusing lifecycle input"
+      HERDR_ORIGINAL_PROCESSES=${snapshot#*$'\n'}
+      [ -n "$HERDR_ORIGINAL_PROCESSES" ] || die "task $ID has no readable original PID/start incarnation"
+      ;;
+    shell)
+      [ "$state" = dead ] || die "task $ID's shell-only OS evidence contradicts endpoint state '$state'; refusing lifecycle input"
+      HERDR_ORIGINAL_PROCESSES=
+      ;;
+    *) die "task $ID's OS process evidence is '${snapshot%%$'\n'*}'; refusing lifecycle input without a recognized agent or positive shell-only proof" ;;
+  esac
+  HERDR_PROCESS_CHECKPOINTED=1
+}
+
+verify_herdr_process_transition() {  # shell|agent|gone
+  local wanted=$1 snapshot
+  [ "$BACKEND" = herdr ] || return 0
+  fm_backend_herdr_process_incarnations_gone "$HERDR_ORIGINAL_PROCESSES" \
+    || die "task $ID's original PID/start incarnation survives or cannot be read; $VERB cannot claim a stop or replacement"
+  [ "$wanted" != gone ] || return 0
+  fm_backend_herdr_parse_target "$T" || die "task $ID has no readable Herdr process target"
+  snapshot=$(fm_backend_herdr_pane_process_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  [ "${snapshot%%$'\n'*}" = "$wanted" ] \
+    || die "task $ID's OS process evidence is '${snapshot%%$'\n'*}', not '$wanted'; $VERB cannot confirm its process postcondition"
+  if [ "$wanted" = agent ]; then
+    [ -n "${snapshot#*$'\n'}" ] \
+      || die "task $ID has no recognized replacement PID/start incarnation"
+  fi
+}
+
 busy_verdict() {
   fm_busy_classify_meta "$META" "$ID" "$STATE"
 }
@@ -637,9 +696,11 @@ retire_busy_incarnation() {
 do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
   require_state_verified_backend exit
+  checkpoint_herdr_processes
   state=$(agent_state)
   case "$state" in
     dead)
+      verify_herdr_process_transition shell
       printf 'already-stopped'
       return 0
       ;;
@@ -658,6 +719,7 @@ do_exit() {
           # verb normally preserves did not survive. The worktree and every
           # uncommitted change are untouched, and `relaunch` re-creates the
           # endpoint from here.
+          verify_herdr_process_transition gone
           printf 'endpoint-gone'
           return 0
           ;;
@@ -666,6 +728,8 @@ do_exit() {
           # no agent - a herdr pane whose session server was merely stopped is
           # the common case. Nothing is gone, so this is the ordinary
           # already-stopped outcome.
+          checkpoint_herdr_processes
+          verify_herdr_process_transition shell
           printf 'already-stopped'
           return 0
           ;;
@@ -680,6 +744,7 @@ do_exit() {
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+  checkpoint_herdr_processes
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -687,6 +752,7 @@ do_exit() {
       state=$(agent_state)
       case "$state" in
         dead)
+          verify_herdr_process_transition shell
           retire_busy_incarnation
           printf 'stopped'
           return 0
@@ -751,6 +817,7 @@ do_exit() {
     fi
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
+  verify_herdr_process_transition shell
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
@@ -831,6 +898,10 @@ relaunch_rollback() {
       ;;
     stopping)
       state=$(agent_state 2>/dev/null || printf unknown)
+      if [ "$BACKEND" = herdr ] && [ "$state" = dead ] \
+         && ! fm_backend_herdr_process_incarnations_gone "$HERDR_ORIGINAL_PROCESSES"; then
+        state=unreadable-original-process
+      fi
       case "$state" in
         alive)
           if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
@@ -975,7 +1046,7 @@ resolve_relaunch_profile() {
 # refuses outright when any of it cannot be established.
 CHECKPOINT_LINES=()
 safe_checkpoint() {
-  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta line
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -1007,6 +1078,13 @@ safe_checkpoint() {
     dirty=no
   fi
   CHECKPOINT_LINES+=("worktree_head=$head" "worktree_dirty=$dirty")
+  if [ "$BACKEND" = herdr ] && [ -n "$HERDR_ORIGINAL_PROCESSES" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] || CHECKPOINT_LINES+=("original_pid_start=$line")
+    done <<EOF
+$HERDR_ORIGINAL_PROCESSES
+EOF
+  fi
   if [ "$KIND" = secondmate ]; then
     # A secondmate's own crewmates outlive its relaunch: they run in their own
     # endpoints, and the relaunched secondmate reconciles them from its home's
@@ -1098,6 +1176,7 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
+  checkpoint_herdr_processes
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
@@ -1146,6 +1225,7 @@ do_relaunch() {
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
+  verify_herdr_process_transition agent
   RELAUNCH_AGENT_CONFIRMED=1
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"

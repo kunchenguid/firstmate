@@ -35,6 +35,13 @@ mkdir -p "$TMP_ROOT/ambient-home"
 export FM_HOME="$TMP_ROOT/ambient-home"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
+# An independent, childless shell stands in for restored shell-only panes.
+# It is not the test/controller's shell, whose helpers would pollute the tree.
+mkfifo "$TMP_ROOT/idle-shell.fifo"
+bash -c 'read -r _ < "$1"' -- "$TMP_ROOT/idle-shell.fifo" &
+export FM_HERDR_FIXTURE_SHELL_PID=$!
+trap 'printf "stop\n" > "$TMP_ROOT/idle-shell.fifo"; wait "$FM_HERDR_FIXTURE_SHELL_PID"; rm -rf "$TMP_ROOT"' EXIT
+
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
 # unit-separated args, to $FM_HERDR_LOG) and returns the canned response for
 # that call read from $FM_HERDR_RESPONSES/<n>.out, consumed IN ORDER (call 1
@@ -64,6 +71,17 @@ fi
 if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
   reason=${FM_FAKE_HERDR_FOREGROUND_REASON:-no_foreground_client}
   printf '{"result":{"reason":"%s"}}\n' "$reason"
+  exit 0
+fi
+# Old restored-pane fixtures already model agent_not_found. Supply the now-
+# required positive shell-only process read without renumbering unrelated
+# canned mutation responses. The strict snapshot tests below drive unsafe
+# process evidence separately, rather than borrowing this shell fixture.
+prev=$((next - 1))
+if [ "${1:-} ${2:-}" = 'pane process-info' ] && [ "$prev" -gt 0 ] \
+   && grep -q agent_not_found "$RESP/$prev.out" 2>/dev/null; then
+  pane=${4:-}
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":[]}}}\n' "$pane" "$FM_HERDR_FIXTURE_SHELL_PID"
   exit 0
 fi
 n=$next
@@ -254,6 +272,9 @@ case "$cmd $sub" in
     tab=${3:-}
     jq_state --arg t "$tab" '.tabs |= [.[]|select(.tab_id != $t)]' | save
     ;;
+  "pane process-info")
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":[]}}}\n' "${4:-}" "$FM_HERDR_FIXTURE_SHELL_PID"
+    ;;
   "agent get")
     pane=${3:-}
     status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
@@ -418,7 +439,12 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
 # deliberate (SC2016).
 # shellcheck disable=SC2016
 run_with_clients() {  # <dir> <path> <body>
-  local dir=$1 path=$2 body=$3
+  local dir=$1 path=$2 body=$3 tool
+  # Keep real Herdr clients excluded, but provide the fixture body's tools
+  # explicitly on hosts where /usr/bin and /bin are not a full toolchain.
+  for tool in cat touch; do
+    ln -sf "$(command -v "$tool")" "$dir/tools/$tool"
+  done
   FM_HERDR_PAIR_DIR="$dir" PATH="$path:$dir/tools:/usr/bin:/bin" \
     bash -c ". \"\$0/bin/backends/herdr.sh\"; $body" "$ROOT"
 }
@@ -562,6 +588,169 @@ test_registered_agent_with_a_live_foreground_process_stays_alive() {
   pass "herdr stale registration: a registered agent with a live Pi foreground process still reads alive"
 }
 
+# Missing registration is not a stop proof. Drive the registration and process
+# signals apart while keeping the process sample identical to the registered
+# counterfactual; these fixtures invoke no real Herdr command.
+test_missing_registration_requires_process_evidence() {
+  local out label process expected
+  for label in claude pi; do
+    for process in agent shell other unreadable; do
+      case "$process" in
+        agent) expected='live alive refused' ;;
+        shell) expected='no-agent dead husk' ;;
+        *) expected='unknown unreadable refused' ;;
+      esac
+      out=$(PROCESS="$process" bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_pane_presence_state() { printf present; }
+        fm_backend_herdr_cli() { printf "{\"error\":{\"code\":\"agent_not_found\"}}"; }
+        fm_backend_herdr_pane_process_state() { printf "%s" "$PROCESS"; }
+        fm_backend_herdr_server_running_state() { printf running; }
+        # The snapshot is independent of the registration read.
+        fm_backend_herdr_pane_process_snapshot() { printf "%s\n" "$PROCESS"; }
+        printf "%s %s " "$(fm_backend_herdr_pane_agent_state lab w1:p2)" "$(fm_backend_herdr_agent_state lab:w1:p2)"
+        fm_backend_herdr_tab_is_husk lab w1:p2 && printf husk || printf refused
+      ' "$ROOT")
+      [ "$out" = "$expected" ] || fail "$label missing registration + $process: expected '$expected', got '$out'"
+    done
+  done
+  pass "herdr missing registration: a live process stays alive; only positive shell proof permits recovery"
+}
+
+test_registration_parser_preserves_unknown_and_business_errors() {
+  local out body expected rc
+  for body in \
+    '{"error":{"code":"agent_not_found"}}' \
+    '{"error":{"code":"permission_denied"}}' \
+    '{"error":{"code":"agent_not_found"},"result":{"agent":{"agent_status":"idle"}}}' \
+    '{"result":{"agent":{"pane_id":"w9:p9","agent_status":"idle"}}}' \
+    '{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle"}}}' \
+    '{"result":{"agent":{"agent_status":"unknown"}}}' \
+    'not-json'; do
+    case "$body" in
+      '{"error":{"code":"agent_not_found"}}'|'{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle"}}}') expected=live ;;
+      *) expected=unknown ;;
+    esac
+    for rc in 0 1; do
+      out=$(BODY="$body" CLI_RC="$rc" bash -c '
+        set -e
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_pane_presence_state() { printf present; }
+        fm_backend_herdr_cli() { printf "%s" "$BODY"; return "$CLI_RC"; }
+        fm_backend_herdr_pane_process_snapshot() { printf "agent\n4202\tstart-agent\n"; }
+        fm_backend_herdr_pane_process_state() { printf agent; }
+        fm_backend_herdr_pane_agent_state lab w1:p2
+      ' "$ROOT")
+      [ "$out" = "$expected" ] || fail "registration rc=$rc must preserve $expected, got '$out' for $body"
+    done
+  done
+  pass "herdr registration parser: business errors work at exit 0/1; foreign, contradictory and unreadable registration refuses"
+}
+
+# Strict pane snapshots use deterministic OS/API fixtures here; the real
+# PID/start primitive is checked separately below. No live runtime is launched.
+strict_snapshot_case() { # <dir> -> snapshot
+  local dir=$1
+  cat > "$dir/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  '-axo pid=,ppid=,comm=')
+    if [ -f "$FIXTURE/rows-after" ]; then
+      reads=$(( $(cat "$FIXTURE/reads" 2>/dev/null || echo 0) + 1 ))
+      printf '%s' "$reads" > "$FIXTURE/reads"
+      if [ "$reads" -gt 1 ]; then cat "$FIXTURE/rows-after"; else cat "$FIXTURE/rows"; fi
+    else
+      cat "$FIXTURE/rows"
+    fi
+    ;;
+  '-axo pid=') awk '{ print $1 }' "$FIXTURE/rows" ;;
+  '-p '*'-o args=') cat "$FIXTURE/args-$2" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/ps"
+  FIXTURE="$dir" FM_HERDR_PS_BIN="$dir/ps" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() { cat "$FIXTURE/info"; }
+    fm_agent_process_start() { cat "$FIXTURE/start-$1"; }
+    fm_backend_herdr_pane_process_snapshot lab w1:p2
+  ' "$ROOT"
+}
+
+test_strict_missing_registration_process_snapshots() {
+  local dir label out shape mode
+  dir=$(mktemp -d "$TMP_ROOT/strict-snapshot.XXXXXX")
+  printf '4200 1 bash\n4201 4200 bash\n' > "$dir/rows"
+  printf bash > "$dir/args-4200"; printf bash > "$dir/args-4201"
+  printf start-shell > "$dir/start-4200"; printf start-nested > "$dir/start-4201"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4200,"foreground_processes":[]}}}' > "$dir/info"
+  out=$(strict_snapshot_case "$dir")
+  [ "$out" = shell ] || fail "a verified shell subtree should be agent-free: $out"
+  for label in claude pi; do
+    printf '4200 1 bash\n4201 4200 bash\n4202 4201 %s\n' "$label" > "$dir/rows"
+    printf '%s' "$label" > "$dir/args-4202"; printf start-agent > "$dir/start-4202"
+    for shape in argv argv0 nested; do
+      case "$shape" in
+        argv) printf '{"pid":4202,"name":"%s","argv":["%s"]}' "$label" "$label" ;;
+        argv0) printf '{"pid":4202,"name":"%s","argv0":"%s"}' "$label" "$label" ;;
+        nested) printf '{"pid":4201,"name":"bash","argv0":"bash"}' ;;
+      esac > "$dir/foreground"
+      jq -n --slurpfile fg "$dir/foreground" '{result:{type:"pane_process_info",process_info:{pane_id:"w1:p2",shell_pid:4200,foreground_processes:$fg}}}' > "$dir/info"
+      out=$(strict_snapshot_case "$dir")
+      [ "$out" = $'agent\n4202\tstart-agent' ] || fail "$label/$shape must capture its exact live incarnation: $out"
+    done
+  done
+  for mode in foreign unreadable contradictory foreign-pid wrong-pane wrong-type fractional-pid bad-argv duplicate-pid; do
+    printf '4200 1 bash\n4201 4200 bash\n4202 4201 pi\n' > "$dir/rows"
+    printf pi > "$dir/args-4202"; printf start-agent > "$dir/start-4202"
+    printf '{"pid":4202,"name":"pi","argv0":"pi"}' > "$dir/foreground"
+    case "$mode" in
+      foreign) printf '4200 1 bash\n4201 4200 bash\n4202 4201 foreign-tool\n' > "$dir/rows"; printf foreign-tool > "$dir/args-4202"; printf '{"pid":4202,"name":"foreign-tool"}' > "$dir/foreground" ;;
+      unreadable) rm "$dir/args-4202" ;;
+      contradictory) printf bash > "$dir/args-4202"; printf '4200 1 bash\n4201 4200 bash\n4202 4201 bash\n' > "$dir/rows" ;;
+      foreign-pid) printf '4200 1 bash\n4201 4200 bash\n4202 99 pi\n' > "$dir/rows" ;;
+      fractional-pid) printf '{"pid":4202.5,"name":"pi"}' > "$dir/foreground" ;;
+      bad-argv) printf '{"pid":4202,"argv":"pi"}' > "$dir/foreground" ;;
+      duplicate-pid) printf '{"pid":4202,"name":"pi"}\n{"pid":4202,"name":"bash"}' > "$dir/foreground" ;;
+    esac
+    jq -n --slurpfile fg "$dir/foreground" '{result:{type:"pane_process_info",process_info:{pane_id:"w1:p2",shell_pid:4200,foreground_processes:$fg}}}' > "$dir/info"
+    case "$mode" in
+      wrong-pane) jq '.result.process_info.pane_id="w9:p9"' "$dir/info" > "$dir/tmp"; mv "$dir/tmp" "$dir/info" ;;
+      wrong-type) jq '.result.type="process_info"' "$dir/info" > "$dir/tmp"; mv "$dir/tmp" "$dir/info" ;;
+    esac
+    out=$(strict_snapshot_case "$dir" 2>/dev/null)
+    case "$mode:$out" in foreign:other|*:unreadable) ;; *) fail "$mode must refuse shell/agent proof: $out" ;; esac
+  done
+  printf '4200 1 bash\n4201 4200 bash\n' > "$dir/rows"
+  printf '4200 1 bash\n4201 4200 bash\n4202 4201 pi\n' > "$dir/rows-after"
+  printf bash > "$dir/args-4201"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4200,"foreground_processes":[]}}}' > "$dir/info"
+  out=$(strict_snapshot_case "$dir")
+  [ "$out" = unreadable ] || fail "a new child during the snapshot must not license a stale shell-only proof: $out"
+  pass "herdr strict process snapshots: Claude/Pi foreground and nested incarnations, shell-only, foreign, unreadable and contradictory evidence"
+}
+
+test_original_process_incarnation_stop_proof() {
+  local start out
+  start=$(bash -c '. "$0/bin/fm-agent-process-lib.sh"; fm_agent_process_start "$1"' "$ROOT" "$$") \
+    || fail "cannot read this fixture's actual OS start incarnation"
+  [ -n "$start" ] || fail "empty actual process incarnation"
+  out=$(START="$start" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    original=$(printf "%s\t%s" "$1" "$START")
+    fm_backend_herdr_process_incarnations_gone "$original" && printf gone || printf survives
+    printf " "
+    # Same PID, different start: PID reuse is not survival of the old owner.
+    original=$(printf "%s\t%s" "$1" not-this-incarnation)
+    fm_backend_herdr_process_incarnations_gone "$original" && printf gone || printf survives
+    printf " "
+    fm_agent_process_start() { return 1; }
+    fm_backend_herdr_process_incarnations_gone "$original" && printf gone || printf unreadable
+  ' "$ROOT" "$$")
+  [ "$out" = 'survives gone unreadable' ] || fail "exact PID/start stop proof failed: $out"
+  pass "herdr stop proof: the original live incarnation cannot be declared gone; reuse differs and unreadable start refuses"
+}
+
 # --- the bound agent session reference (relaunch session continuity) --------
 #
 # Herdr applies only reports carrying the session identity it bound to a pane,
@@ -691,10 +880,7 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
   # A symlink to a real long-running stand-in so the kernel records `pi` as the
   # executable identity (tests/lib.sh fm_agent_standin owns why not host sleep).
-  standin=$(fm_agent_standin "$TMP_ROOT/standin") || {
-    echo "skip: no long-running stand-in survives a rename, so the agent-named descendant case cannot run"
-    return 0
-  }
+  standin=$(fm_agent_standin "$TMP_ROOT/standin") || fail "no native agent stand-in available"
   ln -sf "$standin" "$lab/pi"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
@@ -720,10 +906,7 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
 
 test_agent_descendant_under_a_spaced_install_path_stays_alive() {
   local lab standin shell_pid out
-  standin=$(fm_agent_standin "$TMP_ROOT/standin") || {
-    echo "skip: no long-running stand-in survives a rename, so the spaced-path descendant case cannot run"
-    return 0
-  }
+  standin=$(fm_agent_standin "$TMP_ROOT/standin") || fail "no native agent stand-in available"
   # The executable path the process table reports contains a space (the macOS
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
@@ -3605,7 +3788,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   [ -n "$agent_line" ] && [ "$agent_line" -lt "$close_line" ] \
     || fail "reclaim did not recheck the old pane agent state before the close"
   boundary_mutations=$(sed -n "$((agent_line + 1)),$((close_line - 1))p" "$log" \
-    | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|workspace\x1flist|terminal\x1ftitle\x1fclear)' || true)
+    | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|pane\x1fprocess-info|workspace\x1flist|terminal\x1ftitle\x1fclear)' || true)
   [ -z "$boundary_mutations" ] \
     || fail "reclaim mutated between the old pane agent recheck and the close: $boundary_mutations"
   assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
@@ -5872,6 +6055,10 @@ test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
 test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
 test_registered_agent_with_a_live_foreground_process_stays_alive
+test_missing_registration_requires_process_evidence
+test_registration_parser_preserves_unknown_and_business_errors
+test_strict_missing_registration_process_snapshots
+test_original_process_incarnation_stop_proof
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent
 test_exhausted_settle_window_keeps_a_non_shell_foreground_live

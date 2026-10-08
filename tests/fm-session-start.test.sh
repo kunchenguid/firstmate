@@ -45,7 +45,16 @@ SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
 SESSION_START_HERDR_SECOND_MATE_ID="fmtest-herdr-${TMP_ROOT##*.}"
 SESSION_START_HERDR_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_HERDR_SECOND_MATE_ID"
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT" "$SESSION_START_SECOND_MATE_TMP" "$SESSION_START_HERDR_SECOND_MATE_TMP")
-trap fm_test_cleanup EXIT
+# A real childless shell supplies positive OS proof for the restored husk.
+mkdir -p "$TMP_ROOT"
+mkfifo "$TMP_ROOT/idle-shell.fifo" "$TMP_ROOT/agent.fifo"
+bash -c 'read -r _ < "$1"' -- "$TMP_ROOT/idle-shell.fifo" &
+export FM_HERDR_FIXTURE_SHELL_PID=$!
+bash -c 'exec -a pi bash -c '\''read -r _ < "$1"'\'' -- "$1"' -- "$TMP_ROOT/agent.fifo" &
+export FM_HERDR_FIXTURE_AGENT_PID=$!
+FM_HERDR_PS_BIN=$(command -v ps)
+export FM_HERDR_PS_BIN
+trap 'kill "$FM_HERDR_FIXTURE_SHELL_PID" "$FM_HERDR_FIXTURE_AGENT_PID" 2>/dev/null || true; wait "$FM_HERDR_FIXTURE_SHELL_PID" "$FM_HERDR_FIXTURE_AGENT_PID" 2>/dev/null || true; fm_test_cleanup' EXIT
 fm_git_identity fmtest fmtest@example.invalid
 
 # --- world builders ----------------------------------------------------------
@@ -472,6 +481,14 @@ case "${1:-} ${2:-}" in
     else
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
       exit 1
+    fi
+    ;;
+  "pane process-info")
+    pane=${4:-}
+    if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv":["pi"]}]}}}\n' "$pane" "$FM_HERDR_FIXTURE_AGENT_PID" "$FM_HERDR_FIXTURE_AGENT_PID"
+    else
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":[]}}}\n' "$pane" "$FM_HERDR_FIXTURE_SHELL_PID"
     fi
     ;;
   "pane close")

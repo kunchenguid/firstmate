@@ -367,7 +367,7 @@ That presentation lock lives in a namespace private to the OS account, so anothe
 A namespace at this account's name that another account owns, or that is not mode 700, is still refused and is never adopted, chowned, or removed.
 
 A same-identity version 2 binding may replace one exact agent-free restart husk in place.
-A husk is a restored same-labeled tab with a missing pane or no registered agent, as [Restart and liveness behavior](#restart-and-liveness-behavior) describes.
+[Restart and liveness behavior](#restart-and-liveness-behavior) owns the husk classification; a stale registration never licenses replacement by closing.
 The replacement is allowed only when all of these agree:
 
 - The physical home.
@@ -416,7 +416,7 @@ Firstmate then cleans up the candidate in this order:
 1. Acquire the existing task-id spawn lock, and then the shared named-session presentation lock.
 2. Inside both locks, take one exact snapshot.
 3. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
-4. Positively confirm no registered agent.
+4. Require the pane classifier's `no-agent` verdict, as defined in [Restart and liveness behavior](#restart-and-liveness-behavior).
 5. Read Herdr's process information for the exact named-session pane and apply the process proof below.
 6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus.
 7. Call the existing exact-pane focus-preserving close helper.
@@ -670,14 +670,16 @@ No Herdr-specific copy of that protocol exists.
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids.
 The underlying harness processes and live agent registrations do not survive.
-A restored same-labeled tab with a missing pane or no registered agent is a husk.
+A restored same-labeled tab with a missing pane, or missing registration backed by a positively proved shell-only process view, is a husk.
 
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
 ### Stale agent registrations
 
-A registration alone never proves an agent.
+A registration alone never proves an agent, and missing registration alone never proves its absence.
+An `agent_not_found` response still consults the exact pane's OS process evidence: a recognized live harness remains alive, while foreign, contradictory or unreadable evidence refuses recovery.
+`bin/backends/herdr.sh` owns the strict snapshot and shell-only proof.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
 That nested shell is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
@@ -701,7 +703,8 @@ The native busy verdict is verified the same way, so a shell-only pane never rea
 ### Process-view version support
 
 The `pane process-info` subcommand that this process-level proof depends on is present in every supported release client from the 0.7.1 floor upward (measured 2026-09-10 on the pinned 0.7.1, 0.7.3, 0.7.4, and 0.7.5 release clients - [verification](verification/runtime-backends.md) "Stale agent registration").
-The response shape the adapter parses (`result.type` of `pane_process_info`, `process_info.shell_pid`, and `foreground_processes` entries carrying `name`, `argv0`, `argv`, and `cmdline`) is verified live only on Herdr 0.9.0.
+The registered-agent process view's response shape (`result.type` of `pane_process_info`, `process_info.shell_pid`, and `foreground_processes` entries carrying `name`, `argv0`, `argv`, and `cmdline`) was verified live on Herdr 0.9.0.
+The stricter missing-registration snapshot and lifecycle-incarnation checks have [portable fixture evidence only](verification/runtime-backends.md#missing-registration-and-original-process-stop-proof), not live verification.
 The idle-shell proof's narrower parse was previously verified on 0.7.5.
 A server response below 0.9.0 has not been measured for this parse.
 An unreadable or unparseable process view reads `unknown`, which refuses lifecycle verbs and recovery rather than trusting the registration.
@@ -714,15 +717,14 @@ The generic Herdr agent-liveness probe reuses that pane classifier, then applies
 | --- | --- |
 | A structurally gone pane, or a pane read from a session positively reported as having no running server | `missing` |
 | A restored agent-less shell, or a stale registration over a shell-only pane | `dead` |
-| A registered agent with a live process | `alive` |
+| A registered agent with a live process, or a recognized live process despite missing registration | `alive` |
 | Every other unexpected read | `unreadable` |
 
 Neither the stopped-server exception nor the stale-registration verdict widens husk detection or any close authority.
 Those paths still refuse an unreadable pane.
 A `stale-agent` pane is reused by recovery, never closed as a husk, because the shell it holds may be a nested worktree shell.
 
-Native registration still identifies Pi by name where tmux would see a generic interpreter.
-The process-level proof only decides whether that registration is backed by a running process.
+Ordinary delivery uses this same liveness probe; lifecycle control additionally requires the [process-transition postconditions](agent-control.md#verbs).
 `tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh` pins the live-Pi versus leftover-shell distinction.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#agent-lifecycle-control) owns the versioned evidence.
 

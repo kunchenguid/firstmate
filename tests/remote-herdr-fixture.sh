@@ -28,7 +28,19 @@
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
+  local shell_pid agent_pid bash_bin
   mkdir -p "$remote_root/bin"
+  reset_remote_herdr_fixture "$state"
+  bash_bin=$(command -v bash) || return 1
+  # Stable, childless OS incarnations, not the short-lived CLI's own PID.
+  # Each exits when the owning suite removes its state file.
+  mkfifo "$state.shell-input" "$state.agent-input"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child Bash.
+  "$bash_bin" -c 'while [ -e "$1" ]; do read -r -t 1 _ <&3 || :; done' -- "$state" 3<> "$state.shell-input" >/dev/null 2>&1 &
+  shell_pid=$!
+  # shellcheck disable=SC2016 # Positional parameters expand in the nested child Bash shells.
+  "$bash_bin" -c 'exec -a codex "$1" -c '\''while [ -e "$1" ]; do read -r -t 1 _ <&3 || :; done'\'' -- "$2"' -- "$bash_bin" "$state" 3<> "$state.agent-input" >/dev/null 2>&1 &
+  agent_pid=$!
   cat > "$script" <<SH
 #!/usr/bin/env bash
 set -u
@@ -36,6 +48,8 @@ STATE='$state'
 LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
+SHELL_PID='$shell_pid'
+AGENT_PID='$agent_pid'
 SH
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
@@ -99,8 +113,12 @@ case "${1:-} ${2:-}" in
     jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
   "pane read") printf '\n' ;;
   "pane process-info")
-    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]}}}\n' \
-      "$pane" "$$" "$$" "$$" ;;
+    pid=$SHELL_PID; argv0=bash
+    if [ "$(jq_state -r --arg p "$pane" '.typed[$p] // false')" = true ]; then
+      pid=$AGENT_PID; argv0=codex
+    fi
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv0":"%s","argv":["%s"],"cmdline":"%s"}]}}}\n' \
+      "$pane" "$pid" "$pid" "$pid" "$argv0" "$argv0" "$argv0" ;;
   "agent get")
     pane=${3:-}
     if [ "$(jq_state -r --arg p "$pane" '.working[$p] // false')" = true ]; then
@@ -118,7 +136,6 @@ esac
 exit 0
 SH
   chmod +x "$script"
-  reset_remote_herdr_fixture "$state"
 }
 
 # reset_remote_herdr_fixture <state>: return the fake host to "no workspaces,

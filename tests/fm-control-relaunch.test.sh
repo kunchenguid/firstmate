@@ -39,13 +39,19 @@ TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 TASK_TMPS=()
+HERDR_FIXTURE_DIRS=()
 
 relaunch_cleanup() {
   local d
+  for d in "${HERDR_FIXTURE_DIRS[@]:-}"; do
+    [ -n "$d" ] || continue
+    printf 'quit\n' > "$d/shell-input"
+    wait "$(cat "$d/shell-pid")" 2>/dev/null || true
+  done
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
-  rm -rf "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
 
@@ -262,6 +268,7 @@ run_spawn() {  # <case-dir> <args...>
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_CONTROL_LAUNCH_WAIT=0.05 \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -1991,8 +1998,51 @@ test_reclaim_refuses_an_unreadable_endpoint() {
 #
 # Canned/stateful fake only - never a real herdr session.
 make_herdr_stub() {  # <case-dir>
-  local fb="$1/fakebin"
+  local fb="$1/fakebin" fake="$1/fake" n
   mkdir -p "$fb"
+  mkfifo "$fake/shell-input" "$fake/agent-input"
+  # Real owned Bash processes, no vendor runtime or Herdr server. The shell
+  # owns its synthetic agent, whose argv0 carries the same identity signal
+  # as real Pi/Claude. FIFO commands let the fixture end naturally, without
+  # signals, and let the postconditions observe actual PID/start survival.
+  cat > "$fake/shell-fixture.sh" <<'SH'
+#!/usr/bin/env bash
+D=$1
+printf '%s\n' "$$" > "$D/shell-pid"
+agent=
+exec 8<> "$D/shell-input"
+while IFS= read -r command <&8; do
+  case "$command" in
+    start)
+      if [ -z "$agent" ]; then
+        label=$(cat "$D/becomes")
+        (exec -a "$label" bash --noprofile --norc -c 'read -r _ < "$1"' -- "$D/agent-input") >/dev/null 2>&1 &
+        agent=$!
+        printf '%s\n' "$agent" > "$D/agent-pid"
+      fi
+      ;;
+    stop|quit)
+      if [ -n "$agent" ]; then
+        printf 'stop\n' > "$D/agent-input"
+        wait "$agent"
+        agent=
+        rm -f "$D/agent-pid"
+      fi
+      [ "$command" != quit ] || break
+      ;;
+  esac
+  : > "$D/fixture-ready"
+done
+SH
+  bash "$fake/shell-fixture.sh" "$fake" >/dev/null 2>&1 &
+  HERDR_FIXTURE_DIRS+=("$fake")
+  for n in $(seq 1 50); do
+    if [ -f "$fake/shell-pid" ] \
+       && ps -p "$(cat "$fake/shell-pid")" -o comm= | grep -q bash; then
+      break
+    fi
+    /bin/sleep 0.01
+  done
   # The herdr server-ensure poll must actually wait between reads, so this case
   # keeps the real sleep rather than the tmux cases' instant stub.
   rm -f "$fb/sleep"
@@ -2021,6 +2071,16 @@ if [ -f "$D/herdr-stopped" ]; then
 fi
 case "${1:-} ${2:-}" in
   'pane get')
+    if [ -f "$D/late-start-on-read" ]; then
+      reads=$(( $(cat "$D/pane-reads" 2>/dev/null || echo 0) + 1 ))
+      printf '%s' "$reads" > "$D/pane-reads"
+      if [ "$reads" = 2 ]; then
+        rm -f "$D/fixture-ready"
+        printf 'start\n' > "$D/shell-input"
+        for _ in $(seq 1 100); do [ ! -f "$D/fixture-ready" ] || break; /bin/sleep 0.01; done
+        : > "$D/herdr-agent-live"
+      fi
+    fi
     if [ "${3:-}" = "$(cat "$D/herdr-pane")" ]; then
       printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' \
         "${3:-}" "$(cat "$D/cwd")"
@@ -2033,7 +2093,7 @@ case "${1:-} ${2:-}" in
   'agent get')
     if [ -f "$D/herdr-agent-registration" ]; then
       cat "$D/herdr-agent-registration"
-    elif [ -f "$D/herdr-agent-live" ]; then
+    elif [ -f "$D/herdr-agent-live" ] && [ ! -f "$D/missing-registration" ]; then
       # The agent came back with its server. Nothing here is reclaimable.
       printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
     else
@@ -2042,15 +2102,23 @@ case "${1:-} ${2:-}" in
     fi
     exit 0 ;;
   'pane process-info')
-    # A retained registration with a shell-only pane models an exited agent
-    # whose Herdr status authority still belongs to its previous session.
-    if [ -f "$D/herdr-agent-registration" ]; then
-      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[]}}}\n' \
-        "$(cat "$D/herdr-pane")"
+    shell=$(cat "$D/shell-pid")
+    if [ -f "$D/agent-pid" ]; then
+      pid=$(cat "$D/agent-pid"); label=$(cat "$D/becomes")
+      # Deliberately cached shell-only API evidence can be contradicted by
+      # the real descendant process table, as in the false-success defect.
+      if [ -f "$D/cached-shell-info" ]; then
+        foreground='[]'
+      else
+        foreground=$(printf '[{"pid":%s,"name":"bash","argv0":"%s"}]' "$pid" "$label")
+      fi
     else
-      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' \
-        "$(cat "$D/herdr-pane")"
+      foreground='[]'
     fi
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":%s}}}\n' "$(cat "$D/herdr-pane")" "$shell" "$foreground"
+    exit 0 ;;
+  'pane read')
+    printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
   'pane send-text')
     # Mirrors the tmux fake's `becomes`: delivering the launch brief is what
@@ -2060,12 +2128,36 @@ case "${1:-} ${2:-}" in
     # back before deciding what was delivered - exactly as the tmux fake above
     # and tests/fixtures.sh do.
     payload=${4:-}
+    printf '%s\n' "$payload" >> "$D/literal"
+    if [ "$payload" = /exit ] || [ "$payload" = /quit ]; then
+      if [ -f "$D/mask-original-after-exit" ]; then
+        : > "$D/hide-agent-subtree"
+        : > "$D/cached-shell-info"
+      fi
+      if [ ! -f "$D/original-survives" ]; then
+        rm -f "$D/fixture-ready"
+        printf 'stop\n' > "$D/shell-input"
+        for _ in $(seq 1 100); do [ ! -f "$D/fixture-ready" ] || break; /bin/sleep 0.01; done
+        rm -f "$D/herdr-agent-live"
+      fi
+    fi
     case "$payload" in
       ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
     esac
     case "$payload" in
       *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
         printf '%s\n' "$payload" > "$D/launched-command"
+        if [ ! -f "$D/registration-only-replacement" ]; then
+          rm -f "$D/fixture-ready"
+          printf 'start\n' > "$D/shell-input"
+          for _ in $(seq 1 100); do
+            if [ -f "$D/agent-pid" ] \
+               && ps -p "$(cat "$D/agent-pid")" -o args= | grep -q "^$(cat "$D/becomes") "; then
+              break
+            fi
+            /bin/sleep 0.01
+          done
+        fi
         : > "$D/herdr-agent-live" ;;
     esac
     exit 0 ;;
@@ -2096,12 +2188,10 @@ SH
   chmod +x "$fb/herdr"
   cat > "$fb/ps" <<'SH'
 #!/usr/bin/env bash
-if [ -f "$FM_FAKE_DIR/herdr-agent-registration" ]; then
-  case "$*" in
-    '-axo pid=,ppid=,comm=') printf '4242 1 bash\n' ;;
-    '-p 4242 -o args=') printf 'bash\n' ;;
-    *) exec /bin/ps "$@" ;;
-  esac
+# Diverge pane-subtree evidence from the independent global PID check after
+# exit. The original is a real still-live process, not a fabricated PID.
+if [ "$*" = '-axo pid=,ppid=,comm=' ] && [ -f "$FM_FAKE_DIR/hide-agent-subtree" ]; then
+  /bin/ps "$@" | awk -v pid="$(cat "$FM_FAKE_DIR/agent-pid")" '$1 != pid'
 else
   exec /bin/ps "$@"
 fi
@@ -2157,6 +2247,22 @@ EOF
 # a command-substitution subshell, where its TASK_TMPS registration would
 # mutate a discarded copy and the EXIT trap would never remove the
 # out-of-tmproot /tmp/fm-<id> root the spawn creates.
+start_herdr_fixture_agent() { # <case-dir>
+  local fake="$1/fake" n label
+  rm -f "$fake/fixture-ready"
+  printf 'start\n' > "$fake/shell-input"
+  label=$(cat "$fake/becomes")
+  for n in $(seq 1 100); do
+    if [ -f "$fake/agent-pid" ] \
+       && ps -p "$(cat "$fake/agent-pid")" -o args= | grep -q "^$label "; then
+      : > "$fake/herdr-agent-live"
+      return 0
+    fi
+    /bin/sleep 0.01
+  done
+  fail "fixture agent did not start"
+}
+
 HERDR_CASE_DIR=
 herdr_case_or_skip() {  # <name> <id> [session] [surviving-pane]
   HERDR_CASE_DIR=
@@ -2165,6 +2271,122 @@ herdr_case_or_skip() {  # <name> <id> [session] [surviving-pane]
   add_herdr_ship_task "$HERDR_CASE_DIR" "$2" "${3:-fmlab}" "${4:-%7}"
   make_herdr_stub "$HERDR_CASE_DIR"
   return 0
+}
+
+test_herdr_missing_registration_never_relaunches_a_surviving_original() {
+  local dir label id original start out rc log meta_before
+  for label in claude pi; do
+    id="missing-live-$label"
+    herdr_case_or_skip "$id" "$id" || return 0
+    dir=$HERDR_CASE_DIR
+    rm -f "$dir/fake/herdr-stopped"
+    printf '%s' "$label" > "$dir/fake/becomes"
+    sed -i "s/^harness=claude$/harness=$label/" "$dir/home/state/$id.meta"
+    : > "$dir/fake/missing-registration"
+    : > "$dir/fake/cached-shell-info"
+    : > "$dir/fake/original-survives"
+    start_herdr_fixture_agent "$dir"
+    original=$(cat "$dir/fake/agent-pid")
+    start=$(bash -c '. "$0/bin/fm-agent-process-lib.sh"; fm_agent_process_start "$1"' "$ROOT" "$original")
+    meta_before=$(cat "$dir/home/state/$id.meta")
+
+    # Ordinary durable data-plane delivery shares the classifier: it must not
+    # advertise this independently verified live process as exited.
+    out=$(env -u HERDR_PANE_ID -u HERDR_SESSION PATH="$dir/fakebin:$PATH" \
+      FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" HOME="$dir/user-home" \
+      "$ROOT/bin/fm-send.sh" "$id" 'read the preserved instruction' 2>&1) || true
+    assert_not_contains "$out" 'has exited' "delivery must agree that the missing-registration original is alive"
+    assert_contains "$(cat "$dir/fake/literal")" 'Firstmate instruction waiting:' "ordinary delivery should send only its constant doorbell"
+    : > "$dir/fake/literal"
+
+    out=$(run_spawn "$dir" "$id" --relaunch --harness "$label"); rc=$?
+    expect_code 1 "$rc" "standalone relaunch must refuse a live unregistered $label"
+    [ ! -s "$dir/fake/literal" ] || fail "standalone relaunch typed shell text into the original"
+    out=$(run_control "$dir" "$id" exit); rc=$?
+    expect_code 1 "$rc" "exit must refuse success while the original $label survives"
+    assert_not_contains "$out" already-stopped "a live original is not already stopped"
+    out=$(run_control "$dir" "$id" relaunch --note 'preserve this original'); rc=$?
+    expect_code 1 "$rc" "relaunch must not succeed while the original $label survives"
+    log=$(cat "$dir/fake/literal")
+    assert_not_contains "$log" 'cd --' "no cd may be typed into the original TUI"
+    assert_not_contains "$log" 'export ' "no export may be typed into the original TUI"
+    assert_not_contains "$log" ". '" "no staged launch may be typed into the original TUI"
+    [ "$(cat "$dir/home/state/$id.meta")" = "$meta_before" ] || fail "failed relaunch changed the task binding"
+    assert_not_contains "$(cat "$dir/home/data/$id/brief.md")" 'preserve this original' "failed stop must restore original instructions"
+    [ "$(bash -c '. "$0/bin/fm-agent-process-lib.sh"; fm_agent_process_start "$1"' "$ROOT" "$original")" = "$start" ] || fail "the survival regression lost its original incarnation"
+    [ "$(journal_field "$dir" "$id" phase)" = failed:stopping ] || fail "the failed stop must retain failure evidence: $out"
+  done
+  pass "Herdr Claude/Pi missing registration: delivery stays live, original survival refuses exit/relaunch, and no launch command reaches the TUI"
+}
+
+test_herdr_stop_postcondition_cannot_borrow_a_false_dead_read() {
+  local dir id=masked-original out rc original
+  herdr_case_or_skip "$id" "$id" || return 0
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  : > "$dir/fake/missing-registration"
+  : > "$dir/fake/original-survives"
+  : > "$dir/fake/mask-original-after-exit"
+  start_herdr_fixture_agent "$dir"
+  original=$(cat "$dir/fake/agent-pid")
+  out=$(run_control "$dir" "$id" relaunch --note 'do not borrow pane death'); rc=$?
+  expect_code 1 "$rc" "a false dead pane read must not claim the original stopped: $out"
+  assert_contains "$out" 'original PID/start incarnation survives' "the independent original-process proof must reject false death"
+  assert_not_contains "$(cat "$dir/fake/literal")" ". '" "a false dead read must never license launch source text"
+  [ "$(journal_field "$dir" "$id" phase)" = failed:stopping ] || fail "false stop proof must retain the stop failure"
+  assert_contains "$(journal_field "$dir" "$id" rollback)" 'instructions-restored' "rollback must not advertise a dead original"
+  ps -p "$original" -o pid= >/dev/null || fail "the disconfirming original survival must be real"
+  pass "Herdr stop postcondition: a dead pane read cannot override a surviving exact original incarnation"
+}
+
+test_herdr_relaunch_rechecks_the_shell_at_the_typing_boundary() {
+  local dir out rc id=late-process
+  herdr_case_or_skip "$id" "$id" || return 0
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  : > "$dir/fake/late-start-on-read"
+  : > "$dir/fake/missing-registration"
+  out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a process appearing after intake must stop shell typing: $out"
+  assert_contains "$out" 'not positively shell-only' "the final shell guard must catch a late live process"
+  [ ! -s "$dir/fake/literal" ] || fail "relaunch typed a command after a live process replaced the shell"
+  assert_present "$dir/fake/agent-pid" "late-process regression must actually create its live process"
+  pass "Herdr relaunch: a late process cannot borrow the earlier shell-only read to receive launch text"
+}
+
+test_herdr_relaunch_requires_real_stop_and_replacement_incarnation() {
+  local dir id label original out rc current phase
+  for label in claude pi; do
+    id="new-incarnation-$label"
+    herdr_case_or_skip "$id" "$id" || return 0
+    dir=$HERDR_CASE_DIR
+    rm -f "$dir/fake/herdr-stopped"
+    printf '%s' "$label" > "$dir/fake/becomes"
+    sed -i "s/^harness=claude$/harness=$label/" "$dir/home/state/$id.meta"
+    : > "$dir/fake/missing-registration"
+    start_herdr_fixture_agent "$dir"
+    original=$(cat "$dir/fake/agent-pid")
+    out=$(run_control "$dir" "$id" relaunch --note 'continue the preserved work'); rc=$?
+    expect_code 0 "$rc" "a real stop plus a new $label incarnation should complete: $out"
+    current=$(cat "$dir/fake/agent-pid")
+    [ "$current" != "$original" ] || fail "replacement reused the surviving original PID"
+    ps -p "$original" -o pid= >/dev/null 2>&1 && fail "the original process survived the reported replacement"
+    [ "$(journal_field "$dir" "$id" phase)" = complete ] || fail "verified replacement did not complete its journal"
+    assert_contains "$(cat "$dir/home/state/$id.control-relaunch")" "original_pid_start=$original" "the checkpoint must retain the exact original incarnation"
+  done
+  id=registration-only
+  herdr_case_or_skip "$id" "$id" || return 0
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  : > "$dir/fake/registration-only-replacement"
+  out=$(run_control "$dir" "$id" relaunch --note 'do not borrow registration as process proof'); rc=$?
+  expect_code 1 "$rc" "registration without a real replacement must refuse success"
+  phase=$(journal_field "$dir" "$id" phase)
+  [ "$phase" = failed:launching ] || fail "unconfirmed replacement must retain its launch failure: $phase"
+  out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "standalone relaunch must also refuse registration without a replacement"
+  assert_contains "$out" 'no recognized OS process incarnation was confirmed' "standalone relaunch must explain its unconfirmed replacement"
+  pass "Herdr relaunch: real stop/new incarnation succeeds; registration-only replacement never reports success"
 }
 
 test_herdr_relaunch_resumes_only_the_registered_pi_session() {
@@ -2290,7 +2512,7 @@ test_herdr_reclaim_refuses_an_agent_that_came_back() {
   # The server was stopped, so the first read says `missing` - but starting it
   # brings the pane AND its agent back. A rebind here would put a second agent
   # in this task's worktree, which is the whole reason absence is re-proven.
-  : > "$dir/fake/herdr-agent-live"
+  start_herdr_fixture_agent "$dir"
 
   out=$(run_spawn "$dir" rl74 --relaunch --harness claude); rc=$?
   log=$(cat "$dir/fake/herdr-log")
@@ -2552,6 +2774,10 @@ test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint
+test_herdr_missing_registration_never_relaunches_a_surviving_original
+test_herdr_relaunch_requires_real_stop_and_replacement_incarnation
+test_herdr_relaunch_rechecks_the_shell_at_the_typing_boundary
+test_herdr_stop_postcondition_cannot_borrow_a_false_dead_read
 test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server

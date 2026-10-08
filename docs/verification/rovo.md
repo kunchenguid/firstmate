@@ -181,7 +181,7 @@ $ ls "$LAB/outside/inbox/handled"
 `tests/fm-rovo-signals-live-e2e.test.sh` extends the launch-then-send live guard with exactly this shape end to end: a real rovo process launched with the production `--config-override` grant reads an external brief and appends to an external status file (preserving its prior content), and the same brief and status file, launched WITHOUT the grant, are left untouched while the transcript shows rovo's own refusal - proving the fix closes the gap rather than merely adding an untested flag.
 `tests/fm-rovo-harness.test.sh` pins the portable half against the fake-binary suite: the grant's three paths appear in every rovo launch (including when the requested effort is unsupported and omitted), and exactly one `--config-override` occurrence ever appears.
 
-## Backend liveness: tmux verified live, herdr placement verified live with a herdr-side agent-detection gap
+## Backend liveness: tmux verified live, herdr placement verified live
 
 tmux 3.6a is now installed and was exercised live in an isolated `tmux -L <private-socket>` session, so tmux pane liveness is fully verified rather than pending.
 `bin/fm-agent-process-lib.sh`'s `fm_agent_process_classify_name` (then still inside `bin/backends/tmux.sh`) matches `*rovo*` alongside the other globbed harness names, so a rovo pane classifies `agent` (not `other`).
@@ -203,11 +203,11 @@ A rovo pane was placed in that isolated workspace, launched bare (the same `env 
 The typed pointer (`Read the brief at <path> and follow it exactly.`) was echoed into the pane, and rovo read a trivial no-op brief, ran a real `sleep 15` bash tool call, and replied `PONG` - the same launch-then-send shape already verified over tmux and a raw PTY, now also confirmed live over Herdr.
 `fm_backend_herdr_capture` correctly rendered the `Rovo is thinking...` busy line during the tool call (`fm_busy_rovo_tail_busy` matches that captured text), and the pane read idle with `PONG` visible once the tool call finished; `rovo_wait_for_delivery`'s own composer-empty conjunct did not settle within its poll window, consistent with the already-documented composer-ghost-text gap below rather than a new defect.
 
-`fm_backend_agent_state` is the one signal this run disproves rather than confirms: it reported `dead` throughout - at the ready banner, mid-tool-call busy, and idle-with-`PONG` alike - even though rovo was demonstrably alive and responding the whole time.
-The cause is on Herdr's side, not firstmate's: `fm_backend_herdr_pane_agent_state` calls `herdr agent get <pane>`, which returned `{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"}}` for the live rovo pane, because `herdr integration status` lists no `rovo` entry at all (only `pi`, `omp`, `claude`, `codex`, `copilot`, `devin`, `droid`, `kimi`, `opencode`, `kilo`, `hermes`, `qodercli`, `qwen`, `cursor`, `mastracode`, `antigravity-cli`, and `grok` are known integrations on the installed Herdr build).
-Herdr has not shipped agent detection for rovo, so the classifier that recovery logic depends on (`fm_backend_agent_state`'s `alive`/`dead` distinction, and `fm_backend_herdr_tab_is_husk`'s reuse of it) cannot currently tell a live rovo pane apart from an empty one on the herdr backend; a live rovo worker placed on `backend=herdr` risks being misclassified as an agent-less husk by any recovery path that trusts this classifier.
-This is recorded as a known Herdr-side integration gap rather than a firstmate bug, and is deliberately left unpatched here: no herdr-scoped workaround is safe to add without risking a false-positive `alive` verdict for some unrelated idle shell, so `backend=herdr` remains usable for launching a rovo crewmate/scout but unverified for automatic dead/husk recovery until Herdr ships rovo detection (or `bin/backends/herdr.sh` gains an independent process-based fallback the way `bin/backends/tmux.sh` already has).
-`/exit` returned the pane to an idle shell prompt rather than closing it, unlike tmux which closes the whole window, so `fm_backend_agent_state` reading `dead` after exit is the textually correct verdict for an agent-less-but-present pane; it is only the ready/busy/idle misclassification while rovo was actually running that is the real finding above.
+With the earlier registration-only missing-agent classifier, `fm_backend_agent_state` reported `dead` throughout this measurement - at the ready banner, mid-tool-call busy, and idle-with-`PONG` alike - even though rovo was demonstrably alive and responding.
+`herdr agent get <pane>` returned `{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"}}` for the live rovo pane, and `herdr integration status` listed no `rovo` integration on the measured build.
+Those observations do not verify the current [process-backed missing-registration classifier](../herdr-backend.md#restart-and-liveness-behavior); Rovo's Herdr liveness and automatic dead/husk recovery remain live-unverified under that stricter path.
+[Missing registration and original-process stop proof](runtime-backends.md#missing-registration-and-original-process-stop-proof) owns the portable regression evidence for the new checks.
+`/exit` returned the pane to an idle shell prompt rather than closing it, unlike tmux which closed the whole window.
 
 ## Skill-loading interop gap (documented, not fixed)
 
@@ -234,4 +234,5 @@ bin/fm-test-run.sh tests/fm-rovo-harness.test.sh
 FM_ROVO_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-rovo-signals-live-e2e.test.sh
 ```
 
-The live guard requires a real, authenticated `rovo` binary but drives it through a raw PTY rather than tmux, so it runs on hosts without tmux installed; tmux and herdr pane placement and liveness were both verified separately in live isolated sessions (see the backend-liveness section above), where the herdr agent-state classifier's rovo blind spot is recorded as a Herdr-side integration gap to track, not a live-guard coverage gap this refresh command needs to close.
+The live guard requires a real, authenticated `rovo` binary but drives it through a raw PTY rather than tmux, so it runs on hosts without tmux installed.
+The [backend-liveness measurement](#backend-liveness-tmux-verified-live-herdr-placement-verified-live) separately verifies tmux liveness and Herdr placement, not the current Herdr liveness classifier.

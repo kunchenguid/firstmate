@@ -48,7 +48,7 @@ cleanup() {
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
-  rm -rf -- "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap cleanup EXIT
 
@@ -1371,7 +1371,7 @@ pass "watch liveness: an unreachable remote secondmate is probed, preserved, and
 make_herdr_client_pair "$TMP_ROOT/client-pair" 0.7.1 14 0.7.5 16
 export FM_HERDR_PAIR_DIR="$TMP_ROOT/client-pair"
 SHADOWED_STATE=$(FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
-  PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:/usr/bin:/bin" \
+  PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:${FM_TEST_BASE_PATH:-/usr/bin:/bin}" \
   "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" state ios 2>"$TMP_ROOT/shadowed-state.err")
 [ "$SHADOWED_STATE" = alive ] \
   || fail "a live endpoint behind a stale shadowing client must still read alive, got: $SHADOWED_STATE ($(cat "$TMP_ROOT/shadowed-state.err"))"

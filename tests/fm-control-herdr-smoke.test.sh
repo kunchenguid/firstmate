@@ -7,7 +7,7 @@
 # agent-state classifier the control plane is allowed to trust, so its
 # behavior is pinned here against the REAL binary rather than a stub: whether
 # an agent is running, and therefore whether a lifecycle verb may act at all,
-# comes from herdr's own agent registry.
+# comes from registration reconciled with actual process liveness.
 #
 # No real harness is launched. herdr's `pane report-agent` is the same registry
 # the adapter reads, and a symlink named like a harness is the same process
@@ -49,7 +49,7 @@ SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
-  [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
+  [ -n "$SCRATCH" ] && fm_test_remove_tree "$SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
   fm_test_cleanup
 }
@@ -167,11 +167,32 @@ STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
   || version_fail "a malformed endpoint target does not stay unreadable"
 pass "real herdr $HERDR_VERSION: a gone session reads recoverable while a live pane and a malformed target do not"
 
+wait_process_state() {  # <expected> <tries>
+  local expected=$1 tries=$2 i=0
+  while [ "$i" -lt "$tries" ]; do
+    [ "$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")" != "$expected" ] || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+stop_replacement() {
+  local pid
+  pid=$(cat "$SCRATCH/codex-launched")
+  kill "$pid" 2>/dev/null || fail "could not stop the inert replacement process"
+  wait_process_state shell 50 || fail "the pane did not return to shell-only after stopping the replacement"
+}
+
 FAKEBIN="$SCRATCH/fakebin"
-mkdir -p "$FAKEBIN"
+AGENT_BIN="$SCRATCH/agentbin"
+mkdir -p "$FAKEBIN" "$AGENT_BIN"
+ln -s "$STANDIN_BIN" "$AGENT_BIN/codex"
+ln -s "$STANDIN_BIN" "$AGENT_BIN/claude"
 cat > "$FAKEBIN/codex" <<EOF
 #!/usr/bin/env bash
-: > "$SCRATCH/codex-launched"
+printf '%s\\n' "\$\$" > "$SCRATCH/codex-launched"
+exec "$AGENT_BIN/codex" 900
 EOF
 chmod +x "$FAKEBIN/codex"
 printf -v FAKEBIN_Q '%q' "$FAKEBIN"
@@ -205,6 +226,7 @@ awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.
   > "$HOME_DIR/state/hsmoke.meta.tmp"
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 pass "real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint"
+stop_replacement
 
 if OUT=$(run_control hsmoke interrupt 2>&1); then
   fail "interrupt should refuse when herdr reports no agent on the pane: $OUT"
@@ -223,20 +245,7 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # symlink named `claude` to the fm_agent_standin stand-in decided above, the same
 # construction tests/fm-tmux-agent-liveness.test.sh uses (the symlink name is
 # what the kernel records as argv[0]; tests/lib.sh owns why it is never a copy).
-AGENT_BIN="$SCRATCH/agentbin"
-mkdir -p "$AGENT_BIN"
-ln -s "$STANDIN_BIN" "$AGENT_BIN/claude"
 printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
-
-wait_process_state() {  # <expected> <tries>
-  local expected=$1 tries=$2 i=0
-  while [ "$i" -lt "$tries" ]; do
-    [ "$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")" != "$expected" ] || return 0
-    sleep 0.1
-    i=$((i + 1))
-  done
-  return 1
-}
 
 start_agent_process() {
   fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$AGENT_Q 900" \
@@ -318,6 +327,7 @@ awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.
   > "$HOME_DIR/state/hsmoke.meta.tmp"
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 pass "real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive"
+stop_replacement
 
 # Last: the foreground process is the sleeping stand-in, so the pane never draws any
 # recognized composer chrome. exit's composer-empty guard (bin/fm-control.sh)

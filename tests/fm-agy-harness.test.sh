@@ -311,12 +311,12 @@ test_herdr_shell_first_with_live_registry_stays_live() {
   pass "herdr exit detection: a registered pane with an agy foreground stays live however its shell ranks"
 }
 
-test_herdr_lone_unregistered_pane_is_agent_free() {
+test_herdr_unregistered_pane_without_process_proof_refuses() {
   local dir out
   dir="$TMP_ROOT/herdr-gone"; mkdir -p "$dir"
   printf '%s\n' '{"error":{"code":"agent_not_found","message":"agent target w9:p1 not found"}}' > "$dir/agent-get.json"
   out=$(agy_herdr_agent_state "$dir")
-  [ "$out" = no-agent ] || fail "an unregistered pane must read no-agent, got '$out'"
+  [ "$out" = unknown ] || fail "missing registration without readable process proof must stay unknown, got '$out'"
   out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_pane_presence_state() { printf "present"; }
@@ -324,8 +324,8 @@ test_herdr_lone_unregistered_pane_is_agent_free() {
       case "$*" in *"agent get"*) cat "$AGY_FIX_RESP" ;; *) exit 0 ;; esac
     }
     fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
-  [ "$out" = husk ] || fail "an agent-free pane must allow husk replacement, got '$out'"
-  pass "herdr exit detection: only a positively unregistered pane is agent-free"
+  [ "$out" = refused ] || fail "missing registration alone must refuse husk replacement, got '$out'"
+  pass "herdr exit detection: missing registration without process proof refuses replacement"
 }
 
 test_herdr_malformed_and_failed_reads_stay_unknown() {
@@ -898,7 +898,7 @@ test_agy_tmux_names_the_native_binary_an_agent
 test_herdr_done_with_live_registry_stays_live
 test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live
 test_herdr_shell_first_with_live_registry_stays_live
-test_herdr_lone_unregistered_pane_is_agent_free
+test_herdr_unregistered_pane_without_process_proof_refuses
 test_herdr_malformed_and_failed_reads_stay_unknown
 test_agy_launch_carries_the_brief_with_model_effort_and_autonomy
 test_agy_effort_xhigh_is_recorded_but_omitted

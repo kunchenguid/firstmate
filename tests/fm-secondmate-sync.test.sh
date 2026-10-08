@@ -42,6 +42,15 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
+mkdir -p "$TMP_ROOT"
+mkfifo "$TMP_ROOT/idle-shell.fifo" "$TMP_ROOT/agent.fifo"
+bash -c 'read -r _ < "$1"' -- "$TMP_ROOT/idle-shell.fifo" &
+export FM_HERDR_FIXTURE_SHELL_PID=$!
+bash -c 'exec -a claude bash -c '\''read -r _ < "$1"'\'' -- "$1"' -- "$TMP_ROOT/agent.fifo" &
+export FM_HERDR_FIXTURE_AGENT_PID=$!
+FM_HERDR_PS_BIN=$(command -v ps)
+export FM_HERDR_PS_BIN
+trap 'kill "$FM_HERDR_FIXTURE_SHELL_PID" "$FM_HERDR_FIXTURE_AGENT_PID" 2>/dev/null || true; wait "$FM_HERDR_FIXTURE_SHELL_PID" "$FM_HERDR_FIXTURE_AGENT_PID" 2>/dev/null || true; fm_test_cleanup' EXIT
 export FM_BACKEND=tmux
 
 # --- world builders --------------------------------------------------------
@@ -641,6 +650,14 @@ case "\$cmd \$sub" in
       printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
     else
       printf '{"error":{"code":"agent_not_found","message":"gone"}}\n' >&2
+    fi
+    ;;
+  "pane process-info")
+    pane=\${4:-}
+    if [ "\$pane" = "${stale#*:}" ]; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":[]}}}\n' "\$pane" "\$FM_HERDR_FIXTURE_SHELL_PID"
+    else
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv":["claude"]}]}}}\n' "\$pane" "\$FM_HERDR_FIXTURE_AGENT_PID" "\$FM_HERDR_FIXTURE_AGENT_PID"
     fi
     ;;
   "pane send-text"|"pane run"|"pane send-keys")

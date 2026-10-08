@@ -13,3 +13,19 @@ __pycache__/
 config/
 
 .tools/
+
+# Local CI repair transcripts belong in private task evidence.
+/.ci-herdr.log
+/.ci-serial4.log
+/.ci-serial5.log
+/.ci-serial7.log
+/.ci-runtime/backend-herdr.log
+/.ci-runtime/before-cleanup.log
+/.ci-runtime/control-herdr-smoke.log
+/.ci-runtime/control-relaunch.log
+/.ci-runtime/remote-adviser.log
+/.ci-runtime/remote-lifecycle.log
+/.ci-runtime/remote-parent.log
+/.ci-runtime/remote-trace.log
+/.ci-runtime/secondmate-sync.log
+/.ci-runtime/session-start.log

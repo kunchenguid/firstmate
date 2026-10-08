@@ -80,6 +80,10 @@
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
+#   Herdr relaunch additionally rechecks OS shell-only evidence before each
+#   shell text/literal write and waits for a recognized replacement PID/start
+#   incarnation before success, including standalone --relaunch. The bounded
+#   replacement wait uses FM_CONTROL_LAUNCH_WAIT (default 90 seconds).
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
@@ -4019,7 +4023,21 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# Recheck at the actual shell-input boundary, not only at intake: preparation
+# can outlive the initial agent-free read. Standalone --relaunch shares this
+# guard with fm-control's launch half; neither may type cd/exports/source into
+# a surviving agent, foreign process, or unreadable pane.
+spawn_require_relaunch_shell() { # <target>
+  local snapshot
+  [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = herdr ] || return 0
+  fm_backend_herdr_parse_target "$1" || return 1
+  snapshot=$(fm_backend_herdr_pane_process_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  [ "${snapshot%%$'\n'*}" = shell ] && return 0
+  echo "error: task $ID's Herdr pane is '${snapshot%%$'\n'*}', not positively shell-only; refusing to type a relaunch shell command into it" >&2
+  return 1
+}
 spawn_send_text_line() { # <target> <text>
+  spawn_require_relaunch_shell "$1" || return 1
   case "$BACKEND" in
   tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
   herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
@@ -4037,6 +4055,7 @@ spawn_current_path() { # <target>
   esac
 }
 spawn_send_literal() { # <target> <text>
+  spawn_require_relaunch_shell "$1" || return 1
   case "$BACKEND" in
   tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
   herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
@@ -5557,6 +5576,26 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = herdr ]; then
+  # Standalone --relaunch must satisfy the same replacement-process proof as
+  # its control-plane caller, not report delivery as a completed replacement.
+  relaunch_process_elapsed=0
+  relaunch_process_wait=${FM_CONTROL_LAUNCH_WAIT:-90}
+  while :; do
+    fm_backend_herdr_parse_target "$T" || exit 1
+    relaunch_process_snapshot=$(fm_backend_herdr_pane_process_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+    if [ "${relaunch_process_snapshot%%$'\n'*}" = agent ] \
+       && [ -n "${relaunch_process_snapshot#*$'\n'}" ]; then
+      break
+    fi
+    if ! awk -v e="$relaunch_process_elapsed" -v t="$relaunch_process_wait" 'BEGIN{exit !(e < t)}'; then
+      echo "error: task $ID's replacement launch was delivered but no recognized OS process incarnation was confirmed (process evidence '${relaunch_process_snapshot%%$'\n'*}'); relaunch is unconfirmed" >&2
+      exit 1
+    fi
+    sleep 0.5
+    relaunch_process_elapsed=$(awk -v e="$relaunch_process_elapsed" 'BEGIN{printf "%.1f", e + 0.5}')
+  done
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
