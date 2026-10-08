@@ -626,6 +626,7 @@ registry_homes_walk() {
         return 1
       fi
       printf '%s\n' "$SECONDMATE_REGISTRY_ID" >> "$TMPD/remote-ids"
+      printf '%s\t%s\n' "$SECONDMATE_REGISTRY_ID" "$home" >> "$TMPD/remote-owners"
       continue
     fi
     child=$(canon_dir "$SECONDMATE_REGISTRY_HOME") || return 1
@@ -639,9 +640,22 @@ registry_homes() {
   local root_state
   : > "$TMPD/local-homes" || return 1
   : > "$TMPD/remote-ids" || return 1
+  : > "$TMPD/remote-owners" || return 1
   : > "$TMPD/seen-homes" || return 1
   root_state=$(canon_dir "$ROOT_STATE") || return 1
   registry_homes_walk "$ROOT_HOME" "$root_state" 0
+}
+
+remote_owner() {
+  registry_homes || return 1
+  REMOTE_OWNER=$(awk -F '\t' -v id="$1" '$1 == id { print $2 }' "$TMPD/remote-owners")
+  [ -n "$REMOTE_OWNER" ] || return 1
+  REMOTE_OWNER_STATE=$REMOTE_OWNER/state
+  REMOTE_OWNER_CONFIG=$REMOTE_OWNER/config
+  REMOTE_OWNER_DATA=$REMOTE_OWNER/data
+  if [ "$REMOTE_OWNER" = "$ROOT_HOME" ]; then
+    REMOTE_OWNER_STATE=$ROOT_STATE REMOTE_OWNER_CONFIG=$ROOT_CONFIG REMOTE_OWNER_DATA=$ROOT_DATA
+  fi
 }
 
 # remote_confirmed <id>: the remote's latest certificate is complete, matches
@@ -803,7 +817,9 @@ route_local_gone() {
 # still holds the supervisor lifecycle episode while collecting evidence.
 remote_disposition_fetch() {
   local out
-  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \
+  remote_owner "$1" || return 1
+  [ "$REMOTE_OWNER_STATE" = "$HOLDER_STATE" ] || return 1
+  out=$(FM_HOME="$REMOTE_OWNER" FM_STATE_OVERRIDE="$REMOTE_OWNER_STATE" FM_CONFIG_OVERRIDE="$REMOTE_OWNER_CONFIG" FM_DATA_OVERRIDE="$REMOTE_OWNER_DATA" \
     fm_run_timed "$REMOTE_CALL_TIMEOUT" "$SCRIPT_DIR/fm-on.sh" "$1" \
       fm-remote-secondmate-control.sh disposition "$1" --operation "$2" </dev/null 2>/dev/null) || return 1
   printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1 > "$3"
@@ -1349,7 +1365,8 @@ if [ "$CMD" = release ]; then
 fi
 
 if [ "$CMD" = reconcile-remote ]; then
-  [ "$ROOT_SELF" -eq 1 ] || refuse "only the fleet root accounts for remote supervisors"
+  remote_owner "$TASK" && [ "$REMOTE_OWNER_STATE" = "$HOLDER_STATE" ] \
+    || refuse "only the registered owning home accounts for remote supervisor $TASK"
   private_file_ok "$RESPONSE_FILE" || refuse "the response file $RESPONSE_FILE is not a private regular file"
   lock_or_refuse "$LOCK"
   load_or_refuse
@@ -1376,7 +1393,6 @@ if [ "$CMD" = reclaim ]; then
   revision=$(holder_revision)
   placement=$(inc_get "$GEN" '.route.placement // ""')
   if [ "$placement" = remote ]; then
-    [ "$ROOT_SELF" -eq 1 ] || refuse "only the fleet root reconciles remote supervisors"
     op=$(inc_get "$GEN" '.route.operation // empty')
     remote_disposition_fetch "$TASK" "$op" "$TMPD/disposition" \
       || uncertain "the host did not report a disposition for $TASK operation $op"
@@ -1817,7 +1833,9 @@ if [ "$CMD" = serve-remotes ]; then
     unlock
     served=0
     rpc_rc=0
-    fm_run_timed "$REMOTE_CALL_TIMEOUT" "$SCRIPT_DIR/fm-on.sh" --stdin "$id" fm-fleet-seats.sh serve \
+    remote_owner "$id" || unavailable "the registry owner of $id cannot be resolved"
+    FM_HOME="$REMOTE_OWNER" FM_DATA_OVERRIDE="$REMOTE_OWNER_DATA" \
+      fm_run_timed "$REMOTE_CALL_TIMEOUT" env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE "$SCRIPT_DIR/fm-on.sh" --stdin "$id" fm-fleet-seats.sh serve \
         --digest "$DIGEST" --epoch "$EPOCH" "$@" < "$POOLS" > "$TMPD/served" 2>"$TMPD/served.err" || rpc_rc=$?
     lock_or_refuse "$LOCK"
     if [ "$rpc_rc" -eq 0 ]; then
