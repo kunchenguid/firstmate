@@ -2163,7 +2163,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A reservation whose launching process died is resolved by the watcher's periodic seat maintenance only with evidence that it never dispatched, its confirmed agent later died, or its exact endpoint is proven destroyed; until then the orphan stays counted, however long that evidence remains unavailable.
 - Bounded maintenance rotates its starting holder every 30 seconds so uncertain or busy launches do not permanently prevent later holders from being reconciled.
 - A ship or scout's seat is retained until cleanup while its task record still names that generation; a supervisor's record may remain during generation-specific recovery.
-- A failed endpoint close keeps tracked generations counted and preserves their recovery routes, even with `--force`; the [teardown header](../bin/fm-teardown.sh) owns cleanup ownership checks, including the refusal to close tmux children from a parent home without socket identity.
+- A failed endpoint close keeps tracked generations counted and preserves their recovery routes, even with `--force`; the [teardown header](../bin/fm-teardown.sh) owns cleanup ownership checks and forced child cleanup gates.
 
 **Delivery**
 

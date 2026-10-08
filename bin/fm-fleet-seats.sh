@@ -169,8 +169,12 @@
 # Private carrier files (--route-file, --response-file) must be regular,
 # non-symlink files owned by the caller with no group or other access.
 # A route object is {placement, backend, target, home, host, remote_root,
-# spawn_gen, operation} with placement local|remote and remote-only fields
-# null locally. A host disposition response is the
+# spawn_gen, operation, [socket_path]} with placement local|remote and remote-only
+# fields null locally. Local tmux dispatch captures the current server's absolute
+# socket_path itself; confirmation and stop/destruction evidence use that socket.
+# Without it, including on legacy imports, the route reads unreadable and stays
+# counted rather than observing a same-named endpoint on another server.
+# A host disposition response is the
 # fm-remote-seat-operation.v2 object bin/fm-remote-secondmate-control.sh prints.
 #
 # Fixed bounds: 30s lock wait, 90s remote request wait, 20s per remote serve

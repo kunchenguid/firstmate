@@ -679,11 +679,11 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its selected remote session.
+It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`.
 It never stops the shared session or removes a sibling secondmate's workspace or panes.
 SSH exit 255 preserves both the route and local records because completion is unknown.
-Cleanup releases the ledger's nonterminal generations before discarding their recovery routes or containing homes.
-An accounting failure preserves those routes and homes for reconciliation.
+The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns counted-generation retention during retirement.
+If accounting fails after host retirement, the primary retains its route and local records for reconciliation; the remote home may already be removed.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 
 No generic remote delete or write surface exists:
