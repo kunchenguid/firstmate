@@ -328,6 +328,84 @@ fm_pr_json_draft_state() {  # <pull-request-json>
   ' 2>/dev/null || true
 }
 
+# The one reading of a Forgejo pull request through tea. tea addresses an
+# instance only by login name: a repository slug carries no host, and without
+# --login tea silently reads its default login's instance, which the URL never
+# names. fm_pr_forgejo_tea_login reads `tea logins list --output csv` output,
+# matches the login whose URL's host part is the validated host so an instance
+# served under a URL subpath still matches, and prints that login name or
+# returns 1; bin/fm-pr-check.sh and bin/fm-pr-merge.sh refuse rather than read
+# through a login they could not pin, and bin/fm-pr-poll.sh repeats the same
+# resolution inline because it runs without this library and stays silent.
+fm_pr_forgejo_tea_login() {  # <logins-csv> <host>
+  local csv=${1-} want=${2-} row login url
+  local LC_ALL=C
+  while IFS= read -r row; do
+    case "$row" in
+      ''|Name,*) continue ;;
+    esac
+    login=${row%%,*}
+    url=${row#*,}
+    url=${url%%,*}
+    case "$login" in
+      '"'*'"') login=${login#\"}; login=${login%\"} ;;
+    esac
+    case "$url" in
+      https://*) url=${url#https://} ;;
+      http://*) url=${url#http://} ;;
+      *) continue ;;
+    esac
+    url=${url%/}
+    if [ "${url%%/*}" = "$want" ]; then
+      printf '%s\n' "$login"
+      return 0
+    fi
+  done <<< "$csv"
+  return 1
+}
+
+# The one reading of tea's JSON record for one pull request
+# (`tea pulls <n> --repo <path> --login <name> --output json`). Prints "merged"
+# when the record's hasMerged is true and the record's state string ("open" or
+# "closed") when it is false, and nothing at all when the payload is not an
+# object carrying a string state and a boolean hasMerged, so a caller can tell
+# a readable record from an unreadable one. Only hasMerged is a merged proof:
+# a closed-but-unmerged pull request reports state "closed" with hasMerged
+# false, and only an exact "merged" wakes a poll or proves a merge.
+fm_pr_forgejo_tea_pull_state() {  # <pull-json>
+  printf '%s' "${1-}" | jq -r '
+    if type == "object" and (.state | type) == "string" and (.hasMerged | type) == "boolean"
+    then (if .hasMerged then "merged" else .state end)
+    else error("invalid pull record")
+    end
+  ' 2>/dev/null || true
+}
+
+# The head commit of tea's JSON record for one pull request, or nothing. The
+# caller still validates the value with fm_pr_head_valid, so an absent or
+# malformed headSha records no pr_head rather than a wrong one, exactly like a
+# GitLab task with no readable head.
+fm_pr_forgejo_tea_pull_head() {  # <pull-json>
+  printf '%s' "${1-}" | jq -r '
+    if type == "object" and (.headSha | type) == "string" then .headSha else "" end
+  ' 2>/dev/null || true
+}
+
+# The one reading of a Forgejo pull request's draft state. tea's JSON record
+# carries no draft field, so this reads the CLI's detail text instead, where an
+# open draft is the CLI's one exact marker line. It prints "true" only for that
+# line and nothing for anything else, so free text cannot read as a draft and
+# an unreadable or reformatted payload reads as not-a-draft, matching
+# fm_pr_json_draft_state's contract: only a positive reading refuses, which
+# bin/fm-pr-check.sh does at arming time.
+fm_pr_forgejo_tea_draft_state() {  # <pull-detail-text>
+  if printf '%s\n' "${1-}" \
+    | grep -qxF -- '- Draft (not mergeable until marked ready)'; then
+    printf '%s\n' true
+  fi
+  return 0
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %Lp "$1" 2>/dev/null

@@ -222,6 +222,55 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
+  # Plain tea, reproducing the real CLI's contract: output on stdout and exit 0
+  # on success, and a non-zero exit with no stdout on any failure. Its defaults
+  # answer as the fixture instance does: one default login whose URL is
+  # forgejo.example, and one open, unmerged, non-draft pull request whose JSON
+  # record carries the fields fm-pr-poll.sh and fm-pr-check.sh read.
+  cat > "$fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+[ "${FM_TEST_TEA_FAIL:-0}" = 0 ] || exit 1
+case "${1:-}" in
+  logins)
+    [ "${2:-}" = list ] || exit 2
+    printf 'Name,URL,SSHHost,User,Default\n'
+    printf '%s,%s,%s,user,%s\n' \
+      "${FM_TEST_TEA_LOGIN_NAME:-main}" \
+      "${FM_TEST_TEA_LOGIN_URL:-https://forgejo.example}" \
+      "${FM_TEST_TEA_LOGIN_SSH:-ssh.forgejo.example}" \
+      "${FM_TEST_TEA_LOGIN_DEFAULT:-true}"
+    exit 0
+    ;;
+  pulls)
+    [ "${FM_TEST_TEA_PULL_MISSING:-0}" = 0 ] || exit 1
+    case " $* " in
+      *' --output json '*)
+        if [ -n "${FM_TEST_TEA_JSON_RAW:-}" ]; then
+          printf '%s\n' "$FM_TEST_TEA_JSON_RAW"
+          exit 0
+        fi
+        printf '{"id":1,"index":%s,"title":"%s","state":"%s","headSha":"%s","mergeable":%s,"hasMerged":%s}\n' \
+          "${2:-0}" "${FM_TEST_TEA_TITLE:-fixture pull}" \
+          "${FM_TEST_TEA_STATE:-open}" "${FM_TEST_TEA_HEAD-0123456789abcdef0123456789abcdef01234567}" \
+          "${FM_TEST_TEA_MERGEABLE:-true}" "${FM_TEST_TEA_MERGED:-false}"
+        ;;
+      *)
+        printf '# #%s %s (%s)\n@user created now\t**main** <- **fm/task**\n\nfixture body\n\n---\n' \
+          "${2:-0}" "${FM_TEST_TEA_TITLE:-fixture pull}" \
+          "$([ "${FM_TEST_TEA_MERGED:-false}" = true ] && echo merged || echo "${FM_TEST_TEA_STATE:-open}")"
+        if [ "${FM_TEST_TEA_DRAFT:-false}" = true ]; then
+          printf '%s\n' '- Draft (not mergeable until marked ready)'
+        else
+          printf '%s\n' '- No Conflicts'
+        fi
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 2
+SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
   # Its defaults are the real server's readings for an OPEN change, and the
@@ -266,11 +315,12 @@ if [ -n "${FM_TEST_NM_NEXT_ACTION:-}" ]; then
   printf '  next_action:\n    code: %s\n    command: no-mistakes axi status\n' "$FM_TEST_NM_NEXT_ACTION"
 fi
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi"
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi" "$fakebin/tea"
   chmod +x "$fakebin/no-mistakes"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/tea.log"
   : > "$dir/gerrit-axi.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
@@ -307,7 +357,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_TEA_LOG="$dir/tea.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -318,7 +368,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_TEA_LOG="$dir/tea.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -988,7 +1038,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+  FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_TEA_LOG="$dir/tea.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -2125,6 +2175,183 @@ EOF
     || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
+}
+
+# A Forgejo pull request is armed and followed through tea on any instance the
+# URL names: the login whose instance is the URL's host pins every read, pr_head
+# is recorded from tea's JSON record, and only a pull request tea can read
+# through that exact call arms at all, because the poll is silent on every
+# error and an unreadable one would arm a watch that never wakes.
+test_forgejo_merge_watch() {
+  local dir state out rc url head notea entry bindir name
+  dir=$(make_case forgejo-merge-watch)
+  state="$dir/home/state"
+  url=https://forgejo.example/o/r/pulls/7
+  head=0123456789abcdef0123456789abcdef01234567
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+
+  # Arming records the canonical URL and the forge-reported head, and passes
+  # tea the whole nested project path rather than a flattened owner/repo pair.
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/arm.err" \
+    || fail "arming a Forgejo pull request failed: $(cat "$dir/arm.err")"
+  grep -qxF "pr=$url" "$state/task-a.meta" \
+    || fail "the canonical URL was not recorded"
+  grep -qxF "pr_head=$head" "$state/task-a.meta" \
+    || fail "tea's reported head was not recorded"
+  [ -f "$state/task-a.check.sh" ] || fail "a readable pull request was not armed"
+  grep -qF -- "pulls 7 --repo o/r --login main --output json" "$dir/tea.log" \
+    || fail "arming did not address tea by path, login, and number"
+  ! grep -qF -- "$url" "$dir/tea.log" \
+    || fail "arming passed the pull request URL to tea"
+
+  # An absent headSha records no pr_head, exactly like a GitLab task: the
+  # named-head gate still accepts a copy whose HEAD is the pushed head.
+  write_task_meta "$dir" task-nohead
+  FM_TEST_TEA_HEAD='' run_check_entry "$dir" task-nohead "$url" >/dev/null 2>&1 \
+    || fail "arming refused a pull request with no readable head"
+  ! grep -q '^pr_head=' "$state/task-nohead.meta" \
+    || fail "an unreadable head was recorded as pr_head"
+
+  # Only an exact merged record wakes firstmate. Every other reading, including
+  # an unreadable record and a closed-but-unmerged one, stays silent.
+  for value in 'not-a-record' '{"state":"open"}' ' '; do
+    out=$(FM_TEST_TEA_JSON_RAW="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Forgejo poll emitted for an unreadable record"
+  done
+  out=$(FM_TEST_TEA_STATE=closed run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for a closed, unmerged record"
+  out=$(FM_TEST_TEA_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted after a tea failure"
+  out=$(FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
+  grep -qF -- "pulls 7 --repo o/r --login main --output json" "$dir/tea.log" \
+    || fail "the poll did not address tea by path, login, and number"
+  ! grep -qF -- "$url" "$dir/tea.log" \
+    || fail "the poll passed the pull request URL to tea"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly, and a swapped host resolves no tea login either.
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" elsewhere.example o/r 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" forgejo.example o/other 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for a sidecar whose project was swapped"
+
+  # Arming is where a missing CLI can still be reported, so it refuses there.
+  # The whole search path is mirrored without tea, because a real tea anywhere
+  # on PATH would make this prove nothing.
+  notea="$dir/notea"
+  mkdir -p "$notea"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = tea ] && continue
+      [ -e "$notea/$name" ] || ln -s "$entry" "$notea/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$notea" command -v tea >/dev/null 2>&1 \
+    || fail "the tea-free search path still resolved tea"
+  out=$(FM_TEST_TEA_MERGED=true FM_TEST_TEA_LOG="$dir/tea.log" \
+    PATH="$notea" bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "Forgejo poll emitted with tea absent from PATH"
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$notea" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Forgejo watch succeeded with tea absent"
+  case "$out" in
+    *"requires tea on PATH"*) ;;
+    *) fail "arming a Forgejo watch with tea absent did not report the missing CLI" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Forgejo arming left a poll armed"
+
+  # A host with no tea login is refused rather than read through tea's default
+  # login on another instance, and so is a pull request tea cannot read at all:
+  # both would arm a watch whose every poll stays silent.
+  write_task_meta "$dir" task-c
+  set +e
+  out=$(FM_TEST_TEA_LOGIN_URL=https://elsewhere.example \
+    run_check_entry "$dir" task-c "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming succeeded with no tea login for the URL's host"
+  case "$out" in
+    *"requires a tea login for forgejo.example"*) ;;
+    *) fail "arming without a login did not name the missing login" ;;
+  esac
+  [ ! -e "$state/task-c.check.sh" ] || fail "a loginless arming left a poll armed"
+  write_task_meta "$dir" task-d
+  set +e
+  out=$(FM_TEST_TEA_PULL_MISSING=1 \
+    run_check_entry "$dir" task-d "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming succeeded for a pull request tea cannot read"
+  case "$out" in
+    *"could not read $url through tea"*) ;;
+    *) fail "arming did not report the unreadable pull request: $out" ;;
+  esac
+  [ ! -e "$state/task-d.check.sh" ] || fail "an unreadable arming left a poll armed"
+  write_task_meta "$dir" task-e
+  set +e
+  out=$(FM_TEST_TEA_JSON_RAW='not-a-record' \
+    run_check_entry "$dir" task-e "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming succeeded for a record tea cannot parse"
+  case "$out" in
+    *"could not read the state of $url"*) ;;
+    *) fail "arming did not report the unreadable state: $out" ;;
+  esac
+  [ ! -e "$state/task-e.check.sh" ] || fail "an unparsable arming left a poll armed"
+
+  # A positive draft reading refuses before anything is recorded or armed; an
+  # unreadable draft state is tea's ordinary detail text with no marker line,
+  # which arms as before. tea's JSON record carries no draft field, so the
+  # marker is the only draft evidence there is.
+  write_task_meta "$dir" task-f
+  cp "$state/task-f.meta" "$dir/meta.f.before"
+  : > "$dir/guard.log"
+  set +e
+  out=$(FM_TEST_TEA_DRAFT=true run_check_entry "$dir" task-f "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a draft pull request"
+  case "$out" in
+    *"is a draft pull request"*) ;;
+    *) fail "the refusal did not name the draft state" ;;
+  esac
+  grep -qF -- "$url" <<<"$out" || fail "the refusal did not name the pull request"
+  cmp -s "$dir/meta.f.before" "$state/task-f.meta" \
+    || fail "a refused draft changed the task metadata"
+  [ ! -e "$state/task-f.check.sh" ] || fail "a refused draft armed a poll"
+  [ ! -s "$dir/guard.log" ] || fail "a refused draft reached the guard"
+
+  # A nested org path is addressed whole; tea's slug truncation is upstream
+  # behavior the arming read exposes rather than something arming works around.
+  : > "$dir/tea.log"
+  nested=https://forgejo.example/org/team/repo/pulls/9
+  write_task_meta "$dir" task-g
+  run_check_entry "$dir" task-g "$nested" >/dev/null 2> "$dir/arm-nested.err" \
+    || fail "arming a nested-path pull request failed: $(cat "$dir/arm-nested.err")"
+  grep -qF -- "pulls 9 --repo org/team/repo --login main --output json" "$dir/tea.log" \
+    || fail "arming did not pass tea the whole nested path"
+  grep -qxF "pr=$nested" "$state/task-g.meta" \
+    || fail "the nested canonical URL was not recorded"
+
+  pass "Forgejo pull requests arm through a pinned tea login and never wake falsely"
 }
 
 seed_canonical_poll() {
@@ -3485,6 +3712,7 @@ SH
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_forgejo_merge_watch
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree

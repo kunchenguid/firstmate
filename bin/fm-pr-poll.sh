@@ -6,9 +6,10 @@
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, and gerrit-axi for Gerrit, so an upstream checkout needs no extra
-# tooling to follow the first two. The Gerrit branch additionally needs jq,
-# which bin/fm-pr-check.sh refuses to arm a Gerrit watch without.
+# GitLab, tea for Forgejo, and gerrit-axi for Gerrit, so an upstream checkout
+# needs no extra tooling to follow the first three. The Gerrit and Forgejo
+# branches additionally need jq to read their CLIs' structured records, which
+# bin/fm-pr-check.sh refuses to arm those watches without.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -170,6 +171,78 @@ case "$provider" in
         error("invalid gerrit record")
       end' 2>/dev/null) || exit 0
     [ "$status" = MERGED ] && printf '%s\n' merged
+    ;;
+  forgejo)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    [ "$host" != github.com ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    [ "${#path}" -ge 3 ] && [ "${#path}" -le 1024 ] || exit 0
+    case "$path" in
+      /*|*/|*//*) exit 0 ;;
+    esac
+    # A Forgejo project nests inside organization subgroups the way a GitLab
+    # project nests inside groups, so its path keeps the same shape rules.
+    rest=$path
+    segments=0
+    while [ -n "$rest" ]; do
+      case "$rest" in
+        */*) segment=${rest%%/*}; rest=${rest#*/} ;;
+        *) segment=$rest; rest= ;;
+      esac
+      segments=$((segments + 1))
+      [ "$segments" -le 20 ] || exit 0
+      [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || exit 0
+      case "$segment" in
+        .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) exit 0 ;;
+      esac
+    done
+    [ "$segments" -ge 2 ] || exit 0
+    [ "$url" = "https://$host/$path/pulls/$number" ] || exit 0
+    # tea addresses an instance only through a named login: a repository slug
+    # carries no host, and without --login tea reads its default login's
+    # instance, so the login whose URL's host is this host is resolved from the
+    # login list on every run, the same resolution bin/fm-pr-check.sh refused
+    # to arm without. No login for the host keeps this poll silent rather than
+    # reading another instance.
+    logins=$(tea logins list --output csv 2>/dev/null) || exit 0
+    login=
+    while IFS= read -r row; do
+      case "$row" in
+        ''|Name,*) continue ;;
+      esac
+      cand=${row%%,*}
+      url=${row#*,}
+      url=${url%%,*}
+      case "$cand" in
+        '"'*'"') cand=${cand#\"}; cand=${cand%\"} ;;
+      esac
+      case "$url" in
+        https://*) url=${url#https://} ;;
+        http://*) url=${url#http://} ;;
+        *) continue ;;
+      esac
+      url=${url%/}
+      if [ "${url%%/*}" = "$host" ]; then
+        login=$cand
+        break
+      fi
+    done <<< "$logins"
+    [ -n "$login" ] || exit 0
+    # The pull request is read as tea's JSON record, and only a boolean
+    # hasMerged wakes this poll: a closed-but-unmerged pull request reports
+    # state "closed" with hasMerged false, and anything unreadable stays
+    # silent, so a changed format or an unreachable instance can never be read
+    # as a merge.
+    json=$(tea pulls "$number" --repo "$path" --login "$login" --output json 2>/dev/null) || exit 0
+    state=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type) == "string" and (.hasMerged | type) == "boolean"
+      then (if .hasMerged then "merged" else .state end)
+      else error("invalid pull record")
+      end
+    ' 2>/dev/null) || exit 0
+    [ "$state" = merged ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

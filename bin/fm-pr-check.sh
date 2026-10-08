@@ -6,15 +6,17 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance.
-# A GitHub pull request the forge reports as a draft is refused, naming the draft
-# state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
-# would wait for an event that cannot occur while nobody is asked to act.
-# Mark the pull request ready for review, then arm again; a lane that keeps a
-# draft on purpose declares a wait instead of reporting done. An unreadable
-# draft state does not refuse, matching how the head read below is optional.
+# A GitHub pull request URL, a GitLab merge request URL, a Forgejo pull request
+# URL, and a Gerrit change URL are all accepted, including a merge request,
+# pull request, or change on a self-hosted instance.
+# A GitHub or Forgejo pull request the forge reports as a draft is refused,
+# naming the draft state and recording and arming nothing: a draft cannot be
+# merged, so a poll armed on it would wait for an event that cannot occur while
+# nobody is asked to act. Mark the pull request ready for review, then arm
+# again; a lane that keeps a draft on purpose declares a wait instead of
+# reporting done. An unreadable draft state does not refuse, matching how the
+# head read below is optional; on Forgejo the draft reading is the tea CLI's
+# exact marker line, because tea's JSON record carries no draft field.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # The recorded pr= also frees the task's place in a declared project capacity
@@ -84,7 +86,9 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 # reported, so the absent tool stops the watch here instead of watching nothing.
 # The Gerrit poll also needs jq, because Gerrit's status has to be read out of a
 # structured record rather than off a rendered line: the tool's own table prints
-# a change's subject before its status, and a subject is free text.
+# a change's subject before its status, and a subject is free text. The Forgejo
+# poll needs jq for the same reason: tea's merged proof is a boolean inside its
+# JSON record, and a pull request title is free text.
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
@@ -99,6 +103,16 @@ if [ "$PROVIDER" = gerrit ]; then
     exit 1
   fi
 fi
+if [ "$PROVIDER" = forgejo ]; then
+  if ! command -v tea >/dev/null 2>&1; then
+    echo "error: watching a Forgejo pull request requires tea on PATH" >&2
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching a Forgejo pull request requires jq on PATH" >&2
+    exit 1
+  fi
+fi
 
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
@@ -110,15 +124,45 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
   fi
 fi
 
+# A Forgejo watch is armed only against a pull request tea can read through a
+# login pinned to the URL's host. tea addresses an instance only by login name,
+# so a host with no tea login is refused here rather than read through tea's
+# default login on another instance, and a pull request whose exact poll read
+# fails is refused rather than armed: the poll is silent on every error, so a
+# pull request tea cannot read - upstream tea truncates a repository slug's
+# deeper segments, which is one way a nested org path fails - would otherwise
+# arm a watch that never wakes. The JSON record this reads also supplies the
+# pr_head below; only the draft refusal is separate, through tea's detail text.
+if [ "$PROVIDER" = forgejo ]; then
+  TEA_LOGINS=$(tea logins list --output csv 2>/dev/null) \
+    || { echo "error: could not read the tea login list to watch $URL" >&2; exit 1; }
+  TEA_LOGIN=$(fm_pr_forgejo_tea_login "$TEA_LOGINS" "$HOST") \
+    || { echo "error: watching $URL requires a tea login for $HOST" >&2; exit 1; }
+  TEA_PULL_JSON=$(tea pulls "$NUMBER" --repo "$PROJECT_PATH" --login "$TEA_LOGIN" --output json 2>/dev/null) \
+    || { echo "error: could not read $URL through tea" >&2; exit 1; }
+  [ -n "$(fm_pr_forgejo_tea_pull_state "$TEA_PULL_JSON")" ] \
+    || { echo "error: could not read the state of $URL through tea" >&2; exit 1; }
+  if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+    TEA_PULL_TEXT=$(tea pulls "$NUMBER" --repo "$PROJECT_PATH" --login "$TEA_LOGIN" 2>/dev/null || true)
+    if [ "$(fm_pr_forgejo_tea_draft_state "$TEA_PULL_TEXT")" = true ]; then
+      echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
+      exit 1
+    fi
+  fi
+fi
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head, and neither does a Gerrit task: a Gerrit
-# revision names one patch set, every amend or rebase is a new patch set, and
+# head commit as a selectable field; a Forgejo task records the head from tea's
+# JSON record, which the watch already requires jq to read, and records none
+# when that record carries no valid headSha; plain glab exposes it only inside
+# its JSON output, which would need a JSON processor firstmate does not
+# require, so a GitLab task records no pr_head, and neither does a Gerrit task:
+# a Gerrit revision names one patch set, every amend or rebase is a new patch
+# set, and
 # bin/fm-review-diff.sh has no Gerrit path to resolve a current head with, so a
-# recorded revision would silently become the reviewed content. Both consumers
+# recorded revision would silently become the reviewed content. All consumers
 # already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
@@ -130,6 +174,12 @@ WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+if [ "$PROVIDER" = forgejo ]; then
+  if REMOTE_HEAD=$(fm_pr_forgejo_tea_pull_head "$TEA_PULL_JSON") \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
