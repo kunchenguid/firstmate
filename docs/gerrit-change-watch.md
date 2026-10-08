@@ -116,7 +116,7 @@ The server permitting self-approval is what makes this a policy boundary rather 
 `tests/fm-pr-check-security.test.sh` covers, with no server:
 
 - The canonical change URL parses into the provider-tagged identity with its whole nested project path, and an adversarial URL matrix is refused.
-- Only an exact `MERGED` status wakes the watch, and a fully submittable open change does not.
+- Only an exact `MERGED` or `ABANDONED` status ends the watch (as `merged` or `closed`), and a fully submittable open change does not.
 - A record naming another change never wakes the watch, and neither does a doctored sidecar.
 - A merged record whose `url` is null, absent, or on an alias host still wakes the watch, because the change number is the whole match.
 - A merged spelling inside a change's free-text subject cannot forge a status.

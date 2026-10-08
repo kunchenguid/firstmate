@@ -954,15 +954,17 @@ test_static_poll_contract() {
   dir=$(make_case poll-contract)
   make_poll_fixture "$dir"
 
-  for state in OPEN CLOSED EMPTY MALFORMED; do
+  for state in OPEN EMPTY MALFORMED; do
     case "$state" in
       EMPTY) value= ;;
       MALFORMED) value='not-a-state' ;;
       *) value=$state ;;
     esac
     out=$(FM_TEST_GH_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "static poll emitted for non-merged state"
+    [ -z "$out" ] || fail "static poll emitted for non-terminal state"
   done
+  out=$(FM_TEST_GH_STATE=CLOSED run_poll "$dir")
+  [ "$out" = closed ] || fail "static poll did not emit exactly one closed line"
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
@@ -1572,13 +1574,15 @@ gerrit.example
 group/apps/console
 4201" ] || fail "published Gerrit sidecar bytes were not exact"
 
-  # Only an exact MERGED status wakes firstmate. Every other reading, including
-  # an abandoned change, a lowercase spelling, and a changed format, stays
-  # silent rather than reporting a merge.
-  for value in NEW ABANDONED merged Merged MERGED_LATER '' not-a-status; do
+  # Only MERGED and ABANDONED wake firstmate. Every other reading, including a
+  # lowercase spelling and a changed format, stays silent rather than
+  # reporting a terminal result.
+  for value in NEW merged Merged MERGED_LATER '' not-a-status; do
     out=$(FM_TEST_GERRIT_STATUS="$value" run_poll "$dir")
     [ -z "$out" ] || fail "Gerrit poll emitted for status '$value'"
   done
+  out=$(FM_TEST_GERRIT_STATUS=ABANDONED run_poll "$dir")
+  [ "$out" = closed ] || fail "Gerrit poll did not emit exactly one closed line for ABANDONED"
 
   # Readiness is not merge. A change that is fully submittable - nothing in its
   # blocked_on list, submit OK, submittable true - is exactly what an approved
@@ -1989,12 +1993,15 @@ gitlab.example
 group/subgroup/project
 7" ] || fail "published GitLab sidecar bytes were not exact"
 
-  # Only an exact merged state wakes firstmate. Every other reading, including
-  # an unreadable merge request and a changed output format, stays silent.
-  for value in opened closed locked '' not-a-state MERGED merged-but-not; do
+  # Only the two terminal states wake firstmate: merged emits merged and
+  # closed emits closed. Every other reading, including an unreadable merge
+  # request and a changed output format, stays silent.
+  for value in opened locked '' not-a-state MERGED merged-but-not; do
     out=$(FM_TEST_GLAB_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "GitLab poll emitted for a non-merged state"
+    [ -z "$out" ] || fail "GitLab poll emitted for a non-terminal state"
   done
+  out=$(FM_TEST_GLAB_STATE=closed run_poll "$dir")
+  [ "$out" = closed ] || fail "GitLab poll did not emit exactly one closed line"
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
@@ -2493,6 +2500,161 @@ test_persistent_secondmate_retirement_is_poll_only() {
   pass "a merged poll on a persistent secondmate retires silently: no outcome, marker, or wake, and every lifecycle artifact preserved"
 }
 
+# A kept merge watch is the same armed poll re-bound to a merge-watch record
+# instead of the task meta the teardown removed: the fixture is the canonical
+# poll plus the record, with no <id>.meta at all.
+seed_merge_watch() {  # <dir> <id> <url>
+  local dir=$1 id=$2 url=$3
+  fm_pr_url_parse "$url" || fail "merge-watch fixture URL was invalid"
+  fm_pr_merge_watch_publish "$dir/home/state" "$id" "$FM_PR_PROVIDER" "$url" \
+    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+    || fail "could not publish the merge-watch fixture"
+}
+
+assert_merge_watch_absent() {  # <state> <id>
+  local state=$1 id=$2
+  [ ! -e "$state/$id.merge-watch" ] && [ ! -L "$state/$id.merge-watch" ] \
+    || fail "retired merge watch left $id.merge-watch"
+  [ ! -e "$state/$id.pr-poll-merge-notified" ] \
+    || fail "retired merge watch left $id.pr-poll-merge-notified"
+  [ ! -e "$state/$id.pr-poll-closed-notified" ] \
+    || fail "retired merge watch left $id.pr-poll-closed-notified"
+}
+
+test_merge_watch_reports_merge_and_retires() {
+  local dir state rc url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-watch-merged)
+  state="$dir/home/state"
+  seed_merge_watch "$dir" watch-a "$url"
+  seed_canonical_poll "$dir" watch-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merge-watch merged watcher failed: $(cat "$dir/watch-1.err")"
+  case "$(cat "$dir/watch-1.out")" in
+    check:*watch-a.check.sh:*merged) ;;
+    *) fail "merge-watch merge was not delivered: $(cat "$dir/watch-1.out")" ;;
+  esac
+  assert_grep "check: merge landed: watch-a $url" "$state/.wake-queue" \
+    "merge-watch merge did not queue the durable landed outcome"
+  assert_poll_absent "$state" watch-a
+  assert_merge_watch_absent "$state" watch-a
+  ack_watcher_cycle "$state" || fail "merge-watch merged acknowledgement failed"
+
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "second merge-watch cycle failed: $(cat "$dir/watch-2.err")"
+  case "$(cat "$dir/watch-2.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "second merge-watch cycle did not reach the control check: $(cat "$dir/watch-2.out")" ;;
+  esac
+  ! grep -F 'watch-a.check.sh' "$dir/watch-2.out" >/dev/null \
+    || fail "retired merge watch executed a second time"
+  pass "a kept merge watch reports its merge once and retires completely"
+}
+
+test_merge_watch_reports_closed_and_retires() {
+  local dir state rc url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-watch-closed)
+  state="$dir/home/state"
+  seed_merge_watch "$dir" watch-a "$url"
+  seed_canonical_poll "$dir" watch-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merge-watch closed watcher failed: $(cat "$dir/watch-1.err")"
+  case "$(cat "$dir/watch-1.out")" in
+    check:*watch-a.check.sh:*closed) ;;
+    *) fail "merge-watch closure was not delivered: $(cat "$dir/watch-1.out")" ;;
+  esac
+  assert_grep "check: PR closed without merging: watch-a $url" "$state/.wake-queue" \
+    "merge-watch closure did not queue the durable closed outcome"
+  assert_poll_absent "$state" watch-a
+  assert_merge_watch_absent "$state" watch-a
+  ack_watcher_cycle "$state" || fail "merge-watch closed acknowledgement failed"
+
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "second merge-watch closed cycle failed: $(cat "$dir/watch-2.err")"
+  case "$(cat "$dir/watch-2.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "second closed merge-watch cycle did not reach the control check: $(cat "$dir/watch-2.out")" ;;
+  esac
+  ! grep -F 'watch-a.check.sh' "$dir/watch-2.out" >/dev/null \
+    || fail "retired closed merge watch executed a second time"
+  pass "a kept merge watch reports a close without merging once and retires completely"
+}
+
+test_merge_watch_read_error_stays_silent() {
+  local dir state rc url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-watch-error)
+  state="$dir/home/state"
+  seed_merge_watch "$dir" watch-a "$url"
+  seed_canonical_poll "$dir" watch-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merge-watch error-cycle watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "a forge read error produced a wake: $(cat "$dir/watch.out")" ;;
+  esac
+  ! grep -F 'watch-a.check.sh' "$dir/watch.out" >/dev/null \
+    || fail "a forge read error woke the watch row"
+  fm_pr_merge_watch_valid "$state" watch-a \
+    || fail "a forge read error damaged the merge watch"
+  fm_pr_poll_artifacts_valid "$state" watch-a "$POLL" \
+    || fail "a forge read error retired the armed poll"
+  pass "a forge read error leaves a kept merge watch silent and intact"
+}
+
+test_merge_watch_reports_upward_from_a_secondmate_home() {
+  local dir state rc replies url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-watch-upward)
+  state="$dir/home/state"
+  replies="$state/parent-replies.status"
+  seed_secondmate_home "$dir"
+  seed_merge_watch "$dir" watch-a "$url"
+  seed_canonical_poll "$dir" watch-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merge-watch-upward: watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*watch-a.check.sh:*merged) ;;
+    *) fail "merge-watch-upward: the watch row was lost: $(cat "$dir/watch.out")" ;;
+  esac
+  assert_grep "done [key=merged-watch-a]: merged watch-a $url" <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
+    "merge-watch-upward: a watched merge was never reported upward"
+  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
+    || fail "merge-watch-upward: one watched merge produced more than one upward line"
+  assert_poll_absent "$state" watch-a
+  assert_merge_watch_absent "$state" watch-a
+  pass "a kept merge watch reports its merge upward from a secondmate home like a live task"
+}
+
 test_retirement_crash_recovery() {
   local dir state rc raw_count drain_count historical_poll
 
@@ -2629,15 +2791,12 @@ test_external_merge_transition_retires_only_terminal_poll() {
   add_stop_custom_check "$dir"
   before=$(poll_artifact_snapshot "$state" task-a)
 
-  for label in open-green open-red closed-unmerged forge-error malformed; do
+  for label in open-green open-red forge-error malformed; do
     rm -f "$state/.last-check"
     set +e
     case "$label" in
       open-green|open-red)
         FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
-        ;;
-      closed-unmerged)
-        FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
         ;;
       forge-error)
         FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
@@ -2654,6 +2813,20 @@ test_external_merge_transition_retires_only_terminal_poll() {
     ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
   done
 
+  # A close without merging is terminal too: the poll reports the distinct
+  # closed result and retires, rather than looping silently forever.
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/closed.out" 2> "$dir/closed.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "external closed transition failed: $(cat "$dir/closed.err")"
+  case "$(cat "$dir/closed.out")" in check:*task-a.check.sh:*closed) ;; *) fail "external close did not deliver its notification: $(cat "$dir/closed.out")" ;; esac
+  assert_poll_absent "$state" task-a
+  [ -f "$state/task-a.pr-poll-retirement" ] && fail "retired closed poll left a retirement receipt"
+  ack_watcher_cycle "$state" || fail "external close acknowledgement failed"
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/19
+
   rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged.out" 2> "$dir/merged.err"
@@ -2662,7 +2835,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
   [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
   case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
   assert_poll_absent "$state" task-a
-  pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
+  pass "open/red, malformed, and forge errors remain armed while exact merged and closed transitions retire the poll"
 }
 
 test_retirement_refuses_replacement_and_nonterminal_results() {
@@ -3458,6 +3631,10 @@ test_authority_retirement_preserves_replacement
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only
+test_merge_watch_reports_merge_and_retires
+test_merge_watch_reports_closed_and_retires
+test_merge_watch_read_error_stays_silent
+test_merge_watch_reports_upward_from_a_secondmate_home
 test_retirement_crash_recovery
 test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results

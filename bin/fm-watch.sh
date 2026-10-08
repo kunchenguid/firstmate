@@ -2624,16 +2624,24 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   touch "$STATE/.last-check"
   wake "$reason"
 fi
+# A merge-watch record with no check left is half-finished watch retirement
+# (bin/fm-pr-lib.sh owns the record), not a live watch; sweep it before any
+# check runs.
+fm_pr_merge_watch_prune_orphans "$STATE"
 
 # Shared by both the first-notification and already-notified paths below so
-# the retirement sequence (bin/fm-pr-lib.sh) is stated once.
-retire_merged_pr_poll() {  # <id>
-  local id=$1
-  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
+# the retirement sequence (bin/fm-pr-lib.sh) is stated once. <result> is the
+# terminal outcome the poll emitted: merged or closed.
+retire_terminal_pr_poll() {  # <id> <result>
+  local id=$1 result=$2
+  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$result"; then
     fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-      || triage_log "merged PR poll retirement remains recoverable for $id"
+      || triage_log "$result PR poll retirement remains recoverable for $id"
+    # The poll is retired, so a merge watch bound to it ends here too.
+    fm_pr_merge_watch_retire "$STATE" "$id" \
+      || triage_log "merge watch record for $id could not be fully removed"
   else
-    triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+    triage_log "$result PR poll retirement deferred because its canonical snapshot changed for $id"
   fi
 }
 
@@ -2863,7 +2871,7 @@ EOF
             # persistent worker, never landed work, and the merge it detected
             # belongs to a task in the mate's own home. Retire the poll with no
             # outcome and no wake; bin/fm-pr-check.sh refuses to arm another.
-            retire_merged_pr_poll "$id"
+            retire_terminal_pr_poll "$id" merged
             pr_poll_control_release || exit 1
             touch "$STATE/.last-check"
             triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
@@ -2889,11 +2897,38 @@ EOF
             triage_log "published merge outcome for $id but could not retire its authority record"
             exit 1
           fi
-          retire_merged_pr_poll "$id"
+          retire_terminal_pr_poll "$id" merged
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
+            continue
+          fi
+          wake "$reason"
+        fi
+        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = closed ]; then
+          if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
+            # Same residue rule as the merged branch above: a terminal poll
+            # armed on a secondmate belongs to a task in the mate's own home,
+            # so it retires with no outcome and no wake.
+            retire_terminal_pr_poll "$id" closed
+            pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
+            triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
+            continue
+          fi
+          closed_outcome_rc=0
+          fm_pr_closed_outcome_report "$FM_HOME" "$STATE" "$id" "$url" \
+            || closed_outcome_rc=$?
+          if [ "$closed_outcome_rc" -ne 0 ]; then
+            triage_log "closed-PR outcome for $id could not be recorded (rc=$closed_outcome_rc)"
+            exit 1
+          fi
+          retire_terminal_pr_poll "$id" closed
+          pr_poll_control_release || exit 1
+          touch "$STATE/.last-check"
+          if [ "$FM_PR_CLOSED_OUTCOME_ALREADY_RECORDED" = true ]; then
+            triage_log "absorbed duplicate closed PR poll result for $id"
             continue
           fi
           wake "$reason"

@@ -24,6 +24,8 @@ Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+Cleaning up a ship task whose recorded PR is still open leaves a home-owned merge watch on that PR, so nothing needs to keep the task to learn the outcome.
+A later `check: merge landed:` or `check: PR closed without merging:` wake naming a cleaned-up task is that watch firing; record it against the backlog item the same way a live task's merge is recorded.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
