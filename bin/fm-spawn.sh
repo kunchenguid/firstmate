@@ -1591,16 +1591,43 @@ fm_task_id_creation_valid "$ID" || {
   exit 2
 }
 # A live merge watch (bin/fm-pr-lib.sh owns the record) outlives the task meta
-# it replaced: the armed poll still binds to the watch's canonical PR, so an
-# id carrying one must never be taken over by a new task or silently drop the
-# watch. Refuse before any task state is created.
-if [ -e "$STATE/$ID.merge-watch" ] || [ -L "$STATE/$ID.merge-watch" ]; then
-  if fm_pr_merge_watch_valid "$STATE" "$ID"; then
-    echo "error: task id $ID is bound to a live merge watch on $FM_PR_WATCH_URL (state/$ID.merge-watch); retire or resolve that watch before reusing the id" >&2
-  else
-    echo "error: task id $ID carries an unreadable merge-watch record (state/$ID.merge-watch); refusing to reuse the id - inspect or remove the record, then retry" >&2
+# it replaced: the armed poll still binds to the watch's canonical PR. A fresh
+# ship task on that id adopts the watch: its new record carries the watched PR
+# as pr=, which binds the same poll artifacts the moment it is published, and
+# the watch record is removed at the commit point under the same per-task meta
+# lock. An aborted spawn rolls its record back and leaves the watch record
+# binding the poll as before. Anything that cannot be proven safe to adopt
+# refuses before any task state is created, naming a remedy.
+ADOPT_WATCH_URL=
+SPAWN_MERGE_WATCH_REFUSAL=
+spawn_merge_watch_adoption_check() {
+  local url
+  ADOPT_WATCH_URL=
+  if ! fm_pr_merge_watch_valid "$STATE" "$ID"; then
+    SPAWN_MERGE_WATCH_REFUSAL="task id $ID carries an unreadable merge-watch record (state/$ID.merge-watch), so its watch cannot be adopted - dispatch the work under a different task id"
+    return 1
   fi
-  exit 1
+  url=$FM_PR_WATCH_URL
+  if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" != ship ]; then
+    SPAWN_MERGE_WATCH_REFUSAL="task id $ID is bound to a live merge watch on $url (state/$ID.merge-watch), and only a fresh ship spawn adopts one - dispatch the work as a ship task, or under a different task id"
+    return 1
+  fi
+  if [ -e "$STATE/$ID.pr-poll-retirement" ] || [ -L "$STATE/$ID.pr-poll-retirement" ]; then
+    SPAWN_MERGE_WATCH_REFUSAL="the merge watch on $url for task id $ID is retiring a terminal result - retry once the watcher has finished it"
+    return 1
+  fi
+  if ! fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
+    || [ "$FM_PR_DATA_URL" != "$url" ]; then
+    SPAWN_MERGE_WATCH_REFUSAL="the merge watch on $url for task id $ID has no valid armed poll to adopt - re-arm it with bin/fm-pr-check.sh $ID $url, then retry"
+    return 1
+  fi
+  ADOPT_WATCH_URL=$url
+}
+if [ -e "$STATE/$ID.merge-watch" ] || [ -L "$STATE/$ID.merge-watch" ]; then
+  spawn_merge_watch_adoption_check || {
+    echo "error: $SPAWN_MERGE_WATCH_REFUSAL" >&2
+    exit 1
+  }
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
   BRANCH="$BRANCH_PREFIX$ID"
@@ -5079,6 +5106,13 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
+if [ -n "$ADOPT_WATCH_URL" ]; then
+  SPAWN_ADOPT_EXPECTED_URL=$ADOPT_WATCH_URL
+  if ! spawn_merge_watch_adoption_check || [ "$ADOPT_WATCH_URL" != "$SPAWN_ADOPT_EXPECTED_URL" ]; then
+    echo "error: the merge watch on $SPAWN_ADOPT_EXPECTED_URL for task id $ID changed while the spawn was running; retry the spawn" >&2
+    exit 1
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
 else
@@ -5149,6 +5183,8 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
+  # Last, because pr= ends the identity block fm_pr_metadata_identity_parse reads.
+  [ -z "$ADOPT_WATCH_URL" ] || echo "pr=$ADOPT_WATCH_URL"
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
@@ -5430,8 +5466,11 @@ spawn_record_traceparent() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "traceparent"' "$meta" >"$SPAWN_META_TMP" ||
-    ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >>"$SPAWN_META_TMP" ||
+    ! awk -F= -v tp="$SPAWN_TRACEPARENT" '
+      $1 == "pr" || $1 == "pr_head" { tail = tail $0 "\n"; next }
+      $1 != "traceparent" { print }
+      END { print "traceparent=" tp; printf "%s", tail }
+    ' "$meta" >"$SPAWN_META_TMP" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
@@ -5687,6 +5726,9 @@ trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
+if [ -n "$ADOPT_WATCH_URL" ] && ! fm_pr_merge_watch_remove "$STATE" "$ID"; then
+  echo "warning: task $ID adopted the merge watch on $ADOPT_WATCH_URL, but state/$ID.merge-watch could not be removed; its task record now binds the poll - remove the record by hand" >&2
+fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
   HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;
@@ -5713,4 +5755,5 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+[ -z "$ADOPT_WATCH_URL" ] || echo "merge watch adopted: $ADOPT_WATCH_URL"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

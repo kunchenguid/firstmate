@@ -755,16 +755,18 @@ test_teardown_merged_pr_keeps_no_watch() {
   seed_ship_pr_poll "$case_dir" https://github.com/o/r/pull/7
   write_forge_state_gh_stub "$case_dir"
 
-  FM_TEST_PR_STATE=MERGED run_teardown "$case_dir" --force > /dev/null
+  FM_TEST_PR_STATE=MERGED run_teardown "$case_dir" --force > "$case_dir/stdout"
   [ ! -e "$case_dir/state/task-x1.merge-watch" ] \
     || fail "merged-PR teardown published a merge watch"
+  ! grep -F "merge watch not kept" "$case_dir/stdout" >/dev/null \
+    || fail "merged-PR teardown reported a merged PR as a watch that was not kept"
   for suffix in check.sh pr-poll pr-poll-registration; do
     [ ! -e "$case_dir/state/task-x1.$suffix" ] \
       || fail "merged-PR teardown kept poll artifact task-x1.$suffix"
   done
   [ ! -e "$case_dir/state/task-x1.meta" ] \
     || fail "merged-PR teardown left the task meta behind"
-  pass "teardown of a ship task with a merged PR keeps no watch and removes every artifact"
+  pass "teardown of a ship task with a merged PR keeps no watch, removes every artifact, and stays silent"
 }
 
 test_teardown_without_recorded_pr_keeps_no_watch() {
@@ -787,12 +789,14 @@ test_teardown_closed_pr_keeps_no_watch() {
   seed_ship_pr_poll "$case_dir" https://github.com/o/r/pull/7
   write_forge_state_gh_stub "$case_dir"
 
-  FM_TEST_PR_STATE=CLOSED run_teardown "$case_dir" --force > /dev/null
+  FM_TEST_PR_STATE=CLOSED run_teardown "$case_dir" --force > "$case_dir/stdout"
   [ ! -e "$case_dir/state/task-x1.merge-watch" ] \
     || fail "closed-PR teardown published a merge watch"
+  ! grep -F "merge watch not kept" "$case_dir/stdout" >/dev/null \
+    || fail "closed-PR teardown reported a closed PR as a watch that was not kept"
   [ ! -e "$case_dir/state/task-x1.check.sh" ] \
     || fail "closed-PR teardown kept the armed poll"
-  pass "teardown of a ship task whose PR closed without merging keeps no watch"
+  pass "teardown of a ship task whose PR closed without merging keeps no watch and stays silent"
 }
 
 test_teardown_forge_read_error_keeps_no_watch() {

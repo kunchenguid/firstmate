@@ -11,8 +11,6 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-pr-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
@@ -145,43 +143,8 @@ test_scout_batch_refuses_delivery_flags() {
   pass "scout batch refuses ship delivery flags instead of ignoring them"
 }
 
-# A task id carrying a live merge watch still has its PR bound to it: a spawn
-# on that id would take over or silently drop the watch, so it refuses before
-# any task state is created, naming the record and the watched PR.
-test_spawn_refuses_a_task_id_with_a_live_merge_watch() {
-  local home id=watched-id-z1 url=https://github.com/o/r/pull/7 out status
-  home="$TMP_ROOT/$id home"
-  mkdir -p "$home/state" "$home/data"
-  fm_pr_url_parse "$url" || fail "merge-watch fixture URL was unparseable"
-  fm_pr_merge_watch_publish "$home/state" "$id" "$FM_PR_PROVIDER" "$url" \
-    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
-    || fail "could not publish the merge-watch fixture"
-  fm_pr_poll_prepare "$home/state" "$id" "$FM_PR_PROVIDER" "$url" \
-    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "could not prepare the merge-poll fixture"
-  fm_pr_poll_publish_prepared || fail "could not publish the merge-poll fixture"
-
-  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
-    FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" "$id" projects/none codex --mode no-mistakes --yolo off 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn reused an id bound to a live merge watch: $out"
-  printf '%s\n' "$out" | grep -F "state/$id.merge-watch" >/dev/null \
-    || fail "spawn refusal did not name the merge-watch record: $out"
-  printf '%s\n' "$out" | grep -F "$url" >/dev/null \
-    || fail "spawn refusal did not name the watched PR: $out"
-  fm_pr_merge_watch_valid "$home/state" "$id" \
-    || fail "the refused spawn damaged the merge watch"
-  fm_pr_poll_artifacts_valid "$home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "the refused spawn damaged the armed poll"
-  [ ! -e "$home/state/$id.meta" ] || fail "the refused spawn created task metadata"
-  pass "spawn refuses a task id bound to a live merge watch and leaves the watch intact"
-}
-
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
 test_projects_path_scoping
-test_spawn_refuses_a_task_id_with_a_live_merge_watch

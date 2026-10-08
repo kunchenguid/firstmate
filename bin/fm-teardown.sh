@@ -85,9 +85,9 @@
 # forge: its merge poll stays armed as a home-owned merge watch bound to
 # state/<id>.merge-watch (keep_merge_watch_pr_poll_artifacts below), so the
 # watcher still reports the merge or the close after this record is gone.
-# When a recorded-PR ship task ends its cleanup with no watch kept, teardown
-# prints "merge watch not kept" with the reason so a flaky forge read is
-# visible rather than silent.
+# When a recorded-PR ship task whose PR is not already merged or closed ends
+# its cleanup with no watch kept, teardown prints "merge watch not kept" with
+# the reason so a flaky forge read is visible rather than silent.
 # That volatile state includes the watcher's per-task .seen-* signature for
 # the task's turn-ended file, minted by bin/fm-wake-lib.sh (the .seen-*
 # signature for its status file and its .hb-surfaced- heartbeat marker are
@@ -1483,7 +1483,8 @@ remove_pr_poll_artifacts() {
 # refuses or fails the cleanup.
 # MERGE_WATCH_NOT_KEPT_URL and MERGE_WATCH_NOT_KEPT_REASON let the caller
 # report why a recorded-PR ship task ended its cleanup with no watch: a flaky
-# forge read is invisible without a line.
+# forge read is invisible without a line. A PR the forge already reports merged
+# or closed sets no reason, since nothing was left to watch.
 MERGE_WATCH_NOT_KEPT_URL=
 MERGE_WATCH_NOT_KEPT_REASON=
 keep_merge_watch_not_kept() {  # <reason>
@@ -1522,20 +1523,29 @@ keep_merge_watch_pr_poll_artifacts() {  # <state> <id>
     github)
       fm_pr_github_read_record "${path%%/*}" "${path#*/}" "$number" \
         || keep_merge_watch_not_kept "forge state unreadable" || return 1
-      [ "$FM_PR_RECORD_STATE" = OPEN ] \
-        || keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1
+      case "$FM_PR_RECORD_STATE" in
+        OPEN) ;;
+        MERGED|CLOSED) return 1 ;;
+        *) keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1 ;;
+      esac
       ;;
     gitlab)
       fm_pr_gitlab_read_record "$host" "$path" "$number" \
         || keep_merge_watch_not_kept "forge state unreadable" || return 1
-      [ "$FM_PR_RECORD_STATE" = opened ] \
-        || keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1
+      case "$FM_PR_RECORD_STATE" in
+        opened) ;;
+        merged|closed) return 1 ;;
+        *) keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1 ;;
+      esac
       ;;
     gerrit)
       fm_pr_gerrit_read_record "$host" "$number" \
         || keep_merge_watch_not_kept "forge state unreadable" || return 1
-      [ "$FM_PR_RECORD_STATE" = NEW ] \
-        || keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1
+      case "$FM_PR_RECORD_STATE" in
+        NEW) ;;
+        MERGED|ABANDONED) return 1 ;;
+        *) keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1 ;;
+      esac
       ;;
     *) keep_merge_watch_not_kept "unsupported PR provider" || return 1 ;;
   esac
