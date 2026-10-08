@@ -445,14 +445,15 @@ fm_polytoken_interrupt() {  # <port> <credential-token> [wait-secs]
 }
 
 # fm_polytoken_interrupt_close: the busy close a cancelled turn never emits.
-# Written only when the busy record still reads exactly as it did before the
-# cancel: a prompt queued behind the cancelled turn may submit at the pause
-# and reopen the record, and that live turn must not be overwritten idle.
-fm_polytoken_interrupt_close() {  # <bin-dir> <state-dir> <id> <record-before-cancel>
-  local bin=$1 state=$2 id=$3 before=$4 gen after
+# Written only when the busy record still reads exactly as it did once the
+# cancel settled: the cancelled turn's own mid-turn rewrites all land before
+# that snapshot, while a prompt queued behind it may submit at the pause and
+# reopen the record, and that live turn must not be overwritten idle.
+fm_polytoken_interrupt_close() {  # <bin-dir> <state-dir> <id> <record-once-settled>
+  local bin=$1 state=$2 id=$3 settled=$4 gen now
   gen=$(fm_busy_current_gen "$state" "$id" 2>/dev/null) || return 0
-  after=$(fm_busy_record_read "$state" "$id" 2>/dev/null) || true
-  [ "$after" = "$before" ] || return 0
+  now=$(fm_busy_record_read "$state" "$id" 2>/dev/null) || true
+  [ "$now" = "$settled" ] || return 0
   "$bin/fm-busy-event.sh" apply "$state" "$id" idle \
     --gen "$gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
 }

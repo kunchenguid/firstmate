@@ -643,29 +643,37 @@ test_polytoken_rest_interrupt_settles_the_turn() {
 }
 
 test_polytoken_interrupt_close_spares_a_reopened_turn() {
-  local rec state id before out
+  local rec state id settled out
   rec=$(make_wiring_case interruptclose)
   state="$rec/state"
   id=task
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null \
     || fail "the busy contract must arm"
+  # The cancelled turn's own pre_model_turn rewrites land before the settle,
+  # so the snapshot taken once it settles already carries them and the close
+  # still lands.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
+    --source polytoken-hook --event pre-model-turn >/dev/null \
+    || fail "the mid-turn open must apply"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
+    --source polytoken-hook --event pre-model-turn >/dev/null \
+    || fail "the mid-turn rewrite must apply"
+  settled=$(fm_busy_record_read "$state" "$id")
+  fm_polytoken_interrupt_close "$ROOT/bin" "$state" "$id" "$settled"
+  out=$(fm_busy_record_read "$state" "$id")
+  assert_contains "$out" "idle fm-interrupt interrupt" \
+    "a record rewritten mid-turn before the cancel must still close idle, got '$out'"
   # A prompt queued behind the cancelled turn submits at the pause and reopens
-  # the record; the close must not overwrite that live turn.
-  before=$(fm_busy_record_read "$state" "$id")
+  # the record after the settle; the close must not overwrite that live turn.
+  settled=$(fm_busy_record_read "$state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
     --source polytoken-hook --event pre-user-prompt >/dev/null \
     || fail "the queued prompt's open must apply"
-  fm_polytoken_interrupt_close "$ROOT/bin" "$state" "$id" "$before"
+  fm_polytoken_interrupt_close "$ROOT/bin" "$state" "$id" "$settled"
   out=$(fm_busy_record_read "$state" "$id")
   assert_contains "$out" "busy polytoken-hook pre-user-prompt" \
-    "a record reopened after the cancel must stay busy, got '$out'"
-  # An unchanged record is the cancelled turn itself, so the close lands.
-  before=$(fm_busy_record_read "$state" "$id")
-  fm_polytoken_interrupt_close "$ROOT/bin" "$state" "$id" "$before"
-  out=$(fm_busy_record_read "$state" "$id")
-  assert_contains "$out" "idle fm-interrupt interrupt" \
-    "an unchanged record must close idle after the cancel, got '$out'"
-  pass "fm-polytoken-lib: the interrupt close spares a turn reopened after the cancel"
+    "a busy write after the settle must be kept, got '$out'"
+  pass "fm-polytoken-lib: the interrupt close lands after mid-turn rewrites and spares a turn reopened after the settle"
 }
 
 test_polytoken_turn_settled_reads_the_typed_sync_verdict() {
