@@ -84,6 +84,7 @@ Input acceptance remains distinct from a started model turn, and only the CLI's 
 An unconfirmed delivery retains durable work and a protected successor for inspection rather than creating a fresh request on silence.
 
 Installation uses the checked-out template's tracked `.codex/hooks.json` and `bin/` files, with the normal Codex hook trust flow.
+Keep the hook, adapter and generation-aware watcher libraries from the same checked-out template revision; strict watcher health also binds to the exact code path.
 From the actual lock-owning Orca primary, `python3 bin/fm-codex-orca-continuation.py ensure --home "$FM_HOME"` is the smallest update/readiness entry point; it reuses a verified owner and refuses an incompatible live binding.
 Global dotfile distribution is separate from this project-scoped installation.
 The [runtime verification record](verification/runtime-backends.md#orca) distinguishes portable behavior tests from live vendor lifecycle evidence.

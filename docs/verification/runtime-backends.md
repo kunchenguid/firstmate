@@ -1917,16 +1917,18 @@ On 2026-10-08, the portable continuation suite passed on macOS with Python 3.9.6
 It drives real isolated watcher/queue/ACK processes with a controlled Orca transport and a Codex-shaped parent; this is not vendor lifecycle proof.
 
 ```sh
-bin/fm-test-run.sh tests/fm-codex-orca-continuation.test.sh tests/fm-codex-orca-continuation-live-e2e.test.sh tests/fm-supervision-instructions.test.sh tests/fm-backend-orca.test.sh
+bin/fm-test-run.sh tests/fm-codex-orca-continuation.test.sh
 ```
 
 ```text
-Ran 14 tests in 114.617s
+Ran 20 tests in 203.207s
 OK
-FM_TEST_SUMMARY total=4 failed=0 skipped_gate=1 duration_ms=185033
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=203639
 ```
 
-The fourteen cases cover repeated successor-before-notify handoff and ACK replay, singleton reuse/refusal, owner death and restart, death during input, acceptance versus turn start, exact permitted retry, rejection/timeout, wrong receipt identities, primary/runtime/incarnation changes, successor failure, generation supersession, unconfirmed create, scoped rendering, second-stop behavior and cleanup.
+The twenty cases cover repeated successor-before-notify handoff and ACK replay, singleton reuse/refusal, owner death and restart, death during input, acceptance versus turn start, exact permitted retry, rejection/timeout, wrong receipt identities, primary/runtime/incarnation changes, successor failure, generation supersession, unconfirmed create, scoped rendering, second-stop behavior and cleanup.
+External inbox cases use the public note command and cover repeated cycles, interrupted ACK/duplicate observation, predecessor-close append, rejection/owner replacement, endpoint replacement, preservation of an attached peer and root ACK/new append before delivery confirmation.
+The attached-peer case verifies a new successor arm against the same peer watcher; its ordinary close then transfers watcher ownership before the next notification.
 Each owner-bearing fixture checks that its owner, arm and transport processes and watcher lock are absent after cleanup.
 Linux portability is supported by the local process/flock implementation but has not been driven live here.
 

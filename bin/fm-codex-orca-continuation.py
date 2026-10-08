@@ -12,7 +12,11 @@ terminal, and bounds bootstrap/readiness observation to 20s (plus bounded
 child cleanup). An unconfirmed create is never repeated automatically.
 run is that terminal's foreground command; --seconds bounds an attended test.
 It replaces each closed arm BEFORE submitting one constant generation-bound
-wake. Root alone drains/ACKs. fm-codex-orca-stop.sh owns the Stop integration
+wake and observes externally appended pending generations without draining.
+An external generation takes over only its own arm through fm-watch-arm.sh;
+that interface preserves an attached peer watcher and verifies its successor
+arm against the existing singleton. Root alone drains/ACKs.
+fm-codex-orca-stop.sh owns the Stop integration
 and always calls the unchanged generic guard in the original Bash ancestry.
 status is read-only and reports readiness, binding and last delivery outcome.
 context verifies the current primary/Orca binding without launching or writing.
@@ -66,6 +70,8 @@ class Adapter:
                         FM_CONFIG_OVERRIDE=str(self.home / "config"),
                         FM_DATA_OVERRIDE=str(self.home / "data"), LC_ALL="C")
         self.children = []
+        self.arms = set()
+        self.arm_files = []
         self.record = {}
         self.arm = None
         self.arm_file = None
@@ -294,7 +300,8 @@ class Adapter:
             if self.ready(old):
                 episode = old.get("episode", {})
                 if episode.get("phase") in ("sending", "delivery-unknown", "delivery-rejected"):
-                    if self.recovery() != "acked:handling:" + episode.get("generation", ""):
+                    if self.recovery() not in ("acked:handling:" + episode.get("generation", ""),
+                                               "acked:downtime:" + episode.get("generation", "")):
                         raise Refused("delivery is unconfirmed; inspect exact receipt and drain durable work, no fresh resend")
                 return self.with_bootstrap(old)
             raise Refused("existing owner is not ready; inspect its failure/receipt before retrying")
@@ -350,12 +357,12 @@ class Adapter:
         if p.poll() is None:
             # The arm forwards TERM only after watcher cleanup is ready. A
             # group TERM here would also kill its lock-publication helpers.
-            if p is self.arm:
+            if p in self.arms:
                 p.send_signal(signal.SIGTERM)
             else:
                 os.killpg(p.pid, signal.SIGTERM)
             try:
-                p.wait(timeout=15 if p is self.arm else 3)
+                p.wait(timeout=15 if p in self.arms else 3)
             except subprocess.TimeoutExpired:
                 os.killpg(p.pid, signal.SIGKILL)
                 p.wait(timeout=3)
@@ -384,6 +391,7 @@ class Adapter:
         if predecessor:
             env["FM_WATCH_PREDECESSOR_ARM_PID"] = str(predecessor)
         self.arm_file = tempfile.TemporaryFile(mode="w+t")
+        self.arm_files.append(self.arm_file)
         argv = ["bash", "-c", '[ ! -f "$FM_CONFIG_OVERRIDE/x-mode.env" ] || . "$FM_CONFIG_OVERRIDE/x-mode.env"; exec bash "$@"',
                 "continuation-arm", str(self.code / "bin/fm-watch-arm.sh")]
         if takeover:
@@ -391,6 +399,7 @@ class Adapter:
         self.arm = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=self.arm_file,
                                     stderr=subprocess.STDOUT, text=True, start_new_session=True)
         self.children.append(self.arm)
+        self.arms.add(self.arm)
         self.publish(phase="arming", arm={"pid": self.arm.pid, "identity": self.identity(self.arm.pid)})
         end = time.monotonic() + 15
         while time.monotonic() < end:
@@ -400,11 +409,59 @@ class Adapter:
                 raw = self.arm_file.read()
                 if re.search(r"^watcher: (?:started|attached) pid=" + health[0] + r"\b", raw, re.M):
                     self.publish(phase="ready", watcher=health)
-                    return
+                    return True
             if self.arm.poll() is not None:
+                self.arm_file.seek(0)
+                raw = self.arm_file.read()
+                if self.arm.returncode == 0 and re.search(r"^(signal:|stale:|check:|heartbeat(?:$|:))", raw, re.M):
+                    return False
                 break
             time.sleep(0.1)
         raise Refused("arm failed to establish a verified singleton successor")
+
+    def retire_arm(self, p, output):
+        self.reap(p)
+        if p in self.children:
+            self.children.remove(p)
+        self.arms.discard(p)
+        if not output.closed:
+            output.close()
+        self.arm_files.remove(output)
+
+    def protected_arm(self, predecessor=None, takeover=None):
+        # A take-over can race a real actionable close and return that reason
+        # instead of starting a watcher. Preserve its queue, then establish the
+        # successor before any input; never notify against that closing arm.
+        for _ in range(3):
+            if self.start_arm(predecessor=predecessor, takeover=takeover):
+                return
+            predecessor = self.arm.pid
+            self.retire_arm(self.arm, self.arm_file)
+            takeover = None
+        raise Refused("successors repeatedly closed before readiness; wake remains durable")
+
+    def observe_external_queue(self):
+        token = self.recovery()
+        if not token.startswith("pending:downtime:"):
+            return
+        generation = token.split(":")[-1]
+        if generation == self.record.get("episode", {}).get("generation"):
+            return
+        self.target_valid()
+        self.still_owned()
+        health = self.healthy()
+        old, output = self.arm, self.arm_file
+        if old.poll() is not None or not health or health != self.record.get("watcher"):
+            return  # Ordinary actionable-close path establishes the successor.
+        if self.identity(old.pid) != self.record["arm"]["identity"]:
+            raise Refused("current arm birth identity changed before queued-wake takeover")
+        # The public take-over stops only this arm's own child. For an attached
+        # peer it protects a new attached arm without signalling that watcher.
+        self.protected_arm(predecessor=old.pid, takeover=old.pid)
+        self.retire_arm(old, output)
+        token = self.recovery()
+        if token.startswith(("pending:", "announced:")):
+            self.deliver(token.split(":")[-1])
 
     def still_owned(self):
         current = self.read(self.record_path)
@@ -485,6 +542,20 @@ class Adapter:
                 raise Refused("successor lost after delivery; wake remains durable")
             rc, _, _ = self.command(["bash", str(self.code / "bin/fm-watch-arm.sh"),
                                       "--handling-delivered", generation, "--watcher-pid", health[0]])
+            if rc == 3:
+                # Root can ACK this episode and receive a new append before
+                # the transport receipt returns. The public typed refusal says
+                # its generation moved; it does not invalidate the exact input
+                # receipt or authorize acknowledging/rebinding the new one.
+                token = self.recovery()
+                if (token.startswith(("pending:", "announced:", "acked:"))
+                        and token.split(":")[-1] != generation and self.healthy() == health):
+                    self.target_valid()
+                    self.still_owned()
+                    episode["confirmation_superseded_by"] = token
+                    self.atomic(self.receipts / (generation + ".json"), episode)
+                    self.publish(episode=episode)
+                    return
             if rc:
                 raise Refused("generation-bound handling delivery confirmation failed")
         else:
@@ -502,7 +573,7 @@ class Adapter:
             takeover = previous.get("pid") if previous.get("identity") and self.identity(previous.get("pid")) == previous["identity"] else None
             try:
                 self.recover_transport()
-                self.start_arm(takeover=takeover)
+                self.protected_arm(takeover=takeover)
                 token = self.recovery()
                 if token.startswith(("pending:", "announced:")):
                     self.deliver(token.split(":")[-1])
@@ -515,21 +586,21 @@ class Adapter:
                         self.target_valid()
                         if not self.needed():
                             break
+                        self.observe_external_queue()
                         last_identity_check = time.monotonic()
                     if self.arm.poll() is not None:
                         rc = self.arm.wait()
                         self.arm_file.seek(0)
                         raw = self.arm_file.read()
-                        self.arm_file.close()
                         if rc or not re.search(r"^(signal:|stale:|check:|heartbeat(?:$|:))", raw, re.M):
                             raise Refused("arm closed without an actionable wake: " + raw[-1500:])
                         predecessor = self.arm.pid
-                        self.children.remove(self.arm)
+                        self.retire_arm(self.arm, self.arm_file)
                         token = self.recovery()
                         generation = token.split(":")[-1]
                         if not re.fullmatch(r"[A-Za-z0-9._-]+", generation):
                             raise Refused("actionable close has no recovery generation")
-                        self.start_arm(predecessor=predecessor)
+                        self.protected_arm(predecessor=predecessor)
                         self.deliver(generation)
                     time.sleep(0.2)
                 self.publish(phase="stopped", error="bounded test ended" if self.deadline else "supervision no longer needed")
@@ -545,8 +616,9 @@ class Adapter:
                 self.receipts.mkdir(mode=0o700, exist_ok=True)
                 self.atomic(self.receipts / (self.record["generation"] + ".cleanup.json"), cleanup)
                 self.publish_if_current(cleanup=cleanup)
-                if self.arm_file and not self.arm_file.closed:
-                    self.arm_file.close()
+                for output in self.arm_files:
+                    if not output.closed:
+                        output.close()
 
 
 def main():

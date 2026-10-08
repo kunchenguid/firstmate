@@ -40,6 +40,9 @@ elif a[:2]==['terminal','send']:
  retry=a[a.index('--retry-request')+1] if '--retry-request' in a else None
  with (h/'sends').open('a') as f: f.write(json.dumps({'argv':a,'payload':payload,'retry':retry,'healthy':health.returncode==0,'watcher':health.stdout})+'\n')
  if mode=='timeout': time.sleep(20)
+ if mode=='held':
+  deadline=time.monotonic()+12
+  while not (h/'release-send').exists() and time.monotonic()<deadline: time.sleep(.05)
  if mode=='reject':
   print(json.dumps({'ok':False,'error':{'message':'fixture rejection'}}));sys.exit(1)
  if mode=='ambiguous' and not retry:
@@ -90,7 +93,8 @@ class Fixture:
             if fn():
                 return
             time.sleep(0.1)
-        raise AssertionError(message + "\n" + (self.home / "owner.log").read_text())
+        log = self.home / "owner.log"
+        raise AssertionError(message + "\n" + (log.read_text() if log.exists() else ""))
 
     def ensure(self):
         p = self.call("ensure", "--seconds", "90")
@@ -108,9 +112,20 @@ class Fixture:
     def trigger(self):
         (self.home / "trigger").touch()
 
-    def ack(self):
-        p = subprocess.run(["bash", str(self.code / "bin/fm-wake-drain.sh")], env=self.env,
-                           capture_output=True, text=True, check=True)
+    def note(self, text):
+        p = subprocess.run(["bash", str(self.code / "bin/fm-inbox.sh"), "note", text],
+                           env=self.env, capture_output=True, text=True, check=True)
+        match = re.search(r"^queued (\S+)$", p.stdout, re.M)
+        if not match:
+            raise AssertionError("public inbox note receipt missing: " + p.stdout + p.stderr)
+        return match.group(1)
+
+    def drain(self):
+        return subprocess.run(["bash", str(self.code / "bin/fm-wake-drain.sh")], env=self.env,
+                              capture_output=True, text=True, check=True)
+
+    def ack(self, presented=None):
+        p = presented or self.drain()
         command = next(x.split(" run ", 1)[1] for x in p.stderr.splitlines()
                        if "WAKE_ACK_REQUIRED: " in x)
         tokens = shlex.split(command)
@@ -196,6 +211,151 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(len(f.sends()), 1)
         self.assertEqual(f.record()["episode"]["stages"], ["input_accepted"])
         self.assertTrue(f.call("status").returncode == 0)
+
+    def test_external_inbox_repeated_ack_and_interrupted_replay(self):
+        f = self.fixture()
+        first = f.ensure()
+        previous = first["watcher"][0]
+        generations = []
+        for n in range(2):
+            token = f.note("external continuation note " + str(n))
+            f.wait(lambda: len(f.sends()) == n + 1 and f.record().get("episode", {}).get("phase") == "turn-started",
+                   "public inbox append did not notify")
+            row = f.sends()[-1]
+            self.assertTrue(row["healthy"], "external input preceded a verified successor")
+            self.assertNotEqual(row["watcher"], previous)
+            previous = row["watcher"]
+            generations.append(f.record()["episode"]["generation"])
+            presented = f.drain()
+            self.assertIn(token, presented.stdout)
+            # An interrupted handler has presented but not acknowledged. Both
+            # its durable row and the notification ownership must survive.
+            time.sleep(2.6)
+            repeated = f.drain()
+            self.assertIn(token, repeated.stdout)
+            self.assertEqual(len(f.sends()), n + 1)
+            self.assertEqual(f.ensure()["owner_pid"], first["owner_pid"])
+            f.ack(presented)
+            self.assertEqual((f.home / "state/.wake-queue").read_text(), "")
+        self.assertNotEqual(generations[0], generations[1])
+        self.assertEqual((f.home / "creates").read_text().count("create"), 1)
+
+    def test_external_inbox_rejection_and_owner_replacement(self):
+        f = self.fixture(mode="reject")
+        first = f.ensure()
+        note = f.note("external rejected continuation")
+        f.wait(lambda: f.record().get("episode", {}).get("phase") == "delivery-rejected", "external rejection missing")
+        generation = f.record()["episode"]["generation"]
+        self.assertEqual(len(f.sends()), 1)
+        self.assertNotEqual(f.call("ensure").returncode, 0)
+        os.kill(first["owner_pid"], signal.SIGKILL)
+        f.wait(lambda: not json.loads(f.call("status").stdout)["ready"], "dead external owner remained ready")
+        replacement = f.ensure()
+        self.assertNotEqual(replacement["generation"], first["generation"])
+        time.sleep(2.6)
+        self.assertEqual(len(f.sends()), 1)
+        self.assertEqual(f.record()["episode"]["generation"], generation)
+        self.assertIn(note, f.drain().stdout)
+        f.ack()
+        self.assertEqual(f.call("ensure").returncode, 0)
+        (f.home / "mode").write_text("started")
+        f.note("external continuation after exact acknowledgement")
+        f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "new external episode after ACK was not delivered")
+        self.assertNotEqual(f.record()["episode"]["generation"], generation)
+        self.assertTrue(f.sends()[-1]["healthy"])
+        f.ack()
+
+    def test_external_inbox_during_predecessor_close(self):
+        f = self.fixture()
+        check = f.home / "state/probe.check.sh"
+        check.write_text('#!/usr/bin/env bash\nif [ -f "$FM_HOME/trigger" ]; then\n'
+                         '  rm "$FM_HOME/trigger"\n'
+                         '  bash "$FM_ROOT_OVERRIDE/bin/fm-inbox.sh" note "external during predecessor close" > "$FM_HOME/note-token"\n'
+                         '  echo "continuity regression wake"\nfi\n')
+        subprocess.run(["bash", str(ROOT / "bin/fm-check-register.sh"), "probe"],
+                       env=f.env, check=True, capture_output=True)
+        first = f.ensure()
+        f.trigger()
+        f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "predecessor-close append did not notify")
+        row = f.sends()[0]
+        self.assertTrue(row["healthy"])
+        self.assertNotEqual(row["watcher"], first["watcher"][0])
+        token = re.search(r"^queued (\S+)$", (f.home / "note-token").read_text(), re.M).group(1)
+        self.assertIn(token, f.drain().stdout)
+        time.sleep(2.6)
+        self.assertEqual(len(f.sends()), 1)
+        f.ack()
+        self.assertEqual((f.home / "state/.wake-queue").read_text(), "")
+
+    def test_external_inbox_endpoint_replacement_never_rebinds(self):
+        f = self.fixture()
+        f.ensure()
+        (f.home / "mode").write_text("incarnation-moved")
+        note = f.note("external note after endpoint replacement")
+        f.wait(lambda: f.record().get("phase") == "failed", "external changed endpoint was ignored")
+        self.assertEqual(f.sends(), [])
+        self.assertIn(note, (f.home / "state/.wake-queue").read_text())
+        f.wait(lambda: not (f.home / "state/.watch.lock/pid").exists(), "endpoint replacement leaked watcher")
+
+    def test_external_inbox_attached_peer_is_preserved(self):
+        f = self.fixture()
+        with (f.home / "peer.log").open("w+") as output:
+            peer = subprocess.Popen(["bash", str(ROOT / "bin/fm-watch-arm.sh")],
+                                    env=dict(f.env, FM_WATCH_HANDLING_SUCCESSOR="1"),
+                                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+            try:
+                f.wait(lambda: "watcher: started" in (f.home / "peer.log").read_text(), "peer watcher did not start")
+                first = f.ensure()
+                watcher = first["watcher"][0]
+                parent = subprocess.run(["ps", "-p", watcher, "-o", "ppid="],
+                                        capture_output=True, text=True, check=True).stdout.strip()
+                self.assertEqual(parent, str(peer.pid), "fixture did not actually attach to a peer")
+                token = f.note("external attached-peer continuation")
+                f.wait(lambda: len(f.sends()) == 1 and f.record().get("episode", {}).get("phase") == "turn-started",
+                       "attached peer suppressed public inbox append")
+                self.assertTrue(f.sends()[0]["healthy"])
+                self.assertEqual(f.sends()[0]["watcher"], watcher)
+                self.assertNotEqual(f.record()["arm"]["pid"], first["arm"]["pid"])
+                self.assertIsNone(peer.poll(), "adapter interrupted the foreign arm")
+                self.assertIn(token, f.drain().stdout)
+                f.ack()
+                # Its ordinary close transfers watcher ownership to the app
+                # owner, which must then replace it before the next input.
+                f.trigger()
+                f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("phase") == "turn-started",
+                       "peer close did not establish an owned successor")
+                self.assertNotEqual(f.sends()[1]["watcher"], watcher)
+                self.assertTrue(f.sends()[1]["healthy"])
+                self.assertEqual(peer.wait(timeout=10), 0)
+                f.ack()
+            finally:
+                if peer.poll() is None:
+                    peer.send_signal(signal.SIGTERM)
+                    try:
+                        peer.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(peer.pid, signal.SIGKILL)
+                        peer.wait(timeout=3)
+
+    def test_external_inbox_ack_and_append_during_input(self):
+        f = self.fixture(mode="held")
+        first = f.ensure()
+        one = f.note("external note acknowledged during input")
+        f.wait(lambda: len(f.sends()) == 1, "held input did not start")
+        self.assertIn(one, f.ack())
+        two = f.note("external note appended before delivery confirmation")
+        (f.home / "release-send").touch()
+        f.wait(lambda: len(f.sends()) == 2 and f.record().get("episode", {}).get("phase") == "turn-started",
+               "new generation during receipt/ACK race was not delivered")
+        self.assertTrue(all(row["healthy"] for row in f.sends()))
+        self.assertNotEqual(f.sends()[0]["payload"], f.sends()[1]["payload"])
+        self.assertNotEqual(f.sends()[0]["watcher"], f.sends()[1]["watcher"])
+        self.assertEqual(f.ensure()["owner_pid"], first["owner_pid"])
+        self.assertIn(two, f.drain().stdout)
+        f.ack()
 
     def test_exact_ambiguous_retry(self):
         f = self.fixture(mode="ambiguous")
