@@ -1134,17 +1134,21 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
   ' >/dev/null 2>&1 \
     || fail "the task after the fresh-repository move failure did not land in the primary block ahead of its newly created parent: $(printf '%s' "$FRESH_OK_LIST" | jq -c '[.result.workspaces[].label]')"
   pass "real Herdr lab: the next task on that repository creates the parent again, lands ahead of it, attaches, and binds"
-  teardown_task fresh-fail "$HOME_DIR" > "$TMP_ROOT/fresh-fail-teardown.out" 2> "$TMP_ROOT/fresh-fail-teardown.err" \
-    || fail "fresh-repository move-failure teardown failed: $(cat "$TMP_ROOT/fresh-fail-teardown.err")"
   teardown_task fresh-ok "$HOME_DIR" > "$TMP_ROOT/fresh-ok-teardown.out" 2> "$TMP_ROOT/fresh-ok-teardown.err" \
     || fail "fresh-repository regrouping teardown failed: $(cat "$TMP_ROOT/fresh-ok-teardown.err")"
-  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository teardowns"
+  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository regrouping teardown"
 
   # A refused removal of a fresh parent is recorded per home and retried by
   # the next spawn on that repository. The fixture records the now-childless
   # parent the regrouping spawn created, exactly as a spawn does after a
-  # refused removal, and proves the next spawn removes it through its seeded
-  # pane, forgets the record, and then groups normally under a new parent.
+  # refused removal, while the stranded task fresh-fail keeps running flat at
+  # its leased slot, and proves the next spawn removes the parent through its
+  # seeded pane, forgets the record, never touches fresh-fail, and then
+  # groups normally under a new parent.
+  # Herdr must report fresh-fail's slot open within the parent's group, or the
+  # case could not tell a flat task from a grouped child.
+  lab worktree list --workspace "$FRESH_PARENT_WSID" | jq -e --arg ws "$FRESH_FAIL_WSID" '[.result.worktrees[]? | select(.open_workspace_id == $ws)] | length == 1' >/dev/null 2>&1 \
+    || fail "inconclusive: Herdr does not report the stranded task's slot open in the fresh-repository parent's group: $(lab worktree list --workspace "$FRESH_PARENT_WSID" | jq -c '[.result.worktrees[]? | {path, open_workspace_id}]')"
   RETRY_RECORD="$HOME_DIR/state/.herdr-repo-parent-retry"
   FRESH_PARENT_PANE=$(lab pane list --workspace "$FRESH_PARENT_WSID" | jq -r '[.result.panes[]?] | select(length == 1) | .[0].pane_id // empty')
   [ -n "$FRESH_PARENT_PANE" ] || fail "the fresh-repository fixture parent does not hold exactly one seeded pane"
@@ -1192,10 +1196,15 @@ if [ "$GROUPING_CAPABLE" = 1 ]; then
   if lab pane get "$FRESH_PARENT_PANE" >/dev/null 2>&1; then
     fail "fresh-repository retried removal left the recorded parent's seeded pane $FRESH_PARENT_PANE alive"
   fi
-  pass "real Herdr lab: the next spawn on a repository retries a recorded refused parent removal through the pane path, forgets the record, and groups under a new parent"
+  lab pane get "$FRESH_FAIL_PANE" >/dev/null 2>&1 \
+    || fail "fresh-repository retried removal ended the stranded task's pane $FRESH_FAIL_PANE"
+  assert_flat_row "$FRESH_FAIL_WSID" "fresh-repository retried removal beside the stranded task"
+  pass "real Herdr lab: the next spawn on a repository retries a recorded refused parent removal through the pane path while the stranded task still runs flat, forgets the record, and groups under a new parent"
   teardown_task fresh-retry "$HOME_DIR" > "$TMP_ROOT/fresh-retry-teardown.out" 2> "$TMP_ROOT/fresh-retry-teardown.err" \
     || fail "fresh-repository retried-removal teardown failed: $(cat "$TMP_ROOT/fresh-retry-teardown.err")"
-  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository retried-removal teardown"
+  teardown_task fresh-fail "$HOME_DIR" > "$TMP_ROOT/fresh-fail-teardown.out" 2> "$TMP_ROOT/fresh-fail-teardown.err" \
+    || fail "fresh-repository move-failure teardown failed: $(cat "$TMP_ROOT/fresh-fail-teardown.err")"
+  assert_focus_is "$CAPTAIN_FOCUS" "fresh-repository retried-removal teardowns"
 
   # A recorded parent whose seeded pane the captain has since started using
   # is never closed by the retry: a long-running command in that pane makes

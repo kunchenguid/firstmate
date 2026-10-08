@@ -2989,16 +2989,17 @@ EOF
 # fm_backend_herdr_projection_repo_parent_ensure reported in
 # FM_BACKEND_HERDR_REPO_PARENT_CREATED in this same spawn, never an adopted or
 # pre-existing parent. Nothing happens, with one warning and status 1, unless
-# the parent is still childless: Herdr's own `worktree list` for it names no
-# other open workspace in its group, and it holds exactly one tab with exactly
-# one seeded pane. The removal is never a workspace close: the seeded pane goes
+# the parent is still childless: no workspace that Herdr's own `worktree list`
+# for it names as open carries linked-worktree provenance in the workspace list
+# (a flat task open at its leased slot is not a child), and it holds exactly one
+# tab with exactly one seeded pane. The removal is never a workspace close: the seeded pane goes
 # through fm_backend_herdr_projection_close_pane_focus_preserving, which
 # snapshots and restores focus, lets Herdr remove the emptied workspace through
 # its pane-death path, and refuses when that tab is the active one with a live
 # client. It is never forced or renamed and never retried within the spawn;
 # status 0 means the exact parent is confirmed gone from the workspace list.
 # A refusal is status 2 when it is lasting (the parent already groups other open
-# workspaces or holds more than its seeded tab or pane) and status 1 when it is
+# linked-worktree workspaces or holds more than its seeded tab or pane) and status 1 when it is
 # transient (an unreadable listing, a focus-unsafe pane close, a failed close,
 # or the parent still listed). The spawn records a refused removal so the next spawn on that
 # repository retries it (fm_backend_herdr_projection_repo_parent_retry).
@@ -3017,7 +3018,7 @@ EOF
 # the plain explicit close, and a non-death plan is also lasting.
 fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id> [<which-parent> [<clone-realpath> [<seeded-pane>]]]
   local session=$1 parent=$2 what=${3:-it just created} strict_clone=${4:-} want_pane=${5:-}
-  local group source others tabs panes pane presence root root_real
+  local group source open_ids list others tabs panes pane presence root root_real
   # shellcheck disable=SC2034  # the spawn consumes the seeded pane id when recording a refusal
   FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE=""
   [ -n "$parent" ] || return 1
@@ -3035,17 +3036,28 @@ fm_backend_herdr_projection_repo_parent_close_fresh() {  # <session> <parent-id>
     fi
   fi
   if [ "$source" = "$parent" ]; then
-    others=$(printf '%s' "$group" | jq -r --arg parent "$parent" '
-      [.result.worktrees[]? | select((.open_workspace_id | type) == "string" and .open_workspace_id != $parent)] | length
-    ' 2>/dev/null) || others=
+    open_ids=$(printf '%s' "$group" | jq -ce --arg parent "$parent" '
+      [.result.worktrees[]? | select((.open_workspace_id | type) == "string" and .open_workspace_id != $parent) | .open_workspace_id] | unique
+    ' 2>/dev/null) || open_ids=
+    others=
+    if [ "$open_ids" = "[]" ]; then
+      others=0
+    elif [ -n "$open_ids" ] && list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null); then
+      # Herdr also reports a flat task open at its leased slot, so only an
+      # open workspace that carries linked-worktree provenance is grouped.
+      others=$(printf '%s' "$list" | jq -r --argjson open "$open_ids" '
+        [.result.workspaces[]? | select(.workspace_id as $id | $open | index($id))
+          | select(.worktree.is_linked_worktree? == true)] | length
+      ' 2>/dev/null) || others=
+    fi
     case "$others" in
       0) ;;
       ''|*[!0-9]*)
-        echo "warning: herdr repo grouping could not parse the worktree group of the parent $parent $what; leaving it in place" >&2
+        echo "warning: herdr repo grouping could not read which workspaces the parent $parent $what groups; leaving it in place" >&2
         return 1
         ;;
       *)
-        echo "warning: herdr repo grouping left the parent $parent $what in place because it already groups $others other open workspace(s)" >&2
+        echo "warning: herdr repo grouping left the parent $parent $what in place because it already groups $others other open linked-worktree workspace(s)" >&2
         return 2
         ;;
     esac

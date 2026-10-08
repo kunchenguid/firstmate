@@ -4020,16 +4020,38 @@ SH
   assert_not_contains "$(cat "$log")" $'tab\x1fclose' "the fresh parent removal closed a tab"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "the fresh parent removal renamed a workspace"
 
-  # A parent whose group already opens another workspace is left alone.
+  # A parent whose group already opens another linked-worktree workspace is
+  # left alone.
   dir="$TMP_ROOT/repo-fresh-close-has-child"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' '{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"},{"path":"/tmp/pool/2","open_workspace_id":"wX"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"wF","label":"foo","focused":false},{"workspace_id":"wX","label":"└ child · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false,"worktree":{"is_linked_worktree":true,"repo_name":"foo"}}]}}' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 2 ] || fail "a repo parent whose group opens another workspace was removed (status $status): $out"
-  assert_contains "$out" "already groups" "a parent with a grouped workspace did not explain why it stays"
+  assert_contains "$out" "already groups 1 other" "a parent with a grouped workspace did not explain why it stays: $out"
   assert_not_contains "$(cat "$log")" $'close' "a parent with a grouped workspace was closed"
+
+  # Herdr also reports another task of the repository open at its leased slot
+  # while that task is still flat; without linked-worktree provenance it is
+  # not a child, so the spawn's own removal still goes ahead.
+  dir="$TMP_ROOT/repo-fresh-close-flat-sibling"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"source":{"source_workspace_id":"wF","source_checkout_path":"/tmp/clone","repo_root":"/tmp/clone","repo_name":"foo"},"worktrees":[{"path":"/tmp/clone","open_workspace_id":"wF"},{"path":"/tmp/pool/2","open_workspace_id":"w5"}]}}' > "$resp/1.out"
+  printf '%s\n' "$layout" > "$resp/2.out"
+  printf '%s\n' "$tabs_one" > "$resp/3.out"
+  printf '%s\n' "$panes_one" > "$resp/4.out"
+  printf '%s\n' "$pane_info" > "$resp/5.out"
+  printf '%s\n' "$pane_gone" > "$resp/7.out"
+  printf '%s\n' "$later_layout" | jq -c 'del(.result.workspaces[2])' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c "$stub_env; fm_backend_herdr_projection_repo_parent_close_fresh fmtest wF" "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a flat sibling task open at its slot kept the fresh parent standing (status $status): $out"
+  [ -z "$out" ] || fail "removing the fresh parent beside a flat sibling task warned: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fwF:t1:p1' "the removal beside a flat sibling did not close the parent's seeded pane"
+  assert_not_contains "$(cat "$log")" $'w5' "the removal beside a flat sibling touched that task"
 
   # A parent holding more than its seeded tab is left alone.
   dir="$TMP_ROOT/repo-fresh-close-extra-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4117,7 +4139,7 @@ SH
 
 test_refused_fresh_parent_removal_is_retried_by_the_next_spawn() {
   local state clone clone_real dir log resp fb out status record stub_env
-  local wt_one tabs_one panes_one pane_info pane_gone list_with list_without list_relabelled
+  local wt_one wt_stranded tabs_one panes_one pane_info pane_gone list_with list_without list_relabelled
   state="$TMP_ROOT/retry-state"; mkdir -p "$state"
   clone="$TMP_ROOT/retry-clone"; mkdir -p "$clone"; clone_real=$(cd "$clone" && pwd -P)
   record="$state/.herdr-repo-parent-retry"
@@ -4129,6 +4151,9 @@ test_refused_fresh_parent_removal_is_retried_by_the_next_spawn() {
   list_with='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wF","label":"foo","focused":false},{"workspace_id":"w5","label":"└ flat · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
   list_without='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"w5","label":"└ flat · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
   list_relabelled='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wF","label":"renamed by a human","focused":false}]}}'
+  # Task A, whose move failed, still runs flat at its leased slot, and Herdr
+  # reports that slot open in A's workspace w5 within the parent's group.
+  wt_stranded="{\"result\":{\"source\":{\"source_workspace_id\":\"wF\",\"source_checkout_path\":\"$clone_real\",\"repo_root\":\"$clone_real\",\"repo_name\":\"foo\"},\"worktrees\":[{\"path\":\"/tmp/clone\",\"open_workspace_id\":\"wF\"},{\"path\":\"/tmp/pool/1\",\"open_workspace_id\":\"w5\"}]}}"
   # The retry may only remove the parent through the pane-death path and only
   # after proving a lone idle shell, so the stubs let each case choose the
   # close plan, the idle proof, and the death close, and log the pane each
@@ -4170,16 +4195,19 @@ SH
   [ -z "$out" ] || fail "a retry with nothing recorded printed: $out"
   [ ! -s "$log" ] || fail "a retry with nothing recorded called Herdr: $(cat "$log")"
 
-  # The recorded parent is still standing, still labelled, still childless:
-  # the next spawn removes it through the same focus-preserving pane path,
-  # says so once, forgets the record, and the spawn continues normally.
+  # The recorded parent is still standing, still labelled, still childless,
+  # while the stranded task A it was created for still runs flat at its slot
+  # (not a child: no linked-worktree provenance): the next spawn removes the
+  # parent through the same focus-preserving pane path, says so once, forgets
+  # the record, never touches A, and the spawn continues normally.
   dir="$TMP_ROOT/retry-succeeds"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' "$list_with" > "$resp/1.out"
-  printf '%s\n' "$wt_one" > "$resp/2.out"
-  printf '%s\n' "$tabs_one" > "$resp/3.out"
-  printf '%s\n' "$panes_one" > "$resp/4.out"
-  printf '%s\n' "$pane_info" > "$resp/5.out"
-  printf '%s\n' "$list_without" > "$resp/6.out"
+  printf '%s\n' "$wt_stranded" > "$resp/2.out"
+  printf '%s\n' "$list_with" > "$resp/3.out"
+  printf '%s\n' "$tabs_one" > "$resp/4.out"
+  printf '%s\n' "$panes_one" > "$resp/5.out"
+  printf '%s\n' "$pane_info" > "$resp/6.out"
+  printf '%s\n' "$list_without" > "$resp/7.out"
   : > "$RETRY_STUB_LOG"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -4194,6 +4222,7 @@ SH
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "the retried removal used the plain explicit pane close"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "the retried removal used a workspace close"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "the retried removal renamed a workspace"
+  assert_not_contains "$(cat "$log")" $'w5' "the retried removal touched the stranded task A"
   [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
     || fail "a successful retry kept the record"
 
@@ -4224,9 +4253,11 @@ SH
   # A lasting refusal (extra tab, or another open workspace in the group)
   # forgets the record with one warning, returns 0 so the ordinary ensure
   # adopts the parent, and closes nothing.
-  local tabs_two wt_two lasting_case
+  local tabs_two wt_two list_grouped lasting_case
   tabs_two='{"result":{"tabs":[{"tab_id":"wF:t1","workspace_id":"wF","label":"1","focused":false},{"tab_id":"wF:t2","workspace_id":"wF","label":"2","focused":false}]}}'
-  wt_two="{\"result\":{\"source\":{\"source_workspace_id\":\"wF\",\"source_checkout_path\":\"$clone_real\",\"repo_root\":\"$clone_real\",\"repo_name\":\"foo\"},\"worktrees\":[{\"path\":\"/tmp/clone\",\"open_workspace_id\":\"wF\"},{\"path\":\"/tmp/clone-wt\",\"open_workspace_id\":\"w9\"}]}}"
+  wt_two="{\"result\":{\"source\":{\"source_workspace_id\":\"wF\",\"source_checkout_path\":\"$clone_real\",\"repo_root\":\"$clone_real\",\"repo_name\":\"foo\"},\"worktrees\":[{\"path\":\"/tmp/clone\",\"open_workspace_id\":\"wF\"},{\"path\":\"/tmp/clone-wt\",\"open_workspace_id\":\"w9\"},{\"path\":\"/tmp/pool/1\",\"open_workspace_id\":\"w5\"}]}}"
+  # The group opens one real linked child (w9) beside the flat stranded task.
+  list_grouped=$(printf '%s' "$list_with" | jq -c '.result.workspaces += [{"workspace_id":"w9","label":"└ child · p:QwErTyUiOpAsDfGhJkLzXc","focused":false,"worktree":{"is_linked_worktree":true,"repo_name":"foo"}}]')
   for lasting_case in tabs group; do
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_record "$1" fmtest wF foo "$2"' "$ROOT" "$state" "$clone"
     dir="$TMP_ROOT/retry-lasting-$lasting_case"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4236,6 +4267,7 @@ SH
       printf '%s\n' "$tabs_two" > "$resp/3.out"
     else
       printf '%s\n' "$wt_two" > "$resp/2.out"
+      printf '%s\n' "$list_grouped" > "$resp/3.out"
     fi
     fb=$(make_herdr_fakebin "$dir")
     out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -4244,6 +4276,8 @@ SH
     [ "$status" -eq 0 ] || fail "a lasting refusal ($lasting_case) did not return 0 (status $status): $out"
     [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "a lasting refusal ($lasting_case) did not warn exactly once: $out"
     assert_contains "$out" "adopting it" "a lasting refusal ($lasting_case) did not say the parent is adopted: $out"
+    [ "$lasting_case" != group ] || assert_contains "$out" "already groups 1 other open linked-worktree" \
+      "a lasting group refusal did not count exactly the one linked child: $out"
     assert_not_contains "$(cat "$log")" $'close' "a lasting refusal ($lasting_case) closed something"
     [ -z "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_retry_lookup "$1" fmtest "$2"' "$ROOT" "$state" "$clone")" ] \
       || fail "a lasting refusal ($lasting_case) kept the record"
