@@ -451,7 +451,7 @@ Without an explicit backend, a later launch or liveness recovery preserves the p
 An existing endpoint on a different backend is refused rather than migrated.
 Placement is per backend:
 
-- Herdr: ordinary remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it; isolated validation uses the [session selection contract](#where-the-remote-agent-runs).
+- Herdr: remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 - Rex: each remote secondmate home gets its own `2ndmate-<id>-<hash>` session on the host's persistent personal rex server, the same placement rule a local secondmate home uses.
 
 ### Refused and unsupported launches
