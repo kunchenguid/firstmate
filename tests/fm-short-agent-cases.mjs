@@ -155,6 +155,8 @@ assert.equal(JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'bash
 assert.equal(JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'bash-1.receipt.json'))).output.output,'changed');
 await service.notify(bashTask.id);const bashOutcome=fs.readFileSync(path.join(home,'state/branch-outcomes.jsonl'),'utf8').trim().split('\n').map(JSON.parse).find(row=>row.task===bashTask.id);assert.match(bashOutcome.summary,/Verified Bash command receipts: 2/);
 assert.throws(()=>service.submit({...bashStored.input,bash:{...bashGrant,scope:'a broader scope'}}),/different request/);
+const retryDir=path.join(tmp,'bash-retry');fs.mkdirSync(retryDir);const retryInput={...request('bash-retry'),bash:{...bashGrant,cwd:retryDir,expiresAt:Date.now()+10}};const retryTask=service.submit(retryInput,false);fs.rmSync(retryDir,{recursive:true});await wait(20);
+assert.equal(service.submit(retryInput).id,retryTask.id,'identical retry survives grant expiry and cwd removal');assert.throws(()=>service.submit({...retryInput,bash:{...retryInput.bash,scope:'changed'}}),/different request/);
 assert.throws(()=>service.submit({...request('bash-root'),bash:{...bashGrant,cwd:'/'}}),/non-root canonical/);
 assert.throws(()=>service.submit({...request('bash-no-exclusions'),bash:{...bashGrant,exclusions:[]}}),/exclusions/);
 assert.throws(()=>service.submit({...request('bash-expired'),bash:{...bashGrant,expiresAt:1}}),/expired/);

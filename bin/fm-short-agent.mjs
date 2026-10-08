@@ -61,17 +61,17 @@ function requestVersion(request) {
   else if (request.version !== 2 || Object.hasOwn(request.input ?? {}, 'budget')) throw Error('unsupported short-agent request version');
   return request;
 }
-function validateBashGrant(grant) {
+function validateBashGrant(grant, live = true) {
   if (grant === undefined) return undefined;
   if (!grant || typeof grant !== 'object' || Array.isArray(grant) ||
       Object.keys(grant).some(key => !['authority', 'cwd', 'scope', 'exclusions', 'expiresAt'].includes(key))) throw Error('invalid bash grant');
   const authority = text(grant.authority, 'bash authority');
   const cwd = text(grant.cwd, 'bash cwd');
   const scope = text(grant.scope, 'bash scope');
-  if (!Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= Date.now()) throw Error('bash authority expired');
+  if (!Number.isSafeInteger(grant.expiresAt) || (live && grant.expiresAt <= Date.now())) throw Error('bash authority expired');
   if (!path.isAbsolute(cwd) || cwd.split(path.sep).includes('..')) throw Error('bash cwd must be an absolute canonical directory');
-  const canonical = fs.realpathSync(cwd);
-  if (canonical !== path.resolve(cwd) || canonical === path.parse(canonical).root || !fs.statSync(canonical).isDirectory()) throw Error('bash cwd must be a non-root canonical directory');
+  const canonical = live ? fs.realpathSync(cwd) : path.resolve(cwd);
+  if (canonical !== cwd || canonical === path.parse(canonical).root || (live && !fs.statSync(canonical).isDirectory())) throw Error('bash cwd must be a non-root canonical directory');
   if (!Array.isArray(grant.exclusions) || !grant.exclusions.length) throw Error('bash exclusions must be a non-empty array');
   const exclusions = grant.exclusions.map((value, index) => text(value, `bash exclusion ${index + 1}`));
   return { authority, cwd: canonical, scope, exclusions, expiresAt: grant.expiresAt };
@@ -112,7 +112,7 @@ export function snapshot(filename) {
     return { source: absolute, sha256: sha(content), content };
   } finally { fs.closeSync(fd); }
 }
-export function validate(input) {
+export function validate(input, liveBash = true) {
   if (!input || typeof input !== 'object') throw Error('request object required');
   const current = withoutLegacyBudget(input);
   const { key, goal, acceptance, materials } = current;
@@ -123,7 +123,7 @@ export function validate(input) {
   if (!Array.isArray(materials)) throw Error('material files must be an array');
   for (const file of materials) text(file, 'material');
   const operations = validateOperations(input.operations);
-  const bash = validateBashGrant(input.bash);
+  const bash = validateBashGrant(input.bash, liveBash);
   if (operations && bash) throw Error('bash and fixed operation grants cannot be combined');
   return { key, goal, acceptance, provider, model, materials, ...(operations ? { operations } : {}), ...(bash ? { bash } : {}) };
 }
@@ -186,14 +186,17 @@ export class ShortAgents {
   }
   submit(raw, launch = true) {
     const began = performance.now();
-    const input = validate(raw), id = `short-${sha(input.key)}`, dir = this.dir(id);
+    if (!raw || typeof raw !== 'object') throw Error('request object required');
+    const id = `short-${sha(text(raw.key, 'key'))}`, dir = this.dir(id);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const old = optional(path.join(dir, 'request.json'));
     if (old) {
       requestVersion(old);
+      const input = validate(raw, false);
       if (JSON.stringify(withoutLegacyBudget(old.input)) !== JSON.stringify(input)) throw Error('duplicate key has different request');
       return { ...this.status(id), duplicate: true, submitMs: performance.now() - began };
     }
+    const input = validate(raw);
     const materials = input.materials.map((file, index) => ({ id: `m${index + 1}`, ...snapshot(file) }));
     if (input.bash) primaryOwner(this.home);
     const operationBindings = bindOperations(this.home, input.operations);
