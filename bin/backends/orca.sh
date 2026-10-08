@@ -9,8 +9,8 @@
 # A stale id is resolved at send time from the recorded window= alias, read-only:
 # Orca does not accept a window title as --terminal, and `terminal list
 # --worktree name:<window>` is the native selector because spawn stores that
-# same alias as the worktree display name. A unique live title match is only
-# the fallback. Nothing here rewrites meta. A miss keeps today's failed send.
+# same alias as the worktree display name. Nothing here rewrites meta.
+# A miss keeps today's failed send.
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
@@ -268,7 +268,7 @@ if (data.ok !== false) process.exit(1);
 const err = data.error || {};
 const code = String(err.code || "");
 const msg = String(err.message || "");
-if (code === "terminal_handle_stale" || msg.indexOf("terminal_handle_stale") !== -1 || msg.indexOf("terminal handle stale") !== -1) {
+if (code === "terminal_handle_stale" || code === "terminal_not_writable" || msg.indexOf("terminal_handle_stale") !== -1 || msg.indexOf("terminal handle stale") !== -1 || msg.indexOf("terminal_not_writable") !== -1) {
   process.exit(0);
 }
 process.exit(1);
@@ -280,7 +280,7 @@ fm_backend_orca_last_stale() {
     return 0
   fi
   case "${FM_ORCA_LAST_STDERR:-}" in
-    *terminal_handle_stale*|*"terminal handle stale"*) return 0 ;;
+    *terminal_handle_stale*|*"terminal handle stale"*|*terminal_not_writable*) return 0 ;;
   esac
   return 1
 }
@@ -292,28 +292,18 @@ fm_backend_orca_replay_last() {
   return "${FM_ORCA_LAST_RC:-1}"
 }
 
-# Prints one replacement handle, or fails. Exit 2 from the picker means the
-# named workspace answered with more than one live pane: do not scan elsewhere.
-fm_backend_orca_pick_terminal() {  # <stale-id> <window> <named|title> ; JSON on stdin
+fm_backend_orca_pick_terminal() {
   node -e '
 const fs = require("fs");
 const stale = process.argv[1];
-const windowName = process.argv[2];
-const mode = process.argv[3];
 const raw = fs.readFileSync(0, "utf8").trim();
-function fail(code) { process.exit(code); }
-if (!raw) fail(1);
+if (!raw) process.exit(1);
 let data;
-try { data = JSON.parse(raw); } catch (err) { fail(1); }
-if (!data || data.ok === false) fail(1);
+try { data = JSON.parse(raw); } catch (err) { process.exit(1); }
+if (!data || data.ok === false) process.exit(1);
 const result = data.result || {};
-if (result.truncated === true) fail(1);
+if (result.truncated === true) process.exit(1);
 const terms = Array.isArray(result.terminals) ? result.terminals : [];
-function namesWindow(title) {
-  if (typeof title !== "string" || !windowName) return false;
-  if (title === windowName) return true;
-  return title.endsWith(" - " + windowName) || title.endsWith(" | " + windowName);
-}
 function usable(term) {
   if (!term || typeof term.handle !== "string" || !term.handle) return false;
   if (/[\s]/.test(term.handle) || term.handle === stale) return false;
@@ -321,52 +311,32 @@ function usable(term) {
   return true;
 }
 const live = terms.filter(usable);
-if (mode === "named") {
-  if (live.length === 1) {
-    process.stdout.write(live[0].handle);
-    process.exit(0);
-  }
-  const titled = live.filter(term => namesWindow(term.title));
-  if (titled.length === 1) {
-    process.stdout.write(titled[0].handle);
-    process.exit(0);
-  }
-  if (live.length > 1) fail(2);
-  fail(1);
-}
-const titled = live.filter(term => namesWindow(term.title));
-if (titled.length === 1) {
-  process.stdout.write(titled[0].handle);
+if (live.length === 1) {
+  process.stdout.write(live[0].handle);
   process.exit(0);
 }
-fail(1);
-' "$1" "$2" "$3"
+process.exit(1);
+' "$1"
 }
 
 fm_backend_orca_resolve_live_terminal() {  # <stale-terminal-id>
-  local stale=$1 window named_json title_json handle pick_rc
+  local stale=$1 window named_json
   window=$(fm_backend_orca_window_for_terminal "$stale") || return 1
   case "$window" in
     ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
-  named_json=$(orca terminal list --worktree "name:$window" --limit 200 --json 2>/dev/null) || true
-  pick_rc=0
-  handle=$(printf '%s' "$named_json" | fm_backend_orca_pick_terminal "$stale" "$window" named) || pick_rc=$?
-  if [ "$pick_rc" -eq 0 ] && [ -n "$handle" ]; then
-    printf '%s' "$handle"
-    return 0
-  fi
-  if [ "$pick_rc" -eq 2 ]; then
+  named_json=$(orca terminal list --worktree "name:$window" --limit 200 --json 2>/dev/null) || return 1
+  printf '%s' "$named_json" | fm_backend_orca_pick_terminal "$stale"
+}
+
+fm_backend_orca_check_dialog() {
+  local cap dialog
+  cap=$(fm_backend_orca_composer_capture "$1" 2>/dev/null) || return 0
+  if dialog=$(fm_composer_blocking_dialog "$cap"); then
+    echo "error: blocked on a prompt: $dialog" >&2
     return 1
   fi
-  title_json=$(orca terminal list --limit 200 --json 2>/dev/null) || true
-  pick_rc=0
-  handle=$(printf '%s' "$title_json" | fm_backend_orca_pick_terminal "$stale" "$window" title) || pick_rc=$?
-  if [ "$pick_rc" -eq 0 ] && [ -n "$handle" ]; then
-    printf '%s' "$handle"
-    return 0
-  fi
-  return 1
+  return 0
 }
 
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>
@@ -388,6 +358,7 @@ fm_backend_orca_send_literal() {  # <terminal-id> <text>
   if fm_backend_orca_last_stale; then
     live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
     if [ -n "$live" ]; then
+      fm_backend_orca_check_dialog "$live" || return 1
       if fm_backend_orca_attempt orca terminal send --terminal "$live" --text "$text" --json; then
         FM_ORCA_RESOLVED_TERMINAL=$live
         return 0
@@ -511,6 +482,9 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
   if fm_backend_orca_last_stale; then
     live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
     if [ -n "$live" ]; then
+      case "$key" in
+        Enter|enter) fm_backend_orca_check_dialog "$live" || return 1 ;;
+      esac
       if fm_backend_orca_send_key_once "$live" "$key"; then
         return 0
       else

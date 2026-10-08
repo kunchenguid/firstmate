@@ -43,7 +43,7 @@ worktree=<absolute Orca worktree path>
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by cleanup, and by send while the recorded terminal handle is live.
 A send or send-key whose recorded handle is stale resolves the live pane from that `window=` alias at send time and does not rewrite the record.
-Orca does not accept the alias as `--terminal`; the native selector is `orca terminal list --worktree name:<window>`, with a unique live title match only as the fallback.
+Orca does not accept the alias as `--terminal`; the native selector is `orca terminal list --worktree name:<window>`, which must return exactly one live pane.
 A window that cannot be resolved keeps today's failed send, including the doorbell refusal that names the recorded terminal and leaves the re-ring in place.
 The mechanic is owned by `bin/backends/orca.sh`.
 Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
