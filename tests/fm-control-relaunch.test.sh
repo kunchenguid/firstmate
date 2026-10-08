@@ -235,13 +235,16 @@ EOF
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
-# add_executor_task <case-dir> <id> [harness]
+# add_executor_task <case-dir> <id> [harness] [posture_consent]
+# The project is unregistered (standing default no-mistakes), so the task
+# carries the captain's recorded direct-PR consent unless the fourth argument
+# is given as empty.
 # A kind=executor task: a worktree already on fm/<id> at a recorded base, the
 # executor brief, a meta carrying the executor fields, a finished previous run
 # (exit marker present, pane shell foreground), and a replacement that comes up
 # as opencode.
 add_executor_task() {
-  local dir=$1 id=$2 harness=${3:-opencode}
+  local dir=$1 id=$2 harness=${3:-opencode} consent=${4-direct-PR}
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt" base
   fm_git_worktree "$proj" "$wt" "fm/$id"
   base=$(git -C "$wt" rev-parse HEAD)
@@ -257,6 +260,7 @@ add_executor_task() {
     echo "mode=direct-PR"
     echo "yolo=off"
     echo "issue=5"
+    [ -z "$consent" ] || echo "posture_consent=$consent"
     echo "executor_base=$base"
     echo "executor_launched=1000"
     echo "tasktmp=/tmp/fm-$id"
@@ -2586,6 +2590,8 @@ test_executor_relaunch_reruns_in_place_and_rearms_the_poll() {
   [ "$(meta_field "$dir" ex1 kind)" = executor ] || fail "kind must survive the relaunch"
   [ "$(meta_field "$dir" ex1 issue)" = 5 ] || fail "the issue must survive the relaunch"
   [ "$(meta_field "$dir" ex1 mode)" = direct-PR ] || fail "the implied delivery mode must survive"
+  [ "$(meta_field "$dir" ex1 posture_consent)" = direct-PR ] || fail "the recorded captain consent must survive the relaunch"
+  [ "$(grep -c '^posture_consent=' "$dir/home/state/ex1.meta")" = 1 ] || fail "the consent must be recorded exactly once"
   [ "$(meta_field "$dir" ex1 executor_base)" = "$head_before" ] \
     || fail "the relaunch must record the branch base at the worktree's HEAD, so the poll counts only the new incarnation's commits"
   [ "$(meta_field "$dir" ex1 executor_launched)" != 1000 ] || fail "a relaunch must mint a fresh launch epoch"
@@ -2624,6 +2630,21 @@ test_executor_relaunch_escalates_profile_and_appends_the_note() {
   pass "fm-control relaunch: an executor escalates to a stronger headless profile and refuses a non-headless one"
 }
 
+# The captain's direct-PR consent is granted at the first spawn and only reused
+# by a relaunch: an executor recorded without it on a project whose standing
+# posture is stricter cannot be relaunched into direct-PR delivery.
+test_executor_relaunch_without_consent_refuses() {
+  local dir out rc
+  dir=$(new_case executor-noconsent ex5)
+  add_executor_task "$dir" ex5 opencode ''
+  out=$(run_control "$dir" ex5 relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "an executor relaunch with no recorded consent on a no-mistakes project must refuse"$'\n'"$out"
+  assert_contains "$out" "below the standing posture no-mistakes" "the refusal names the standing posture"
+  assert_contains "$out" "--accept-direct-pr" "the refusal names the consent flag"
+  [ "$(meta_field "$dir" ex5 executor_launched)" = 1000 ] || fail "a refused relaunch must not mint a fresh launch"
+  ! grep -q "opencode run" "$dir/fake/literal" 2>/dev/null || fail "a refused relaunch must launch nothing"
+  pass "fm-control relaunch: an executor without recorded captain consent is refused on a no-mistakes project"
+}
 
 # A relaunched executor is a NEW incarnation: the poll must describe its work,
 # not the commits the bounced first incarnation left on the shared branch.
@@ -2739,5 +2760,6 @@ test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_executor_relaunch_reruns_in_place_and_rearms_the_poll
 test_executor_relaunch_escalates_profile_and_appends_the_note
+test_executor_relaunch_without_consent_refuses
 test_executor_relaunch_counts_only_the_new_incarnations_commits
 test_executor_promotion_is_refused

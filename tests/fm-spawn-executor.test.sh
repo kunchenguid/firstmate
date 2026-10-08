@@ -16,8 +16,11 @@
 #       form, a batch pair, and --relaunch --issue
 #   (d) brief/spawn kind and issue agreement in both directions
 #   (e) a raw launch command receives the encoded brief as its final argument
-#   (f) the registry-deviation notice on a no-mistakes project, and silence on
-#       a direct-PR one
+#   (f) the posture guard: a project whose standing posture is stricter than
+#       direct-PR (no-mistakes, no-mistakes-prod-only, or unregistered) refuses
+#       without --accept-direct-pr and records posture_consent=direct-PR with
+#       it; a direct-PR project spawns silently. Every other case registers the
+#       fixture project as direct-PR so the guard stays out of its way.
 #   (g) a fresh spawn resets a stale fm/<id> left by an earlier partial
 #       failure onto the freshened base, and refuses with git's own words
 #       when another worktree holds that branch
@@ -52,6 +55,7 @@ exec "$@"
 SH
   chmod +x "$fakebin/timeout"
   fm_test_spawn_home "$home"
+  printf '%s\n' '- project [direct-PR] - fixture (added 2026-07-01)' > "$home/data/projects.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -191,6 +195,12 @@ test_executor_refusals() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" ship-ref-c2 "$PROJ_DIR" --mode direct-PR --yolo off --issue 3 --harness opencode); rc=$?
   expect_code 1 "$rc" "--issue on a ship spawn must refuse"
   assert_contains "$out" 'applies only to --executor' "the ship refusal names the executor flag"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" ship-ref-c2 "$PROJ_DIR" --mode direct-PR --yolo off --accept-direct-pr --harness opencode); rc=$?
+  expect_code 1 "$rc" "--accept-direct-pr on a ship spawn must refuse"
+  assert_contains "$out" '--accept-direct-pr applies only to --executor' "the ship refusal names the consent flag"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch --accept-direct-pr --harness opencode); rc=$?
+  expect_code 1 "$rc" "--relaunch --accept-direct-pr must refuse"
+  assert_contains "$out" 'cannot be granted on a relaunch' "consent is never granted on a relaunch"
   pass "executor refusals: mode, kind conflicts, issue, yolo, non-headless adapters, batch, relaunch --issue"
 }
 
@@ -239,23 +249,37 @@ test_raw_command_receives_brief_as_final_argument() {
   pass "a raw executor command receives the encoded brief last unless it places __BRIEF__ itself"
 }
 
-test_registry_deviation_notice() {
-  local rec id out rc
-  id=exec-reg-f1
-  rec=$(make_case registry); read_case "$rec"
-  printf '%s\n' '- project [no-mistakes] - fixture (added 2026-07-01)' > "$HOME_DIR/data/projects.md"
-  executor_brief "$HOME_DIR" "$id" 2
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --executor --issue 2 --yolo off --harness opencode); rc=$?
-  expect_code 0 "$rc" "the notice never blocks the spawn: $out"
-  assert_contains "$out" "notice: $id is an executor (mode=direct-PR) while the standing posture for project is no-mistakes" "the deviation notice is printed"
-  id=exec-reg-f2
-  rec=$(make_case registry-direct); read_case "$rec"
-  printf '%s\n' '- project [direct-PR] - fixture (added 2026-07-01)' > "$HOME_DIR/data/projects.md"
+test_posture_guard() {
+  local rec id out rc meta posture
+  for posture in no-mistakes no-mistakes-prod-only unregistered; do
+    id=exec-pos-$posture
+    rec=$(make_case "posture-$posture"); read_case "$rec"
+    if [ "$posture" = unregistered ]; then
+      : > "$HOME_DIR/data/projects.md"
+    else
+      printf '%s\n' "- project [$posture] - fixture (added 2026-07-01)" > "$HOME_DIR/data/projects.md"
+    fi
+    executor_brief "$HOME_DIR" "$id" 2
+    meta="$HOME_DIR/state/$id.meta"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --executor --issue 2 --yolo off --harness opencode); rc=$?
+    expect_code 1 "$rc" "an executor below a $posture posture must refuse without consent: $out"
+    assert_contains "$out" "error: $id cannot launch: an executor delivers direct-PR, below the standing posture" "the refusal names the posture ($posture)"
+    assert_contains "$out" "--accept-direct-pr" "the refusal names the consent flag ($posture)"
+    [ ! -e "$meta" ] || fail "a refused spawn must publish no record ($posture)"
+    [ -z "$(cat "$LAUNCH_LOG")" ] || fail "a refused spawn must launch nothing ($posture)"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --executor --issue 2 --yolo off --accept-direct-pr --harness opencode); rc=$?
+    expect_code 0 "$rc" "captain consent lets the executor launch ($posture): $out"
+    assert_contains "$out" "notice: $id is an executor (mode=direct-PR) while the standing posture for project is" "the consented deviation is still announced ($posture)"
+    assert_grep 'posture_consent=direct-PR' "$meta" "the consent is recorded ($posture)"
+  done
+  id=exec-pos-direct
+  rec=$(make_case posture-direct); read_case "$rec"
   executor_brief "$HOME_DIR" "$id" 2
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --executor --issue 2 --yolo off --harness opencode); rc=$?
   expect_code 0 "$rc" "a direct-PR project spawns cleanly: $out"
   assert_not_contains "$out" 'notice:' "no notice when the standing posture is already direct-PR"
-  pass "an executor on a no-mistakes project prints the deviation notice and continues"
+  assert_no_grep 'posture_consent=' "$HOME_DIR/state/$id.meta" "no consent is recorded where none was needed"
+  pass "an executor below a stricter standing posture refuses without --accept-direct-pr and records the consent with it"
 }
 
 test_stale_branch_retry_and_held_branch_refusal() {
@@ -294,5 +318,5 @@ test_headless_templates_per_adapter
 test_executor_refusals
 test_brief_and_spawn_kind_agreement
 test_raw_command_receives_brief_as_final_argument
-test_registry_deviation_notice
+test_posture_guard
 test_stale_branch_retry_and_held_branch_refusal

@@ -3,7 +3,7 @@
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --executor --issue <N> --yolo <on|off> [--harness <adapter>|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --executor --issue <N> --yolo <on|off> [--accept-direct-pr] [--harness <adapter>|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -62,7 +62,12 @@
 #   authority is unchanged by the kind; --mode is REFUSED because an executor's
 #   delivery is inherently direct-PR (recorded as mode=direct-PR so every
 #   mode-reading consumer keeps working), and the rigor that replaces the
-#   no-mistakes pipeline is firstmate's own real-diff review. --executor is
+#   no-mistakes pipeline is firstmate's own real-diff review. Because that
+#   drops below any stricter standing posture (no-mistakes, the unregistered
+#   default, or no-mistakes-prod-only), such a project REFUSES the spawn unless
+#   --accept-direct-pr carries a present captain instruction for this task; the
+#   consent is recorded as posture_consent=direct-PR, reused by a relaunch, and
+#   never granted on one. --executor is
 #   refused together with --scout, --secondmate, batch pairs, and --relaunch's
 #   own --issue, while --relaunch of an existing executor task is supported and
 #   is how a failed attempt is escalated to a stronger profile. The brief must
@@ -753,6 +758,8 @@ YOLO=
 BRANCH_PREFIX=fm/
 ISSUE=
 ISSUE_SET=0
+ACCEPT_DIRECT_PR=0
+POSTURE_CONSENT=
 EXECUTOR_BASE=
 EXECUTOR_LAUNCHED=
 TRACEPARENT_ARG=
@@ -855,6 +862,7 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --issue) want_value=issue ;;
+  --accept-direct-pr) ACCEPT_DIRECT_PR=1 ;;
   --issue=*)
     ISSUE=${a#--issue=}
     ISSUE_SET=1
@@ -999,6 +1007,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded issue; --issue cannot override it (re-scope the issue itself, then relaunch)" >&2
     exit 1
   }
+  [ "$ACCEPT_DIRECT_PR" -eq 0 ] || {
+    echo "error: --relaunch reuses the consent recorded at the executor's first spawn; --accept-direct-pr cannot be granted on a relaunch (tear the task down and spawn it afresh on the captain's word)" >&2
+    exit 1
+  }
 elif [ "$KIND" = executor ]; then
   # An executor's delivery contract (AGENTS.md section 7): the issue it closes
   # and firstmate's merge authority are required and validated here; its
@@ -1035,6 +1047,10 @@ elif [ "$KIND" = executor ]; then
 else
   [ "$ISSUE_SET" -eq 0 ] || {
     echo "error: --issue applies only to --executor spawns" >&2
+    exit 1
+  }
+  [ "$ACCEPT_DIRECT_PR" -eq 0 ] || {
+    echo "error: --accept-direct-pr applies only to --executor spawns; a ship task chooses its delivery with --mode" >&2
     exit 1
   }
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
@@ -2013,6 +2029,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     }
     [ -n "$MODE" ] || MODE=direct-PR
+    POSTURE_CONSENT=$(fm_meta_get "$RELAUNCH_META" posture_consent)
   elif [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -3541,13 +3558,25 @@ if [ "$KIND" = ship ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
 elif [ "$KIND" = executor ]; then
-  # An executor's implied direct-PR delivery drops below a no-mistakes standing
-  # posture exactly as a ship spawn would: the same notice, the same continue.
+  # An executor's implied direct-PR delivery may not drop below a stricter
+  # standing posture on firstmate's own judgment. A project whose posture
+  # outranks direct-PR (no-mistakes, the unregistered default, or the
+  # no-mistakes-prod-only policy, whose product-facing leg is no-mistakes) is
+  # REFUSED unless --accept-direct-pr carries a present captain instruction for
+  # this task. The consent is recorded as posture_consent=direct-PR so a
+  # relaunch reuses it rather than asking again, and a relaunch without it
+  # re-checks the posture as it stands now.
   PROJ_NAME=$(basename "$PROJ_ABS")
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
-  if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
-    [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
-    echo "notice: $ID is an executor (mode=$MODE) while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; firstmate's real-diff review replaces the pipeline, so proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  [ "$ACCEPT_DIRECT_PR" -eq 0 ] || POSTURE_CONSENT=direct-PR
+  if [ "$STANDING_MODE" = no-mistakes-prod-only ] ||
+    { [ -n "$STANDING_MODE" ] &&
+      [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; }; then
+    if [ "$POSTURE_CONSENT" != direct-PR ]; then
+      echo "error: $ID cannot launch: an executor delivers direct-PR, below the standing posture $STANDING_MODE for $PROJ_NAME, and dropping below the captain's standing posture needs the captain's word; on a present captain instruction for this task, spawn again with --accept-direct-pr, otherwise dispatch a no-mistakes ship task" >&2
+      exit 1
+    fi
+    echo "notice: $ID is an executor (mode=$MODE) while the standing posture for $PROJ_NAME is $STANDING_MODE - proceeding on the recorded captain consent (posture_consent=direct-PR); firstmate's real-diff review replaces the pipeline" >&2
   fi
 fi
 
@@ -5342,7 +5371,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo issue executor_base executor_launched branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo issue posture_consent executor_base executor_launched branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5360,6 +5389,7 @@ preserve_relaunch_meta() {
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   if [ "$KIND" = executor ]; then
     echo "issue=$ISSUE"
+    [ -z "$POSTURE_CONSENT" ] || echo "posture_consent=$POSTURE_CONSENT"
     echo "executor_base=$EXECUTOR_BASE"
     echo "executor_launched=$EXECUTOR_LAUNCHED"
   fi

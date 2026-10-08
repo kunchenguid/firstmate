@@ -54,8 +54,9 @@ Right-size it: an issue that needs more than one pull request, more than one ver
 ## Intake mechanics
 
 File the backlog item with `bin/fm-tasks-axi.sh add <id> "<title>" --kind executor`, then scaffold with `bin/fm-brief.sh <id> <repo> --executor --issue <N> --verify "<command>"`, resolving the project's CI-equivalent gate yourself; the scaffold never guesses it.
-Resolve the profile through `config/crew-dispatch.json` and `quota-array-dispatch` exactly as for a crewmate, then spawn with `bin/fm-spawn.sh <id> <project-dir> --executor --issue <N> --yolo <on|off> --harness <adapter> [--model <name>] [--effort <level>]`.
+Resolve the profile through `config/crew-dispatch.json` and `quota-array-dispatch` exactly as for a crewmate, then spawn with `bin/fm-spawn.sh <id> <project-dir> --executor --issue <N> --yolo <on|off> [--accept-direct-pr] --harness <adapter> [--model <name>] [--effort <level>]`.
 The spawn refuses an adapter without a verified headless form; `bin/fm-spawn.sh --help` names the accepted set and the raw-command escape hatch.
+An executor delivers direct-PR, so on a project whose standing posture is stricter (no-mistakes, the unregistered default, or no-mistakes-prod-only) the spawn refuses unless you pass `--accept-direct-pr`, and you pass it only on the captain's present word for this task, never on your own judgment; otherwise dispatch a no-mistakes ship task instead.
 
 ## Canary rule
 
