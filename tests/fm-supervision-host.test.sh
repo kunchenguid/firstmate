@@ -1427,6 +1427,7 @@ test_successor_left_at_the_turn_survives_the_hook_process_group_teardown() {
   kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
   sleep 2
   kill -0 "$watcher" 2>/dev/null || fail "at-turn teardown: the successor watcher (pid $watcher) did not survive the hook's process group teardown"
+  stop_home_processes "$home"
   pass "host+hook: the successor a close that turns main-only at its turn leaves for main survives the hook's process group teardown"
 }
 
@@ -1511,6 +1512,7 @@ test_pass_through_successor_survives_the_hook_process_group_teardown() {
   sleep 2
   kill -0 "$watcher" 2>/dev/null || fail "group teardown: the successor watcher (pid $watcher) did not survive the hook's process group teardown"
   [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$watcher" ] || fail "group teardown: the watcher lock moved"
+  stop_home_processes "$home"
   pass "host+hook: the successor a pass-through leaves for main survives the hook's process group teardown"
 }
 
