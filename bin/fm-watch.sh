@@ -3068,7 +3068,21 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
+    if ! watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")"; then
+      backend=$(window_backend "$w")
+      agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+      case "$agent_state" in
+        dead|missing)
+          hf="$STATE/.hash-$key"
+          ssf="$STATE/.stale-since-$key"
+          ewf="$STATE/.wedge-escalations-$key"
+          h=$(cat "$hf" 2>/dev/null || true)
+          [ -n "$h" ] || h=missing
+          wedge_timer_check "$w" "$ssf" "stale" "$ewf" "$task" "$h"
+          ;;
+      esac
+      continue
+    fi
     tail40=$WATCHER_CAPTURE
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
