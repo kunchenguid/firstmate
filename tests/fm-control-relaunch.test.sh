@@ -3250,11 +3250,13 @@ test_observed_predecessors_and_opt_out_successors() {
     route="$home/state/predecessor-route"
     # shellcheck disable=SC2016
     env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+      PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" \
       FM_HOME="$home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
         "$SEATS" reserve rl63 --generation "$1" --kind "$2" --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
         (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"fmses:fm-rl63\",\"home\":null,\"host\":null,\"remote_root\":null,\"spawn_gen\":\"%s\"}\n" "$1" > "$3")
         "$SEATS" dispatch rl63 --generation "$1" --route-file "$3" >/dev/null
       ' _ "$old" "${kind/optout/ship}" "$route" || fail "could not dispatch the predecessor for $kind"
+    assert_equals "$dir/fake/socket" "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .route.socket_path')" "$kind predecessor dispatch used a socket outside the fixture"
     assert_equals reserved "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "the fixture predecessor was already confirmed"
     if [ "$kind" = optout ]; then
       cp "$home/config/fleet-seats" "$dir/policy"
