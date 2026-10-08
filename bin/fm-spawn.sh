@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|no-mistakes-slim|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -14,7 +14,7 @@
 #   scaffolded before that line existed warns once and launches on the flag. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, or an incomplete pair of Task subsections.
-#   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
+#   Every ship or scout spawn renders `launch-brief.md`; for a pipeline ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
 #   provenance-marking rules; unmarked legacy Tasks stop for migration rather
@@ -600,7 +600,7 @@ else
   # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
-      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      echo "error: ship spawns require --mode <no-mistakes|no-mistakes-slim|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
@@ -608,11 +608,11 @@ else
       exit 1
     }
     case "$MODE" in
-      no-mistakes|direct-PR|local-only) ;;
+      no-mistakes|no-mistakes-slim|direct-PR|local-only) ;;
       no-mistakes-prod-only)
-        echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
+        echo "error: no-mistakes-prod-only is a registry policy, not a task mode; resolve routine low-risk internal tool/skill work to no-mistakes-slim, other low-risk internal work to direct-PR, and risky, product-facing, mixed, or uncertain work to no-mistakes at intake" >&2
         exit 1 ;;
-      *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+      *) echo "error: --mode must be one of no-mistakes, no-mistakes-slim, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
     esac
     case "$YOLO" in
       on|off) ;;
@@ -2359,14 +2359,14 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
-  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = no-mistakes-slim ]; }; then
     if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
       CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
     else
       LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
       CAPTAIN_INTENT=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
       if [ -z "$(printf '%s' "$CAPTAIN_INTENT" | tr -d '[:space:]')" ]; then
-        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
+        echo "error: legacy mixed # Task brief has no provenance-marked captain words for $MODE --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
         exit 1
       fi
     fi
@@ -2380,8 +2380,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     cat "$SOURCE_BRIEF" &&
       printf '\n' &&
       fm_brief_worker_role &&
-      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = no-mistakes-slim ]; }; then
+        fm_brief_intent_overlay "$CAPTAIN_INTENT" "$MODE"
       fi
   } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2; exit 1; }
   if ! mv "$BRIEF_TMP" "$BRIEF"; then
@@ -2391,9 +2391,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
 fi
 
-delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
+delivery_rigor_rank() {  # <mode> -> 4 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
-    no-mistakes) echo 3 ;;
+    no-mistakes) echo 4 ;;
+    no-mistakes-slim) echo 3 ;;
     direct-PR) echo 2 ;;
     local-only) echo 1 ;;
     *) echo 0 ;;
@@ -2417,7 +2418,7 @@ if [ "$KIND" = ship ]; then
   # allowed (a current explicit captain instruction wins) but never silent. An
   # unregistered project resolves to the same no-mistakes standing default, which
   # is why the notice names the standing posture rather than the registry line. A
-  # conditional policy is excluded: both of its legs are legitimate classifications.
+  # conditional policy is excluded: each of its resolved legs is legitimate.
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then

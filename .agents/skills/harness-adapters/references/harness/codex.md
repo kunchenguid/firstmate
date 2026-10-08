@@ -10,7 +10,7 @@ Verified on 2026-09-22 with codex-cli 0.155.1 unless a fact gives a newer versio
 | Exit command | `/quit`; its slash popup needs about one second between text and Enter, which the shared submit path used by the control plane handles. |
 | Interrupt | Single Escape. |
 | Queued Firstmate doorbell | A live codex-cli 0.155.1 run showed `Messages to be submitted after next tool call (press esc to interrupt and send immediately)` above a queued Firstmate doorbell, then acted on and acknowledged it after the held tool call returned. The idle-only Escape-then-Enter re-ring is covered by the captured-pane regression; see [Steering-inbox doorbell verification](../../../../../docs/verification/runtime-backends.md#steering-inbox-doorbell). |
-| Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
+| Skill invocation | `$<skill>`, for example `$no-mistakes` or `$no-mistakes-slim`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'`; Firstmate accepts low through max. See [Codex CLI reasoning-effort evidence](../../../../../docs/verification/runtime-backends.md#codex-cli-reasoning-effort) for live-verification limits. |
@@ -28,7 +28,7 @@ Submitting too fast lets the popup swallow Enter, so the invocation never lands.
 `../../../bin/fm-send.sh` gives a leading `$` a 1.2-second settle before the first Enter only when the exact task metadata records `harness=codex`, with the target backend's submit retry as the safety net.
 That scope is load-bearing because a leading `$` commonly starts ordinary text such as `$5/month` or `$HOME`.
 An explicit `session:window` target has no metadata, so its harness is unknown and uses the non-Codex fast path.
-This is why `$no-mistakes` reaches a Codex worker instead of being consumed by the popup.
+This is why `$no-mistakes` and `$no-mistakes-slim` reach a Codex worker instead of being consumed by the popup.
 
 ## Primary integration
 

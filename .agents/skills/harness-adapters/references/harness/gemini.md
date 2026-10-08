@@ -13,7 +13,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Turn end | `AfterAgent` fires once per turn after the final response, carrying `cwd`, `session_id`, `prompt`, `prompt_response`, `stop_hook_active`, and `transcript_path`. On a cancelled turn `prompt_response` is `[no response text]`. |
 | Exit | `/quit` (alias `/exit`), one Enter, exit status 0; prints `To resume this session: gemini --resume <session-id>`. `Ctrl+C` cancels or quits on empty input and `Ctrl+D` exits on an empty buffer. |
 | Interrupt | Single `Escape`, which prints `ℹ Request cancelled.` and leaves the agent running. The composer does not repollute; it returns to its `Type your message or @path/to/file` placeholder. |
-| Skill | `/<skill>`, for example `/no-mistakes`; ONE Enter submits, with no popup swallow, and the turn opens with an `Activate Skill` tool call. |
+| Skill | `/<skill>`, for example `/no-mistakes` or `/no-mistakes-slim`; ONE Enter submits, with no popup swallow, and the turn opens with an `Activate Skill` tool call. |
 | Autonomy | `-y` / `--yolo`, footer ` YOLO Ctrl+Y`, verified unattended on a real file write with no approval gate; `--approval-mode yolo` is the equivalent long form. |
 | Marker | `GEMINI_CLI=1` on child and tool processes. `AI_AGENT` is NOT a Gemini identity - see Detection below. |
 | Resume | `gemini --resume <session-id>` restores full history; `--resume latest` and an index are also accepted, and `--list-sessions` enumerates them per project. |

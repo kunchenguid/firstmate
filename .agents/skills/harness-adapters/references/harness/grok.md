@@ -11,7 +11,7 @@ Launch shape: `grok --always-approve "$(cat <brief>)"`.
 | Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source: ASCII mid-turn `Ctrl+c:cancel`, absent from idle bar `Shift+Tab:mode │ Ctrl+.:shortcuts`, never the locale-fragile braille spinner. |
 | Exit | `/exit` prints `Resume this session with: grok --resume <session-id>`; fallback is `Ctrl+Q` twice within 1000ms, `Ctrl+D` quits in VS Code-family terminals, and `Ctrl+C` interrupts. |
 | Interrupt | Single `Ctrl+C`; Escape only focuses scrollback. |
-| Skill | `/<skill>`, for example `/no-mistakes`, with end-to-end user-skill discovery, invocation, and real `no-mistakes axi run` evidence; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
+| Skill | `/<skill>`, for example `/no-mistakes` or `/no-mistakes-slim`, with end-to-end user-skill discovery and invocation; the full `no-mistakes` path has real `no-mistakes axi run` evidence, and the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
 | Autonomy | `--always-approve`, footer `· always-approve`, verified unattended; `--permission-mode bypassPermissions` is stronger equivalent. |
 | Marker | `GROK_AGENT=1` on child or tool processes in 0.2.73 and no `CLAUDECODE`; a 1.0.0 hook instead had `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` without `GROK_AGENT`, so ancestry guarantees identity. |
 | Resume | `grok --resume <session-id>`, or `grok -c` / `--continue` for cwd latest; `--fork-session` creates a new id. |

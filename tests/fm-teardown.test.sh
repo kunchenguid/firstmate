@@ -128,6 +128,9 @@ SH
   # run_teardown.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_FAKE_NM_TOOL_CALLS:-}" ] && [ "${FM_FAKE_SLIM_ROUTE:-0}" != 1 ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_NM_TOOL_CALLS"
+fi
 case "${1:-}" in
   axi)
     shift
@@ -165,7 +168,12 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  cat > "$fakebin/no-mistakes-slim" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_SLIM_TOOL_CALLS:?}"
+FM_FAKE_SLIM_ROUTE=1 exec "$(dirname "$0")/no-mistakes" "$@"
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" "$fakebin/no-mistakes-slim"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -2741,6 +2749,32 @@ test_parked_own_run_is_aborted_before_teardown() {
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
 }
 
+test_slim_parked_run_uses_only_slim_cli_before_teardown() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-slim)
+  write_meta "$case_dir" no-mistakes-slim ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/slim-abort.log" \
+  FM_FAKE_SLIM_TOOL_CALLS="$case_dir/slim-calls.log" \
+  FM_FAKE_NM_TOOL_CALLS="$case_dir/regular-calls.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-slim: teardown should still succeed"
+  assert_grep '^axi status$' "$case_dir/slim-calls.log" \
+    "parked-run-slim: teardown did not inspect the slim run"
+  assert_grep '^axi abort --run 01RUN$' "$case_dir/slim-calls.log" \
+    "parked-run-slim: teardown did not abort the verified slim run"
+  assert_absent "$case_dir/regular-calls.log" \
+    "parked-run-slim: teardown queried the regular no-mistakes command"
+  assert_grep 'no-mistakes-slim run for task-x1 is parked' "$case_dir/stderr" \
+    "parked-run-slim: teardown did not identify the slim run it concluded"
+  pass "a slim task's parked run is concluded through no-mistakes-slim only"
+}
+
 # The pipeline advanced the parked run past the submitted head in its own
 # repo, so the run head object does not exist in the task copy at all and the
 # strict object-local identity rule cannot bind the run. The daemon's own
@@ -3721,6 +3755,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
+test_slim_parked_run_uses_only_slim_cli_before_teardown
 test_parked_run_advanced_past_unfetched_head_is_still_aborted
 test_parked_run_with_mismatched_ledger_head_is_never_aborted
 test_parked_run_with_malformed_ledger_row_is_never_aborted

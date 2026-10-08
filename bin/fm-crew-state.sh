@@ -8,7 +8,7 @@
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
+# selected-pipeline run-step attributed under bin/fm-nm-run-lib.sh's contract, else
 # the pane busy-signature) and reconciles the possibly-stale log against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
@@ -26,8 +26,8 @@
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
-#   2. Matching no-mistakes run for this crew's branch AND current code identity,
-#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
+#   2. Matching selected-pipeline run for this crew's branch AND current code identity,
+#      active or terminal (from `axi status`, or the coarse `runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
@@ -118,7 +118,7 @@ META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
 LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
-# How many of the most recent `no-mistakes runs` rows each ledger read
+# How many of the most recent pipeline `runs` rows each ledger read
 # (fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh) scans, whether it is
 # the cross-branch fallback or the live-sibling probe behind a terminal `axi
 # status` answer (docs/configuration.md owns the setting). Generous enough to
@@ -146,9 +146,12 @@ meta_value() {  # <key>
 
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
+MODE=$(meta_value mode)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+PIPELINE_CMD=no-mistakes
+[ "$MODE" = no-mistakes-slim ] && PIPELINE_CMD=no-mistakes-slim
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
@@ -256,7 +259,7 @@ crew_busy_verdict() {  # <target>
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
-# --- no-mistakes run lookup (authoritative when a run matches this branch) --
+# --- selected-pipeline run lookup (authoritative when a run matches this branch) --
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
 # attribution helpers below are thin wrappers over the ONE owner in
 # bin/fm-nm-run-lib.sh, shared with fm-teardown.sh's pre-teardown run abort.
@@ -264,7 +267,11 @@ crew_busy_verdict() {  # <target>
 trim() { fm_nm_trim "$@"; }
 strip_quotes() { fm_nm_strip_quotes "$@"; }
 nm_run() {  # <args...>
-  fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
+  fm_nm_run_with_tool "$PIPELINE_CMD" "$WT" "$NM_TIMEOUT" "$@"
+}
+
+nm_run_checked() {  # <args...>
+  fm_nm_run_with_tool_checked "$PIPELINE_CMD" "$WT" "$NM_TIMEOUT" "$@"
 }
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
@@ -459,14 +466,14 @@ nm_reclassify_failed_run_as_held_green() {
   return 0
 }
 
-# 0 when an explicit probe proves the shared daemon down: `no-mistakes daemon
-# status` is the canonical down-probe (the same one fm-brief.sh hands crews
+# 0 when an explicit probe proves the selected pipeline daemon down: its
+# `daemon status` is the canonical down-probe (the same one fm-brief.sh hands crews
 # before a blocked append) and exits non-zero when the daemon is not running.
 # Bounded like every other CLI call; a probe that fails for any reason -
 # refused socket, timeout, non-zero answer - means the daemon is not provably
 # up, which is the only fact the coarse fallback needs.
 nm_daemon_probe_down() {
-  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || return 0
+  nm_run_checked daemon status >/dev/null || return 0
   return 1
 }
 
@@ -496,7 +503,7 @@ nm_effective_ci_step_status() {
 }
 
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
-# to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
+# to the captain, the pipeline's ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
 # reports every check green - it only reaches outcome=passed once the PR is
 # actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
@@ -504,9 +511,9 @@ nm_effective_ci_step_status() {
 # merge": both read as plain `ci,running,...`. The only place that transition is
 # recorded is the ci step's own log text, e.g. "all CI checks passed - still
 # monitoring until merged or closed" or "no CI checks reported - still
-# monitoring until merged or closed" (verified against 360+ real run logs under
-# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
+# monitoring until merged or closed" (verified against 360+ real full-pipeline
+# run logs on the installed v1.32.2 binary, including the actual PR #252 run).
+# Reads the ci step's log tail from the selected pipeline via `axi logs` and scans it
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
@@ -530,7 +537,7 @@ nm_ci_checks_state() {
 # validate the same underlying repo concurrently - a worktree with its own
 # active run reliably gets that run answered, even under concurrent load), or
 # it names this branch's run but the strict head rule rejected it. The real
-# run-listing command is the top-level `no-mistakes runs` (the `axi` surface
+# run-listing command is the top-level `runs` (the `axi` surface
 # has no runs-listing subcommand; tests/fm-crew-state.test.sh owns the
 # 2026-07-02 dead-code incident history this fallback replaced).
 # fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh is the ONE owner of
@@ -567,9 +574,9 @@ HAVE_RUN=0
 # the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
-# Scouts and secondmates never drive a no-mistakes validation of their own
+# Scouts and secondmates never drive a pipeline validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v "$PIPELINE_CMD" >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
@@ -643,7 +650,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         # from a dead instrument and must not read as work failure.
         if nm_daemon_probe_down; then
           RUN_STATE=unknown
-          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record failed - unverified"
+          RUN_DETAIL="$PIPELINE_CMD daemon unreachable; last ledger record failed - unverified"
         else
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;

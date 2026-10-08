@@ -64,7 +64,7 @@ make_repo_on_branch() {  # <dir> <branch>
   export FM_FAKE_RUN_HEAD
 }
 
-# A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
+# A fakebin with fake full and slim pipeline commands (serving the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
 # command surface the helper uses: `axi status`, `axi status --run <id>` (the
 # `axi` surface - no runs-listing subcommand exists under it, verified against
@@ -77,6 +77,9 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_REGULAR_CALLS:-}" ] && [ "${FM_FAKE_SLIM_ROUTE:-0}" != 1 ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_REGULAR_CALLS"
+fi
 case "${1:-}" in
   axi)
     shift
@@ -99,6 +102,12 @@ case "${1:-}" in
     exit 0 ;;
 esac
 exit 0
+SH
+  cat > "$fb/no-mistakes-slim" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_SLIM_CALLS:?}"
+FM_FAKE_SLIM_ROUTE=1 exec "$(dirname "$0")/no-mistakes" "$@"
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -180,7 +189,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/no-mistakes-slim" "$fb/tmux" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -528,6 +537,22 @@ test_active_run_is_authoritative() {
   assert_contains "$out" "source: run-step" "active run -> run-step source"
   assert_contains "$out" "validating (running)" "active run reports the step"
   pass "active run-step is authoritative"
+}
+
+test_slim_mode_reads_its_own_run_state() {
+  reset_fakes
+  local d; d=$(new_case slim-mode)
+  make_repo_on_branch "$d/wt" fm/feat-slim
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-slim.meta" "window=fm:fm-feat-slim" "worktree=$d/wt" "kind=ship" "mode=no-mistakes-slim"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-slim)"
+  local out
+  out=$(FM_FAKE_SLIM_CALLS="$d/slim-calls" FM_FAKE_REGULAR_CALLS="$d/regular-calls" run_crew_state "$d" feat-slim)
+  assert_contains "$out" "state: working" "slim active run -> working"
+  assert_contains "$out" "source: run-step" "slim active run -> run-step source"
+  assert_grep '^axi status$' "$d/slim-calls" "slim mode did not query no-mistakes-slim axi status"
+  assert_absent "$d/regular-calls" "slim mode queried the regular no-mistakes command"
+  pass "slim mode reads its run state through no-mistakes-slim"
 }
 
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
@@ -2484,6 +2509,7 @@ EOF
 }
 
 test_active_run_is_authoritative
+test_slim_mode_reads_its_own_run_state
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive

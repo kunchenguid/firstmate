@@ -3,14 +3,14 @@
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
-# no-mistakes worker that never received the ask-user escalation rule or the
+# pipeline worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
+# fm_dod_block <no-mistakes|no-mistakes-slim|direct-PR|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
+# This file is the one owner of the pipeline `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
@@ -145,10 +145,10 @@ fm_brief_marked_captain_words() {  # <task-body>
   '
 }
 
-fm_brief_intent_overlay() {  # <captain-intent>
+fm_brief_intent_overlay() {  # <captain-intent> [<pipeline-command>]
+  local pipeline=${2:-no-mistakes}
+  printf '\n# Current %s intent contract\n' "$pipeline"
   cat <<'EOF'
-
-# Current no-mistakes intent contract
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
 Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
 
@@ -181,11 +181,15 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
-fm_ask_user_escalation_block() {  # <data-dir> <task-id>
-  local data=$1 id=$2
+fm_ask_user_escalation_block() {  # <data-dir> <task-id> [<pipeline-command>]
+  local data=$1 id=$2 pipeline=${3:-no-mistakes} prefix=nm label=no-mistakes
+  if [ "$pipeline" = no-mistakes-slim ]; then
+    prefix=nmslim
+    label=no-mistakes-slim
+  fi
   cat <<EOF
-   For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
-   \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
+   For a $label ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/$prefix-<run>-findings.txt\`, then report the gate with
+   \`needs-decision [key=$prefix-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/$prefix-<run>-findings.txt\`
    naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
 EOF
 }
@@ -214,26 +218,36 @@ When it is implemented and committed, append \`done: ready in branch fm/$id\` to
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
-    no-mistakes)
+    no-mistakes|no-mistakes-slim)
+      local pipeline=$mode skill_use skill_activation completion_label
+      if [ "$mode" = no-mistakes-slim ]; then
+        skill_use="invoke /no-mistakes-slim using your harness's skill syntax"
+        skill_activation="invoke /no-mistakes-slim"
+        completion_label="the \`no-mistakes-slim\` skill"
+      else
+        skill_use="run /no-mistakes"
+        skill_activation="invoke /no-mistakes"
+        completion_label=/no-mistakes
+      fi
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes
+Delivery contract: mode=$mode
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to $skill_use to validate and ship a PR.
 
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
-For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
+You drive $pipeline by responding to its gates, not by implementing fixes.
+Follow the guidance $pipeline itself provides for the mechanics: it loads when you $skill_activation, and \`$pipeline axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+When starting $pipeline, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
+For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting $pipeline.
 Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
-This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
+This replaces the $pipeline skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
-So background the drive call and poll \`no-mistakes axi status\` from a separate call instead of sitting in one blocking hold your harness will kill.
+So background the drive call and poll \`$pipeline axi status\` from a separate call instead of sitting in one blocking hold your harness will kill.
 Where a harness's own command limit is not established, assume it bounds commands and use that same background-and-poll shape.
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
@@ -241,12 +255,20 @@ Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
+  When the decision comes back, feed it to the gate with \`$pipeline axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- NEVER pass \`--yes\` (or \`-y\`) to \`$pipeline axi run\` or \`$pipeline axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After $completion_label reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
+      if [ "$mode" = no-mistakes-slim ]; then
+        cat <<'EOF'
+
+Before starting validation, run `no-mistakes-slim status` in this task worktree.
+Only if it reports `repo not initialized`, run `no-mistakes-slim init` in this same task worktree.
+Never initialize slim setup in the primary checkout or another worktree, and never run `no-mistakes` or access `~/.no-mistakes`.
+EOF
+      fi
       ;;
     *)
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2

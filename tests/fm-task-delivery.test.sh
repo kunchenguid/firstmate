@@ -91,10 +91,14 @@ EOF
 missing both flags||ship spawns require --mode
 missing --yolo|--mode no-mistakes|ship spawns require --yolo
 missing --mode|--yolo off|ship spawns require --mode
-unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, local-only
+unknown mode|--mode nope --yolo off|must be one of no-mistakes, no-mistakes-slim, direct-PR, local-only
 unknown yolo|--mode no-mistakes --yolo maybe|--yolo must be on or off
-conditional policy as a task mode|--mode no-mistakes-prod-only --yolo off|classify this task's surface
+conditional policy as a task mode|--mode no-mistakes-prod-only --yolo off|routine low-risk internal tool/skill work
 ROWS
+  write_brief "$home" delivery-slim-accepted no-mistakes-slim
+  out=$(run_spawn "$home" "$fakebin" delivery-slim-accepted "$proj" claude --mode no-mistakes-slim --yolo off)
+  assert_not_contains "$out" "must be one of" "fm-spawn rejected the new slim delivery mode"
+  assert_not_contains "$out" "error: --mode" "fm-spawn treated the new slim delivery mode as invalid"
   pass "fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created"
 }
 
@@ -186,7 +190,10 @@ EOF
 no-mistakes project shipped direct-PR|- proj [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
 no-mistakes project shipped local-only|- proj [no-mistakes] - fixture (added 2026-01-01)|local-only|notice|no-mistakes
 no-mistakes project shipped no-mistakes|- proj [no-mistakes] - fixture (added 2026-01-01)|no-mistakes|quiet|no-mistakes
+no-mistakes project shipped slim|- proj [no-mistakes] - fixture (added 2026-01-01)|no-mistakes-slim|notice|no-mistakes
 local-only project shipped no-mistakes|- proj [local-only] - fixture (added 2026-01-01)|no-mistakes|quiet|local-only
+slim project shipped full pipeline|- proj [no-mistakes-slim] - fixture (added 2026-01-01)|no-mistakes|quiet|no-mistakes-slim
+slim project shipped direct-PR|- proj [no-mistakes-slim] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes-slim
 conditional policy shipped direct-PR|- proj [no-mistakes-prod-only] - fixture (added 2026-01-01)|direct-PR|quiet|no-mistakes-prod-only
 unregistered project resolves to the no-mistakes standing default|- other [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
 ROWS
@@ -236,7 +243,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode no-mistakes-prod-only --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
-  assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
+  assert_contains "$out" "routine low-risk internal tool/skill work" "promote did not refuse the conditional policy as a task mode"
 
   blocked_data="$home/data-blocked"
   printf 'not a directory\n' > "$blocked_data"
@@ -318,7 +325,7 @@ printf '%s' "$2" > "$FM_TEST_CAPTURE"
 STUB
   chmod +x "$sendroot/bin/fm-send.sh"
 
-  for mode in no-mistakes direct-PR local-only; do
+  for mode in no-mistakes no-mistakes-slim direct-PR local-only; do
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
@@ -381,6 +388,26 @@ STUB
   assert_grep "It is banned fleet-wide" "$payload" \
     "promoted no-mistakes worker did not receive the fleet-wide ban wording"
 
+  payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes-slim"
+  assert_grep "no-mistakes-slim axi run --help" "$payload" \
+    "promoted slim worker did not receive the slim run contract"
+  assert_grep "no-mistakes-slim axi respond" "$payload" \
+    "promoted slim worker did not receive the slim response command"
+  assert_grep "no-mistakes-slim axi status" "$payload" \
+    "promoted slim worker did not receive the slim status command"
+  assert_grep "no-mistakes-slim status" "$payload" \
+    "promoted slim worker was not told to check setup in its task worktree"
+  assert_grep "no-mistakes-slim init" "$payload" \
+    "promoted slim worker was not told to initialize missing setup lazily"
+  assert_grep "never run \`no-mistakes\` or access \`~/.no-mistakes\`" "$payload" \
+    "promoted slim worker was not told to leave the regular binary and state untouched"
+  assert_grep 'needs-decision [key=nmslim-<run>-<step>]: ask-user findings=<id1>,<id2>,...' "$payload" \
+    "promoted slim worker did not receive the distinct ask-user escalation key"
+  assert_grep "$home/data/promote-dod-no-mistakes-slim/nmslim-<run>-findings.txt" "$payload" \
+    "promoted slim worker's ask-user snapshot did not use its isolated filename"
+  assert_no_grep 'no-mistakes axi run' "$payload" \
+    "promoted slim worker received a regular pipeline run command"
+
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"
   assert_grep "supersede the scout delivery rules and report-based Definition of done" "$payload" \
     "promoted worker retained the scout delivery contract"
@@ -408,6 +435,7 @@ test_project_mode_maps_the_conditional_policy() {
 - prodproj [no-mistakes-prod-only] - fixture (added 2026-01-01)
 - yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
 - flatproj [direct-PR] - fixture (added 2026-01-01)
+- slimproj [no-mistakes-slim] - fixture (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
@@ -423,6 +451,12 @@ EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" slimproj 2>/dev/null)
+  [ "$out" = "no-mistakes-slim off" ] || fail "registered slim mode did not resolve as a flat posture (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw slimproj 2>/dev/null)
+  [ "$out" = "no-mistakes-slim off" ] || fail "--raw altered the registered slim mode (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"

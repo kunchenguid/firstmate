@@ -199,19 +199,19 @@
 # refusal above has already passed, and BEFORE any worktree return, branch
 # delete, or backend kill below - a still-active run or a leaked process may
 # own live work in that worktree):
-#   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
-#     be torn down while its no-mistakes pipeline run is still PARKED at a gate
+#   Fix 1 - conclude the task's own selected-pipeline run. A ship task's worktree can
+#     be torn down while its pipeline run is still PARKED at a gate
 #     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
 #     left to ever answer it - the run then sits there holding a fleet slot
 #     indefinitely (observed 2026-08-03: runs parked 7h39m and parked at a
 #     post-CI approval gate after the worker was already cleaned up). A run
 #     with an autonomous step still under way (running/fixing/ci) is left
-#     alone: no-mistakes drives those against its own gate-repo clone, not the
+#     alone: the selected pipeline drives those against its own gate-repo clone, not the
 #     crew's worktree, so they are not orphaned by removing the worktree.
-#     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
+#     conclude_task_pipeline_run attributes the active-or-most-recent run to
 #     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
 #     strict fm_nm_head_matches_worktree rule) both match this worktree, then
-#     runs `no-mistakes axi abort --run <id>` for that verified run instance.
+#     runs the selected pipeline's `axi abort --run <id>` for that verified run instance.
 #     When the run head is absent from this copy's object store - the pipeline
 #     committed its fix round in its own repo and the task copy never fetched
 #     it - attribution falls to the same lib's shared
@@ -244,7 +244,7 @@
 #     being reachable by Fix 2, because its working directory is wherever it
 #     was launched rather than the task worktree (observed 2026-08-07: 29
 #     workers at ppid 1, 1-2 days old, each still polling and appending to a
-#     log in a pruned no-mistakes gate worktree). bin/fm-remote-job-reap-orphans.sh
+#     log in a pruned pipeline gate worktree). bin/fm-remote-job-reap-orphans.sh
 #     owns that sweep and its safety rule; it never touches a worker whose code
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
@@ -954,6 +954,8 @@ elif [ "$TREEHOUSE_SLOT_LOCK_REQUIRED" = 1 ]; then
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+PIPELINE_CMD=no-mistakes
+[ "$MODE" = no-mistakes-slim ] && PIPELINE_CMD=no-mistakes-slim
 
 # A record accepted as a legacy incarnation (no spawn_gen, --legacy-record
 # given) may be torn down only when its recorded endpoint is confidently gone
@@ -1721,7 +1723,7 @@ validate_worktree_teardown_safety() {
   fi
 }
 
-# Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
+# Fix 1 (see script header): does the active-or-most-recent selected-pipeline run in
 # worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
 # that is about to be removed? Prints nothing; returns 0 only on a genuine
 # match so the caller knows it is safe to abort - never a guess. Identity
@@ -1730,7 +1732,7 @@ validate_worktree_teardown_safety() {
 # this copy cannot resolve at all.
 NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
 case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
-# How many of the most recent `no-mistakes runs` rows the parked-run
+# How many of the most recent selected-pipeline `runs` rows the parked-run
 # continuation proof may scan, mirroring bin/fm-crew-state.sh's limit posture
 # (generous: rows of other branches interleave freely in the real ledger).
 NM_TEARDOWN_RUNS_LIMIT=${FM_TEARDOWN_NM_RUNS_LIMIT:-200}
@@ -1769,7 +1771,7 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
     # abort here must never fire for a run that already ended).
     [ -n "$run_head" ] || return 1
     [ -z "$(fm_nm_resolve_commit "$wt" "$run_head")" ] || return 1
-    ledger=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" runs --limit "$NM_TEARDOWN_RUNS_LIMIT")
+    ledger=$(fm_nm_run_with_tool "$PIPELINE_CMD" "$wt" "$NM_TEARDOWN_TIMEOUT" runs --limit "$NM_TEARDOWN_RUNS_LIMIT")
     [ "$(fm_nm_runs_status_for_worktree "$wt" "$branch" "$ledger" "$run_head")" = running ] || return 1
   fi
   awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
@@ -1787,8 +1789,8 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
 task_run_is_own_parked_run() {  # <worktree>
   local wt=$1 out
   # Accepted best-effort residual: query failures stay fail-open because making
-  # no-mistakes availability a prerequisite would block ship tasks with no run.
-  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
+  # pipeline availability a prerequisite would block ship tasks with no run.
+  out=$(fm_nm_run_with_tool "$PIPELINE_CMD" "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
   task_status_is_own_parked_run "$wt" "$out"
 }
 
@@ -1810,28 +1812,28 @@ task_status_is_run_not_found() {  # <status-error> <run-id>
   [ "$actual" = "$expected" ]
 }
 
-# Abort THIS task's own parked no-mistakes run before the worker that would
+# Abort THIS task's own parked selected-pipeline run before the worker that would
 # have answered its gate is removed, so no run is left orphaned holding a
-# fleet slot. Only KIND=ship drives a no-mistakes validation of its own
+# fleet slot. Only KIND=ship drives a pipeline validation of its own
 # worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
 # a run not attributed to this exact branch+head is left completely alone.
-conclude_task_no_mistakes_run() {  # <worktree>
+conclude_task_pipeline_run() {  # <worktree>
   local wt=$1 out run_id
   [ "$KIND" = ship ] || return 0
   [ -d "$wt" ] || return 0
-  command -v no-mistakes >/dev/null 2>&1 || return 0
+  command -v "$PIPELINE_CMD" >/dev/null 2>&1 || return 0
   task_run_is_own_parked_run "$wt" || return 0
   run_id=$TASK_RUN_ID
-  echo "teardown: no-mistakes run for $ID is parked at a gate; aborting before the worker is removed" >&2
+  echo "teardown: $PIPELINE_CMD run for $ID is parked at a gate; aborting before the worker is removed" >&2
   # Accepted best-effort residual: abort supports run-id targeting but no atomic
   # live-state condition; fully closing the resume race needs upstream compare-and-cancel.
-  fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi abort --run "$run_id" >/dev/null 2>&1 || true
-  if out=$(fm_nm_run_bounded "$wt" "$NM_TEARDOWN_TIMEOUT" axi status --run "$run_id" 2>&1); then
+  fm_nm_run_with_tool_checked "$PIPELINE_CMD" "$wt" "$NM_TEARDOWN_TIMEOUT" axi abort --run "$run_id" >/dev/null 2>&1 || true
+  if out=$(fm_nm_run_with_tool_bounded "$PIPELINE_CMD" "$wt" "$NM_TEARDOWN_TIMEOUT" axi status --run "$run_id" 2>&1); then
     task_status_is_terminal_run "$out" "$run_id" && return 0
   elif task_status_is_run_not_found "$out" "$run_id"; then
     return 0
   fi
-  echo "REFUSED: no-mistakes run for $ID is still parked after axi abort; confirm it stopped (no-mistakes axi status) or abort it manually (no-mistakes axi abort --run <id>) before retrying teardown." >&2
+  echo "REFUSED: $PIPELINE_CMD run for $ID is still parked after axi abort; confirm it stopped ($PIPELINE_CMD axi status) or abort it manually ($PIPELINE_CMD axi abort --run <id>) before retrying teardown." >&2
   return 1
 }
 
@@ -3286,7 +3288,7 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  conclude_task_no_mistakes_run "$WT"
+  conclude_task_pipeline_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"

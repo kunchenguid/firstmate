@@ -199,7 +199,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
+  for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-nmslim-a4:no-mistakes-slim" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
@@ -216,9 +216,17 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    if [ "$mode" = no-mistakes-slim ]; then
+      assert_grep "no-mistakes-slim axi run --help" "$brief" \
+        "$id: slim definition of done omitted the selected pipeline command"
+      assert_grep "Only if it reports \`repo not initialized\`, run \`no-mistakes-slim init\` in this same task worktree" "$brief" \
+        "$id: slim definition of done omitted lazy task-worktree initialization"
+      assert_grep 'Never initialize slim setup in the primary checkout or another worktree' "$brief" \
+        "$id: slim definition of done allowed initialization outside the task worktree"
+    fi
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  pass "fm-brief.sh: full, slim, direct-PR, and local-only briefs generate cleanly"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -242,8 +250,8 @@ test_ship_mode_is_required_and_closed_set() {
   done <<'ROWS'
 missing --mode||ship briefs require --mode
 empty --mode value|--mode|requires a value
-unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
-conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
+unknown mode value|--mode nope|must be one of no-mistakes, no-mistakes-slim, direct-PR, local-only
+conditional policy is not a task mode|--mode no-mistakes-prod-only|routine low-risk internal tool/skill work
 ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
 }
