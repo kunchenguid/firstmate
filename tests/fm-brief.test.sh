@@ -1006,6 +1006,19 @@ ROWS
   pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor"
 }
 
+# Lavish artifacts are written straight into the backed-up home, for scouts and ships.
+test_briefs_direct_lavish_artifacts_to_the_home_data_dir() {
+  local kind brief
+  for kind in scout ship; do
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "lavish-dir-$kind" alpha \
+      $([ "$kind" = scout ] && echo --scout || echo --mode direct-PR) >/dev/null 2>&1 \
+      || fail "$kind scaffold failed"
+    brief="$BRIEF_HOME/data/lavish-dir-$kind/brief.md"
+    assert_grep "$BRIEF_HOME/data/lavish-dir-$kind/lavish/" "$brief" "$kind brief did not name the data lavish dir"
+  done
+  pass "fm-brief.sh: scout and ship briefs send Lavish artifacts to data/<id>/lavish/"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -1489,6 +1502,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
+test_briefs_direct_lavish_artifacts_to_the_home_data_dir
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_workers_wait_without_spending_turns

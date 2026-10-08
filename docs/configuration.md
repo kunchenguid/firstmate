@@ -1952,6 +1952,7 @@ An already-armed Lavish source keeps its registered listener command until it is
 **Arm and confirm a listener**
 
 A live task that hosts a Lavish board owns its listener, so firstmate must never arm that board.
+The worker creates the artifact HTML and its assets directly in `$FM_HOME/data/<task-id>/lavish/` (the generated brief names that path and allows it as the one extra write location), so the home backup versions every edit and nothing is lost when the task worktree is returned.
 After opening the artifact as required above, the worker arms it with `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and never runs `lavish-axi poll` itself.
 
 `arm` prints `armed` only after the process-event owner confirms this registration generation's listener is running, and otherwise returns nonzero without that line.
