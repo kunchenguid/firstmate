@@ -89,7 +89,7 @@ Keep the hook, adapter and generation-aware watcher libraries from the same chec
 Before attempting a turn end, verify that the Stop hook actually loaded by Codex uses the same installed code root as the continuation owner's watcher.
 An owner's ready result does not prove this: a guard loaded from another code root rejects that watcher even when both revisions are identical and the beacon is fresh.
 The guard must evaluate the real primary home; pointing its root at an exempt task worktree does not establish Stop integration.
-From the actual lock-owning Orca primary, `python3 bin/fm-codex-orca-continuation.py ensure --home "$FM_HOME"` is the smallest update/readiness entry point; it reuses a verified owner and refuses an incompatible live binding, and it also refuses a matching owner while a prior delivery is unresolved or a re-presented generation is unacknowledged.
+From the actual lock-owning Orca primary, `python3 bin/fm-codex-orca-continuation.py ensure --home "$FM_HOME"` is the smallest update/readiness entry point; it reuses a verified owner and refuses an incompatible live binding, and it also refuses reuse or relaunch, under any binding, while a prior delivery is unresolved or a re-presented generation is unacknowledged.
 Installation and Codex hook trust or reload must precede the attended native acceptance test; the readiness command does not install or reload hooks.
 Global dotfile distribution is separate from this project-scoped installation.
 The [runtime verification record](verification/runtime-backends.md#orca) distinguishes portable behavior tests from live vendor lifecycle evidence.
