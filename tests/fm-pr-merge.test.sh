@@ -26,6 +26,18 @@ MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
+# The Forgejo fixture. A nested org/team/repo path, because a Forgejo project
+# keeps its whole path the way a GitLab one does, and a tea login whose token
+# lives in tea's own config file, which is the only place curl can get one.
+FR_HOST=forge.example
+FR_PATH=owner/team/repo
+FR_PROJECT_URL="https://$FR_HOST/$FR_PATH"
+FR_URL="$FR_PROJECT_URL/pulls/7"
+FR_HEAD=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+FR_STALE_HEAD=fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb
+FR_LOGIN=fr
+FR_TOKEN=fr-token-1
+
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
@@ -365,6 +377,167 @@ SH
   ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
 }
 
+# tea's own configuration under the case's user home: one token login pinned
+# to the URL's host, written the way `tea login add` with an application token
+# writes it. Args: case_dir [login url token auth]
+write_tea_config() {
+  local case_dir=$1 login=${2-$FR_LOGIN} url=${3-"https://$FR_HOST"} token=${4-$FR_TOKEN} auth=${5-}
+  mkdir -p "$case_dir/user-home/.config/tea"
+  {
+    printf 'logins:\n'
+    printf '    - name: %s\n' "$login"
+    printf '      url: %s\n' "$url"
+    printf '      token: %s\n' "$token"
+    [ -z "$auth" ] || printf '      auth_method: %s\n' "$auth"
+    printf '      default: true\n'
+  } > "$case_dir/user-home/.config/tea/config.yml"
+}
+
+# write_pull_json <file> [<field>=<value> ...]: tea's JSON record for one pull
+# request, satisfying every pre-merge condition unless a field is overridden.
+write_pull_json() {
+  local file=$1 kv key value
+  local state=open merged=false mergeable=true head=$FR_HEAD
+  shift
+  for kv in "$@"; do
+    key=${kv%%=*}
+    value=${kv#*=}
+    case "$key" in
+      state) state=$value ;;
+      merged) merged=$value ;;
+      mergeable) mergeable=$value ;;
+      head) head=$value ;;
+      *) fail "write_pull_json: unknown field '$key'" ;;
+    esac
+  done
+  printf '{"index":7,"state":"%s","hasMerged":%s,"mergeable":%s,"headSha":"%s"}\n' \
+    "$state" "$merged" "$mergeable" "$head" > "$file"
+}
+
+# tea's detail text for one pull request, draft or not: the one place the CLI
+# surfaces a draft is its exact marker line.
+write_pull_detail() {
+  local file=$1 draft=${2:-false}
+  printf '#7 fixture pull (open)\n@captain wants to merge 1 commit\n' > "$file"
+  if [ "$draft" = true ]; then
+    printf '%s\n' '- Draft (not mergeable until marked ready)' >> "$file"
+  else
+    printf '%s\n' '- No Conflicts' >> "$file"
+  fi
+}
+
+# The instance's combined commit status at the head. Args: file state count
+write_forge_status() {
+  local file=$1 state=$2 count=$3 entries='' i
+  for ((i = 0; i < count; i++)); do
+    entries="${entries:+$entries,}{\"status\":\"success\"}"
+  done
+  printf '{"state":"%s","statuses":[%s]}\n' "$state" "$entries" > "$file"
+}
+
+# add_tea_mocks <case_dir> [<pull-field>=<value> ...]: fake tea and curl
+# binaries reproducing the real CLIs' contracts. tea answers the login list
+# from the case's CSV and the pull record from pull.json, switching to
+# pull-post.json once the merge endpoint was called, unless tea-stays-open
+# pins the open record to prove an unproved merge. curl answers the combined
+# status from forgejo-status.json and the merge endpoint with the case's
+# HTTP code and body, recording the request body it was given. Marker files
+# in the case dir drive the failure modes, as with the glab mock.
+add_tea_mocks() {
+  local case_dir=$1
+  shift
+  write_pull_json "$case_dir/pull.json" "$@"
+  write_pull_json "$case_dir/pull-post.json" state=closed merged=true
+  write_pull_detail "$case_dir/pull-detail.txt"
+  write_forge_status "$case_dir/forgejo-status.json" success 1
+  write_tea_config "$case_dir"
+  printf 'Name,URL,SSHHost,User,Default\n%s,%s,,captain,true\n' \
+    "$FR_LOGIN" "https://$FR_HOST" > "$case_dir/tea-logins.csv"
+  cat > "$case_dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case_dir=$(dirname "$FM_TEST_TEA_LOG")
+case "${1:-} ${2:-}" in
+  "logins list")
+    [ ! -e "$case_dir/tea-logins-fail" ] || exit 1
+    cat "$FM_TEST_TEA_LOGINS_CSV"
+    exit 0
+    ;;
+esac
+[ "${1:-}" = pulls ] || exit 2
+case " $* " in
+  *" --output json "*)
+    [ ! -e "$case_dir/tea-pull-fails" ] || exit 1
+    if [ -e "$case_dir/forgejo-merge-called" ] && [ ! -e "$case_dir/tea-stays-open" ]; then
+      cat "$case_dir/pull-post.json"
+    else
+      cat "$case_dir/pull.json"
+    fi
+    ;;
+  *)
+    [ ! -e "$case_dir/tea-detail-fails" ] || exit 1
+    cat "$case_dir/pull-detail.txt"
+    ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_CURL_LOG"
+case_dir=$(dirname "$FM_TEST_CURL_LOG")
+out= body=
+collect=
+for arg in "$@"; do
+  if [ "$collect" = o ]; then out=$arg; collect=
+  elif [ "$collect" = data ]; then body=$arg; collect=
+  else
+    case "$arg" in
+      -o) collect=o ;;
+      --data) collect=data ;;
+    esac
+  fi
+done
+case "$*" in
+  *"commits/"*"/status")
+    cat "$case_dir/forgejo-status.json" > "$out"
+    exit 0
+    ;;
+  *"pulls/"*"/merge")
+    : > "$case_dir/forgejo-merge-called"
+    [ -z "$body" ] || cp "${body#@}" "$case_dir/forgejo-merge-body"
+    code=200
+    [ -f "$case_dir/forgejo-merge-code" ] && code=$(cat "$case_dir/forgejo-merge-code")
+    [ -f "$case_dir/forgejo-merge-response" ] || : > "$case_dir/forgejo-merge-response"
+    cat "$case_dir/forgejo-merge-response" > "$out"
+    printf '%s\n' "$code"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tea" "$case_dir/fakebin/curl"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
+  : > "$case_dir/tea.log"
+  : > "$case_dir/curl.log"
+  : > "$case_dir/gh-axi.log"
+}
+
+# make_forgejo_case <name> [<pull-field>=<value> ...]: a case dir with the tea
+# and curl mocks and a pull record payload. Echoes the case dir.
+make_forgejo_case() {
+  local name=$1 case_dir
+  shift
+  case_dir=$(make_case "$name")
+  add_tea_mocks "$case_dir" "$@"
+  printf '%s\n' "$case_dir"
+}
+
+# The merge URL curl was asked to POST, so a test asserts the endpoint rather
+# than a substring of the whole log.
+forgejo_merge_line() {
+  grep -F '/merge' "$1" || true
+}
+
 # write_mr_json <file> [<field>=<value> ...]
 # A merge request payload that satisfies every pre-merge condition, with the
 # named fields overridden so one case drives exactly one condition. Values are
@@ -481,6 +654,10 @@ run_pr_merge() {
   FM_TEST_AWAY_MUTATE_RC="$case_dir/away-mutate-rc" \
   FM_TEST_AWAY_WORDS_AT_MERGE="$case_dir/away-words-at-merge" \
   FM_TEST_REAL_MV="$REAL_MV" \
+  FM_TEST_TEA_LOG="$case_dir/tea.log" \
+  FM_TEST_TEA_LOGINS_CSV="$case_dir/tea-logins.csv" \
+  FM_TEST_CURL_LOG="$case_dir/curl.log" \
+  XDG_CONFIG_HOME='' \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
   HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
@@ -2013,6 +2190,400 @@ test_gitlab_missing_tool_refuses_before_recording() {
       "gitlab-no-$tool: a merge poll was armed despite the missing tool"
   done
   pass "fm-pr-merge refuses before recording anything when glab or jq is absent"
+}
+
+test_forgejo_merge_records_pr_head_and_proves_merged() {
+  local case_dir rc merge_line body
+  case_dir=$(make_forgejo_case forgejo-merges)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-merges: a well-formed pull request URL should merge, not error"
+  assert_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-merges: pr= was not recorded before merging"
+  assert_grep "pr_head=$FR_HEAD" "$case_dir/state/task-x1.meta" \
+    "forgejo-merges: pr_head= was not recorded from tea's record"
+  assert_grep "pulls 7 --repo $FR_PATH --login $FR_LOGIN --output json" "$case_dir/tea.log" \
+    "forgejo-merges: the pull request was not read through the host-pinned tea login"
+  assert_grep "commits/$FR_HEAD/status" "$case_dir/curl.log" \
+    "forgejo-merges: the combined status was not read at the live head"
+  merge_line=$(forgejo_merge_line "$case_dir/curl.log")
+  case "$merge_line" in
+    *"https://$FR_HOST/api/v1/repos/$FR_PATH/pulls/7/merge") ;;
+    *) fail "forgejo-merges: unexpected merge endpoint: '$merge_line'" ;;
+  esac
+  body=$(cat "$case_dir/forgejo-merge-body")
+  [ "$body" = "{\"Do\":\"\",\"head_commit_id\":\"$FR_HEAD\"}" ] \
+    || fail "forgejo-merges: unexpected merge body: '$body'"
+  assert_grep "verified: $FR_URL is merged (state=closed, hasMerged=true)" "$case_dir/stdout" \
+    "forgejo-merges: the read-back proof was not reported"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "forgejo-merges: the recording step did not leave its poll armed"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "forgejo-merges: a pull request reached the GitHub CLI"
+  assert_no_grep "$FR_TOKEN" "$case_dir/curl.log" \
+    "forgejo-merges: the login token reached curl's command line"
+  pass "fm-pr-merge merges a Forgejo pull request through the pinned tea login and the instance's own endpoint"
+}
+
+test_forgejo_method_flags_map_to_the_endpoint_style() {
+  local case_dir rc body
+  case_dir=$(make_forgejo_case forgejo-squash)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-squash: a named merge style should merge"
+  body=$(cat "$case_dir/forgejo-merge-body")
+  [ "$body" = "{\"Do\":\"squash\",\"head_commit_id\":\"$FR_HEAD\"}" ] \
+    || fail "forgejo-squash: the squash flag did not become the endpoint's Do: '$body'"
+
+  case_dir=$(make_forgejo_case forgejo-method-value)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" -- --method rebase-merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-method-value: a --method value should merge"
+  body=$(cat "$case_dir/forgejo-merge-body")
+  [ "$body" = "{\"Do\":\"rebase-merge\",\"head_commit_id\":\"$FR_HEAD\"}" ] \
+    || fail "forgejo-method-value: the method value did not become the endpoint's Do: '$body'"
+
+  case_dir=$(make_forgejo_case forgejo-bad-method)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" -- --method manually-merged \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "forgejo-bad-method: a manual-merge mark must be refused"
+  assert_grep '"manually-merged" is not a Forgejo merge style' "$case_dir/stderr" \
+    "forgejo-bad-method: the refusal did not name the unsupported style"
+  assert_no_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-bad-method: a PR reference was recorded despite the refused style"
+  [ ! -e "$case_dir/forgejo-merge-body" ] \
+    || fail "forgejo-bad-method: the endpoint was called despite the refused style"
+  pass "fm-pr-merge maps the caller's merge-style flags onto the endpoint's Do value and refuses the rest"
+}
+
+test_forgejo_missing_tool_refuses_before_recording() {
+  local case_dir rc tool
+  for tool in tea jq curl; do
+    case_dir=$(make_forgejo_case "forgejo-no-$tool")
+    mirror_path_without "$case_dir/no$tool" "$tool" "$case_dir/fakebin"
+
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_TEA_LOG="$case_dir/tea.log" \
+    FM_TEST_TEA_LOGINS_CSV="$case_dir/tea-logins.csv" \
+    FM_TEST_CURL_LOG="$case_dir/curl.log" \
+    HOME="$case_dir/user-home" \
+    XDG_CONFIG_HOME='' \
+    PATH="$case_dir/no$tool" \
+      "$PR_MERGE" task-x1 "$FR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-no-$tool: fm-pr-merge should refuse"
+    assert_grep "error: merging a Forgejo pull request requires $tool on PATH" \
+      "$case_dir/stderr" "forgejo-no-$tool: refusal did not name the missing tool"
+    assert_no_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+      "forgejo-no-$tool: a PR reference was recorded despite the missing tool"
+    assert_absent "$case_dir/state/task-x1.check.sh" \
+      "forgejo-no-$tool: a merge poll was armed despite the missing tool"
+  done
+  pass "fm-pr-merge refuses before recording anything when tea, jq or curl is absent"
+}
+
+test_forgejo_unpinnable_or_unreadable_pull_refuses() {
+  local case_dir rc name
+  for name in logins-fail other-host pull-fails not-an-object; do
+    case_dir=$(make_forgejo_case "forgejo-unreadable-$name")
+    case "$name" in
+      logins-fail) : > "$case_dir/tea-logins-fail" ;;
+      other-host)
+        printf 'Name,URL,SSHHost,User,Default\nother,https://elsewhere.example,,bob,false\n' \
+          > "$case_dir/tea-logins.csv" ;;
+      pull-fails) : > "$case_dir/tea-pull-fails" ;;
+      not-an-object) printf '[]\n' > "$case_dir/pull.json" ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-unreadable-$name: fm-pr-merge should refuse"
+    case "$name" in
+      logins-fail)
+        assert_grep 'could not read the tea login list' "$case_dir/stderr" \
+          "forgejo-unreadable-$name: refusal did not name the unreadable login list" ;;
+      other-host)
+        assert_grep "requires a tea login for $FR_HOST" "$case_dir/stderr" \
+          "forgejo-unreadable-$name: refusal did not name the missing login" ;;
+      pull-fails)
+        assert_grep "could not read $FR_URL through tea" "$case_dir/stderr" \
+          "forgejo-unreadable-$name: refusal did not name the unreadable record" ;;
+      not-an-object)
+        assert_grep "could not read the state of $FR_URL through tea" "$case_dir/stderr" \
+          "forgejo-unreadable-$name: refusal did not name the unreadable state" ;;
+    esac
+    [ -z "$(forgejo_merge_line "$case_dir/curl.log")" ] \
+      || fail "forgejo-unreadable-$name: a merge was attempted on an unreadable pull request"
+    assert_no_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+      "forgejo-unreadable-$name: a PR reference was recorded before the pull request proved readable"
+  done
+  pass "fm-pr-merge refuses a Forgejo pull request it cannot pin or read through tea"
+}
+
+test_forgejo_tokenless_login_refuses_without_merging() {
+  local case_dir rc name
+  for name in oauth empty; do
+    case_dir=$(make_forgejo_case "forgejo-tokenless-$name")
+    if [ "$name" = oauth ]; then
+      write_tea_config "$case_dir" "$FR_LOGIN" "https://$FR_HOST" stale-token oauth
+    else
+      write_tea_config "$case_dir" "$FR_LOGIN" "https://$FR_HOST" ''
+    fi
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-tokenless-$name: fm-pr-merge should refuse"
+    assert_grep "stores no API token in tea's config" "$case_dir/stderr" \
+      "forgejo-tokenless-$name: refusal did not name the unauthorizable login"
+    [ -z "$(forgejo_merge_line "$case_dir/curl.log")" ] \
+      || fail "forgejo-tokenless-$name: a merge was attempted without an authorizable login"
+    assert_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+      "forgejo-tokenless-$name: a refusal should still leave the recorded PR reference"
+  done
+  pass "fm-pr-merge refuses a Forgejo merge whose tea login carries no usable API token"
+}
+
+test_forgejo_each_condition_refuses_independently() {
+  local case_dir rc name expected override
+  set -- \
+    "state|state=closed|state is \"closed\", not open" \
+    "merged|merged=true|hasMerged is \"true\", not false" \
+    "mergeable|mergeable=false|mergeable is \"false\", not true" \
+    "invalid-head|head=not-a-sha|could not read the Forgejo pull request head commit before merging" \
+    "status-failure|failure|the combined commit status at head $FR_HEAD is \"failure\", not success" \
+    "status-pending|pending|the combined commit status at head $FR_HEAD is \"pending\", not success"
+  for override in "$@"; do
+    name=${override%%|*}
+    expected=${override##*|}
+    override=${override#*|}
+    override=${override%%|*}
+    case_dir=$(make_forgejo_case "forgejo-refuse-$name")
+    case "$name" in
+      status-*) write_forge_status "$case_dir/forgejo-status.json" "$override" 1 ;;
+      *) write_pull_json "$case_dir/pull.json" "$override" ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-refuse-$name: fm-pr-merge should refuse"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "forgejo-refuse-$name: refusal did not name the failing condition"
+    [ -z "$(forgejo_merge_line "$case_dir/curl.log")" ] \
+      || fail "forgejo-refuse-$name: a merge was attempted despite the refusal"
+    assert_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+      "forgejo-refuse-$name: a refusal should still leave the recorded PR reference"
+    assert_present "$case_dir/state/task-x1.check.sh" \
+      "forgejo-refuse-$name: a refusal should still leave the merge poll armed"
+  done
+  # The draft marker lives in tea's detail text, so it gets its own fixture.
+  case_dir=$(make_forgejo_case forgejo-refuse-draft)
+  write_pull_detail "$case_dir/pull-detail.txt" true
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-refuse-draft: a draft must refuse"
+  assert_grep 'the pull request is a draft' "$case_dir/stderr" \
+    "forgejo-refuse-draft: refusal did not name the draft"
+  [ -z "$(forgejo_merge_line "$case_dir/curl.log")" ] \
+    || fail "forgejo-refuse-draft: a merge was attempted on a draft"
+  pass "fm-pr-merge refuses on each Forgejo pre-merge condition independently"
+}
+
+test_forgejo_unreadable_status_refuses() {
+  local case_dir rc name
+  for name in garbage no-statuses-field; do
+    case_dir=$(make_forgejo_case "forgejo-status-$name")
+    case "$name" in
+      garbage) printf 'not json\n' > "$case_dir/forgejo-status.json" ;;
+      no-statuses-field) printf '{"state":"success"}\n' > "$case_dir/forgejo-status.json" ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-status-$name: an unreadable status must refuse"
+    assert_grep "the combined commit status at head $FR_HEAD could not be read" "$case_dir/stderr" \
+      "forgejo-status-$name: refusal did not name the unreadable status"
+    [ -z "$(forgejo_merge_line "$case_dir/curl.log")" ] \
+      || fail "forgejo-status-$name: a merge was attempted on an unreadable status"
+  done
+  pass "fm-pr-merge refuses a Forgejo merge whose combined status cannot be read"
+}
+
+test_forgejo_zero_exit_false_success_refuses() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-zero-exit-open)
+  : > "$case_dir/tea-stays-open"
+  printf '200\n' > "$case_dir/forgejo-merge-code"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-zero-exit-open: an unproved merge must fail"
+  assert_grep "the Forgejo merge endpoint for $FR_URL answered HTTP 200" "$case_dir/stderr" \
+    "forgejo-zero-exit-open: refusal did not quote the endpoint's answer"
+  assert_grep '(empty body)' "$case_dir/stderr" \
+    "forgejo-zero-exit-open: the empty success body was not reported as the forge's text"
+  assert_grep 'state=open, hasMerged=false, so the merge is not proved' "$case_dir/stderr" \
+    "forgejo-zero-exit-open: refusal did not name the concrete observed state"
+  assert_grep 'the merge poll remains armed' "$case_dir/stderr" \
+    "forgejo-zero-exit-open: refusal did not say the poll keeps watching"
+  assert_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-zero-exit-open: the attempted merge lost its PR reference"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "forgejo-zero-exit-open: the attempted merge did not leave its poll armed"
+  assert_no_grep 'is merged' "$case_dir/stdout" \
+    "forgejo-zero-exit-open: an unproved merge was reported as landed"
+  pass "fm-pr-merge refuses a Forgejo merge call that leaves the pull request open"
+}
+
+test_forgejo_merge_http_error_surfaces_the_forge_text() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-http-error)
+  printf '409\n' > "$case_dir/forgejo-merge-code"
+  printf '%s\n' '{"message":"the head commit does not match"}' > "$case_dir/forgejo-merge-response"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-http-error: a failed merge must fail"
+  assert_grep "the Forgejo merge endpoint for $FR_URL answered HTTP 409" "$case_dir/stderr" \
+    "forgejo-http-error: refusal did not name the endpoint's status"
+  assert_grep 'the head commit does not match' "$case_dir/stderr" \
+    "forgejo-http-error: the forge's own error body was not surfaced raw"
+  assert_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-http-error: the failed merge lost its PR reference"
+  [ -e "$case_dir/forgejo-merge-called" ] \
+    || fail "forgejo-http-error: the endpoint was never called"
+  pass "fm-pr-merge surfaces a failed Forgejo merge endpoint answer raw and first"
+}
+
+test_forgejo_extra_forge_arguments_refuse() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-extra-args)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" -- --delete-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-extra-args: branch deletion must be refused without --attended-override"
+  assert_grep 'pass --attended-override only for an explicit captain instruction' "$case_dir/stderr" \
+    "forgejo-extra-args: refusal did not name --attended-override"
+
+  case_dir=$(make_forgejo_case forgejo-unknown-flag)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" -- --subject 'a title' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "forgejo-unknown-flag: an unimplemented forge flag must be refused"
+  assert_grep 'a Forgejo merge takes no forge arguments beyond the merge-style flags' "$case_dir/stderr" \
+    "forgejo-unknown-flag: refusal did not name the style-only surface"
+  assert_no_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-unknown-flag: a PR reference was recorded despite the refused flag"
+  [ ! -e "$case_dir/forgejo-merge-body" ] \
+    || fail "forgejo-unknown-flag: the endpoint was called despite the refused flag"
+
+  case_dir=$(make_forgejo_case forgejo-allow-red)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" --allow-red ci \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "forgejo-allow-red: the waiver must not apply on Forgejo"
+  assert_grep '--allow-red does not apply to Forgejo' "$case_dir/stderr" \
+    "forgejo-allow-red: the refusal did not name Forgejo"
+  assert_no_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-allow-red: a PR reference was recorded despite the refused waiver"
+  pass "fm-pr-merge refuses forge flags and waivers the Forgejo path does not implement"
+}
+
+test_forgejo_no_statuses_still_merges() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-no-checks)
+  write_forge_status "$case_dir/forgejo-status.json" '' 0
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-no-checks: a repository with no checks should merge"
+  assert_grep "verified: $FR_URL is merged" "$case_dir/stdout" \
+    "forgejo-no-checks: the merge was not proved"
+  pass "fm-pr-merge treats a Forgejo head with no statuses as a repository without checks"
+}
+
+test_forgejo_stale_recorded_head_is_reported() {
+  local case_dir rc body
+  case_dir=$(make_forgejo_case forgejo-stale-head)
+  # The recorded head is what a rebase leaves behind; the recording step then
+  # replaces it with tea's live headSha, so the notice comes from the head
+  # read before bin/fm-pr-check.sh rewrote the metadata.
+  printf 'pr_head=%s\n' "$FR_STALE_HEAD" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-stale-head: the live head satisfies every condition, so it should merge"
+  assert_grep "recorded head $FR_STALE_HEAD disagrees with the live head $FR_HEAD" \
+    "$case_dir/stderr" "forgejo-stale-head: the stale recorded head was trusted silently"
+  body=$(cat "$case_dir/forgejo-merge-body")
+  case "$body" in
+    *"\"head_commit_id\":\"$FR_HEAD\""*) ;;
+    *) fail "forgejo-stale-head: the merge was not bound to the live head: '$body'" ;;
+  esac
+  assert_no_grep "pr_head=$FR_STALE_HEAD" "$case_dir/state/task-x1.meta" \
+    "forgejo-stale-head: the stale recorded head survived the recording step"
+  pass "fm-pr-merge reports a stale recorded Forgejo head and verifies the live one"
 }
 
 test_gitlab_head_override_args_refuse_before_recording() {
@@ -3833,6 +4404,18 @@ test_allow_missing_follows_the_allow_red_rules() {
 }
 
 test_gitlab_head_override_args_refuse_before_recording
+test_forgejo_merge_records_pr_head_and_proves_merged
+test_forgejo_method_flags_map_to_the_endpoint_style
+test_forgejo_missing_tool_refuses_before_recording
+test_forgejo_unpinnable_or_unreadable_pull_refuses
+test_forgejo_tokenless_login_refuses_without_merging
+test_forgejo_each_condition_refuses_independently
+test_forgejo_unreadable_status_refuses
+test_forgejo_zero_exit_false_success_refuses
+test_forgejo_merge_http_error_surfaces_the_forge_text
+test_forgejo_extra_forge_arguments_refuse
+test_forgejo_no_statuses_still_merges
+test_forgejo_stale_recorded_head_is_reported
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward

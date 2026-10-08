@@ -4,7 +4,11 @@
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded. A Gerrit change
+# host and path, so any instance works and no host is hardcoded. A Forgejo
+# pull request is read through the tea CLI its watch already pins and merged
+# through the instance's own REST endpoint, because tea has no merge command
+# and no combined-status read; curl is the client for exactly those two calls.
+# A Gerrit change
 # is refused outright: that adapter is read-only, and the refusal at the parse
 # below owns why.
 #
@@ -96,7 +100,35 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Before either forge merge, the task's existing per-task control lock
+# A Forgejo merge is refused unless every pre-merge condition holds, each read
+# live at merge time rather than taken from recorded metadata: the pull request
+# is open and unmerged, tea's JSON record says mergeable, the pull request is
+# not a draft (tea's detail-text marker, positive-only exactly as at arming,
+# because tea's JSON record carries no draft field), and the combined commit
+# status at the exact current head is green - "success", or no statuses at all,
+# which is a repository without checks rather than a red one. Every failing
+# condition is reported, not just the first. The instance comes from the
+# pinned tea login's own URL in tea's configuration, so an instance served
+# under a URL subpath is addressed correctly, and that login's API token
+# authorizes both curl calls through a header file curl reads, never through
+# this script's arguments. A login whose token is not in tea's config - an
+# OAuth-stored login - cannot authorize the endpoint and is refused by name.
+# Reading and proving that state needs tea, jq and curl, and any one absent
+# stops the merge before any state is recorded. The verified head is then
+# bound to the merge as the endpoint's head_commit_id, so a push that lands
+# between that read and the merge fails the merge instead of landing commits
+# nothing verified. No merge style is imposed when the caller names none: the
+# endpoint then applies its own default style, and the style flags --merge,
+# --rebase, --rebase-merge, --squash and --fast-forward-only (each also
+# spellable as --method <value>) are the only forge arguments this path reads.
+# The endpoint answers success with HTTP 200 and an empty body, which is never
+# parsed as JSON: the merge is proved only by reading the pull request back
+# through tea, where only hasMerged=true is a landed merge, so an accepted
+# request that leaves the pull request unmerged refuses exactly like GitHub's
+# unproved outcomes, quoting the endpoint's answer as the forge's text while
+# the armed poll keeps watching.
+#
+# Before any forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
@@ -238,6 +270,14 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
   exit 2
 fi
+if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = forgejo ]; then
+  echo "error: --allow-red does not apply to Forgejo, where a merge already requires the combined commit status at the verified head to be green" >&2
+  exit 2
+fi
+if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = forgejo ]; then
+  echo "error: --allow-missing does not apply to Forgejo, where a merge already requires the combined commit status at the verified head to be green" >&2
+  exit 2
+fi
 
 caller_has_merge_method() {
   local arg
@@ -363,6 +403,40 @@ if [ "$PROVIDER" = gitlab ]; then
     esac
   done
 fi
+
+# The merge style the caller's own extra arguments named, as the endpoint's Do
+# value. Empty when the caller named no style, which leaves the endpoint to
+# apply its own default; the endpoint's other styles beyond gh's three
+# spellings are accepted, while "manually-merged" is refused because it marks
+# a pull request merged by hand rather than merging anything.
+FM_PR_FORGEJO_DO=
+if [ "$PROVIDER" = forgejo ]; then
+  forgejo_method=$(caller_merge_method "$@")
+  case "$forgejo_method" in
+    '') ;;
+    merge|rebase|rebase-merge|squash|fast-forward-only) FM_PR_FORGEJO_DO=$forgejo_method ;;
+    *)
+      printf 'error: "%s" is not a Forgejo merge style; the endpoint accepts merge, rebase, rebase-merge, squash and fast-forward-only\n' \
+        "$forgejo_method" >&2
+      exit 2
+      ;;
+  esac
+  forgejo_skip_next=false
+  for arg in "$@"; do
+    if [ "$forgejo_skip_next" = true ]; then
+      forgejo_skip_next=false
+      continue
+    fi
+    case "$arg" in
+      --merge|--rebase|--squash|--method=*) ;;
+      --method) forgejo_skip_next=true ;;
+      *)
+        echo "error: a Forgejo merge takes no forge arguments beyond the merge-style flags --merge, --rebase, --rebase-merge, --squash and --fast-forward-only" >&2
+        exit 2
+        ;;
+    esac
+  done
+fi
 FM_PR_AWAY_POSTURE=false
 
 fm_backlog_directory_present "$STATE" "state directory" || {
@@ -439,11 +513,22 @@ if [ "$PROVIDER" = github ]; then
     exit 1
   fi
 fi
+FORGEJO_MISSING=
+if [ "$PROVIDER" = forgejo ]; then
+  for forgejo_tool in tea jq curl; do
+    command -v "$forgejo_tool" >/dev/null 2>&1 \
+      || FORGEJO_MISSING="${FORGEJO_MISSING:+$FORGEJO_MISSING and }$forgejo_tool"
+  done
+  if [ -n "$FORGEJO_MISSING" ]; then
+    echo "error: merging a Forgejo pull request requires $FORGEJO_MISSING on PATH" >&2
+    exit 1
+  fi
+fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
+if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -550,6 +635,205 @@ FIELDS
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
+}
+
+FM_PR_FORGEJO_LOGIN=
+FM_PR_FORGEJO_API=
+FM_PR_FORGEJO_TOKEN=
+FORGEJO_RESPONSE=
+
+# One call to the pinned login's Forgejo instance through curl. tea has no
+# command for the merge or for the combined-status read, which is why curl is
+# the client for exactly those two calls and nothing else. The API root comes
+# from the login's own URL in tea's config, so an instance served under a URL
+# subpath is addressed correctly. The login's token reaches curl through a
+# header file with restrictive permissions rather than an argument, so it
+# never appears in a process listing; that file is removed before returning.
+# The body lands in $FORGEJO_RESPONSE and the HTTP status code in
+# $FORGEJO_CODE, both of which the caller removes or rereads, because a
+# command substitution would run this in a subshell where those assignments
+# could never reach the caller. A transport failure returns curl's own nonzero
+# exit after curl has already surfaced its error raw.
+forgejo_api_call() {  # <method> <api-path> [body-file]
+  local method=$1 path=$2 body=${3-} hdr rc=0
+  FORGEJO_CODE=
+  hdr=$(mktemp "${TMPDIR:-/tmp}/fm-forgejo-hdr.XXXXXX") || return 1
+  FORGEJO_RESPONSE=$(mktemp "${TMPDIR:-/tmp}/fm-forgejo-resp.XXXXXX") || {
+    rm -f "$hdr"
+    return 1
+  }
+  printf 'Authorization: token %s\n' "$FM_PR_FORGEJO_TOKEN" > "$hdr"
+  chmod 600 "$hdr" "$FORGEJO_RESPONSE" || true
+  local args=(-sS -X "$method" -H @"$hdr" -H 'Content-Type: application/json' \
+    -o "$FORGEJO_RESPONSE" -w '%{http_code}')
+  [ -z "$body" ] || args+=(--data "@$body")
+  FORGEJO_CODE=$(curl "${args[@]}" "$FM_PR_FORGEJO_API/$path") || rc=$?
+  rm -f "$hdr"
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$FORGEJO_RESPONSE"
+    FORGEJO_RESPONSE=
+    FORGEJO_CODE=
+    return "$rc"
+  fi
+  return 0
+}
+
+# Pre-merge conditions for a Forgejo pull request, read live through the tea
+# login pinned to the URL's host and the instance's own combined-status
+# endpoint. Sets FM_PR_MERGE_HEAD to the verified head on success, resolves
+# FM_PR_FORGEJO_LOGIN, FM_PR_FORGEJO_API and FM_PR_FORGEJO_TOKEN for the merge
+# call, and returns non-zero after reporting every condition that failed.
+forgejo_verify_mergeable() {
+  local logins config fields line
+  local login_url='' login_token='' login_auth=''
+  local json state='' merged='' mergeable='' live_head=''
+  local total=0 named=0 refusals=''
+  local detail status_rc=0 status_fields status_state='' status_count=''
+
+  if ! logins=$(tea logins list --output csv 2>/dev/null); then
+    echo "error: could not read the tea login list to merge $URL" >&2
+    return 1
+  fi
+  FM_PR_FORGEJO_LOGIN=$(fm_pr_forgejo_tea_login "$logins" "$PR_HOST") || {
+    echo "error: merging $URL requires a tea login for $PR_HOST" >&2
+    return 1
+  }
+  config=$(fm_pr_forgejo_tea_config_file)
+  if ! fields=$(fm_pr_forgejo_tea_login_config "$config" "$FM_PR_FORGEJO_LOGIN"); then
+    printf 'error: could not read the tea login %s from %s\n' "$FM_PR_FORGEJO_LOGIN" "$config" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      url=*) login_url=${line#url=} ;;
+      token=*) login_token=${line#token=} ;;
+      auth=*) login_auth=${line#auth=} ;;
+    esac
+  done <<FIELDS
+$fields
+FIELDS
+  case "$login_url" in
+    https://*/*|https://*|http://*/*|http://*) ;;
+    *)
+      echo "error: the tea login $FM_PR_FORGEJO_LOGIN carries no instance URL, so the Forgejo merge endpoint cannot be addressed" >&2
+      return 1
+      ;;
+  esac
+  if [ -z "$login_token" ] || [ "$login_auth" = oauth ]; then
+    echo "error: the tea login $FM_PR_FORGEJO_LOGIN stores no API token in tea's config, so the Forgejo merge endpoint cannot be authorized; log in with tea using an application token" >&2
+    return 1
+  fi
+  FM_PR_FORGEJO_API="${login_url%/}/api/v1"
+  FM_PR_FORGEJO_TOKEN=$login_token
+
+  if ! json=$(tea pulls "$PR_NUMBER" --repo "$PR_PATH" --login "$FM_PR_FORGEJO_LOGIN" --output json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" then
+        "state=" + ((.state // "") | tostring),
+        "merged=" + (.hasMerged | tostring),
+        "mergeable=" + (.mergeable | tostring),
+        "head=" + ((.headSha // "") | tostring)
+      else
+        error("pull request payload is not an object")
+      end' 2>/dev/null); then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      mergeable=*) mergeable=${line#mergeable=} ;;
+      head=*) live_head=${line#head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ]; then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the Forgejo pull request head commit before merging" >&2
+    return 1
+  fi
+  # A rebase moves the head and leaves the recorded value behind, so the
+  # disagreement is reported and the live head is what gets verified and merged.
+  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
+    printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
+      "$RECORDED_HEAD" "$live_head" >&2
+  fi
+
+  [ "$state" = open ] \
+    || refusals="$refusals  - state is \"${state:-unreadable}\", not open
+"
+  [ "$merged" = false ] \
+    || refusals="$refusals  - hasMerged is \"${merged:-unreadable}\", not false
+"
+  [ "$mergeable" = true ] \
+    || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not true
+"
+  # tea's JSON record carries no draft field, so the draft reading is the
+  # CLI's one exact detail-text marker, positive-only exactly as at arming:
+  # an unreadable detail is not a draft, and the server refuses a work-in-
+  # progress title itself on top of this.
+  detail=$(tea pulls "$PR_NUMBER" --repo "$PR_PATH" --login "$FM_PR_FORGEJO_LOGIN" 2>/dev/null || true)
+  if [ "$(fm_pr_forgejo_tea_draft_state "$detail")" = true ]; then
+    refusals="$refusals  - the pull request is a draft
+"
+  fi
+
+  forgejo_api_call GET "repos/$PR_PATH/commits/$live_head/status" || status_rc=$?
+  if [ "$status_rc" -ne 0 ]; then
+    refusals="$refusals  - the combined commit status at head $live_head could not be read
+"
+  elif ! status_fields=$(jq -r '
+      if type == "object" and (.statuses | type) == "array" then
+        "state=" + ((.state // "") | tostring),
+        "count=" + ((.statuses | length) | tostring)
+      else
+        error("status payload is not a combined status")
+      end' "$FORGEJO_RESPONSE" 2>/dev/null); then
+    refusals="$refusals  - the combined commit status at head $live_head could not be read
+"
+  else
+    while IFS= read -r line; do
+      case "$line" in
+        state=*) status_state=${line#state=} ;;
+        count=*) status_count=${line#count=} ;;
+      esac
+    done <<FIELDS
+$status_fields
+FIELDS
+    # No statuses at all is a repository without checks rather than a red or
+    # pending one, exactly like GitHub's empty rollup; anything else must be
+    # the aggregate "success".
+    if [ "$status_state" != success ] && [ "$status_count" != 0 ]; then
+      refusals="$refusals  - the combined commit status at head $live_head is \"${status_state:-none}\", not success
+"
+    fi
+  fi
+  if [ -n "$FORGEJO_RESPONSE" ]; then
+    rm -f "$FORGEJO_RESPONSE"
+    FORGEJO_RESPONSE=
+  fi
+
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  printf 'verified: %s is open and mergeable, with a green combined commit status at head %s\n' \
+    "$URL" "$live_head" >&2
+  FM_PR_MERGE_HEAD=$live_head
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
@@ -1326,7 +1610,47 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
-# Record before either forge call. This arms the merge poll without claiming a
+# Read the pull request back through tea after the endpoint accepted the merge.
+# Only hasMerged=true is a landed merge - the record's state string stays
+# "open" or "closed" - so everything else, including an unreadable readback,
+# returns nonzero with the observed fields kept for the refusal. The merge
+# endpoint's own success answer is an empty body and is never parsed as JSON;
+# this read is the whole proof, exactly like the GitHub path's outcome read.
+FM_PR_FORGEJO_OUT_STATE=
+FM_PR_FORGEJO_OUT_MERGED=
+FM_PR_FORGEJO_OUT_READABLE=false
+forgejo_confirm_merged() {
+  local json fields line total=0 named=0
+  if ! json=$(tea pulls "$PR_NUMBER" --repo "$PR_PATH" --login "$FM_PR_FORGEJO_LOGIN" --output json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type) == "string" and (.hasMerged | type) == "boolean" then
+        "state=" + .state,
+        "merged=" + (.hasMerged | tostring)
+      else
+        error("pull request payload is not an object")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) FM_PR_FORGEJO_OUT_STATE=${line#state=} ;;
+      merged=*) FM_PR_FORGEJO_OUT_MERGED=${line#merged=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  [ "$named" -eq 2 ] && [ "$total" -eq 2 ] || return 1
+  FM_PR_FORGEJO_OUT_READABLE=true
+  [ "$FM_PR_FORGEJO_OUT_MERGED" = true ]
+}
+
+# Record before any forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 away_status=0
@@ -1337,9 +1661,10 @@ record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
-# oversight: if this lock-owning shell dies while its gh or glab child lives,
-# stale-owner recovery can release the record for archive or replacement and
-# the orphaned forge child can still merge on the lapsed away authority.
+# oversight: if this lock-owning shell dies while its gh, glab, tea or curl
+# child lives, stale-owner recovery can release the record for archive or
+# replacement and the orphaned forge child can still merge on the lapsed away
+# authority.
 case "$PROVIDER" in
   github)
     merge_output=
@@ -1458,6 +1783,79 @@ case "$PROVIDER" in
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    ;;
+  forgejo)
+    forgejo_verify_mergeable || exit 1
+    # head_commit_id binds the merge to the head this run verified, so a push
+    # that lands in between is refused by the endpoint instead of merged
+    # unverified. The away record is locked first, so this last presence and
+    # authority read and the forge call below share one live-owner critical
+    # section.
+    hold_away_record_for_merge || exit 1
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
+    merge_body=$(mktemp "${TMPDIR:-/tmp}/fm-forgejo-body.XXXXXX") || exit 1
+    printf '{"Do":"%s","head_commit_id":"%s"}\n' "$FM_PR_FORGEJO_DO" "$FM_PR_MERGE_HEAD" > "$merge_body"
+    chmod 600 "$merge_body" || true
+    merge_status=0
+    forgejo_api_call POST "repos/$PR_PATH/pulls/$PR_NUMBER/merge" "$merge_body" || merge_status=$?
+    merge_code=$FORGEJO_CODE
+    rm -f "$merge_body"
+    if [ "$merge_status" -ne 0 ]; then
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      exit "$merge_status"
+    fi
+    case "$merge_code" in
+      2*)
+        ;;
+      *)
+        fm_afk_contract_lock_release || true
+        fm_lock_release "$MERGE_CONTROL_LOCK" || true
+        MERGE_CONTROL_LOCK=
+        printf 'error: the Forgejo merge endpoint for %s answered HTTP %s with the forge text:\n' \
+          "$URL" "$merge_code" >&2
+        if [ -s "$FORGEJO_RESPONSE" ]; then
+          cat "$FORGEJO_RESPONSE" >&2
+        else
+          printf '(empty body)\n' >&2
+        fi
+        rm -f "$FORGEJO_RESPONSE"
+        FORGEJO_RESPONSE=
+        exit 1
+        ;;
+    esac
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
+    # The endpoint's success answer is an empty body and is never parsed as
+    # JSON; the proof is the read-back below, and an accepted request that
+    # proves nothing refuses exactly like GitHub's unproved outcomes.
+    if ! forgejo_confirm_merged; then
+      printf 'error: the Forgejo merge endpoint for %s answered HTTP %s with the forge text:\n' \
+        "$URL" "$merge_code" >&2
+      if [ -s "$FORGEJO_RESPONSE" ]; then
+        cat "$FORGEJO_RESPONSE" >&2
+      else
+        printf '(empty body)\n' >&2
+      fi
+      if [ "$FM_PR_FORGEJO_OUT_READABLE" = true ]; then
+        printf 'error: but the pull request reads back as state=%s, hasMerged=%s, so the merge is not proved; the merge poll remains armed\n' \
+          "$FM_PR_FORGEJO_OUT_STATE" "$FM_PR_FORGEJO_OUT_MERGED" >&2
+      else
+        printf 'error: but its landed state could not be read back through tea, so the merge is not proved; the merge poll remains armed\n' >&2
+      fi
+      rm -f "$FORGEJO_RESPONSE"
+      FORGEJO_RESPONSE=
+      exit 1
+    fi
+    rm -f "$FORGEJO_RESPONSE"
+    FORGEJO_RESPONSE=
+    printf 'verified: %s is merged (state=%s, hasMerged=%s)\n' \
+      "$URL" "$FM_PR_FORGEJO_OUT_STATE" "$FM_PR_FORGEJO_OUT_MERGED"
     ;;
   *)
     echo "error: invalid PR merge request" >&2

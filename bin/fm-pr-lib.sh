@@ -406,6 +406,92 @@ fm_pr_forgejo_tea_draft_state() {  # <pull-detail-text>
   return 0
 }
 
+# The one path tea's own configuration lives at, matching where tea itself
+# reads it: $XDG_CONFIG_HOME/tea/config.yml through the XDG default
+# ~/.config on non-Darwin systems, and ~/Library/Application Support/tea on
+# Darwin, because tea follows Go's per-platform user configuration directory.
+# Only bin/fm-pr-merge.sh reads this; the poll and the arming read need no
+# token, so they stay independent of tea's private file.
+fm_pr_forgejo_tea_config_file() {
+  local base
+  if [ "$(uname)" = Darwin ]; then
+    base="${HOME}/Library/Application Support"
+  else
+    base="${XDG_CONFIG_HOME:-$HOME/.config}"
+  fi
+  printf '%s/tea/config.yml\n' "$base"
+}
+
+# The one reading of one login's entry in tea's own configuration
+# (fm_pr_forgejo_tea_config_file's file): prints "url=", "token=" and "auth="
+# lines for the named login, with double-quoted YAML values unquoted, and
+# returns 1 when the file is unreadable or carries no such login. Only the
+# login list's own YAML shape is parsed - an entry begins at a "- " list
+# marker and its keys are the more-indented "key: value" lines that follow -
+# because tea writes exactly that shape and firstmate adds no YAML engine.
+# A login created through tea's OAuth flow keeps its token in the system
+# credential store instead, so such an entry reads an empty token and an
+# auth_method of "oauth"; the caller decides what that authorizes.
+fm_pr_forgejo_tea_login_config() {  # <config-file> <login>
+  local file=${1-} want=${2-}
+  local row spaces content rest key value
+  local dash_indent=-1 line_indent found=false active=false
+  local url='' token='' auth=''
+  local LC_ALL=C
+  [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r row || [ -n "$row" ]; do
+    spaces=${row%%[![:space:]]*}
+    content=${row#"$spaces"}
+    case "$content" in
+      ''|'#'*) continue ;;
+    esac
+    line_indent=${#spaces}
+    case "$content" in
+      -*)
+        # A list marker starts a new entry whatever its depth, so the previous
+        # entry's keys cannot leak across it.
+        dash_indent=$line_indent
+        active=false
+        rest=${content#-}
+        spaces=${rest%%[![:space:]]*}
+        rest=${rest#"$spaces"}
+        case "$rest" in
+          name:*)
+            value=${rest#name:}
+            value=${value#"${value%%[![:space:]]*}"}
+            value=${value%\"} ; value=${value#\"}
+            if [ "$value" = "$want" ]; then
+              found=true
+              active=true
+            fi
+            ;;
+        esac
+        ;;
+      *)
+        [ "$line_indent" -gt "$dash_indent" ] || continue
+        [ "$active" = true ] || continue
+        key=${content%%:*}
+        value=${content#*:}
+        value=${value#"${value%%[![:space:]]*}"}
+        value=${value%\"} ; value=${value#\"}
+        case "$key" in
+          name)
+            if [ "$value" = "$want" ]; then
+              found=true
+              active=true
+            fi
+            ;;
+          url) url=$value ;;
+          token) token=$value ;;
+          auth_method) auth=$value ;;
+        esac
+        ;;
+    esac
+  done < "$file"
+  [ "$found" = true ] || return 1
+  printf 'url=%s\ntoken=%s\nauth=%s\n' "$url" "$token" "$auth"
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %Lp "$1" 2>/dev/null
