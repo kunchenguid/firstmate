@@ -91,6 +91,7 @@ fm_test_spawn_brief "$H" "$ID" "Runtime verification only: compute 12345 plus 67
 # pane's `treehouse get` enters the prepared worktree in a subshell exactly as
 # the real tool does.
 printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCKET" > "$LAB/bin/tmux"
+# shellcheck disable=SC2016 # the single-quoted shim expands its own argument
 printf '#!/bin/sh\n[ "${1:-}" = get ] || exit 0\ncd "%s" && exec /bin/bash --noprofile --norc\n' "$WT" > "$LAB/bin/treehouse"
 chmod +x "$LAB/bin/tmux" "$LAB/bin/treehouse"
 export PATH="$LAB/bin:$PATH" FM_HOME="$H" HOME="$U" XDG_CONFIG_HOME="$U/.config" XDG_DATA_HOME="$U/.local/share"
