@@ -108,6 +108,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/experience-evidence/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
       "audience": "agent-runtime"
     },

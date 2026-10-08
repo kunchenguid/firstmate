@@ -204,6 +204,8 @@ Forbidden destinations: any firstmate-repo-tracked skill per the hard rule; firs
 
 ## Knowledge sweep and routing
 
+When a task report contains a reusable experience candidate, load `experience-evidence` for its validity, conflict, revocation, and provenance rules; this skill remains the sole owner of curation and promotion routing.
+
 1. **Sweep the session for uncaptured durable knowledge.**
    Look for operational learnings, captain preferences expressed in passing, project-intrinsic facts, standing decisions, and undone next steps.
 2. **Route each finding using AGENTS.md's knowledge-routing table.**

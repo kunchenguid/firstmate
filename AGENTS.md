@@ -177,6 +177,7 @@ Keep `local-only` work in the main home.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 
+Before intake or diagnosis where prior evidence may change scope or explain a repeated entity, symptom, work phase, or tool surface, load `experience-evidence` and use its bounded retrieval and original-evidence checks.
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
 
@@ -271,6 +272,7 @@ Resume fleet supervision immediately after the decision lands.
 Historical validation records remain readable through `bin/fm-crew-state.sh` and teardown so an old active or parked run is never duplicated or discarded. Fresh tasks do not require that executable or start new runs through it.
 These runtime states establish delivery milestones, not semantic acceptance of the original goal.
 On every returned artifact or terminal-looking event, compare the actual result with the task's goal and acceptance method: accept and continue the selected delivery path when they are satisfied, route one specific bounded continuation when an authorized gap remains, or record the precise hard blocker when no authorized recovery path remains.
+In the same handling turn after semantic acceptance, an accepted reliable diagnosis, or a reliable user correction, load `experience-evidence` to decide whether the task report needs a reusable candidate; do not wait for `/stow` to make the first record.
 
 ### PR ready, landing, and teardown
 

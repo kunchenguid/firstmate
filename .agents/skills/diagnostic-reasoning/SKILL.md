@@ -14,6 +14,7 @@ metadata:
 Use this procedure before scoping a reported bug and before acting on a diagnostic report.
 This skill is the single owner of Firstmate's bug-diagnosis reasoning procedure.
 Firstmate applies it when briefing delegated investigation and evaluating the resulting evidence, without taking over project-specific investigation itself.
+Load `experience-evidence` before the history lookup when a prior entity, symptom, work phase, or tool surface may explain the current case; that skill owns bounded retrieval, applicability, and original-evidence readback.
 
 ## Establish the observed behavior
 
