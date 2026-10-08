@@ -33,7 +33,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them). If a hostname follows the line, preserve it exactly: ask for `! gh auth login --hostname <host>` so GitHub Enterprise credentials are repaired on the failing host.
 - `NEEDS_GLAB_AUTH: <host>` - ask the captain to run `! glab auth login --hostname <host>` (interactive; you cannot run it for them).
 - `FORGE_UNSUPPORTED: <project> (host: <host|unresolved>)` - the registered project has an origin outside the configured GitHub/GitLab provider boundary, so do not dispatch forge-dependent work for it.
-  Confirm the remote is correct, or add a self-managed GitLab hostname to `FM_GITLAB_HOSTS`, then rerun session start.
+  Confirm the remote is correct, or add the host to the matching `FM_GITHUB_HOSTS` or `FM_GITLAB_HOSTS` list, then rerun session start.
   This diagnostic comes from local origin classification, not network reachability. If a configured forge cannot be reached or its credentials are invalid, follow the corresponding `NEEDS_GH_AUTH` or `NEEDS_GLAB_AUTH` remediation instead.
 - `NETWORK_CHECKS: <what did not complete>; rerun <command>` - the deferred network stage itself could not finish, so the checks it names are simply unknown, not failed.
   Rerun the printed command; it is idempotent and re-derives every finding.

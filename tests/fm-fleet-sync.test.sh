@@ -89,6 +89,21 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+snapshot_clone_state() {
+  local project=$1 output=$2 head
+  {
+    if head=$(git -C "$project" symbolic-ref -q HEAD 2>/dev/null); then
+      printf 'HEAD=%s\n' "$head"
+    else
+      printf 'HEAD=%s\n' "$(git -C "$project" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    fi
+    printf '%s\n' REFS
+    git -C "$project" for-each-ref --format='%(refname) %(objectname)'
+    printf '%s\n' WORKTREE
+    git -C "$project" status --porcelain --untracked-files=all
+  } > "$output"
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
@@ -396,17 +411,22 @@ test_no_origin_skipped() {
 }
 
 test_unknown_origin_is_skipped_even_when_invoked_directly() {
-  local home project out
+  local home project out before after
   home="$TMP_ROOT/unknown-origin"
   mkdir -p "$home/projects"
   project="$home/projects/unknown"
   mkdir -p "$project"
   git init -q "$project"
   git -C "$project" remote add origin https://code.example/team/project.git
+  before="$home/unknown-before"
+  after="$home/unknown-after"
+  snapshot_clone_state "$project" "$before"
 
   out=$(run_sync "$home")
+  snapshot_clone_state "$project" "$after"
 
   [ -z "$out" ] || fail "direct fleet-sync must silently skip an unsupported origin, got: $out"
+  cmp -s "$before" "$after" || fail "direct fleet-sync mutated an unsupported-origin clone"
   pass "direct fleet-sync fails closed for unsupported forge origins"
 }
 

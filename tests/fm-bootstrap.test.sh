@@ -202,6 +202,21 @@ add_no_origin_projects() {
   done
 }
 
+snapshot_clone_state() {
+  local project=$1 output=$2 head
+  {
+    if head=$(git -C "$project" symbolic-ref -q HEAD 2>/dev/null); then
+      printf 'HEAD=%s\n' "$head"
+    else
+      printf 'HEAD=%s\n' "$(git -C "$project" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    fi
+    printf '%s\n' REFS
+    git -C "$project" for-each-ref --format='%(refname) %(objectname)'
+    printf '%s\n' WORKTREE
+    git -C "$project" status --porcelain --untracked-files=all
+  } > "$output"
+}
+
 run_bootstrap_timeout_case() {
   local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
   override=__unset__
@@ -1067,7 +1082,7 @@ SH
 
 
 test_forge_provider_bootstrap_contracts() {
-  local case_dir fakebin out project
+  local case_dir fakebin out project before after
 
   case_dir="$TMP_ROOT/forge-unknown"
   project="$case_dir/home/projects/mystery"
@@ -1075,11 +1090,16 @@ test_forge_provider_bootstrap_contracts() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   git -C "$project" init -q
   git -C "$project" remote add origin https://code.example/team/project.git
+  before="$case_dir/unknown-before"
+  after="$case_dir/unknown-after"
+  snapshot_clone_state "$project" "$before"
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  snapshot_clone_state "$project" "$after"
   [ "$out" = "FORGE_UNSUPPORTED: mystery (host: code.example)" ] \
     || fail "unknown forge must fail closed with its project and host, got: $out"
+  cmp -s "$before" "$after" || fail "bootstrap mutated an unsupported-origin clone"
 
   case_dir="$TMP_ROOT/forge-https-ignores-ssh-config"
   project="$case_dir/home/projects/github-project"
