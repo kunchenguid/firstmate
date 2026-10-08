@@ -638,7 +638,11 @@ retire_busy_incarnation() {
 do_exit() {
   local result TASK_PROCESS_SCOPE=browser
   result=$(do_exit_agent) || return $?
-  reap_task_worktree_processes browser "$WT" "$(fm_meta_get "$META" tasktmp)" || return $?
+  case "$KIND" in
+    ship|scout)
+      reap_task_worktree_processes browser "$WT" "$(fm_meta_get "$META" tasktmp)" || return $?
+      ;;
+  esac
   printf '%s' "$result"
 }
 

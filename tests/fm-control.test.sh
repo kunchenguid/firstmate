@@ -1174,12 +1174,14 @@ EOF
 }
 
 test_exit_reaps_owned_browser_helpers() (
-  local dir state out rc owned other terminal pid i
+  local dir state kind scenario out rc owned other terminal pid i
   local -a pids=()
   trap 'for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done' EXIT
-  for state in alive dead; do
-    dir=$(new_case "browser-exit-$state")
-    add_task "$dir" t1 claude
+  for scenario in ship:alive ship:dead scout:alive scout:dead secondmate:alive secondmate:dead; do
+    kind=${scenario%:*}
+    state=${scenario#*:}
+    dir=$(new_case "browser-exit-$kind-$state")
+    add_task "$dir" t1 claude "$kind"
     [ "$state" != alive ] || alive_as "$dir" claude
     mkdir -p "$dir/browser-state/sessions/other" "$dir/outside" "$dir/proc"
     printf 'uncommitted work\n' > "$dir/wt-t1/preserved.txt"
@@ -1196,7 +1198,12 @@ PL
     (cd "$dir/wt-t1" && exec /bin/sleep 300) &
     terminal=$!; pids+=("$terminal")
     mkdir -p "$dir/proc/$owned" "$dir/proc/$other"
-    printf 'PWD=%s\0' "$dir/wt-t1" > "$dir/proc/$owned/environ"
+    if [ "$kind" = secondmate ]; then
+      mkdir -p "$dir/wt-t1/projects"
+      printf 'PWD=%s\0OLDPWD=%s\0' "$dir/outside" "$dir/wt-t1/projects" > "$dir/proc/$owned/environ"
+    else
+      printf 'PWD=%s\0' "$dir/wt-t1" > "$dir/proc/$owned/environ"
+    fi
     printf 'PWD=%s\0' "$dir/outside" > "$dir/proc/$other/environ"
     printf '{"pid":%s}\n' "$owned" > "$dir/browser-state/bridge.pid"
     printf '{"pid":%s}\n' "$other" > "$dir/browser-state/sessions/other/bridge.pid"
@@ -1209,8 +1216,10 @@ PL
     rm "$dir/fakebin/sleep"
     out=$(FM_PROC_ROOT_OVERRIDE="$dir/proc" run_control "$dir" t1 exit); rc=$?
     expect_code 0 "$rc" "browser cleanup failed for $state agent: $out"
-    if kill -0 "$owned" 2>/dev/null; then
-      fail "owned browser helper survived $state worker exit"
+    if [ "$kind" = secondmate ]; then
+      kill -0 "$owned" 2>/dev/null || fail "secondmate exit killed a child browser helper"
+    elif kill -0 "$owned" 2>/dev/null; then
+      fail "owned browser helper survived $state $kind exit"
     fi
     kill -0 "$other" && kill -0 "$terminal" \
       || fail "exit killed an unrelated helper or preserved terminal process"
@@ -1220,8 +1229,11 @@ PL
       || fail "exit changed the task record"
     [ "$(cat "$dir/fake/command")" = zsh ] || fail "worker did not stop"
     run_control "$dir" t1 exit >/dev/null || fail "repeated exit failed"
+    if [ "$kind" = secondmate ]; then
+      kill -0 "$owned" 2>/dev/null || fail "repeated secondmate exit killed a child browser helper"
+    fi
   done
-  pass "exit reaps owned bridges for active and stopped workers while preserving work and other processes"
+  pass "exit reaps ship/scout bridges while preserving secondmate child helpers, work, and other processes"
 )
 
 test_exit_reaps_owned_browser_helpers || exit $?
