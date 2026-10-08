@@ -52,9 +52,10 @@
 #     that is unsafe or holds nothing for the branch) stay main's. That
 #     pass-through starts the successor watcher cycle and leaves it running
 #     before the close is printed, so supervision continues when the session
-#     drops the handoff. It confirms no handling handoff, so the recovery
-#     marker still reads downtime and the re-arm owner delivers the close to
-#     main. The host records that successor's arm before relinquishing it
+#     drops the handoff. It confirms no handling handoff and republishes the
+#     recovery marker as downtime, even over handling an earlier engine turn
+#     left, so the re-arm owner delivers the close to main; a failed publish
+#     prints a watcher FAILED line instead of the close. The host records that successor's arm before relinquishing it
 #     (detach_successor owns the persistence check and failure path). The
 #     session's next park without --restart requests a take-over of its cycle
 #     rather than an ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
