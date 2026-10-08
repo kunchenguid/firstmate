@@ -27,7 +27,8 @@ if a[:2]==['terminal','show']:
  marker=h/'state/.watcher-down'; rec=h/'state/.codex-orca-continuation.json'
  if mode=='show-fails-announced' and marker.exists() and marker.read_text().startswith('announced:downtime:'):
   print('fixture terminal show unavailable',file=sys.stderr);sys.exit(1)
- if (h/'hold-show').exists() and marker.exists() and marker.read_text().startswith('announced:downtime:'):
+ owner=' run ' in subprocess.run(['ps','-p',str(os.getppid()),'-o','args='],capture_output=True,text=True).stdout
+ if owner and (h/'hold-show').exists() and marker.exists() and marker.read_text().startswith('announced:downtime:'):
   deadline=time.monotonic()+4
   while (h/'hold-show').exists() and time.monotonic()<deadline: time.sleep(.05)
  if mode=='show-fails-launching' and rec.exists() and json.loads(rec.read_text()).get('phase')=='launching':
