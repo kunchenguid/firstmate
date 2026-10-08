@@ -117,6 +117,7 @@ It also passes the close through unchanged, with no added line, when any of thes
 
 - The home names no usable engine.
 - A tool its turns need is missing: the engine executable, node, jq, or one of perl, timeout, or gtimeout to bound the turn.
+  Claude resolution also accepts the executable from the active NVM toolchain when a hook receives a restricted `PATH` but retains `NVM_BIN`.
 - The primary has no verified dialog mirror.
 - The main session's lock holder cannot be identified.
 - The session is cooling down after engine errors; see [The broken-session latch](#the-broken-session-latch).

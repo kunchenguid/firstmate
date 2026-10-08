@@ -297,6 +297,52 @@ append_status() {  # <home> <text>
   printf '%s [at=%s]: %s\n' "${3:-working}" "$(date +%s)" "$2" >> "$1/state/demo.status"
 }
 
+# A Stop-hook process may keep NVM_BIN while receiving a restricted PATH.
+# The active NVM toolchain remains a precise fallback, but it never outranks a
+# directly reachable executable and an absent executable still fails clearly.
+test_engine_resolution_uses_only_path_or_the_active_nvm_bin() {
+  local dir nvm_bin direct_bin restricted out rc=0
+  dir="$TMP_ROOT/engine-resolution"
+  nvm_bin="$dir/nvm/bin"
+  direct_bin="$dir/direct"
+  restricted="$dir/restricted"
+  mkdir -p "$nvm_bin" "$direct_bin" "$restricted" "$dir/config"
+  ln -s "$(command -v jq)" "$restricted/jq"
+  ln -s "$(command -v perl)" "$restricted/perl"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/nvm-claude"
+  printf '#!/bin/sh\nexit 0\n' > "$nvm_bin/node"
+  printf '#!/bin/sh\nexit 0\n' > "$direct_bin/claude"
+  chmod +x "$dir/nvm-claude" "$nvm_bin/node" "$direct_bin/claude"
+  ln -s "$dir/nvm-claude" "$nvm_bin/claude"
+
+  out=$(FM_SUPERVISION_ENGINE_CLAUDE_BIN='' NVM_BIN="$nvm_bin" PATH="$restricted" /bin/bash -c '
+    set -u
+    . "$1"
+    fm_supervision_host_attended_ready "$2" claude
+    fm_supervision_engine_bin claude
+    command -v node
+  ' _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/config") || fail "the active NVM bin did not make the host ready with Claude and its Node: $out"
+  [ "$out" = "$nvm_bin/claude"$'\n'"$nvm_bin/node" ] || fail "the NVM fallback resolved unexpected tools: $out"
+
+  out=$(FM_SUPERVISION_ENGINE_CLAUDE_BIN='' NVM_BIN="$nvm_bin" PATH="$direct_bin" /bin/bash -c '
+    set -u
+    . "$1"
+    fm_supervision_engine_bin claude
+  ' _ "$ROOT/bin/fm-supervision-engine-lib.sh") || fail "Claude on PATH did not resolve: $out"
+  [ "$out" = "$direct_bin/claude" ] || fail "the active NVM bin outranked PATH: $out"
+
+  rm -f "$nvm_bin/claude"
+  out=$(FM_SUPERVISION_ENGINE_CLAUDE_BIN='' NVM_BIN="$nvm_bin" PATH="$restricted" /bin/bash -c '
+    set -u
+    . "$1"
+    fm_supervision_engine_bin claude
+  ' _ "$ROOT/bin/fm-supervision-engine-lib.sh" 2>&1) || rc=$?
+  expect_code 1 "$rc" "a genuinely missing Claude executable must not resolve"
+  assert_contains "$out" "the claude engine executable was not found on PATH or in the active NVM bin" \
+    "the missing-executable diagnostic must name both supported locations"
+  pass "engine resolution: restricted PATH uses only the active NVM bin, while PATH wins and a genuine absence still fails"
+}
+
 # --- report surface -----------------------------------------------------------
 
 test_report_surface_enforces_actor_turn_and_scope() {
@@ -2958,6 +3004,7 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
 test_claude_stop_hook_notifies_when_closed_announced_successor_downtime_restore_fails
 test_park_exit_probe_uses_half_second_child_sleeps
+test_engine_resolution_uses_only_path_or_the_active_nvm_bin
 test_report_surface_enforces_actor_turn_and_scope
 test_report_after_the_return_is_queued_for_main
 test_dispatch_entry_scopes_rows_and_renders_the_away_tail

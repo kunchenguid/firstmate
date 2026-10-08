@@ -1111,6 +1111,7 @@ while :; do
     if [ -z "$FM_SUPERVISION_ENGINE" ]; then
       exit_to_main "no supervision engine runs here: $FM_SUPERVISION_ENGINE_PROBLEM; this wake is yours"
     fi
+    fm_supervision_engine_prepare_path "$FM_SUPERVISION_ENGINE"
     if ! command -v node >/dev/null 2>&1; then
       exit_to_main "node is required to compute branch eligibility; this wake is yours"
     fi

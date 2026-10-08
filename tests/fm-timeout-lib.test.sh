@@ -18,7 +18,7 @@ TMP_ROOT=$(fm_test_tmproot fm-timeout-lib)
 # timeout variant: fm_exec_timed must take its perl watchdog here.
 PERL_ONLY="$TMP_ROOT/perl-only-bin"
 mkdir -p "$PERL_ONLY"
-for tool in perl bash sleep; do
+for tool in perl bash sh sleep; do
   ln -s "$(command -v "$tool")" "$PERL_ONLY/$tool"
 done
 
@@ -131,22 +131,32 @@ test_kill_ends_a_term_ignoring_command_after_the_grace() {
 # replaced by the bounding process, whose child the command is. This holds for
 # whichever mechanism the host selects, and for the perl watchdog explicitly.
 test_the_bound_replaces_the_calling_shell() {
-  local dir path caller parent
+  local dir path bashpid caller parent
   dir="$TMP_ROOT/replace"
   mkdir -p "$dir"
   for path in "$PATH" "$PERL_ONLY"; do
-    rm -f "$dir/caller" "$dir/parent"
-    (
-      . "$ROOT/bin/fm-timeout-lib.sh"
-      perl -e 'print getppid(), "\n"' > "$dir/caller"
-      PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
-    ) || fail "the bounded probe failed under PATH=$path"
-    caller=$(cat "$dir/caller")
-    parent=$(cat "$dir/parent")
-    [ "$caller" = "$parent" ] \
-      || fail "the command's parent $parent is not the replaced caller $caller under PATH=$path"
+    for bashpid in present absent; do
+      rm -f "$dir/caller" "$dir/parent"
+      (
+        . "$ROOT/bin/fm-timeout-lib.sh"
+        [ "$bashpid" = present ] || unset BASHPID
+        caller=$(perl -e 'print getppid(), "\n"')
+        # Stock macOS Bash has no BASHPID, so emulate the modern-Bash value
+        # for the branch that must retain the existing owner semantics.
+        if [ "$bashpid" = present ] && [ -z "${BASHPID:-}" ]; then
+          # shellcheck disable=SC2030 # this fixture assignment belongs here
+          BASHPID=$caller
+        fi
+        printf '%s\n' "$caller" > "$dir/caller"
+        PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
+      ) || fail "the bounded probe failed under PATH=$path with BASHPID $bashpid"
+      caller=$(cat "$dir/caller")
+      parent=$(cat "$dir/parent")
+      [ "$caller" = "$parent" ] \
+        || fail "the command's parent $parent is not the replaced caller $caller under PATH=$path with BASHPID $bashpid"
+    done
   done
-  pass "fm_exec_timed replaces the calling shell instead of wrapping it"
+  pass "fm_exec_timed replaces the calling shell with and without BASHPID"
 }
 
 # The regression a direct-child watchdog had: the command dies at the bound
@@ -239,6 +249,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   # shellcheck disable=SC2016
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
+    unset BASHPID
     (
       perl -e "print getppid(), qq(\\n)" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
@@ -260,7 +271,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
     fi
     sleep 0.02
   done
-  pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
+  pass "fm_exec_timed ends the command when its owner dies during watchdog startup without BASHPID"
 }
 
 # A top-level calling shell has its own PID in $$, unlike a Bash subshell.

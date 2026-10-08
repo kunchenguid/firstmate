@@ -646,6 +646,25 @@ tests/fm-supervision-instructions.test.sh
 tests/fm-watch-arm.test.sh
 ```
 
+### macOS Bash and restricted PATH portability
+
+The engine-turn bound and Claude executable fallback were measured on 2026-10-08 on macOS 26.5.2 arm64 with the stock Bash 3.2.57.
+The timeout regression explicitly removes `BASHPID`, proves the bounded process still replaces its caller, and proves owner death still ends the command.
+The host regression gives Claude an executable only under an absolute `NVM_BIN`, removes it from `PATH`, then separately proves that `PATH` wins when both exist and that a genuinely absent executable is rejected.
+
+```text
+$ /bin/bash --version | head -n 1
+GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
+
+$ /bin/bash tests/fm-timeout-lib.test.sh
+ok - fm_exec_timed replaces the calling shell with and without BASHPID
+ok - fm_exec_timed ends the command when its owner dies during watchdog startup without BASHPID
+
+$ bin/fm-test-run.sh tests/fm-supervision-host.test.sh
+ok - engine resolution: restricted PATH uses only the active NVM bin, while PATH wins and a genuine absence still fails
+FM_TEST_END 2026-10-08T20:09:22Z tests/fm-supervision-host.test.sh exit=0 duration_ms=661541 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=661649
+```
 
 ### Non-Pi primaries
 

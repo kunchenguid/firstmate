@@ -40,9 +40,12 @@
 # process group of its own. docs/supervision-host.md "Engines" owns the
 # verified engine facts each argument list below is built from.
 #
-# Test seams: FM_SUPERVISION_ENGINE_CLAUDE_BIN names the claude executable
-# (default: claude on PATH), so a hermetic test can run a stub engine through
-# the real argument construction. FM_TEST_HARNESS pins the primary harness
+# Engine resolution: FM_SUPERVISION_ENGINE_CLAUDE_BIN names an explicit claude
+# executable; otherwise `claude` on PATH wins, followed by `claude` in the
+# active NVM toolchain's absolute NVM_BIN. No shell startup file is evaluated
+# and no unselected Node installation is searched. The explicit setting also
+# remains the test seam for running a stub through the real argument
+# construction. FM_TEST_HARNESS pins the primary harness
 # fm_supervision_host_primary reports when FM_TEST_SEAM=1 and its value is a
 # known harness token; otherwise detection remains real (tests/lib.sh arms
 # the marker for isolated suites).
@@ -234,10 +237,29 @@ fm_supervision_host_clock() {
   date -r "$1" '+%H:%M' 2>/dev/null || date -d "@$1" '+%H:%M' 2>/dev/null || printf 'the end of its cooldown'
 }
 
+# fm_supervision_engine_prepare_path <engine>: restore the active NVM bin to a
+# restricted child PATH only when it holds the otherwise-unreachable Claude
+# executable. This also gives Claude's /usr/bin/env node shebang the same Node
+# toolchain that installed it. Explicit overrides and a Claude already on PATH
+# leave the environment untouched.
+fm_supervision_engine_prepare_path() {
+  local nvm_bin
+  [ "${1:-}" = claude ] || return 0
+  [ -z "${FM_SUPERVISION_ENGINE_CLAUDE_BIN:-}" ] || return 0
+  command -v claude >/dev/null 2>&1 && return 0
+  nvm_bin=${NVM_BIN:-}
+  case "$nvm_bin" in /*) ;; *) return 0 ;; esac
+  [ -x "$nvm_bin/claude" ] || return 0
+  case ":${PATH:-}:" in *":$nvm_bin:"*) return 0 ;; esac
+  PATH="$nvm_bin${PATH:+:$PATH}"
+  export PATH
+}
+
 # fm_supervision_engine_bin <engine>: print the executable, or fail with a
 # plain reason on stderr.
 fm_supervision_engine_bin() {
   local bin
+  fm_supervision_engine_prepare_path "$1"
   case "$1" in
     claude)
       bin=${FM_SUPERVISION_ENGINE_CLAUDE_BIN:-}
@@ -246,7 +268,7 @@ fm_supervision_engine_bin() {
     *) bin= ;;
   esac
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-    echo "the $1 engine executable was not found on PATH" >&2
+    echo "the $1 engine executable was not found on PATH or in the active NVM bin" >&2
     return 1
   fi
   printf '%s\n' "$bin"
@@ -340,6 +362,7 @@ fm_supervision_engine_turn() {
   local engine=$1 model=$2 prompt=$3 message=$4 session=$5 mode=$6 timeout=$7 result=$8 errors=$9
   local pid_file=${10:-} bin grace i ledger watched rc home_phys root_phys state_phys identity recorded
   local -a args
+  fm_supervision_engine_prepare_path "$engine"
   bin=$(fm_supervision_engine_bin "$engine" 2>"$errors") || return 127
   case "$timeout" in ''|0*|*[!0-9]*) timeout=1200 ;; esac
   grace=${FM_SUPERVISION_ENGINE_GRACE:-30}
