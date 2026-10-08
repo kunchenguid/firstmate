@@ -8,7 +8,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 
 | Fact | Value |
 |---|---|
-| Busy state | `pre_user_prompt` and `pre_model_turn` open, `stop` closes, through the generation-bound writer; `../../../bin/fm-busy-lib.sh` owns trust. A REST-cancelled turn emits no `stop` (verified live), so the control plane writes the close itself as `idle fm-interrupt` after the typed settle. `post_model_turn` fires per model response - mid-turn, between tool phases (verified live) - and is deliberately never wired as a close. |
+| Busy state | `pre_user_prompt` and `pre_model_turn` open, `stop` closes, through the generation-bound writer; `../../../bin/fm-busy-lib.sh` owns trust. A REST-cancelled turn emits no `stop` (verified live), so the control plane writes the close itself as `idle fm-interrupt` after the typed settle, unless a `pre_user_prompt` written since the pre-cancel snapshot shows a queued prompt reopened the turn or `GET /sync` shows a turn running again right before the write (`fm_polytoken_interrupt_task`). `post_model_turn` fires per model response - mid-turn, between tool phases (verified live) - and is deliberately never wired as a close. |
 | Exit command | `/quit` through the shared slash-palette settle: Enter accepts the preselected row, the TUI exits, the pane falls to its shell, the daemon deletes its credential and exits on its own shortly after (all verified live). `POST /terminate` is NOT used on attached sessions: it wedges the TUI on an SSE reconnect error for ~20s and records a crash log (verified live). |
 | Interrupt | No TUI chord exists at all (`print tui-command-actions` has no cancel action in Prompt scope; a single Escape does nothing; Escape Escape opens the rewind picker). Interrupt is `POST /turn/cancel` on the session daemon, answering `{"status":"cancel_requested","generation":N}`, with `GET /sync`'s `turn: null` as the typed settle. Firstmate never sends interrupt keys. |
 | Skill invocation | `@skill:<name>` in prompt text and the model's `skill` tool; no slash-command skill form. |
@@ -23,7 +23,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 
 ## Worker lifecycle limits
 
-Hook handlers receive the event JSON on stdin and `POLYTOKEN_*` variables but NO argv (verified live: a handler written as `<script> <arg>` runs with `$*` empty), so every firstmate hook is a generated self-contained script referenced by absolute path.
+Hook handlers receive the event JSON on stdin and `POLYTOKEN_*` variables but NO argv (verified live: a handler written as `<script> <arg>` runs with `$*` empty), so every firstmate hook is a generated self-contained script referenced by absolute path, and a state dir whose busy-script path contains whitespace refuses polytoken wiring at spawn because the handler's splitting rules are unverified.
 A failing hook breaks the turn (verified live: a pre_model_turn hook exiting 1 errors the whole turn), so every generated hook wraps its writer in `|| true` and exits 0.
 A project hook that negates a global hook by name fails daemon startup (the scout's finding), so per-task hooks are self-contained and negate nothing.
 Enter while a turn runs queues the text for the next agent pause - `Queued for the next agent pause` - exactly like OpenCode (verified live), and the queued text renders above the composer separator.
