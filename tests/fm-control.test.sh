@@ -1211,8 +1211,9 @@ PL
       ps -p "$owned" -o command= | grep -q chrome-devtools-axi-bridge && break
       /bin/sleep 0.02
     done
-    kill -0 "$owned" && kill -0 "$other" && kill -0 "$terminal" \
-      || fail "browser exit fixture processes are not alive"
+    if ! kill -0 "$owned" || ! kill -0 "$other" || ! kill -0 "$terminal"; then
+      fail "browser exit fixture processes are not alive"
+    fi
     rm "$dir/fakebin/sleep"
     out=$(FM_PROC_ROOT_OVERRIDE="$dir/proc" run_control "$dir" t1 exit); rc=$?
     expect_code 0 "$rc" "browser cleanup failed for $state agent: $out"
@@ -1221,8 +1222,9 @@ PL
     elif kill -0 "$owned" 2>/dev/null; then
       fail "owned browser helper survived $state $kind exit"
     fi
-    kill -0 "$other" && kill -0 "$terminal" \
-      || fail "exit killed an unrelated helper or preserved terminal process"
+    if ! kill -0 "$other" || ! kill -0 "$terminal"; then
+      fail "exit killed an unrelated helper or preserved terminal process"
+    fi
     [ "$(cat "$dir/wt-t1/preserved.txt")" = 'uncommitted work' ] \
       || fail "exit lost uncommitted work"
     cmp -s "$dir/meta-before" "$dir/home/state/t1.meta" \
