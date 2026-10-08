@@ -764,7 +764,7 @@ case "${1:-}" in
           launch=${launch%"'"}
           [ -f "$launch" ] || exit 0
           cat "$launch" >>"${PTFAKE_LAUNCH_LINE_LOG:?}"
-          CLAUDECODE=1 ORCA_X=1 FM_FOO=1 FM_TASK_ID=seeded-task FM_TASK_INBOX=seeded-inbox \
+          AGENT=1 CLAUDECODE=1 ORCA_X=1 FM_FOO=1 FM_TASK_ID=seeded-task FM_TASK_INBOX=seeded-inbox \
             bash -c "$(cat "$launch")" >>"${PTFAKE_LAUNCH_STDOUT:-/dev/null}" 2>&1 || true
           ;;
       esac
@@ -834,6 +834,7 @@ test_polytoken_launch_carries_the_hybrid_contract() {
   envlog="$CASE_DIR/polytoken-env.log"
   [ -s "$envlog" ] || fail "the fake polytoken must have recorded its launch environment"
   ! grep -q '^CLAUDECODE=' "$envlog" || fail "the launch must clear the inherited launcher marker"
+  ! grep -q '^AGENT=' "$envlog" || fail "the launch must clear an inherited generic AGENT marker"
   ! grep -q '^ORCA_X=' "$envlog" || fail "the launch must clear inherited ORCA_ markers"
   ! grep -q '^FM_FOO=' "$envlog" || fail "the launch must clear inherited FM_ markers"
   grep -qx 'FM_TASK_ID=seeded-task' "$envlog" || fail "the launch must keep the launch-owned FM_TASK_ID"

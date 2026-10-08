@@ -2312,7 +2312,7 @@ launch_template() {
   # effort inside the model reference as `<model>(<effort>)`, so the effort
   # axis rides `__MODELFLAG__` (the record-and-omit contract drops an effort
   # the model's selectable set does not name).
-  polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ new --sessions-dir __POLYTOKENSESSIONS__ --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ new --sessions-dir __POLYTOKENSESSIONS__ --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded

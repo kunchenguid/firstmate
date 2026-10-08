@@ -32,7 +32,7 @@ Ctrl+C ends the session; Escape Escape opens the rewind picker; neither is ever 
 A TUI-attached daemon stays alive while idle (verified minutes-scale) and exits on its own after its session ends, so the pane design needs no daemon-lifetime supervision.
 The daemon imposes no cap on consecutive `stop`-hook `continue` outcomes (verified live: five forced continuations all ran), so any Phase 2 turn-end guard must self-bound with its own latch.
 
-`../../../../../bin/fm-spawn.sh` owns autonomy (the generated config dir), the worktree hook and facet wiring, session discovery into task metadata (`polytoken sessions --format json` with the launch's `--config-dir` and `--sessions-dir`), the foreign-marker clearing loop, and the readiness gate.
+`../../../../../bin/fm-spawn.sh` owns autonomy (the generated config dir), the worktree hook and facet wiring, session discovery into task metadata (`polytoken sessions --format json` with the launch's `--config-dir` and `--sessions-dir`), the foreign-marker clearing (the fixed `env -u` set, including the generic `AGENT`, plus the ORCA_*/FM_ loop), and the readiness gate.
 `../../../../../bin/fm-polytoken-lib.sh` owns every generated artifact and the REST control core.
 `../../../../../bin/fm-control-lib.sh` owns the REST interrupt transport (`fm_control_interrupt_transport`), the `/quit` exit command, and the wiring tables.
 

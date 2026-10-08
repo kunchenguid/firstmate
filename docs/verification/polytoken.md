@@ -61,4 +61,4 @@ Ancestry, verified from a real tool subprocess inside a live session:
     1     0 /sbin/launchd
 ```
 
-A tool subprocess's parent IS the session daemon, so the anchored `polytoken)` comm case in `bin/fm-harness.sh` reaches comm strength at hop one; foreign markers from the launching session (`AGENT=1`, `ORCA_AGENT_HOOK_ENV`, `ORCA_OPENCODE_AGENT`) were verified reaching a worker tool subprocess through the pane, which the launch command's fixed `env -u` set plus ORCA_*/FM_ clearing loop removes.
+A tool subprocess's parent IS the session daemon, so the anchored `polytoken)` comm case in `bin/fm-harness.sh` reaches comm strength at hop one; foreign markers from the launching session (`AGENT=1`, `ORCA_AGENT_HOOK_ENV`, `ORCA_OPENCODE_AGENT`) were verified reaching a worker tool subprocess through the pane, which the launch command's fixed `env -u` set (including `-u AGENT`) plus ORCA_*/FM_ clearing loop removes.
