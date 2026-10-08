@@ -1082,7 +1082,7 @@ SH
 
 
 test_forge_provider_bootstrap_contracts() {
-  local case_dir fakebin out project project_two before after
+  local case_dir fakebin out project project_two before after before_two after_two
 
   case_dir="$TMP_ROOT/forge-unknown"
   project="$case_dir/home/projects/mystery"
@@ -1096,11 +1096,15 @@ test_forge_provider_bootstrap_contracts() {
   git -C "$project_two" remote add origin https://other.example/team/project.git
   before="$case_dir/unknown-before"
   after="$case_dir/unknown-after"
+  before_two="$case_dir/unknown-two-before"
+  after_two="$case_dir/unknown-two-after"
   snapshot_clone_state "$project" "$before"
+  snapshot_clone_state "$project_two" "$before_two"
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   snapshot_clone_state "$project" "$after"
+  snapshot_clone_state "$project_two" "$after_two"
   assert_contains "$out" "FORGE_UNSUPPORTED: mystery (host: code.example)" \
     "the first unsupported project must retain its diagnostic"
   assert_contains "$out" "FORGE_UNSUPPORTED: mystery-two (host: other.example)" \
@@ -1108,6 +1112,7 @@ test_forge_provider_bootstrap_contracts() {
   [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 2 ] \
     || fail "unsupported projects must be reported once each, got: $out"
   cmp -s "$before" "$after" || fail "bootstrap mutated an unsupported-origin clone"
+  cmp -s "$before_two" "$after_two" || fail "bootstrap mutated the second unsupported-origin clone"
 
   case_dir="$TMP_ROOT/forge-malformed-binding"
   project="$case_dir/home/projects/malformed"
