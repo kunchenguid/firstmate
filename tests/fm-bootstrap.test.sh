@@ -1326,10 +1326,10 @@ SH
   git -C "$project" remote set-url origin https://github.com..../example/project.git
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "repeated trailing-dot GitHub host labels must use canonical auth policy, got: $out"
-  [ "$(cat "$calls")" = "auth status --hostname github.com" ] \
-    || fail "repeated trailing-dot GitHub host labels must authenticate against github.com, got: $(cat "$calls")"
-  pass "bootstrap canonicalizes trailing-dot forge hosts"
+  [ "$out" = "FORGE_UNSUPPORTED: github-project (host: github.com...)" ] \
+    || fail "repeated trailing-dot GitHub host labels must fail closed, got: $out"
+  [ ! -s "$calls" ] || fail "malformed repeated trailing-dot host must not trigger GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap canonicalizes valid trailing-dot hosts and rejects malformed ones"
 }
 
 test_forge_configured_host_trailing_dot_is_canonicalized() {
