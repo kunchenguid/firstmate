@@ -1,285 +1,191 @@
 #!/usr/bin/env bash
-# Live drift guard for the Polytoken CLI adapter's vendor-controlled surface:
-# process identity, the generated worker config and facet, the hook-driven busy
-# contract on a real turn, the rendered busy row, the REST interrupt, and the
-# /quit exit.
-# Opt-in because it submits real prompts on a real provider credential (the
-# cheap zai/glm-5.3-flash model, per the adapter's verification plan).
+# Credentialed Polytoken worker guard. Opt in with FM_POLYTOKEN_SIGNALS_LIVE=1.
+# Drives the real Firstmate verbs end to end in a private tmux server: the
+# launch is bin/fm-spawn.sh's generated polytoken command (so a broken launch
+# template fails here), the steer is bin/fm-send.sh, the interrupt, relaunch,
+# and exit are bin/fm-control.sh, and liveness is the tmux backend's own
+# agent-state read. Only worktree allocation uses a fixture (a `treehouse`
+# stand-in that enters a prepared worktree). Also proves `polytoken print
+# models` discovery, detection from a real tool subprocess, and the hook-driven
+# busy open/close on real turns. Runs the cheap zai/glm-5.3-flash model at low
+# effort, per the adapter's verification plan.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REAL_TMUX=$(command -v tmux 2>/dev/null || true)
-LAB=
-SOCKET="fm-polytoken-signals-$$"
-SESSION=polytoken-signals
-TARGET="$SESSION:worker"
+fm_live_gate opt-in FM_POLYTOKEN_SIGNALS_LIVE polytoken tmux jq curl git
 
-cleanup() {
-  if [ -n "$LAB" ] && [ -n "${POLYTOKEN_BIN:-}" ] && [ -n "${POLYTOKEN_SESSION_ID:-}" ]; then
-    "$POLYTOKEN_BIN" --config-dir "$LAB/state/ptguard.polytoken-config" \
-      reap "$POLYTOKEN_SESSION_ID" --force \
-      --sessions-dir "$LAB/state/ptguard.polytoken-sessions" >/dev/null 2>&1 || true
-  fi
-  [ -n "$REAL_TMUX" ] && "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  [ -z "$LAB" ] || rm -rf -- "$LAB"
-}
-
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  cleanup
-  exit 1
-}
-
-pass() {
-  printf 'ok - %s\n' "$1"
-}
-
-fm_live_gate opt-in FM_POLYTOKEN_SIGNALS_LIVE polytoken tmux
-
-# shellcheck source=/dev/null
+# shellcheck source=bin/fm-polytoken-lib.sh
 . "$ROOT/bin/fm-polytoken-lib.sh"
-# shellcheck source=/dev/null
+# shellcheck source=bin/fm-busy-lib.sh
 . "$ROOT/bin/fm-busy-lib.sh"
-# shellcheck source=/dev/null
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
+# shellcheck source=bin/fm-composer-lib.sh
 . "$ROOT/bin/fm-composer-lib.sh"
 
 POLYTOKEN_BIN=$(fm_polytoken_binary 2>/dev/null) || POLYTOKEN_BIN=
 [ -n "$POLYTOKEN_BIN" ] || fail "polytoken is not installed"
-POLYTOKEN_VERSION=$("$POLYTOKEN_BIN" --version 2>/dev/null || echo unknown)
+VERSION=$("$POLYTOKEN_BIN" --version 2>/dev/null || echo unknown)
+REAL_TMUX=$(command -v tmux)
+SOCKET="fm-polytoken-signals-$$"
+ID=ptguard
+LAB=
+
+cleanup() {
+  local meta sid
+  if [ -n "$LAB" ]; then
+    meta="$LAB/fm/state/$ID.meta"
+    sid=$(awk -F= '$1 == "polytoken_session" { v = substr($0, index($0, "=") + 1) } END { print v }' "$meta" 2>/dev/null)
+    if [ -n "$sid" ]; then
+      HOME="$LAB/user-home" "$POLYTOKEN_BIN" --config-dir "$LAB/fm/state/$ID.polytoken-config" \
+        reap "$sid" --force --sessions-dir "$LAB/fm/state/$ID.polytoken-sessions" >/dev/null 2>&1 || true
+    fi
+  fi
+  "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  [ -z "$LAB" ] || { chmod -R u+w "$LAB" 2>/dev/null; rm -rf -- "$LAB"; }
+}
+
+fail() {
+  printf 'not ok - %s: %s\n' "$VERSION" "$1" >&2
+  exit 1
+}
 
 # Model discovery is part of the verified surface: the guard launches on the
 # cheap model's low-effort reference, which a live catalog must still list as
 # a selectable form (the exact validation fm-spawn performs at intake).
 discovered_ref=$(fm_polytoken_model_ref "$POLYTOKEN_BIN" zai/glm-5.3-flash low 2>/dev/null)
 [ "$discovered_ref" = 'zai/glm-5.3-flash(low)' ] \
-  || fail "$POLYTOKEN_VERSION: 'polytoken print models' no longer lists zai/glm-5.3-flash(low) (got '${discovered_ref:-none}')"
-pass "$POLYTOKEN_VERSION: the live model catalog still lists the cheap low-effort reference"
+  || fail "'polytoken print models' no longer lists zai/glm-5.3-flash(low) (got '${discovered_ref:-none}')"
+pass "$VERSION: the live model catalog still lists the cheap low-effort reference"
 
-LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-polytoken-signals.XXXXXX") || fail "could not create the isolated polytoken lab"
-trap cleanup EXIT
-
-# The worker runs under a throwaway HOME whose XDG config stages a copy of the
-# operator's global polytoken config, so every write the daemon or TUI makes -
-# session trees, logs, even a TUI crash log - lands inside the lab, never the
-# operator's real store, and the config mirror's source is the staged copy.
-mkdir -p "$LAB/home/.config" "$LAB/workspace" "$LAB/state" "$LAB/logs" \
-  || fail "could not shape the isolated polytoken lab"
 GLOBAL_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/polytoken/config.yaml"
-[ -f "$GLOBAL_CFG" ] || fail "no global polytoken config at $GLOBAL_CFG to stage for the lab"
-mkdir -p "$LAB/home/.config/polytoken"
-cp "$GLOBAL_CFG" "$LAB/home/.config/polytoken/config.yaml" \
-  || fail "could not stage the polytoken config copy"
-# The license acceptance the operator already granted lives in the data home
-# keyed by revision (~/.local/share/polytoken/license-acceptance.json, found
-# live during this verification). A fleet launch reads it through the
-# operator's real HOME, so it never auto-accepts anything; this lab isolates
-# HOME, so the operator's existing record is staged as a copy - never
-# extended, and never answered by pressing the dialog - because a lab without
-# it would park on exactly the blocker the fleet treats as blocked.
 LICENSE_ACCEPT="${XDG_DATA_HOME:-$HOME/.local/share}/polytoken/license-acceptance.json"
+[ -f "$GLOBAL_CFG" ] || fail "no global polytoken config at $GLOBAL_CFG to stage for the lab"
+# The license acceptance the operator already granted lives in the data home
+# keyed by revision. This lab isolates HOME, so the operator's existing record
+# is staged as a copy - never extended, and never answered by pressing the
+# dialog - because a lab without it would park on exactly the blocker the
+# fleet treats as blocked.
 [ -f "$LICENSE_ACCEPT" ] \
   || fail "no operator license acceptance at $LICENSE_ACCEPT; the fleet itself would be blocked on the first-start dialog, and the guard refuses to accept anything on the operator's behalf"
-mkdir -p "$LAB/home/.local/share/polytoken"
-cp "$LICENSE_ACCEPT" "$LAB/home/.local/share/polytoken/license-acceptance.json" \
+
+LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-polytoken-signals.XXXXXX") || fail "could not create the isolated polytoken lab"
+LAB=$(cd "$LAB" && pwd -P)
+trap cleanup EXIT
+
+H="$LAB/fm"
+U="$LAB/user-home"
+PROJ="$LAB/project"
+WT="$LAB/wt"
+fm_test_spawn_home "$H" polytoken
+fm_git_worktree "$PROJ" "$WT" polytoken-live >/dev/null 2>&1 || fail "could not create the lab worktree"
+mkdir -p "$U/.config/polytoken" "$U/.local/share/polytoken" "$LAB/bin"
+cp "$GLOBAL_CFG" "$U/.config/polytoken/config.yaml" || fail "could not stage the polytoken config copy"
+cp "$LICENSE_ACCEPT" "$U/.local/share/polytoken/license-acceptance.json" \
   || fail "could not stage the operator license acceptance copy"
-WORKSPACE=$(cd "$LAB/workspace" && pwd -P) || fail "could not resolve the lab workspace"
-STATE_REAL=$(cd "$LAB/state" && pwd -P) || fail "could not resolve the lab state"
+fm_test_spawn_brief "$H" "$ID" "Runtime verification only: compute 12345 plus 67890 using your shell tool and write only the result into answer.txt. Then use your shell tool to run 'bash $ROOT/bin/fm-harness.sh' and write its output to harness.txt. Do no other work, do not commit, and do not delegate."
 
-# The real generated worker wiring, exactly as fm-spawn arms it: the busy
-# contract, the config dir (mirrored operator config with the unattended
-# posture enforced), the worker facet, the no-argv busy writer, and the
-# worktree hook layer binding the three verified events.
-ID=ptguard
-GEN=$("$ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID" 2>/dev/null) \
-  || fail "could not arm the busy contract in the lab"
-XDG_CONFIG_HOME="$LAB/home/.config" HOME="$LAB/home" \
-  fm_polytoken_write_config "$(fm_polytoken_config_dir "$STATE_REAL" "$ID")" \
-  || fail "could not generate the worker config dir"
-fm_polytoken_write_facet "$WORKSPACE" "$STATE_REAL/$ID.inbox" \
-  || fail "could not generate the worker facet"
-fm_polytoken_write_busy_script "$ROOT" "$STATE_REAL" "$ID" "$GEN" "$STATE_REAL/$ID.turn-ended" \
-  || fail "could not generate the busy writer"
-fm_polytoken_write_hooks "$WORKSPACE" "$(fm_polytoken_busy_script "$STATE_REAL" "$ID")" \
-  || fail "could not generate the worktree hook layer"
-CFG_DIR=$(fm_polytoken_config_dir "$STATE_REAL" "$ID")
-SESSIONS_ROOT=$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")
-POLYTOKEN_SESSION_ID=
-
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n worker -c "$WORKSPACE" \
+# Every backend read and write lands on this guard's private server, and the
+# pane's `treehouse get` enters the prepared worktree in a subshell exactly as
+# the real tool does.
+printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCKET" > "$LAB/bin/tmux"
+printf '#!/bin/sh\n[ "${1:-}" = get ] || exit 0\ncd "%s" && exec /bin/bash --noprofile --norc\n' "$WT" > "$LAB/bin/treehouse"
+chmod +x "$LAB/bin/tmux" "$LAB/bin/treehouse"
+export PATH="$LAB/bin:$PATH" FM_HOME="$H" HOME="$U" XDG_CONFIG_HOME="$U/.config" XDG_DATA_HOME="$U/.local/share"
+unset TMUX FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
+tmux -f /dev/null new-session -d -s firstmate -n lab -x 160 -y 50 "/bin/bash --noprofile --norc" \
   || fail "could not start the isolated tmux server"
+tmux set-option -g default-command "/bin/bash --noprofile --norc" >/dev/null \
+  || fail "could not pin the lab shell"
 
-capture() {
-  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" -S -100 2>/dev/null || true
+META="$H/state/$ID.meta"
+meta_value() { awk -F= -v k="$1" '$1 == k { v = substr($0, index($0, "=") + 1) } END { print v }' "$META"; }
+record() { fm_busy_record_read "$H/state" "$ID" 2>/dev/null || true; }
+wait_file() {
+  local path=$1 i
+  for i in $(seq 1 480); do [ -s "$path" ] && return 0; sleep 0.5; done
+  fail "timed out waiting for ${path##*/}"
+}
+wait_record() {  # <prefix> <what>
+  local i
+  for i in $(seq 1 240); do
+    case "$(record)" in "$1"*) return 0 ;; esac
+    sleep 0.5
+  done
+  fail "$2 (last record '$(record)')"
 }
 
-type_line() {
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l "$1" \
-    || fail "could not type into the polytoken pane"
-}
+# The launch is fm-spawn's own generated command; its readiness gate already
+# requires the session to surface in `polytoken sessions` and a hook-written
+# busy record before the spawn reports success.
+FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJ" --scout --harness polytoken \
+  --model zai/glm-5.3-flash --effort low > "$LAB/spawn.log" 2>&1 \
+  || fail "fm-spawn's generated polytoken launch failed: $(cat "$LAB/spawn.log")"
+TARGET=$(meta_value window)
+SESSION1=$(meta_value polytoken_session)
+[ -n "$TARGET" ] || fail "the spawn recorded no endpoint"
+[ -n "$SESSION1" ] && [ -n "$(meta_value polytoken_port)" ] && [ -n "$(meta_value polytoken_credential)" ] \
+  || fail "the spawn did not bind the session id, port, and credential into task metadata"
+capture() { tmux capture-pane -p -t "$TARGET" -S -200 2>/dev/null || true; }
+[ "$(fm_backend_agent_state tmux "$TARGET")" = alive ] \
+  || fail "the tmux backend does not classify the spawned polytoken worker alive"
+screen=$(capture)
+case "$screen" in *firstmate-worker*) ;; *) fail "the spawned pane never showed the generated worker facet" ;; esac
+case "$screen" in *"perms: bypass"*) ;; *) fail "the spawned pane never rendered the enforced bypass posture" ;; esac
+pass "$VERSION: fm-spawn's generated launch starts a bound, alive worker on the generated config and facet"
 
-press_enter() {
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
-    || fail "could not send Enter to the polytoken pane"
-}
+wait_file "$WT/answer.txt"
+wait_file "$WT/harness.txt"
+[ "$(tr -d '[:space:]' < "$WT/answer.txt")" = 80235 ] || fail "the launch brief did not execute"
+[ "$(tr -d '[:space:]' < "$WT/harness.txt")" = polytoken ] \
+  || fail "fm-harness.sh did not detect polytoken from a real tool subprocess (got '$(cat "$WT/harness.txt")')"
+pass "$VERSION: the brief ran and fm-harness.sh detects polytoken from a real tool subprocess"
+wait_record "idle polytoken-hook " "the finished brief turn never closed the busy record through the stop hook"
+[ -f "$H/state/$ID.turn-ended" ] || fail "the stop hook never touched the turn-ended marker"
+pass "$VERSION: the stop hook closes the busy record and touches the turn-ended marker"
 
-# The launch prompt asks for a computed answer (12345+67890=80235) so the
-# awaited token never appears in the echoed launch line itself. The model
-# reference is single-quoted exactly as the spawn's model flag builder emits
-# it, because the parenthesized effort form is shell syntax when unquoted.
-type_line "HOME=\"$LAB/home\" XDG_CONFIG_HOME=\"$LAB/home/.config\" $POLYTOKEN_BIN --config-dir \"$CFG_DIR\" new --facet firstmate-worker --facets-dir \"$WORKSPACE/.polytoken/facets\" --sessions-dir \"$SESSIONS_ROOT\" --log-dir \"$LAB/logs\" --model 'zai/glm-5.3-flash(low)' --prompt \"Add 12345 and 67890. Reply with exactly the sum and nothing else\""
-press_enter
-
-# The footer and switch banner are the live proof the generated config and
-# facet took effect: the enforced bypass posture renders in the footer (both
-# the early full form and the compressed settled form), and the worker facet
-# renders in the early footer's facet field and in the "Facet switched" banner
-# that stays in the scrollback, so the guard accepts either surface for it.
-facet_seen=
-bypass_seen=
-for _ in $(seq 1 120); do
-  screen=$(capture)
-  case "$screen" in
-    *"perms: bypass"*) bypass_seen=1 ;;
-  esac
-  case "$screen" in
-    *firstmate-worker*) facet_seen=1 ;;
-  esac
-  if [ -n "$facet_seen" ] && [ -n "$bypass_seen" ]; then
-    break
-  fi
-  sleep 0.5
-done
-[ -n "$bypass_seen" ] \
-  || fail "$POLYTOKEN_VERSION: the real pane never rendered the enforced bypass posture in its footer"
-[ -n "$facet_seen" ] \
-  || fail "$POLYTOKEN_VERSION: the real pane never showed the worker facet"
-pass "$POLYTOKEN_VERSION: the generated config and facet carry the real worker pane"
-
-# The busy contract opens on the real brief turn: pre_user_prompt fires the
-# moment the auto-submitted prompt is accepted, so even a fast model leaves a
-# catchable busy record.
-busy_opened=
-for _ in $(seq 1 120); do
-  record=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null) || record=
-  case "$record" in
-    "busy polytoken-hook "*) busy_opened=1; break ;;
-  esac
-  sleep 0.5
-done
-[ -n "$busy_opened" ] \
-  || fail "$POLYTOKEN_VERSION: the real turn never opened the busy record through the generated hook"
-pass "$POLYTOKEN_VERSION: the generated hook opens the busy record on a real turn"
-
-reply=
-for _ in $(seq 1 240); do
-  screen=$(capture)
-  case "$screen" in
-    *80235*|*80,235*) reply=1; break ;;
-  esac
-  sleep 0.5
-done
-[ -n "$reply" ] || fail "$POLYTOKEN_VERSION: the real worker never answered its launch prompt"
-pass "$POLYTOKEN_VERSION: the real worker processed its launch prompt"
-
-# The turn end closes the record through the stop hook, which is the pair's
-# other half on a real pane.
-idle_closed=
-for _ in $(seq 1 120); do
-  record=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null) || record=
-  case "$record" in
-    "idle polytoken-hook "*) idle_closed=1; break ;;
-  esac
-  sleep 0.5
-done
-[ -n "$idle_closed" ] \
-  || fail "$POLYTOKEN_VERSION: the finished turn never closed the busy record through the stop hook"
-pass "$POLYTOKEN_VERSION: the stop hook closes the busy record on turn end"
-[ -f "$STATE_REAL/$ID.turn-ended" ] \
-  || fail "$POLYTOKEN_VERSION: the stop hook never touched the turn-ended notification marker"
-pass "$POLYTOKEN_VERSION: the stop hook touches the turn-ended marker"
-
-# Detection from a real tool subprocess: the worker's own shell tool runs the
-# real detector, whose ancestry walk must name polytoken from inside the
-# session it is working for.
-type_line "Use your shell tool to run the command: bash $ROOT/bin/fm-harness.sh - exit code and output only, no other text."
-press_enter
-detected=
-for _ in $(seq 1 240); do
-  screen=$(capture)
-  case "$screen" in
-    *polytoken*) detected=1; break ;;
-  esac
-  sleep 0.5
-done
-[ -n "$detected" ] \
-  || fail "$POLYTOKEN_VERSION: fm-harness.sh never detected polytoken from inside a real tool subprocess"
-pass "$POLYTOKEN_VERSION: fm-harness.sh detects polytoken from a real tool subprocess"
-
-# A genuinely long turn proves the rendered busy row and the REST interrupt:
-# the row must match the pinned delivery signature while in flight, and the
-# cancel must settle the turn with its typed acknowledgement. No interrupt key
-# exists, so nothing but the REST verb is ever sent.
-type_line "Write a 1500-word essay on the history of glass"
-press_enter
+"$ROOT/bin/fm-send.sh" "$ID" 'Runtime interrupt verification: run sleep 90 in your shell tool and wait for it to finish. Do not respond before it finishes.' \
+  > "$LAB/send.log" 2>&1 || fail "fm-send could not steer the worker: $(cat "$LAB/send.log")"
+wait_record "busy polytoken-hook " "the steered turn never opened the busy record through the generated hook"
 busy_row=
 for _ in $(seq 1 120); do
-  screen=$(capture)
-  if printf '%s' "$screen" | fm_busy_lines_match polytoken; then busy_row=1; break; fi
+  if capture | fm_busy_lines_match polytoken; then busy_row=1; break; fi
   sleep 0.5
 done
-[ -n "$busy_row" ] \
-  || fail "$POLYTOKEN_VERSION: the real long turn never rendered the Running-for busy row"
-pass "$POLYTOKEN_VERSION: the real busy row matches the pinned delivery signature"
+[ -n "$busy_row" ] || fail "the running turn never rendered the pinned busy row"
+pass "$VERSION: fm-send steers a real turn that opens the busy record and renders the busy row"
 
-discovered=
-for _ in $(seq 1 40); do
-  found=$(fm_polytoken_session_for_project "$POLYTOKEN_BIN" "$CFG_DIR" "$SESSIONS_ROOT" "$WORKSPACE" 2>/dev/null) || found=
-  if [ -n "$found" ]; then
-    IFS=$'\t' read -r POLYTOKEN_SESSION_ID POLYTOKEN_PORT POLYTOKEN_CREDENTIAL _ <<EOF
-$found
-EOF
-    discovered=1
-    break
-  fi
-  sleep 0.5
-done
-[ -n "$discovered" ] \
-  || fail "$POLYTOKEN_VERSION: the live session never surfaced through sessions --format json"
-token=$(fm_polytoken_credential_token "$POLYTOKEN_CREDENTIAL" 2>/dev/null) || token=
-[ -n "$token" ] || fail "$POLYTOKEN_VERSION: the live session credential could not be read"
-cancel=$(fm_polytoken_interrupt "$POLYTOKEN_PORT" "$token" 15 2>/dev/null)
-[ "$cancel" = cancelled ] \
-  || fail "$POLYTOKEN_VERSION: the REST interrupt never settled the running turn (got '${cancel:-none}')"
-pass "$POLYTOKEN_VERSION: the REST interrupt cancels and settles a real turn"
+"$ROOT/bin/fm-control.sh" "$ID" interrupt > "$LAB/interrupt.log" 2>&1 \
+  || fail "fm-control interrupt failed: $(cat "$LAB/interrupt.log")"
+grep -q 'cancel=cancelled' "$LAB/interrupt.log" \
+  || fail "fm-control interrupt did not report a settled cancel: $(cat "$LAB/interrupt.log")"
+case "$(record)" in "idle "*) ;; *) fail "the interrupt did not close the busy record (got '$(record)')" ;; esac
 canceled_row=
 for _ in $(seq 1 60); do
-  screen=$(capture)
-  case "$screen" in
-    *"Canceled after"*) canceled_row=1; break ;;
-  esac
+  case "$(capture)" in *"Canceled after"*) canceled_row=1; break ;; esac
   sleep 0.5
 done
-[ -n "$canceled_row" ] \
-  || fail "$POLYTOKEN_VERSION: the cancelled turn never rendered its Canceled row"
-pass "$POLYTOKEN_VERSION: the cancelled turn renders its Canceled row"
+[ -n "$canceled_row" ] || fail "the cancelled turn never rendered its Canceled row"
+[ "$(fm_backend_agent_state tmux "$TARGET")" = alive ] || fail "the interrupt did not leave the worker alive"
+pass "$VERSION: fm-control interrupt cancels the real turn over REST and leaves the worker alive"
 
-# The exit is the /quit keyplane: the palette accepts the preselected row, the
-# TUI exits, and the pane falls back to its shell.
-type_line "/quit"
-press_enter
-gone=
-for _ in $(seq 1 120); do
-  current=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{pane_current_command}' 2>/dev/null || true)
-  case "$current" in
-    *polytoken*) sleep 0.5 ;;
-    *) gone=1; break ;;
-  esac
-done
-[ -n "$gone" ] || fail "$POLYTOKEN_VERSION: /quit never stopped the real polytoken TUI"
-pass "$POLYTOKEN_VERSION: /quit stops the real polytoken TUI"
+"$ROOT/bin/fm-control.sh" "$ID" relaunch \
+  --note 'Runtime relaunch verification: compute 17 times 29 with your shell tool and write only the result to relaunched.txt. Do no other work.' \
+  > "$LAB/relaunch.log" 2>&1 || fail "fm-control relaunch failed: $(cat "$LAB/relaunch.log")"
+SESSION2=$(meta_value polytoken_session)
+[ -n "$SESSION2" ] && [ "$SESSION2" != "$SESSION1" ] \
+  || fail "the relaunch did not bind a fresh polytoken session (was '$SESSION1', now '${SESSION2:-none}')"
+[ "$(fm_backend_agent_state tmux "$TARGET")" = alive ] \
+  || fail "the tmux backend does not classify the relaunched worker alive"
+wait_file "$WT/relaunched.txt"
+[ "$(tr -d '[:space:]' < "$WT/relaunched.txt")" = 493 ] || fail "the relaunched worker did not act on its note"
+pass "$VERSION: fm-control relaunch replaces the worker through the generated launch and rebinds its session"
 
-cleanup
-trap - EXIT
+wait_record "idle polytoken-hook " "the relaunched worker's turn never closed the busy record"
+"$ROOT/bin/fm-control.sh" "$ID" exit > "$LAB/exit.log" 2>&1 \
+  || fail "fm-control exit failed: $(cat "$LAB/exit.log")"
+[ "$(fm_backend_agent_state tmux "$TARGET")" = dead ] \
+  || fail "the tmux backend does not classify the exited worker dead"
+pass "$VERSION: fm-control exit stops the real worker and the backend reads it dead"

@@ -162,7 +162,7 @@ fm_polytoken_write_config() {  # <config-dir>
   }
   mkdir -p "$cfgdir" || return 1
   chmod 700 "$cfgdir" 2>/dev/null || true
-  matcher=$(sed -n 's/^default_permission_matcher:[[:space:]]*//p' "$source" | head -1 | tr -d '[:space:]')
+  matcher=$(sed -n 's/^default_permission_matcher:[[:space:]]*//p' "$source" | head -1 | sed 's/[[:space:]]#.*$//' | tr -d "[:space:]\"'")
   case "$matcher" in
     bypass_plus) replace=keep ;;
     *) replace=enforce ;;
@@ -360,10 +360,10 @@ fm_polytoken_credential_token() {  # <credential-file>
 fm_polytoken_rest() {  # <method> <port> <credential-token> <path> [json-body]
   local method=$1 port=$2 token=$3 path=$4 body=${5:-} code
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X "$method" \
-    -H "Authorization: Bearer $token" \
+    -H @- \
     ${body:+-H "Content-Type: application/json" -d "$body"} \
     --connect-timeout 2 --max-time 10 \
-    "http://127.0.0.1:$port$path" 2>/dev/null) || return 1
+    "http://127.0.0.1:$port$path" 2>/dev/null <<<"Authorization: Bearer $token") || return 1
   case "$code" in
     2*) return 0 ;;
     *) return 1 ;;
@@ -374,10 +374,10 @@ fm_polytoken_rest() {  # <method> <port> <credential-token> <path> [json-body]
 fm_polytoken_rest_json() {  # <method> <port> <credential-token> <path> [json-body]
   local method=$1 port=$2 token=$3 path=$4 body=${5:-}
   curl -fsS -X "$method" \
-    -H "Authorization: Bearer $token" \
+    -H @- \
     ${body:+-H "Content-Type: application/json" -d "$body"} \
     --connect-timeout 2 --max-time 10 \
-    "http://127.0.0.1:$port$path" 2>/dev/null
+    "http://127.0.0.1:$port$path" 2>/dev/null <<<"Authorization: Bearer $token"
 }
 
 # fm_polytoken_turn_settled: GET /sync's `turn` is null (no turn running).

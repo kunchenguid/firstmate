@@ -298,6 +298,16 @@ test_polytoken_write_config_enforces_the_unattended_posture() {
   mirrored=$(cat "$cfgdir/config.yaml")
   assert_contains "$mirrored" "default_permission_matcher: bypass_plus" \
     "the bypass_plus posture must be preserved, not flattened to bypass"
+  # Quoted and commented YAML spellings of bypass_plus are the same value.
+  for spelling in '"bypass_plus"' "'bypass_plus'" 'bypass_plus # keep deny rules'; do
+    printf 'version: 4\ndefault_permission_matcher: %s\n' "$spelling" > "$home/.config/polytoken/config.yaml"
+    rm -rf "$cfgdir"
+    XDG_CONFIG_HOME="$home/.config" HOME="$home" fm_polytoken_write_config "$cfgdir" \
+      || fail "a bypass_plus global config spelled $spelling must be mirrored"
+    mirrored=$(cat "$cfgdir/config.yaml")
+    assert_contains "$mirrored" "default_permission_matcher: $spelling" \
+      "the bypass_plus posture spelled $spelling must be preserved, not flattened to bypass"
+  done
   # An absent key is appended, not silently inherited: the project layer
   # fully replaces the global config, so nothing can be inherited.
   printf 'version: 4\n' > "$home/.config/polytoken/config.yaml"
@@ -429,6 +439,10 @@ done
 for arg in "\$@"; do
   case "\$arg" in
     print|new|sessions|reap) subcmd=\$arg; break ;;
+    --sessions-dir)
+      echo "error: unexpected argument '--sessions-dir' found" >&2
+      exit 2
+      ;;
   esac
 done
 case "\$subcmd" in
@@ -775,10 +789,10 @@ test_polytoken_launch_carries_the_hybrid_contract() {
   assert_grep 'polytoken_port=49999' "$meta" "the meta did not record the port"
   assert_grep "polytoken_credential=$HOME_DIR/state/$id.polytoken-sessions-v1/0czfake-echo/credential.json" \
     "$meta" "the meta did not record the credential path"
-  assert_grep "polytoken_config_dir=$HOME_DIR/state/$id.polytoken-config" \
-    "$meta" "the meta did not record the config dir"
-  assert_grep "polytoken_sessions_root=$HOME_DIR/state/$id.polytoken-sessions" \
-    "$meta" "the meta did not record the sessions root"
+  assert_no_grep 'polytoken_config_dir=' "$meta" \
+    "the meta must bind only the session id, port, and credential"
+  assert_no_grep 'polytoken_sessions_root=' "$meta" \
+    "the meta must bind only the session id, port, and credential"
   # The session binding lines are exact whole lines: the sessions listing's
   # @tsv row carries a fourth field (the daemon pid) that must never be glued
   # onto the credential path the control verbs address.
