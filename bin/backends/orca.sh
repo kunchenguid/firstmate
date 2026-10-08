@@ -331,14 +331,28 @@ fm_backend_orca_resolve_live_terminal() {  # <stale-terminal-id>
 
 fm_backend_orca_check_replacement() {
   local cap dialog cstate
-  cap=$(fm_backend_orca_composer_capture "$1" 2>/dev/null) || return 0
+  if ! cap=$(fm_backend_orca_composer_capture "$1" 2>/dev/null); then
+    if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+      FM_ORCA_RESOLVED_TERMINAL=$1
+      return 4
+    fi
+    return 0
+  fi
   if dialog=$(fm_composer_blocking_dialog "$cap"); then
     echo "error: blocked on a prompt: $dialog" >&2
     return 1
   fi
   if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
     cstate=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
-    if ! fm_task_inbox_check_pending orca "$1" "$FM_TASK_INBOX_RING_LINE" "$cstate"; then
+    # The old endpoint's advisory read cannot authorize replacement input.
+    # Unknown content must wait for a later ring, never receive text or Enter.
+    case "$cstate" in
+      empty|pending) ;;
+      *) FM_ORCA_RESOLVED_TERMINAL=$1; return 4 ;;
+    esac
+    if printf '%s' "$cap" | fm_busy_lines_match \
+       || [ "$(fm_backend_busy_state orca "$1" 2>/dev/null)" = busy ] \
+       || ! fm_task_inbox_check_pending orca "$1" "$FM_TASK_INBOX_RING_LINE" "$cstate"; then
       FM_ORCA_RESOLVED_TERMINAL=$1
       return 4
     fi

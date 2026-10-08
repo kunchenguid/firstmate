@@ -1981,7 +1981,7 @@ test_retargeted_dialog_blocks_text_and_enter_but_allows_interrupt() {
 test_inbox_retarget_preserves_pending_content_and_explicit_input() {
   local code mode state id rec bell before out expected events held drops busy
   for code in terminal_handle_stale terminal_not_writable; do
-    for mode in initial-draft initial-own initial-busy initial-empty retry-draft retry-own retry-busy second-draft second-own second-busy rering-draft typed Enter C-c scope; do
+    for mode in cursor-draft cursor-own cursor-busy unreadable initial-draft initial-own initial-busy initial-empty initial-empty-busy retry-draft retry-own retry-busy second-draft second-own second-busy rering-draft typed Enter C-c scope; do
       orca_case "inbox-retarget-$code-$mode"
       state="$CASE_DIR/state"
       id=orcainboxdraft
@@ -1998,6 +1998,10 @@ test_inbox_retarget_preserves_pending_content_and_explicit_input() {
         *-busy) held=$bell; busy=busy; expected=1 ;;
         initial-empty) held= ;;
         *-draft) expected=1 ;;
+      esac
+      case "$mode" in
+        cursor-*|unreadable) expected=1 ;;
+        initial-empty-busy) held=; busy=unknown ;;
       esac
       case "$mode" in initial-own|retry-own) drops=1 ;; esac
       printf '%s' "$held" > "$CASE_DIR/composer"
@@ -2023,12 +2027,23 @@ function accepted() { reply({ok:true, result:{send:{accepted:true}}}); }
 if (args[1] === 'list') {
   reply({ok:true, result:{terminals:[{handle:'term-live', writable:true, connected:true}]}});
 } else if (args[1] === 'read') {
-  if (terminal === 'term-stale' && !/^(retry|second)-/.test(mode)) {
+  if (terminal === 'term-live' && mode === 'unreadable') {
+    process.exitCode = 1;
+  } else if (terminal === 'term-stale' && !/^(retry|second)-/.test(mode)) {
     stale();
   } else {
     const body = fs.readFileSync(dir + (terminal === 'term-stale' ? '/old-composer' : '/composer'), 'utf8');
     const rule = '─'.repeat(body.length + 4);
-    reply({ok:true, result:{terminal:{tail:['╭' + rule + '╮', '│ > ' + body + ' │', '╰' + rule + '╯']}}});
+    // Cursor's captured plain-text screen has no composer border, and its
+    // footer includes the worktree path. Preserve this real shape rather
+    // than replacing it with the boxed composer the classifier understands.
+    const tail = mode.startsWith('cursor-')
+      ? ['  → ' + body, '  Ask (shift+tab to cycle)', '  Auto · 11.6%',
+         '  ' + dir + '/worktree', '  · fm-orcainboxdraft']
+      : ['╭' + rule + '╮', '│ > ' + body + ' │', '╰' + rule + '╯'];
+    if (mode === 'cursor-busy') tail.unshift(' ⠠⠛ Working');
+    if (mode === 'initial-empty-busy') tail.unshift('ctrl+c to stop');
+    reply({ok:true, result:{terminal:{tail}}});
   }
 } else if (args[1] === 'send') {
   if (terminal === 'term-stale') {
@@ -2070,6 +2085,13 @@ JS
           fm_backend_busy_state() {
             if [ "$2" = term-live ]; then printf "%s" "$FM_ORCA_TEST_BUSY"; else printf unknown; fi
           }
+          case "$1" in
+            cursor-*)
+              [ "$(fm_backend_composer_state orca term-live)" = unknown ] || exit 1 ;;
+            initial-empty-busy)
+              [ "$(fm_backend_composer_state orca term-live)" = empty ] || exit 1
+              [ "$(fm_backend_busy_state orca term-live)" = unknown ] || exit 1 ;;
+          esac
           rc=0
           case "$1" in
             typed)
