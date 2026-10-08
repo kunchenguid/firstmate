@@ -400,6 +400,17 @@ INVALID_URLS=(
   'https://github.com/owner-/r/pull/1'
   'https://github.com/owner--name/r/pull/1'
   'https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r/pull/1'
+  'https://github.com/_owner/r/pull/1'
+  'https://github.com/owner_/r/pull/1'
+  'https://github.com/_/r/pull/1'
+  'https://github.com/owner__data/r/pull/1'
+  'https://github.com/owner_data_x/r/pull/1'
+  'https://github.com/owner-_data/r/pull/1'
+  'https://github.com/owner_-data/r/pull/1'
+  'https://github.com/owner_da-ta/r/pull/1'
+  'https://github.com/-owner_data/r/pull/1'
+  'https://github.com/owner--x_data/r/pull/1'
+  'https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_data/r/pull/1'
   'https://github.com/o/./pull/1'
   'https://github.com/o/../pull/1'
   'https://github.com/o/r+z/pull/1'
@@ -486,6 +497,9 @@ test_parser_matrix() {
 https://github.com/a/b/pull/1|a|b|1
 https://github.com/my-org/repo/pull/42|my-org|repo|42
 https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.parts|123456
+https://github.com/matthew-moorcroft_data/personal_management/pull/9|matthew-moorcroft_data|personal_management|9
+https://github.com/a_b/r/pull/1|a_b|r|1
+https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_data/r/pull/1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_data|r|1
 EOF
   while IFS='|' read -r url host path number; do
     [ -n "$url" ] || continue
@@ -886,6 +900,44 @@ run_watcher_bounded() {
     "${FM_TEST_WATCH_BOUND_PAUSE:-}" env "${check_timeout_env[@]}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+# An Enterprise Managed User owner such as matthew-moorcroft_data carries one
+# "_<short code>" suffix; the same URL must be recorded, merged, and polled.
+test_enterprise_managed_owner_end_to_end() {
+  local dir expected url sidecar out owner
+  dir=$(make_case emu-owner)
+  write_task_meta "$dir"
+  expected=0123456789abcdef0123456789abcdef01234567
+  url=https://github.com/matthew-moorcroft_data/personal_management/pull/9
+  FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a "$url" \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "check refused an enterprise managed owner: $(cat "$dir/stderr")"
+  grep -qxF "pr=$url" "$dir/home/state/task-a.meta" || fail "enterprise managed owner pr metadata was not exact"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "enterprise managed owner poll artifacts were invalid"
+  sidecar=$(cat "$dir/home/state/task-a.pr-poll")
+  [ "$sidecar" = "github"$'\n'"$url"$'\n'"github.com"$'\n'"matthew-moorcroft_data/personal_management"$'\n'"9" ] \
+    || fail "enterprise managed owner sidecar bytes were not exact"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "static poll ignored a merged enterprise managed owner PR"
+
+  for owner in owner_ owner__data owner_data_x owner-_data owner_-data owner_da-ta; do
+    printf '%s\n%s\n%s\n%s\n%s\n' github "https://github.com/$owner/r/pull/1" github.com "$owner/r" 1 \
+      > "$dir/home/state/task-a.pr-poll"
+    out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+    [ -z "$out" ] || fail "static poll accepted an invalid underscore owner: $owner"
+  done
+
+  dir=$(make_case emu-owner-merge)
+  write_task_meta "$dir"
+  FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "check refused an enterprise managed owner before merge"
+  : > "$dir/gh.log"
+  FM_TEST_GH_HEAD=$expected run_merge_entry "$dir" task-a "$url" -- --merge \
+    > "$dir/merge.out" 2> "$dir/merge.err" || fail "merge refused an enterprise managed owner: $(cat "$dir/merge.err")"
+  grep -qxF "pr merge 9 --repo matthew-moorcroft_data/personal_management --match-head-commit $expected --merge" "$dir/gh.log" \
+    || fail "merge did not address the enterprise managed owner repository"
+  pass "an enterprise managed owner URL is recorded, merged, and polled consistently"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -3469,6 +3521,7 @@ test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
+test_enterprise_managed_owner_end_to_end
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
