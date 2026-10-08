@@ -190,8 +190,8 @@ fm_pr_gerrit_path_valid() {
 
 # A GitHub owner is a personal or organization login: at most 39 characters of
 # letters, digits, and single inner hyphens. An Enterprise Managed User login
-# appends exactly one "_" and an alphanumeric enterprise short code to such a
-# name, within the same 39-character limit.
+# appends exactly one "_" and a 3 to 8 character alphanumeric enterprise short
+# code to such a name, within the same 39-character limit.
 fm_pr_github_owner_valid() {
   local owner=${1-} base suffix
   local LC_ALL=C
@@ -202,8 +202,9 @@ fm_pr_github_owner_valid() {
     *_*)
       base=${owner%_*}
       suffix=${owner#*_}
+      [ "${#suffix}" -ge 3 ] && [ "${#suffix}" -le 8 ] || return 1
       case "$suffix" in
-        ''|*[!A-Za-z0-9]*) return 1 ;;
+        *[!A-Za-z0-9]*) return 1 ;;
       esac
       ;;
   esac

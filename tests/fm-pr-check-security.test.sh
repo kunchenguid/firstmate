@@ -411,6 +411,10 @@ INVALID_URLS=(
   'https://github.com/-owner_data/r/pull/1'
   'https://github.com/owner--x_data/r/pull/1'
   'https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_data/r/pull/1'
+  'https://github.com/a_b/r/pull/1'
+  'https://github.com/ab_1/r/pull/1'
+  'https://github.com/owner_ab/r/pull/1'
+  'https://github.com/owner_abcdefghi/r/pull/1'
   'https://github.com/o/./pull/1'
   'https://github.com/o/../pull/1'
   'https://github.com/o/r+z/pull/1'
@@ -498,7 +502,8 @@ https://github.com/a/b/pull/1|a|b|1
 https://github.com/my-org/repo/pull/42|my-org|repo|42
 https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.parts|123456
 https://github.com/matthew-moorcroft_data/personal_management/pull/9|matthew-moorcroft_data|personal_management|9
-https://github.com/a_b/r/pull/1|a_b|r|1
+https://github.com/a_abc/r/pull/1|a_abc|r|1
+https://github.com/a-b_ABCD1234/r/pull/1|a-b_ABCD1234|r|1
 https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_data/r/pull/1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_data|r|1
 EOF
   while IFS='|' read -r url host path number; do
@@ -921,7 +926,13 @@ test_enterprise_managed_owner_end_to_end() {
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll ignored a merged enterprise managed owner PR"
 
-  for owner in owner_ owner__data owner_data_x owner-_data owner_-data owner_da-ta; do
+  for owner in a_abc a-b_ABCD1234; do
+    printf '%s\n%s\n%s\n%s\n%s\n' github "https://github.com/$owner/r/pull/1" github.com "$owner/r" 1 \
+      > "$dir/home/state/task-a.pr-poll"
+    out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+    [ "$out" = merged ] || fail "static poll rejected a valid short code owner: $owner"
+  done
+  for owner in owner_ owner__data owner_data_x owner-_data owner_-data owner_da-ta a_b ab_1 owner_ab owner_abcdefghi; do
     printf '%s\n%s\n%s\n%s\n%s\n' github "https://github.com/$owner/r/pull/1" github.com "$owner/r" 1 \
       > "$dir/home/state/task-a.pr-poll"
     out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")

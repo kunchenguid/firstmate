@@ -64,8 +64,10 @@ case "$provider" in
       *_*_*) exit 0 ;;
       *_*)
         owner_base=${owner%_*}
-        case "${owner#*_}" in
-          ''|*[!A-Za-z0-9]*) exit 0 ;;
+        owner_suffix=${owner#*_}
+        [ "${#owner_suffix}" -ge 3 ] && [ "${#owner_suffix}" -le 8 ] || exit 0
+        case "$owner_suffix" in
+          *[!A-Za-z0-9]*) exit 0 ;;
         esac
         ;;
     esac
