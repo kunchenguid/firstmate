@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -2437,6 +2439,69 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# --- relaunch and an already-armed PR poll ----------------------------------
+
+# bin/fm-pr-check.sh records pr= (and pr_head=) as the LAST lines of the task
+# record, and fm_pr_metadata_identity_parse refuses any other key appearing
+# after pr= so that a later writer cannot smuggle a different identity past the
+# armed watch. A relaunch rewrites that record, so it must not append its own
+# control_relaunch_tx= transaction marker after the identity block: doing so
+# made fm_pr_poll_artifacts_valid fail, which the watcher reports as an
+# unauthenticated check and which silently stops merge monitoring.
+#
+# The record is seeded exactly as bin/fm-pr-check.sh writes it - pr= appended
+# last - and the poll artifacts are published through the same
+# fm_pr_poll_prepare/fm_pr_poll_publish_prepared pair it uses.
+test_relaunch_keeps_an_armed_pr_poll_authenticating() {
+  local dir out rc url
+  dir=$(new_case pr-poll-relaunch rl80)
+  add_ship_task "$dir" rl80 claude
+  url='https://github.com/example/repo/pull/1'
+  printf 'pr=%s\npr_head=1111111111111111111111111111111111111111\n' "$url" \
+    >> "$dir/home/state/rl80.meta" \
+    || fail "could not seed the pr= identity for the relaunch-ordering test"
+  fm_pr_poll_prepare "$dir/home/state" rl80 github "$url" github.com example/repo 1 \
+    "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the PR poll fixture for the relaunch-ordering test"
+  fm_pr_poll_publish_prepared \
+    || fail "could not publish the PR poll fixture for the relaunch-ordering test"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl80 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture did not authenticate before the relaunch"
+
+  out=$(run_control "$dir" rl80 relaunch --note "replace the agent"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a task with an armed PR poll should succeed"$'\n'"$out"
+
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl80 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the relaunch invalidated the armed PR poll, so a real merge would notify nobody"
+  [ "$(grep -n '^control_relaunch_tx=' "$dir/home/state/rl80.meta" | tail -1 | cut -d: -f1)" \
+    -lt "$(grep -n '^pr=' "$dir/home/state/rl80.meta" | tail -1 | cut -d: -f1)" ] \
+    || fail "control_relaunch_tx= must stay before the pr= identity block"
+  [ "$(grep -c '^pr=' "$dir/home/state/rl80.meta")" = 1 ] \
+    || fail "the relaunch must preserve exactly one pr= identity"
+  pass "a relaunch keeps an already-armed PR poll authenticating"
+}
+
+# A task with no PR registered must be unaffected: no identity block is
+# invented, no poll artifact appears, and the relaunch still succeeds.
+test_relaunch_leaves_a_task_without_a_pr_unchanged() {
+  local dir out rc
+  dir=$(new_case no-pr-relaunch rl81)
+  add_ship_task "$dir" rl81 claude
+  [ ! -e "$dir/home/state/rl81.pr-poll" ] || fail "the fixture must start with no PR poll"
+
+  out=$(run_control "$dir" rl81 relaunch --note "replace the agent"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a task with no PR should still succeed"$'\n'"$out"
+  assert_no_grep '^pr=' "$dir/home/state/rl81.meta" \
+    "a relaunch must not invent a PR identity for a task that has none"
+  [ ! -e "$dir/home/state/rl81.pr-poll" ] \
+    || fail "a relaunch must not create PR poll artifacts for a task with no PR"
+  [ ! -e "$dir/home/state/rl81.check.sh" ] \
+    || fail "a relaunch must not create a check for a task with no PR"
+  [ -n "$(meta_field "$dir" rl81 control_relaunch_tx)" ] \
+    || fail "the relaunch transaction marker should still be recorded"
+  pass "a relaunch leaves a task without a PR unchanged"
+}
+
 test_exit_and_relaunch_remove_the_dialog_file() {
   local dir out rc
   dir=$(new_case dialog-file-exit rl70)
@@ -2562,3 +2627,5 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_keeps_an_armed_pr_poll_authenticating
+test_relaunch_leaves_a_task_without_a_pr_unchanged
