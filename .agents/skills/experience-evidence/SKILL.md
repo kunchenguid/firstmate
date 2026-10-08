@@ -122,33 +122,88 @@ Match exact entities first.
 Also match tool surface plus symptom or work phase, because the useful mechanism may come from a different table, endpoint, or business object.
 Filter and score every structured candidate block before selecting reports, so common words or filesystem traversal order cannot hide a relevant candidate.
 The score only orders which compact candidate metadata to inspect first; applicability and original evidence, never the score, decide truth.
+Keep the complete ranked locator list outside the reasoning context, and expose only one page of eight compact candidates at a time.
 
 ```bash
-candidate_reports=$(
+entity_key='<exact-entity>'
+task_key='<task-type>'
+tool_key='<tool-surface>'
+symptom_key='<symptom-or-phase>'
+region_key='<region>'
+boundary_key='<permission-or-identity-boundary>'
+result_key='<result-state>'
+candidate_ranked=$(
 rg -l -F -g report.md -- 'schema: firstmate-experience-candidate.v1' "$experience_home/data" |
 while IFS= read -r report; do
-  candidate_block=$(awk 'found && /^## / { exit } /^## Reusable experience candidates$/ { found=1 } found { print }' "$report")
-  score=0
-  if printf '%s\n' "$candidate_block" | rg -q -F -i -- '<exact-entity>' || {
-    printf '%s\n' "$candidate_block" | rg -q -F -i -- '<tool-surface>' &&
-    printf '%s\n' "$candidate_block" | rg -q -F -i -- '<symptom-or-phase>'
-  }; then
-    printf '%s\n' "$candidate_block" | rg -q -F -i -- '<exact-entity>' && score=$((score + 100))
-    for key in '<task-type>' '<tool-surface>' '<symptom-or-phase>' '<region>' '<permission-or-identity-boundary>' '<result-state>'; do
-      printf '%s\n' "$candidate_block" | rg -q -F -i -- "$key" && score=$((score + 10))
-    done
-    printf '%04d\t%s\n' "$score" "$report"
-  fi
-done | sort -k1,1nr -k2,2 | cut -f2-
+  awk -v report="$report" -v entity="$entity_key" -v task="$task_key" \
+      -v tool="$tool_key" -v symptom="$symptom_key" -v region="$region_key" \
+      -v boundary="$boundary_key" -v result="$result_key" '
+    function contains(text, key) { return key != "" && index(tolower(text), tolower(key)) }
+    function value(line) { sub(/^[^:]*:[[:space:]]*/, "", line); return line }
+    function emit(   exact, mechanism, score, key) {
+      if (!contains(block, "schema: firstmate-experience-candidate.v1")) return
+      exact = contains(block, entity)
+      mechanism = contains(block, tool) && contains(block, symptom)
+      if (!exact && !mechanism) return
+      score = exact ? 100 : 0
+      if (contains(block, task)) score += 10
+      if (contains(block, tool)) score += 10
+      if (contains(block, symptom)) score += 10
+      if (contains(block, region)) score += 10
+      if (contains(block, boundary)) score += 10
+      if (contains(block, result)) score += 10
+      gsub(/[[:space:]]+/, " ", candidate_id)
+      printf "%04d\t%s\t%s\t%s\t%s\t%s\n", score, candidate_id, status, validity, outcome, report
+    }
+    /^```yaml[[:space:]]*$/ { in_yaml=1; block=""; candidate_id=""; status=""; validity=""; outcome=""; next }
+    in_yaml && /^```[[:space:]]*$/ { emit(); in_yaml=0; next }
+    in_yaml {
+      block = block $0 "\n"
+      if ($0 ~ /^id:[[:space:]]*/) { candidate_id=$0; candidate_id=value(candidate_id) }
+      else if ($0 ~ /^status:[[:space:]]*/) { status=$0; status=value(status) }
+      else if ($0 ~ /^lesson_validity:[[:space:]]*/) { validity=$0; validity=value(validity) }
+      else if ($0 ~ /^execution_outcome:[[:space:]]*/) { outcome=$0; outcome=value(outcome) }
+    }
+  ' "$report"
+done | sort -k1,1nr -k6,6 -k2,2
 )
-printf '%s\n' "$candidate_reports" | while IFS= read -r report; do
+candidate_page() {
+  page_start=$1
+  page_end=$((page_start + 7))
+  printf '%s\n' "$candidate_ranked" | sed -n "${page_start},${page_end}p"
+}
+page_start=1
+candidate_page "$page_start"
+```
+
+The page output is only `score`, candidate ID, status, lesson validity, execution outcome, and absolute owning-report path.
+Use the IDs and paths on the current page to read only those eight candidate blocks, not every matching section.
+
+```bash
+candidate_page "$page_start" | while IFS="$(printf '\t')" read -r score candidate_id status validity outcome report; do
   [ -n "$report" ] || continue
-  awk 'found && /^## / { exit } /^## Reusable experience candidates$/ { found=1 } found { print }' "$report"
+  printf 'candidate=%s score=%s status=%s validity=%s outcome=%s report=%s\n' \
+    "$candidate_id" "$score" "$status" "$validity" "$outcome" "$report"
+  awk -v wanted="$candidate_id" '
+    function value(line) { sub(/^[^:]*:[[:space:]]*/, "", line); return line }
+    /^```yaml[[:space:]]*$/ { in_yaml=1; block=""; candidate_id=""; next }
+    in_yaml && /^```[[:space:]]*$/ {
+      if (candidate_id == wanted && block ~ /schema: firstmate-experience-candidate.v1/) printf "%s", block
+      in_yaml=0
+      next
+    }
+    in_yaml {
+      block = block $0 "\n"
+      if ($0 ~ /^id:[[:space:]]*/) { candidate_id=$0; candidate_id=value(candidate_id) }
+    }
+  ' "$report"
 done
 ```
 
 Rank a candidate only after checking keys as conditions rather than treating them as similarity scores.
-Walk the ordered compact blocks until three applicable entries cover the relevant proven and failing paths, continuing past every rejected or revoked item rather than imposing a pre-read path cap.
+Apply the conditions and anti-conditions to the eight displayed blocks, retain applicable candidates, and increment `page_start` by eight only when more evidence is still needed.
+Stop after three applicable entries cover the relevant proven and failing paths or after the complete compact locator list is exhausted.
+Continue past every rejected, deprecated, or revoked item, so paging never becomes a permanent pre-applicability cutoff.
 An exact entity match does not overcome a region, permission, time, version, identity, or surface mismatch.
 A mechanism match without the same entity may remain applicable when its claim and evidence are explicitly surface-level and its anti-conditions do not exclude the current case.
 Do not choose a claim merely because it is newest or textually most similar.
