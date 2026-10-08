@@ -142,7 +142,6 @@ if [ "$SEAT_TRACKED" -eq 1 ]; then
   RELAUNCH_ARGS+=(--operation "$NEW_GEN" --previous "$PREV_GEN")
 fi
 
-[[ "$(fm_meta_get "$META" remote_herdr_session)" == fm-lab-* ]] && RELAUNCH_ARGS+=(--herdr-session "$(fm_meta_get "$META" remote_herdr_session)")
 rc=0
 RELAUNCH_OUT=$(fm_run_timed 300 "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   "${RELAUNCH_ARGS[@]}" </dev/null 2>&1) || rc=$?

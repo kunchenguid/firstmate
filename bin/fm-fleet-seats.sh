@@ -59,8 +59,8 @@
 #   nonterminal -> released       release --reason replaced (a candidate naming
 #                                 this generation as previous exists and its
 #                                 confirmed agent stopped or endpoint is proven
-#                                 destroyed) or teardown (cleanup no longer
-#                                 binds the task record to this generation).
+#                                 destroyed) or teardown (never dispatched,
+#                                 confirmed stopped, or proven destroyed).
 #   nonterminal -> reclaimed      reclaim, recovery with fresh generation-bound
 #                                 endpoint or host-operation evidence.
 #   remote operations             reconcile-remote applies one host disposition.
@@ -762,12 +762,18 @@ lifecycle_leave() {
 # route_local_state <generation>: recovery-grade state of the incarnation's
 # local route, "none" without one.
 route_local_state() {
-  local backend target
+  local backend target socket
   backend=$(inc_get "$1" '.route.backend // empty')
   target=$(inc_get "$1" '.route.target // empty')
   if [ -z "$backend" ] || [ -z "$target" ]; then
     printf 'none'
     return 0
+  fi
+  if [ "$backend" = tmux ]; then
+    socket=$(inc_get "$1" '.route.socket_path // empty')
+    case "$socket" in /*) ;; *) printf 'unreadable'; return 0 ;; esac
+    local TMUX="$socket,0,0"
+    export TMUX
   fi
   fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unreadable'
 }
@@ -780,8 +786,9 @@ route_local_gone() {
   backend=$(inc_get "$1" '.route.backend // empty')
   target=$(inc_get "$1" '.route.target // empty')
   [ -n "$backend" ] && [ -n "$target" ] || return 1
-  state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || return 1
+  state=$(route_local_state "$1") || return 1
   [ "$state" = missing ] || return 1
+  [ "$backend" != tmux ] || return 0
   verdict=$(fm_control_endpoint_absence_verdict "$backend" "$target")
   EVIDENCE_REASON=${verdict#*$'\t'}
   [ "${verdict%%$'\t'*}" = gone ]
@@ -1218,8 +1225,17 @@ if [ "$CMD" = dispatch ]; then
       ;;
     *) refuse "generation $GEN of $TASK is not a prepared reservation" ;;
   esac
-  holder_mutate '(.incarnations[] | select(.generation == $g)) |= (.launch_phase = "dispatching" | .route = $r[0])' \
-    --arg g "$GEN" --slurpfile r "$ROUTE_FILE" || unavailable "cannot record the dispatch for $TASK"
+  route=$(jq -c . "$ROUTE_FILE") || refuse "cannot read the dispatch route for $TASK"
+  if [ "$(printf '%s' "$route" | jq -r '.backend // empty')" = tmux ] \
+    && [ "$(printf '%s' "$route" | jq -r .placement)" = local ]; then
+    socket=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || socket=
+    case "$socket" in
+      /*) route=$(printf '%s' "$route" | jq -c --arg s "$socket" '.socket_path = $s') || refuse "cannot bind the tmux socket for $TASK" ;;
+      *) route=$(printf '%s' "$route" | jq -c 'del(.socket_path)') || refuse "cannot normalize the tmux route for $TASK" ;;
+    esac
+  fi
+  holder_mutate '(.incarnations[] | select(.generation == $g)) |= (.launch_phase = "dispatching" | .route = $r)' \
+    --arg g "$GEN" --argjson r "$route" || unavailable "cannot record the dispatch for $TASK"
   echo "fleet-seats: dispatched id=$TASK generation=$GEN"
   exit 0
 fi
@@ -1295,9 +1311,30 @@ if [ "$CMD" = release ]; then
       esac
       ;;
     teardown)
-      meta="$HOLDER_STATE/$TASK.meta"
-      if [ -e "$meta" ] || [ -L "$meta" ]; then
-        [ "$(meta_generation "$meta")" != "$GEN" ] || refuse "task $TASK still records generation $GEN; cleanup has not finished"
+      if [ "$(inc_get "$GEN" .launch_phase)" != prepared ]; then
+        case "$(inc_get "$GEN" '.route.placement // ""')" in
+          local)
+            state=$(route_local_state "$GEN")
+            case "$state" in
+              dead)
+                [ "$(inc_get "$GEN" .startup_confirmed)" = true ] \
+                  || uncertain "the unconfirmed launch $TASK generation $GEN may still execute in its shell"
+                ;;
+              missing) route_local_gone "$GEN" || uncertain "the cleanup endpoint for $TASK generation $GEN is not proven destroyed${EVIDENCE_REASON:+: $EVIDENCE_REASON}" ;;
+              *) uncertain "the cleanup endpoint for $TASK generation $GEN reads '$state', so its agent is not proven stopped" ;;
+            esac
+            ;;
+          remote)
+            private_file_ok "$RESPONSE_FILE" || uncertain "cleanup has no host retirement evidence for $TASK generation $GEN"
+            jq -e --arg t "$TASK" --argjson r "$(inc_get "$GEN" .route)" '
+              .task == $t and (.generation | type == "string" and length > 0)
+              and .generation == $r.spawn_gen and .home == $r.home
+              and .backend == $r.backend and .target == $r.target and .destroyed == true
+            ' "$RESPONSE_FILE" >/dev/null 2>&1 \
+              || uncertain "host retirement evidence does not prove destruction of $TASK generation $GEN"
+            ;;
+          *) uncertain "cleanup has no recorded route for $TASK generation $GEN" ;;
+        esac
       fi
       ;;
   esac

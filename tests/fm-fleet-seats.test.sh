@@ -111,7 +111,7 @@ case "\$1" in
     [ ! -e "\$D/inventory-broken" ] || { echo 'lost server' >&2; exit 1; }
     cat "\$D/windows" ;;
   display-message)
-    case "\$*" in *pane_current_command*) cat "\$D/command" ;; *) printf 'fakepane\\n' ;; esac ;;
+    case "\$*" in *socket_path*) [ ! -f "\$D/no-socket" ] || exit 1; printf '%s\\n' "\$D/socket" ;; *pane_current_command*) cat "\$D/command" ;; *) printf 'fakepane\\n' ;; esac ;;
   kill-window) : > "\$D/windows" ;;
 esac
 exit 0
@@ -908,6 +908,7 @@ make_spawn_fakebin() {  # <dir>
 #!/usr/bin/env bash
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{socket_path}"*) printf '%s/socket\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n' ;;
@@ -1103,7 +1104,9 @@ test_proven_cancellation_frees_a_buffered_launch() {
   for _ in $(seq 1 100); do [ -e "$base/ready1.done" ] && break; sleep 0.1; done
   assert_equals released "$(lifecycle_of "$root" c1 g1)" "the owner's proven cancellation did not release its candidate: $(cat "$base/ready1.out")"
   printf 'fm-c2\n' > "$ep/windows"
+  : > "$ep/no-socket"
   PATH="$fakebin:$PATH" owner_launch "$root" c2 g2 - ship firstmate:fm-c2 "$base/ready2"
+  rm -f "$ep/no-socket"
   kill "$OWNER_PID"
   wait "$OWNER_PID" 2>/dev/null
   # Anyone else needs the backend's absence proof: a shell-only endpoint, an
@@ -1374,7 +1377,7 @@ test_cleanup_releases_only_its_generation() {
   out=$(reserve "$home" s pool-model-a 2>&1) || fail "initial reservation: $out"
   task_record "$home" s pool-model-a ship "spawn_gen=g-s"
   out=$(seats "$home" release s --generation g-s --reason teardown 2>&1); rc=$?
-  expect_code 5 "$rc" "a cleanup release while the record still names the generation: $out"
+  expect_code 0 "$rc" "cleanup of a never-dispatched generation: $out"
   rm -f "$home/state/s.meta"
   out=$(seats "$home" release s --generation g-s --reason teardown 2>&1) || fail "a finished cleanup release: $out"
   out=$(reserve_gen "$home" s g-s2 - pool-model-a 2>&1) || fail "a new episode after cleanup: $out"
@@ -1400,16 +1403,21 @@ test_confirmed_missing_and_policy_removal() {
   PATH="$fakebin:$PATH" seats "$home" confirm sm --generation g1 >/dev/null || fail "confirming g1"
   kill "$OWNER_PID"
   wait "$OWNER_PID" 2>/dev/null
-  : > "$ep/windows"
+  : > "$ep/inventory-broken"
   out=$(PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation g1 2>&1)
-  expect_code 3 "$?" "a confirmed endpoint missing from another tmux server: $out"
-  assert_equals confirmed "$(lifecycle_of "$home" sm g1)" "unproven absence reclaimed a confirmed launch"
+  expect_code 3 "$?" "an unreadable owning tmux server: $out"
+  assert_equals confirmed "$(lifecycle_of "$home" sm g1)" "an unreadable server reclaimed a confirmed launch"
   new_holder
   out=$(reserve "$home" other pool-model-a 2>&1)
   expect_code 4 "$?" "unproven confirmed absence must keep capacity: $out"
   rm "$home/config/fleet-seats"
   assert_equals confirmed "$(lifecycle_of "$home" sm g1)" "policy removal hid the surviving ledger"
-  seats "$home" release sm --generation g1 --reason teardown >/dev/null || fail "teardown after policy removal"
+  out=$(PATH="$fakebin:$PATH" seats "$home" release sm --generation g1 --reason teardown 2>&1)
+  expect_code 3 "$?" "cleanup without proof after policy removal: $out"
+  rm -f "$ep/inventory-broken"
+  printf 'fm-sm\n' > "$ep/windows"
+  printf 'bash\n' > "$ep/command"
+  PATH="$fakebin:$PATH" seats "$home" release sm --generation g1 --reason teardown >/dev/null || fail "teardown after policy removal"
   pools "$home" 1
   assert_equals released "$(lifecycle_of "$home" sm g1)" "policy removal skipped teardown"
   reserve "$home" other pool-model-a >/dev/null || fail "a released seat remained occupied after policy restoration"
@@ -1682,6 +1690,16 @@ project=$home"
   done
   pass "validated legacy routes confirm and recover, while invalid endpoint evidence stays counted"
 }
+
+if [ "$#" -gt 0 ]; then
+  for focused_test in "$@"; do
+    case "$focused_test" in
+      test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      *) fail "unknown focused test: $focused_test" ;;
+    esac
+  done
+  exit 0
+fi
 
 test_no_pool_configured_is_off
 test_pool_names_do_not_escape_the_seat_directory

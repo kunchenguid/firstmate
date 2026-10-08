@@ -555,7 +555,9 @@ fm_sm_live_require_locks
 
 teardown_release_seat() {
   local seat_state=$1 seat_home=$2 seat_config=$3 seat_data=$4 seat_id=$5
-  local ledger generations gen meta="$1/$5.meta" backup='' carrier lock rc=0
+  local ledger generations gen meta="$1/$5.meta" carrier lock rc=0
+  local response_args=()
+  [ -z "${TEARDOWN_REMOTE_RETIREMENT:-}" ] || response_args=(--response-file "$TEARDOWN_REMOTE_RETIREMENT")
   [ -d "$seat_state" ] || return 1
   lock=$(fm_supervisor_lifecycle_lock_path "$seat_state" "$seat_id") || return 1
   local FM_SUPERVISOR_LIFECYCLE_CARRIER=${TEARDOWN_LIFECYCLE_CARRIER:-}
@@ -576,19 +578,10 @@ teardown_release_seat() {
     echo "error: $seat_id's endpoint was not closed; preserving its counted generations and recovery route" >&2
     return 1
   fi
-  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
-    backup=$(umask 077; mktemp "$seat_state/.seat-retire-$seat_id.XXXXXX") || return 1
-    cp -p "$meta" "$backup" || { rm -f "$backup"; return 1; }
-    if ! { { grep -Ev '^(fleet_seat_generation|spawn_gen|remote_spawn_gen)=' "$backup" > "$backup.unbound" || [ "$?" -eq 1 ]; } \
-        && chmod 0600 "$backup.unbound" && mv -f "$backup.unbound" "$meta"; }; then
-      rm -f "$backup" "$backup.unbound"
-      return 1
-    fi
-  fi
   while IFS= read -r gen; do
     if ! FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
       FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" release "$seat_id" \
-      --generation "$gen" --reason teardown >/dev/null; then
+      --generation "$gen" --reason teardown "${response_args[@]}" >/dev/null; then
       echo "error: $seat_id's fleet seat generation $gen stays counted; preserving its recovery route and home" >&2
       rc=1
       break
@@ -596,7 +589,6 @@ teardown_release_seat() {
   done <<EOF_GENERATIONS
 $generations
 EOF_GENERATIONS
-  [ -z "$backup" ] || mv -f "$backup" "$meta" || return 1
   return "$rc"
 }
 # Supervision lease guard: post-landing cleanup is overlap territory between
@@ -1282,7 +1274,13 @@ remote_secondmate_teardown() {
     || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
   handoff_wake_retire \
     || { echo "error: remote receiver wake cleanup failed; preserving the local route for retry" >&2; return 1; }
-  teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || return 1
+  local TEARDOWN_REMOTE_RETIREMENT
+  TEARDOWN_REMOTE_RETIREMENT=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
+  printf '%s\n' "$out" | sed -n 's/^seat_retirement=//p' > "$TEARDOWN_REMOTE_RETIREMENT"
+  rc=0
+  teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || rc=$?
+  rm -f "$TEARDOWN_REMOTE_RETIREMENT"
+  [ "$rc" -eq 0 ] || return "$rc"
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
