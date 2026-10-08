@@ -50,6 +50,11 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          The restored-worker recovery that runs beside it is owned by
+#          bin/fm-restored-recover.sh: an alive direct report parked on a
+#          harness startup gate, or running outside its recorded worktree after
+#          a machine restart, is relaunched there; a relaunch prints one
+#          BOOTSTRAP_INFO fact and a failed one an actionable RESTORED_WORKER line.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -101,10 +106,10 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
-#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync) while still
+#          secondmate_liveness_sweep, restored-worker recovery,
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -112,7 +117,7 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes and receiver wakes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          Unset/0 (the default) runs all seven sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -121,8 +126,9 @@
 #                 step. Unrecognized values fall back here on purpose: a typo
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
-#                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
-#                 secondmate_handoff_resume, and fleet_sync.
+#                 `gh auth status`, secondmate_liveness_sweep, restored-worker
+#                 recovery, secondmate_sync, secondmate_handoff_resume, and
+#                 fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
 #                 reconciliation, no x_mode_setup: those already ran on the
@@ -1589,6 +1595,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       __fm_timing_stamp=$(fm_timing_now_ms)
       secondmate_liveness_sweep
       fm_timing_record phase secondmate-liveness "$__fm_timing_stamp"
+    fi
+    if network_sweep_authorized 'restored-worker recovery'; then
+      __fm_timing_stamp=$(fm_timing_now_ms)
+      FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-restored-recover.sh"
+      fm_timing_record phase restored-worker-recovery "$__fm_timing_stamp"
     fi
     if network_sweep_authorized 'secondmate convergence'; then
       __fm_timing_stamp=$(fm_timing_now_ms)

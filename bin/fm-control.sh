@@ -36,7 +36,12 @@
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent). An endpoint that reads
+#              Already-stopped is success (idempotent). An agent parked on a
+#              harness startup gate (fm_composer_startup_dialog's recorded set:
+#              folder trust, external-imports consent, the auto-mode scan) is
+#              stopped by signalling its own harness processes instead, because
+#              any key would answer a question the operator owns; that reports
+#              `stopped-at-startup-gate`. An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
@@ -171,6 +176,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -412,6 +419,42 @@ refuse_blocking_prompt() {  # <dialog-name>
   die "task $ID is blocked on a prompt: $1. Refusing to type Enter into it."
 }
 
+# startup_gate: name the harness startup gate the visible viewport shows
+# (fm_composer_startup_dialog owns the recognised set), or return 1.
+startup_gate() {
+  local screen
+  fm_backend_visible_capture_supported "$BACKEND" || return 1
+  screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
+  fm_composer_startup_dialog "$screen"
+}
+
+# stop_at_startup_gate <gate>: stop an agent parked on a startup gate without
+# answering it. Every gate asks a question the operator owns, so no key is
+# typed; the gate holds no turn and no composer text, so ending the harness
+# process loses nothing the worktree or the harness's own session store does not
+# keep. Only the verified harness processes in the endpoint's foreground group
+# are signalled, and only while the gate is still on screen: TERM first, then
+# KILL once if TERM did not stop it within the exit wait.
+stop_at_startup_gate() {  # <gate>
+  local gate=$1 pids pid sig state
+  for sig in TERM KILL; do
+    startup_gate >/dev/null \
+      || die "task $ID's $gate closed before it could be stopped; nothing was signalled. Retry '$VERB'"
+    pids=$(fm_backend_agent_pids "$BACKEND" "$T" 2>/dev/null) || pids=
+    [ -n "$pids" ] \
+      || die "task $ID is parked on the $gate, but no $HARNESS process could be attributed to its endpoint, so nothing was signalled"
+    for pid in $pids; do
+      kill "-$sig" "$pid" 2>/dev/null || true
+    done
+    if state=$(wait_agent_state "$EXIT_WAIT" dead); then
+      retire_busy_incarnation
+      printf 'stopped-at-startup-gate'
+      return 0
+    fi
+  done
+  die "task $ID was parked on the $gate and its $HARNESS process was sent TERM and then KILL, but the agent still reads '$state' after ${EXIT_WAIT}s"
+}
+
 # rendered_matches <ere>: whether any row of the visible viewport matches.
 # An unreadable viewport is a no, so every caller treats it as missing proof.
 rendered_matches() {  # <ere>
@@ -633,7 +676,7 @@ retire_busy_incarnation() {
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
-# `already-stopped`, `endpoint-gone`, or `stopped`.
+# `already-stopped`, `endpoint-gone`, `stopped`, or `stopped-at-startup-gate`.
 do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
   require_state_verified_backend exit
@@ -680,6 +723,12 @@ do_exit() {
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+  # A harness parked on a startup gate cannot take the exit command: the gate
+  # owns the keyboard, and Enter or Escape would answer it.
+  if dialog=$(startup_gate); then
+    stop_at_startup_gate "$dialog"
+    return $?
+  fi
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)

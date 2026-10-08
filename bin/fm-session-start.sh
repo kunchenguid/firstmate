@@ -19,7 +19,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its six mutating
+# bootstrap running its detect-only diagnostics without its seven mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -30,11 +30,12 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's six MUTATING sweeps
+#                       diagnostics always run. Bootstrap's seven MUTATING sweeps
 #                       (same-home backlog reconciliation,
-#                       secondmate convergence, secondmate liveness, pending remote
-#                       handoff retry, X-mode artifact writes, fleet sync) also run only when
-#                       locked; the four network sweeps run in the deferred
+#                       secondmate convergence, secondmate liveness, restored-worker
+#                       recovery, pending remote handoff retry, X-mode artifact
+#                       writes, fleet sync) also run only when
+#                       locked; the five network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
 #   3. wake-drain     - presents durable wakes and advances recovery handling
 #                       state, so it only runs when locked. The local bounded
@@ -131,7 +132,7 @@
 # and all of which are safe to compute without verified lock ownership.
 # It deliberately skips the network-only GitHub-auth probe because a read-only
 # session has no dispatch, spawn, steer, or merge action for that verdict to gate.
-# Only projection cleanup, the six bootstrap mutating sweeps, and wake-queue
+# Only projection cleanup, the seven bootstrap mutating sweeps, and wake-queue
 # presentation are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
@@ -207,10 +208,10 @@
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
 #             mutating sweeps that startup already reconciled - the stale Herdr
-#             projection cleanup and bootstrap's six mutating sweeps (fleet
+#             projection cleanup and bootstrap's seven mutating sweeps (fleet
 #             sync, same-home backlog reconciliation, secondmate convergence and
-#             liveness, pending remote handoff retry, X-mode
-#             artifact writes) - and
+#             liveness, restored-worker recovery, pending remote handoff retry,
+#             X-mode artifact writes) - and
 #             re-emit the rest. Wake-queue presentation is NOT skipped: queued
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
@@ -692,8 +693,9 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
-    printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
-    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
+    printf '●  secondmate convergence, secondmate liveness, restored-worker recovery,\n'
+    printf '●  pending remote handoff retry, X-mode artifacts, fleet sync, and wake-queue\n'
+    printf '●  drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
@@ -998,7 +1000,8 @@ stage network-checks
 section "NETWORK CHECKS"
 if [ "$READ_ONLY" -eq 1 ]; then
   printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
-  printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
+  printf 'secondmate liveness and convergence, restored-worker recovery, and pending\n'
+  printf 'handoff delivery were not run.\n'
   printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
   printf 'has no action they would gate. The session holding the lock runs them.\n'
 else

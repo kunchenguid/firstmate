@@ -301,6 +301,24 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+# fm_backend_tmux_agent_pids: the pids of the verified harness processes in
+# <target>'s foreground process group, one per line, classified by the shared
+# bin/fm-agent-process-lib.sh owner. Empty output means none was proven. This is
+# the same RAW pane read as fm_backend_tmux_foreground_pids, so a caller must
+# already have confirmed the exact window (fm_backend_tmux_agent_state `alive`).
+fm_backend_tmux_agent_pids() {  # <target>
+  local pid comm args argv0
+  for pid in $(fm_backend_tmux_foreground_pids "$1"); do
+    comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || continue
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    [ "$(fm_agent_process_classify "$comm" "$argv0" "$args" "$pid")" = agent ] \
+      && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for

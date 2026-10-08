@@ -4,8 +4,8 @@
 # WHY THIS EXISTS. Every external-network call a session start makes used to run
 # BEFORE the digest printed, on a hook that blocks session initialization: `gh
 # auth status`, the secondmate liveness and convergence sweeps (per-secondmate
-# remote probes, which bootstrap runs concurrently), pending remote
-# handoff delivery, and the fleet-sync fetch of every project clone. None of
+# remote probes, which bootstrap runs concurrently), restored-worker recovery,
+# pending remote handoff delivery, and the fleet-sync fetch of every project clone. None of
 # those calls is individually bounded, so one unreachable host could consume the
 # whole FM_SESSION_START_TIMEOUT budget and truncate the digest outright, turning
 # a slow network into a startup that never printed the work queue at all.
@@ -95,8 +95,9 @@
 #   .startup-network.timings  per-step elapsed times for the last run, in
 #                             bin/fm-timing-lib.sh's tab-separated format: the
 #                             stage total, one record per network phase (gh auth,
-#                             secondmate liveness, secondmate convergence, handoff
-#                             delivery, fleet sync), one per secondmate for the
+#                             secondmate liveness, restored-worker recovery,
+#                             secondmate convergence, handoff delivery, fleet
+#                             sync), one per secondmate for the
 #                             remote-touching steps (id and host), and one per
 #                             project clone. Published for a timed-out or failed
 #                             run too, where a partial record is the answer.
@@ -224,7 +225,7 @@ worker_alive() {
 phase_label() {  # <phases>
   case "$1" in
     probe) printf 'GitHub authentication' ;;
-    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
+    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, restored-worker recovery, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
     *) printf 'the deferred network checks' ;;
   esac
 }
@@ -590,7 +591,7 @@ EOF
   fm_timing_record stage network-checks "$stage_started" "$phases"
 
   if [ "$downgraded" -eq 1 ]; then
-    printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested these, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
+    printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested these, so dead-secondmate relaunch, restored-worker recovery, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
   fi
   case "$rc" in
     0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" ;;

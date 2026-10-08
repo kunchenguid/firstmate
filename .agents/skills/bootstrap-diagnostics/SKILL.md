@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, RESTORED_WORKER, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or any other BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -68,6 +68,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - secondmate convergence left a live home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing its placement-specific target commit, unreachable, or otherwise not fast-forwardable, or because inherited local-material propagation failed; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.
 - `SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>` - the session-start liveness sweep could not guarantee that the registered secondmate is running a real agent process.
   Investigate the reason because that secondmate is not guaranteed live.
+- `RESTORED_WORKER: <id>: was <cause>; relaunch failed: <reason>` - after a restart the worker came back alive but parked on a harness startup gate or outside its recorded worktree, and the automatic relaunch (`bin/fm-restored-recover.sh`) did not complete.
+  Treat it as a stopped or misplaced worker: load `stuck-crewmate-recovery`, resolve the named reason, and relaunch with `bin/fm-control.sh <id> relaunch`; never answer the startup gate on the operator's behalf, and never let the worker continue in a primary checkout.
 - `SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)` - queued work has already left the main dispatchable backlog and remains safe in the named remote route's backlog-format outbox because backlog receipt or local outbox cleanup has not completed; [`bin/fm-backlog-handoff.sh`](../../../bin/fm-backlog-handoff.sh) owns the release contract.
   Preserve that outbox and rerun `bin/fm-backlog-handoff.sh --resume-pending` after the route, receipt, or cleanup problem is resolved; never re-add or dispatch the items from the main backlog.
   An unsafe-outbox variant requires path and file-type inspection before any retry.

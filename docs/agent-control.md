@@ -54,6 +54,12 @@ The clear is refused before anything is sent when the recorded backend cannot de
 A stopped agent whose pane still shows the dialog text is not refused.
 [`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
 
+**Startup gates.**
+An agent can also stop before its composer on a startup consent question, such as Claude's external `CLAUDE.md` imports or folder-trust question, which only the operator may answer and which the composer reads as pending text.
+`exit` never types into such a gate: it signals the harness processes attributed to the endpoint, `TERM` and then `KILL`, waits for the recovery-grade classifier to report the agent gone, and reports `stopped-at-startup-gate`, so `relaunch` can replace an agent parked there.
+It refuses rather than signal when the gate closes before the stop or when no harness process can be attributed to the endpoint.
+[`fm_composer_startup_dialog`](../bin/fm-composer-lib.sh) owns the recognised set; [its verification record](verification/runtime-backends.md#claude-startup-gates) shows that the stop records no consent.
+
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
@@ -195,3 +201,4 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-restored-recover.test.sh` - the startup-gate stop and the restored-worker sweep (`bin/fm-restored-recover.sh`) against a real tmux server, with `tests/fm-restored-recover-live-e2e.test.sh` as its live counterpart against the installed Claude.

@@ -4056,10 +4056,12 @@ spawn_send_key() { # <target> <key>
 }
 
 # Enter the exact copy recorded for this task immediately before trust setup and
-# launch. Herdr restores a pane's shell cwd from its durable tab layout, so a
-# treehouse subshell's foreground cwd is not enough to keep a later pane restart
-# out of the primary checkout. The same explicit cd gives every backend one
-# launch boundary and makes a dropped or ignored cwd change a refusal.
+# launch. The explicit cd gives every backend one launch boundary and makes a
+# dropped or ignored cwd change a refusal. It runs in the treehouse subshell, so
+# it does not move the pane's top shell, whose directory is the one a Herdr
+# restart resumes the agent in; bin/fm-restored-recover.sh recovers that case
+# (docs/verification/runtime-backends.md "Herdr restart resumes agents in the
+# top shell's directory").
 spawn_enter_recorded_worktree() {
   [ "$KIND" = secondmate ] && return 0
   spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")" || {

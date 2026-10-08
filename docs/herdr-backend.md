@@ -675,6 +675,13 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
+### Agents resumed after a restart
+
+A pane whose agent had reported its session comes back with that session resumed (for Claude, `claude --resume <id>`) in the pane's saved directory.
+That directory is the pane's top shell's, and a worker pane's top shell sits in the project's primary checkout because `treehouse get` enters the task worktree in a nested shell ([verification](verification/runtime-backends.md) "Herdr restart resumes agents in the top shell's directory").
+So a resumed worker is alive but outside its worktree, and it may be parked on a startup gate such as Claude's external `CLAUDE.md` imports question.
+At the next session start, [`bin/fm-restored-recover.sh`](../bin/fm-restored-recover.sh) relaunches each such worker in its recorded worktree, preserving the work there and telling the replacement what happened; that relaunch also moves the top shell, so the next restart resumes in the worktree.
+
 ### Stale agent registrations
 
 A registration alone never proves an agent.

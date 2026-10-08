@@ -508,6 +508,51 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Claude startup gates
+
+Measured 2026-10-08 on Linux x86_64 (WSL2) against Claude Code 2.1.293, in a private tmux server and in an isolated Herdr 0.9.1 lab session.
+Claude Code can stop before its composer on a full-screen consent question that only the operator may answer.
+Three were recorded, and each is drawn with its heading on its own row, a selected `❯ ` row under it, and a fixed footer as the last non-blank row:
+
+```text
+Allow external CLAUDE.md file imports?        Enter to confirm · Esc to cancel
+Teach auto mode about your environment?       ←/→ to change · Enter to continue · Esc to cancel
+Accessing workspace:                          Enter to confirm · Esc to cancel
+```
+
+The first is drawn when a resumed or fresh session starts in a directory whose `CLAUDE.md` imports a file outside it and the store has no answer for that directory; its default row is `No, disable external imports`.
+The second was recorded from an operator's own session, so its structure comes from that transcript rather than from a lab launch.
+The third is the ordinary folder-trust question.
+The composer classifier reads each of them as pending text, which is why `bin/fm-control.sh exit` used to refuse them and why a relaunch of such an agent reported that it failed while stopping the old agent.
+[`fm_composer_startup_dialog`](../../bin/fm-composer-lib.sh) recognizes them by that structure only, so the same strings quoted above a composer, in a sentence, without a selected row, or above another footer are not a gate.
+
+Sending `SIGTERM` to the parked Claude process ends it in about 1.5 seconds without answering the question: after the stop, the store still records no consent for the directory.
+
+```sh
+jq -c --arg p "$LAB/proj" '.projects[$p] | {hasClaudeMdExternalIncludesApproved, hasClaudeMdExternalIncludesWarningShown}' ~/.claude.json
+```
+
+```text
+{"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false}
+```
+
+`bin/fm-control.sh exit` therefore stops an agent parked on a recognized gate by signalling the harness processes attributed to its endpoint, `TERM` and then `KILL`, and reports `stopped-at-startup-gate`; it types nothing into the gate.
+`tests/fm-restored-recover.test.sh` pins the classifier and that stop portably against a real tmux server with a stand-in agent and the recorded viewport.
+Refresh the live half, which launches the installed Claude bare and spends no model tokens, with:
+
+```sh
+tests/fm-restored-recover-live-e2e.test.sh
+```
+
+Observed 2026-10-08:
+
+```text
+ok - real claude 2.1.293: the folder-trust prompt is recognized and fm-control exit stops Claude without trusting the folder
+ok - real claude 2.1.293: the external CLAUDE.md imports prompt is recognized and fm-control exit stops Claude without approving the imports
+```
+
+The auto-mode question is not exercised live, because no lab launch reproduced it.
+
 ## Pi seeded-secondmate project trust
 
 [`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the seeded-secondmate project-trust approval contract and compatibility fallback.
@@ -1722,6 +1767,36 @@ ok - real herdr: a drifted agent-free shell returns to its worktree and reuses t
 `tests/fm-control-herdr-smoke.test.sh` proves the Herdr-only drift recovery against a real binary in an isolated lab session.
 `tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
 The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
+
+### Herdr restart resumes agents in the top shell's directory
+
+Measured 2026-10-08 on Linux x86_64 (WSL2) against Herdr 0.9.1 and Claude Code 2.1.293 in an isolated `fm-lab-` session.
+Herdr saves each pane's `cwd` and its reported `agent_session` in the session's `session.json`, and when the server starts again it runs `claude --resume <id>` in that saved directory.
+The saved directory is the pane's top shell's working directory.
+A worker pane is created in the project's primary checkout, and `treehouse get` enters the task worktree in a nested shell, so neither a `cd` typed into that nested shell nor the agent's own directory reaches the saved layout.
+In the lab, a Claude started in the worktree under a nested shell came back after a server stop and start like this:
+
+```sh
+"$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$P" | jq -c '.result.pane | {cwd,foreground_cwd,agent,agent_status}'
+```
+
+```text
+{"cwd":"/tmp/fm-reboot-repro.txr7dT/proj","foreground_cwd":"/tmp/fm-reboot-repro.txr7dT/proj","agent":"claude","agent_status":"blocked"}
+```
+
+The resumed agent reads `alive` to the recovery-grade classifier, so no dead-endpoint recovery fires, and with an external `CLAUDE.md` import in the primary checkout it sits on the imports gate recorded in "Claude startup gates".
+[`bin/fm-restored-recover.sh`](../../bin/fm-restored-recover.sh) finds that state at session start and relaunches the worker through `bin/fm-control.sh relaunch`, whose Herdr path moves the top shell back into the worktree.
+Observed in the same lab, for a gate-parked worker and for one that was only in the wrong directory:
+
+```text
+BOOTSTRAP_INFO: worker rr was parked on the Claude external CLAUDE.md imports prompt; relaunched in its recorded worktree /tmp/fm-reboot-repro.txr7dT/wt
+BOOTSTRAP_INFO: worker rr was running in /tmp/fm-reboot-repro.txr7dT/proj instead of its recorded worktree; relaunched in its recorded worktree /tmp/fm-reboot-repro.txr7dT/wt
+```
+
+After each relaunch the pane's `cwd` and `foreground_cwd` were the worktree, a second sweep printed nothing, and the next saved layout recorded the worktree, so the following restart resumes there.
+No macOS host was available, so the restart was not run there; the detection reads only the backend's own working-directory and viewport answers and `ps`, through the same helpers on both hosts.
 
 ### Stale agent registration
 

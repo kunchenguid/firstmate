@@ -3070,6 +3070,43 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
+# fm_backend_herdr_agent_pids: the pids of the verified harness processes in
+# <target>'s foreground process group, one per line, read from `pane
+# process-info` and classified by the shared bin/fm-agent-process-lib.sh owner,
+# exactly as fm_backend_herdr_pane_process_state_sample reads them. Empty output
+# means none was proven; a read that fails or describes another pane returns 1.
+fm_backend_herdr_agent_pids() {  # <target>
+  local info count i pid name argv0 args
+  fm_backend_herdr_parse_target "$1" || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || return 1
+  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  count=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) \
+    || return 1
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    pid=$(printf '%s' "$info" | jq -r --argjson i "$i" \
+      '.result.process_info.foreground_processes[$i].pid | select(type == "number" and . > 1) | floor' 2>/dev/null)
+    name=$(printf '%s' "$info" | jq -r --argjson i "$i" \
+      '.result.process_info.foreground_processes[$i].name // empty' 2>/dev/null)
+    argv0=$(printf '%s' "$info" | jq -r --argjson i "$i" '
+      .result.process_info.foreground_processes[$i] as $p
+      | (($p.argv // [])[0]) // $p.argv0 // empty' 2>/dev/null)
+    args=$(printf '%s' "$info" | jq -r --argjson i "$i" '
+      .result.process_info.foreground_processes[$i] as $p
+      | $p.cmdline // (($p.argv // []) | join(" ")) // empty' 2>/dev/null)
+    if [ -n "$pid" ] && [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
+      printf '%s\n' "$pid"
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,
 # ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
 # spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types

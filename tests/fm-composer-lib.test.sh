@@ -1231,7 +1231,109 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
   pass "picker text quoted above a normal composer is not read as a live picker"
 }
 
+# --- Startup gates: modal prompts a harness raises before its first turn -------
+#
+# Each screen is a real Claude Code 2.1.293 viewport (docs/verification/
+# runtime-backends.md "Claude startup gates"), trimmed of the shell lines above.
+
+startup_imports_screen() {
+  printf '%s\n' \
+    '────────────────────────────────────────' \
+    '  Allow external CLAUDE.md file imports?' \
+    '' \
+    "  This project's CLAUDE.md or .claude/rules imports files outside the current working directory. Never allow this for" \
+    '  third-party repositories.' \
+    '' \
+    '  External imports:' \
+    '    /tmp/fm-reboot-repro/outside.md' \
+    '' \
+    '  Important: Only use Claude Code with files you trust. Accessing untrusted files may pose security risks' \
+    '  https://code.claude.com/docs/en/security' \
+    '' \
+    '  ❯ No, disable external imports' \
+    '    Yes, allow external imports' \
+    '' \
+    '  Enter to confirm · Esc to cancel'
+}
+
+startup_auto_mode_screen() {
+  printf '%s\n' \
+    '▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔' \
+    '   Teach auto mode about your environment?' \
+    '   Claude Code reads this project, your recent Claude sessions, and optionally your shell' \
+    '   history and other repositories. Claude analyzes this data and customizes auto mode to' \
+    '   make better decisions.' \
+    '     How you use Claude here     Mixed' \
+    '   ❯ Also scan shell history     true' \
+    '     Also scan your other repos  false' \
+    '     Continue' \
+    '   ←/→ to change · Enter to continue · Esc to cancel'
+}
+
+startup_trust_screen() {
+  printf '%s\n' \
+    '────────────────────────────────────────' \
+    ' Accessing workspace:' \
+    ' /tmp/fm-reboot-repro/wt' \
+    ' Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source' \
+    " project, or work from your team). If not, take a moment to review what's in this folder first." \
+    " Claude Code'll be able to read, edit, and execute files here." \
+    ' Security guide' \
+    ' ❯ No, exit' \
+    '   Yes, I trust this folder' \
+    ' Enter to confirm · Esc to cancel'
+}
+
+test_startup_gates_are_named() {
+  local out rc cr
+  out=$(fm_composer_startup_dialog "$(startup_imports_screen)"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Claude external CLAUDE.md imports prompt' ] \
+    || fail "the external-imports gate should be named, got rc=$rc '$out'"
+  out=$(fm_composer_startup_dialog "$(startup_auto_mode_screen)"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Claude auto-mode environment prompt' ] \
+    || fail "the auto-mode gate should be named, got rc=$rc '$out'"
+  out=$(fm_composer_startup_dialog "$(startup_trust_screen)"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Claude folder-trust prompt' ] \
+    || fail "the folder-trust gate should be named, got rc=$rc '$out'"
+  # Herdr's visible read ends every row with a carriage return and styles the
+  # heading, selected row, and footer; neither may hide the gate.
+  cr=$(printf '\r')
+  out=$(fm_composer_startup_dialog "$(startup_imports_screen | sed "s/\$/$cr/" \
+    | sed "s/Allow external/$(printf '\033')[1mAllow external/")"); rc=$?
+  [ "$rc" -eq 0 ] || fail "carriage returns and styling must not hide the external-imports gate"
+  out=$(fm_composer_startup_dialog "$(printf '%s\n' "$(startup_trust_screen)" '' '')"); rc=$?
+  [ "$rc" -eq 0 ] || fail "blank rows below the footer should still match"
+  pass "Claude's recorded startup gates are named from their exact on-screen structure"
+}
+
+test_startup_gate_text_elsewhere_is_not_a_gate() {
+  local out rc
+  # Quoted above a live composer: the last row is the composer, not the footer.
+  out=$(fm_composer_startup_dialog "$(printf '%s\n' "$(startup_imports_screen)" '' \
+    '╭──────────────╮' '│ > next steer │' '╰──────────────╯')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "a gate quoted above a composer must not match, got '$out'"
+  # Heading buried in a sentence.
+  out=$(fm_composer_startup_dialog "$(printf '%s\n' \
+    'The worker saw Allow external CLAUDE.md file imports? earlier' \
+    '❯ No, disable external imports' 'Enter to confirm · Esc to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a heading inside a sentence must not match"
+  # No selected row.
+  out=$(fm_composer_startup_dialog "$(startup_imports_screen | grep -v '❯')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a gate with no selected row must not match"
+  # The other gate's footer.
+  out=$(fm_composer_startup_dialog "$(startup_auto_mode_screen | sed '$d'; printf '%s\n' 'Enter to confirm · Esc to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "the auto-mode gate must end with its own recorded footer"
+  # The background-task exit picker is a different dialog.
+  out=$(fm_composer_startup_dialog "$(exit_picker_screen)"); rc=$?
+  [ "$rc" -eq 1 ] || fail "the background-task exit picker is not a startup gate"
+  out=$(fm_composer_startup_dialog ''); rc=$?
+  [ "$rc" -eq 1 ] || fail "an empty screen is not a gate"
+  pass "startup-gate text quoted, buried, or missing its structure is not read as a gate"
+}
+
 test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+test_startup_gates_are_named
+test_startup_gate_text_elsewhere_is_not_a_gate

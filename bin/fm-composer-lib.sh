@@ -1696,6 +1696,43 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
   return 1
 }
 
+# fm_composer_startup_dialog: name a harness startup gate on <screen>, a modal
+# the harness raises before its first turn, so the process holds no turn and no
+# composer text. Prints the name and returns 0 only for the recorded structure
+# of one gate: its heading alone on a row, a later row selected with the
+# pointer glyph, and that gate's recorded footer as the last non-blank row. A
+# quoted heading inside a diff, a note, or a running transcript does not end the
+# screen with the footer, so it is not that gate. A miss returns 1 and prints
+# nothing.
+# Every gate here asks a question the operator owns - folder trust, external
+# import consent, auto-mode scanning scope - so no caller may answer one by
+# typing Enter, Escape, or an option. bin/fm-control.sh stops the process
+# instead (docs/agent-control.md "Startup gates").
+# Recorded 2026-10-08 on Claude Code 2.1.293 (docs/verification/runtime-backends.md
+# "Claude startup gates"): the folder-trust check on an untrusted path, the
+# external-imports consent on a trusted path whose CLAUDE.md imports a file
+# outside it, and the auto-mode environment scan offered on a resumed session.
+fm_composer_startup_dialog() {  # <screen> -> gate name
+  local screen=${1-} name
+  [ -n "$screen" ] || return 1
+  name=$(printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+    {
+      row = trim($0)
+      if (row == "Allow external CLAUDE.md file imports?") { gate = "Claude external CLAUDE.md imports prompt"; footer = "Enter to confirm · Esc to cancel"; selected = 0 }
+      else if (row == "Teach auto mode about your environment?") { gate = "Claude auto-mode environment prompt"; footer = "←/→ to change · Enter to continue · Esc to cancel"; selected = 0 }
+      else if (row == "Accessing workspace:") { gate = "Claude folder-trust prompt"; footer = "Enter to confirm · Esc to cancel"; selected = 0 }
+      else if (gate != "" && row ~ /^❯ [^ ]/) { selected = 1 }
+      if (row != "") { last = row }
+    }
+    END {
+      if (gate != "" && selected && last == footer) { printf "%s", gate; exit 0 }
+      exit 1
+    }
+  ') || return 1
+  printf '%s' "$name"
+}
+
 # A command substitution drops a shell variable, and every composer read runs
 # inside one. The name is therefore written to FM_COMPOSER_DIALOG_SINK when
 # that path is set. The classifier verdict is unchanged. When the sink is
