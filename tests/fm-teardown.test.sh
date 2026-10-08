@@ -3597,6 +3597,36 @@ SH
   pass "forced secondmate teardown preflights every Herdr child before cleanup mutation"
 }
 
+configure_stoppable_child_tmux() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/kill.log"
+case "\$1" in
+  kill-window)
+    target=\${3//=/}
+    case "\$target" in
+      firstmate:fm-child-a|firstmate:fm-child-b|firstmate:fm-nested-sm)
+        : > "$case_dir/\${target#*:}.stopped"
+        ;;
+    esac
+    ;;
+  display-message)
+    if [ "\${!#}" = '#{pane_dead}' ]; then
+      target=\${4//=/}
+      if [ -e "$case_dir/\${target#*:}.stopped" ]; then
+        printf '1\n'
+      else
+        printf '0\n'
+      fi
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+}
+
 configure_secondmate_with_tmux_children() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" child child_wt
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -3614,6 +3644,7 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
       "mode=local-only"
     : > "$home/state/$child.status"
   done
+  configure_stoppable_child_tmux "$case_dir"
 }
 
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
@@ -3624,11 +3655,6 @@ test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
   home="$case_dir/secondmate-home"
   : > "$case_dir/kill.log"
   : > "$case_dir/treehouse.log"
-  cat > "$case_dir/fakebin/tmux" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$case_dir/kill.log"
-exit 0
-SH
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
@@ -3713,6 +3739,7 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
 
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
+  configure_stoppable_child_tmux "$case_dir"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   mkdir -p "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
