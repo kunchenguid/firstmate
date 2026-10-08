@@ -354,23 +354,35 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} cstate verdict key_rc
+  local FM_TASK_INBOX_RING_LINE=
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
-  if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
+  if ! FM_TASK_INBOX_RING_LINE=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
-        && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
-        || return 1
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      fm_task_inbox_check_pending "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" "$cstate" "$label" || return 1
+      key_rc=0
+      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || key_rc=$?
+      if [ "$key_rc" -ne 0 ]; then
+        [ "$backend" = orca ] && [ "$key_rc" -eq 4 ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ] && return 1
+        return 2
+      fi
+      if [ "$backend" = orca ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ]; then
+        target=$FM_ORCA_RESOLVED_TERMINAL
+      fi
       sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      fm_task_inbox_composer_holds "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" "$label" || return 0
+      key_rc=0
+      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || key_rc=$?
+      if [ "$key_rc" -ne 0 ]; then
+        [ "$backend" = orca ] && [ "$key_rc" -eq 4 ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ] && return 1
+        return 2
+      fi
       return 0
       ;;
   esac
@@ -378,13 +390,22 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" 2 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
   # The verdict is read only to report a failed keystroke; every other value
   # (empty, pending, unknown, ...) is deliberately ignored, never proof.
-  [ "$verdict" != send-failed ] || return 2
+  case "$verdict" in
+    inbox-deferred) return 1 ;;
+    send-failed) return 2 ;;
+  esac
   return 0
+}
+
+fm_task_inbox_check_pending() {
+  [ "$4" = pending ] || return 0
+  fm_task_inbox_composer_holds "$1" "$2" "$3" "${5:-}" \
+    && [ "$(fm_backend_busy_state "$1" "$2" 2>/dev/null)" != busy ]
 }
 
 # Whether the composer's content, ignoring line wrapping, is exactly <line>.

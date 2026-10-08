@@ -329,12 +329,20 @@ fm_backend_orca_resolve_live_terminal() {  # <stale-terminal-id>
   printf '%s' "$named_json" | fm_backend_orca_pick_terminal "$stale"
 }
 
-fm_backend_orca_check_dialog() {
-  local cap dialog
+fm_backend_orca_check_replacement() {
+  local cap dialog cstate
   cap=$(fm_backend_orca_composer_capture "$1" 2>/dev/null) || return 0
   if dialog=$(fm_composer_blocking_dialog "$cap"); then
     echo "error: blocked on a prompt: $dialog" >&2
     return 1
+  fi
+  if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+    cstate=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
+    if ! fm_task_inbox_check_pending orca "$1" "$FM_TASK_INBOX_RING_LINE" "$cstate"; then
+      FM_ORCA_RESOLVED_TERMINAL=$1
+      return 4
+    fi
+    [ "$cstate" != pending ] || return 2
   fi
   return 0
 }
@@ -346,7 +354,7 @@ fm_backend_orca_send_text_line() {  # <terminal-id> <text>
 }
 
 fm_backend_orca_send_literal() {  # <terminal-id> <text>
-  local terminal=$1 text=$2 live rc=0
+  local terminal=$1 text=$2 live rc=0 check_rc
   fm_backend_orca_tool_check || return 1
   FM_ORCA_RESOLVED_TERMINAL=
   if fm_backend_orca_attempt orca terminal send --terminal "$terminal" --text "$text" --json; then
@@ -358,7 +366,13 @@ fm_backend_orca_send_literal() {  # <terminal-id> <text>
   if fm_backend_orca_last_stale; then
     live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
     if [ -n "$live" ]; then
-      fm_backend_orca_check_dialog "$live" || return 1
+      check_rc=0
+      fm_backend_orca_check_replacement "$live" || check_rc=$?
+      case "$check_rc" in
+        0) ;;
+        2) FM_ORCA_RESOLVED_TERMINAL=$live; return 0 ;;
+        *) return "$check_rc" ;;
+      esac
       if fm_backend_orca_attempt orca terminal send --terminal "$live" --text "$text" --json; then
         FM_ORCA_RESOLVED_TERMINAL=$live
         return 0
@@ -465,7 +479,8 @@ fm_backend_orca_send_key_once() {  # <terminal-id> <key>
 }
 
 fm_backend_orca_send_key() {  # <terminal-id> <key>
-  local terminal=$1 key=$2 live rc=0
+  local terminal=$1 key=$2 live rc=0 check_rc
+  FM_ORCA_RESOLVED_TERMINAL=
   fm_backend_orca_tool_check || return 1
   case "$key" in
     C-c|ctrl+c|Ctrl-c|Ctrl-C|Enter|enter) ;;
@@ -483,9 +498,14 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
     live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
     if [ -n "$live" ]; then
       case "$key" in
-        Enter|enter) fm_backend_orca_check_dialog "$live" || return 1 ;;
+        Enter|enter)
+          check_rc=0
+          fm_backend_orca_check_replacement "$live" || check_rc=$?
+          case "$check_rc" in 0|2) ;; *) return "$check_rc" ;; esac
+          ;;
       esac
       if fm_backend_orca_send_key_once "$live" "$key"; then
+        FM_ORCA_RESOLVED_TERMINAL=$live
         return 0
       else
         fm_backend_orca_replay_last
@@ -503,11 +523,19 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # slash-command popup placeholder fill gets the required second Enter without
 # duplicating text.
 fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 target
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 target rc=0
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
   # A stale recorded id is retried once through window= inside send_literal.
   # Enter and the composer read then use that live id, still typing the text once.
-  fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
+  fm_backend_orca_send_literal "$terminal" "$text" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 4 ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ]; then
+      printf 'inbox-deferred'
+    else
+      printf 'send-failed'
+    fi
+    return 0
+  fi
   target=${FM_ORCA_RESOLVED_TERMINAL:-$terminal}
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
