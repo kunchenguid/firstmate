@@ -5151,7 +5151,8 @@ test_branch_dispatch_routes_only_identity_bound_ida_results() {
 import { chmodSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const { scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const { dispositionForWakeTrigger, idaResultRowsForWake, scopeForUnreadWake } =
+  await import(pathToFileURL(process.env.LIB).href);
 const state = `${process.env.FM_HOME}/state`;
 const task = "ida-task";
 const source = `ida-${task}`;
@@ -5228,6 +5229,15 @@ if (JSON.stringify([...mixed.eligibleTasks].sort()) !== JSON.stringify(["ida-tas
 if (mixed.eligibleIdaResults.map((result) => result.trigger).join("|") !==
     `check: procevent ida ${source} 2|check: procevent ida ${source} 1|check: procevent ida ${source} 2`) {
   throw new Error(`iDA trigger identity was not preserved exactly: ${JSON.stringify(mixed)}`);
+}
+const surfaced = `check: process-event result captured: procevent:${source}:2`;
+if (!dispositionForWakeTrigger(surfaced, mixed).eligible ||
+    idaResultRowsForWake(surfaced, mixed).join(",") !== "1,3") {
+  throw new Error(`surfaced iDA capture did not resolve to its exact queue rows: ${JSON.stringify(mixed)}`);
+}
+if (dispositionForWakeTrigger("check: process-event result captured: procevent:ida-other:2", mixed).reason !==
+    "check-main-only") {
+  throw new Error("an unbound surfaced capture became branch eligible");
 }
 
 const assertMainFallback = (label, row) => {
@@ -6722,6 +6732,13 @@ EOF
   expect_code 0 "$status" "authenticated ShortTask public notification boundary: $out"
   pass "$out"
 }
+
+case "${FM_PI_BRANCH_TEST_CASE:-}" in
+  ida-routing)
+    test_branch_dispatch_routes_only_identity_bound_ida_results
+    exit 0
+    ;;
+esac
 
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable

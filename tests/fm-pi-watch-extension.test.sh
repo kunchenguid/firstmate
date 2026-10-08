@@ -1112,7 +1112,7 @@ while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
-      FM_TEST_MODE="$mode" FM_TEST_REASON='check: procevent ida ida-ida-task 7' \
+      FM_TEST_MODE="$mode" FM_TEST_REASON='check: process-event result captured: procevent:ida-ida-task:7' \
       node --input-type=module 2>&1 <<'EOF'
 import { chmodSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -1146,7 +1146,7 @@ privateWrite(`${state}/procevent-inbox/${source}.7.result`, JSON.stringify({
   terminal: true, ambiguous: false, result_availability: "available", result_kind: "text",
   answer: "verified result", artifact_reference: null, error_class: null,
 }));
-privateWrite(`${state}/.wake-queue`, `1\t1\tcheck\tprocevent:${source}:7\t${process.env.FM_TEST_REASON}\n`);
+privateWrite(`${state}/.wake-queue`, `1\t1\tcheck\tprocevent:${source}:7\tcheck: procevent ida ${source} 7\n`);
 privateWrite(`${state}/.lock`, `${process.pid}\n`);
 
 const offers = [];

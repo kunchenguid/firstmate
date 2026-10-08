@@ -68,12 +68,13 @@ export interface UnreadWakeScope {
   /** Structurally valid rows whose current task identity cannot be resolved. */
   unresolvedRows: Array<{ seq: string; kind: "signal" | "stale"; key: string }>;
   /**
-   * Exact check payloads whose captured iDA result identity was proved to
-   * belong to this home's recorded remote-agent task. The watcher uses this
-   * set to distinguish the one branch-owned check trigger from every other
-   * check class, which remains main-owned.
+   * Exact check payloads and queue keys whose captured iDA result identity was
+   * proved to belong to this home's recorded remote-agent task. The watcher
+   * uses this set to distinguish both the queue payload and the watcher's
+   * surfaced capture message from every other check class, which remains
+   * main-owned.
    */
-  eligibleIdaResults: Array<{ trigger: string; row: string; task: string }>;
+  eligibleIdaResults: Array<{ trigger: string; key: string; row: string; task: string }>;
   taskByWakeKey: Record<string, string>;
   /** Exact queued rows already claimed by MAIN; never branch candidates. */
   mainOwnedRows: Array<{ seq: string; kind: string; key: string; payload: string }>;
@@ -449,7 +450,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const taskBySeq = new Map<string, string>();
   const needsDecisionKeys: string[] = [];
   const unresolvedRows: Array<{ seq: string; kind: "signal" | "stale"; key: string }> = [];
-  const eligibleIdaResults: Array<{ trigger: string; row: string; task: string }> = [];
+  const eligibleIdaResults: Array<{ trigger: string; key: string; row: string; task: string }> = [];
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -482,7 +483,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         eligibleSeqs.push(seq);
         eligibleTasks.add(idaResult.task);
         taskBySeq.set(seq, idaResult.task);
-        eligibleIdaResults.push({ trigger: idaResult.trigger, row: seq, task: idaResult.task });
+        eligibleIdaResults.push({ trigger: idaResult.trigger, key, row: seq, task: idaResult.task });
       }
       continue;
     }
@@ -597,6 +598,28 @@ function taskIdentity(scope: UnreadWakeScope, key: string): string {
   return scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
 }
 
+function surfacedProcessEventKeys(message: string): string[] | null {
+  const prefix = "check: process-event result captured:";
+  if (!message.startsWith(prefix)) return null;
+  const body = message.slice(prefix.length).trim();
+  if (!body || body.includes(";")) return null;
+  const keys = body.split(/\s+/);
+  return keys.every((key) => /^procevent:[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[0-9]+$/.test(key))
+    ? keys
+    : null;
+}
+
+/** Exact iDA rows named by either the queue payload or the watcher's surfaced capture close. */
+export function idaResultRowsForWake(message: string, scope: UnreadWakeScope): string[] {
+  const direct = scope.eligibleIdaResults.filter((result) => result.trigger === message);
+  if (direct.length > 0) return direct.map((result) => result.row);
+  const keys = surfacedProcessEventKeys(message);
+  if (!keys) return [];
+  const matched = keys.flatMap((key) => scope.eligibleIdaResults.filter((result) => result.key === key));
+  if (keys.some((key) => !matched.some((result) => result.key === key))) return [];
+  return matched.map((result) => result.row);
+}
+
 /** Shared watcher/admission verdict for the exact actionable close. */
 export function dispositionForWakeTrigger(message: string, scope: UnreadWakeScope): WakeTriggerDisposition {
   if (scope.corrupted) return { eligible: false, reason: "corrupt-queue" };
@@ -619,8 +642,9 @@ export function dispositionForWakeTrigger(message: string, scope: UnreadWakeScop
     return { eligible: false, reason: "decision-owned" };
   }
   if (/^check:/.test(message)) {
-    const matched = scope.eligibleIdaResults.some((result) => result.trigger === message);
-    if (!matched) return { eligible: false, reason: "check-main-only" };
+    if (idaResultRowsForWake(message, scope).length === 0) {
+      return { eligible: false, reason: "check-main-only" };
+    }
   }
   return scope.eligible
     ? { eligible: true, reason: "eligible" }
