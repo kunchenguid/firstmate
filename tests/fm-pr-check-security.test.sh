@@ -2280,9 +2280,9 @@ EOF
   assert_grep 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
     "merge wrapper did not explain its unreadable GitLab state refusal"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
-  grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
+  grep -qxF "api projects/group%2Fsubgroup%2Fproject/merge_requests/7 --hostname gitlab.example --repo https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
     || fail "merge wrapper did not read the merge request through glab at its own instance"
-  ! grep -qE '^(api projects/|mr merge )' "$dir/glab.log" \
+  ! grep -qE '^(api projects/[^/[:space:]]+([[:space:]]|$)|mr merge )' "$dir/glab.log" \
     || fail "an unreadable MR state reached project-policy discovery or merging"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
