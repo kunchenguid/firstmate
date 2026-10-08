@@ -354,9 +354,11 @@ fm_polytoken_credential_token() {  # <credential-file>
   jq -r '.token // empty' "$cred" 2>/dev/null
 }
 
-# fm_polytoken_rest: one REST call. Prints the response body on a 2xx and
-# returns nonzero otherwise, so callers treat every non-2xx as a refusal
-# rather than guessing at success.
+# fm_polytoken_rest: one REST call. Returns zero on a 2xx (discarding the
+# body) and nonzero otherwise, so callers treat every non-2xx as a refusal
+# rather than guessing at success. The bearer header rides stdin (`-H @-`),
+# never argv: the token grants full control of a bypass-permission daemon,
+# and argv is readable by every local user through the process list.
 fm_polytoken_rest() {  # <method> <port> <credential-token> <path> [json-body]
   local method=$1 port=$2 token=$3 path=$4 body=${5:-} code
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X "$method" \
