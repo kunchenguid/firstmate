@@ -27,7 +27,7 @@ fm_forge_normalize_host() {
 # guess: unknown/missing remotes are reported as "unknown", never silently
 # defaulted to github or gitlab.
 #
-# Output: one line, one of: github gitlab local unknown
+# Output: one line, one of: github gitlab gerrit local unknown
 # Exit: 0 always (the classification itself is the result; "unknown" is not
 #       a script failure)
 fm_forge_github_hosts() {
@@ -146,8 +146,21 @@ fm_forge_checkout_remote() {
   return 1
 }
 
+fm_forge_registered_binding() {
+  local project_id=${1:-} root home data forge
+
+  [ -n "$project_id" ] || return 1
+  root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+  home=${FM_HOME:-$root}
+  data=${FM_DATA_OVERRIDE:-$home/data}
+  forge=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    "$root/bin/fm-project-mode.sh" --forge "$project_id" 2>/dev/null) || return 1
+  [ "$forge" = gerrit ] || return 1
+  printf '%s\n' "$forge"
+}
+
 fm_forge_detect_provider() {
-  local checkout=${1:-} remote_url raw_host host
+  local checkout=${1:-} remote_url raw_host host binding
 
   if [ -z "$checkout" ] || [ ! -d "$checkout" ]; then
     echo "unknown"
@@ -161,6 +174,11 @@ fm_forge_detect_provider() {
     echo "local"
     return 0
   }
+  binding=$(fm_forge_registered_binding "$(basename "$checkout")" || true)
+  if [ "$binding" = gerrit ]; then
+    echo gerrit
+    return 0
+  fi
   case "$remote_url" in
     file://*|git+file://*|/*|./*|../*|[[:alpha:]]:[/\\]*)
       echo "local"
@@ -253,6 +271,9 @@ fm_forge_provider_tools() {
     gitlab)
       printf '%s\n' glab
       ;;
+    gerrit)
+      printf '%s\n' gerrit-axi jq
+      ;;
     local|unknown)
       return 5
       ;;
@@ -303,7 +324,7 @@ fm_forge_check_auth() {
         glab auth status >/dev/null 2>&1 || { echo "NEEDS_GLAB_AUTH"; return 1; }
       fi
       ;;
-    local) return 0 ;;
+    gerrit|local) return 0 ;;
     unknown)
       echo "FORGE_UNSUPPORTED"
       return 1

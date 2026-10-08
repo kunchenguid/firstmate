@@ -898,6 +898,7 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    gerrit-axi) echo "npm install -g gerrit-axi" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
@@ -1822,7 +1823,7 @@ if network_phase; then
   while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
     [ -n "${_proj_provider:-}" ] || continue
     case "$_proj_provider" in
-      github|gitlab) : ;;
+      github|gitlab|gerrit) : ;;
       *) continue ;;
     esac
     _pair="$_proj_provider:${_proj_host:-}"

@@ -430,6 +430,27 @@ test_unknown_origin_is_skipped_even_when_invoked_directly() {
   pass "direct fleet-sync fails closed for unsupported forge origins"
 }
 
+test_explicit_gerrit_binding_allows_sync() {
+  local home clone out remote_url
+  home=$(new_home)
+  clone=$(build_pair "$home" gerrit-project)
+  advance_origin "$home" gerrit-project C1
+  remote_url=$(git -C "$clone" remote get-url origin)
+  git -C "$clone" remote set-url origin ssh://review.example:29418/team/project
+  git -C "$clone" config url."$remote_url".insteadOf ssh://review.example:29418/team/project
+  mkdir -p "$home/data"
+  printf -- '- gerrit-project [no-mistakes forge=gerrit] - review project (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gerrit-project: synced" \
+    "an explicit Gerrit binding must allow the normal clone refresh path"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "an explicit Gerrit binding did not fast-forward the clone"
+  pass "direct fleet-sync honors an explicit Gerrit binding"
+}
+
 test_local_only_skipped() {
   local home clone out
   home=$(new_home)
@@ -792,6 +813,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_unknown_origin_is_skipped_even_when_invoked_directly
+test_explicit_gerrit_binding_allows_sync
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves

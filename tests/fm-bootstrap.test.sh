@@ -1247,6 +1247,25 @@ SH
   pass "bootstrap keeps origin-only local semantics and owns forge remediation"
 }
 
+test_forge_provider_explicit_gerrit_binding() {
+  local case_dir fakebin out project
+  case_dir="$TMP_ROOT/forge-gerrit-binding"
+  project="$case_dir/home/projects/gerrit-project"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- gerrit-project [no-mistakes forge=gerrit] - review project (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  git -C "$project" remote add origin ssh://review.example:29418/team/project
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  fm_fake_exit0 "$fakebin" gerrit-axi jq
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "explicit Gerrit binding must select Gerrit tooling without auth or unsupported diagnostics, got: $out"
+  pass "bootstrap honors explicit Gerrit provider bindings"
+}
+
 test_forge_host_trailing_dot_is_canonicalized() {
   local case_dir fakebin out project
   case_dir="$TMP_ROOT/forge-trailing-dot"
@@ -2361,6 +2380,7 @@ test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
 test_forge_provider_cli_policy_and_auth_host
+test_forge_provider_explicit_gerrit_binding
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
