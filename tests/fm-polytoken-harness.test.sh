@@ -169,6 +169,10 @@ test_polytoken_control_mechanics_are_the_verified_ones() {
 test_polytoken_wiring_tables_cover_every_generated_artifact() {
   local wt="$TMP_ROOT/wiring-wt" state="$TMP_ROOT/wiring-state" id=polytoken-wiring
   local files dirs
+  mkdir -p "$wt" "$state"
+  fm_polytoken_write_facet "$wt" "$state/$id.inbox" || fail "the facet writer should succeed"
+  fm_polytoken_write_hooks "$wt" "$(fm_polytoken_busy_script "$state" "$id")" \
+    || fail "the hook writer should succeed"
   files=$(fm_control_harness_wiring_paths polytoken "$wt" "$state" "$id")
   dirs=$(fm_control_harness_wiring_dirs polytoken "$state" "$id")
   assert_contains "$files" "$wt/.polytoken/hooks.json" "the worktree hook layer must be retired on relaunch"
@@ -177,7 +181,17 @@ test_polytoken_wiring_tables_cover_every_generated_artifact() {
   assert_contains "$dirs" "$state/$id.polytoken-config" "the per-task config dir must be retired on relaunch"
   assert_contains "$dirs" "$state/$id.polytoken-sessions" "the per-task sessions root must be retired on relaunch"
   assert_contains "$dirs" "$state/$id.polytoken-sessions-v1" "the versioned sessions sibling must be retired on relaunch"
-  pass "fm-control-lib: polytoken wiring tables name every generated artifact"
+  printf '[{"name":"project-own","event":"stop","handler":{"bash":"/bin/true"}}]\n' \
+    > "$wt/.polytoken/hooks.json"
+  printf -- '---\nname: firstmate-worker\n---\nproject facet\n' \
+    > "$wt/.polytoken/facets/firstmate-worker.md"
+  files=$(fm_control_harness_wiring_paths polytoken "$wt" "$state" "$id")
+  assert_not_contains "$files" "$wt/.polytoken/hooks.json" \
+    "a project's own hook layer must never be named for retirement"
+  assert_not_contains "$files" "$wt/.polytoken/facets/firstmate-worker.md" \
+    "a facet firstmate did not generate for this task must never be named for retirement"
+  assert_contains "$files" "$state/$id.polytoken-busy.sh" "the busy writer stays retirable"
+  pass "fm-control-lib: polytoken wiring tables name every generated artifact and no project file"
 }
 
 test_polytoken_tmux_names_the_native_binary_an_agent() {

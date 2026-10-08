@@ -2301,10 +2301,13 @@ test_teardown_missing_busy_sidecar_completes() {
 }
 
 seed_polytoken_wiring() {
-  local wt=$1
-  mkdir -p "$wt/.polytoken/facets"
-  printf '[]\n' > "$wt/.polytoken/hooks.json"
-  printf 'facet\n' > "$wt/.polytoken/facets/firstmate-worker.md"
+  local case_dir=$1
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-polytoken-lib.sh"
+    fm_polytoken_write_facet "$case_dir/wt" "$case_dir/state/task-x1.inbox"
+    fm_polytoken_write_hooks "$case_dir/wt" "$(fm_polytoken_busy_script "$case_dir/state" task-x1)"
+  ) || fail "seeding the generated polytoken wiring failed"
 }
 
 test_teardown_retires_polytoken_wiring_on_pool_return() {
@@ -2312,7 +2315,7 @@ test_teardown_retires_polytoken_wiring_on_pool_return() {
   case_dir=$(make_case polytoken-wiring)
   write_meta "$case_dir" local-only ship
   printf 'harness=polytoken\n' >> "$case_dir/state/task-x1.meta"
-  seed_polytoken_wiring "$case_dir/wt"
+  seed_polytoken_wiring "$case_dir"
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 0 "$rc" "polytoken-wiring: teardown should succeed ($(cat "$case_dir/stderr"))"
@@ -2328,7 +2331,7 @@ test_teardown_preserves_tracked_polytoken_layer() {
   case_dir=$(make_case polytoken-tracked)
   write_meta "$case_dir" local-only ship
   printf 'harness=polytoken\n' >> "$case_dir/state/task-x1.meta"
-  seed_polytoken_wiring "$case_dir/wt"
+  seed_polytoken_wiring "$case_dir"
   git -C "$case_dir/wt" add -f .polytoken/hooks.json
   git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project hook layer"
   rc=0
@@ -2341,12 +2344,28 @@ test_teardown_preserves_tracked_polytoken_layer() {
   pass "teardown never deletes a tracked .polytoken hook layer"
 }
 
+test_teardown_preserves_untracked_project_polytoken_layer() {
+  local case_dir rc
+  case_dir=$(make_case polytoken-project-own)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=polytoken\n' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.polytoken"
+  printf '[{"name":"project-own","event":"stop","handler":{"bash":"/bin/true"}}]\n' \
+    > "$case_dir/wt/.polytoken/hooks.json"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "polytoken-project-own: teardown should succeed ($(cat "$case_dir/stderr"))"
+  assert_contains "$(cat "$case_dir/wt/.polytoken/hooks.json" 2>/dev/null)" "project-own" \
+    "polytoken-project-own: teardown deleted a hook layer firstmate did not generate"
+  pass "teardown never deletes a .polytoken hook layer firstmate did not generate"
+}
+
 test_teardown_leaves_polytoken_layer_for_other_harnesses() {
   local case_dir rc
   case_dir=$(make_case polytoken-other-harness)
   write_meta "$case_dir" local-only ship
   printf 'harness=claude\n' >> "$case_dir/state/task-x1.meta"
-  seed_polytoken_wiring "$case_dir/wt"
+  seed_polytoken_wiring "$case_dir"
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 0 "$rc" "polytoken-other-harness: teardown should succeed ($(cat "$case_dir/stderr"))"
@@ -4714,6 +4733,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_teardown_retires_polytoken_wiring_on_pool_return
 test_teardown_preserves_tracked_polytoken_layer
+test_teardown_preserves_untracked_project_polytoken_layer
 test_teardown_leaves_polytoken_layer_for_other_harnesses
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
