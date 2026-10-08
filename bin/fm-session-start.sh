@@ -700,6 +700,27 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
   }
 fi
+
+# A native fresh open reports whether it arrived through the enforced launcher
+# handoff.  This is evidence about this session only; it never claims that a
+# raw CLI/GUI entry was blocked, and it never substitutes for the launcher's
+# separately owned whole-pull receipt.  Context rebuilds and saved-session
+# sources are not fresh launches, so they print no new pull claim.
+case "$SESSION_SOURCE:$REEMIT" in
+  startup:0|new:0|:0)
+    subsection "STARTUP PULL"
+    PRELAUNCH_HOME=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P || true)
+    if [ "$LOCK_RC" -eq 0 ] && [ -n "$PRELAUNCH_HOME" ] \
+      && fm_prelaunch_handoff_authenticated "$STATE" "$PRELAUNCH_HOME" \
+        "${FM_PRELAUNCH_OWNER_PID:-}" "${FM_PRELAUNCH_TOKEN:-}"; then
+      printf 'STARTUP_PULL: verified launcher handoff; source %s -> %s (%s)\n' \
+        "$FM_PRELAUNCH_HANDOFF_SOURCE_COMMIT" "$FM_PRELAUNCH_HANDOFF_TARGET_COMMIT" \
+        "$FM_PRELAUNCH_HANDOFF_UPDATE_STATUS"
+    else
+      printf 'STARTUP_PULL: bypassed; no verified firstmate-start handoff reached this fresh session\n'
+    fi
+    ;;
+esac
 REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 

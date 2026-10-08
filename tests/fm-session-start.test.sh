@@ -2444,6 +2444,9 @@ EOF
 
   startup=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
   assert_contains "$startup" "SESSION START - $home" "true startup did not run the full digest"
+  assert_contains "$startup" "STARTUP PULL" "true startup omitted startup-pull receipt reporting"
+  assert_contains "$startup" "STARTUP_PULL: bypassed; no verified firstmate-start handoff reached this fresh session" \
+    "a raw fresh start did not disclose its startup-pull bypass"
   assert_present "$home/state/.session-start-agents-baseline" "true startup did not record an AGENTS baseline"
   baseline=$(cat "$home/state/.session-start-agents-baseline")
   expected_hash=$(hash_file_for_test "$root/AGENTS.md")
@@ -2451,6 +2454,8 @@ EOF
     || fail "true startup baseline did not record the original AGENTS hash: $baseline"
 
   compact_equal=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_not_contains "$compact_equal" "STARTUP PULL" \
+    "a compact re-emit claimed a new startup pull"
   assert_not_contains "$compact_equal" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
     "an unchanged AGENTS file was unnecessarily re-emitted"
   [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
@@ -2461,6 +2466,8 @@ FIRSTMATE_TEST_INSTRUCTION=updated
 The complete updated instruction must survive every stale rebuild.
 EOF
   resume_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source resume)
+  assert_not_contains "$resume_out" "STARTUP PULL" \
+    "a saved-session continuation claimed a new startup pull"
   assert_not_contains "$resume_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
     "a context-preserving continuation emitted a replacement contract"
   [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \

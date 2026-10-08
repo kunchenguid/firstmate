@@ -21,6 +21,10 @@
 # The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
 # the same library drives local and remote parent-targeted secondmate sync, so
 # there is one ff implementation, not several.
+# An independent primary additionally calls fm-prelaunch.sh guard-write before
+# its first fetch.  With no reservation this preserves the explicit update's
+# existing authority; a live startup reservation permits only its authenticated
+# launcher through the separate pinned-commit update action.
 #
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
@@ -84,6 +88,17 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 [ $# -eq 0 ] || { usage; exit 1; }
+
+ROOT_PHYSICAL=$(CDPATH='' cd -- "$FM_ROOT" 2>/dev/null && pwd -P || true)
+HOME_PHYSICAL=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P || true)
+if [ -n "$ROOT_PHYSICAL" ] && [ "$ROOT_PHYSICAL" = "$HOME_PHYSICAL" ] \
+  && [ ! -e "$ROOT_PHYSICAL/.fm-secondmate-home" ] \
+  && [ ! -L "$ROOT_PHYSICAL/.fm-secondmate-home" ] \
+  && [ ! -e "$ROOT_PHYSICAL/.fm-lab-home" ] \
+  && [ ! -L "$ROOT_PHYSICAL/.fm-lab-home" ] \
+  && [ "${NO_MISTAKES_GATE+x}" != x ]; then
+  bash "$SCRIPT_DIR/fm-prelaunch.sh" guard-write --home "$ROOT_PHYSICAL" >/dev/null
+fi
 
 # --- main firstmate repo ---------------------------------------------------
 

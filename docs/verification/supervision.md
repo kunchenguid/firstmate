@@ -6,6 +6,36 @@ This record supports current session-start, turn-end, watcher-continuity, superv
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
+## Fresh primary startup-pull coordination
+
+The portable startup-pull suite ran on 2026-10-08 against disposable standalone Git homes and real operating-system processes.
+It did not install into or drive the live primary home, and it is not native vendor lifecycle evidence.
+
+```sh
+tests/fm-prelaunch.test.sh
+```
+
+Observed result:
+
+```text
+ok - prelaunch: capabilities are read-only and expose a frozen closure plus exact fresh profiles
+ok - prelaunch: reservation validation, write guard, token binding and release are enforced
+ok - prelaunch: pinned preflight/update are local-only, count SHA movement, and disable Git hooks
+ok - prelaunch: filters, dirty state and wrong branches refuse without checkout mutation
+ok - prelaunch: active fleet, pending queue, session/publication locks and malformed state refuse
+ok - prelaunch: source origin/default identity remains bound after reservation
+ok - prelaunch: races, death, PID reuse and copied-token ancestry are fail-closed
+ok - prelaunch: attached child keeps occupancy and completes verified handoff after launcher death
+ok - prelaunch: aliases, secondmates, no-mistakes phases and linked workers are excluded
+ok - prelaunch: only the authenticated genuine child atomically exchanges into the session lock
+```
+
+The suite uses the executable JSON interface, local Git objects, a disabled-hook sentinel, concurrent launchers, process death, PID-generation tampering, physical-path aliases, an attached child that outlives its launcher, and a harness-shaped process that invokes the real `fm-lock.sh` handoff.
+It also proves that live or ambiguous dotfiles publication state blocks reservation and that dangling session/reservation lock symlinks fail closed.
+The companion dotfiles suite owns network budget, committed portable-object validation, backup/publication failure recovery, whole-pull evidence, and exactly-one-child assertions.
+Combined disposable-home acceptance must run both suites against the same committed Firstmate closure before enrollment.
+Real supported harness launches remain an opt-in acceptance obligation and must record the exact vendor command, version, child-visible sentinel, and handoff result; no native lifecycle evidence was fabricated by this portable run.
+
 ## Native session-start delivery
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
