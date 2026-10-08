@@ -100,13 +100,12 @@ stop_reply_listener() {
   return 1
 }
 
-# Block until this generation's capture has been applied. A live listener keeps
-# its claim across polls, so start is only launched when nothing owns the source.
+# Block until this generation's capture has been applied. A manual handle can
+# replace the registration while the old listener is exiting, so establish
+# readiness for the current registration rather than sampling process liveness.
 await_reply_result() { # <result-path>
   local result=$1 handled=${1%.result}.handled _
-  if [ "$(reply_owner)" != live ]; then
-    remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
-  fi
+  remote_env "$ROOT/bin/fm-procevent.sh" ensure-listening "$SID" >/dev/null 2>&1 &
   for _ in $(seq 1 800); do
     [ -s "$result" ] && [ -f "$handled" ] && return 0
     sleep 0.05
