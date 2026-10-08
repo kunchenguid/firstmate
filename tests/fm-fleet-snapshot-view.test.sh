@@ -1152,8 +1152,63 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+write_oversized_backlog() {  # <home> <rows>
+  local i
+  {
+    printf '## Queued\n'
+    for ((i = 1; i <= $2; i++)); do
+      printf -- '- [ ] queued-%s - Queued task %s with a long padded title xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (repo: alpha) (kind: ship) (since 2026-07-08)\n' "$i" "$i"
+    done
+  } > "$1/data/backlog.md"
+}
+
+test_contribution_input_survives_oversized_backlog() {
+  local home out rc
+  home=$(make_home contribution-oversized)
+  write_oversized_backlog "$home" 1500
+  fm_write_meta "$home/state/ship-task.meta" "kind=ship" "pr=https://github.com/kunchenguid/firstmate/pull/9"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --contribution-input 2>"$home/stderr")
+  rc=$?
+  assert_equals "$rc" 0 "contribution input over an oversized backlog must succeed: $(cat "$home/stderr")"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 1500
+      and (.tasks | map([.id, .pr.url])) == [["ship-task", "https://github.com/kunchenguid/firstmate/pull/9"]]
+  ' >/dev/null || fail "contribution input must carry the whole backlog and task pair"
+  # Linux caps one argv string at MAX_ARG_STRLEN (128KiB); stay above it so
+  # the case cannot go quietly vacuous as the row shape changes.
+  [ "$(printf '%s' "$out" | jq -c .backlog | wc -c)" -gt 131072 ] \
+    || fail "fixture backlog JSON must exceed 128KiB to exercise the argv cap"
+  pass "contribution input carries a backlog larger than one argv string"
+}
+
+test_contribution_input_render_failure_refuses() {
+  local home fakebin real_jq out rc
+  home=$(make_home contribution-render-failure)
+  write_oversized_backlog "$home" 2
+  fakebin=$(fm_fakebin "$home")
+  real_jq=$(command -v jq)
+  # Fault injection: fail only the jq call that consumes the staged backlog.
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" --slurpfile backlog "*) echo "jq: injected render failure" >&2; exit 2 ;;
+esac
+exec "$real_jq" "\$@"
+SH
+  chmod +x "$fakebin/jq"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --contribution-input 2>"$home/stderr")
+  rc=$?
+  assert_not_equals "$rc" 0 "contribution input must exit nonzero when its render fails"
+  assert_equals "$out" "" "a failed contribution input must print nothing on stdout"
+  assert_contains "$(cat "$home/stderr")" "fm-fleet-snapshot: contribution input staging failed" \
+    "a failed contribution input must name the failed step"
+  pass "contribution input refuses instead of reporting an empty success"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_contribution_input_survives_oversized_backlog
+test_contribution_input_render_failure_refuses
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
