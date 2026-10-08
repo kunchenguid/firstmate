@@ -155,7 +155,7 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found ready queued work, could not
 #                          read backlog readiness, or found an unsurfaced
-#                          captain-relevant status; daemon-backed afk emits every
+#                          captain-relevant status; a present state/.afk emits every
 #                          heartbeat. The backlog consumer owns readiness;
 #                          supervision rechecks current stops and worker capacity.
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
