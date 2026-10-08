@@ -115,8 +115,9 @@
 #     (fm-wake-drain.sh may run its redirected presentation body in a subshell
 #     on Bash 3.2); it skips the nested acquire so drain's bounded lock wait
 #     remains the deadline.
-#   fm-branch-outcome.sh list [--recent <n>]
+#   fm-branch-outcome.sh list [--recent <n> | --task <id>]
 #     Print the last n records (default 20), read or not.
+#     --task prints all records for that task, including acknowledged outcomes.
 #   fm-branch-outcome.sh lookup --seqs <n,...>
 #     Print the requested records in sequence order only when every sequence
 #     exists; validate the full store while holding its lock.
@@ -163,7 +164,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n> | --task <id>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -700,9 +701,14 @@ case "$CMD" in
     ;;
   list)
     RECENT=20
+    TASK=''
     if [ "${1:-}" = --recent ]; then
       RECENT=${2:-}
       case "$RECENT" in ''|*[!0-9]*|0) usage ;; esac
+      shift 2 || usage
+    elif [ "${1:-}" = --task ]; then
+      TASK=${2:-}
+      [ -n "$TASK" ] || usage
       shift 2 || usage
     fi
     [ "$#" -eq 0 ] || usage
@@ -713,7 +719,11 @@ case "$CMD" in
       exit 1
     fi
     if [ -s "$STORE" ]; then
-      tail -n "$RECENT" "$STORE"
+      if [ -n "$TASK" ]; then
+        jq -c --arg task "$TASK" 'select(.task == $task)' "$STORE"
+      else
+        tail -n "$RECENT" "$STORE"
+      fi
     fi
     fm_lock_release "$LOCK"
     ;;

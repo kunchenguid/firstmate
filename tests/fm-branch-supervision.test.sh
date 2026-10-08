@@ -57,6 +57,12 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"A no-mistakes ship's first \`done:\`, appended before any pull request exists"*"report it as verdict captain"*"never as a routine outcome"*) ;;
     *) fail "branch prompt lost the rule that a no-mistakes ship's pre-validation done is a captain outcome" ;;
   esac
+  # This pins the emitted agent interface; real-model interpretation is
+  # verified in a credentialed development lab, outside deterministic CI.
+  case "$out_a" in
+    *'Before reporting this step, run `bin/fm-branch-outcome.sh list --task <task-id>`'*"including captain outcomes MAIN has already acknowledged"*"even in a fresh conversation after a restart"*) ;;
+    *) fail "branch prompt does not require durable completion history after a restart" ;;
+  esac
   case "$out_a" in
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done [at=<epoch>]: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
@@ -1544,7 +1550,43 @@ WRAPPER
   pass "the away spend cap is rechecked under the task-set lock so concurrent spawns cannot both publish"
 }
 
+test_outcome_task_history_survives_acknowledgement() {
+  local home out cursor processed snapshot
+  home="$TMP_ROOT/task-history"
+  mkdir -p "$home/state"
+  # Seed the serialized outcome protocol with old completion history beyond
+  # the default recent window, followed by unrelated fleet outcomes.
+  python3 - "$home/state/branch-outcomes.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], "w") as store:
+    for seq in range(1, 26):
+        row = dict(seq=seq, epoch=1, task="handoff" if seq <= 2 else "other",
+                   wake="signal", verdict="captain" if seq == 1 else "routine",
+                   summary="waiting for validation go", silent=seq == 2)
+        store.write(json.dumps(row) + "\n")
+PY
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 25 || fail "history mark-read failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 || fail "history acknowledgement failed"
+  cursor=$(cat "$home/state/.branch-outcomes-cursor")
+  processed=$(cat "$home/state/.branch-outcomes-processed")
+  snapshot=$(cat "$home/state/branch-outcomes.jsonl")
+  out=$(cd "$TMP_ROOT" && FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --task handoff) \
+    || fail "task history could not be read from the active home"
+  printf '%s\n' "$out" | python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; assert [(r["seq"], r["task"], r["verdict"], r["silent"]) for r in rows] == [(1,"handoff","captain",False),(2,"handoff","routine",True)], rows' \
+    || fail "task history omitted acknowledged captain outcomes or included another task"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --task missing)" ] || fail "unknown task returned history"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = "$cursor" ] || fail "history read moved the delivery cursor"
+  [ "$(cat "$home/state/.branch-outcomes-processed")" = "$processed" ] || fail "history read changed acknowledgement"
+  [ "$(cat "$home/state/branch-outcomes.jsonl")" = "$snapshot" ] || fail "history read rewrote outcomes"
+  printf 'not-json\n' >> "$home/state/branch-outcomes.jsonl"
+  if FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --task handoff >/dev/null 2>&1; then
+    fail "task history accepted a malformed outcome store"
+  fi
+  pass "task history returns all matching outcomes across acknowledgement and recent-window limits without changing state"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
+test_outcome_task_history_survives_acknowledgement
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget
