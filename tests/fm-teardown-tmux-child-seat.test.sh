@@ -85,3 +85,47 @@ if tmux -S "$LAB/p" display-message -p -t '=primary:=fm-parent' '#{pane_id}' >/d
     || fail 'successful retry left the parent endpoint live'
 fi
 echo 'ok - forced teardown preserves wrong-socket children until owning-home cleanup'
+
+HOME_SOLO="$LAB/solo"
+"$ROOT/bin/fm-lab-home.sh" create "$HOME_SOLO" >/dev/null
+printf 'solo\n' > "$HOME_SOLO/.fm-secondmate-home"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$HOME_PARENT" > "$HOME_SOLO/.fm-secondmate-parent"
+printf -- '- solo - Lab mate. (home: %s; scope: tests; projects: ; added 2026-10-07)\n' "$HOME_SOLO" > "$HOME_PARENT/data/secondmates.md"
+tmux -f /dev/null -S "$LAB/c" new-session -d -s solo -n fm-solo -c "$HOME_SOLO" 'sleep 300'
+tmux -f /dev/null -S "$LAB/p" new-session -d -s decoy -n unrelated -c "$ROOT" 'sleep 300'
+"$ROOT/bin/fm-fleet-seats.sh" reserve solo --generation g-solo --harness claude --model pool-model-a --kind secondmate --holder-pid "$$" >/dev/null
+printf 'kind=secondmate\nmode=local-only\nbackend=tmux\nwindow=solo:fm-solo\nendpoint_task_id=solo\nworktree=%s\nproject=%s\nhome=%s\nspawn_gen=g-solo\nmodel=pool-model-a\n' "$HOME_SOLO" "$HOME_SOLO" "$HOME_SOLO" > "$HOME_PARENT/state/solo.meta"
+(umask 077; printf '{"placement":"local","backend":"tmux","target":"solo:fm-solo","spawn_gen":"g-solo"}\n' > "$LAB/solo.route")
+TMUX="$LAB/c,1,0" "$ROOT/bin/fm-fleet-seats.sh" dispatch solo --generation g-solo --route-file "$LAB/solo.route" >/dev/null
+rc=0
+"$ROOT/bin/fm-teardown.sh" solo --force > "$LAB/solo.stdout" 2> "$LAB/solo.stderr" || rc=$?
+[ "$rc" -ne 0 ] || fail 'top-level wrong-socket cleanup succeeded'
+[ "$(tmux -S "$LAB/c" display-message -p -t '=solo:=fm-solo' '#{pane_dead}')" = 0 ] || fail 'wrong-socket cleanup stopped the owning endpoint'
+[ -f "$HOME_PARENT/state/solo.meta" ] || fail 'wrong-socket cleanup erased the route'
+[ -d "$HOME_SOLO" ] || fail 'wrong-socket cleanup removed the home'
+grep -Fx 'spawn_gen=g-solo' "$HOME_PARENT/state/solo.meta" >/dev/null || fail 'wrong-socket cleanup erased the generation binding'
+ledger=$("$ROOT/bin/fm-fleet-seats.sh" show solo)
+[ "$(printf '%s' "$ledger" | jq -r '.incarnations[0].lifecycle')" = reserved ] || fail 'wrong-socket cleanup released the seat'
+TMUX="$LAB/c,1,0" "$ROOT/bin/fm-teardown.sh" solo --force > "$LAB/solo.retry.stdout" 2> "$LAB/solo.retry.stderr" || { cat "$LAB/solo.retry.stderr" >&2; fail 'owning-socket cleanup failed'; }
+[ ! -e "$HOME_SOLO" ] || fail 'verified owning-socket cleanup retained the home'
+ledger=$("$ROOT/bin/fm-fleet-seats.sh" show solo)
+[ "$(printf '%s' "$ledger" | jq -r '.incarnations[0].lifecycle')" = released ] || fail 'verified destruction retained the seat'
+echo 'ok - top-level cleanup requires owning-socket destruction evidence'
+
+"$ROOT/bin/fm-fleet-seats.sh" reserve remote --generation g-remote --harness claude --model pool-model-a --kind secondmate --holder-pid "$$" >/dev/null
+(umask 077; printf '{"placement":"remote","backend":"herdr","target":"fm-remote:p1","spawn_gen":"g-remote","operation":"g-remote","host":"remote-test","home":"/srv/mate","remote_root":"/srv/fm"}\n' > "$LAB/remote.route")
+"$ROOT/bin/fm-fleet-seats.sh" dispatch remote --generation g-remote --route-file "$LAB/remote.route" >/dev/null
+rc=0
+"$ROOT/bin/fm-fleet-seats.sh" release remote --generation g-remote --reason teardown > "$LAB/remote.stdout" 2>&1 || rc=$?
+[ "$rc" -eq 3 ] || fail 'remote cleanup accepted missing host evidence'
+for field in generation home target destroyed; do
+  (umask 077; jq -n --arg field "$field" '{task:"remote",generation:"g-remote",home:"/srv/mate",backend:"herdr",target:"fm-remote:p1",destroyed:true} | .[$field] = (if $field == "destroyed" then false else "wrong" end)' > "$LAB/retirement.json")
+  rc=0
+  "$ROOT/bin/fm-fleet-seats.sh" release remote --generation g-remote --reason teardown --response-file "$LAB/retirement.json" > "$LAB/remote.stdout" 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || fail "remote cleanup accepted mismatched $field evidence"
+done
+(umask 077; printf '{"task":"remote","generation":"g-remote","home":"/srv/mate","backend":"herdr","target":"fm-remote:p1","destroyed":true}\n' > "$LAB/retirement.json")
+"$ROOT/bin/fm-fleet-seats.sh" release remote --generation g-remote --reason teardown --response-file "$LAB/retirement.json" >/dev/null || fail 'remote cleanup refused matching host evidence'
+ledger=$("$ROOT/bin/fm-fleet-seats.sh" show remote)
+[ "$(printf '%s' "$ledger" | jq -r '.incarnations[0].lifecycle')" = released ] || fail 'verified remote retirement retained the seat'
+echo 'ok - remote cleanup requires generation-bound host destruction evidence'

@@ -16,16 +16,12 @@
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
-# Append --herdr-session <owned-fm-lab-name> for isolated validation.
-# Omission retains fm-remote; empty or other explicit names refuse.
-#
 # Remote placement ends here, but the second-mate agent runs only on a
 # session-provider backend whose server survives every SSH disconnection that
-# supervises it: herdr in the dedicated fm-remote session (or the selected
-# owned lab session), or rex in this home's own 2ndmate-<id>-<hash> session on
-# the host's personal rex server. Launch refuses any other selection rather
-# than reading this home's config/backend. The user's interactive sessions
-# remain for the user's work.
+# supervises it: herdr in the dedicated fm-remote session, or rex in this
+# home's own 2ndmate-<id>-<hash> session on the host's personal rex server.
+# Launch refuses any other selection rather than reading this home's
+# config/backend. The user's interactive sessions remain for the user's work.
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
 # The home's own workers keep their ordinary backend selection.
 # bin/fm-remote-doctor.sh owns that host's readiness for the selected backend.
@@ -107,20 +103,9 @@ REMOTE_HERDR_SESSION=fm-remote
 # cannot repair while it answers, so nothing this control plane runs may start
 # one: bin/fm-remote-doctor.sh --fix alone starts the persistent server.
 export FM_BACKEND_REX_NO_AUTOSTART=1
-if [ "$#" -ge 2 ]; then
-  session_flag_index=$(($# - 1))
-  if [ "${!session_flag_index}" = --herdr-session ]; then
-    REMOTE_HERDR_SESSION=${!#}
-    if ! [[ "$REMOTE_HERDR_SESSION" =~ ^fm-lab-[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
-      printf 'error: invalid remote Herdr lab session: %s; expected an owned fm-lab-* name\n' "$REMOTE_HERDR_SESSION" >&2
-      exit 1
-    fi
-    set -- "${@:1:$#-2}"
-  fi
-fi
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
 # Sourcing fm-wake-lib.sh through the libraries below creates "$FM_HOME/state",
@@ -930,7 +915,7 @@ cmd_update() {
 }
 
 cmd_retire() {
-  local id=$1 force=${2:-} recorded_server current_server
+  local id=$1 force=${2:-} recorded_server current_server generation target verdict
   validate_id "$id"
   validate_home "$id"
   [ -z "$force" ] || [ "$force" = --force ] || usage
@@ -942,19 +927,27 @@ cmd_retire() {
       die "cannot prove access to the recorded Rex server '$recorded_server'; restore access to the recorded Rex server on this account, then retry retirement; refusing block close and home deletion"
     fi
   fi
+  generation=$(fm_meta_get "$(meta_path "$id")" spawn_gen)
+  target=$REMOTE_ENDPOINT_TARGET
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" "$SCRIPT_DIR/fm-guard.sh" || true
   if [ -n "$force" ]; then
     FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
       FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
-      "$SCRIPT_DIR/fm-teardown.sh" "$id" --force
+      "$SCRIPT_DIR/fm-teardown.sh" "$id" --force || return "$?"
   else
     FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
       FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
-      "$SCRIPT_DIR/fm-teardown.sh" "$id"
+      "$SCRIPT_DIR/fm-teardown.sh" "$id" || return "$?"
   fi
+  fm_backend_source "$REMOTE_ENDPOINT_BACKEND" || return 1
+  verdict=$(fm_control_endpoint_absence_verdict "$REMOTE_ENDPOINT_BACKEND" "$target" "$REMOTE_ENDPOINT_META")
+  [ "${verdict%%$'\t'*}" = gone ] || return 1
+  printf 'seat_retirement={"task":%s,"generation":%s,"home":%s,"backend":%s,"target":%s,"destroyed":true}\n' \
+    "$(json_str "$id")" "$(json_str "$generation")" "$(json_str "$TARGET_HOME")" \
+    "$(json_str "$REMOTE_ENDPOINT_BACKEND")" "$(json_str "$target")"
 }
 
 case "${1:-}" in
