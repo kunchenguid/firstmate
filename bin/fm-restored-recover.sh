@@ -186,7 +186,7 @@ restored_cause() {  # <backend> <target> <worktree-real>
 
 relaunch_note() {  # <cause> <worktree>
   printf '%s\n' \
-    "The machine restarted, and your terminal came back with your previous session resumed but $1." \
+    "Your terminal was found with your previous session $1." \
     "Firstmate stopped that copy without answering any prompt and relaunched you in your recorded worktree $2." \
     "Every committed and uncommitted change there is exactly as you left it." \
     "Re-read these instructions, run git status and git log to see where the work stands, and continue from there."

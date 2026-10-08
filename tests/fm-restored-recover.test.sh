@@ -307,7 +307,7 @@ done
 pass "a worker the sweep cannot relaunch is reported with its cause and keeps its agent and its work"
 
 # A gate-parked worker in its worktree is stopped without answering the gate
-# and relaunched in place through the ordinary relaunch, with the restart
+# and relaunched in place through the ordinary relaunch, with the cause
 # explained in the instructions the replacement reads.
 new_task "$OK_ID" wt "$LAB/imports-gate.txt"
 OK_PANE=$(tmux display-message -p -t "$SESSION:fm-$OK_ID" '#{pane_id}')
@@ -319,8 +319,8 @@ $OUT" ;;
 esac
 grep -Fqx 'exit_result=stopped-at-startup-gate' "$LAB/home/state/$OK_ID.control-relaunch" \
   || fail "the relaunch did not stop the old agent through the startup-gate path"
-grep -Fq 'The machine restarted, and your terminal came back' "$LAB/home/data/$OK_ID/brief.md" \
-  || fail "the replacement's instructions do not explain the restart"
+grep -Fq 'Your terminal was found with your previous session parked on the Claude external CLAUDE.md imports prompt' "$LAB/home/data/$OK_ID/brief.md" \
+  || fail "the replacement's instructions do not explain why it was relaunched"
 wait_for_state "$SESSION:fm-$OK_ID" alive || fail "the relaunched agent is not running"
 [ "$(tmux display-message -p -t "$SESSION:fm-$OK_ID" '#{pane_id}')" = "$OK_PANE" ] \
   || fail "the relaunch replaced the endpoint instead of reusing it"
@@ -330,7 +330,7 @@ OUT=$(PATH="$LAB/bin:$PATH" run_recover --dry-run)
 case "$OUT" in
   *"$OK_ID"*) fail "a relaunched worker is flagged again: $OUT" ;;
 esac
-pass "a gate-parked worker is relaunched in its worktree with the restart explained, and is healthy afterwards"
+pass "a gate-parked worker is relaunched in its worktree with the cause explained, and is healthy afterwards"
 
 # --- an endpoint that is not readable yet --------------------------------
 #
