@@ -1237,7 +1237,8 @@ EOF
     record="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}/$task/task.json"
     if [ ! -f "$record" ] || [ -L "$record" ] || ! jq -e --arg task "$task" '
       .id == $task and .state == "archived" and
-      (.hold == null or .hold.kind != "captain")
+      (.hold == null or .hold.kind != "captain") and
+      (.blocked_by | type == "array" and length == 0)
     ' "$record" >/dev/null 2>&1; then
       echo "REFUSED: task $task lacks an exact non-captain archived disposition; preserving its presentation state" >&2
       [ "$own_lock" = 0 ] || fm_lock_release "$lock"

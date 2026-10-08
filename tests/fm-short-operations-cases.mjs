@@ -562,7 +562,7 @@ try {
   const archivedCleanupPath=path.join(replayState,archivedTask+'.cleanup.json'),archivedCleanup=JSON.parse(fs.readFileSync(archivedCleanupPath));
   archivedCleanup.phases={pane_close:{state:'confirmed',reason_code:'exact-pane-absent'},directory_return:{state:'retained',reason_code:'uncommitted-content'},record_close:{state:'confirmed',reason_code:'backlog-paired-resource-record-retained'}};
   fs.writeFileSync(archivedCleanupPath,JSON.stringify(archivedCleanup));
-  const archivedCli=()=>JSON.parse(execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'settle-cleanup',archivedSubmission.id,'0'],{encoding:'utf8',env:{...replayEnv,PATH:process.env.PATH}}));
+  const archivedCli=(extra={})=>JSON.parse(execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'settle-cleanup',archivedSubmission.id,'0'],{encoding:'utf8',env:{...replayEnv,PATH:process.env.PATH,...extra}}));
   assert.throws(archivedCli,/already absent exact endpoint/,'present endpoint did not refuse partial cleanup recovery');
   const archivedTaskPath=path.join(replayData,archivedTask,'task.json'),archivedTaskBytes=fs.readFileSync(archivedTaskPath,'utf8');
   fs.writeFileSync(archivedTaskPath,JSON.stringify({...JSON.parse(archivedTaskBytes),state:'in_flight'}));assert.throws(archivedCli,/non-captain archived task/);fs.writeFileSync(archivedTaskPath,archivedTaskBytes);
@@ -572,6 +572,21 @@ try {
   const archivedMetaBytes=fs.readFileSync(archivedMetaPath,'utf8');
   fs.writeFileSync(archivedMetaPath,archivedMetaBytes.replace(archivedGeneration,'wrong-generation'));assert.throws(archivedCli,/task binding changed/);fs.writeFileSync(archivedMetaPath,archivedMetaBytes);
   execFileSync(path.join(recoveryBin,'herdr'),['pane','close',archivedEndpoint.root_pane.pane_id,'--session','fixture'],{env:{...replayEnv,FM_HERDR_LOG:path.join(recoveryBin,'herdr.log')}});
+  const archivedHerdrReal=path.join(recoveryBin,'herdr-real'),archivedResurrectionCount=path.join(recoveryRoot,'resurrection-count');
+  fs.renameSync(path.join(recoveryBin,'herdr'),archivedHerdrReal);
+  fs.writeFileSync(path.join(recoveryBin,'herdr'),`#!/usr/bin/env bash
+set -eu
+if [ "\${1:-} \${2:-}" = "pane get" ] && [ "\${3:-}" = "\${FM_RESURRECT_PANE:-}" ] && [ -n "\${FM_RESURRECT_COUNT:-}" ]; then
+  count=$(cat "$FM_RESURRECT_COUNT" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\\n' "$count" > "$FM_RESURRECT_COUNT"
+  if [ "$count" -eq 3 ]; then jq --arg p "$FM_RESURRECT_PANE" '.tabs += [{tab_id:"resurrected-tab",label:"resurrected",workspace_id:"resurrected-workspace",pane_id:$p}]' "$FM_FAKE_HERDR_STATE" > "$FM_FAKE_HERDR_STATE.tmp" && mv "$FM_FAKE_HERDR_STATE.tmp" "$FM_FAKE_HERDR_STATE"; fi
+fi
+exec ${JSON.stringify(archivedHerdrReal)} "$@"
+`,{mode:0o755});
+  const preResurrectionCloseCalls=closeCount(archivedEndpoint.root_pane.pane_id);
+  assert.throws(()=>archivedCli({FM_RESURRECT_PANE:archivedEndpoint.root_pane.pane_id,FM_RESURRECT_COUNT:archivedResurrectionCount}),/requires the exact endpoint to remain absent/,'reappearing endpoint was closed by bookkeeping-only recovery');
+  assert.equal(closeCount(archivedEndpoint.root_pane.pane_id),preResurrectionCloseCalls,'reappearing endpoint reached the close owner');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(recoveryRoot,'state.json'))).tabs.some(tab=>tab.pane_id===archivedEndpoint.root_pane.pane_id),true,'resurrection fixture did not make the endpoint present');
+  execFileSync(path.join(recoveryBin,'herdr'),['pane','close',archivedEndpoint.root_pane.pane_id,'--session','fixture'],{env:replayEnv});
   const archivedCloseCalls=closeCount(archivedEndpoint.root_pane.pane_id),archivedResultBytes=fs.readFileSync(path.join(archivedDir,'result.json'),'utf8');
   const archivedSettled=archivedCli();
   assert.equal(archivedSettled.state,'completed');assert.equal(archivedSettled.result,'blocked');assert.equal(archivedSettled.settlement,'dead-owner-cleanup-readback');

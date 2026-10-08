@@ -364,10 +364,11 @@ function settleCleanupLocked(home,request,started,index,step) {
   return null;
 }
 
-// MAIN may finish the exact remaining bookkeeping for an archived cleanup
-// that already closed its bound endpoint and retained its copy before a status
-// presentation refusal. The original attempt remains failed and immutable;
-// this path never classifies an effect-bearing attempt as no-effect.
+// MAIN may finish exact remaining bookkeeping when an archived historical
+// attempt has the legacy runner-owned effect marker and status refusal while
+// independent current owner evidence proves its endpoint absent and copy
+// retained. The original attempt remains failed and immutable; this path never
+// classifies an effect-bearing attempt as no-effect.
 function archivedStatusCleanupOperationContext(home,id,index) {
   primaryOwner(home);
   if(process.env.FM_SUPERVISION_ACTOR&&process.env.FM_SUPERVISION_ACTOR!=='main') fail('cleanup recovery belongs to MAIN');

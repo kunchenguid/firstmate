@@ -378,6 +378,28 @@ test_archived_retirement_makes_only_presented_non_captain_task_decisions_moot() 
   assert_grep 'not a presented blocker proven to predate' "$err" 'post-archive decision refusal was not explicit'
   assert_present "$state/$id.status" 'post-archive decision refusal removed status history'
 
+  id=archived-cross-task
+  register_task_fixture "$state" "$id"
+  prime_cursor "$state" "$state/$id.status"
+  printf 'blocked [key=upstream]: waiting for sibling task output\n' >> "$state/$id.status"
+  backdate_status "$state/$id.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" \
+    hold "$id" --kind blocker --reason 'waiting for sibling task' >/dev/null
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" \
+    block "$id" --by sibling-task >/dev/null
+  append_wake "$state" signal "$id.status" "signal: $id.status" || fail 'cross-task blocker signal failed'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-tasks-axi.sh" archive "$id" >/dev/null
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$2" "$3" --require-archived
+  ' _ "$ROOT" "$state" "$id" 2>"$err"; then
+    fail 'archived retirement erased a cross-task blocker'
+  fi
+  assert_grep 'lacks an exact non-captain archived disposition' "$err" 'cross-task blocker refusal was not explicit'
+  assert_present "$state/$id.status" 'cross-task blocker refusal removed status history'
+
   for id in active-decision archived-captain; do
     register_task_fixture "$state" "$id"
     prime_cursor "$state" "$state/$id.status"

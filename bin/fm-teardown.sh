@@ -444,6 +444,10 @@ teardown_completed_task() (
     present|dead) ;;
     *) echo 'REFUSED: exact endpoint cannot be resolved' >&2; exit 1 ;;
   esac
+  if [ -n "${FM_SHORT_CLEANUP_RECOVERY:-}" ] && [ "$presence" != dead ]; then
+    echo 'REFUSED: cleanup recovery requires the exact endpoint to remain absent' >&2
+    exit 1
+  fi
   # Hold presentation serialization from admission through final retirement:
   # a later append must become a fresh log after cleanup, never an unreceipted
   # post-effect refusal inside this operation.
