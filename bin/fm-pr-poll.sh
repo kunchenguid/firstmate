@@ -5,7 +5,9 @@
 # state: "merged" for a merged change and "closed" for one definitively closed
 # without merging (GitHub CLOSED, GitLab closed, Gerrit ABANDONED). It stays
 # silent on every other state and on every error, so a failed lookup can never
-# be read as a terminal result. The provider-tagged identity is data in the sidecar and is never
+# be read as a terminal result. Whether a "closed" line is terminal is
+# bin/fm-watch.sh's decision, not this program's: it acts on one only for a
+# kept merge watch. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, and gerrit-axi for Gerrit, so an upstream checkout needs no extra

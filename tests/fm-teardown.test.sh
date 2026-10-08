@@ -802,12 +802,15 @@ test_teardown_forge_read_error_keeps_no_watch() {
   seed_ship_pr_poll "$case_dir" https://github.com/o/r/pull/7
   write_forge_state_gh_stub "$case_dir"
 
-  run_teardown "$case_dir" --force > /dev/null
+  run_teardown "$case_dir" --force > "$case_dir/stdout"
+  assert_grep "merge watch not kept: https://github.com/o/r/pull/7 (forge state unreadable)" \
+    "$case_dir/stdout" \
+    "teardown on a failed forge read printed no not-kept line"
   [ ! -e "$case_dir/state/task-x1.merge-watch" ] \
     || fail "teardown published a merge watch on a failed forge read"
   [ ! -e "$case_dir/state/task-x1.check.sh" ] \
     || fail "teardown on a failed forge read kept the armed poll"
-  pass "a forge read error during teardown keeps no watch and still cleans up"
+  pass "a forge read error during teardown keeps no watch, says so, and still cleans up"
 }
 
 test_local_only_fork_remote_allows() {

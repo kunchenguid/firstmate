@@ -2655,6 +2655,89 @@ test_merge_watch_reports_upward_from_a_secondmate_home() {
   pass "a kept merge watch reports its merge upward from a secondmate home like a live task"
 }
 
+test_closed_result_is_terminal_only_for_a_merge_watch() {
+  local dir state rc url task_before
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case closed-scope)
+  state="$dir/home/state"
+  # One live task's poll and one kept merge watch on the same closed reading:
+  # the task has no watch record, so its poll must stay armed and silent while
+  # the watch reports and retires.
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  seed_merge_watch "$dir" watch-a "$url"
+  seed_canonical_poll "$dir" watch-a "$url"
+  add_stop_custom_check "$dir"
+  task_before=$(poll_artifact_snapshot "$state" task-a)
+
+  set +e
+  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "closed-scope watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*watch-a.check.sh:*closed) ;;
+    *) fail "the kept watch's closed result was not delivered: $(cat "$dir/watch.out")" ;;
+  esac
+  assert_grep "check: PR closed without merging: watch-a $url" "$state/.wake-queue" \
+    "closed-scope: kept watch did not queue the closed outcome"
+  assert_poll_absent "$state" watch-a
+  assert_merge_watch_absent "$state" watch-a
+  [ "$(poll_artifact_snapshot "$state" task-a)" = "$task_before" ] \
+    || fail "closed-scope: a live task's poll was retired by a closed reading"
+  [ -f "$state/task-a.meta" ] || fail "closed-scope: a live task lost its record"
+  ! grep -F 'task-a.check.sh' "$dir/watch.out" >/dev/null \
+    || fail "closed-scope: a live task's closed reading produced a wake"
+  ! grep -F 'task-a' "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "closed-scope: a live task's closed reading queued an outcome"
+  [ ! -e "$state/task-a.pr-poll-closed-notified" ] \
+    || fail "closed-scope: a live task recorded a closed notification"
+  pass "a closed reading is terminal for a kept merge watch and silent for a live task"
+}
+
+test_merge_watch_rearms_after_template_change() {
+  local dir state rc url out
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-watch-rearm)
+  state="$dir/home/state"
+  seed_merge_watch "$dir" watch-a "$url"
+  seed_canonical_poll "$dir" watch-a "$url"
+
+  # Template drift: a check whose bytes differ from bin/fm-pr-poll.sh is
+  # unauthenticated, so the watcher rejects it before it can ever emit.
+  printf '\n' >> "$state/watch-a.check.sh"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "stale-template watcher failed: $(cat "$dir/watch-1.err")"
+  grep -F 'rejected unauthenticated state checks' "$dir/watch-1.out" >/dev/null \
+    || fail "a template-stale watch check ran instead of being rejected: $(cat "$dir/watch-1.out")"
+  fm_pr_merge_watch_valid "$state" watch-a \
+    || fail "the rejection damaged the merge-watch record"
+  ack_watcher_cycle "$state" || fail "stale-template rejection acknowledgement failed"
+
+  # No task meta exists, so re-arm binds to the watch record itself.
+  run_check_entry "$dir" watch-a "$url" > "$dir/rearm.out" 2> "$dir/rearm.err" \
+    || fail "merge-watch re-arm refused: $(cat "$dir/rearm.err")"
+  grep -F 'armed: state/watch-a.check.sh' "$dir/rearm.out" >/dev/null \
+    || fail "merge-watch re-arm did not report arming: $(cat "$dir/rearm.out")"
+  fm_pr_poll_artifacts_valid "$state" watch-a "$POLL" \
+    || fail "re-armed watch poll did not validate against the template"
+
+  # A URL the watch record does not carry is refused, naming both.
+  set +e
+  out=$(run_check_entry "$dir" watch-a https://github.com/o/r/pull/2 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "re-arm accepted a URL the watch record does not carry"
+  printf '%s\n' "$out" | grep -F 'https://github.com/o/r/pull/2' >/dev/null \
+    || fail "re-arm refusal did not name the supplied URL: $out"
+  printf '%s\n' "$out" | grep -F 'https://github.com/o/r/pull/1' >/dev/null \
+    || fail "re-arm refusal did not name the record's URL: $out"
+  pass "a kept merge watch re-arms from its record after a template change and refuses a different URL"
+}
+
 test_retirement_crash_recovery() {
   local dir state rc raw_count drain_count historical_poll
 
@@ -2791,12 +2874,15 @@ test_external_merge_transition_retires_only_terminal_poll() {
   add_stop_custom_check "$dir"
   before=$(poll_artifact_snapshot "$state" task-a)
 
-  for label in open-green open-red forge-error malformed; do
+  for label in open-green open-red closed-unmerged forge-error malformed; do
     rm -f "$state/.last-check"
     set +e
     case "$label" in
       open-green|open-red)
         FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
+        ;;
+      closed-unmerged)
+        FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
         ;;
       forge-error)
         FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
@@ -2813,20 +2899,6 @@ test_external_merge_transition_retires_only_terminal_poll() {
     ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
   done
 
-  # A close without merging is terminal too: the poll reports the distinct
-  # closed result and retires, rather than looping silently forever.
-  rm -f "$state/.last-check"
-  set +e
-  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/closed.out" 2> "$dir/closed.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "external closed transition failed: $(cat "$dir/closed.err")"
-  case "$(cat "$dir/closed.out")" in check:*task-a.check.sh:*closed) ;; *) fail "external close did not deliver its notification: $(cat "$dir/closed.out")" ;; esac
-  assert_poll_absent "$state" task-a
-  [ -f "$state/task-a.pr-poll-retirement" ] && fail "retired closed poll left a retirement receipt"
-  ack_watcher_cycle "$state" || fail "external close acknowledgement failed"
-  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/19
-
   rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged.out" 2> "$dir/merged.err"
@@ -2835,7 +2907,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
   [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
   case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
   assert_poll_absent "$state" task-a
-  pass "open/red, malformed, and forge errors remain armed while exact merged and closed transitions retire the poll"
+  pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
 }
 
 test_retirement_refuses_replacement_and_nonterminal_results() {
@@ -3635,6 +3707,8 @@ test_merge_watch_reports_merge_and_retires
 test_merge_watch_reports_closed_and_retires
 test_merge_watch_read_error_stays_silent
 test_merge_watch_reports_upward_from_a_secondmate_home
+test_closed_result_is_terminal_only_for_a_merge_watch
+test_merge_watch_rearms_after_template_change
 test_retirement_crash_recovery
 test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results

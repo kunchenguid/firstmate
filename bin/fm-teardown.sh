@@ -85,6 +85,9 @@
 # forge: its merge poll stays armed as a home-owned merge watch bound to
 # state/<id>.merge-watch (keep_merge_watch_pr_poll_artifacts below), so the
 # watcher still reports the merge or the close after this record is gone.
+# When a recorded-PR ship task ends its cleanup with no watch kept, teardown
+# prints "merge watch not kept" with the reason so a flaky forge read is
+# visible rather than silent.
 # That volatile state includes the watcher's per-task .seen-* signature for
 # the task's turn-ended file, minted by bin/fm-wake-lib.sh (the .seen-*
 # signature for its status file and its .hb-surfaced- heartbeat marker are
@@ -1478,6 +1481,15 @@ remove_pr_poll_artifacts() {
 # poll that was never armed or fails its own validation, a non-ship task, or a
 # publish failure - falls through to full removal; keeping a watch never
 # refuses or fails the cleanup.
+# MERGE_WATCH_NOT_KEPT_URL and MERGE_WATCH_NOT_KEPT_REASON let the caller
+# report why a recorded-PR ship task ended its cleanup with no watch: a flaky
+# forge read is invisible without a line.
+MERGE_WATCH_NOT_KEPT_URL=
+MERGE_WATCH_NOT_KEPT_REASON=
+keep_merge_watch_not_kept() {  # <reason>
+  MERGE_WATCH_NOT_KEPT_REASON=$1
+  return 1
+}
 keep_merge_watch_pr_poll_artifacts() {  # <state> <id>
   local state_dir=$1 id=$2
   local provider url host path number recorded_pr
@@ -1488,7 +1500,9 @@ keep_merge_watch_pr_poll_artifacts() {  # <state> <id>
   # into a poll and cannot anchor one.
   recorded_pr=$(grep '^pr=' "$state_dir/$id.meta" | tail -1 | cut -d= -f2- || true)
   [ -n "$recorded_pr" ] || return 1
-  fm_pr_url_parse "$recorded_pr" || return 1
+  MERGE_WATCH_NOT_KEPT_URL=$recorded_pr
+  fm_pr_url_parse "$recorded_pr" \
+    || keep_merge_watch_not_kept "recorded pr= is not a canonical PR URL" || return 1
   provider=$FM_PR_PROVIDER
   url=$FM_PR_URL
   host=$FM_PR_HOST
@@ -1496,45 +1510,58 @@ keep_merge_watch_pr_poll_artifacts() {  # <state> <id>
   number=$FM_PR_NUMBER
   # The same unsafe-artifact preflight the full-removal path enforces; a
   # refusal there must refuse here identically, before any forge read.
-  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
+  validate_pr_poll_cleanup "$state_dir" "$id" \
+    || keep_merge_watch_not_kept "unsafe poll artifacts" || return 1
   # A pending retirement receipt owns the artifacts and finishes their removal
   # here first, exactly as the full-removal path does; a removed poll leaves
   # nothing to keep.
-  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+    || keep_merge_watch_not_kept "pending poll retirement could not be recovered" || return 1
   # Only an unambiguously open live reading keeps the watch.
   case "$provider" in
     github)
-      fm_pr_github_read_record "${path%%/*}" "${path#*/}" "$number" || return 1
-      [ "$FM_PR_RECORD_STATE" = OPEN ] || return 1
+      fm_pr_github_read_record "${path%%/*}" "${path#*/}" "$number" \
+        || keep_merge_watch_not_kept "forge state unreadable" || return 1
+      [ "$FM_PR_RECORD_STATE" = OPEN ] \
+        || keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1
       ;;
     gitlab)
-      fm_pr_gitlab_read_record "$host" "$path" "$number" || return 1
-      [ "$FM_PR_RECORD_STATE" = opened ] || return 1
+      fm_pr_gitlab_read_record "$host" "$path" "$number" \
+        || keep_merge_watch_not_kept "forge state unreadable" || return 1
+      [ "$FM_PR_RECORD_STATE" = opened ] \
+        || keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1
       ;;
     gerrit)
-      fm_pr_gerrit_read_record "$host" "$number" || return 1
-      [ "$FM_PR_RECORD_STATE" = NEW ] || return 1
+      fm_pr_gerrit_read_record "$host" "$number" \
+        || keep_merge_watch_not_kept "forge state unreadable" || return 1
+      [ "$FM_PR_RECORD_STATE" = NEW ] \
+        || keep_merge_watch_not_kept "PR state is $FM_PR_RECORD_STATE, not open" || return 1
       ;;
-    *) return 1 ;;
+    *) keep_merge_watch_not_kept "unsupported PR provider" || return 1 ;;
   esac
   # The poll must already be armed and bound to the recorded PR; a missing or
   # invalid poll is never re-armed here.
-  fm_pr_poll_artifacts_valid "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
-  [ "$FM_PR_DATA_URL" = "$url" ] || return 1
+  fm_pr_poll_artifacts_valid "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+    || keep_merge_watch_not_kept "merge poll absent or invalid" || return 1
+  [ "$FM_PR_DATA_URL" = "$url" ] \
+    || keep_merge_watch_not_kept "armed poll is bound to $FM_PR_DATA_URL" || return 1
   # A <id>.merge-watch already present at this moment is residue from a
   # previous incarnation of the id: the task meta still exists, so it - not
   # any watch record - is the poll's authoritative binding, and the record can
   # never be live here. Clear it so a reused id does not lose its watch to the
   # publish's refuse-if-exists invariant.
-  fm_pr_merge_watch_remove "$state_dir" "$id" || return 1
+  fm_pr_merge_watch_remove "$state_dir" "$id" \
+    || keep_merge_watch_not_kept "stale merge-watch record could not be removed" || return 1
   # Publish the watch record before removing anything, so a failure here falls
   # through to today's full removal rather than leaving a half-kept watch.
   fm_pr_merge_watch_publish "$state_dir" "$id" \
-    "$provider" "$url" "$host" "$path" "$number" || return 1
+    "$provider" "$url" "$host" "$path" "$number" \
+    || keep_merge_watch_not_kept "merge-watch record could not be published" || return 1
   if ! fm_pr_poll_merge_notified_remove "$state_dir" "$id" \
     || ! fm_pr_poll_closed_notified_remove "$state_dir" "$id" \
     || ! rm -f "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; then
     fm_pr_merge_watch_remove "$state_dir" "$id" || true
+    keep_merge_watch_not_kept "superseded record cleanup failed"
     return 1
   fi
   printf 'merge watch kept: %s\n' "$url"
@@ -3846,8 +3873,12 @@ fi
 # task path can keep one: the secondmate child sweep above retires a whole
 # home, where a watch would point into a deleted home. A watch that cannot be
 # kept falls through to today's full removal and never fails the cleanup.
-keep_merge_watch_pr_poll_artifacts "$STATE" "$ID" \
-  || { remove_pr_poll_artifacts "$STATE" "$ID" || exit 1; }
+if ! keep_merge_watch_pr_poll_artifacts "$STATE" "$ID"; then
+  [ -z "$MERGE_WATCH_NOT_KEPT_REASON" ] \
+    || printf 'merge watch not kept: %s (%s)\n' \
+      "$MERGE_WATCH_NOT_KEPT_URL" "$MERGE_WATCH_NOT_KEPT_REASON"
+  remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.

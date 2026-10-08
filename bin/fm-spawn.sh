@@ -1590,6 +1590,18 @@ fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
 }
+# A live merge watch (bin/fm-pr-lib.sh owns the record) outlives the task meta
+# it replaced: the armed poll still binds to the watch's canonical PR, so an
+# id carrying one must never be taken over by a new task or silently drop the
+# watch. Refuse before any task state is created.
+if [ -e "$STATE/$ID.merge-watch" ] || [ -L "$STATE/$ID.merge-watch" ]; then
+  if fm_pr_merge_watch_valid "$STATE" "$ID"; then
+    echo "error: task id $ID is bound to a live merge watch on $FM_PR_WATCH_URL (state/$ID.merge-watch); retire or resolve that watch before reusing the id" >&2
+  else
+    echo "error: task id $ID carries an unreadable merge-watch record (state/$ID.merge-watch); refusing to reuse the id - inspect or remove the record, then retry" >&2
+  fi
+  exit 1
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
   BRANCH="$BRANCH_PREFIX$ID"
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then

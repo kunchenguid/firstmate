@@ -192,7 +192,9 @@ WATCH_HOME_EXISTED=0
 # Single owner of durable merge-outcome publication, shared with
 # bin/fm-pr-merge.sh so self and poll origins use the same role-routed outcome.
 # The watcher still owns immediate delivery of its actionable poll result and
-# poll retirement.
+# poll retirement. A poll's "closed" result is actionable only for a kept
+# merge watch (a valid state/<id>.merge-watch record); an ordinary task's poll
+# swallows it and stays armed, exactly as it did before "closed" existed.
 # This library is a canonical lint root in its own right, and it reaches the
 # wake queue, PR identity, and secondmate parent libraries. Keep it an analysis
 # boundary here for the same reason as the transition and inbox owners above and
@@ -2907,6 +2909,15 @@ EOF
           wake "$reason"
         fi
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = closed ]; then
+          if ! fm_pr_merge_watch_valid "$STATE" "$id"; then
+            # A close without merging is terminal only for a kept merge watch.
+            # An ordinary live task's poll stays armed and silent, exactly as
+            # before, and the result must be swallowed here - falling through
+            # to the generic wake tail would wake firstmate every interval.
+            pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
+            continue
+          fi
           if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
             # Same residue rule as the merged branch above: a terminal poll
             # armed on a secondmate belongs to a task in the mate's own home,
