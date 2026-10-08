@@ -86,6 +86,11 @@
 #   - A run whose pipeline executed outside the task's own copy of the
 #     repository, such as a scratch clone raising a PR elsewhere, does not
 #     resolve here, and that row reports its run as unestablished.
+#   - When two live no-mistakes runs share one branch, bin/fm-nm-run-lib.sh
+#     reports that neither has exclusive authority rather than picking one, and
+#     this command carries that answer through as a failed collection with the
+#     library's own reason, because choosing between them is not a read-only
+#     view's decision.
 #   - Crew state and endpoint liveness are whatever bin/fm-fleet-snapshot.sh
 #     published, read at ITS observation time rather than at draw time.
 #
