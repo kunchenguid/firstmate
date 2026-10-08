@@ -25,6 +25,17 @@
 # teardown use that mode so this side-band publication can never change their
 # result. Without it, failures are printed and returned to the direct caller
 # for tests and diagnostics.
+#
+# A worker that misses its deadline is killed mid-attempt, and one that dies
+# otherwise may not have run its own cleanup either, so after any worker
+# failure the parent removes that attempt's temporary files itself. Each worker
+# tags its temporary names with its parent's pid, so a concurrent attempt's
+# files are never touched. A missed deadline is also recorded in
+# state/.home-summary-refresh.backoff: one line holding the count of
+# consecutive deadline misses, with the file's mtime marking the latest one. A
+# successful publication removes the record. The watcher reads it to back off
+# its own refresh triggers (bin/fm-watch.sh home_summary_refresh_detached);
+# session start, spawn, and teardown ignore it.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +48,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 LEDGER="$STATE/home-summary.json"
 ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
+BACKOFF_RECORD="$STATE/.home-summary-refresh.backoff"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
@@ -47,6 +59,10 @@ HOME_SUMMARY_FAILURE_STAMP=
 HOME_SUMMARY_TMP=
 HOME_SUMMARY_ERR_TMP=
 HOME_SUMMARY_LOCK_HELD=0
+HOME_SUMMARY_ATTEMPT=${FM_HOME_SUMMARY_ATTEMPT:-$$}
+case "$HOME_SUMMARY_ATTEMPT" in
+  ''|*[!0-9]*) HOME_SUMMARY_ATTEMPT=$$ ;;
+esac
 
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
@@ -115,11 +131,11 @@ home_summary_refresh_once() {
     fm_lock_acquire_wait "$REFRESH_LOCK"
   fi
   HOME_SUMMARY_LOCK_HELD=1
-  HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
+  HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.$HOME_SUMMARY_ATTEMPT.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
     return 1
   }
-  HOME_SUMMARY_ERR_TMP=$(umask 077; mktemp "$STATE/.home-summary-error.XXXXXX") || {
+  HOME_SUMMARY_ERR_TMP=$(umask 077; mktemp "$STATE/.home-summary-error.$HOME_SUMMARY_ATTEMPT.XXXXXX") || {
     home_summary_fail "could not create a producer diagnostic file in $STATE"
     return 1
   }
@@ -182,6 +198,7 @@ home_summary_refresh_once() {
     return 1
   fi
   HOME_SUMMARY_TMP=
+  rm -f -- "$BACKOFF_RECORD" 2>/dev/null || true
   fm_lock_release "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=0
   trap - EXIT HUP INT TERM
@@ -208,6 +225,26 @@ home_summary_log_failure() {
   fi
 }
 
+# Parent side of a worker failure: a killed worker's EXIT trap may never have
+# run, so remove the temporary files this attempt tagged.
+home_summary_reap_attempt() {
+  rm -f -- "$STATE/.home-summary.json.$$."* "$STATE/.home-summary-error.$$."* \
+    2>/dev/null || true
+}
+
+home_summary_record_deadline_miss() {
+  local misses tmp
+  misses=$(head -n 1 "$BACKOFF_RECORD" 2>/dev/null) || misses=
+  case "$misses" in
+    ''|*[!0-9]*) misses=0 ;;
+  esac
+  [ "$misses" -lt 1000 ] || misses=999
+  tmp="$BACKOFF_RECORD.tmp.$$"
+  printf '%s\n' "$((misses + 1))" > "$tmp" 2>/dev/null \
+    && mv -f -- "$tmp" "$BACKOFF_RECORD" 2>/dev/null
+  rm -f -- "$tmp" 2>/dev/null || true
+}
+
 if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
   HOME_SUMMARY_ERROR=${FM_HOME_SUMMARY_PARENT_ERROR:-"refresh worker failed"}
   HOME_SUMMARY_FAILURE_STAMP=${FM_HOME_SUMMARY_PARENT_STAMP:-}
@@ -220,11 +257,14 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
     FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
+    FM_HOME_SUMMARY_ATTEMPT="$$" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_worker; then
     exit 0
   else
     refresh_rc=$?
   fi
+  home_summary_reap_attempt
+  [ "$refresh_rc" -ne 124 ] || home_summary_record_deadline_miss
   if [ "$BEST_EFFORT" -eq 1 ]; then
     if [ "$refresh_rc" -eq 124 ]; then
       parent_error="refresh exceeded its ${HOME_SUMMARY_TIMEOUT}-second deadline"
