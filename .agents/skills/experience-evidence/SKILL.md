@@ -73,7 +73,7 @@ Allowed `lesson_validity` values are `validated`, `inferred`, `pending`, and `re
 Allowed `status` values are `proposed`, `promoted`, `deprecated`, `conflict-pending-diagnosis`, and `revoked`.
 
 Record exact execution identity only in the owning task report.
-Do not copy task paths, provider run IDs, or volatile versions into a promoted general rule.
+Preserve the stable owning task-report reference when promoting a claim, but do not copy provider run IDs, worktree paths, transient artifact paths, or volatile versions into a promoted general rule.
 An accepted successful execution and a validated reusable lesson are separate claims, and neither grants authority to repeat the operation.
 A failed or uncertain execution may support a validated negative lesson when the failure boundary is observable, but it never supports a success claim or replay authority.
 A model self-rating and a user statement that an operation should succeed are not provider or server outcome evidence.
@@ -91,7 +91,18 @@ Search only skill front matter for a matching JIT trigger before deciding whethe
 
 ```bash
 experience_home=${FM_HOME:?FM_HOME must name the active Firstmate home}
-experience_root=${FM_ROOT_OVERRIDE:-$(git rev-parse --show-toplevel)}
+experience_skill='<absolute loaded path to this SKILL.md>'
+experience_root=${experience_skill%/.agents/skills/experience-evidence/SKILL.md}
+[ -f "$experience_root/.agents/skills/experience-evidence/SKILL.md" ] || {
+  printf '%s\n' 'experience-evidence: loaded skill path does not resolve its tracked Firstmate root' >&2
+  exit 1
+}
+if [ -n "${FM_ROOT_OVERRIDE:-}" ]; then
+  [ "$(realpath "$FM_ROOT_OVERRIDE")" = "$(realpath "$experience_root")" ] || {
+    printf '%s\n' 'experience-evidence: FM_ROOT_OVERRIDE disagrees with the loaded skill root' >&2
+    exit 1
+  }
+fi
 rg -n -F -i -- '<entity-or-mechanism>' "$experience_home/data/learnings.md"
 for skills_dir in "$experience_root/.agents/skills" "$experience_home/.agents/skills"; do
   [ -d "$skills_dir" ] || continue
@@ -109,20 +120,26 @@ Treat a promoted rule as a routing lead, then follow its provenance when the cur
 
 Match exact entities first.
 Also match tool surface plus symptom or work phase, because the useful mechanism may come from a different table, endpoint, or business object.
-Filter candidate blocks by those keys before bounding the result list, so common words in unrelated report prose cannot hide a relevant candidate.
+Filter and score every structured candidate block before selecting reports, so common words or filesystem traversal order cannot hide a relevant candidate.
+The score only orders which compact candidate metadata to inspect first; applicability and original evidence, never the score, decide truth.
 
 ```bash
 candidate_reports=$(
 rg -l -F -g report.md -- 'schema: firstmate-experience-candidate.v1' "$experience_home/data" |
 while IFS= read -r report; do
   candidate_block=$(awk 'found && /^## / { exit } /^## Reusable experience candidates$/ { found=1 } found { print }' "$report")
+  score=0
   if printf '%s\n' "$candidate_block" | rg -q -F -i -- '<exact-entity>' || {
     printf '%s\n' "$candidate_block" | rg -q -F -i -- '<tool-surface>' &&
     printf '%s\n' "$candidate_block" | rg -q -F -i -- '<symptom-or-phase>'
   }; then
-    printf '%s\n' "$report"
+    printf '%s\n' "$candidate_block" | rg -q -F -i -- '<exact-entity>' && score=$((score + 100))
+    for key in '<task-type>' '<tool-surface>' '<symptom-or-phase>' '<region>' '<permission-or-identity-boundary>' '<result-state>'; do
+      printf '%s\n' "$candidate_block" | rg -q -F -i -- "$key" && score=$((score + 10))
+    done
+    printf '%04d\t%s\n' "$score" "$report"
   fi
-done | sed -n '1,12p'
+done | sort -k1,1nr -k2,2 | cut -f2-
 )
 printf '%s\n' "$candidate_reports" | while IFS= read -r report; do
   [ -n "$report" ] || continue
@@ -131,6 +148,7 @@ done
 ```
 
 Rank a candidate only after checking keys as conditions rather than treating them as similarity scores.
+Walk the ordered compact blocks until three applicable entries cover the relevant proven and failing paths, continuing past every rejected or revoked item rather than imposing a pre-read path cap.
 An exact entity match does not overcome a region, permission, time, version, identity, or surface mismatch.
 A mechanism match without the same entity may remain applicable when its claim and evidence are explicitly surface-level and its anti-conditions do not exclude the current case.
 Do not choose a claim merely because it is newest or textually most similar.
@@ -150,6 +168,29 @@ If Honcho is absent, unavailable, or cannot resolve a local source, continue wit
 ### 4. Empty result fallback
 
 If no structured candidate matches, search ordinary `report.md` files with the same exact-entity and tool-plus-symptom routes and read only the small set of likely reports.
+Use the following locator to score every matching path before keeping eight for evidence readback.
+Choose specific result-state and identity terms from the current question, such as a provider terminal state or durable identity field, rather than relying on generic words alone.
+If all eight are rejected after readback, advance the final `sed` window to `9,16p` and continue in bounded pages until an applicable report is found or the ranked list is exhausted.
+
+```bash
+unstructured_reports=$(
+{
+  rg -l -F -i -g report.md -- '<exact-entity>' "$experience_home/data"
+  rg -l -F -i -g report.md -- '<tool-surface>' "$experience_home/data"
+  rg -l -F -i -g report.md -- '<symptom-or-phase>' "$experience_home/data"
+} | sort -u | while IFS= read -r report; do
+  score=0
+  rg -q -F -i -- '<exact-entity>' "$report" && score=$((score + 100))
+  for key in '<task-type>' '<tool-surface>' '<symptom-or-phase>' '<region>' '<result-state>' '<execution-identity-term>'; do
+    rg -q -F -i -- "$key" "$report" && score=$((score + 10))
+  done
+  printf '%04d\t%s\n' "$score" "$report"
+done | sort -k1,1nr -k2,2 | sed -n '1,8p' | cut -f2-
+)
+printf '%s\n' "$unstructured_reports"
+```
+
+Read the selected reports and apply the same condition, anti-condition, outcome, identity, and original-evidence checks before using any claim.
 Mark any useful result as unstructured prior evidence rather than silently treating it as a validated candidate.
 If that also returns nothing applicable, proceed from current evidence and say that bounded history lookup found no applicable prior evidence.
 
