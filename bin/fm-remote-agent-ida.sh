@@ -318,7 +318,9 @@ cmd_followup() (
         [ "$(jq -r '.data.session_id | tostring' "$output")" = "$session" ]; then
       task=$(jq -r '.data.task_id // empty | tostring' "$output")
     fi
-    if [ -z "$task" ]; then
+    if [ -z "$task" ] && jq -e '
+        .status == "error" and .data == null and (.error | type == "object")
+      ' "$output" >/dev/null 2>&1; then
       detail_session=$(jq -r '
         [.error.details.session_id?, .error.details.sessionId?]
         | map(select(. != null) | tostring) | unique

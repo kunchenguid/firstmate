@@ -230,6 +230,14 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
               result=$(printf '{"status":"error","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"completed without an answer","details":{"session_id":%s,"sessionId":%s,"task_id":%s,"taskId":%s}}}' "$session" "$((session + 1))" "$remote_task" "$((remote_task + 1))")
               mcp_error=true
               ;;
+            renamed-invalid-success)
+              printf '%s\tprovider-renamed\tcompleted\t%s\n' "$session" "$marker" >"$sessions"
+              result=$(printf '{"status":"success","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"contradictory success envelope","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
+              ;;
+            renamed-invalid-data)
+              printf '%s\tprovider-renamed\tcompleted\t%s\n' "$session" "$marker" >"$sessions"
+              result=$(printf '{"status":"error","data":{"unexpected":true},"error":{"code":"IDA_EMPTY_RESULT","message":"contradictory data envelope","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
+              ;;
             zero) printf '%s\t%s\tcompleted\t%s\n' "$session" "$stored_marker" "$stored_marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":""},"error":null}' "$session" "$remote_task") ;;
             step-answer-only)
               printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"
@@ -1872,7 +1880,7 @@ SH
 }
 
 test_followup_identity_and_unknown_submission() {
-  local home fakebin id=ida-followup old_sha creates outcome rc=0
+  local home fakebin id=ida-followup old_sha creates outcome mode rc=0
   home=$(new_home followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'initial followup fixture dispatch'
@@ -1937,6 +1945,29 @@ test_followup_identity_and_unknown_submission() {
   creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
   [ "$creates" = 2 ] || fail "conflicting error receipt repeated create: $creates total"
   pass 'conflicting structured error receipt aliases stay unknown without duplicate create'
+
+  for mode in renamed-invalid-success renamed-invalid-data; do
+    id="ida-followup-$mode"
+    home=$(new_home "followup-$mode"); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+    : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+    REMOTE_TASK_ID=80001
+    dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "$mode initial dispatch"
+    wait_phase "$home" "$id" terminal-success || fail "$mode initial terminal"
+    printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+    chmod 600 "$home/data/$id/followup.txt"
+    REMOTE_TASK_ID=80002
+    if FM_IDA_FAKE_MODE="$mode" run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/invalid-receipt" 2>&1; then
+      fail "$mode invalid structured receipt was accepted"
+    fi
+    [ "$(phase_of "$home" "$id")" = submission-unknown ] || fail "$mode invalid receipt lost submission-unknown"
+    jq -e '.provider_state.task_id==null' "$(state_file "$home" "$id")" >/dev/null || fail "$mode invalid receipt bound an unverified task"
+    if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/invalid-receipt-replay" 2>&1; then
+      fail "$mode invalid receipt replay inferred a task without exact evidence"
+    fi
+    creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
+    [ "$creates" = 2 ] || fail "$mode invalid receipt repeated create: $creates total"
+  done
+  pass 'invalid structured receipt envelopes stay unknown without duplicate create'
 
   id=ida-followup-normalized-marker
   home=$(new_home followup-normalized-marker); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
