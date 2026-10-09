@@ -609,6 +609,11 @@ if [ "$mode" = take-over ]; then
   fi
 fi
 
+# A previous cycle that ended with no successor is recorded once, then this
+# arm continues the existing start or attach path. A fresh beacon or a live
+# lock pid is not that gap, so an idle live session queues nothing.
+fm_watcher_continuity_note "$STATE" watcher-continuity-main "this home" || true
+
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
 # one - attach to that cycle and wait until it ends so the harness notify fires
 # then, not as an immediate empty wake. (--restart skips this: it just stopped

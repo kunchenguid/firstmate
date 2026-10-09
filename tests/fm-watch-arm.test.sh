@@ -1713,6 +1713,230 @@ EOF
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
 }
 
+write_gap_log() { # <state> [successor]
+  local successor=${2:-none}
+  printf 'arm_pid=15024\twatcher_pid=15078\torigin=arm\tstarted_at=1000\tended_at=1000\texit_code=0\tsignal=\treason=actionable\tbeacon_age=999999\tlock_before=held\tlock_after=free\tsuccessor=%s\n' \
+    "$successor" > "$1/.watch-cycle-exits.log"
+}
+
+run_continuity_gap() { # <watched> [grace]
+  FM_STATE_OVERRIDE="$1" FM_WATCHER_CONTINUITY_BOUND_SECS=1 FM_GUARD_GRACE="${2:-1}" \
+    bash -c '
+      . "$1"
+      if ! fm_watcher_continuity_gap "$2"; then
+        exit 1
+      fi
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$1"
+}
+
+run_continuity_note() { # <queue-state> <watched> <prefix> <subject>
+  FM_STATE_OVERRIDE="$1" FM_WATCHER_CONTINUITY_BOUND_SECS=1 FM_GUARD_GRACE=1 \
+    bash -c '
+      . "$1"
+      fm_watcher_continuity_note "$2" "$3" "$4"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$2" "$3" "$4"
+}
+
+test_watcher_continuity_gap_is_a_missing_successor() {
+  local dir state out rc key
+  dir=$(make_case continuity-gap)
+  state="$dir/state"
+  write_gap_log "$state"
+  out=$(run_continuity_gap "$state") || fail "a successor=none cycle was not a gap"
+  case "$out" in
+    "episode=15024-1000 ended_at=1000 idle="*) ;;
+    *) fail "gap line drifted: $out" ;;
+  esac
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+    || fail "the continuity note could not be queued"
+  key="watcher-continuity-main-15024-1000"
+  grep -Fq "$key" "$state/.wake-queue" || fail "the continuity check was not queued"
+  grep -Fq "check: watcher continuity lost: this home episode=15024-1000 idle=" "$state/.wake-queue" \
+    || fail "the continuity payload drifted: $(cat "$state/.wake-queue")"
+  grep -Fq "successor=none" "$state/.wake-queue" || fail "the payload omitted successor=none"
+  [ -f "$state/.continuity-note-watcher-continuity-main" ] || fail "the episode marker was not written"
+
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+    || fail "a repeat while the check is queued failed"
+  [ "$(grep -c "$key" "$state/.wake-queue")" = 1 ] || fail "a queued continuity check was duplicated"
+
+  grep -v "$key" "$state/.wake-queue" > "$state/.wake-queue.kept" || true
+  mv "$state/.wake-queue.kept" "$state/.wake-queue"
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+    || fail "a consumed check inside the bound failed"
+  grep -Fq "$key" "$state/.wake-queue" && fail "acking the check resolved the gap"
+  [ -f "$state/.continuity-note-watcher-continuity-main" ] \
+    || fail "acking the check removed the episode marker"
+
+  awk 'index($0, "alerted_at=") == 1 { print "alerted_at=1"; next } { print }' \
+    "$state/.continuity-note-watcher-continuity-main" > "$state/.continuity-note.tmp"
+  mv "$state/.continuity-note.tmp" "$state/.continuity-note-watcher-continuity-main"
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+    || fail "a repeat after the bound failed"
+  grep -Fq "$key" "$state/.wake-queue" || fail "an unresolved gap was not requeued after the bound"
+
+  printf '%s\n' 'successor=attached:9 ended_at=1000' >> "$state/.watch-cycle-exits.log"
+  # The reader uses the last cycle line. A non-none successor closes the gap.
+  write_gap_log "$state" "attached:9"
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+    || fail "a closed gap failed the note"
+  [ ! -e "$state/.continuity-note-watcher-continuity-main" ] \
+    || fail "a recorded successor left the episode marker in place"
+
+  write_gap_log "$state"
+  touch "$state/.last-watcher-beat"
+  out=$(run_continuity_gap "$state" 300)
+  [ -z "$out" ] || fail "a fresh beacon was treated as a missing successor: $out"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  rm -f "$state/.last-watcher-beat"
+  out=$(run_continuity_gap "$state")
+  [ -z "$out" ] || fail "a live lock pid was treated as a missing successor: $out"
+  rm -rf "$state/.watch.lock"
+
+  rm -f "$state/.wake-queue"
+  mkdir -p "$state/.continuity-note-watcher-continuity-main"
+  rc=0
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a marker-write failure after the check was queued returned $rc"
+  grep -Fq "$key" "$state/.wake-queue" || fail "the check was lost when the marker could not be written"
+  rm -rf "$state/.continuity-note-watcher-continuity-main"
+
+  rm -f "$state/.watch-cycle-exits.log"
+  mkdir "$state/.watch-cycle-exits.log"
+  rc=0
+  run_continuity_gap "$state" >/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || fail "an unreadable cycle log returned $rc"
+  rc=0
+  run_continuity_note "$state" "$state" watcher-continuity-keel "mate=keel" || rc=$?
+  [ "$rc" -eq 0 ] || fail "an unreadable cycle log failed the note ($rc)"
+  grep -q 'watcher-continuity-keel' "$state/.wake-queue" \
+    && fail "an unreadable cycle log queued a continuity check"
+  pass "a missing successor is one bounded continuity episode, and a fresh beacon or live lock is not"
+}
+
+test_arm_notes_a_cycle_that_ended_without_a_successor() {
+  local dir state i
+  dir=$(make_case continuity-arm)
+  state="$dir/state"
+  fm_test_track_watcher_state "$state"
+  write_gap_log "$state"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=30 \
+    FM_WATCHER_CONTINUITY_BOUND_SECS=1 FM_GUARD_GRACE=1 \
+    "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -q 'watcher-continuity-main-15024-1000' "$state/.wake-queue" 2>/dev/null && break
+    kill -0 "$ARM_PID" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -f "$state/.watch.lock/pid" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop >/dev/null 2>&1 || true
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  grep -q 'watcher-continuity-main-15024-1000' "$state/.wake-queue" \
+    || fail "the arm did not note its own missing successor: $(cat "$dir/arm.out" 2>/dev/null)"
+  [ "$(grep -c 'watcher-continuity-main-15024-1000' "$state/.wake-queue")" = 1 ] \
+    || fail "the arm noted the same gap more than once"
+  pass "the arm notes one missing-successor gap, then continues the existing start path"
+}
+
+test_arm_stop_does_not_note_a_continuity_gap() {
+  local dir state out status
+  dir=$(make_case continuity-stop)
+  state="$dir/state"
+  write_gap_log "$state"
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_WATCHER_CONTINUITY_BOUND_SECS=1 FM_GUARD_GRACE=1 "$WATCH_ARM" --stop 2>&1); status=$?
+  expect_code 0 "$status" "--stop must succeed when no watcher is running"
+  assert_contains "$out" "watcher: none running" "--stop with no watcher must say so"
+  if [ -f "$state/.wake-queue" ] && grep -q 'watcher-continuity-' "$state/.wake-queue"; then
+    fail "--stop noted a continuity gap: $(cat "$state/.wake-queue")"
+  fi
+  pass "stopping the watcher does not note a continuity gap"
+}
+
+test_live_watcher_with_a_fresh_beacon_is_not_a_continuity_gap() {
+  local dir state
+  dir=$(make_case continuity-live)
+  state="$dir/state"
+  fm_test_track_watcher_state "$state"
+  FM_HOME="$dir" start_seed_watcher "$state" "$dir/fakebin" "$dir/watch.out"
+  write_gap_log "$state"
+  FM_HOME="$dir" start_attached_arm "$state" "$dir/fakebin" "$dir/arm.out" 5
+  if [ -f "$state/.wake-queue" ] && grep -q 'watcher-continuity-' "$state/.wake-queue"; then
+    fail "a live watcher with a fresh beacon was noted as a continuity gap"
+  fi
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop >/dev/null 2>&1 || true
+  pass "an idle live watcher is not a missing successor"
+}
+
+test_parent_watcher_notes_a_local_mates_missing_successor() {
+  local dir parent state fakebin pid i mate child
+  dir=$(make_case continuity-parent)
+  parent="$dir/parent"
+  state="$parent/state"
+  mkdir -p "$state" "$parent/config"
+  fakebin="$dir/fakebin"
+  fm_test_track_watcher_state "$state"
+  touch "$state/.secondmate-liveness-tick"
+  for mate in harbor keel; do
+    child="$dir/$mate-home"
+    mkdir -p "$child/state"
+    printf '%s\n' "$mate" > "$child/.fm-secondmate-home"
+    fm_write_secondmate_meta "$state/$mate.meta" "$child"
+    write_gap_log "$child/state"
+  done
+  child="$dir/offshore-home"
+  mkdir -p "$child/state"
+  printf '%s\n' offshore > "$child/.fm-secondmate-home"
+  fm_write_secondmate_meta "$state/offshore.meta" "$child"
+  printf 'remote_host=example.test\n' >> "$state/offshore.meta"
+  write_gap_log "$child/state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$parent" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCHER_CONTINUITY_BOUND_SECS=1 FM_GUARD_GRACE=1 \
+    "$WATCH" > "$dir/watch.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 150 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    grep -q 'watcher-continuity-harbor-15024-1000' "$state/.wake-queue" 2>/dev/null \
+      && grep -q 'watcher-continuity-keel-15024-1000' "$state/.wake-queue" 2>/dev/null \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  PATH="$fakebin:$PATH" FM_HOME="$parent" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop >/dev/null 2>&1 || true
+  grep -q 'watcher-continuity-harbor-15024-1000' "$state/.wake-queue" \
+    || fail "parent did not note harbor: $(cat "$dir/watch.out" 2>/dev/null; echo '---'; cat "$state/.wake-queue" 2>/dev/null)"
+  grep -q 'watcher-continuity-keel-15024-1000' "$state/.wake-queue" \
+    || fail "parent did not note keel"
+  grep -q 'successor=none' "$state/.wake-queue" || fail "the parent payload omitted successor=none"
+  if grep -q 'watcher-continuity-offshore' "$state/.wake-queue" 2>/dev/null; then
+    fail "parent noted a remote mate"
+  fi
+  [ ! -f "$dir/harbor-home/state/.watch.lock/pid" ] || fail "parent started harbor's watcher"
+  [ ! -f "$dir/keel-home/state/.watch.lock/pid" ] || fail "parent started keel's watcher"
+  pass "a parent notes each local mate whose monitoring ended with no successor, and does not note a remote mate"
+}
+
+test_watcher_continuity_gap_is_a_missing_successor
+test_arm_notes_a_cycle_that_ended_without_a_successor
+test_arm_stop_does_not_note_a_continuity_gap
+test_live_watcher_with_a_fresh_beacon_is_not_a_continuity_gap
+test_parent_watcher_notes_a_local_mates_missing_successor
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
