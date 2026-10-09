@@ -224,6 +224,11 @@ Its header owns the byte-stable-prefix contract (no timestamps, no fleet snapsho
 The outcome store is `bin/fm-branch-outcome.sh`.
 Its header owns the append-only format, read cursor, and bounded per-task status-coverage indexes.
 
+One handled fleet event produces at most one row per verdict class: the store collapses a re-mint of an event it already recorded into that existing record, under the conjunctive event identity - task, verdict, wake, claimed handling, silence class, and summary text - and window the store header owns.
+A stray duplicate report call inside one wake - the provider-side flourish that produced identical records seconds apart - therefore stores nothing new and prints the existing record's seq, and a collapsed duplicate never touches any read, unprocessed, or acknowledged state, so the re-ring and acknowledgment lifecycles are unchanged.
+Within one claiming handling, a reworded disposition is a distinct event and records its own row: summary equality is one AND-term of the identity, never a sufficient key on its own.
+The collapse compares only records main has not fully acknowledged, so a settled predecessor never swallows its repeat, and the window is the residual bound only for reports outside any wake handling.
+
 Outcomes are written to the store before delivery to Pi.
 A captain row advances the cursor only after its matching visible session entry exists.
 Locked session-start replay stops before the first captain row, so it cannot acknowledge that outcome through prose alone.

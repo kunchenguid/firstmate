@@ -626,12 +626,18 @@ function makeOffer(message, projects = [approvedProject], heartbeat = false, eli
   };
   return offer;
 }
+// The real watcher appends every new wake with a fresh monotonic. row seq
+// (state/.wake-queue.seq), so two wake firings are two discrete queue rows,
+// never one row replayed. This driver mirrors that: every dispatch mints the
+// next row seq even when it reuses a wake line.
+let wakeRowSeq = 0;
 function dispatch(message, projects, heartbeat, eligible) {
   const offer = makeOffer(message, projects, heartbeat, eligible);
   if (offer.eligible) {
+    wakeRowSeq += 1;
     const row = offer.heartbeat
-      ? "1\t1\theartbeat\theartbeat\theartbeat\n"
-      : `1\t1\tsignal\tbranch-driver.status\t${message}\n`;
+      ? `1\t${wakeRowSeq}\theartbeat\theartbeat\theartbeat\n`
+      : `1\t${wakeRowSeq}\tsignal\tbranch-driver.status\t${message}\n`;
     writeFileSync(`${home}/state/.wake-queue`, row);
   }
   bus.emit("fm-branch-supervision:dispatch", offer);
@@ -2590,6 +2596,66 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "the report tool must refuse tasks the wake never named: $out"
   pass "fm_branch_report refuses a task the wake did not name, fleet included, while a heartbeat is unscoped"
+}
+
+# The observed duplicate bursts: one wake handling re-called fm_branch_report
+# with identical arguments up to five times, minting a store row and a captain
+# opening per call. The store's collapse guard now folds each identical
+# re-mint into the one recorded event, so within one handling the second call
+# must succeed with the truthful collapse message, store nothing, and open no
+# second captain entry - while the first call's single visible entry survives.
+test_branch_report_collapses_a_duplicate_remint_into_the_one_recorded_outcome() {
+  local repo home out status
+  repo="$TMP_ROOT/duplicate-remint-root"
+  home="$TMP_ROOT/duplicate-remint-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+
+await fire("session_start", {}, defaultSessionCtx);
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
+const offer = dispatch("signal: branch-driver working");
+if (!offer.accepted) throw new Error("branch did not accept the wake offer");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+
+// One handling's re-mint flurry: the branch model re-reports the same captain
+// verdict with identical prose seconds apart.
+const params = { task: "branch-driver", verdict: "captain", summary: "PR https://example.com/pr/1 ready for review" };
+const first = await report.execute("first", params, undefined, undefined, {});
+if (first.isError) throw new Error(`the first report call failed: ${JSON.stringify(first)}`);
+if (!first.content[0].text.includes("recorded seq 1 and delivered [captain] into main")) {
+  throw new Error(`the first report call did not record and deliver: ${first.content[0].text}`);
+}
+const second = await report.execute("second", params, undefined, undefined, {});
+if (second.isError) throw new Error(`the duplicate re-mint call failed instead of collapsing: ${JSON.stringify(second)}`);
+if (!second.content[0].text.startsWith("duplicate re-mint collapsed into the existing seq 1")) {
+  throw new Error(`the duplicate re-mint call did not name its collapse: ${second.content[0].text}`);
+}
+finishWakePrompt();
+await offer.settlement;
+
+const stored = outcomeScript(["list", "--recent", "50"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+const prRows = stored.filter((row) => row.summary.startsWith("PR https://example.com/pr/1 ready for review"));
+if (prRows.length !== 1 || prRows[0].verdict !== "captain" || prRows[0].seq !== 1) {
+  throw new Error(`the duplicate re-mint did not collapse into one stored row: ${JSON.stringify(prRows)}`);
+}
+const opened = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === 1);
+if (opened.length !== 1) {
+  throw new Error(`the duplicate re-mint opened ${opened.length} captain entries, not exactly one`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("the recorded outcome was left unread by its delivery");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a duplicate re-mint inside one wake handling must collapse into the one recorded outcome: $out"
+  pass "fm_branch_report collapses an identical duplicate re-mint into the one recorded outcome"
 }
 
 # The non-heartbeat half of the same recheck: a check-kind row that arrives
@@ -5969,6 +6035,7 @@ test_away_only_wake_rejects_when_record_is_archived_before_drain
 test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
+test_branch_report_collapses_a_duplicate_remint_into_the_one_recorded_outcome
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
 test_settled_branch_prompt_releases_unacknowledged_grant

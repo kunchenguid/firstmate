@@ -601,6 +601,16 @@ export default function (pi: ExtensionAPI) {
   // never named is never stored or delivered. Null outside a wake prompt and
   // during a heartbeat review, which is not scoped by task.
   let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
+  // The wake rows the branch prompt being handled right now claimed, as the
+  // eligible-row snapshot published them (comma-joined). fm_branch_report
+  // carries it to the outcome store as the handling token for the re-mint
+  // dedup: every report of one claim is a re-mint of that handling and
+  // collapses there, while each newly claimed wake row is a fresh handling
+  // that records. Unlike wakeTaskScope it is never lifted - an away posture
+  // or a heartbeat review unscopes tasks but its claim still identifies the
+  // handling. Null outside a wake prompt, where reports carry the empty
+  // token.
+  let claimedRowsToken: string | null = null;
   let mainStreaming = false;
   let shuttingDown = false;
   // Bumps at every session replacement so a stale chain continuation from the
@@ -958,7 +968,12 @@ export default function (pi: ExtensionAPI) {
       cwd: fmRoot,
       env: scriptEnv,
     });
-    if (result.status === 0) return { ok: true, stdout: (result.stdout || "").trim(), detail: "" };
+    // On success, stdout is the sequence number (or unprocessed/read output)
+    // and stderr may carry at most a "duplicate:" collapse note from append;
+    // expose it as detail so the report tool can name a collapse truthfully.
+    if (result.status === 0) {
+      return { ok: true, stdout: (result.stdout || "").trim(), detail: (result.stderr || "").trim() };
+    }
     return {
       ok: false,
       stdout: "",
@@ -1237,6 +1252,14 @@ export default function (pi: ExtensionAPI) {
         }
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);
+        // The handling token for the store's re-mint dedup: the wake rows this
+        // handling claimed (claimedRowsToken, set from the eligible-row
+        // snapshot when the branch prompt opened). One handling re-minting its
+        // own report collapses in the store; the next claimed wake row is a
+        // fresh handling and records normally. Reports outside any wake
+        // prompt carry the empty token, where the dedup window alone bounds
+        // the residual.
+        appendArgs.push("--handling", claimedRowsToken ?? "");
         // Ownership, the durable append, and the delivery it authorizes are
         // ONE unit of the delivery queue: store-before-visible-delivery and
         // this report's place in sequence order are exactly what another
@@ -1264,6 +1287,16 @@ export default function (pi: ExtensionAPI) {
               content: [{ type: "text", text: `recorded seq ${appended.stdout}, but visible delivery or cursor advancement failed` }],
               details: undefined,
               isError: true,
+            };
+          }
+          // A duplicate report call for one wake collapses in the store: the
+          // append printed the existing record's seq and nothing new was
+          // stored. Name that truth instead of "recorded", so a model retrying
+          // its report sees the event already has its one record and settles.
+          if (appended.detail.startsWith("duplicate:")) {
+            return {
+              content: [{ type: "text", text: `duplicate re-mint collapsed into the existing seq ${appended.stdout}; that record stays this event's one outcome, already reconciled into main` }],
+              details: undefined,
             };
           }
           return {
@@ -1549,6 +1582,7 @@ ${context.command}
         wakeTaskScope = heartbeat || scope.checkSeqs.length > 0 || scope.heartbeatSeqs.length > 0
           ? null
           : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        claimedRowsToken = scope.eligibleSeqs.join(",");
         // Same residual: archive during snapshot publish or read-back still
         // lets this prompt proceed; the guarded scripts revalidate, and the
         // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
@@ -1557,6 +1591,7 @@ ${context.command}
           await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail));
         } finally {
           wakeTaskScope = null;
+          claimedRowsToken = null;
         }
         const providerError = settledPromptProviderError(sessionManager, entryOffset);
         if (providerError) {

@@ -139,6 +139,243 @@ PY
   pass "outcome store is append-only and refuses sequence reuse after a torn tail"
 }
 
+test_outcome_append_collapses_a_remint_of_one_recorded_event() {
+  local home store out status seq duplicate_note
+  home="$TMP_ROOT/remint-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  printf 'working: setup line\n' > "$home/state/remint-task.status"
+
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task remint-task --verdict routine --summary 'worker healthy' --wake 'signal: remint-task.status') \
+    || fail "first append failed"
+  [ "$seq" = 1 ] || fail "first outcome seq was $seq, not 1"
+
+  # The observed duplicate bursts: the same disposition re-fired word for
+  # word seconds later. One re-fire must keep one record, so it collapses
+  # into the existing seq and writes nothing.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task remint-task --verdict routine --summary 'worker healthy' --wake 'signal: remint-task.status' \
+    2>"$TMP_ROOT/remint-append.stderr")
+  status=$?
+  [ "$status" -eq 0 ] || fail "a duplicate re-mint failed instead of collapsing: $out $(cat "$TMP_ROOT/remint-append.stderr")"
+  duplicate_note=$(cat "$TMP_ROOT/remint-append.stderr")
+  assert_contains "$duplicate_note" "duplicate: outcome re-mint for task remint-task collapsed into the existing seq 1" \
+    "a duplicate re-mint did not print its collapse note"
+  [ "$out" = 1 ] \
+    || fail "a collapsed re-mint lost the strict stdout seq contract: $out"
+  [ "$(wc -l < "$store" | tr -d ' ')" = 1 ] || fail "a duplicate re-mint appended a second record"
+
+  # Summary text is a narrowing AND-term, never a sufficient key: one
+  # handling may carry several distinct dispositions of one task, so a
+  # reworded disposition of the same wake records as its own event rather
+  # than collapsing onto its neighbor.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task remint-task --verdict routine --summary 'worded differently, own disposition' --wake 'signal: remint-task.status') \
+    || fail "a reworded sibling disposition failed to record"
+  [ "$seq" = 2 ] || fail "a reworded sibling disposition collapsed onto its neighbor: $seq"
+  [ "$(wc -l < "$store" | tr -d ' ')" = 2 ] \
+    || fail "prose equality alone decided the collapse and swallowed a distinct disposition"
+
+  # A collapsed re-mint does not touch the record's lifecycle: an unread row
+  # stays unread and stays re-ringable until it is acknowledged.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "unread failed"
+  assert_contains "$out" '"seq":1' "the collapsed record stopped being unread"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 || fail "mark-read failed"
+
+  # The acknowledged state matters in both directions: a read routine row and
+  # a read-and-processed captain row are distinct classes, and a re-fire of
+  # one in-flight disposition mint nothing new when re-rung, while a
+  # different verdict class is a different outcome and records.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task remint-task --verdict routine --summary 'worker healthy' --wake 'signal: remint-task.status' \
+    2>"$TMP_ROOT/remint-append.stderr")
+  [ "$out" = 1 ] || fail "a re-mint after mark-read re-appended: $out"
+  [ "$(wc -l < "$store" | tr -d ' ')" = 2 ] || fail "a re-mint after mark-read appended a second record"
+
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task remint-task --verdict captain --summary 'PR https://example.com/pr/1 ready' --wake 'signal: remint-task.status') \
+    || fail "captain append for the other verdict class failed"
+  [ "$seq" = 3 ] || fail "a captain outcome for the same wake did not record as its own verdict class: $seq"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 3 || fail "mark-read across captain row failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 3 \
+    || fail "mark-processed across the captain row failed"
+  # A fully acknowledged record is main's settled history: the collapse base
+  # is the unprocessed portion, so a repeat of that identity has nothing
+  # outstanding to re-mint and records fresh again instead of being swallowed
+  # by its already-settled predecessor.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task remint-task --verdict captain --summary 'PR https://example.com/pr/1 ready' --wake 'signal: remint-task.status') \
+    || fail "a verbatim repeat of a fully acknowledged identity failed to record"
+  [ "$seq" = 4 ] || fail "a fully acknowledged captain identity failed to record fresh: $seq"
+  [ "$(wc -l < "$store" | tr -d ' ')" = 4 ] \
+    || fail "the store holds $(( $(wc -l < "$store" | tr -d ' ') )) records where the acknowledged repeat must hold 4"
+
+  # The handling token is part of the event identity: each newly claimed wake
+  # row is a fresh handling, so the same wake line over the same unchanged
+  # status log records when a different handling claims it, while one
+  # handling's own re-mint flurry collapses.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task remint-task --verdict captain --summary 'PR https://example.com/pr/1 ready' --wake 'signal: remint-task.status' --handling '4451') \
+    || fail "append under a handling claim failed"
+  [ "$seq" = 5 ] || fail "a freshly claimed handling collapsed into an earlier handling's record: $seq"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task remint-task --verdict captain --summary 'PR https://example.com/pr/1 ready' --wake 'signal: remint-task.status' --handling '4451' \
+    2>"$TMP_ROOT/remint-append.stderr")
+  [ "$out" = 5 ] || fail "a re-mint inside one handling re-appended: $out"
+  assert_contains "$(cat "$TMP_ROOT/remint-append.stderr")" "collapsed into the existing seq 5" \
+    "a re-mint inside one handling did not print its collapse note"
+  [ "$(wc -l < "$store" | tr -d ' ')" = 5 ] || fail "a re-mint inside one handling appended a second record"
+  pass "append collapses a re-mint of one recorded event into its one existing record, acknowledged or not"
+}
+
+test_outcome_remint_collapse_keeps_separate_events_separate() {
+  local home store out status seq now
+  home="$TMP_ROOT/remint-separate-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  printf 'working: setup line\n' > "$home/state/separate-task.status"
+
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task separate-task --verdict routine --summary 'handled the signal' --wake 'signal: separate-task.status') \
+    || fail "first append failed"
+  [ "$seq" = 1 ] || fail "first outcome seq was $seq, not 1"
+
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task separate-task --verdict routine --summary 'handled the stale event' --wake 'stale: default:w9:p2') \
+    || fail "append for a different wake event failed"
+  [ "$seq" = 2 ] || fail "a different wake line collapsed into the first event's record: $seq"
+
+  # A new fleet event may reuse a wake line over an unchanged status log only
+  # past the window; the status log growing is a new event the same instant.
+  printf 'done: handle second batch\n' >> "$home/state/separate-task.status"
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task separate-task --verdict routine --summary 'handled the signal' --wake 'signal: separate-task.status') \
+    || fail "append after the status log grew failed"
+  [ "$seq" = 3 ] || fail "a re-mint over a changed status event collapsed: $seq"
+  [ "$(wc -l < "$store" | tr -d ' ')" = 3 ] \
+    || fail "the status-grown append changed earlier store rows"
+
+  # Under a one-second window the same identity still collapses, proving the
+  # FM_OUTCOME_DUPLICATE_WINDOW override drives the guard.
+  now=$(date +%s)
+  FM_OUTCOME_DUPLICATE_WINDOW=1 FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task separate-task --verdict routine --summary 'handled the signal' --wake 'signal: separate-task.status' \
+    2>"$TMP_ROOT/remint-separate.stderr" >/dev/null \
+    || fail "a within-window append after the status change failed"
+  assert_contains "$(cat "$TMP_ROOT/remint-separate.stderr")" \
+    "collapsed into the existing seq 3" "a within-window re-mint under the shrunken override did not collapse"
+  [ "$(wc -l < "$store" | tr -d ' ')" = 3 ] \
+    || fail "a within-window re-mint under the shrunken override appended a record"
+
+  # Past that window the same wake line over the same unchanged status log is
+  # a later fleet event and records normally.
+  sleep 2
+  seq=$(FM_OUTCOME_DUPLICATE_WINDOW=1 FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task separate-task --verdict routine --summary 'handled the signal' --wake 'signal: separate-task.status') \
+    || fail "append past the window failed"
+  [ "$seq" = 4 ] || fail "the relevance window never expired, so the later same-line event collapsed: $seq"
+  [ "$(wc -l < "$store" | tr -d ' ')" = 4 ] \
+    || fail "the post-window append did not grow the store to its 4 rows"
+
+  # A re-mint against a legacy store row without status provenance still
+  # collapses when both captures are the empty identity (0 and "-"), which a
+  # fleet-wide report always is, and the summary text matches word for word.
+  jq -nc --argjson now "$(date +%s)" \
+    '{seq: 5, epoch: $now, task: "fleet", wake: "heartbeat: fleet review", verdict: "routine", summary: "legacy fleet note", silent: false}' \
+    >> "$store"
+  printf '5\n' > "$home/state/.branch-outcomes-cursor"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task fleet --verdict routine --summary 'legacy fleet note' --wake 'heartbeat: fleet review' \
+    2>"$TMP_ROOT/remint-append.stderr")
+  status=$?
+  [ "$status" -eq 0 ] || fail "a fleet re-mint over a legacy row failed: $out $(cat "$TMP_ROOT/remint-append.stderr")"
+  [ "$out" = 5 ] \
+    || fail "a provenance-less fleet re-mint minted a second record: $out"
+  pass "re-mint collapse keeps separate events separate: new wake lines, changed status, expired windows, and legacy rows"
+}
+
+test_outcome_remint_window_binds_only_tokenless_remints() {
+  local home store out seq
+  home="$TMP_ROOT/remint-window-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  printf 'working: setup line\n' > "$home/state/window-task.status"
+
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task window-task --verdict routine --summary 'handled the signal' --wake 'signal: window-task.status') \
+    || fail "tokenless append failed"
+  [ "$seq" = 1 ] || fail "tokenless outcome seq was $seq, not 1"
+
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task window-task --verdict routine --summary 'handled the signal' --wake 'signal: window-task.status' --handling '4451') \
+    || fail "claimed-handling append failed"
+  [ "$seq" = 2 ] || fail "a freshly claimed handling collapsed onto the tokenless record: $seq"
+
+  # One handling is one fleet event: its re-mints keep collapsing for the
+  # whole span that record stays unprocessed, past the window that bounds
+  # only the token-less residual. A one-second window plus a two-second gap
+  # proves the window term is not what carried the collapse.
+  sleep 2
+  out=$(FM_OUTCOME_DUPLICATE_WINDOW=1 FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task window-task --verdict routine --summary 'handled the signal' --wake 'signal: window-task.status' --handling '4451' \
+    2>"$TMP_ROOT/remint-window.stderr") \
+    || fail "a token-carrying re-mint past the window failed"
+  [ "$out" = 2 ] \
+    || fail "a token-carrying re-mint past the window minted a second record: $out"
+  assert_contains "$(cat "$TMP_ROOT/remint-window.stderr")" "collapsed into the existing seq 2" \
+    "a token-carrying re-mint past the window lost its collapse note"
+  [ "$(awk 'END { print NR }' "$store")" = 2 ] \
+    || fail "a token-carrying re-mint past the window appended a second record"
+
+  # The window stays the residual bound for token-less re-mints: past it the
+  # same identity over the unchanged status log records as a later event.
+  seq=$(FM_OUTCOME_DUPLICATE_WINDOW=1 FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task window-task --verdict routine --summary 'handled the signal' --wake 'signal: window-task.status') \
+    || fail "tokenless append past the window failed"
+  [ "$seq" = 3 ] \
+    || fail "the window stopped bounding the token-less residual: $seq"
+  [ "$(awk 'END { print NR }' "$store")" = 3 ] \
+    || fail "the post-window tokenless append did not grow the store to 3 rows"
+  pass "the duplicate window bounds only token-less re-mints; one handling collapses for its whole unprocessed span"
+}
+
+test_outcome_append_rejects_a_poisoning_handling_token() {
+  local home store out rc seq long
+  home="$TMP_ROOT/poison-handling-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  long=$(printf '%0.sx' $(seq 600))
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task poison-task --verdict routine --summary 'handled the signal' --handling "$(printf 'a\tb')" 2>&1); rc=$?
+  [ "$rc" -eq 2 ] || fail "a tab-carrying handling token was accepted: rc=$rc $out"
+  [ ! -e "$store" ] || fail "a refused handling token still wrote a store row"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task poison-task --verdict routine --summary 'handled the signal' --handling "$(printf 'a\nb')" 2>&1); rc=$?
+  [ "$rc" -eq 2 ] || fail "a newline-carrying handling token was accepted: rc=$rc $out"
+  [ ! -e "$store" ] || fail "a refused handling token still wrote a store row"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task poison-task --verdict routine --summary 'handled the signal' --handling "$long" 2>&1); rc=$?
+  [ "$rc" -eq 2 ] || fail "an over-long handling token was accepted: rc=$rc $out"
+  assert_contains "$out" "512-codepoint" \
+    "an over-long handling token refusal must name the bound"
+  [ ! -e "$store" ] || fail "a refused handling token still wrote a store row"
+
+  # The boundary stays open: a valid handling token records, and the store
+  # stays readable afterwards.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task poison-task --verdict routine --summary 'handled the signal' --handling '4451,4452') \
+    || fail "the tightening append seam refused a valid handling token"
+  [ "$seq" = 1 ] || fail "a valid handling token did not record as seq 1: $seq"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "the store stopped reading back after the refusal round"
+  assert_contains "$out" '"handling":"4451,4452"' \
+    "the valid handling token did not reach the readable store row"
+  pass "append rejects handling tokens that would brick the store's own validator, while valid tokens keep recording"
+}
+
 test_outcome_append_keeps_a_bounded_display_tail() {
   local home store tail cursor
   home="$TMP_ROOT/tail-home"
@@ -1542,6 +1779,10 @@ WRAPPER
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
+test_outcome_append_collapses_a_remint_of_one_recorded_event
+test_outcome_remint_collapse_keeps_separate_events_separate
+test_outcome_remint_window_binds_only_tokenless_remints
+test_outcome_append_rejects_a_poisoning_handling_token
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget
 test_outcome_seed_tail_creates_only_an_absent_display_tail
