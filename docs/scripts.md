@@ -77,7 +77,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-forge-detect.sh`     | Propose a clone's forge binding from its origin remote for project-add intake, never recording it |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
-| `fm-review-request.sh`   | Request one OpenCode `/oc review` on a pull request's current head when its repository carries the caller workflow and no request or completed review covers that head; idempotent, never merges or edits |
+| `fm-review-request.sh`   | Request one OpenCode `/oc review` on a pull request's current head when its repository carries the caller workflow and that head's durable request marker is absent; idempotent, never merges or edits |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-task-inbox-lib.sh`   | Single owner of durable steering-inbox records, acknowledgement, doorbells, and the delivery-attempt ladder |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and keyed escalation lifecycle |
