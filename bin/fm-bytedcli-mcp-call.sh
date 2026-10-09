@@ -163,10 +163,10 @@ if ! printf '%s\n' "$line" | jq -e '
   exit 1
 fi
 text=$(printf '%s\n' "$line" | jq -r '[.result.content[]? | select(.type == "text") | .text] | join("\n")')
-if printf '%s\n' "$line" | jq -e '.result.isError == true' >/dev/null 2>&1; then
-  mcp_error "$text"
-fi
 if [ "$mode" = capabilities ] || [ "$mode" = capabilities-followup ]; then
+  if printf '%s\n' "$line" | jq -e '.result.isError == true' >/dev/null 2>&1; then
+    mcp_error "$text"
+  fi
   capability_ready=true
   for required in \
       'bytedcli ida deep-research create' '--content' '--name' '--model' '--timeout-ms' \
@@ -187,9 +187,20 @@ if [ "$mode" = capabilities ] || [ "$mode" = capabilities-followup ]; then
     exit 1
   fi
 elif [ -z "$text" ] || ! printf '%s\n' "$text" | jq -e . >/dev/null 2>&1; then
+  if printf '%s\n' "$line" | jq -e '.result.isError == true' >/dev/null 2>&1; then
+    mcp_error "$text"
+  fi
   jq -n '{status:"error",data:null,error:{code:"MCP_RESULT_INVALID",message:"bytedcli MCP returned no normalized JSON result"}}'
   exit 1
 else
+  if printf '%s\n' "$line" | jq -e '.result.isError == true' >/dev/null 2>&1; then
+    if printf '%s\n' "$text" | jq -e '.status == "error" and .data == null and (.error | type == "object")' >/dev/null 2>&1; then
+      printf '%s\n' "$text" | jq -c .
+    else
+      jq -n '{status:"error",data:null,error:{code:"MCP_RESULT_INVALID",message:"bytedcli MCP returned an invalid normalized error result"}}'
+    fi
+    exit 1
+  fi
   printf '%s\n' "$text" | jq -c .
   printf '%s\n' "$text" | jq -e '.status == "success" and .error == null' >/dev/null 2>&1
 fi

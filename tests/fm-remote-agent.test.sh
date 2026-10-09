@@ -433,6 +433,17 @@ run_mcp_helper() {
     "$ROOT/bin/fm-bytedcli-mcp-call.sh" capabilities
 }
 
+run_mcp_create_helper() {
+  local home=$1 fakebin=$2 mode=$3 arguments
+  arguments="$home/mcp-create-arguments.json"
+  jq -n '{content:"fixture only",name:"firstmate:mcp-response:0123456789abcdef",timeoutMs:"30000"}' >"$arguments"
+  chmod 0600 "$arguments"
+  FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+  FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+  FM_IDA_FAKE_MODE="$mode" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-bytedcli-mcp-call.sh" ida_deep_research_create "$arguments"
+}
+
 test_mcp_response_contract() {
   local home fakebin out rc mode expected
   home=$(new_home mcp-response); fakebin=$(make_fake_bytedcli "$home")
@@ -472,6 +483,13 @@ test_mcp_response_contract() {
     printf '%s\n' "$out" | jq -e '.error.code == "MCP_TOOL_AUTH"' >/dev/null \
       || fail "$mode MCP denial lost its auth classification"
   done
+  rc=0
+  out=$(run_mcp_create_helper "$home" "$fakebin" renamed-empty) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'structured create error was reported as success'
+  printf '%s\n' "$out" | jq -e --argjson session "$SESSION_ID" --argjson task "$REMOTE_TASK_ID" '
+    .status == "error" and .error.code == "IDA_EMPTY_RESULT"
+    and .error.details.session_id == $session and .error.details.task_id == $task
+  ' >/dev/null || fail 'structured create error lost its provider code or submission identity'
   pass 'MCP owner keeps user identity, accepts one structured result, and rejects missing, malformed, duplicate, mismatched, or denied responses'
 }
 
