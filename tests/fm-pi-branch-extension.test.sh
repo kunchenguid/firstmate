@@ -4798,7 +4798,8 @@ const progress = JSON.parse(command.stdout);
 command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`, ["update-progress", "task-a",
   "--progress", JSON.stringify({ acceptance: "The existing contract passes",
     current_state: "Validation requested a review decision", remaining_gap: "The finding is unresolved",
-    next_step: "Classify the finding against the accepted intent" })],
+    next_step: "Classify the finding against the accepted intent",
+    continuation: { kind: "action", owner: "MAIN decision classification owner", review_at: "", effect_id: "" } })],
   { encoding: "utf8", env: { ...process.env, FM_HOME: process.env.FM_HOME, FM_SUPERVISION_ACTOR: "main" } });
 if (command.status !== 0) throw new Error(`progress fixture update failed: ${command.stderr}`);
 
@@ -6303,7 +6304,9 @@ await fire("session_start", {}, defaultSessionCtx);
 let prompts = 0;
 let unacknowledgedWasVisible = false;
 let staleGenerationWasVisible = false;
+let acknowledgedIdleWasVisible = false;
 let acknowledgedWasQuiet = false;
+let receiptReport = null;
 globalThis.__fmExecuteBranchBash = (context) => {
   const result = spawnSync("bash", ["-c", context.command], { encoding: "utf8", cwd: context.cwd, env: context.env });
   return { content: [{ type: "text", text: `${result.stdout}${result.stderr}` }],
@@ -6353,9 +6356,16 @@ globalThis.__fmOnBranchPrompt = async ({ text }) => {
     }, undefined, undefined, {});
     staleGenerationWasVisible = !staleAck.isError && !staleAck.content[0].text.includes("retained quietly");
     writeFileSync(meta, currentMeta);
-    const afterAck = await report.execute("receipt-after-ack", {
-      task: "receipt-task", verdict: "routine", summary: "generation-bound instruction acknowledged", silent: true,
+    const idleAck = await report.execute("receipt-ack-idle", {
+      task: "receipt-task", verdict: "routine", summary: "current-generation acknowledgement without executor start", silent: true,
     }, undefined, undefined, {});
+    acknowledgedIdleWasVisible = !idleAck.isError && !idleAck.content[0].text.includes("retained quietly");
+    writeFileSync(`${home}/state/receipt-task.status`, "working: current generation started the acknowledged continuation\n");
+    writeFileSync(`${home}/state/receipt-task.busy-state`, "v1 gen=g-receipt-task seq=2 state=busy source=pi-ext event=turn-start ts=2\n");
+    const afterAck = await report.execute("receipt-after-ack", {
+      task: "receipt-task", verdict: "routine", summary: "generation-bound instruction acknowledged and started", silent: true,
+    }, undefined, undefined, {});
+    receiptReport = afterAck;
     acknowledgedWasQuiet = !afterAck.isError && afterAck.content[0].text.includes("retained quietly");
   }
 };
@@ -6416,10 +6426,16 @@ command("fm-task-state.sh", ["update-progress", "receipt-task", "--progress", JS
   next_step: "Run the exact acknowledged continuation fixture",
   continuation: { kind: "action", owner: "same-worker-inbox", review_at: "", effect_id: "" },
 })]);
-await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => acknowledgedWasQuiet, "receipt-confirmed continuation prompt and acknowledgement");
-if (!unacknowledgedWasVisible || !staleGenerationWasVisible || !acknowledgedWasQuiet) {
-  throw new Error(`action receipt gate did not distinguish enqueue, stale generation, and current-generation acknowledgement: ${JSON.stringify({unacknowledgedWasVisible, staleGenerationWasVisible, acknowledgedWasQuiet})}`);
+const receiptSettle = await fire("agent_before_settle", {}, defaultSessionCtx);
+if (prompts < 4) {
+  throw new Error(`receipt continuation was not offered: ${JSON.stringify({prompts, receiptSettle,
+    progress: command("fm-task-state.sh", ["progress", "receipt-task"]).stdout,
+    executor: command("fm-task-state.sh", ["--durable-only", "receipt-task"]).stdout})}`);
+}
+await settle(() => receiptReport !== null, "receipt-confirmed continuation prompt and acknowledgement");
+if (!acknowledgedWasQuiet) throw new Error(`started acknowledgement did not settle quietly: ${JSON.stringify(receiptReport)}`);
+if (!unacknowledgedWasVisible || !staleGenerationWasVisible || !acknowledgedIdleWasVisible || !acknowledgedWasQuiet) {
+  throw new Error(`action receipt gate did not distinguish enqueue, stale generation, acknowledged-idle, and started execution: ${JSON.stringify({unacknowledgedWasVisible, staleGenerationWasVisible, acknowledgedIdleWasVisible, acknowledgedWasQuiet})}`);
 }
 process.exit(0);
 EOF

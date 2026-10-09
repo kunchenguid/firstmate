@@ -1693,8 +1693,20 @@ export default function (pi: ExtensionAPI) {
             }
             const before = branchProgressSnapshots[task];
             const after = await compactResumeSnapshot(task);
-            const actionReceipt = progress.continuation?.kind !== "action" || compactActionReceipt(task, progressToken);
-            safeRoutineContinuation = Boolean(before) && Boolean(after) && actionReceipt &&
+            const actionContinuation = progress.continuation?.kind === "action";
+            const actionReceipt = !actionContinuation || compactActionReceipt(task, progressToken);
+            let actionStarted = !actionContinuation;
+            if (actionContinuation && actionReceipt) {
+              const metaText = readFileSync(join(state, `${task}.meta`), "utf8");
+              const harness = metaText.split("\n").find((line) => line.startsWith("harness="))?.slice("harness=".length) || "";
+              const executionGeneration = metaText.split("\n").find((line) => line.startsWith("spawn_gen="))?.slice("spawn_gen=".length) || "";
+              const started = await runCommandAsync("bash", ["-c",
+                '. "$1"; harness=$4; expected_gen=$5; current_gen=$(fm_busy_current_gen "$2" "$3") || exit 1; [ "$current_gen" = "$expected_gen" ] || exit 1; record=$(fm_busy_record_read "$2" "$3") || exit 1; read -r busy_state busy_source _ <<< "$record"; [ "$busy_state" = busy ] && fm_busy_source_trusted "$harness" "$busy_source"',
+                "fm-action-start", join(fmRoot, "bin/fm-busy-lib.sh"), state, task, harness, executionGeneration],
+              { env: scriptEnv, maxBuffer: 64 * 1024 });
+              actionStarted = started.status === 0;
+            }
+            safeRoutineContinuation = Boolean(before) && Boolean(after) && actionReceipt && actionStarted &&
               !branchEffectAuthorityNeeded.has(task);
             continuationChange = after === before ? "none" : "material";
             if (branchEffectAuthorityNeeded.has(task)) verdict = "captain";

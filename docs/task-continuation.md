@@ -53,7 +53,7 @@ Delivery, merge authority, decisions, and cleanup retain their own records and g
 A captain hold remains an independent disposition constraint: cleanup verifies its decision inventory and retains the held task row, but the hold does not revoke an already recorded semantic acceptance.
 
 Healthy unchanged execution and deliberate external waits stay quiet.
-An `action` owned by `same-worker-inbox` may enter that inbox path only for the exact MAIN-authored text, and quiet advancement requires its token-bound inbox record under `handled/` with the current executor generation.
+An `action` owned by `same-worker-inbox` may enter that inbox path only for the exact MAIN-authored text, and quiet advancement requires both its token-bound inbox record under `handled/` with the current executor generation and current executor evidence that the continuation started.
 Missing or unparseable executor evidence returns to MAIN for reconciliation before any action or readback routing.
 An action naming any other existing owner returns to MAIN for that owner's interface and receipt/start verification.
 A `wait` stays quiet before its RFC3339 UTC `review_at`, then emits one reconciliation request to its named owner; that due request never authorizes replay of the awaited effect.
