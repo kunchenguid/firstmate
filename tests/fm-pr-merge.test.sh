@@ -501,8 +501,16 @@ for arg in "$@"; do
   fi
 done
 case "$*" in
-  *"commits/"*"/status")
-    cat "$case_dir/forgejo-status.json" > "$out"
+  *"commits/"*"/status?limit=50&page="*)
+    page=${*: -1}
+    page=${page##*page=}
+    if [ "$page" = 1 ]; then
+      cat "$case_dir/forgejo-status.json" > "$out"
+    elif [ -f "$case_dir/forgejo-status-page$page.json" ]; then
+      cat "$case_dir/forgejo-status-page$page.json" > "$out"
+    else
+      printf '{"state":"","total_count":0,"statuses":null}\n' > "$out"
+    fi
     exit 0
     ;;
   *"pulls/"*"/merge")
@@ -2446,7 +2454,8 @@ test_forgejo_each_condition_refuses_independently() {
     "mergeable|mergeable=false|mergeable is \"false\", not true" \
     "invalid-head|head=not-a-sha|could not read the Forgejo pull request head commit before merging" \
     "status-failure|failure|the combined commit status at head $FR_HEAD is \"failure\", not success" \
-    "status-pending|pending|the combined commit status at head $FR_HEAD is \"pending\", not success"
+    "status-pending|pending|the combined commit status at head $FR_HEAD is \"pending\", not success" \
+    "status-page2-failure|failure|the combined commit status at head $FR_HEAD is \"failure\", not success"
   for override in "$@"; do
     name=${override%%|*}
     expected=${override##*|}
@@ -2454,6 +2463,10 @@ test_forgejo_each_condition_refuses_independently() {
     override=${override%%|*}
     case_dir=$(make_forgejo_case "forgejo-refuse-$name")
     case "$name" in
+      status-page2-*)
+        write_forge_status "$case_dir/forgejo-status.json" success 50
+        write_forge_status "$case_dir/forgejo-status-page2.json" "$override" 1
+        ;;
       status-*) write_forge_status "$case_dir/forgejo-status.json" "$override" 1 ;;
       *) write_pull_json "$case_dir/pull.json" "$override" ;;
     esac

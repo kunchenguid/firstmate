@@ -693,7 +693,7 @@ forgejo_verify_mergeable() {
   local login_url='' login_token='' login_auth=''
   local json state='' merged='' mergeable='' live_head=''
   local total=0 named=0 refusals=''
-  local detail status_rc=0 status_fields status_state='' status_count=''
+  local detail status_rc=0 status_fields status_state='' page=1 page_state page_count
   local default_style
 
   if ! logins=$(tea logins list --output csv 2>/dev/null); then
@@ -797,35 +797,47 @@ FIELDS
 "
   fi
 
-  forgejo_api_call GET "repos/$PR_PATH/commits/$live_head/status" || status_rc=$?
-  if [ "$status_rc" -ne 0 ]; then
-    refusals="$refusals  - the combined commit status at head $live_head could not be read
-"
-  elif ! status_fields=$(jq -r '
-      if type == "object" and has("statuses") and ((.statuses // []) | type) == "array" then
-        "state=" + ((.state // "") | tostring),
-        "count=" + ((.statuses // [] | length) | tostring)
-      else
-        error("status payload is not a combined status")
-      end' "$FORGEJO_RESPONSE" 2>/dev/null); then
-    refusals="$refusals  - the combined commit status at head $live_head could not be read
-"
-  else
+  # The endpoint computes state and statuses from one page of the latest
+  # status per context, so every page is read until an empty one and the
+  # head is green only when each non-empty page is. No statuses at all is a
+  # repository without checks rather than a red or pending one, exactly like
+  # GitHub's empty rollup.
+  while :; do
+    status_rc=0
+    page_state='' page_count=''
+    forgejo_api_call GET "repos/$PR_PATH/commits/$live_head/status?limit=50&page=$page" || status_rc=$?
+    if [ "$status_rc" -ne 0 ] || ! status_fields=$(jq -r '
+        if type == "object" and has("statuses") and ((.statuses // []) | type) == "array" then
+          "state=" + ((.state // "") | tostring),
+          "count=" + ((.statuses // [] | length) | tostring)
+        else
+          error("status payload is not a combined status")
+        end' "$FORGEJO_RESPONSE" 2>/dev/null); then
+      status_state=unreadable
+      break
+    fi
+    rm -f "$FORGEJO_RESPONSE"
+    FORGEJO_RESPONSE=
     while IFS= read -r line; do
       case "$line" in
-        state=*) status_state=${line#state=} ;;
-        count=*) status_count=${line#count=} ;;
+        state=*) page_state=${line#state=} ;;
+        count=*) page_count=${line#count=} ;;
       esac
     done <<FIELDS
 $status_fields
 FIELDS
-    # No statuses at all is a repository without checks rather than a red or
-    # pending one, exactly like GitHub's empty rollup; anything else must be
-    # the aggregate "success".
-    if [ "$status_state" != success ] && [ "$status_count" != 0 ]; then
-      refusals="$refusals  - the combined commit status at head $live_head is \"${status_state:-none}\", not success
-"
+    [ "$page_count" != 0 ] || break
+    if [ "$page_state" != success ] && [ -z "$status_state" ]; then
+      status_state=${page_state:-none}
     fi
+    page=$((page + 1))
+  done
+  if [ "$status_state" = unreadable ]; then
+    refusals="$refusals  - the combined commit status at head $live_head could not be read
+"
+  elif [ -n "$status_state" ]; then
+    refusals="$refusals  - the combined commit status at head $live_head is \"$status_state\", not success
+"
   fi
   if [ -n "$FORGEJO_RESPONSE" ]; then
     rm -f "$FORGEJO_RESPONSE"
