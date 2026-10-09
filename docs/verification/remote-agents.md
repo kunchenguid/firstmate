@@ -10,6 +10,7 @@ The base lifecycle was re-verified on 2026-08-24 with installed `bytedcli` 0.130
 Model selection was re-verified on 2026-08-25 with installed `bytedcli` 0.131.0.
 Task-bound terminal and non-empty result readback were re-verified on 2026-08-26 with installed `bytedcli` 0.131.0.
 MCP capability response handling was re-verified on 2026-10-09 with installed `bytedcli` 0.165.0.
+Followup receipt reconciliation was re-verified on 2026-10-09 against code/test candidate `1c542b9db4d68fb07420776266968373868b7adf` with isolated provider fixtures and no provider operation.
 Those versions identify this evidence only; iDA setup and execution do not pin or compare them.
 The read-only base surfaces were:
 
@@ -64,6 +65,11 @@ bin/fm-test-run.sh tests/fm-aime-cloud-worker.test.sh
 
 Re-verified on 2026-08-26 against base `3a3e00dd447b2c8301a952c3a7d31390d3eeeb61` with GNU Bash 5.2.15, installed `bytedcli` 0.131.0, and the repository-pinned ShellCheck 0.11.0.
 The focused iDA command above completed with the exact terminal assertion `# fm-remote-agent.test.sh: all assertions passed` and summary fields `total=1`, `failed=0`, and `skipped_gate=0`.
+
+The followup receipt cases were re-verified on 2026-10-09 against code/test candidate `1c542b9db4d68fb07420776266968373868b7adf` before this verification-only documentation update.
+`FM_REMOTE_TEST_CASE=followup bin/fm-test-run.sh tests/fm-remote-agent.test.sh` passed the valid structured-error, conflicting alias, invalid envelope, normalized marker, raw marker, normalized/raw conflict, baseline exclusion, and lost-response cases with `total=1`, `failed=0`, and `skipped_gate=0`.
+`bin/fm-test-run.sh tests/fm-remote-agent.test.sh` then completed with `# fm-remote-agent.test.sh: all assertions passed`, `total=1`, `failed=0`, and `skipped_gate=0`; `bin/fm-lint.sh` passed with pinned ShellCheck 0.11.0 and actionlint 1.7.12.
+These fixtures execute the public adapter against an isolated fake `bytedcli`; they do not create, continue, cancel, or otherwise modify an iDA provider task.
 
 The data-free official SG check used the public dispatch and candidate process-event adapter, then verified its normalized state, report, acknowledgement, and one real post-terminal captured generation.
 Its exact safe summaries were:
