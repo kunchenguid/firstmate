@@ -67,6 +67,18 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# Branch merge proof: remote reachability proves only that cleanup loses
+# nothing, not that a PR merged, so it never lets the supervision branch
+# (fm_lease_actor = branch, whose teardown authority is ordinary cleanup of
+# merged work) tear down a ship task whose mode is not local-only. For that
+# actor teardown always requires the merged-PR or content-in-default proof
+# above, even when the branch is pushed; with no owned worktree to inspect
+# (missing, or its slot reassigned) it requires the recorded pr= to read
+# MERGED on the forge. A gh error, an open or closed PR, or no PR is never
+# that proof, so the branch is refused with a reason it relays unless the
+# change is already in the default branch. Main's rules are unchanged, so a
+# pushed branch with an open PR - such as a fork-pushed contribution - still
+# tears down for main.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
@@ -416,7 +428,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 # Role partition: forced teardown discards work, and the supervision branch
 # never discards anything - only an ordinary landed-work teardown is branch
-# territory (contract: bin/fm-lease-lib.sh).
+# territory (contract: bin/fm-lease-lib.sh), and for a PR task "landed" needs
+# merge proof (header "Branch merge proof").
 if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
@@ -1611,6 +1624,31 @@ work_is_landed() {
   content_in_default
 }
 
+# Branch merge proof (see script header): the supervision branch may only clean
+# up a PR-based ship task whose merge is proven, never one that is merely safe
+# to discard because its branch is on a remote.
+branch_requires_merge_proof() {
+  [ "$(fm_lease_actor)" = branch ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ]
+}
+
+# Merge proof that needs no local copy, for a branch teardown whose worktree is
+# missing or was reassigned: the recorded PR is MERGED on the forge. Any gh
+# error, or no recorded PR, is not proof.
+recorded_pr_is_merged() {
+  local state
+  [ -n "$PR_URL" ] || return 1
+  state=$(gh pr view "$PR_URL" --json state -q .state 2>/dev/null) || return 1
+  case "$state" in
+    MERGED|merged) return 0 ;;
+  esac
+  return 1
+}
+
+refuse_branch_without_merge_proof() {
+  echo "REFUSED: task $ID's pull request ${PR_URL:-(none recorded)} is not proven merged - the forge does not report it merged, could not be reached, or no PR is recorded - and the supervision branch only cleans up merged work." >&2
+  echo "Leave the task for its merge notice: work on a remote whose PR is still open is safe but not landed." >&2
+}
+
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
@@ -1942,13 +1980,17 @@ validate_worktree_teardown_safety() {
     report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
-  elif [ -n "$unpushed" ]; then
+  elif [ -n "$unpushed" ] || branch_requires_merge_proof; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
+      if [ -z "$unpushed" ]; then
+        refuse_branch_without_merge_proof
+        return 1
+      fi
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
@@ -3447,6 +3489,11 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+elif branch_requires_merge_proof && ! recorded_pr_is_merged; then
+  # No owned local copy to inspect (the worktree is gone or its slot was
+  # reassigned), so the branch's merge proof is the recorded PR's forge state.
+  refuse_branch_without_merge_proof
+  exit 1
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole
