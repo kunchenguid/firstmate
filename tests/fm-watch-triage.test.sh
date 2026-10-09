@@ -6446,6 +6446,65 @@ test_captain_held_rechecked_under_a_quiet_record() {
     || fail "the quiet daemon's one-shot did not queue the captain-held pane for the daemon: $(cat "$state/.wake-queue" 2>/dev/null)"
   pass "quiet mode's record silences no captain-held recheck, on the watcher's cadence or through a quiet daemon's one-shot"
 }
+# --- quiet-mode ownership: daemon one-shot and extension stay exclusive -----
+# Away/quiet under state/.afk is never a second owner. The watcher stays
+# one-shot when state/.afk is present (daemon ownership), and the omp
+# extension's arm must not keep re-arming a long-running watcher alongside
+# that daemon. Simulate a quiet state where the watcher and an external arm
+# both existed; the second's close should be a quiet decline instead of a new
+# restart. That evidence happens through the daemon collision check below.
+# First, a watcher run on a quiet record must still hand a status wake off to
+# the daemon rather than starting an always-on cycle.
+test_quiet_mode_watcher_hands_status_off_to_quiet_daemon() {
+  local dir state fakebin out pid status_sig
+  dir=$(make_case quiet-status-handoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'quiet\n' > "$state/.afk"
+  write_quiet_record "$state"
+  printf 'working [at=%s]: in flight\n' "$(date +%s)" > "$state/demo.status"
+  status_sig=$(seen_sig "$state/demo.status")
+  printf '%s' "$status_sig" > "$state/.seen-demo_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="demo:1" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "quiet one-shot watcher did not exit while parked under the quiet record"; }
+  grep -F "signal: $state/demo.status" "$out" >/dev/null \
+    || fail "quiet watcher did not hand the status wake to the daemon: $(cat "$out")"
+  pass "quiet mode leaves the watcher one-shot and hands the wake to the daemon"
+}
+
+# And the daemon itself refuses the mixed-ownership bug: if it starts under
+# .afk while state/.watch.lock points at a long-running non-daemon watcher
+# (the omp extension or the supervision host), that is a collision, not a
+# takeover. This is the fail-closed surface firstmate should see.
+test_quiet_daemon_refuses_a_competing_external_watcher() {
+  local dir state fakebin out fake_pid
+  dir=$(make_supercase quiet-owner-collision); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/daemon.out"
+  printf 'quiet\n' > "$state/.afk"
+  write_quiet_record "$state"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/fm-watch.sh"
+  chmod +x "$fakebin/fm-watch.sh"
+  sleep 10000 &
+  fake_pid=$!
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$fake_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "fake identity $fake_pid" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "/nonexistent/external-watch.sh" > "$state/.watch.lock/watcher-path"
+  WATCH="$fakebin/fm-watch.sh" PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=%0 \
+    "$ROOT/bin/fm-supervise-daemon.sh" > "$out" 2>&1 || true
+  kill "$fake_pid" 2>/dev/null || true
+  wait "$fake_pid" 2>/dev/null || true
+  grep -F "watcher collision: watch lock already held by pid=$fake_pid" "$out" >/dev/null \
+    || fail "quiet daemon did not report the external watcher collision: $(cat "$out")"
+  [ ! -e "$state/.supervise-daemon.pid" ] \
+    || fail "quiet daemon continued to start under the external watcher collision"
+  pass "quiet daemon refuses to start side by side with an external watcher under state/.afk"
+}
+
 
 test_live_captain_held_first_sight_silenced_by_away_record() {
   local dir state fakebin out capture_file statusf window key sig pid
@@ -6751,3 +6810,5 @@ test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_quiet_mode_watcher_hands_status_off_to_quiet_daemon
+test_quiet_daemon_refuses_a_competing_external_watcher

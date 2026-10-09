@@ -934,6 +934,16 @@ export default function (pi: ExtensionAPI) {
     owner.retryTimer = timer;
   }
 
+  // The daemon's flag is the sole authority selecting daemon ownership: while
+  // it exists quiet mode and away mode run the watcher one-shot through the
+  // daemon, and this extension's arm host and the supervision host both stand
+  // down. bin/fm-supervise-daemon.sh owns the collision check that proves the
+  // handoff, so recurring automation disputes surface as a real refusal rather
+  // than an indefinite retry loop.
+  function daemonOwnerActive(): boolean {
+    return existsSync(`${state}/.afk`);
+  }
+
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     const ownership = lockOwnership();
@@ -958,6 +968,12 @@ export default function (pi: ExtensionAPI) {
       };
     }
     const id = ++owner.seq;
+    if (daemonOwnerActive()) {
+      return {
+        ok: true,
+        message: `watcher: unchanged - the daemon owns supervision while state/.afk exists (quiet or away mode); no omp extension arm is running; ${repairOnlyHint}`,
+      };
+    }
     const hostMode = hostModeEnabled();
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -1074,6 +1090,12 @@ export default function (pi: ExtensionAPI) {
     replacementCoordinator.receiver = receiveReplacementActionable;
     let pending: PendingActionableClose[] = [];
     let loadFailure = "";
+    if (daemonOwnerActive()) {
+      return {
+        ok: true,
+        message: `watcher: unchanged - the daemon owns supervision while state/.afk exists (quiet or away mode); no omp extension arm is running; ${repairOnlyHint}`,
+      };
+    }
     try {
       pending = loadReplacementHandoff();
     } catch (error) {

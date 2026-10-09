@@ -647,6 +647,23 @@ tests/fm-watch-arm.test.sh
 ```
 
 
+### Quiet-mode ownership on omp
+
+While `state/.afk` exists quiet mode must have exactly one supervisor: `bin/fm-supervise-daemon.sh` running the watcher one-shot.
+The failure this guards is the omp watch extension (or the supervision host in its place) restarting a long-running watcher beside the daemon, which double-wokes main per wake and broke classification in the daemon log.
+The fix gates `.omp/extensions/fm-primary-omp-watch.ts` a daemon owner exists while `state/.afk` exists, and the daemon refuses to start beside a live non-child watcher holding `state/.watch.lock`, surfacing a `watcher collision` line rather than an indefinite restart loop.
+Verified on 2026-10-09 on macOS 25.6.0 arm64 in a named Herdr lab session on a disposable FM_HOME:
+
+| Case | Observed |
+| --- | --- |
+| Fake external watcher (pid alive, `state/.watch.lock` recorded) under `state/.afk` | `bin/fm-supervise-daemon.sh` exited 2 before watching, logged `watcher collision: watch lock already held by pid=<pid> watcher-path=... command=...; refusing to start quiet supervision while state/.afk exists; stop that watcher or remove the state/.afk flag if quiet mode is not live`, left no `state/.supervise-daemon.pid` |
+| Daemon-owned watcher lock or absent lock | the daemon starts and owns supervision as before; its own one-shot watcher child re-takes the lock between polls without tripping the guard |
+| Quiet one-shot hand-off through the watcher | `tests/fm-watch-triage.test.sh`: `test_quiet_mode_watcher_hands_status_off_to_quiet_daemon` - the watcher exits after enqueueing one `signal:` wake for the daemon |
+| Daemon collision unit guard | `tests/fm-watch-triage.test.sh`: `test_quiet_daemon_refuses_a_competing_external_watcher` - the daemon refuses with the collision line and leaves no pidfile under the planted external lock |
+| `npx -y shellcheck bin/fm-supervise-daemon.sh tests/fm-watch-triage.test.sh` | clean (informational only) |
+
+Evidence scripts and the lab transcript live in the task's private report directory; the refresh commands for these guarantees are the two triage tests above plus `tests/fm-daemon.test.sh`, `tests/fm-supervision-host.test.sh`, and `tests/fm-watch-arm.test.sh`.
+
 ### Non-Pi primaries
 
 This supports the per-primary routing in [supervision-host.md](../supervision-host.md): with `config/supervision-host`, the Cursor, OpenCode, Grok, and Codex arm owners run the host with the Claude engine, and without it nothing changes.
