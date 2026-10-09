@@ -192,6 +192,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -438,6 +440,48 @@ test_hook_blocks_when_unhealthy_in_primary() {
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
+}
+
+test_hook_allows_when_another_session_holds_fleet_lock() {
+  local dir owner fakebin out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-read-only-lock")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  fakebin=$(fm_fakebin "$TMP_ROOT/read-only-lock-bin")
+  cat > "$fakebin/ps" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" -p $owner "*)
+    case " \$* " in *comm=*) printf 'codex\\n' ;; *) printf 'codex\\n' ;; esac
+    ;;
+  *) exec /bin/ps "\$@" ;;
+esac
+EOF
+  chmod +x "$fakebin/ps"
+  out=$(printf '{"stop_hook_active":false}' | PATH="$fakebin:$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 0 "$status" "a session refused the live fleet lock must allow its stop"
+  [ -z "$out" ] || fail "read-only lock-refused stop should be silent, got: $out"
+  pass "fm-turnend-guard: allows stop when another live firstmate session owns the fleet lock"
+}
+
+test_hook_blocks_lock_owner_without_watcher() {
+  local dir home out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-lock-owner-no-watcher")
+  : > "$dir/state/task1.meta"
+  ln -s /bin/bash "$dir/claude"
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # the fake harness expands FM_HOME and PAYLOAD in its child shell.
+  out=$(FM_HOME="$home" PAYLOAD='{"stop_hook_active":false,"session_id":"lock-owner"}' "$dir/claude" -c '
+    printf "%s\\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\\n" "$PAYLOAD" | "$FM_HOME/bin/fm-turnend-guard.sh" --claude
+  ' 2>&1); status=$?
+  expect_code 2 "$status" "the fleet-lock owner must still block when no watcher is running"
+  assert_contains "$out" "TURN WOULD END BLIND" "the lock owner's missing watcher must remain a blocking failure"
+  pass "fm-turnend-guard: lock owner remains blocked without a watcher"
 }
 
 test_hook_blocks_from_fm_home_state() {
@@ -1672,6 +1716,9 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
     [ -z "$out" ] || fail "inert auto-arm produced output at stop $i: $out"
     [ "$(sed -n '1p' "$dir/state/.claude-autoarm-epoch")" = "$epoch_line" ] \
       || fail "the ledger epoch advanced at stop $i, so this case no longer drives a frozen epoch"
+    # The competing auto-arm must see the foreign lock, but the guard below
+    # represents the lock-owning session whose stop is under test.
+    rm -f "$dir/state/.lock"
     guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
     if [ "$i" -lt 4 ]; then
       expect_code 2 "$guard_status" "frozen-epoch stop $i must still re-block within the budget"
@@ -2219,6 +2266,8 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
+test_hook_allows_when_another_session_holds_fleet_lock
+test_hook_blocks_lock_owner_without_watcher
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode

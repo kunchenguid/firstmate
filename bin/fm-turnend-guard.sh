@@ -117,6 +117,8 @@ done
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -185,6 +187,15 @@ fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
+fi
+# A live firstmate session that owns the fleet lock is responsible for watcher
+# continuity. This hook may run in another session that was refused that lock;
+# that session is read-only and cannot repair supervision, so let its stop pass.
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  session_lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  if [ -n "$session_lock_pid" ] && fm_harness_pid_alive "$session_lock_pid"; then
+    exit 0
+  fi
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
