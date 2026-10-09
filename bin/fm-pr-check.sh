@@ -129,9 +129,7 @@ fi
 # so a host with no tea login is refused here rather than read through tea's
 # default login on another instance, and a pull request whose exact poll read
 # fails is refused rather than armed: the poll is silent on every error, so a
-# pull request tea cannot read - upstream tea truncates a repository slug's
-# deeper segments, which is one way a nested org path fails - would otherwise
-# arm a watch that never wakes. The JSON record this reads also supplies the
+# pull request tea cannot read would otherwise arm a watch that never wakes. The JSON record this reads also supplies the
 # pr_head below; only the draft refusal is separate, through tea's detail text.
 if [ "$PROVIDER" = forgejo ]; then
   TEA_LOGINS=$(tea logins list --output csv 2>/dev/null) \

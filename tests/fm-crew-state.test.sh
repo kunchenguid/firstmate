@@ -1643,18 +1643,18 @@ test_terminal_passed_with_open_forgejo_pr_does_not_claim_merged() {
   make_repo_on_branch "$d/wt" fm/feat-dforgejoopen
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-dforgejoopen.meta" "window=fm:fm-feat-dforgejoopen" \
-    "worktree=$d/wt" "kind=ship" "pr=https://codeberg.org/org/team/repo/pulls/12"
+    "worktree=$d/wt" "kind=ship" "pr=https://codeberg.org/org/repo/pulls/12"
   read_log="$d/tea-read.log"
   : > "$read_log"
   FM_FAKE_TEA_READ_LOG=$read_log
   FM_FAKE_TEA_STATE=open
   FM_FAKE_TEA_MERGED=false
-  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dforgejoopen https://codeberg.org/org/team/repo/pulls/12)"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dforgejoopen https://codeberg.org/org/repo/pulls/12)"
   out=$(run_crew_state "$d" feat-dforgejoopen)
   assert_contains "$out" "run passed: PR open" "open Forgejo PR state is named"
   assert_not_contains "$out" "PR merged" "open Forgejo PR must not be reported merged"
-  assert_grep 'pulls 12 --repo org/team/repo --login main --output json' "$read_log" \
-    "Forgejo PR read addresses the whole nested path through the host-pinned login"
+  assert_grep 'pulls 12 --repo org/repo --login main --output json' "$read_log" \
+    "Forgejo PR read addresses the project path through the host-pinned login"
   pass "terminal passed run reads open Forgejo PR state"
 }
 

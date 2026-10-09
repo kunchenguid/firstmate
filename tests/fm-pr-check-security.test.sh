@@ -431,6 +431,8 @@ INVALID_URLS=(
   'https://forgejo.example/o/./pulls/1'
   'https://forgejo.example/o/../pulls/1'
   'https://forgejo.example/repo/pulls/1'
+  'https://forgejo.example/sub/o/r/pulls/1'
+  'https://forgejo.example/a/b/c/d/pulls/1'
   'https://forgejo.example/o/r/pulls/1/2'
   'https://Forgejo.example/o/r/pulls/1'
   'https://forgejo.example:3000/o/r/pulls/1'
@@ -610,8 +612,7 @@ EOF
       || fail "parser set GitHub owner/repository for a Forgejo pull request URL"
   done <<'EOF'
 https://codeberg.org/owner/repo/pulls/1|codeberg.org|owner/repo|1
-https://git.example.com/org/team/repo/pulls/42|git.example.com|org/team/repo|42
-https://forgejo.internal.co.uk/a/b/c/d/pulls/123456|forgejo.internal.co.uk|a/b/c/d|123456
+https://forgejo.internal.co.uk/a/b/pulls/123456|forgejo.internal.co.uk|a/b|123456
 https://git.example.com/o/r.name-x_1/pulls/7|git.example.com|o/r.name-x_1|7
 https://git.example.com/o/pulls/pulls/3|git.example.com|o/pulls|3
 EOF
@@ -2339,17 +2340,22 @@ EOF
   [ ! -e "$state/task-f.check.sh" ] || fail "a refused draft armed a poll"
   [ ! -s "$dir/guard.log" ] || fail "a refused draft reached the guard"
 
-  # A nested org path is addressed whole; tea's slug truncation is upstream
-  # behavior the arming read exposes rather than something arming works around.
+  # Forgejo has no nested organizations, so a deeper path is a subpath-served
+  # instance whose prefix would address the wrong repository; it is refused
+  # before tea is asked anything.
   : > "$dir/tea.log"
-  nested=https://forgejo.example/org/team/repo/pulls/9
+  nested=https://forgejo.example/sub/team/repo/pulls/9
   write_task_meta "$dir" task-g
-  run_check_entry "$dir" task-g "$nested" >/dev/null 2> "$dir/arm-nested.err" \
-    || fail "arming a nested-path pull request failed: $(cat "$dir/arm-nested.err")"
-  grep -qF -- "pulls 9 --repo org/team/repo --login main --output json" "$dir/tea.log" \
-    || fail "arming did not pass tea the whole nested path"
-  grep -qxF "pr=$nested" "$state/task-g.meta" \
-    || fail "the nested canonical URL was not recorded"
+  cp "$state/task-g.meta" "$dir/meta.g.before"
+  set +e
+  run_check_entry "$dir" task-g "$nested" >/dev/null 2> "$dir/arm-nested.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a three-segment Forgejo path"
+  [ ! -s "$dir/tea.log" ] || fail "a refused three-segment path still reached tea"
+  cmp -s "$dir/meta.g.before" "$state/task-g.meta" \
+    || fail "a refused three-segment path changed the task metadata"
+  [ ! -e "$state/task-g.check.sh" ] || fail "a refused three-segment path armed a poll"
 
   pass "Forgejo pull requests arm through a pinned tea login and never wake falsely"
 }

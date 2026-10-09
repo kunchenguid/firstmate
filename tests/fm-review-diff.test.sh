@@ -250,7 +250,7 @@ test_forgejo_pr_url_fetches_pull_head() {
   stale_and_pr_commits "$case_dir"
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/12/head"
   write_task_meta "$case_dir" \
-    "pr=https://codeberg.org/example/team/repo/pulls/12"
+    "pr=https://codeberg.org/example/repo/pulls/12"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 

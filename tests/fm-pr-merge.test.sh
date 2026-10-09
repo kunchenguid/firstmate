@@ -26,11 +26,10 @@ MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
-# The Forgejo fixture. A nested org/team/repo path, because a Forgejo project
-# keeps its whole path the way a GitLab one does, and a tea login whose token
+# The Forgejo fixture. An owner/repository path, and a tea login whose token
 # lives in tea's own config file, which is the only place curl can get one.
 FR_HOST=forge.example
-FR_PATH=owner/team/repo
+FR_PATH=owner/repo
 FR_PROJECT_URL="https://$FR_HOST/$FR_PATH"
 FR_URL="$FR_PROJECT_URL/pulls/7"
 FR_HEAD=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
@@ -451,6 +450,7 @@ add_tea_mocks() {
   write_pull_detail "$case_dir/pull-detail.txt"
   write_forge_status "$case_dir/forgejo-status.json" success 1
   write_tea_config "$case_dir"
+  printf '{"default_merge_style":"rebase"}\n' > "$case_dir/forgejo-repo.json"
   printf 'Name,URL,SSHHost,User,Default\n%s,%s,,captain,true\n' \
     "$FR_LOGIN" "https://$FR_HOST" > "$case_dir/tea-logins.csv"
   cat > "$case_dir/fakebin/tea" <<'SH'
@@ -510,6 +510,16 @@ case "$*" in
     [ -f "$case_dir/forgejo-merge-response" ] || : > "$case_dir/forgejo-merge-response"
     cat "$case_dir/forgejo-merge-response" > "$out"
     printf '%s\n' "$code"
+    exit 0
+    ;;
+  *"/api/v1/repos/"*)
+    if [ -f "$case_dir/forgejo-repo.json" ]; then
+      cat "$case_dir/forgejo-repo.json" > "$out"
+      printf '200\n'
+    else
+      printf '{"message":"not found"}\n' > "$out"
+      printf '404\n'
+    fi
     exit 0
     ;;
 esac
@@ -2217,8 +2227,8 @@ test_forgejo_merge_records_pr_head_and_proves_merged() {
     *) fail "forgejo-merges: unexpected merge endpoint: '$merge_line'" ;;
   esac
   body=$(cat "$case_dir/forgejo-merge-body")
-  [ "$body" = "{\"Do\":\"\",\"head_commit_id\":\"$FR_HEAD\"}" ] \
-    || fail "forgejo-merges: unexpected merge body: '$body'"
+  [ "$body" = "{\"Do\":\"rebase\",\"head_commit_id\":\"$FR_HEAD\"}" ] \
+    || fail "forgejo-merges: the repository's default merge style was not used: '$body'"
   assert_grep "verified: $FR_URL is merged (state=closed, hasMerged=true)" "$case_dir/stdout" \
     "forgejo-merges: the read-back proof was not reported"
   assert_present "$case_dir/state/task-x1.check.sh" \
@@ -2227,6 +2237,37 @@ test_forgejo_merge_records_pr_head_and_proves_merged() {
   assert_no_grep "$FR_TOKEN" "$case_dir/curl.log" \
     "forgejo-merges: the login token reached curl's command line"
   pass "fm-pr-merge merges a Forgejo pull request through the pinned tea login and the instance's own endpoint"
+}
+
+test_forgejo_unreadable_default_style_refuses_without_merging() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-no-default-style)
+  rm -f "$case_dir/forgejo-repo.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-no-default-style: an unreadable default merge style must refuse"
+  assert_grep "default merge style could not be read" "$case_dir/stderr" \
+    "forgejo-no-default-style: the refusal did not name the missing default style"
+  [ ! -e "$case_dir/forgejo-merge-called" ] \
+    || fail "forgejo-no-default-style: the merge endpoint was called without a style"
+
+  case_dir=$(make_forgejo_case forgejo-named-style-skips-default)
+  rm -f "$case_dir/forgejo-repo.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-named-style-skips-default: a named style needs no repository default"
+  ! grep -qE "/api/v1/repos/$FR_PATH\$" "$case_dir/curl.log" \
+    || fail "forgejo-named-style-skips-default: the repository default was read although a style was named"
+  pass "fm-pr-merge refuses a Forgejo merge whose style it cannot determine, and reads no default when one is named"
 }
 
 test_forgejo_method_flags_map_to_the_endpoint_style() {
@@ -4405,6 +4446,7 @@ test_allow_missing_follows_the_allow_red_rules() {
 
 test_gitlab_head_override_args_refuse_before_recording
 test_forgejo_merge_records_pr_head_and_proves_merged
+test_forgejo_unreadable_default_style_refuses_without_merging
 test_forgejo_method_flags_map_to_the_endpoint_style
 test_forgejo_missing_tool_refuses_before_recording
 test_forgejo_unpinnable_or_unreadable_pull_refuses

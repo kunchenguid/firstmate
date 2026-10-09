@@ -5,12 +5,11 @@
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
 # "path" is the full project path, which is owner/repository on GitHub, an
-# arbitrarily nested group/subgroup/project namespace on GitLab, an
-# owner/repository pair that can nest inside organization subgroups on
-# Forgejo, and an arbitrarily nested project name on Gerrit, where "number"
-# is the change number. A GitLab or Gerrit project can sit at any depth and a
-# Forgejo one can nest, so no fixed owner/repository pair addresses every
-# project and the sidecar carries the whole path instead. All three also run
+# arbitrarily nested group/subgroup/project namespace on GitLab,
+# owner/repository on Forgejo, and an arbitrarily nested project name on
+# Gerrit, where "number" is the change number. A GitLab or Gerrit project can
+# sit at any depth, so no fixed owner/repository pair addresses every project
+# and the sidecar carries the whole path instead. All three also run
 # on self-hosted instances, and Gerrit runs nowhere else, so the host is part
 # of that identity rather than a constant. Every consumer re-derives the
 # identity from the stored URL and refuses any record whose parts do not
@@ -165,11 +164,12 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
-# A Forgejo project path is owner/repository and can also nest inside
-# organization subgroups, so at least two segments and no fixed depth,
-# exactly like a GitLab namespace. A leading hyphen is refused because the
-# path is what names the project to the tea CLI, where a leading hyphen reads
-# as an option instead, and a ".git" suffix is refused because Forgejo strips
+# A Forgejo project path is exactly owner/repository: Forgejo has no nested
+# organizations, so a deeper path can only be an instance served under a URL
+# subpath, whose prefix would then be misread as part of the project and
+# address the wrong repository through both tea and the API. A leading
+# hyphen is refused because the path is what names the project to the tea
+# CLI, where a leading hyphen reads as an option instead, and a ".git" suffix is refused because Forgejo strips
 # it on clone URLs and the stripped name is the canonical one. A ".atom"
 # suffix is refused for the same reason as GitLab's: it is a feed suffix
 # rather than a project spelling, so accepting it could only arm a watch on
@@ -178,12 +178,12 @@ fm_pr_forgejo_path_valid() {
   local path=${1-} segment
   local LC_ALL=C
   local -a segments
-  [ "${#path}" -ge 3 ] && [ "${#path}" -le 1024 ] || return 1
+  [ "${#path}" -ge 3 ] && [ "${#path}" -le 511 ] || return 1
   case "$path" in
     /*|*/|*//*) return 1 ;;
   esac
   IFS=/ read -ra segments <<< "$path"
-  [ "${#segments[@]}" -ge 2 ] && [ "${#segments[@]}" -le 20 ] || return 1
+  [ "${#segments[@]}" -eq 2 ] || return 1
   for segment in "${segments[@]}"; do
     [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
     case "$segment" in
@@ -271,14 +271,10 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
-  # A Forgejo pull request URL is https://<host>/<path>/pulls/<n>, where the
-  # project path is owner/repository and can nest inside organization
-  # subgroups, so it is captured whole and never flattened into an
-  # owner/repository pair, following the GitLab precedent. The path class
-  # contains every character of "pulls", so this match is greedy to the last
-  # "/pulls/": an earlier separator lands inside the captured path, and
-  # because the number is always the URL's last segment that greedy split is
-  # the canonical one at every nesting depth.
+  # A Forgejo pull request URL is https://<host>/<owner>/<repo>/pulls/<n>.
+  # The path is captured whole and fm_pr_forgejo_path_valid then requires
+  # exactly two segments, so a subpath-served instance's URL is refused rather
+  # than parsed with its subpath folded into the project.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/pulls/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
     host=${BASH_REMATCH[1]}

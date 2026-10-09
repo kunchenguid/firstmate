@@ -178,12 +178,12 @@ case "$provider" in
     case "$host" in
       .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
     esac
-    [ "${#path}" -ge 3 ] && [ "${#path}" -le 1024 ] || exit 0
+    [ "${#path}" -ge 3 ] && [ "${#path}" -le 511 ] || exit 0
     case "$path" in
       /*|*/|*//*) exit 0 ;;
     esac
-    # A Forgejo project nests inside organization subgroups the way a GitLab
-    # project nests inside groups, so its path keeps the same shape rules.
+    # A Forgejo project path is exactly owner/repository, the same rule
+    # fm_pr_forgejo_path_valid applies at parse time.
     rest=$path
     segments=0
     while [ -n "$rest" ]; do
@@ -192,13 +192,13 @@ case "$provider" in
         *) segment=$rest; rest= ;;
       esac
       segments=$((segments + 1))
-      [ "$segments" -le 20 ] || exit 0
+      [ "$segments" -le 2 ] || exit 0
       [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || exit 0
       case "$segment" in
         .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) exit 0 ;;
       esac
     done
-    [ "$segments" -ge 2 ] || exit 0
+    [ "$segments" -eq 2 ] || exit 0
     [ "$url" = "https://$host/$path/pulls/$number" ] || exit 0
     # tea addresses an instance only through a named login: a repository slug
     # carries no host, and without --login tea reads its default login's

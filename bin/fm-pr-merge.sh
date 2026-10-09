@@ -117,10 +117,12 @@
 # stops the merge before any state is recorded. The verified head is then
 # bound to the merge as the endpoint's head_commit_id, so a push that lands
 # between that read and the merge fails the merge instead of landing commits
-# nothing verified. No merge style is imposed when the caller names none: the
-# endpoint then applies its own default style, and the style flags --merge,
-# --rebase, --rebase-merge, --squash and --fast-forward-only (each also
-# spellable as --method <value>) are the only forge arguments this path reads.
+# nothing verified. The endpoint requires a merge style, so when the caller
+# names none the repository's own default_merge_style is read live and used,
+# and an unreadable default refuses rather than guessing one; the style flags
+# --merge, --rebase, --rebase-merge, --squash and --fast-forward-only (each
+# also spellable as --method <value>) are the only forge arguments this path
+# reads.
 # The endpoint answers success with HTTP 200 and an empty body, which is never
 # parsed as JSON: the merge is proved only by reading the pull request back
 # through tea, where only hasMerged=true is a landed merge, so an accepted
@@ -405,10 +407,11 @@ if [ "$PROVIDER" = gitlab ]; then
 fi
 
 # The merge style the caller's own extra arguments named, as the endpoint's Do
-# value. Empty when the caller named no style, which leaves the endpoint to
-# apply its own default; the endpoint's other styles beyond gh's three
-# spellings are accepted, while "manually-merged" is refused because it marks
-# a pull request merged by hand rather than merging anything.
+# value. Empty when the caller named no style, which forgejo_verify_mergeable
+# then fills from the repository's default_merge_style; the endpoint's other
+# styles beyond gh's three spellings are accepted, while "manually-merged" is
+# refused because it marks a pull request merged by hand rather than merging
+# anything.
 FM_PR_FORGEJO_DO=
 if [ "$PROVIDER" = forgejo ]; then
   forgejo_method=$(caller_merge_method "$@")
@@ -689,6 +692,7 @@ forgejo_verify_mergeable() {
   local json state='' merged='' mergeable='' live_head=''
   local total=0 named=0 refusals=''
   local detail status_rc=0 status_fields status_state='' status_count=''
+  local default_style
 
   if ! logins=$(tea logins list --output csv 2>/dev/null); then
     echo "error: could not read the tea login list to merge $URL" >&2
@@ -824,6 +828,30 @@ FIELDS
   if [ -n "$FORGEJO_RESPONSE" ]; then
     rm -f "$FORGEJO_RESPONSE"
     FORGEJO_RESPONSE=
+  fi
+
+  # The merge endpoint requires a style, so a caller who named none gets the
+  # repository's own configured default rather than one chosen here.
+  if [ -z "$FM_PR_FORGEJO_DO" ]; then
+    default_style=
+    if forgejo_api_call GET "repos/$PR_PATH"; then
+      case "$FORGEJO_CODE" in
+        2*)
+          default_style=$(jq -r '
+            if type == "object" and (.default_merge_style | type) == "string"
+            then .default_merge_style else "" end' "$FORGEJO_RESPONSE" 2>/dev/null || true)
+          ;;
+      esac
+      rm -f "$FORGEJO_RESPONSE"
+      FORGEJO_RESPONSE=
+    fi
+    case "$default_style" in
+      merge|rebase|rebase-merge|squash|fast-forward-only) FM_PR_FORGEJO_DO=$default_style ;;
+      *)
+        refusals="$refusals  - the repository's default merge style could not be read; name one with --merge, --rebase, --squash, or --method <style>
+"
+        ;;
+    esac
   fi
 
   if [ -n "$refusals" ]; then
