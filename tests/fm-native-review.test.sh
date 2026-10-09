@@ -63,9 +63,9 @@ if [ "\${1:-}" = app-server ] && [ "\${2:-}" = --stdio ]; then
 fi
 [ "\${1:-}" = --model ] || exit 91
 [ "\${2:-}" = gpt-6.1-sol ] || exit 92
-[ "\${3:-}" = -c ] || exit 93
-[ "\${4:-}" = 'model_reasoning_effort="xhigh"' ] || exit 94
-[ "\${5:-}" = review ] || exit 95
+[ "\${3:-}" = review ] || exit 93
+[ "\${4:-}" = -c ] || exit 94
+[ "\${5:-}" = 'model_reasoning_effort="xhigh"' ] || exit 95
 [ "\${6:-}" = -c ] || exit 96
 [ "\${7:-}" = "\${7#developer_instructions=}" ] && exit 97
 [ "\${8:-}" = --base ] || exit 98
@@ -96,7 +96,8 @@ test_worker_harnesses_use_configured_reviewer() {
       || fail "$harness coding task did not use configured Codex review"
     assert_equals --model "$(sed -n '1p' "$dir/argv")" "$harness review omitted explicit model selection"
     assert_equals gpt-6.1-sol "$(sed -n '2p' "$dir/argv")" "$harness review selected the wrong model"
-    assert_equals 'model_reasoning_effort="xhigh"' "$(sed -n '4p' "$dir/argv")" "$harness review omitted effective effort"
+    assert_equals review "$(sed -n '3p' "$dir/argv")" "$harness review misplaced the native review subcommand"
+    assert_equals 'model_reasoning_effort="xhigh"' "$(sed -n '5p' "$dir/argv")" "$harness review omitted review-local effective effort"
     assert_equals --base "$(sed -n '8p' "$dir/argv")" "$harness review omitted the base selector"
     assert_equals "$base" "$(sed -n '9p' "$dir/argv")" "$harness review did not bind the exact base"
     assert_grep "$candidate" "$out" "$harness evidence did not bind the exact candidate"

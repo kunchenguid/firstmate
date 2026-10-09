@@ -302,8 +302,8 @@ trap 'rm -f "$TMP" "$RESULT" "$TRACE"' EXIT HUP INT TERM
 # native diff selector. JSON string syntax is valid TOML basic-string syntax and
 # preserves newlines without shell evaluation.
 REVIEW_RC=0
-(cd "$WORKTREE" && "$COMMAND" --model "$MODEL" \
-  -c "model_reasoning_effort=\"$EFFORT\"" review \
+(cd "$WORKTREE" && "$COMMAND" --model "$MODEL" review \
+  -c "model_reasoning_effort=\"$EFFORT\"" \
   -c "developer_instructions=$PROMPT_CONFIG" --base "$BASE_FULL") >"$RESULT" 2>"$TRACE" \
   || REVIEW_RC=$?
 if [ "$REVIEW_RC" -ne 0 ]; then

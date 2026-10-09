@@ -51,6 +51,7 @@ FM_HOME="$home" "$ROOT/bin/fm-native-review.sh" live-review \
 assert_grep "Reviewer harness: \`$HARNESS\`" "$output" "live evidence omitted the installed reviewer harness"
 assert_grep "Reviewer model: \`$MODEL\`" "$output" "live evidence omitted the explicit reviewer model"
 assert_grep "Reviewer effort: \`$EFFORT\`" "$output" "live evidence omitted the effective reviewer effort"
+assert_grep "reasoning effort: $EFFORT" "$output" "installed reviewer did not apply the selected effort"
 assert_grep "Candidate: \`$candidate\`" "$output" "live evidence omitted the exact candidate"
 assert_grep 'INTENT_CONFORMANCE: pass' "$output" "installed reviewer did not pass the isolated candidate"
 pass "installed $HARNESS native review binds identity, intent, and final response"
