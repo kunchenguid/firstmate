@@ -103,8 +103,10 @@ configure_merged_github() {  # <home>
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
+  "repo view") printf 'main\n' ;;
   "pr view")
     case " $* " in
+      *baseRefName*) printf 'main\n' ;;
       *statusCheckRollup*)
         printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
         ;;
@@ -198,6 +200,7 @@ write_origin_meta() {  # <home> <id> [kind]
     "kind=$kind" \
     "mode=$kind" \
     "spawn_gen=fixture-$id"
+  [ "$kind" != ship ] || printf 'no_issue=1\n' >> "$home/state/$id.meta"
 }
 
 # --- markdown-to-beads migration resolution ----------------------------------
@@ -3210,7 +3213,7 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
   fm_write_meta "$home/state/$pr_id.meta" \
     "window=firstmate:fm-$pr_id" "endpoint_task_id=$pr_id" "worktree=$wt" \
     "project=$repo" "harness=codex" "kind=ship" "mode=direct-PR" \
-    "pr=$pr" "spawn_gen=fixture-$pr_id"
+    "no_issue=1" "pr=$pr" "spawn_gen=fixture-$pr_id"
   run_captain "$home" hold "$pr_id" --reason "captain merge approval pending" >/dev/null \
     || fail "could not hold the PR entrypoint fixture"
 
