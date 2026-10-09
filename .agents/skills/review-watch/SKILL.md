@@ -35,6 +35,14 @@ After repairing the valid findings and pushing, reply once on the pull request d
 Repair is bounded to three rounds per pull request.
 After the third round, report the remaining findings plainly instead of looping.
 
+## Recorded sweep
+
+The named 2026-10-09 sweep was run as `saiqulhaq-hh`.
+First, platform-infra PR 66 removed its contradictory "zero in-place changes" claim and already had a completed OpenCode review on `167d7e2f232049a8ab5ca60bae6517400dc4d37a`.
+Platform-infra PRs 49, 70, and 71, including the named DeepSeek and Langfuse user-tracking PRs, had completed reviews on `1f13172b2f4f228e2e64c8eb4dc668f191712b2b`, `74805935dc10fa3c789512c99f48aecbe11418f1`, and `cf2a7601810140eee75d0f64b8de00b9318de573`.
+hh-relay PRs 433 and 434 had completed reviews on `00a72a47ec8c8af4f51c4be10ebaef37688e92a4` and `b0d4c28b138c1ec3e244fb37a4a0353c1b6ec0e5`, while PR 374, the Superpowers-doc PR, received a fresh `/oc review` request on `01b560182a605f0704383a0572bbd5460270b756`.
+hungryhub-team/.github PR 1 has no OpenCode caller workflow on its default branch, so no review can run there.
+
 ## Boundaries
 
 ClickUp status stays with the existing delivery flow; this rule does not add a ClickUp integration.

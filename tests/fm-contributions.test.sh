@@ -229,22 +229,26 @@ test_review_wake() { test_incoming_signal review; }
 test_inline_wake() { test_incoming_signal inline; }
 
 test_review_bot_signal_wakes() {
-  local home out
-  home=$(new_home review-bot)
-  forge_home "$home"
-  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
-    || fail 'could not register the owned delivery'
-  registered_checks "$home" >/dev/null
-  jq -n --arg head "$HEAD_A" '[{id:31,user:{login:"opencode-agent[bot]",type:"Bot"},author_association:"NONE",
-    body:"finding: fix the contract",html_url:"https://github.com/o/r/pull/8#issuecomment-31",
-    updated_at:"2026-09-16T08:01:00Z",submitted_at:"2026-09-16T08:01:00Z"}]' > "$home/forge/comments.json"
-  registered_checks "$home" >/dev/null
-  jq -e '.records[0].pending | length == 1' "$home/data/delivery/contributions.json" >/dev/null \
-    || fail 'an OpenCode review-bot finding must survive as a pending signal'
-  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
-  printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "opencode-agent[bot]"' >/dev/null \
-    || fail 'supervisor cannot retrieve the review-bot finding'
-  pass 'an OpenCode review-bot finding wakes and stays pending'
+  local association home out
+  for association in NONE MEMBER; do
+    home=$(new_home "review-bot-$association")
+    forge_home "$home"
+    with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+      || fail 'could not register the owned delivery'
+    registered_checks "$home" >/dev/null
+    jq -n --arg association "$association" '[{id:31,user:{login:"opencode-agent[bot]",type:"Bot"},author_association:$association,
+      body:"finding: fix the contract",html_url:"https://github.com/o/r/pull/8#issuecomment-31",
+      updated_at:"2026-09-16T08:01:00Z",submitted_at:"2026-09-16T08:01:00Z"}]' > "$home/forge/comments.json"
+    registered_checks "$home" >/dev/null
+    jq -e '.records[0].pending | length == 1' "$home/data/delivery/contributions.json" >/dev/null \
+      || fail "an OpenCode review-bot finding with $association association must survive as a pending signal"
+    out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+    printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "opencode-agent[bot]"' >/dev/null \
+      || fail "supervisor cannot retrieve the $association review-bot finding"
+    [ -s "$home/state/.wake-queue" ] \
+      || fail "an OpenCode review-bot finding with $association association must wake firstmate"
+  done
+  pass 'an OpenCode review-bot finding wakes regardless of association'
 }
 
 test_other_bot_signal_is_ignored() {

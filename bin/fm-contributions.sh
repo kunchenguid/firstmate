@@ -79,8 +79,9 @@
 # ready-for-pr. Labels are matched case-insensitively and exactly.
 #
 # New pull-request comments/reviews from any human other than the contribution
-# author (whatever their GitHub association) and from the review bots whose
-# author_association is NONE (the OpenCode reviewer and the Relay bots), plus
+# author (whatever their GitHub association) and from the allowlisted review
+# bots (the OpenCode reviewer and the Relay bots), whatever their association,
+# plus
 # issue comments from maintainers and issue transitions to ready-for-pr,
 # persist as pending before any wake. poll appends ordinary durable check
 # wakes through fm-wake-lib
@@ -123,11 +124,11 @@ case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT" in ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;; esac
 BUDGET_CAP=$((CHECK_TIMEOUT - 3))
-# Review-bot logins whose comments and reviews are findings worth a wake even
-# though GitHub reports their author_association as NONE. The OpenCode reviewer
-# and the Relay review bots are the automated finding sources firstmate
-# monitors on pull requests; every other bot stays excluded so dependency and
-# housekeeping bots never wake firstmate.
+# Review-bot logins whose comments and reviews are findings worth a wake
+# regardless of GitHub association. The OpenCode reviewer and the Relay review
+# bots are the automated finding sources firstmate monitors on pull requests;
+# every other bot stays excluded so dependency and housekeeping bots never wake
+# firstmate.
 REVIEW_BOTS='["opencode-agent[bot]","hh-relay-dev[bot]","hh-relay[bot]","relay-bot-dev[bot]"]'
 [ "$BUDGET_CAP" -ge 1 ] || BUDGET_CAP=1
 [ "$BUDGET" -le "$BUDGET_CAP" ] || BUDGET=$BUDGET_CAP
