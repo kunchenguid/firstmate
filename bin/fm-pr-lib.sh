@@ -1255,7 +1255,7 @@ FIELDS
 
 # The status of one Forgejo pull request, the read bin/fm-crew-state.sh bounds
 # for a terminal passed run's PR detail. tea addresses an instance only by
-# login name, so the login whose URL's host part is <host> is resolved from
+# login name, so the login whose URL is exactly https://<host> is resolved from
 # `tea logins list --output csv` (fm_pr_forgejo_tea_login) and a host no login
 # pins refuses rather than read tea's default instance. The pull request is
 # then read as tea's JSON record and classified by fm_pr_forgejo_tea_pull_state
