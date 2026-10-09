@@ -5432,16 +5432,25 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-# Export the compact-adviser kill switch into the pane shell through the same
-# pre-launch channel, so later commands in that shell inherit it too. The launch
-# command independently establishes the value for the agent process itself.
-spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
+# Herdr's pane run returns before zsh has consumed the submitted line. Several
+# rapid exports can enter its paste buffer together and lose their separators,
+# merging with the later source command. Source the setup with the staged launch
+# instead, in the pane shell and outside any env-i wrapper. Other backends retain
+# their existing delivery path.
+SPAWN_PANE_SETUP=
+spawn_export_line() { # <target> <export command>
+  if [ "$BACKEND" = herdr ]; then
+    SPAWN_PANE_SETUP+="$2"$'\n'
+  else
+    spawn_send_text_line "$1" "$2"
+  fi
+}
+# Export GOTMPDIR into the pane shell so the agent and every child inherit it.
+spawn_export_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# The launch independently establishes the compact-adviser switch for the agent.
+spawn_export_line "$T" "export COMPACT_ADVISER_DISABLE=1"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
-  spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
+  spawn_export_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
 fi
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
@@ -5449,13 +5458,13 @@ fi
 # The id reached a validated bare-slug charset above, so it carries no shell
 # syntax of its own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  spawn_export_line "$T" "export FM_TASK_ID=$ID"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+  if spawn_export_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
@@ -5501,6 +5510,9 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+# Apply deferred pane exports before the cleared-environment wrapper expands
+# its forwarded variables, preserving them in the pane shell after agent exit.
+LAUNCH="$SPAWN_PANE_SETUP$LAUNCH"
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
 # the final filename keeps a buffered source line bound to this incarnation.
