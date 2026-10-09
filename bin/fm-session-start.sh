@@ -936,6 +936,20 @@ for status in "$STATE"/*.status; do
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
+subsection "GOODNIGHT"
+if fm_goodnight_active "$STATE"; then
+  GOODNIGHT_ENTERED=$(head -n 1 "$STATE/.goodnight" 2>/dev/null || true)
+  case "$GOODNIGHT_ENTERED" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
+      printf 'active since %s; morning list: %s/goodnight/%s.md\n' "$GOODNIGHT_ENTERED" "$DATA" "${GOODNIGHT_ENTERED%%T*}"
+      ;;
+    *) printf 'active; entry time unreadable, inspect morning lists under %s/goodnight/\n' "$DATA" ;;
+  esac
+  printf 'Load /goodnight and read the morning list. Ask whether to lift the hold with /goodmorning; until then it remains active.\n'
+else
+  printf '(inactive)\n'
+fi
+
 subsection "AFK"
 # The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
 # still marks a running daemon on the harnesses that launch one.

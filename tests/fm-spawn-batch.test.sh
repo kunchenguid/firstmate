@@ -4,9 +4,8 @@
 # These exercise argument routing only: each spawn attempt fails fast at the
 # missing-brief check, which is reached before any tmux/treehouse side effect, so
 # the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
-# live watcher guard / state. Parser and path-scoping cases are table-driven; the
-# only behavior asserted on its own is "a multi-pair batch does not stop after the
-# first failure".
+# live watcher guard / state. Also covers the goodnight hold and per-invocation
+# override, presence predicate, and skill discovery metadata.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -143,6 +142,92 @@ test_scout_batch_refuses_delivery_flags() {
   pass "scout batch refuses ship delivery flags instead of ignoring them"
 }
 
+goodnight_spawn() {
+  local home=$1
+  shift
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" "$@" 2>&1
+}
+
+test_goodnight_hold() {
+  local home="$TMP_ROOT/goodnight" out status backend args
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects/none"
+  git init -q "$home/projects/none"
+  printf '2026-10-09T22:15:00Z\n' > "$home/state/.goodnight"
+  # The common guard must run before every backend's allocator or probe.
+  for backend in tmux herdr zellij orca cmux; do
+    for args in 'ship projects/none --mode no-mistakes --yolo off' \
+      'scout projects/none --scout' 'mate --secondmate' 'ship --relaunch' \
+      'batch-a=projects/none batch-b=projects/none --mode direct-PR --yolo off'; do
+      # shellcheck disable=SC2086 # Intentional argument table.
+      out=$(goodnight_spawn "$home" $args --backend "$backend")
+      status=$?
+      [ "$status" -eq 76 ] || fail "goodnight $backend $args returned $status instead of 76: $out"
+      assert_contains "$out" 'deferred: goodnight is active' 'hold refusal missing'
+    done
+  done
+  [ ! -e "$home/state/ship.meta" ] || fail 'hold published worker metadata'
+  [ ! -e "$home/data/ship" ] || fail 'hold created task material'
+
+  out=$(goodnight_spawn "$home" bypass projects/none --mode no-mistakes --yolo off --goodnight-override)
+  status=$?
+  [ "$status" -eq 1 ] || fail "override did not reach ordinary missing-brief validation: $out"
+  assert_contains "$out" 'task bypass has no brief' 'override was not accepted'
+  out=$(goodnight_spawn "$home" bypass-a=projects/none bypass-b=projects/none --mode direct-PR --yolo off --goodnight-override)
+  assert_contains "$out" 'task bypass-a has no brief' 'batch override not passed to first child'
+  assert_contains "$out" 'task bypass-b has no brief' 'batch override not passed to second child'
+  [ -e "$home/state/.goodnight" ] || fail 'override lifted global hold'
+  out=$(goodnight_spawn "$home" after projects/none --scout)
+  status=$?
+  [ "$status" -eq 76 ] || fail 'per-spawn override leaked into next invocation'
+
+  rm "$home/state/.goodnight"
+  out=$(goodnight_spawn "$home" morning projects/none --scout)
+  assert_contains "$out" 'task morning has no brief' 'lifting marker did not restore ordinary validation'
+  pass 'goodnight refuses all spawn paths before backend allocation; explicit override is per invocation and carried through batches'
+}
+
+test_goodnight_presence() {
+  local state="$TMP_ROOT/goodnight-presence"
+  mkdir -p "$state"
+  FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_goodnight_active "$2" && exit 1
+    : > "$2/.goodnight"
+    fm_goodnight_active "$2" || exit 1
+    printf "malformed\n" > "$2/.goodnight"
+    fm_goodnight_active "$2" || exit 1
+    rm "$2/.goodnight"
+    ln -s "$2/missing" "$2/.goodnight"
+    fm_goodnight_active "$2" || exit 1
+    rm "$2/.goodnight"
+    fm_goodnight_active "$2" && exit 1
+    exit 0
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || fail 'goodnight presence did not fail closed'
+  pass 'fm_goodnight_active holds on empty, malformed, and dangling records and clears only on absence'
+}
+
+# Skill descriptions are discovery data, the always-loaded trigger index.
+test_goodnight_discovery() {
+  python3 - "$ROOT/.agents/skills" <<'PY' || fail 'goodnight missing from skill discovery index'
+import pathlib, sys
+index = {}
+for skill in pathlib.Path(sys.argv[1]).glob('*/SKILL.md'):
+    fields = skill.read_text().split('---', 2)[1]
+    index[skill.parent.name] = fields
+entry = index['goodnight']
+for trigger in ('/goodnight', '"goodnight"', '"going to bed"', 'state/.goodnight', 'session start', 'wake handling', '/goodmorning'):
+    assert trigger in entry, trigger
+assert 'user-invocable: true' in entry
+assert 'user-invocable: true' in index['goodmorning']
+PY
+  pass 'goodnight and goodmorning are discoverable with the required trigger metadata'
+}
+
+test_goodnight_hold
+test_goodnight_presence
+test_goodnight_discovery
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
