@@ -153,7 +153,8 @@ a { color: inherit; text-decoration: none; }
 
 .bb-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .bb-section__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.bb-cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 22px; }
+/* Charted Next, Underway, and Recently Landed share one row under the deck */
+.bb-trio { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 18px; align-items: start; }
 
 /* ---- Captain's Call: one card at a time, dealt off a visible stack ---- */
 .bb-callwrap { display: flex; flex-direction: column; gap: 12px; }
@@ -187,7 +188,9 @@ a { color: inherit; text-decoration: none; }
 .bb-call > .bb-decision { grid-area: 1 / 1; z-index: 1; }
 .bb-call > .bb-decision[hidden] { display: none; }
 .bb-decision { display: flex; flex-direction: column; }
-.bb-decision__pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
+/* Dossier card: question and answers on the left, the Context box on the right */
+.bb-decision--dossier { display: grid; grid-template-columns: minmax(0,1.15fr) minmax(0,1fr); }
+.bb-decision__pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; min-width: 0; }
 .bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .bb-decision__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-decision__title { margin: 0; font-size: var(--fs-h4); font-weight: 800; color: var(--text-strong); line-height: 1.25; }
@@ -198,8 +201,6 @@ a { color: inherit; text-decoration: none; }
 .bb-ctx__k { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-faint); white-space: nowrap; }
 .bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0; }
-.bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-.bb-decision__link:hover { text-decoration: underline; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
    the card pad, and the foot rides margin-top:auto so every Queue answer button
    sits on the same baseline with identical breathing room. */
@@ -233,6 +234,36 @@ a { color: inherit; text-decoration: none; }
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
 
+/* ---- Context box (the dossier half of a Captain's Call card) ---- */
+.bb-dossier {
+  background: var(--surface-card-warm); border-left: 2px dashed var(--border-default);
+  padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0;
+}
+.bb-dossier__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.bb-dossier__age { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
+.bb-dossier__h { margin: 0 0 4px; font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-muted); }
+.bb-dossier__p { margin: 0; font-size: var(--fs-sm); color: var(--text-body); line-height: 1.45; overflow-wrap: anywhere; }
+.bb-stakes { background: var(--gold-100); border: 1.5px solid var(--gold-500); border-radius: var(--radius-sm);
+  padding: 9px 12px; font-size: var(--fs-sm); color: var(--text-strong); line-height: 1.45; overflow-wrap: anywhere; }
+.bb-stakes__h { display: block; font-family: var(--font-mono); font-size: var(--fs-2xs); text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--gold-600); }
+.bb-links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.bb-links__item { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--fs-sm); }
+.bb-links__item .bb-link, .bb-links__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-links__state { margin-left: auto; flex: none; font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-muted); }
+.bb-kind { flex: none; font-family: var(--font-mono); font-size: 10px; font-weight: 700; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px; border: 1px solid; }
+.bb-kind--mr, .bb-kind--pr { color: var(--ocean-600); border-color: var(--ocean-200); background: var(--ocean-050); }
+.bb-kind--report, .bb-kind--doc, .bb-kind--board { color: var(--sea-700); border-color: var(--sea-200); background: var(--sea-050); }
+.bb-kind--ticket { color: var(--rust-600); border-color: var(--rust-100); background: var(--rust-050); }
+.bb-timeline { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--border-soft);
+  display: flex; flex-direction: column; gap: 6px; }
+.bb-timeline li { position: relative; font-size: var(--fs-xs); color: var(--text-muted); overflow-wrap: anywhere; }
+.bb-timeline li::before { content: ""; position: absolute; left: -19px; top: 6px; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--border-default); border: 1.5px solid var(--ink-500); }
+.bb-timeline__date { font-family: var(--font-mono); font-weight: 600; color: var(--text-body); margin-right: 6px; }
+
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
 .bb-row {
@@ -248,6 +279,8 @@ a { color: inherit; text-decoration: none; }
 .bb-row__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-row__pr { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ocean-600); white-space: nowrap; }
 .bb-row__pr:hover { text-decoration: underline; }
+.bb-link { color: var(--ocean-600); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.bb-link:hover { color: var(--ocean-500); }
 .bb-row__check { width: 26px; height: 26px; border-radius: var(--radius-sm); display: grid; place-items: center; flex: none;
   background: var(--status-online-soft); color: var(--status-online); border: 1.5px solid var(--sea-200); }
 .bb-row__check svg { width: 15px; height: 15px; }
@@ -264,7 +297,7 @@ a { color: inherit; text-decoration: none; }
 .bb-pick { accent-color: var(--rust-500); width: 16px; height: 16px; flex: none; cursor: pointer; margin: 0; }
 .bb-pick-spacer { width: 16px; flex: none; }
 .bb-dispatch {
-  display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 18px;
   border-top: 1.5px solid var(--border-default); background: var(--paper-100);
 }
 .bb-dispatch__count { flex: 1 1 auto; font-size: var(--fs-xs); font-weight: 800; color: var(--text-muted);
@@ -273,7 +306,8 @@ a { color: inherit; text-decoration: none; }
 .bb-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--border-default); padding-top: 14px; }
 
 @media (max-width: 900px) {
-  .bb-cols { grid-template-columns: 1fr; }
+  .bb-trio, .bb-decision--dossier { grid-template-columns: 1fr; }
+  .bb-dossier { border-left: none; border-top: 2px dashed var(--border-default); }
 }
 </style>
 </head>
@@ -296,7 +330,6 @@ a { color: inherit; text-decoration: none; }
 
   <div class="bb-stats" id="bb-stats"></div>
 
-  <div class="bb-cols">
   <section class="bb-section">
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
@@ -307,8 +340,7 @@ a { color: inherit; text-decoration: none; }
     </div>
     <div class="bb-callwrap">
       <div class="bb-call" id="bb-call"></div>
-      <!-- nav sits under the stack so the active card's top edge aligns with
-           the Charted Next card across the row -->
+      <!-- nav sits under the stack so the full-width card leads the page -->
       <div class="bb-stacknav">
         <span class="bb-stacknav__count" id="bb-stack-count">-</span>
         <button type="button" class="bb-stacknav__btn" id="bb-stack-prev" aria-label="Previous card">
@@ -321,29 +353,28 @@ a { color: inherit; text-decoration: none; }
     </div>
   </section>
 
-  <section class="bb-section">
-    <div class="bb-section__head">
-      <span class="fm-sign fm-sign--eyebrow">
-        <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
-        Charted Next
-      </span>
-      <span class="fm-sign fm-sign--muted" id="bb-charted-sub"></span>
-    </div>
-    <div class="fm-card fm-card--warm">
-      <div class="bb-rows" id="bb-charted"></div>
-      <div class="bb-dispatch" id="bb-dispatch" hidden>
-        <span class="bb-dispatch__count" id="bb-dispatch-count">nothing picked</span>
-        <span class="bb-queued" id="bb-dispatch-queued">
-          <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-          queued
+  <div class="bb-trio">
+    <section class="bb-section">
+      <div class="bb-section__head">
+        <span class="fm-sign fm-sign--eyebrow">
+          <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+          Charted Next
         </span>
-        <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-dispatch-btn">Queue dispatch order</button>
+        <span class="fm-sign fm-sign--muted" id="bb-charted-sub"></span>
       </div>
-    </div>
-  </section>
-  </div>
+      <div class="fm-card fm-card--warm">
+        <div class="bb-rows" id="bb-charted"></div>
+        <div class="bb-dispatch" id="bb-dispatch" hidden>
+          <span class="bb-dispatch__count" id="bb-dispatch-count">nothing picked</span>
+          <span class="bb-queued" id="bb-dispatch-queued">
+            <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            queued
+          </span>
+          <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-dispatch-btn">Queue dispatch order</button>
+        </div>
+      </div>
+    </section>
 
-  <div class="bb-cols">
     <section class="bb-section">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
@@ -434,6 +465,45 @@ __FM_BEARINGS_BOARD_DATA__
     if (text != null) n.textContent = text;
     return n;
   }
+  /* Payload text is appended as text nodes. Only http(s) URLs, and absolute
+     markdown report paths the build snapshotted into a preview page, become
+     anchors, so no payload string is ever parsed as HTML. */
+  var PREVIEW_HREF = /^bearings-board-reports\/[0-9a-f]{16}\.html$/;
+  var previews = data.report_previews && typeof data.report_previews === "object" ? data.report_previews : {};
+  var LINK_RE = /(https?:\/\/[^\s<>"'`]+)|(\/[^\s"'<>()\[\]`]+\.md)(?![A-Za-z0-9_])/g;
+  function trimUrl(u) {
+    for (;;) {
+      var t = u.replace(/[.,;:!?'"]+$/, "");
+      if (t.slice(-1) === ")" && (t.split("(").length < t.split(")").length)) t = t.slice(0, -1);
+      if (t === u) return u;
+      u = t;
+    }
+  }
+  function previewHref(path, before) {
+    if (before && !/[\s(\["'`]/.test(before)) return null;
+    if (!Object.prototype.hasOwnProperty.call(previews, path)) return null;
+    var href = previews[path];
+    return typeof href === "string" && PREVIEW_HREF.test(href) ? href : null;
+  }
+  function linked(tag, cls, text) {
+    var n = el(tag, cls);
+    var s = String(text), last = 0, m;
+    LINK_RE.lastIndex = 0;
+    while ((m = LINK_RE.exec(s))) {
+      var shown = m[1] ? trimUrl(m[1]) : m[2];
+      var href = m[1] ? shown : previewHref(m[2], s.charAt(m.index - 1));
+      if (!href) continue;
+      if (m.index > last) n.appendChild(document.createTextNode(s.slice(last, m.index)));
+      var a = el("a", "bb-link", shown);
+      a.href = href; a.target = "_blank"; a.rel = "noopener";
+      if (m[2]) a.title = "Rendered preview of " + shown;
+      n.appendChild(a);
+      last = m.index + shown.length;
+      LINK_RE.lastIndex = last;
+    }
+    if (last < s.length) n.appendChild(document.createTextNode(s.slice(last)));
+    return n;
+  }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
   /* Warnings ride the charted feed for layout only; they are alarms, not work,
      so every count of queued work excludes them. */
@@ -480,13 +550,109 @@ __FM_BEARINGS_BOARD_DATA__
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
     row.appendChild(el("span", "bb-ctx__k", k));
-    row.appendChild(el("span", "bb-ctx__v", v));
+    row.appendChild(linked("span", "bb-ctx__v", v));
     return row;
+  }
+
+  /* Context box: the card's optional background, stakes, links, history, and
+     opened fields, every string rendered as text. Background falls back to the
+     card's about line (merge: detail), a merge card's PR always appears among
+     its links, and a card with no context at all stays one column. */
+  var LINK_KINDS = { mr: "MR", pr: "PR", ticket: "ticket", report: "report", doc: "doc", board: "board" };
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function hasText(v) { return typeof v === "string" && v.length > 0; }
+  function listOf(v) { return Array.isArray(v) ? v.filter(function (x) { return x && typeof x === "object"; }) : []; }
+  function isoDay(s) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(typeof s === "string" ? s : "");
+    return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN;
+  }
+  function shortDate(s) {
+    var t = isoDay(s);
+    if (isNaN(t)) return String(s);
+    var d = new Date(t);
+    return (d.getUTCDate() < 10 ? "0" : "") + d.getUTCDate() + " " + MONTHS[d.getUTCMonth()];
+  }
+  function openFor(opened) {
+    var days = Math.floor((isoDay(data.generated) - isoDay(opened)) / 86400000);
+    if (isNaN(days) || days < 0) return "opened " + opened;
+    return days === 0 ? "open today" : "open " + days + " day" + (days === 1 ? "" : "s");
+  }
+  function dossierSection(name, heading) {
+    var sec = el("div", "bb-dossier__sec bb-dossier__sec--" + name);
+    if (heading) sec.appendChild(el("p", "bb-dossier__h", heading));
+    return sec;
+  }
+  function contextLink(l) {
+    var li = el("li", "bb-links__item");
+    li.appendChild(el("span", "bb-kind bb-kind--" + l.kind, LINK_KINDS[l.kind] || String(l.kind)));
+    var href = hasText(l.url) && /^https?:\/\//.test(l.url) ? l.url
+      : (hasText(l.path) ? previewHref(l.path, "") : null);
+    var label;
+    if (href) {
+      label = el("a", "bb-link", l.label);
+      label.href = href; label.target = "_blank"; label.rel = "noopener";
+      label.title = hasText(l.url) ? l.url : "Rendered preview of " + l.path;
+    } else {
+      /* a report with no preview page stays plain text */
+      label = el("span", "bb-links__label", l.label);
+      if (hasText(l.path)) label.title = l.path;
+    }
+    li.appendChild(label);
+    if (hasText(l.state)) li.appendChild(el("span", "bb-links__state", l.state));
+    return li;
+  }
+  function contextBox(item) {
+    var box = el("aside", "bb-dossier");
+    var head = el("div", "bb-dossier__head");
+    head.appendChild(el("span", "fm-sign fm-sign--muted", "Context"));
+    if (hasText(item.opened)) head.appendChild(el("span", "bb-dossier__age", openFor(item.opened)));
+    box.appendChild(head);
+    var sections = 0;
+    var background = hasText(item.background) ? item.background : (item.type === "merge" ? item.detail : item.about);
+    if (hasText(background)) {
+      var bg = dossierSection("background", "Background");
+      bg.appendChild(linked("p", "bb-dossier__p", background));
+      box.appendChild(bg); sections++;
+    }
+    if (hasText(item.stakes)) {
+      var st = dossierSection("stakes");
+      st.className += " bb-stakes";
+      st.appendChild(el("span", "bb-stakes__h", "If this waits"));
+      st.appendChild(linked("span", "bb-stakes__text", item.stakes));
+      box.appendChild(st); sections++;
+    }
+    var links = listOf(item.links);
+    if (item.type === "merge" && hasText(item.pr_url) &&
+        !links.some(function (l) { return l.url === item.pr_url; })) {
+      links.unshift({ kind: "pr", label: item.pr_url, url: item.pr_url });
+    }
+    if (links.length) {
+      var ls = dossierSection("links", "Links");
+      var ul = el("ul", "bb-links");
+      links.forEach(function (l) { ul.appendChild(contextLink(l)); });
+      ls.appendChild(ul);
+      box.appendChild(ls); sections++;
+    }
+    var history = listOf(item.history);
+    if (history.length) {
+      var hs = dossierSection("history", "History");
+      var tl = el("ul", "bb-timeline");
+      history.forEach(function (h) {
+        var li = el("li");
+        li.appendChild(el("span", "bb-timeline__date", shortDate(h.date)));
+        li.appendChild(linked("span", "bb-timeline__text", h.text));
+        tl.appendChild(li);
+      });
+      hs.appendChild(tl);
+      box.appendChild(hs); sections++;
+    }
+    return sections || hasText(item.opened) ? box : null;
   }
 
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     var pad = el("div", "bb-decision__pad");
+    var context = contextBox(item);
 
     var top = el("div", "bb-decision__top");
     if (item.type === "merge") {
@@ -498,19 +664,16 @@ __FM_BEARINGS_BOARD_DATA__
     }
     pad.appendChild(top);
 
-    pad.appendChild(el("h3", "bb-decision__title", item.title));
+    pad.appendChild(linked("h3", "bb-decision__title", item.title));
 
+    /* about and detail stay beside the question only when an authored
+       background takes their place in the Context box */
     if (item.type === "merge") {
-      if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
-      if (item.pr_url) {
-        var pr = el("a", "bb-decision__link", item.pr_url);
-        pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
-        pad.appendChild(pr);
-      }
+      if (item.detail && hasText(item.background)) pad.appendChild(linked("p", "bb-decision__detail", item.detail));
     } else {
       /* the rec marker on the option itself carries the recommendation */
       var ctx = el("div", "bb-ctx");
-      if (item.about) ctx.appendChild(ctxRow("about", item.about));
+      if (item.about && hasText(item.background)) ctx.appendChild(ctxRow("about", item.about));
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);
     }
@@ -524,8 +687,8 @@ __FM_BEARINGS_BOARD_DATA__
       input.type = "radio"; input.name = "answer"; input.value = o.value;
       lab.appendChild(input);
       var body = el("span", "bb-opt__body");
-      body.appendChild(el("span", "bb-opt__label", o.label));
-      if (o.hint) body.appendChild(el("span", "bb-opt__hint", o.hint));
+      body.appendChild(linked("span", "bb-opt__label", o.label));
+      if (o.hint) body.appendChild(linked("span", "bb-opt__hint", o.hint));
       lab.appendChild(body);
       if (item.recommend_value && o.value === item.recommend_value) {
         lab.appendChild(el("span", "bb-opt__rec", "rec"));
@@ -534,12 +697,13 @@ __FM_BEARINGS_BOARD_DATA__
     });
     form.appendChild(opts);
 
-    if (item.allow_freeform) {
-      var ff = document.createElement("input");
-      ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
-      form.appendChild(ff);
-    }
+    /* every card offers free text; a note alone is a valid answer */
+    var ff = document.createElement("input");
+    ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
+    ff.placeholder = item.freeform_hint || (item.type === "credential"
+      ? "say what you did - never paste a password, token, or key here"
+      : "or answer in your own words…");
+    form.appendChild(ff);
 
     var foot = el("div", "bb-decision__foot");
     var btn = el("button", "fm-btn fm-btn--sm " + (item.type === "merge" ? "fm-btn--gold" : "fm-btn--primary"), "Queue answer");
@@ -589,6 +753,10 @@ __FM_BEARINGS_BOARD_DATA__
 
     pad.appendChild(form);
     card.appendChild(pad);
+    if (context) {
+      card.classList.add("bb-decision--dossier");
+      card.appendChild(context);
+    }
     deck.appendChild(card);
   });
 
@@ -630,10 +798,10 @@ __FM_BEARINGS_BOARD_DATA__
     var main = el("div", "bb-row__main");
     /* the snapshot's durable name-or-id label leads the row so a scan says
        WHICH task this is; the run status keeps its place on the second line */
-    main.appendChild(el("div", "bb-row__title", t.name));
+    main.appendChild(linked("div", "bb-row__title", t.name));
     /* captain-facing rows name the repo; the internal task id shows only when
        no repo is known */
-    main.appendChild(el("div", "bb-row__sub",
+    main.appendChild(linked("div", "bb-row__sub",
       t.doing + " · " + t.kind + " · " + (t.repo || t.id)));
     row.appendChild(main);
     uw.appendChild(row);
@@ -648,8 +816,8 @@ __FM_BEARINGS_BOARD_DATA__
     chk.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
     row.appendChild(chk);
     var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.what));
-    main.appendChild(el("div", "bb-row__sub", (t.repo || t.id) + " · " + t.owner));
+    main.appendChild(linked("div", "bb-row__title", t.what));
+    main.appendChild(linked("div", "bb-row__sub", (t.repo || t.id) + " · " + t.owner));
     row.appendChild(main);
     if (t.pr_url) {
       var a = el("a", "bb-row__pr", "#" + t.pr_url.split("/").pop());
@@ -698,10 +866,10 @@ __FM_BEARINGS_BOARD_DATA__
       row.appendChild(el("span", "bb-pick-spacer"));
     }
     var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.title));
-    /* second line keeps the title uncrowded in the half-width column */
+    main.appendChild(linked("div", "bb-row__title", t.title));
+    /* second line keeps the title uncrowded in the third-width column */
     var chSub = t.repo || t.id;
-    main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
+    main.appendChild(linked("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
     row.appendChild(main);
     if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
     else if (t.reason) row.appendChild(badge("warn", "waiting"));
