@@ -785,49 +785,62 @@ handoff_marker_write() { # <task> <fingerprint>
 }
 
 handoff_one() { # <id> <meta>
-  local id=$1 meta=$2 status kind mode incarnation line verb fingerprint observed
+  local id=$1 meta=$2 status kind mode incarnation line verb fingerprint observed record known
   local -a open_fps=()
   local now age key alerted last_alert state_line state_rc path item fp
   local clearer_epoch marker proof='' reason='' evidence_rc=0
   status="$STATE/$id.status"
-  [ -f "$status" ] && [ ! -L "$status" ] || return 0
   kind=$(meta_field "$meta" kind)
   mode=$(meta_field "$meta" mode)
   incarnation=$(meta_incarnation "$meta")
   valid_id "$incarnation" || incarnation=unknown
+  for record in "$HANDOFF_DIR"/*.record; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    [ "$(handoff_value "$record" task_id)" = "$id" ] || continue
+    [ "$(handoff_value "$record" incarnation)" = "$incarnation" ] || continue
+    [ -z "$(handoff_value "$record" cleared_epoch)" ] || continue
+    fingerprint=${record##*/}
+    fingerprint=${fingerprint%.record}
+    observed=$(handoff_value "$record" observed_epoch)
+    open_fps+=("$fingerprint|$observed")
+  done
   # A line with no trailing newline is still being appended. Reading only
   # newline-terminated lines keeps a partial needs-validation from becoming
   # its own episode and then a second episode once the line is finished.
-  while IFS= read -r line; do
-    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    verb=$(status_line_verb "$line")
-    _fm_status_verb_recognized "$verb" || continue
-    if handoff_is_completion "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
-      fingerprint=$(sha256_text "$incarnation|$id|$line")
-      observed=$(handoff_line_epoch "$line")
-      case "$observed" in
-        ''|*[!0-9]*) observed=$(handoff_value "$(handoff_record_path "$fingerprint")" observed_epoch) ;;
-      esac
-      case "$observed" in
-        ''|*[!0-9]*) observed=$(reconcile_now) ;;
-      esac
-      handoff_ensure "$fingerprint" "$id" "$incarnation" "$line" "$observed" || return 1
-      # A cleared episode stays closed. The same completion line must not
-      # reopen on the next scan, restart, or note appended after it.
-      if [ -z "$(handoff_value "$(handoff_record_path "$fingerprint")" cleared_epoch)" ]; then
-        open_fps+=("$fingerprint|$observed")
+  if [ -f "$status" ] && [ ! -L "$status" ]; then
+    while IFS= read -r line; do
+      case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+      verb=$(status_line_verb "$line")
+      _fm_status_verb_recognized "$verb" || continue
+      if handoff_is_completion "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
+        fingerprint=$(sha256_text "$incarnation|$id|$line")
+        observed=$(handoff_line_epoch "$line")
+        case "$observed" in
+          ''|*[!0-9]*) observed=$(handoff_value "$(handoff_record_path "$fingerprint")" observed_epoch) ;;
+        esac
+        case "$observed" in
+          ''|*[!0-9]*) observed=$(reconcile_now) ;;
+        esac
+        handoff_ensure "$fingerprint" "$id" "$incarnation" "$line" "$observed" || return 1
+        if [ -z "$(handoff_value "$(handoff_record_path "$fingerprint")" cleared_epoch)" ]; then
+          known=0
+          for item in "${open_fps[@]+"${open_fps[@]}"}"; do
+            [ "${item%%|*}" = "$fingerprint" ] && known=1
+          done
+          [ "$known" -eq 1 ] || open_fps+=("$fingerprint|$observed")
+        fi
+      elif handoff_clears "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
+        clearer_epoch=$(handoff_line_epoch "$line")
+        for item in "${open_fps[@]+"${open_fps[@]}"}"; do
+          fp=${item%%|*}
+          handoff_clear_record "$fp" "status:$verb" "$clearer_epoch" || return 1
+        done
+        open_fps=()
+      else
+        [ "$?" -eq 1 ] || return 1
       fi
-    elif handoff_clears "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
-      clearer_epoch=$(handoff_line_epoch "$line")
-      for item in "${open_fps[@]+"${open_fps[@]}"}"; do
-        fp=${item%%|*}
-        handoff_clear_record "$fp" "status:$verb" "$clearer_epoch" || return 1
-      done
-      open_fps=()
-    else
-      [ "$?" -eq 1 ] || return 1
-    fi
-  done < "$status"
+    done < "$status"
+  fi
   if [ "${#open_fps[@]}" -eq 0 ]; then
     marker="$HANDOFF_DIR/$id.open"
     if [ -f "$marker" ] && [ ! -L "$marker" ]; then

@@ -1046,33 +1046,6 @@ EOF
   return 0
 }
 
-# A recorded local secondmate whose own monitoring cycle ended with
-# successor=none, and no live watcher replaced it. Reads only that mate's
-# recorded state directory. Never starts or signals the mate's watcher, and
-# never reads any other home. fm_watcher_continuity_note owns the gap, the
-# bound, and the repeat.
-secondmate_watcher_continuity_tick() {
-  local meta task kind remote_host home child_watch_path
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    kind=$(fm_meta_get "$meta" kind)
-    [ "$kind" = secondmate ] || continue
-    remote_host=$(fm_meta_get "$meta" remote_host)
-    [ -z "$remote_host" ] || continue
-    task=${meta##*/}
-    task=${task%.meta}
-    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-    home=$(fm_meta_get "$meta" home)
-    [ -n "$home" ] || continue
-    [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || continue
-    [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] || continue
-    [ -d "$home/state" ] && [ ! -L "$home/state" ] || continue
-    child_watch_path="$home/bin/fm-watch.sh"
-    fm_watcher_continuity_note "$home/state" "watcher-continuity-$task" "mate=$task" "$child_watch_path" "$home" || return 1
-  done
-  return 0
-}
-
 # The ordinary-supervision half of the secondmate liveness guarantee, paired
 # with bin/fm-bootstrap.sh's session-start sweep over the shared library in
 # bin/fm-secondmate-liveness-lib.sh (which owns the state contract, the remote
@@ -2778,13 +2751,6 @@ while :; do
   # the parent without consuming or rewriting the receiving home's record.
   secondmate_wake_stall_tick || {
     echo "watcher: secondmate wake-loop observation failed" >&2
-    exit 1
-  }
-
-  # A mate whose monitoring cycle ended with no successor is a different gap
-  # from a frozen queue. The note only reads that mate's recorded state.
-  secondmate_watcher_continuity_tick || {
-    echo "watcher: secondmate watcher-continuity check failed" >&2
     exit 1
   }
 

@@ -382,10 +382,6 @@ Only a cycle with no matching delivery record emits `watcher: FAILED - cycle end
 ### Cycle exit log
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
-A last record of `successor=none`, older than the continuity bound, with no fresh identity-matched watcher lock and beacon, is a cycle that ended without a healthy successor.
-`bin/fm-wake-lib.sh`'s `fm_watcher_continuity_gap` is that read.
-A parent queues it only for a secondmate named in its own direct-report records, and a main home queues it from `bin/fm-watch-arm.sh` for itself.
-The same episode is queued again only after the previous check has left the queue and another bound has passed, and only fresh monitoring or a recorded successor clears it.
 Each record includes:
 
 - Arm and watcher PIDs.

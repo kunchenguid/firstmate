@@ -1280,6 +1280,33 @@ EOF
   pass "an unreadable continuation predicate fails the scan after releasing its task lock"
 }
 
+test_handoff_idle_survives_a_replaced_status_log() {
+  local home record fp8 key
+  make_world handoff-replaced-status
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" intake "needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests" inc-replaced-1
+  scan_handoff "$home"
+  record=$(one_record "$home" intake) || fail "the original handoff was not recorded"
+  fp8=$(basename "$record" .record)
+  key="handoff-idle-intake-${fp8:0:8}"
+  printf '%s\n' "working [at=$HANDOFF_CONT]: status log replaced" > "$home/state/intake.status"
+  scan_handoff "$home"
+  [ -f "$record" ] || fail "a replaced status log removed the durable handoff record"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "a generic replacement status cleared the handoff"
+  grep -Fxq "$fp8" "$home/state/handoff-continuations/intake.open" \
+    || fail "a replaced status log retired the open handoff marker"
+  grep -Fq "$key" "$home/state/.wake-queue" \
+    || fail "a replaced status log retired the idle alert"
+  FM_FAKE_CREW_SOURCE=run-step FM_FAKE_CREW_STATE=working scan_handoff "$home"
+  [ "$(handoff_field "$record" clear_reason)" = run-step ] \
+    || fail "attributed continuation did not clear the retained handoff"
+  [ ! -e "$home/state/handoff-continuations/intake.open" ] \
+    || fail "positive continuation left the retained handoff open"
+  pass "a replaced status log preserves a handoff until attributed continuation"
+}
+
 test_handoff_idle_clears_only_on_continuation() {
   local home record before after verb uncleared
   local completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
@@ -1610,6 +1637,7 @@ test_handoff_idle_rejects_an_unverified_green_followup
 test_handoff_idle_uses_only_positional_status_timestamps
 test_handoff_ignores_an_unterminated_completion_line
 test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable
+test_handoff_idle_survives_a_replaced_status_log
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan
 test_handoff_idle_bound_refuses_out_of_range
