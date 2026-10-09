@@ -159,6 +159,7 @@ It repeats that reconciliation after a timeout or ambiguous submission before de
 A unique match is adopted; multiple matches, a truncated listing, provider unavailability, or unresolved identity becomes a preserved unavailable or ambiguous state and never authorizes a silent duplicate create.
 Restart adoption and startup recovery use the durable marker and session id and re-arm the existing process-event source without pretending a local endpoint exists.
 An incomplete task after an iDA terminal report continues from the original task's compact gap through the provider adapter's same-session followup described in [goal-directed continuation](task-continuation.md); `bin/fm-remote-agent-ida.sh --help` owns the exact invocation.
+The followup owner binds an exact same-session task pair from either a successful create result or a structured provider error that retains both identifiers; if the response is unavailable, read-only recovery requires one consistent normalized `task_result.task_id` or raw `deep_research_content.taskId` on the exact marker-bearing message.
 That path never authorizes a fresh research session or provider switch, and unavailable or uncorrelatable provider support remains an explicit goal gap.
 
 `bin/fm-procevent-ida.sh` owns first submission, session readback, normalized state transitions, report creation, acknowledgement, and re-arming.

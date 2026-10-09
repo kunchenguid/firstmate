@@ -124,8 +124,9 @@ The durable `local_readback_blocked` recovery marker survives intervening provid
 iDA submission records `firstmate:<task-id>:<instruction-digest-prefix>` before the only permitted create.
 The adapter lists sessions and exact-matches that marker before creation and after uncertain completion.
 Zero unique matches permit creation only from `submission-not-started`; one match is adopted; duplicates, truncation, or unresolved readback become unavailable or ambiguous and never authorize another create.
-A successful official create receipt instead binds its exact session and task in the existing provider record, and later session readback selects that task even when a follow-up input marker is not exposed again.
-The behavioral suite covers a type-0 initial marker with a type-8 follow-up result whose normalized `task_id` and raw `taskId` agree, while retaining marker reconciliation for a submission with no receipt identity and refusing pre-existing baseline tasks.
+A successful official create receipt or a structured provider error retaining its exact session and task binds that pair in the existing provider record, and later session readback selects that task even when a follow-up input marker is not exposed again.
+If the receipt identity is unavailable, read-only followup recovery accepts only one marker-bearing message with a consistent normalized `task_result.task_id` or raw `deep_research_content.taskId`; conflicting shapes, multiple identities, missing bindings, and pre-existing baseline tasks remain unknown without another create.
+The behavioral suite covers both normalized and raw marker/task binding, a structured error receipt, conflicting normalized/raw identities, a missing marker/task binding, and a type-8 follow-up result whose normalized `task_id` and raw `taskId` agree.
 A wedged `ambiguous` or `submission-unknown` record can fail-terminal only through the captain-authorized abandon command after a fresh authoritative complete non-truncated zero-match list; abandonment performs no provider write, never retries or recreates, and leaves re-execution to a separate explicit dispatch.
 
 ## Privacy and authority boundary
