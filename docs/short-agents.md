@@ -16,9 +16,18 @@ Load `.pi/extensions/fm-short-agent.ts` alongside the normal primary extensions.
 The tools require that session or an ancestor to own the home's session lock.
 There is no additional daemon, terminal, or task worktree.
 
-The default is `openai-codex/gpt-5.6-luna`.
-Explicit `provider` and `model` overrides remain supported; discovery or authentication failure refuses execution without substituting another provider.
-Use `node bin/fm-short-agent.mjs models` to discover pairs through the installed Pi runtime.
+Create the single home-owned model selection before enabling submissions:
+
+```bash
+mkdir -p "$FM_HOME/config"
+printf '%s\n' '{"provider":"openai-codex","model":"gpt-6-luna"}' > "$FM_HOME/config/short-agent.json"
+```
+
+The file is strict JSON with exactly the non-empty string fields `provider` and `model`.
+Every genuinely new submission reads it and verifies that exact pair through the installed Pi runtime and current authentication before accepting work.
+Missing, malformed, or unavailable configuration refuses the submission with a setup error; Firstmate does not select a hidden default or fallback.
+The Pi tool and new CLI request schema do not expose `provider` or `model`, and the service rejects those caller fields even when they equal the configuration.
+Use `node bin/fm-short-agent.mjs models` to discover currently available pairs through the installed Pi runtime.
 The runner initializes Pi's HTTP dispatcher, respecting existing proxy variables without copying credentials or importing provider extensions.
 `FM_PI_PACKAGE_DIR` can select the installed Pi package when `pi` is not on PATH.
 
@@ -33,8 +42,11 @@ Call `fm_short_submit` with a stable retry key, goal, acceptance condition, and 
 }
 ```
 
-Submission captures the selected files and returns `id`, `state`, `submitMs`, and an evidence directory before model initialization.
-An identical retry returns the same task and original snapshots; changed arguments with the same key are rejected.
+Submission validates model availability, captures the selected files, and returns `id`, `state`, the resolved `provider` and `model`, `submitMs`, and an evidence directory before child execution.
+The immutable request and runtime records retain that resolved identity.
+An identical retry returns the same task, resolved identity, and original snapshots without rereading the configuration or relaunching work; changed arguments with the same key are rejected.
+Configuration edits affect only genuinely new keys and do not alter accepted or running jobs.
+Historical v1/v2 requests, results, status, cancellation, and reconciliation remain readable; a retry can omit their historical provider/model fields and retains the stored identity.
 For compatibility, the CLI accepts the former `budget` object and ignores its four legacy fields when comparing or storing a new request.
 The Pi tool no longer exposes that object.
 The CLI equivalent is `FM_HOME=/absolute/home node bin/fm-short-agent.mjs submit request.json`.
@@ -188,7 +200,8 @@ SSE uses zero transport retries, and each model stream may issue only one HTTP r
 Reloading MAIN leaves children running and reconciles results when the extension starts again.
 A stale heartbeat produces `completed` only when every fixed operation has a verified completed receipt; otherwise it produces `interrupted`.
 Neither path replays work.
-Historical v1 requests retain their legacy budget object for immutable evidence, but status and recovery ignore it; an unstarted stale request becomes `interrupted`, and an existing terminal `timeout` or `budget` result remains readable without execution.
+Historical v1 requests retain their legacy budget object for immutable evidence, and historical v1/v2 requests retain their original model selection; status and recovery keep reading them without consulting current configuration.
+An unstarted stale request becomes `interrupted`, and an existing terminal `timeout` or `budget` result remains readable without execution.
 For operations, intent is persisted before calling the owner and a receipt requires authoritative postcondition readback.
 Completed early steps remain visible if a later step fails.
 A verified merge whose command response was lost can still complete through the merge owner's readback.
@@ -218,7 +231,7 @@ Run `bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh` for inline and bou
 The operation suite doubles the model and forge; it does not perform an external merge.
 Set `FM_SHORT_INSTALL_LIVE=1` for its optional verified ShellCheck install into a temporary directory.
 Run `FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` for cleanup through a generated named Herdr lab and its default-session safety tripwire.
-For the real-model guard, run `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
+For the real-model guard, run `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
 It loads the candidate extension, submits all three task modes, verifies a harmless Bash write and separate readback in a disposable fixture plus a real fast-forward of a disposable local clone, and checks that another parent prompt completes while each child runs.
 It also reproduces a connection refusal using only child-process proxy variables, verifies that all three modes stop before any operation or Bash command, and checks the initialized SDK settings and extension isolation.
 [Runtime verification](verification/runtime-backends.md#pi-headless-short-tasks) records the current measured evidence and its limits.

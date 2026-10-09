@@ -27,7 +27,7 @@ export function createBashToolDefinition(cwd) { return {name:'bash',label:'bash'
  try { const result=await execFile('bash',['-c',args.command],{cwd}); return {content:[{type:'text',text:result.stdout||'(no output)'}],details:undefined,structuredContent:{output:result.stdout,exit_code:0,wall_time_seconds:0,truncated:false}}; }
  catch(error) { return {content:[{type:'text',text:(error.stdout||'')+(error.stderr||'')+'Command exited with code '+(error.code||1)}],details:undefined,structuredContent:{output:(error.stdout||'')+(error.stderr||''),exit_code:Number(error.code)||1,wall_time_seconds:0,truncated:false},isError:true}; }
 }};}
-export const ModelRuntime = { create: async () => ({provider:{},getProvider(){return this.provider;},getAvailable: async () => [{provider:'fixture',id:'fixture'}],streamSimple:async (_m,_c,opts)=> {
+export const ModelRuntime = { create: async () => ({provider:{},getProvider(){return this.provider;},getAvailable: async () => [{provider:'fixture',id:'fixture'},{provider:'fixture',id:'fixture-two'}],streamSimple:async (_m,_c,opts)=> {
  if(Object.hasOwn(opts,'maxTokens')) throw Error('application output cap still present');
  if(_c.transport) await opts.fetch('https://unused.invalid');
  if(_c.replay) {await opts.fetch();await opts.fetch();}
@@ -70,16 +70,39 @@ export async function createAgentSession(o) {
 `);
 const fixture = path.join(tmp, 'evidence.txt'); fs.writeFileSync(fixture, 'value = 42\n');
 const largeFixture = path.join(tmp, 'large-evidence.txt'); fs.writeFileSync(largeFixture, 'value = 42\n' + 'x'.repeat(40000));
+fs.mkdirSync(path.join(home, 'config'));fs.writeFileSync(path.join(home, 'config/short-agent.json'),'{"provider":"fixture","model":"fixture"}\n');
 const service = new ShortAgents(home, root);
-const request = (key, goal='delayed', budget) => ({key,goal,acceptance:'return value with evidence',provider:'fixture',model:'fixture',materials:[fixture],...(budget ? {budget} : {})});
+const request = (key, goal='delayed', budget) => ({key,goal,acceptance:'return value with evidence',materials:[fixture],...(budget ? {budget} : {})});
+for (const [name,contents,pattern] of [
+  ['missing',null,/config missing/],
+  ['malformed','{',/malformed JSON/],
+  ['fields','{"provider":"fixture","model":"fixture","extra":true}',/exactly provider and model/],
+  ['unavailable','{"provider":"fixture","model":"absent"}',/configured short-agent model fixture\/absent is unavailable/],
+]) {
+  const invalidHome=path.join(tmp,`config-${name}`);fs.mkdirSync(path.join(invalidHome,'config'),{recursive:true});
+  if(contents!==null)fs.writeFileSync(path.join(invalidHome,'config/short-agent.json'),contents);
+  assert.throws(()=>new ShortAgents(invalidHome,root).submit(request(`config-${name}`),false),pattern);
+}
+assert.throws(()=>service.submit({...request('override-provider'),provider:'fixture'},false),/provider\/model request overrides are unsupported/);
+assert.throws(()=>service.submit({...request('override-model'),model:'fixture'},false),/provider\/model request overrides are unsupported/);
 const accepted = service.submit(request('one'));
-assert.equal(accepted.state, 'accepted'); assert.ok(accepted.submitMs < 1000);
-assert.equal(service.submit(request('one')).id, accepted.id);
+assert.equal(accepted.state, 'accepted');assert.equal(accepted.provider,'fixture');assert.equal(accepted.model,'fixture');assert.ok(accepted.submitMs < 1000);
+fs.writeFileSync(path.join(home,'config/short-agent.json'),'{"provider":"fixture","model":"fixture-two"}\n');
+const changedSelection=service.submit(request('config-changed'),false);assert.equal(changedSelection.model,'fixture-two');
+assert.equal(JSON.parse(fs.readFileSync(path.join(service.dir(changedSelection.id),'request.json'))).input.model,'fixture-two');
+assert.equal(service.submit(request('one')).model,'fixture','retry retains the model resolved at original acceptance');
+assert.equal(JSON.parse(fs.readFileSync(path.join(service.dir(accepted.id),'request.json'))).input.model,'fixture','live request identity is immutable across config edits');
+fs.writeFileSync(path.join(home,'config/short-agent.json'),'{"provider":"fixture","model":"fixture"}\n');
 assert.throws(()=>service.submit(request('one','different')), /different request/);
+const cliRequestFile=path.join(tmp,'cli-request.json');fs.writeFileSync(cliRequestFile,JSON.stringify(request('cli-config')));
+const cliAccepted=JSON.parse(execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'submit',cliRequestFile],{env:{...process.env,FM_HOME:home},encoding:'utf8'}));
+assert.deepEqual({provider:cliAccepted.provider,model:cliAccepted.model},{provider:'fixture',model:'fixture'},'CLI returns its configured selection receipt');
+const cliOverrideFile=path.join(tmp,'cli-override.json');fs.writeFileSync(cliOverrideFile,JSON.stringify({...request('cli-override'),provider:'fixture',model:'fixture'}));
+assert.throws(()=>execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'submit',cliOverrideFile],{env:{...process.env,FM_HOME:home},encoding:'utf8'}),/provider\/model request overrides are unsupported/);
 assert.throws(()=>service.status('../escape'), /invalid/);
 let ticks=0; const tick=setInterval(()=>ticks++,10);
 const until = async (id, state) => {for(let n=0;n<200;n++){const s=service.status(id);if(s.state===state)return s;await wait(50);}throw Error('did not reach '+state+' '+JSON.stringify(service.status(id)));};
-const done=await until(accepted.id,'completed'); clearInterval(tick); assert.ok(ticks>20);
+const done=await until(accepted.id,'completed');clearInterval(tick);assert.ok(ticks>20);assert.deepEqual({provider:done.provider,model:done.model},{provider:'fixture',model:'fixture'});
 const started=JSON.parse(fs.readFileSync(path.join(service.dir(accepted.id),'started.json')));
 assert.ok(started.at >= accepted.acceptedAt);
 const runtime=JSON.parse(fs.readFileSync(path.join(service.dir(accepted.id),'runtime.json')));
@@ -124,18 +147,26 @@ for(const goal of ['delayed','toolbudget','modelbudget','oversize']) {
  assert.ok(!Object.hasOwn(JSON.parse(fs.readFileSync(path.join(service.dir(a.id),'request.json'))).input,'budget'));
  if(goal==='delayed')assert.ok(result.finishedAt-began>=800,'legacy wall budget does not stop execution');
 }
-const large=service.submit({key:'k'.repeat(200),goal:'large-output'+('g'.repeat(9000)),acceptance:'a'.repeat(5000),provider:'fixture',model:'fixture',materials:Array(5).fill(largeFixture)});
+const large=service.submit({key:'k'.repeat(200),goal:'large-output'+('g'.repeat(9000)),acceptance:'a'.repeat(5000),materials:Array(5).fill(largeFixture)});
 const largeResult=await until(large.id,'completed');assert.equal(largeResult.summary.length,4096);assert.ok(JSON.parse(fs.readFileSync(path.join(service.dir(large.id),'request.json'))).materials[0].content.length>40000);
 const legacy=service.submit(request('legacy-readable'),false),legacyFile=path.join(service.dir(legacy.id),'request.json');
 const legacyRecord=JSON.parse(fs.readFileSync(legacyFile));legacyRecord.version=1;legacyRecord.input.budget={timeMs:1,tools:1,outputTokens:1,requests:1};fs.writeFileSync(legacyFile,JSON.stringify(legacyRecord));
 assert.equal(service.status(legacy.id).state,'accepted','legacy wall budget is ignored');
 assert.equal(service.submit(request('legacy-readable')).id,legacy.id,'legacy budget does not change duplicate identity');
+assert.equal(service.submit({...request('legacy-readable'),provider:'fixture',model:'fixture'}).id,legacy.id,'historical retry may repeat its original selected identity');
+assert.throws(()=>service.submit({...request('legacy-readable'),provider:'fixture',model:'fixture-two'}),/different request/);
 assert.ok(!fs.existsSync(path.join(service.dir(legacy.id),'started.json')),'legacy duplicate is never replayed');
 fs.writeFileSync(path.join(service.dir(legacy.id),'heartbeat'),'old');fs.utimesSync(path.join(service.dir(legacy.id),'heartbeat'),new Date(0),new Date(0));
 assert.equal(service.status(legacy.id).state,'interrupted');
 const legacyTerminal=service.submit(request('legacy-terminal'),false),legacyTerminalFile=path.join(service.dir(legacyTerminal.id),'request.json');
 const legacyTerminalRecord=JSON.parse(fs.readFileSync(legacyTerminalFile));legacyTerminalRecord.version=1;legacyTerminalRecord.input.budget={timeMs:1000,tools:1,outputTokens:64,requests:1};fs.writeFileSync(legacyTerminalFile,JSON.stringify(legacyTerminalRecord));
 service.finish(legacyTerminal.id,'budget','historical budget result');assert.equal(service.status(legacyTerminal.id).state,'budget');
+for(const version of [1,2]) {
+ const historical=service.submit(request(`historical-v${version}-cancel-reconcile`),false),historicalDir=service.dir(historical.id),historicalFile=path.join(historicalDir,'request.json');
+ const historicalRecord=JSON.parse(fs.readFileSync(historicalFile));historicalRecord.version=version;if(version===1)historicalRecord.input.budget={timeMs:1};fs.writeFileSync(historicalFile,JSON.stringify(historicalRecord));
+ assert.equal(service.cancel(historical.id).state,'cancelled',`historical v${version} cancellation remains readable`);
+ await service.reconcile();assert.equal(service.status(historical.id).state,'cancelled');assert.ok(fs.existsSync(path.join(historicalDir,'notified.json')),`historical v${version} reconciliation remains readable`);
+}
 const crash=service.submit(request('crash','crash'));await wait(500);
 // Age only the specific crashed lease; do not rely on broad process scans.
 const crashDir=service.dir(crash.id);fs.writeFileSync(path.join(crashDir,'heartbeat'),'old');fs.utimesSync(path.join(crashDir,'heartbeat'),new Date(0),new Date(0));
@@ -146,7 +177,7 @@ assert.equal(fresh.status(lost.id).state,'interrupted');
 fs.mkdirSync(path.join(home,'state'),{recursive:true});fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
 const bashDir=path.join(tmp,'bash-fixture');fs.mkdirSync(bashDir);fs.writeFileSync(path.join(bashDir,'value.txt'),'original');
 const bashGrant={authority:'write and verify this disposable fixture only',cwd:bashDir,scope:'Replace value.txt with changed and read it back',exclusions:['No access outside this fixture','No deletion, merge, sync, cleanup, credential use, security change, or service restart'],expiresAt:Date.now()+60000};
-const bashTask=service.submit({key:'bash-fixture',goal:'bash-fixture',acceptance:'Write changed to value.txt, then verify its final contents with a separate Bash readback.',provider:'fixture',model:'fixture',materials:[],bash:bashGrant});
+const bashTask=service.submit({key:'bash-fixture',goal:'bash-fixture',acceptance:'Write changed to value.txt, then verify its final contents with a separate Bash readback.',materials:[],bash:bashGrant});
 const bashResult=await until(bashTask.id,'completed');assert.equal(fs.readFileSync(path.join(bashDir,'value.txt'),'utf8'),'changed');
 assert.deepEqual(bashResult.bash.map(({index,state,exitCode})=>({index,state,exitCode})),[{index:0,state:'completed',exitCode:0},{index:1,state:'completed',exitCode:0}]);
 const bashStored=JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'request.json')));assert.deepEqual(bashStored.input.bash,bashGrant);
@@ -154,7 +185,8 @@ const bashContext=JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),
 assert.equal(JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'bash-0.receipt.json'))).output.output,'');
 assert.equal(JSON.parse(fs.readFileSync(path.join(service.dir(bashTask.id),'bash-1.receipt.json'))).output.output,'changed');
 await service.notify(bashTask.id);const bashOutcome=fs.readFileSync(path.join(home,'state/branch-outcomes.jsonl'),'utf8').trim().split('\n').map(JSON.parse).find(row=>row.task===bashTask.id);assert.match(bashOutcome.summary,/Verified Bash command receipts: 2/);
-assert.throws(()=>service.submit({...bashStored.input,bash:{...bashGrant,scope:'a broader scope'}}),/different request/);
+const {provider:_storedProvider,model:_storedModel,...bashRetryInput}=bashStored.input;
+assert.throws(()=>service.submit({...bashRetryInput,bash:{...bashGrant,scope:'a broader scope'}}),/different request/);
 const retryDir=path.join(tmp,'bash-retry');fs.mkdirSync(retryDir);const retryInput={...request('bash-retry'),bash:{...bashGrant,cwd:retryDir,expiresAt:Date.now()+10}};const retryTask=service.submit(retryInput,false);fs.rmSync(retryDir,{recursive:true});await wait(20);
 assert.equal(service.submit(retryInput).id,retryTask.id,'identical retry survives grant expiry and cwd removal');assert.throws(()=>service.submit({...retryInput,bash:{...retryInput.bash,scope:'changed'}}),/different request/);
 assert.throws(()=>service.submit({...request('bash-root'),bash:{...bashGrant,cwd:'/'}}),/non-root canonical/);
@@ -162,13 +194,13 @@ assert.throws(()=>service.submit({...request('bash-no-exclusions'),bash:{...bash
 assert.throws(()=>service.submit({...request('bash-expired'),bash:{...bashGrant,expiresAt:1}}),/expired/);
 assert.throws(()=>service.submit({...request('bash-mixed'),bash:bashGrant,operations:{authority:'fixture',expiresAt:Date.now()+60000,steps:[{action:'sync',project:bashDir}]}}),/cannot be combined/);
 const replacedDir=path.join(tmp,'bash-replaced'),replacement=path.join(tmp,'bash-replacement');fs.mkdirSync(replacedDir);fs.mkdirSync(replacement);
-const reboundInput={key:'bash-rebound',goal:'bash-fixture',acceptance:'Refuse a changed cwd identity.',provider:'fixture',model:'fixture',materials:[],bash:{...bashGrant,cwd:replacedDir,expiresAt:Date.now()+60000}};
+const reboundInput={key:'bash-rebound',goal:'bash-fixture',acceptance:'Refuse a changed cwd identity.',materials:[],bash:{...bashGrant,cwd:replacedDir,expiresAt:Date.now()+60000}};
 const rebound=service.submit(reboundInput,false);fs.renameSync(replacedDir,replacedDir+'-old');fs.symlinkSync(replacement,replacedDir);execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',home,rebound.id]);const reboundResult=service.status(rebound.id);assert.equal(reboundResult.state,'blocked');assert.match(reboundResult.summary,/working directory identity changed/);assert.deepEqual(reboundResult.bash,[]);
-const uncertainInput={key:'bash-uncertain',goal:'bash-uncertain',acceptance:'Preserve uncertain effect evidence.',provider:'fixture',model:'fixture',materials:[],bash:{...bashGrant,expiresAt:Date.now()+60000}};
+const uncertainInput={key:'bash-uncertain',goal:'bash-uncertain',acceptance:'Preserve uncertain effect evidence.',materials:[],bash:{...bashGrant,expiresAt:Date.now()+60000}};
 const uncertain=service.submit(uncertainInput);
 const uncertainResult=await until(uncertain.id,'blocked');assert.equal(fs.readFileSync(path.join(bashDir,'uncertain.txt'),'utf8'),'x');assert.equal(uncertainResult.bash[0].state,'uncertain');assert.match(uncertainResult.summary,/effects are uncertain and were not replayed/);
 const uncertainAt=uncertainResult.finishedAt;assert.equal(service.submit(uncertainInput).finishedAt,uncertainAt);execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',home,uncertain.id]);assert.equal(fs.readFileSync(path.join(bashDir,'uncertain.txt'),'utf8'),'x','restart does not replay uncertain write');
-const cancelInput={key:'bash-cancel',goal:'bash-cancel',acceptance:'Preserve cancellation evidence.',provider:'fixture',model:'fixture',materials:[],bash:{...bashGrant,expiresAt:Date.now()+60000}};
+const cancelInput={key:'bash-cancel',goal:'bash-cancel',acceptance:'Preserve cancellation evidence.',materials:[],bash:{...bashGrant,expiresAt:Date.now()+60000}};
 const cancelling=service.submit(cancelInput);for(let n=0;n<200&&!fs.existsSync(path.join(service.dir(cancelling.id),'bash-0.intent.json'));n++)await wait(20);assert.ok(fs.existsSync(path.join(service.dir(cancelling.id),'bash-0.intent.json')));service.cancel(cancelling.id);await wait(500);
 const cancelledBash=service.status(cancelling.id);assert.equal(cancelledBash.state,'cancelled');assert.equal(cancelledBash.bash[0].state,'uncertain');assert.equal(fs.readFileSync(path.join(bashDir,'cancelled.txt'),'utf8'),'c');assert.equal(service.submit(cancelInput).finishedAt,cancelledBash.finishedAt,'cancelled write is not replayed');execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',home,cancelling.id]);assert.equal(fs.readFileSync(path.join(bashDir,'cancelled.txt'),'utf8'),'c','restart does not replay cancelled write');
 // A duplicate child cannot claim an already-started job or replace its result.

@@ -25,6 +25,7 @@ Wake and watcher state mechanics remain with their named scripts and reference s
 ## Headless short tasks
 
 `FM_SHORT_AGENT_ENABLED=1` enables the Pi-primary short-task tools; [the current-use guide](short-agents.md) owns setup, examples, provider-limit distinctions, and recovery.
+`config/short-agent.json` is the single home-owned provider/model selection for new short-task submissions; the CLI owner's `--help` and the current-use guide own its exact schema and setup.
 `state/short-agents/` holds their runner-owned records, whose lifecycle format is owned by `bin/fm-short-agent.mjs` and operation grants/receipts by `bin/fm-short-operations.mjs`.
 
 ## Feishu current-Pi channel

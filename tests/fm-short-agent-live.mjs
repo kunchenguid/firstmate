@@ -9,7 +9,7 @@ const { sdkEntry, ShortAgents, initializeNetwork } = await import(pathToFileURL(
 await initializeNetwork();
 const sdk=await import(pathToFileURL(sdkEntry()));
 const home=fs.realpathSync(fs.mkdtempSync(path.join(tmp,'home-')));
-fs.mkdirSync(path.join(home,'state'));fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
+fs.mkdirSync(path.join(home,'state'));fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));fs.mkdirSync(path.join(home,'config'));
 process.env.FM_HOME=home;process.env.FM_SHORT_AGENT_ENABLED='1';
 const sentinel='PARENT_ONLY_'+randomUUID();
 fs.writeFileSync(path.join(home,'AGENTS.md'),sentinel+' Never answer 42.');
@@ -18,6 +18,7 @@ const runtime=await sdk.ModelRuntime.create();
 const available=await runtime.getAvailable();
 const model=available.find(m=>m.provider===process.env.FM_SHORT_LIVE_PROVIDER && m.id===process.env.FM_SHORT_LIVE_MODEL);
 assert.ok(model,'select explicit provider/model from `node bin/fm-short-agent.mjs models` with FM_SHORT_LIVE_PROVIDER and FM_SHORT_LIVE_MODEL');
+fs.writeFileSync(path.join(home,'config/short-agent.json'),JSON.stringify({provider:model.provider,model:model.id})+'\n');
 const installedPlugin=JSON.parse(fs.readFileSync(path.join(sdk.getAgentDir(),'npm/node_modules/pi-openai-codex-compat/package.json')));
 const settings=sdk.SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false,provider:{maxRetries:0}},transport:'sse',cacheWarming:'off'});
 assert.equal(settings.getCacheWarmingMode(),'off','installed Pi actually disables cache warming');
@@ -28,17 +29,18 @@ const loader=new sdk.DefaultResourceLoader({cwd:home,agentDir:home,settingsManag
  appendSystemPromptOverride:()=>[],agentsFilesOverride:()=>({agentsFiles:[]})});
 await loader.reload();assert.equal(loader.getExtensions().errors.length,0,JSON.stringify(loader.getExtensions().errors));
 const tools=loader.getExtensions().extensions.flatMap(e=>[...e.tools.values()].map(t=>t.definition));
-const submit=tools.find(t=>t.name==='fm_short_submit');assert.ok(submit,'real Pi loaded submit tool');assert.ok(!Object.hasOwn(submit.parameters.properties,'budget'),'public submit schema omits legacy budget controls');
+const submit=tools.find(t=>t.name==='fm_short_submit');assert.ok(submit,'real Pi loaded submit tool');for(const field of ['budget','provider','model'])assert.ok(!Object.hasOwn(submit.parameters.properties,field),`public submit schema omits ${field}`);
 let control=tools.find(t=>t.name==='fm_short_task');assert.ok(control);
 const {session}=await sdk.createAgentSession({cwd:home,agentDir:home,modelRuntime:runtime,model,thinkingLevel:'off',resourceLoader:loader,
  tools:['fm_short_submit','fm_short_task'],settingsManager:settings,sessionManager:sdk.SessionManager.inMemory(home)});
 await session.bindExtensions({mode:'print',onError:e=>{throw Error(e.error);}});
 try {
+  await assert.rejects(()=>submit.execute('lab-override',{key:randomUUID(),goal:'must refuse',acceptance:'must not run',provider:model.provider,model:model.id,materials:[]}),/provider\/model request overrides are unsupported/);
   const parentBeforeBytes=Buffer.byteLength(JSON.stringify(session.messages));
   const began=Date.now();
-  const submitted=await submit.execute('lab-submit',{key:randomUUID(),goal:'Read m1. Explain the measured count and evidence label. Give the final result with m1 citation.',acceptance:'Report 42 and harmless-fixture supported by an actual read_material call.',provider:model.provider,model:model.id,materials:[fixture]});
+  const submitted=await submit.execute('lab-submit',{key:randomUUID(),goal:'Read m1. Explain the measured count and evidence label. Give the final result with m1 citation.',acceptance:'Report 42 and harmless-fixture supported by an actual read_material call.',materials:[fixture]});
   const accepted=JSON.parse(submitted.content[0].text), returnedAt=Date.now();
-  assert.equal(accepted.state,'accepted');
+  assert.equal(accepted.state,'accepted');assert.deepEqual({provider:accepted.provider,model:accepted.model},{provider:model.provider,model:model.id});
   const service=new ShortAgents(home,root);
   await session.reload();
   control=session.getToolDefinition('fm_short_task');assert.ok(control,'real Pi reloaded control tool');
@@ -52,7 +54,7 @@ try {
   const parentReplyAt=Date.now();
   let result;
   for(let n=0;n<1300;n++){result=service.status(accepted.id);if(result.finishedAt)break;await new Promise(r=>setTimeout(r,100));}
-  assert.equal(result.state,'completed',JSON.stringify(result));assert.ok(result.requests >= 2);assert.ok(!Object.hasOwn(result,'reservedOutputTokens'));assert.match(result.summary,/42/);assert.match(result.summary,/harmless-fixture/);
+  assert.equal(result.state,'completed',JSON.stringify(result));assert.deepEqual({provider:result.provider,model:result.model},{provider:model.provider,model:model.id});assert.ok(result.requests >= 2);assert.ok(!Object.hasOwn(result,'reservedOutputTokens'));assert.match(result.summary,/42/);assert.match(result.summary,/harmless-fixture/);
   assert.ok(parentReplyAt < result.finishedAt, 'parent replied before read-only child completed');
   const dir=service.dir(accepted.id),context=fs.readFileSync(path.join(dir,'context.json'),'utf8'),journal=fs.readFileSync(path.join(dir,'journal.jsonl'),'utf8');
   const contextRecord=JSON.parse(context),journalRecords=journal.trim().split('\n').map(JSON.parse);
@@ -62,6 +64,7 @@ try {
   assert.deepEqual(contextRecord.tools,['read_material']);assert.match(journal,/"type":"read"/);
   const pluginResult=JSON.parse(fs.readFileSync(path.join(dir,'plugin-result.json')));assert.deepEqual({name:pluginResult.name,version:pluginResult.version},{name:installedPlugin.name,version:installedPlugin.version});assert.ok(pluginResult.nativeResponses >= 2);assert.equal(pluginResult.extensionErrors,0);assert.deepEqual(pluginResult.tools,['read_material']);
   const runtimeRecord=JSON.parse(fs.readFileSync(path.join(dir,'runtime.json')));
+  const requestRecord=JSON.parse(fs.readFileSync(path.join(dir,'request.json')));assert.deepEqual({provider:requestRecord.input.provider,model:requestRecord.input.model},{provider:model.provider,model:model.id});
   assert.equal(runtimeRecord.cacheWarming,'off');assert.equal(runtimeRecord.extensions.length,1);assert.deepEqual(runtimeRecord.plugin,{name:installedPlugin.name,version:installedPlugin.version});assert.equal(runtimeRecord.providerRegistered,true);assert.equal(runtimeRecord.extensionErrors,0);
   assert.ok(!fs.existsSync(path.join(home,'projects')));
   const evidence={pi:JSON.parse(fs.readFileSync(path.join(path.dirname(sdkEntry()),'../package.json'))).version,node:process.version,model:{provider:model.provider,id:model.id},home,
@@ -70,7 +73,7 @@ try {
     runtime:runtimeRecord,readEvents:journalRecords.filter(event=>event.type==='read').length,projectsCreated:fs.existsSync(path.join(home,'projects')),
     childFinishedAt:result.finishedAt,parentReplyAt,resultBytes:Buffer.byteLength(JSON.stringify(result)),contextBytes:Buffer.byteLength(context),journalBytes:Buffer.byteLength(journal),result};
   const bashDir=path.join(home,'bash-fixture');fs.mkdirSync(bashDir);fs.writeFileSync(path.join(bashDir,'value.txt'),'original');
-  const bashInput={key:randomUUID(),goal:"Use Bash. First run exactly: printf 'changed' > value.txt . Then make a separate Bash call that runs exactly: cat value.txt . Report the observed final contents.",acceptance:'The first command changes value.txt and a separate second Bash command reads back exactly changed.',provider:model.provider,model:model.id,materials:[],bash:{authority:'authorized live test of one disposable fixture',cwd:bashDir,scope:'Replace value.txt with changed and read back value.txt',exclusions:['No access outside this fixture','No deletion, merge, sync, task cleanup, credential use, security change, or service restart'],expiresAt:Date.now()+120000}};
+  const bashInput={key:randomUUID(),goal:"Use Bash. First run exactly: printf 'changed' > value.txt . Then make a separate Bash call that runs exactly: cat value.txt . Report the observed final contents.",acceptance:'The first command changes value.txt and a separate second Bash command reads back exactly changed.',materials:[],bash:{authority:'authorized live test of one disposable fixture',cwd:bashDir,scope:'Replace value.txt with changed and read back value.txt',exclusions:['No access outside this fixture','No deletion, merge, sync, task cleanup, credential use, security change, or service restart'],expiresAt:Date.now()+120000}};
   const bashBegan=Date.now();const bashSubmit=await session.getToolDefinition('fm_short_submit').execute('lab-bash',bashInput);const bashAccepted=JSON.parse(bashSubmit.content[0].text),bashReturned=Date.now();assert.equal(bashAccepted.state,'accepted');
   await session.prompt('Reply exactly MAIN_BASH_RESPONSIVE. Do not use tools.');const bashReply=Date.now();assert.match(session.getLastAssistantText(),/MAIN_BASH_RESPONSIVE/);
   let bashResult;for(let n=0;n<1300;n++){bashResult=service.status(bashAccepted.id);if(bashResult.finishedAt)break;await new Promise(r=>setTimeout(r,100));}
@@ -87,7 +90,7 @@ try {
   const beforeHead=git('-C',project,'rev-parse','HEAD');
   fs.writeFileSync(path.join(seed,'one'),'two');git('-C',seed,'commit','-am','advance fixture');git('-C',seed,'push','origin','main');
   const expectedHead=git('-C',seed,'rev-parse','HEAD');assert.notEqual(beforeHead,expectedHead);
-  const opInput={key:randomUUID(),goal:'Execute the granted operation chain with run_operations and report the verified receipt.',acceptance:'A sync receipt from the action owner.',provider:model.provider,model:model.id,materials:[],operations:{authority:'isolated live-test clone only',expiresAt:Date.now()+120000,steps:[{action:'sync',project}]}};
+  const opInput={key:randomUUID(),goal:'Execute the granted operation chain with run_operations and report the verified receipt.',acceptance:'A sync receipt from the action owner.',materials:[],operations:{authority:'isolated live-test clone only',expiresAt:Date.now()+120000,steps:[{action:'sync',project}]}};
   // Counterfactual: only these detached children's proxy environment changes.
   // No external request reaches the provider and no operation may begin.
   // Restore the submitting parent's environment before the normal operation.

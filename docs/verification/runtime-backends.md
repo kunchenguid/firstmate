@@ -1213,6 +1213,17 @@ Herdr has no atomic compare-and-close transaction, so concurrent external mutati
 
 ## Pi headless short tasks
 
+On 2026-10-09 (Asia/Shanghai), Pi 1.1.0, Node v22.22.2, and `pi-openai-codex-compat` 0.0.22 passed the candidate ShortTask guard with the isolated home's `config/short-agent.json` selecting authenticated `openai-codex/gpt-6-luna`.
+The read-only task's acceptance receipt, immutable request, runtime record, and terminal result all recorded that exact pair; the child read the harmless fixture and returned measured count `42` with label `harmless-fixture`.
+The same run also retained the existing disposable Bash, local Git sync, parent-responsiveness, transport-refusal, plugin, and isolation checks.
+
+```text
+$ FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh
+installed plugin initialization, handler behavior and resource exclusion passed
+ok - real Pi short task stays independent while the parent accepts another prompt
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=22769
+```
+
 On 2026-10-08 (Asia/Shanghai), Pi 1.1.0, Node v22.22.2, and `pi-openai-codex-compat` 0.0.21 passed the candidate ShortTask guard with authenticated `openai-codex/gpt-5.6-luna` for snapshot analysis, a per-task Bash grant, and a fixed operation chain.
 The Bash child received only `read_material` and Pi's native `bash`, excluded the parent sentinel and history, wrote `changed` to one file in an isolated disposable directory, then made a separate Bash call that read back exactly `changed`.
 Its two durable receipts recorded the exact commands, bound working directory, zero exit codes, and captured output; MAIN executed no child command and answered another model prompt before the child finished.
@@ -1241,7 +1252,7 @@ FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0
 ```
 
 On 2026-09-29, Pi 0.87.1, Node v22.22.2, and installed `pi-openai-codex-compat` 0.0.17 passed the isolated SDK guard with authenticated `openai-codex/gpt-5.6-luna` for both read-only analysis and an authorized fast-forward of a disposable local clone.
-Refresh with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
+Refresh current evidence with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
 Both submitted through the loaded candidate extension and returned before child completion; the parent answered another real-model prompt while each child was active.
 Both children excluded the parent-only sentinel.
 The installed SDK read back `cacheWarming: "off"` and disabled compaction; each child loaded only `pi-openai-codex-compat@0.0.17`, with zero extension errors and zero starting parent messages.
