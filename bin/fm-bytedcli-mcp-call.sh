@@ -90,7 +90,9 @@ chmod 0600 "$root/arguments.json"
 } >"$request" || { printf 'error: cannot build MCP request\n' >&2; exit 1; }
 chmod 0600 "$request"
 
-if ! fm_ida_run_bytedcli --as user mcp --allow-domains ida \
+# Keep `mcp` as the first non-option token so bytedcli retains its stdio server;
+# select the required user identity through the CLI's equivalent environment input.
+if ! BYTECLOUD_AUTH_AS=user fm_ida_run_bytedcli mcp --allow-domains ida \
     <"$request" >"$response" 2>"$error"; then
   code=MCP_TRANSPORT_ERROR
   case "$(tr '[:lower:]' '[:upper:]' <"$error")" in
@@ -103,19 +105,68 @@ if ! fm_ida_run_bytedcli --as user mcp --allow-domains ida \
   exit 1
 fi
 
-line=$(jq -c 'select(.id == 2)' "$response" 2>/dev/null | tail -1)
-[ -n "$line" ] || {
-  jq -n '{status:"error",data:null,error:{code:"MCP_RESPONSE_MISSING",message:"bytedcli MCP returned no tool response"}}'
+mcp_error() { # <safe-source-text>
+  local upper code=MCP_TOOL_ERROR message='bytedcli MCP tool failed'
+  upper=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
+  case "$upper" in
+    *RATE*LIMIT*|*TOO*MANY*REQUEST*|*HTTP*429*|*QUOTA*) code=MCP_TOOL_RATE_LIMITED; message='bytedcli MCP tool was rate limited' ;;
+    *AUTH*|*SSO*|*FORBIDDEN*|*PERMISSION*DENIED*|*HTTP*401*|*HTTP*403*) code=MCP_TOOL_AUTH; message='bytedcli MCP tool was denied by authentication or permission' ;;
+    *UNSUPPORTED*|*NOT*IMPLEMENTED*|*UNKNOWN*COMMAND*) code=MCP_TOOL_UNSUPPORTED; message='bytedcli MCP tool is unsupported' ;;
+    *TIMEOUT*|*TIMED*OUT*) code=MCP_TOOL_TIMEOUT; message='bytedcli MCP tool timed out' ;;
+    *NETWORK*|*FETCH*FAILED*|*ECONN*|*UNAVAILABLE*|*HTTP*50[234]*) code=MCP_TOOL_UNAVAILABLE; message='bytedcli MCP tool is unavailable' ;;
+    *NOT*FOUND*|*HTTP*404*) code=MCP_TOOL_NOT_FOUND; message='bytedcli MCP tool target was not found' ;;
+  esac
+  jq -n --arg code "$code" --arg message "$message" \
+    '{status:"error",data:null,error:{code:$code,message:$message}}'
   exit 1
 }
+
+if ! jq -s -e 'type == "array" and all(.[]; type == "object")' "$response" >/dev/null 2>&1; then
+  jq -n '{status:"error",data:null,error:{code:"MCP_RESPONSE_INVALID",message:"bytedcli MCP returned malformed JSON-RPC output"}}'
+  exit 1
+fi
+response_count=$(jq -s '[.[] | select(.id == 2)] | length' "$response")
+case "$response_count" in
+  0)
+    if jq -s -e 'any(.[]; (.id | tostring) == "2")' "$response" >/dev/null 2>&1; then
+      jq -n '{status:"error",data:null,error:{code:"MCP_RESPONSE_INVALID",message:"bytedcli MCP returned a tool response with invalid identity"}}'
+      exit 1
+    fi
+    jq -n '{status:"error",data:null,error:{code:"MCP_RESPONSE_MISSING",message:"bytedcli MCP returned no tool response"}}'
+    exit 1
+    ;;
+  1) ;;
+  *)
+    jq -n '{status:"error",data:null,error:{code:"MCP_RESPONSE_AMBIGUOUS",message:"bytedcli MCP returned duplicate tool responses"}}'
+    exit 1
+    ;;
+esac
+line=$(jq -c 'select(.id == 2)' "$response")
+if ! printf '%s\n' "$line" | jq -e '
+    .jsonrpc == "2.0"
+    and ((has("result") and (has("error") | not)) or (has("error") and (has("result") | not)))
+  ' >/dev/null 2>&1; then
+  jq -n '{status:"error",data:null,error:{code:"MCP_RESPONSE_INVALID",message:"bytedcli MCP returned an invalid tool response"}}'
+  exit 1
+fi
 if printf '%s\n' "$line" | jq -e '.error | type == "object"' >/dev/null 2>&1; then
-  jq -n '{status:"error",data:null,error:{code:"MCP_TOOL_ERROR",message:"bytedcli MCP tool failed"}}'
+  error_text=$(printf '%s\n' "$line" | jq -r '[.error.code?,.error.message?] | map(select(type == "string" or type == "number")) | map(tostring) | join(" ")')
+  mcp_error "$error_text"
+fi
+if ! printf '%s\n' "$line" | jq -e '
+    (.result | type == "object")
+    and (.result.content | type == "array")
+    and all(.result.content[]; type == "object")
+  ' >/dev/null 2>&1; then
+  jq -n '{status:"error",data:null,error:{code:"MCP_RESPONSE_INVALID",message:"bytedcli MCP returned an invalid tool result"}}'
   exit 1
 fi
 text=$(printf '%s\n' "$line" | jq -r '[.result.content[]? | select(.type == "text") | .text] | join("\n")')
+if printf '%s\n' "$line" | jq -e '.result.isError == true' >/dev/null 2>&1; then
+  mcp_error "$text"
+fi
 if [ "$mode" = capabilities ] || [ "$mode" = capabilities-followup ]; then
   capability_ready=true
-  if printf '%s\n' "$line" | jq -e '.result.isError == true' >/dev/null 2>&1; then capability_ready=false; fi
   for required in \
       'bytedcli ida deep-research create' '--content' '--name' '--model' '--timeout-ms' \
       'bytedcli ida session raw list' '--agent-id' \
