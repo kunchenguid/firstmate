@@ -460,9 +460,9 @@ if [ "$PROVIDER" = gitlab ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
-# Pre-merge conditions for a GitLab merge request, read from one live view of
-# the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
-# returns non-zero after reporting every condition that failed.
+# GitLab pre-merge verification follows the evidence contract in this header.
+# Sets FM_PR_MERGE_HEAD to the verified source head on success and returns
+# non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
 FM_PR_GITLAB_RESULT_MR=
