@@ -833,6 +833,7 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
   # blockers, terminal outcomes, notes, correlation-marked lines (both forms the
   # fleet writes), and any verb the classifier does not know.
   for line in 'needs-decision [key=k2]: pick one' 'blocked [key=k3]: need access' \
+      'needs-validation [at=1]: committed c118078, 706 tests' \
       'done [at=1]: shipped' 'failed [at=1]: broke' 'note: routed reply for the parent' \
       'resolved corr=0123456789abcdef [key=k4]: answered' \
       'working [corr=0123456789abcdef]: mirrored remote line' \

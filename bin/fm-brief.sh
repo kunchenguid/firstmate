@@ -667,6 +667,12 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
+# needs-validation is the no-mistakes implementation handoff. Other ship modes
+# and the scout and secondmate briefs keep done as their completion verb.
+SHIP_STATES="working, needs-decision, blocked, $PAUSED_VERB, done, failed"
+if [ "$MODE" = no-mistakes ]; then
+  SHIP_STATES="working, needs-decision, blocked, $PAUSED_VERB, needs-validation, done, failed"
+fi
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 
@@ -694,7 +700,7 @@ $RULE1
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   States: $SHIP_STATES.
    Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the

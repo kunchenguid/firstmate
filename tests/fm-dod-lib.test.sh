@@ -94,6 +94,16 @@ test_no_mistakes_prevalidation_done_is_not_gated() {
   pass "no-mistakes pre-validation done: is not gated"
 }
 
+test_needs_validation_handoff_is_not_gated() {
+  fm_dod_should_gate_ship_done ship no-mistakes \
+    'needs-validation: committed c118078, 706 tests' \
+    && fail "needs-validation was gated as a done claim"
+  accept_done ship no-mistakes /no/such /no/such \
+    'needs-validation [at=1700000000]: committed c118078, 706 tests' \
+    || fail "needs-validation handoff was refused"
+  pass "needs-validation is a handoff and is not gated"
+}
+
 test_local_only_linked_branch_is_accepted() {
   local repo wt
   repo="$TMP_ROOT/local-repo"
@@ -427,6 +437,7 @@ EOF
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
+test_needs_validation_handoff_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head

@@ -901,8 +901,13 @@ $templates
 SIGNALS
     [ "$signals" -ge 4 ] \
       || fail "$kind brief instructed only $signals stamped status signals"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
-      "$kind brief did not render the configured pause verb in its states list"
+    if [ "$kind" = ship:no-mistakes ]; then
+      assert_grep "States: working, needs-decision, blocked, awaiting, needs-validation, done, failed." "$brief" \
+        "$kind brief did not list the validation handoff beside the configured pause verb"
+    else
+      assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+        "$kind brief did not render the configured pause verb in its states list"
+    fi
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
       "$kind brief did not instruct the configured pause status"
