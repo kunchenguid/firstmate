@@ -1424,6 +1424,43 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive, dead for exit 1, dead for any other probe status"
 }
 
+# A remote second mate's endpoint lives on its own host, so the digest must not
+# probe a local backend for it: a meta with no backend= key used to default to
+# tmux and report the live remote mate as dead from a local miss.
+test_endpoint_liveness_remote_secondmate_is_not_probed_locally() {
+  local rec root home fakebin out probes
+  rec=$(new_world liveness-remote)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  probes="$root/tmux-probes.log"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$probes"
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  # The deferred network stage may ask the remote host; keep it unreachable.
+  printf '#!/usr/bin/env bash\nexit 255\n' > "$fakebin/ssh"
+  chmod +x "$fakebin/ssh"
+
+  printf 'window=remote:sm-remote\nendpoint_task_id=sm-remote\nkind=secondmate\nmode=secondmate\nremote_host=sm-host\nremote_backend=herdr\nremote_target=fm-remote:w1:p1\n' \
+    > "$home/state/sm-remote.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=remote:sm-remote)" \
+    "a remote second mate was reported dead from a local tmux probe"
+  assert_contains "$out" "endpoint: remote (host=sm-host window=remote:sm-remote" \
+    "a remote second mate's endpoint line does not name its host"
+  if [ -f "$probes" ] && grep -q 'remote:sm-remote' "$probes"; then
+    fail "the digest probed a remote second mate's window on the local tmux"
+  fi
+
+  pass "a remote second mate's endpoint is not probed on the local backend"
+}
+
 test_endpoint_read_death_is_isolated_and_reported() {
   local rec root home fakebin out status=0
   [ -r /proc/self/stat ] || { echo "skip: /proc not readable (the read-death shape needs process ancestry)"; return 0; }
@@ -3038,6 +3075,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_endpoint_liveness_remote_secondmate_is_not_probed_locally
 test_endpoint_read_death_is_isolated_and_reported
 test_endpoint_read_hang_is_bounded_and_reported
 test_endpoint_bound_rejects_padded_zero
