@@ -23,7 +23,7 @@ Current empirical evidence lives in [`docs/verification/runtime-backends.md`](..
 ## Settings and discovery
 
 `../../../../../bin/fm-spawn.sh` owns settings construction, literal native-model selection, supported effort omission, atomic publication, rollback, and relaunch replacement.
-The requested native catalog id or custom registry id is passed unchanged; no provider-facing alias is inferred from global settings.
+An explicit native catalog id or custom registry id is passed unchanged; an omitted model or `default` leaves the CLI's model default intact, and no provider-facing alias is inferred from global settings.
 `../../../../../bin/fm-teardown.sh` removes task settings and retires the trust receipt, including after a harness switch; the control plane retires process-local settings during a harness switch.
 `../../../../../bin/fm-droid-trust.sh` owns serialized settings updates, acquired-entry rollback, and cleanup transfer when another recorded task uses the same pooled path.
 Model availability depends on the installed CLI and account: inspect `droid --help`, the interactive `/model` catalog, and the user's `~/.factory/settings.json` custom-model registry without exposing credentials.

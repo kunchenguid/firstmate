@@ -110,8 +110,8 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, devin,
-# commandcode, polytoken, cortex, and kiro are crewmate/scout adapters only: none has a primary
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, devin, droid,
+# commandcode, polytoken, cortex, kiro, and hermes are crewmate/scout adapters only: none has a primary
 # supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
