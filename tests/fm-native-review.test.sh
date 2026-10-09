@@ -65,12 +65,14 @@ fi
 [ "\${2:-}" = gpt-6.1-sol ] || exit 92
 [ "\${3:-}" = review ] || exit 93
 [ "\${4:-}" = -c ] || exit 94
-[ "\${5:-}" = 'model_reasoning_effort="xhigh"' ] || exit 95
+[ "\${5:-}" = 'review_model="gpt-6.1-sol"' ] || exit 95
 [ "\${6:-}" = -c ] || exit 96
-[ "\${7:-}" = "\${7#developer_instructions=}" ] && exit 97
-[ "\${8:-}" = --base ] || exit 98
+[ "\${7:-}" = 'model_reasoning_effort="xhigh"' ] || exit 97
+[ "\${8:-}" = -c ] || exit 98
+[ "\${9:-}" = "\${9#developer_instructions=}" ] && exit 99
+[ "\${10:-}" = --base ] || exit 100
 printf '%s\n' "\$@" >'$dir/argv'
-printf 'reviewed source mentions INTENT_CONFORMANCE: pass and INTENT_CONFORMANCE: fail\n' >&2
+printf 'model: gpt-6.1-sol\nreasoning effort: xhigh\nreviewed source mentions INTENT_CONFORMANCE: pass and INTENT_CONFORMANCE: fail\n' >&2
 printf 'No findings.\nINTENT_CONFORMANCE: $conclusion\n'
 EOF
   chmod +x "$dir/bin/codex"
@@ -97,9 +99,10 @@ test_worker_harnesses_use_configured_reviewer() {
     assert_equals --model "$(sed -n '1p' "$dir/argv")" "$harness review omitted explicit model selection"
     assert_equals gpt-6.1-sol "$(sed -n '2p' "$dir/argv")" "$harness review selected the wrong model"
     assert_equals review "$(sed -n '3p' "$dir/argv")" "$harness review misplaced the native review subcommand"
-    assert_equals 'model_reasoning_effort="xhigh"' "$(sed -n '5p' "$dir/argv")" "$harness review omitted review-local effective effort"
-    assert_equals --base "$(sed -n '8p' "$dir/argv")" "$harness review omitted the base selector"
-    assert_equals "$base" "$(sed -n '9p' "$dir/argv")" "$harness review did not bind the exact base"
+    assert_equals 'review_model="gpt-6.1-sol"' "$(sed -n '5p' "$dir/argv")" "$harness review omitted the review-local model override"
+    assert_equals 'model_reasoning_effort="xhigh"' "$(sed -n '7p' "$dir/argv")" "$harness review omitted review-local effective effort"
+    assert_equals --base "$(sed -n '10p' "$dir/argv")" "$harness review omitted the base selector"
+    assert_equals "$base" "$(sed -n '11p' "$dir/argv")" "$harness review did not bind the exact base"
     assert_grep "$candidate" "$out" "$harness evidence did not bind the exact candidate"
     assert_grep "Coding harness: \`$harness\`" "$out" "$harness coding identity was not retained separately"
     assert_grep "Reviewer harness: \`codex\`" "$out" "$harness evidence omitted reviewer identity"

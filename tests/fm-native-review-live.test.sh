@@ -21,9 +21,15 @@ EFFORT=${FM_NATIVE_REVIEW_EFFORT:-}
 [ -n "$MODEL" ] && [ -n "$EFFORT" ] || fail "FM_NATIVE_REVIEW_MODEL and FM_NATIVE_REVIEW_EFFORT are required"
 
 TMP_ROOT=$(fm_test_tmproot "fm-native-review-live-$HARNESS")
-home="$TMP_ROOT/home"
+fixture_home="$TMP_ROOT/home"
 repo="$TMP_ROOT/repo"
-mkdir -p "$home/data/live-review" "$home/state" "$repo"
+source_codex_home=${CODEX_HOME:-$HOME/.codex}
+fixture_codex_home="$TMP_ROOT/codex-home"
+mkdir -p "$fixture_home/data/live-review" "$fixture_home/state" "$fixture_codex_home" "$repo"
+cp "$source_codex_home/auth.json" "$fixture_codex_home/auth.json"
+cp "$source_codex_home/models_cache.json" "$fixture_codex_home/models_cache.json"
+chmod 600 "$fixture_codex_home/auth.json"
+printf '%s\n' 'review_model = "gpt-6-astra"' >"$fixture_codex_home/config.toml"
 git -C "$repo" init -q
 git -C "$repo" config user.email test@example.com
 git -C "$repo" config user.name test
@@ -34,8 +40,8 @@ base=$(git -C "$repo" rev-parse HEAD)
 printf 'candidate\n' >> "$repo/value.txt"
 git -C "$repo" commit -qam candidate
 candidate=$(git -C "$repo" rev-parse HEAD)
-printf 'worktree=%s\nharness=%s\n' "$repo" "$HARNESS" > "$home/state/live-review.meta"
-cat > "$home/data/live-review/brief.md" <<'EOF'
+printf 'worktree=%s\nharness=%s\n' "$repo" "$HARNESS" > "$fixture_home/state/live-review.meta"
+cat > "$fixture_home/data/live-review/brief.md" <<'EOF'
 # Task
 ## Captain's intent
 Verify the installed native review interface on an isolated trivial change.
@@ -44,14 +50,16 @@ Verify the installed native review interface on an isolated trivial change.
 Report only concrete correctness issues and bind the exact base and candidate.
 EOF
 
-output="$home/data/live-review/evidence.md"
-FM_HOME="$home" "$ROOT/bin/fm-native-review.sh" live-review \
+output="$fixture_home/data/live-review/evidence.md"
+CODEX_HOME="$fixture_codex_home" FM_HOME="$fixture_home" "$ROOT/bin/fm-native-review.sh" live-review \
   --base "$base" --candidate "$candidate" --output "$output" \
   --review-harness "$HARNESS" --model "$MODEL" --effort "$EFFORT"
 assert_grep "Reviewer harness: \`$HARNESS\`" "$output" "live evidence omitted the installed reviewer harness"
 assert_grep "Reviewer model: \`$MODEL\`" "$output" "live evidence omitted the explicit reviewer model"
 assert_grep "Reviewer effort: \`$EFFORT\`" "$output" "live evidence omitted the effective reviewer effort"
 assert_grep "reasoning effort: $EFFORT" "$output" "installed reviewer did not apply the selected effort"
+assert_grep "model: $MODEL" "$output" "installed reviewer did not override the inherited review model"
+assert_no_grep 'model: gpt-6-astra' "$output" "inherited review_model overrode the explicit reviewer selection"
 assert_grep "Candidate: \`$candidate\`" "$output" "live evidence omitted the exact candidate"
 assert_grep 'INTENT_CONFORMANCE: pass' "$output" "installed reviewer did not pass the isolated candidate"
 pass "installed $HARNESS native review binds identity, intent, and final response"

@@ -303,6 +303,7 @@ trap 'rm -f "$TMP" "$RESULT" "$TRACE"' EXIT HUP INT TERM
 # preserves newlines without shell evaluation.
 REVIEW_RC=0
 (cd "$WORKTREE" && "$COMMAND" --model "$MODEL" review \
+  -c "review_model=\"$MODEL\"" \
   -c "model_reasoning_effort=\"$EFFORT\"" \
   -c "developer_instructions=$PROMPT_CONFIG" --base "$BASE_FULL") >"$RESULT" 2>"$TRACE" \
   || REVIEW_RC=$?
@@ -312,6 +313,14 @@ if [ "$REVIEW_RC" -ne 0 ]; then
   echo "error: $REVIEW_HARNESS native review failed for $BASE_FULL..$CANDIDATE_FULL" >&2
   exit 1
 fi
+ACTUAL_MODEL=$(sed -n 's/^model: //p' "$TRACE" | head -1)
+ACTUAL_EFFORT=$(sed -n 's/^reasoning effort: //p' "$TRACE" | head -1)
+[ "$ACTUAL_MODEL" = "$MODEL" ] && [ "$ACTUAL_EFFORT" = "$EFFORT" ] || {
+  cat "$RESULT" >&2
+  cat "$TRACE" >&2
+  echo "error: Codex native review identity mismatch: requested model=$MODEL effort=$EFFORT, actual model=${ACTUAL_MODEL:-unknown} effort=${ACTUAL_EFFORT:-unknown}" >&2
+  exit 1
+}
 POST_HEAD=$(git -C "$WORKTREE" rev-parse HEAD)
 [ "$POST_HEAD" = "$CANDIDATE_FULL" ] \
   && [ -z "$(git -C "$WORKTREE" status --porcelain --untracked-files=all)" ] || {
@@ -342,8 +351,8 @@ CONTRACT_SHA=$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')
   printf -- "- Task: \`%s\`\n" "$ID"
   printf -- "- Coding harness: \`%s\`\n" "$HARNESS"
   printf -- "- Reviewer harness: \`%s\`\n" "$REVIEW_HARNESS"
-  printf -- "- Reviewer model: \`%s\`\n" "$MODEL"
-  printf -- "- Reviewer effort: \`%s\`\n" "$EFFORT"
+  printf -- "- Reviewer model: \`%s\`\n" "$ACTUAL_MODEL"
+  printf -- "- Reviewer effort: \`%s\`\n" "$ACTUAL_EFFORT"
   printf -- "- Runtime: \`%s\`\n" "$VERSION"
   printf -- "- Base: \`%s\`\n" "$BASE_FULL"
   printf -- "- Candidate: \`%s\`\n" "$CANDIDATE_FULL"
