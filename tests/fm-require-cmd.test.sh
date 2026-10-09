@@ -38,21 +38,43 @@ test_slash_command_is_taken_as_a_path() {
 }
 
 test_directories_do_not_resolve() {
-  local explicit path out rc
+  local explicit first second out rc
   explicit="$TMP_ROOT/explicit-command"
-  path="$TMP_ROOT/path"
-  mkdir -p "$explicit" "$path/path-command"
+  first="$TMP_ROOT/path-first"
+  second="$TMP_ROOT/path-second"
+  mkdir -p "$explicit" "$first/path-command" "$second"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo ran' > "$second/path-command"
+  chmod +x "$second/path-command"
 
   out=$("$REQUIRE" --resolve-only "$explicit" 2>&1)
   rc=$?
   [ "$rc" -eq 127 ] || fail "an explicit directory resolved successfully (got $rc)"
   assert_contains "$out" "not an executable file" "the explicit-directory diagnostic was unclear"
 
-  out=$(PATH="$path" "$BASH" "$REQUIRE" --resolve-only path-command 2>&1)
+  out=$(PATH="$first" "$BASH" "$REQUIRE" --resolve-only path-command 2>&1)
   rc=$?
   [ "$rc" -eq 127 ] || fail "a PATH directory resolved successfully (got $rc)"
   assert_contains "$out" "no executable found" "the PATH-directory diagnostic was unclear"
+
+  out=$(PATH="$first:$second" "$BASH" "$REQUIRE" --resolve-only path-command) ||
+    fail "a regular PATH executable after a directory did not resolve"
+  [ "$out" = "$second/path-command" ] || fail "resolved the wrong PATH command: $out"
   pass "directories do not resolve as commands"
+}
+
+test_nonregular_fallback_does_not_resolve() {
+  local home path out rc
+  home="$TMP_ROOT/fifo-home"
+  path="$TMP_ROOT/fifo-path"
+  mkdir -p "$home/.local/bin" "$path"
+  mkfifo "$home/.local/bin/fifo-command"
+  chmod +x "$home/.local/bin/fifo-command"
+
+  out=$(HOME="$home" PATH="$path" "$BASH" "$REQUIRE" --resolve-only fifo-command 2>&1)
+  rc=$?
+  [ "$rc" -eq 127 ] || fail "a FIFO fallback resolved successfully (got $rc)"
+  assert_contains "$out" "no executable found" "the FIFO diagnostic was unclear"
+  pass "nonregular fallback candidates do not resolve"
 }
 
 test_npx_cache_resolves() {
@@ -144,6 +166,7 @@ test_nonexecutable_slash_path_is_named() {
 test_path_command_resolves
 test_slash_command_is_taken_as_a_path
 test_directories_do_not_resolve
+test_nonregular_fallback_does_not_resolve
 test_npx_cache_resolves
 test_unavailable_command_is_actionable
 test_resolve_only_does_not_run

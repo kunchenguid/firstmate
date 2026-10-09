@@ -4,7 +4,7 @@
 # caller that only needs the path captures it with --resolve-only.
 #
 # Resolution order, most authoritative first:
-#   1. PATH, via command -v.
+#   1. PATH.
 #   2. A command containing a slash, taken as a path as written.
 #   3. ~/.local/bin.
 #   4. The npm exec cache, ~/.npm/_npx/*/node_modules/.bin, where an `npx <cmd>`
@@ -81,17 +81,13 @@ case "$CMD" in
     fi
     ;;
   *)
-    found=$(command -v "$CMD" 2>/dev/null) || found=""
-    if [ -n "$found" ] && [ -f "$found" ] && [ -x "$found" ]; then
-      EXE=$found
-    else
-      for dir in "${SEARCH[@]}"; do
-        if [ -x "$dir/$CMD" ] && [ ! -d "$dir/$CMD" ]; then
-          EXE="$dir/$CMD"
-          break
-        fi
-      done
-    fi
+    for dir in "${PATH_DIRS[@]}" "${SEARCH[@]}"; do
+      [ -n "$dir" ] || dir=$PWD
+      if [ -f "$dir/$CMD" ] && [ -x "$dir/$CMD" ]; then
+        EXE="$dir/$CMD"
+        break
+      fi
+    done
     ;;
 esac
 
