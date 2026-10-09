@@ -157,6 +157,10 @@
 #      unreachable, and an alive endpoint whose scrollback read failed is still
 #      classified by step 4. Backends with no classifier keep reading a failed
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
+#      A readable endpoint holding only its shell (the harness exited, for
+#      example on a provider usage-limit error) reads unknown · none as agent
+#      gone before a stale busy record or non-terminal status log can report
+#      working; a valid terminal done/failed declaration is still preserved.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -320,6 +324,32 @@ pane_readable() {  # <target>
   case "$TASK_BACKEND" in
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
+  esac
+}
+# crew_agent_gone: positive recovery-grade evidence that a readable endpoint
+# contains only its shell, not the recorded harness. Tmux first confirms its
+# foreground command is a shell so a transient process-table read cannot turn a
+# live agent into a dead one; Herdr owns that distinction in its own classifier.
+# A dead agent must outrank stale busy or status-log evidence, but every
+# ambiguous, unreadable, or unverified result preserves the existing fallback.
+crew_agent_gone() {
+  local current state
+  fm_backend_source "$TASK_BACKEND" || return 1
+  case "$TASK_BACKEND" in
+    tmux)
+      current=$(fm_backend_tmux_current_command "$BACKEND_TARGET" 2>/dev/null) || return 1
+      case "$(fm_agent_process_classify_name "$current")" in
+        shell) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    herdr) ;;
+    *) return 1 ;;
+  esac
+  state=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")
+  case "$state" in
+    dead|missing) return 0 ;;
+    *) return 1 ;;
   esac
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
@@ -1281,6 +1311,26 @@ if ! pane_readable "$BACKEND_TARGET"; then
       emit unknown none "backend target gone: $BACKEND_TARGET"
       ;;
   esac
+fi
+
+# A readable shell-only endpoint is an agent-free worker, not an idle worker.
+# Do this before accepting either a stale semantic busy record or the status log,
+# while leaving secondmate liveness to its routed status contract below. A
+# terminal declaration is the exception: once the harness is positively gone,
+# preserve a valid ship/scout outcome instead of losing it to the death verdict.
+if [ "$KIND" != secondmate ] && crew_agent_gone; then
+  case "$LOG_VERB" in
+    "done")
+      if [ "$KIND" = ship ]; then
+        emit_ship_status_done
+      fi
+      emit "done" status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+    failed)
+      emit failed status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+  esac
+  emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
 fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
