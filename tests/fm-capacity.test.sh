@@ -129,7 +129,7 @@ test_invalid_target_is_reported() {
     "invalid target must name the problem"
   local bad
   for bad in '3\n4\n' '1 2\n' '99999999999999999999\n'; do
-    printf "$bad" > "$home/config/lane-capacity"
+    printf '%b' "$bad" >"$home/config/lane-capacity"
     out=$(run_capacity "$home" "$fakebin"); rc=$?
     expect_code 1 "$rc" "invalid target $bad"
     assert_contains "$out" 'reason=invalid-target' "target '$bad' must be rejected"
