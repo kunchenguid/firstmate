@@ -56,7 +56,12 @@
 #                          Each long-cadence recheck (declared pause, deferred
 #                          wait, or deferred write) ends with " task=<id>" after
 #                          its parenthetical, so the supervisor reports on the
-#                          task rather than the pane.
+#                          task rather than the pane. A stale that would
+#                          otherwise carry no parenthetical (first sight, away
+#                          mode, or the afk handoff below) is instead written
+#                          "stale: <window> (task=<id>)", so every reader that
+#                          takes the window up to the first " (" still resolves
+#                          it.
 #                          A pane whose recorded endpoint holds no agent at all is
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
@@ -69,8 +74,8 @@
 #                          turn completes). Past that bound, a declared external
 #                          wait or verified captain-held transfer uses the long
 #                          pause recheck cadence; under daemon-backed afk an
-#                          external wait is instead handed to the daemon as this
-#                          plain reason once per declaration, while captain-held
+#                          external wait is instead handed to the daemon as the
+#                          task-named reason once per declaration, while captain-held
 #                          work stays silent until return
 #                          (busy_turn_bound_check owns that split);
 #                          every other pane goes through the same wedge timer,
