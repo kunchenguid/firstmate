@@ -275,6 +275,22 @@ test_flag_off_writes_nothing() {
   pass "flag off: the whole lifecycle leaves no ledger file, offset, or lock"
 }
 
+test_large_status_text_is_capped_and_captured_once() {
+  local home="$TMP_ROOT/large-status"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/fleet-ledger"
+  jq -nr '"needs-decision [key=large-call]: " + ("é" * 100000) + " tail"' > "$home/state/large.status"
+  FM_HOME="$home" "$ROOT/bin/fm-fleet-ledger.sh" appended "$home/config" "$home/state/large.status" \
+    || fail "large status append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-fleet-ledger.sh" capture || fail "large status capture failed"
+  jq -e -s 'length == 1 and .[0].event == "task.status" and .[0].task == "large"
+    and .[0].state == "needs-decision" and .[0].key == "large-call"
+    and .[0].text == (" " + ("é" * 1999))' "$home/state/fleet-ledger.jsonl" >/dev/null \
+    || fail "large status was lost, duplicated, or capped incorrectly"
+  pass "large status text retains its codepoint cap and one capture"
+}
+
+test_large_status_text_is_capped_and_captured_once
 test_flag_on_records_the_task_lifecycle
 test_flag_on_records_a_pr_merge_once
 test_flag_on_records_a_pr_registration

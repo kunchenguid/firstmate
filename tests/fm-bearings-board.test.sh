@@ -769,6 +769,31 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+test_build_drops_large_key_array_and_keeps_open_card() {
+  local home data board
+  home=$(make_home large-dropped-keys)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '
+    [range(0;1200) | "landed-" + tostring + "-" + ("x" * 110)] as $keys
+    | .captains_call = [$keys[] | {key:.,type:"decision",repo:"sample",title:"Shipped",
+        options:[{value:"yes",label:"Yes"}]}]
+      + [{key:"still-open",type:"decision",repo:"sample",title:"Open",options:[{value:"yes",label:"Yes"}]}]
+    | .landed = [$keys[] | {id:.,repo:"sample",what:"shipped",owner:"crew"}]
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq -e '([.landed[].id] | tojson | length) > 131072' "$data" >/dev/null \
+    || fail "landed-key fixture must exceed the single-argument limit"
+  run_board "$home" build "$data" > "$home/build.log" 2>&1 || fail "large dropped-key build failed"
+  extract_payload "$board" | jq -e '
+    [.captains_call[].key] == ["still-open"] and (.landed | length) == 1200
+    and (.landed | map(.id) | sort) == ([range(0;1200) | "landed-" + tostring + "-" + ("x" * 110)] | sort)
+    and (.captains_call[0].options | map(.value)) == ["yes","reconcile"]
+  ' >/dev/null || fail "large dropped-key set lost landed records or the open card"
+  pass "board drops all landed keys above the argument limit and keeps the open card"
+}
+
+test_build_drops_large_key_array_and_keeps_open_card
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values

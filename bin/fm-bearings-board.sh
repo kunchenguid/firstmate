@@ -322,8 +322,9 @@ effective_payload() {  # <data.json> <dest.json>
     drop=$drop$key$'\n'
   done < <(jq -r '.captains_call[]? | select(.type == "decision") | .key' "$data")
   tmp=$(printf '%s' "$drop" | jq -R -s 'split("\n") | map(select(length > 0))') || return 1
-  jq --argjson dropped "$tmp" '
-    .captains_call = [
+  jq --rawfile dropped <(printf '%s' "$tmp") '
+    ($dropped | fromjson) as $dropped
+    | .captains_call = [
       .captains_call[]
       | . as $card
       | select($card.type != "decision" or (($dropped | index($card.key)) == null))

@@ -36,5 +36,5 @@ done
 DIGEST=$("$SCRIPT_DIR/fm-sessionstart-run.sh" --source "$SOURCE" </dev/null 2>/dev/null || true)
 [ -n "$DIGEST" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
-jq -n --arg c "$DIGEST" '{additional_context:$c}' 2>/dev/null || true
+printf '%s' "$DIGEST" | jq -Rs '{additional_context:.}' 2>/dev/null || true
 exit 0

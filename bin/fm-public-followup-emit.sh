@@ -390,7 +390,7 @@ EVENT_JSON=$(jq -Sc -n \
   --arg source_home_id "$SOURCE_HOME" \
   --arg outcome_type "$OUTCOME" \
   --argjson deliverables "$DELIVERABLES_JSON" \
-  --arg public_safe_outcome "$OUTCOME_TEXT" \
+  --rawfile public_safe_outcome <(printf '%s' "$OUTCOME_TEXT") \
   --argjson outcome_max "$FM_PF_OUTCOME_TEXT_MAX" \
   --arg occurred_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{schema_version:$schema_version, event_id:$event_id, obligation_id:$obligation_id,

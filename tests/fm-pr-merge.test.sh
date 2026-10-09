@@ -3457,6 +3457,74 @@ run_required_case() {
   set -e
 }
 
+# Paginated API runs exceed the Linux single-argument cap even after projection.
+# Drive the real merge entrypoint so the size fix cannot bypass either guard.
+test_large_required_check_runs() {
+  local case_dir head variant expected app
+  head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+  for variant in green missing wrong-app red waived-red; do
+    case_dir=$(make_case "large-required-runs-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    write_github_required "$case_dir" classic:ci ruleset:validate
+    jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+      "$case_dir/github-branch.json" > "$case_dir/updated.json"
+    mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+    app=15368
+    [ "$variant" != wrong-app ] || app=42
+    jq -nc --arg head "$head" --argjson app "$app" '
+      range(0; 2) | {check_runs: [range(0; 2500) |
+        {name:"ci", app:{id:$app}, head_sha:$head,
+         output:{summary:("large check-run output " * 20)}}]}
+    ' > "$case_dir/github-runs.json"
+    [ "$(wc -c < "$case_dir/github-runs.json")" -gt 262144 ] \
+      || fail "large-required-runs: fixture did not exceed the argument limit"
+    # Pin the size of the fields actually needed for matching too, so merely
+    # projecting bulky metadata cannot turn this regression into a small case.
+    jq -sc '[.[].check_runs[] | {name, app:{id:.app.id}}]' \
+      "$case_dir/github-runs.json" > "$case_dir/projected-runs.json"
+    [ "$(wc -c < "$case_dir/projected-runs.json")" -gt 131072 ] \
+      || fail "large-required-runs: projected fixture did not exceed the argument limit"
+    if [ "$variant" != missing ]; then
+      write_github_rollup_json "$case_dir" "$head" \
+        "$(check_run ci COMPLETED SUCCESS)" "$(check_run validate COMPLETED SUCCESS)"
+    fi
+    case "$variant" in
+      red|waived-red)
+        write_github_rollup_json "$case_dir" "$head" \
+          "$(check_run ci COMPLETED SUCCESS)" "$(check_run validate COMPLETED SUCCESS)" \
+          "$(check_run optional-lint COMPLETED FAILURE)"
+        ;;
+    esac
+    expected=1
+    case "$variant" in
+      green) expected=0; run_required_case "$case_dir" 112 ;;
+      waived-red)
+        expected=0
+        run_required_case "$case_dir" 112 --attended-override --allow-red optional-lint -- --admin
+        ;;
+      *) run_required_case "$case_dir" 112 ;;
+    esac
+    expect_code "$expected" "$RC" "large-required-runs-$variant: $(cat "$case_dir/stderr")"
+    assert_no_grep 'check rollup could not be read' "$case_dir/stderr" \
+      "large-required-runs-$variant: JSON was still passed through an oversized argument"
+    if [ "$expected" -eq 0 ]; then
+      if [ "$variant" = waived-red ]; then
+        assert_logged_gh_merge "$case_dir" 112 example/repo --squash --admin
+      else
+        assert_logged_gh_merge "$case_dir" 112 example/repo --squash
+      fi
+    else
+      assert_no_grep 'pr merge' "$case_dir/gh.log" "large-required-runs-$variant: refusal reached merge"
+    fi
+    case "$variant" in
+      missing) assert_grep "required check 'validate' has not reported" "$case_dir/stderr" "missing context lost" ;;
+      wrong-app) assert_grep "required check 'ci' has not reported" "$case_dir/stderr" "producer identity lost" ;;
+      red) assert_grep "check 'optional-lint' is not green" "$case_dir/stderr" "unwaived red check lost" ;;
+    esac
+  done
+  pass "fm-pr-merge handles large paginated check runs while enforcing required contexts, apps, and green checks"
+}
+
 test_required_producer_identity() {
   local case_dir head kind variant expected app
   head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
@@ -3883,6 +3951,7 @@ test_unreadable_required_set_refuses
 test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
+test_large_required_check_runs
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
