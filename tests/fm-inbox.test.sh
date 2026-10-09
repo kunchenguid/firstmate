@@ -544,3 +544,55 @@ run_inbox "$home" drain --ack "$did" >/dev/null || fail "drain --ack failed"
 assert_absent "$home/state/inbox/$did.note" "acked note leaves pending"
 assert_present "$home/state/inbox/handled/$did.note" "acked note is in handled"
 pass "drain --ack still moves the note to handled"
+
+# --- reply and note option parsing & help handling -------------------------
+
+home=$(make_home reply-help)
+note_out=$(run_inbox "$home" note "note for reply help") || fail "seed note failed"
+nid=${note_out#queued }
+nid=${nid%%$'\n'*}
+
+# reply -h / --help prints usage and records nothing
+help_reply_code=0
+help_reply=$(run_inbox "$home" reply --help 2>&1) || help_reply_code=$?
+expect_code 1 "$help_reply_code" "reply --help exits 1 with usage"
+assert_contains "$help_reply" "usage: fm-inbox.sh reply" "reply --help outputs usage"
+
+help_reply_id_code=0
+help_reply_id=$(run_inbox "$home" reply "$nid" --help 2>&1) || help_reply_id_code=$?
+expect_code 1 "$help_reply_id_code" "reply <id> --help exits 1 with usage"
+assert_contains "$help_reply_id" "usage: fm-inbox.sh reply" "reply <id> --help outputs usage"
+
+# verify no reply was recorded by the help call
+assert_absent "$home/state/inbox/.replies/$nid" "reply --help must never record a reply"
+
+# reply <id> --unknown is refused as an unknown option
+unknown_reply_code=0
+unknown_reply=$(run_inbox "$home" reply "$nid" --verbose "some text" 2>&1) || unknown_reply_code=$?
+expect_code 1 "$unknown_reply_code" "reply <id> --unknown is refused"
+assert_contains "$unknown_reply" "unknown option for reply" "refusal names unknown option"
+assert_absent "$home/state/inbox/.replies/$nid" "unknown option refusal must never record a reply"
+
+# note --unknown is refused as an unknown option
+unknown_note_code=0
+unknown_note=$(run_inbox "$home" note --bogus "some note" 2>&1) || unknown_note_code=$?
+expect_code 1 "$unknown_note_code" "note --unknown is refused"
+assert_contains "$unknown_note" "unknown option for note" "note refusal names unknown option"
+
+# reply <id> -- --help is accepted as raw body text via -- delimiter
+run_inbox "$home" reply "$nid" -- "--help is the recorded answer" >/dev/null || fail "reply with -- delimiter failed"
+assert_present "$home/state/inbox/.replies/$nid" "reply with -- is recorded"
+reply_body=$(run_inbox "$home" receipts --all-replies | python3 -c 'import json,sys
+print(json.load(sys.stdin)["replies"][0]["body"])')
+assert_equals "--help is the recorded answer" "$reply_body" "reply body with leading dashes is preserved"
+
+# stdin reply with leading dashes via -
+note_stdin=$(run_inbox "$home" note "note for stdin reply") || fail "second seed note failed"
+nid_stdin=${note_stdin#queued }
+nid_stdin=${nid_stdin%%$'\n'*}
+printf '%s\n' "--help from stdin" | run_inbox "$home" reply "$nid_stdin" - >/dev/null || fail "reply from stdin failed"
+reply_stdin_body=$(run_inbox "$home" receipts --all-replies | python3 -c 'import json,sys
+print([r for r in json.load(sys.stdin)["replies"] if r["id"] == "'"$nid_stdin"'"][0]["body"])')
+assert_equals "--help from stdin" "$reply_stdin_body" "stdin reply with leading dashes is preserved"
+
+pass "reply and note option parsing refuses unknown flags and handles --help without recording"
