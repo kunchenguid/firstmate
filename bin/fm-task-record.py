@@ -22,6 +22,7 @@ from typing import Any
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 PROGRESS_FIELDS = ("acceptance", "current_state", "remaining_gap", "next_step")
+CONTINUATION_FIELDS = ("kind", "owner", "review_at", "effect_id")
 STATES = {"queued", "in_flight", "done", "archived"}
 
 
@@ -44,9 +45,42 @@ def task_path(data: Path, task_id: str) -> Path:
     return data / task_id / "task.json"
 
 
-def clean_progress(value: Any) -> dict[str, str]:
-    if not isinstance(value, dict) or set(value) != set(PROGRESS_FIELDS):
-        raise Refusal("progress must contain exactly acceptance, current_state, remaining_gap and next_step")
+def clean_continuation(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != set(CONTINUATION_FIELDS):
+        raise Refusal("continuation must contain exactly kind, owner, review_at and effect_id")
+    clean = {name: text(value[name], f"continuation.{name}", empty=True) for name in CONTINUATION_FIELDS}
+    if clean["kind"] not in ("action", "wait", "readback"):
+        raise Refusal("continuation.kind must be action, wait or readback")
+    if not clean["owner"]:
+        raise Refusal("continuation.owner must not be empty")
+    for name, field in clean.items():
+        if "\n" in field or "\r" in field:
+            raise Refusal(f"continuation.{name} must be one line")
+        if len(field.encode("utf-8")) > 1200:
+            raise Refusal(f"continuation.{name} exceeds 1200 UTF-8 bytes")
+    if clean["kind"] == "wait":
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", clean["review_at"]):
+            raise Refusal("wait continuation.review_at must be an RFC3339 UTC second")
+        try:
+            datetime.strptime(clean["review_at"], "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError as exc:
+            raise Refusal("wait continuation.review_at is not a real UTC timestamp") from exc
+        if clean["effect_id"]:
+            raise Refusal("wait continuation.effect_id must be empty")
+    elif clean["review_at"]:
+        raise Refusal("only wait continuation may set review_at")
+    if clean["kind"] == "readback" and not clean["effect_id"]:
+        raise Refusal("readback continuation requires an exact effect_id")
+    if clean["kind"] == "action" and clean["effect_id"]:
+        raise Refusal("action continuation.effect_id must be empty")
+    return clean
+
+
+def clean_progress(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) not in (set(PROGRESS_FIELDS), set(PROGRESS_FIELDS) | {"continuation"}):
+        raise Refusal("progress must contain acceptance, current_state, remaining_gap and next_step, plus optional continuation")
     clean = {name: text(value[name], name, empty=True) for name in PROGRESS_FIELDS}
     for name, field in clean.items():
         if "\n" in field or "\r" in field:
@@ -57,6 +91,10 @@ def clean_progress(value: Any) -> dict[str, str]:
         raise Refusal("acceptance and current_state must be present once progress is recorded")
     if bool(clean["remaining_gap"]) != bool(clean["next_step"]):
         raise Refusal("remaining_gap and next_step must both be empty or both be present")
+    continuation = clean_continuation(value.get("continuation"))
+    if not clean["remaining_gap"] and continuation is not None:
+        raise Refusal("accepted progress must clear continuation with the remaining gap")
+    clean["continuation"] = continuation
     return clean
 
 

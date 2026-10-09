@@ -11,6 +11,7 @@ import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; record_token: string;
   goal: string; acceptance: string; current_state: string; remaining_gap: string; next_step: string;
+  continuation: { kind: "action" | "wait" | "readback"; owner: string; review_at: string; effect_id: string } | null;
   task_state: string; task_held: string; task_blocked: string; executor_state: string };
 type Reconciliation = { task_id: string; reason: string; key: string };
 type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; reconciliation: true }[];
@@ -82,7 +83,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     return "Unfinished task records require goal-directed MAIN follow-through:\n" +
       lines.join("\n") + "\nUse fm_task_continuation read/update for the task goal, acceptance method, current state, remaining gap and next step. " +
       "Update only after a material change; do not write after each command or unchanged wait. " +
-      "Take the authorized next step through its existing owner, review actual artifacts, and clear the gap only when the requested goal is satisfied. " +
+      "Take the authorized next step through its recorded existing owner, verify generation-bound receipt and executor start, review actual artifacts, and clear the gap only when the requested goal is satisfied. " +
       "If an exact owner refuses and no supported action remains, do not preserve the refusal as an eligible next step: use fm_task_continuation hold for a named blocker or captain decision, or route an exact existing cross-task action through fm-task-handoff and verify its receipt/start. " +
       "A worker return, report, PR, empty inbox or provider success is not acceptance. " +
       "After semantic acceptance, keep delivery and resource cleanup in their existing owners instead of recording them as a new goal gap. " +
@@ -110,13 +111,41 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         // progress. Keep the descriptive fields readable without manufacturing
         // a continuation action that bypasses the waiting owner.
         if (progress.task_held === "yes" || progress.task_blocked === "yes") continue;
+        const continuation = progress.continuation && typeof progress.continuation === "object"
+          ? progress.continuation as Observation["continuation"] : null;
+        if (!continuation) {
+          const reason = "open goal has no structured continuation owner; MAIN must name an action owner, bounded wait checkpoint, or exact-effect readback";
+          const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${reason}`).digest("hex");
+          reconciliations.push({ task_id: id, reason, key });
+          continue;
+        }
         const current = await runCommandAsync("bash", [join(root, "bin/fm-task-state.sh"), "--durable-only", id], {
           env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_DATA_OVERRIDE: data }, maxBuffer: 64 * 1024,
         });
         const executorState = current.stdout.trim();
         const match = executorState.match(/(?:^|\n)state: ([a-z-]+)/);
         const taskState = current.status === 0 && match ? match[1] : "unknown";
-        if (["running", "working", "pending", "paused", "parked"].includes(taskState)) continue;
+        if (["failed", "error"].includes(taskState)) {
+          const reason = `executor reached terminal ${taskState}; ${continuation.owner} must choose one materially different authorized diagnosis or recovery; the recorded continuation cannot remain a self-clearing wait or be replayed: ${progress.next_step}`;
+          const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${executorState}\0failed`).digest("hex");
+          reconciliations.push({ task_id: id, reason, key });
+          continue;
+        }
+        if (continuation.kind === "wait") {
+          const due = Date.parse(continuation.review_at);
+          if (Number.isFinite(due) && Date.now() < due) continue;
+          const reason = `external wait checkpoint is due; ${continuation.owner} must execute this recorded review without replaying the awaited effect: ${progress.next_step}`;
+          const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${continuation.review_at}`).digest("hex");
+          reconciliations.push({ task_id: id, reason, key });
+          continue;
+        }
+        if (continuation.kind === "action" && continuation.owner !== "same-worker-inbox") {
+          const reason = `authorized action belongs to ${continuation.owner}; MAIN must route it through that existing owner and verify receipt/start: ${progress.next_step}`;
+          const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${continuation.owner}`).digest("hex");
+          reconciliations.push({ task_id: id, reason, key });
+          continue;
+        }
+        if (["running", "working", "pending", "parked"].includes(taskState)) continue;
         const reason = `goal: ${progress.goal}; acceptance: ${progress.acceptance}; current state: ${progress.current_state}; remaining gap: ${progress.remaining_gap}; next step: ${progress.next_step}`;
         // The task row deliberately changes only when MAIN records semantic
         // progress. Executor detail is therefore part of the admission key:
@@ -125,7 +154,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         const key = createHash("sha256").update(JSON.stringify([id, progress.record_token, executorState])).digest("hex");
         observations.push({ task_id: id, state: taskState, reason, key, record_token: progress.record_token,
           goal: progress.goal, acceptance: progress.acceptance, current_state: progress.current_state,
-          remaining_gap: progress.remaining_gap, next_step: progress.next_step, task_state: progress.task_state,
+          remaining_gap: progress.remaining_gap, next_step: progress.next_step, continuation, task_state: progress.task_state,
           task_held: progress.task_held, task_blocked: progress.task_blocked,
           executor_state: executorState });
       } catch (error) {
@@ -385,12 +414,17 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 
   registerFirstmateTool(pi, {
     name: "fm_task_continuation", label: "Task continuation",
-    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record, or place the same task on an existing canonical hold after supported actions are exhausted. The task title is its goal; update records the acceptance method, current state, remaining gap and executable next step. hold requires named responsibility, required action or decision, and an observable clearing condition; kind captain uses the existing captain-hold owner and kind blocker uses the existing task-record hold owner. Clear both gap fields after semantic acceptance; delivery and resource cleanup remain with their existing owners instead of becoming a new goal gap. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, routes handoffs, or accepts a goal from process success.",
+    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record, or place the same task on an existing canonical hold after supported actions are exhausted. The task title is its goal; update records the acceptance method, current state, remaining gap, executable next step, and structured continuation owner. action owner same-worker-inbox uses its generation-bound acknowledgement; another action owner returns to MAIN for that owner's interface and receipt/start verification. wait requires a durable review_at checkpoint, and readback requires an exact effect_id that forbids blind replay. hold requires named responsibility, required action or decision, and an observable clearing condition. Clear the gap and continuation only after semantic acceptance; delivery and resource cleanup remain with their existing owners. This tool neither executes work nor accepts a goal from process success.",
     executionMode: "sequential",
     parameters: Type.Object({ action: Type.Union([Type.Literal("read"), Type.Literal("update"), Type.Literal("hold")]),
       task: Type.String(),
       progress: Type.Optional(Type.Object({ acceptance: Type.String(), current_state: Type.String(),
-        remaining_gap: Type.String(), next_step: Type.String() }, { additionalProperties: false })),
+        remaining_gap: Type.String(), next_step: Type.String(),
+        continuation: Type.Union([Type.Null(), Type.Object({
+          kind: Type.Union([Type.Literal("action"), Type.Literal("wait"), Type.Literal("readback")]),
+          owner: Type.String(), review_at: Type.String(), effect_id: Type.String(),
+        }, { additionalProperties: false })]),
+      }, { additionalProperties: false })),
       hold: Type.Optional(Type.Object({
         kind: Type.Union([Type.Literal("blocker"), Type.Literal("captain")]),
         responsibility: Type.String(), action: Type.String(), clearing_condition: Type.String(),

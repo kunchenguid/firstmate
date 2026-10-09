@@ -91,6 +91,25 @@ out=$("$STATE" update-progress first --progress \
   '{"acceptance":"line one\nline two","current_state":"state","remaining_gap":"gap","next_step":"step"}' 2>&1) || rc=$?
 expect_code 6 "$rc" "multiline progress update"
 assert_contains "$out" 'must be one line' 'multiline progress was not bounded'
+wait_record='{"acceptance":"The provider result is reconciled","current_state":"Waiting for a simulated review checkpoint","remaining_gap":"The existing result needs review","next_step":"Read the simulated result without replay","continuation":{"kind":"wait","owner":"provider readback owner","review_at":"2099-01-01T00:00:00Z","effect_id":""}}'
+wait_updated=$("$STATE" update-progress first --progress "$wait_record") || fail "structured wait progress failed"
+printf '%s' "$wait_updated" | jq -e '.continuation.kind=="wait" and .continuation.owner=="provider readback owner"' >/dev/null \
+  || fail "structured wait checkpoint was not retained in canonical progress"
+rc=0
+out=$("$STATE" update-progress first --progress \
+  '{"acceptance":"The result is reconciled","current_state":"Waiting","remaining_gap":"Review remains","next_step":"Review it","continuation":{"kind":"wait","owner":"review owner","review_at":"2099-02-31T00:00:00Z","effect_id":""}}' 2>&1) || rc=$?
+expect_code 6 "$rc" "invalid wait checkpoint"
+assert_contains "$out" 'not a real UTC timestamp' 'invalid wait checkpoint entered canonical progress'
+rc=0
+out=$("$STATE" update-progress first --progress \
+  '{"acceptance":"The result is reconciled","current_state":"Unknown write","remaining_gap":"Readback remains","next_step":"Read it","continuation":{"kind":"readback","owner":"effect owner","review_at":"","effect_id":""}}' 2>&1) || rc=$?
+expect_code 6 "$rc" "readback without effect identity"
+assert_contains "$out" 'requires an exact effect_id' 'identity-free readback entered canonical progress'
+rc=0
+out=$("$STATE" update-progress first --progress \
+  '{"acceptance":"The result is accepted","current_state":"Accepted","remaining_gap":"","next_step":"","continuation":{"kind":"action","owner":"worker","review_at":"","effect_id":""}}' 2>&1) || rc=$?
+expect_code 6 "$rc" "accepted progress retaining continuation"
+assert_contains "$out" 'must clear continuation' 'accepted goal retained executable continuation state'
 oversized=$(printf 'x%.0s' $(seq 1 1201))
 oversized_json=$(jq -cn --arg value "$oversized" \
   '{acceptance:$value,current_state:"state",remaining_gap:"gap",next_step:"step"}')

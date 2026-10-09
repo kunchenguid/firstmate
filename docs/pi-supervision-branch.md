@@ -52,15 +52,18 @@ The portable checks are `tests/fm-pi-branch-status.test.sh`; `tests/fm-pi-branch
 
 Presentation acknowledgement does not establish task acceptance.
 The canonical `data/<task>/task.json` record owns task identity, disposition and progress.
-Its title is the task goal, and its progress fields store the acceptance method, current state, remaining gap and next step.
+Its title is the task goal, and its progress fields store the acceptance method, current state, remaining gap, next step and structured continuation owner.
 MAIN reads and materially updates those fields with the native tool's `read` and `update` actions.
 The opaque read token binds one Branch admission to the exact projected goal, progress values, and current backlog disposition.
 It rejects a continuation when that projection changes after admission, but it is not a MAIN update precondition or a persisted concurrency record.
-Together with the exact current MAIN-authored `next_step`, it permits only idempotent same-worker inbox continuation; all other effects remain with their existing authority owners.
+Together with an `action` continuation owned by `same-worker-inbox` and the exact current MAIN-authored `next_step`, it permits only idempotent same-worker inbox continuation; all other effects remain with their existing authority owners.
+The branch settles action advancement quietly only after the token-bound inbox record is acknowledged under the current executor generation.
+Future `wait` checkpoints stay quiet, due checkpoints return to MAIN for reconciliation without replay authority, and `readback` continuations require their exact effect identity instead of entering inbox delivery.
 The branch can read only the exact token-bound compact admission while its original task remains unheld, unblocked and `in_flight`; it cannot write progress or make final semantic acceptance.
 
 The Pi extension uses the existing heartbeat coordinator's tick and `progress-list` to inspect canonical task ids.
-A healthy working executor, unchanged wait, task with no compact progress, or task with no remaining gap stays quiet.
+A healthy working executor, unchanged wait before its checkpoint, task with no compact progress, or task with no remaining gap stays quiet.
+Legacy open progress without structured continuation returns to MAIN for reconciliation rather than inferring an owner from prose.
 An actionable gap without healthy execution is offered to the branch with the canonical task id, goal, acceptance method, current state, remaining gap and next step.
 The branch inspects current artifacts and routes an already-authorized next step through its existing owner; failure or refusal falls back to MAIN.
 Endpoint text is never substituted for task identity.

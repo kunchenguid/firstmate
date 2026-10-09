@@ -123,6 +123,7 @@ assert.deepEqual(readFileSync(taskRecord), beforeRemovedToken,
 const empty = await tool({ action: 'read', task: 'task' });
 assert.equal(empty.goal, 'Deliver compact continuation');
 assert.equal(empty.recorded, false);
+assert.equal(empty.continuation, null);
 assert.equal('evidence' in empty, false);
 assert.equal('authority_ref' in empty, false);
 
@@ -131,10 +132,11 @@ const progress = {
   current_state: 'Implementation returned an intermediate result',
   remaining_gap: 'The restart check and final behavior review remain',
   next_step: 'Restart the session, read the task row, and run the final checks',
+  continuation: { kind: 'action', owner: 'same-worker-inbox', review_at: '', effect_id: '' },
 };
 const updated = await validatedTool({ action: 'update', task: 'task', progress });
 assert.deepEqual({ goal: updated.goal, acceptance: updated.acceptance, current_state: updated.current_state,
-  remaining_gap: updated.remaining_gap, next_step: updated.next_step },
+  remaining_gap: updated.remaining_gap, next_step: updated.next_step, continuation: updated.continuation },
 { goal: 'Deliver compact continuation', ...progress });
 assert.equal(existsSync(home + '/data/task/lifecycle.json'), false, 'ordinary progress created lifecycle state');
 
@@ -252,12 +254,29 @@ assert.equal((await fire('agent_before_settle')).some(value => value?.continue),
   'a genuinely new session file reset unchanged-offer pacing or admitted a sibling transcript from another operational home');
 
 const changedProjection = { ...progress, current_state: 'A materially newer executor result exists' };
+writeFileSync(home + '/state/task.status', 'paused: finite worker stopped before the authorized continuation\n');
 await tool({ action: 'update', task: 'task', progress: changedProjection });
 offered.length = 0;
 offerHandler = offer => { offered.push(offer.admission); return true; };
 await fire('agent_before_settle');
 offerHandler = undefined;
-assert.equal(offered.length, 1, 'material record revision did not re-admit continuation');
+assert.equal(offered.length, 1, 'paused finite worker or material record revision did not re-admit continuation');
+
+writeFileSync(home + '/state/task.status', 'failed: simulated provider execution reached a terminal failure\n');
+const failedProjection = { ...changedProjection,
+  current_state: 'The simulated provider execution failed terminally',
+  remaining_gap: 'A different diagnosis or recovery is required',
+  next_step: 'Read the failed simulated execution and select a different authorized recovery',
+  continuation: { kind: 'wait', owner: 'MAIN provider readback owner',
+    review_at: '2099-01-01T00:00:00Z', effect_id: '' },
+};
+await tool({ action: 'update', task: 'task', progress: failedProjection });
+const failedSettle = await fire('agent_before_settle');
+const failedEntry = failedSettle.flatMap(value => value?.entries || [])
+  .find(entry => entry.customType === 'fm-task-continuation-escalation');
+assert.ok(failedEntry, 'terminal failed execution was treated as a self-clearing wait or replayable action');
+assert.match(failedEntry.content, /materially different authorized diagnosis or recovery/);
+session.appendCustomMessageEntry(failedEntry.customType, failedEntry.content, failedEntry.display, failedEntry.details);
 
 const blocked = await validatedTool({ action: 'hold', task: 'task', hold: {
   kind: 'blocker', responsibility: 'existing effect owner',
@@ -270,7 +289,8 @@ assert.equal((await fire('agent_before_settle')).some(value => value?.continue),
   'blocked disposition remained eligible for continuation');
 command('fm-tasks-axi.sh', ['unhold', 'task']);
 
-const finalProgress = { ...changedProjection, current_state: 'Requested behavior verified', remaining_gap: '', next_step: '' };
+const finalProgress = { ...failedProjection, current_state: 'Requested behavior verified', remaining_gap: '', next_step: '',
+  continuation: null };
 const completed = await tool({ action: 'update', task: 'task', progress: finalProgress });
 assert.equal(completed.remaining_gap, '');
 assert.equal(completed.next_step, '');
@@ -284,6 +304,51 @@ assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
 assert.equal((await tool({ action: 'read', task: 'task' })).current_state, finalProgress.current_state,
   'final compact read lost the active progress');
 
+// A simulated external wait is canonical task state, not conversation prose.
+// It stays quiet before its deterministic checkpoint, survives replacement,
+// and produces one reconciliation request when due without replaying an effect.
+command('fm-tasks-axi.sh', ['add', 'wait-task', 'Review simulated provider state', '--kind', 'scout',
+  '--body', 'Simulation only; no provider call or data write.', '--start']);
+const waitProgress = {
+  acceptance: 'The simulated terminal state is reconciled against the goal',
+  current_state: 'The fixture is waiting for its recorded review checkpoint',
+  remaining_gap: 'The simulated provider state still needs readback',
+  next_step: 'Read the existing simulated execution identity and classify its terminal state',
+  continuation: { kind: 'wait', owner: 'MAIN provider readback owner',
+    review_at: '2099-01-01T00:00:00Z', effect_id: '' },
+};
+await tool({ action: 'update', task: 'wait-task', progress: waitProgress });
+assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
+  'unchanged external wait woke before its checkpoint');
+await fire('session_shutdown', { reason: 'wait-context-replacement' });
+session = SessionManager.open(session.getSessionFile());
+continuation = await install();
+assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
+  'context replacement lost the future wait checkpoint');
+const realWaitDateNow = Date.now;
+Date.now = () => Date.parse('2099-01-01T00:00:01Z');
+try {
+  const due = await fire('agent_before_settle');
+  const dueEntry = due.flatMap(value => value?.entries || [])
+    .find(entry => entry.customType === 'fm-task-continuation-escalation');
+  assert.ok(dueEntry, 'due wait checkpoint did not request reconciliation');
+  assert.match(dueEntry.content, /without replaying the awaited effect/);
+  session.appendCustomMessageEntry(dueEntry.customType, dueEntry.content, dueEntry.display, dueEntry.details);
+  assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
+    'one due wait checkpoint produced a duplicate unchanged review');
+} finally {
+  Date.now = realWaitDateNow;
+}
+command('fm-tasks-axi.sh', ['archive', 'wait-task']);
+
+const missingEffect = await tool({ action: 'update', task: 'task', progress: {
+  ...finalProgress, remaining_gap: 'An uncertain write requires exact readback',
+  next_step: 'Read back the existing write outcome',
+  continuation: { kind: 'readback', owner: 'existing provider effect owner', review_at: '', effect_id: '' },
+} }, false);
+assert.match(missingEffect, /effect_id|tool arguments/i,
+  'readback without an exact effect identity was accepted for possible replay');
+
 // Archive is an explicit terminal boundary and must prevent later revival,
 // even if historical status and progress evidence remain on disk.
 command('fm-tasks-axi.sh', ['archive', 'task']);
@@ -293,8 +358,8 @@ session = SessionManager.open(session.getSessionFile());
 continuation = await install();
 assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
   'explicitly archived task revived after restart');
-assert.equal(JSON.parse(command('fm-tasks-axi.sh', ['inventory']).stdout).tasks.length, 1,
-  'archive recovery duplicated or deleted the canonical task record');
+assert.deepEqual(JSON.parse(command('fm-tasks-axi.sh', ['inventory']).stdout).tasks.map(item => item.id), ['task', 'wait-task'],
+  'archive recovery duplicated or deleted a canonical task record');
 
 await fire('session_shutdown', { reason: 'quit' });
 console.log('evidence - task continuation IO ' + JSON.stringify({

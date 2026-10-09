@@ -6249,7 +6249,7 @@ test_continuation_archive_during_report_settlement() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, settle, home, realRoot, defaultSessionCtx, outcomeScript }; })()`);
 const { pi, fire, settle, home, realRoot, defaultSessionCtx, outcomeScript } = globalThis.__t;
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
@@ -6288,6 +6288,7 @@ const seed = (task) => {
   command("fm-task-state.sh", ["update-progress", task, "--progress", JSON.stringify({
     acceptance: "The exact terminal disposition is retained", current_state: "Worker result is ready",
     remaining_gap: "MAIN disposition remains", next_step: "Inspect the result and settle the task",
+    continuation: { kind: "action", owner: "same-worker-inbox", review_at: "", effect_id: "" },
   })]);
   writeFileSync(`${home}/state/${task}.meta`, `spawn_gen=g-${task}\nkind=ship\nexecutor=local-agent\nproject=${home}/projects/approved\nworktree=${home}/projects/approved\nbackend=herdr\nwindow=fixture-session:fixture-pane\nherdr_session=fixture-session\nherdr_workspace_id=fixture-workspace\nherdr_tab_id=fixture-tab\nherdr_pane_id=fixture-pane\nharness=pi\nendpoint_task_id=${task}\n`);
   writeFileSync(`${home}/state/${task}.busy-gen`, `g-${task}\n`);
@@ -6298,6 +6299,14 @@ const seed = (task) => {
 seed("archive-task");
 await fire("session_start", {}, defaultSessionCtx);
 let prompts = 0;
+let unacknowledgedWasVisible = false;
+let staleGenerationWasVisible = false;
+let acknowledgedWasQuiet = false;
+globalThis.__fmExecuteBranchBash = (context) => {
+  const result = spawnSync("bash", ["-c", context.command], { encoding: "utf8", cwd: context.cwd, env: context.env });
+  return { content: [{ type: "text", text: `${result.stdout}${result.stderr}` }],
+    details: { stdout: result.stdout, stderr: result.stderr, exitCode: result.status }, isError: result.status !== 0 };
+};
 globalThis.__fmOnBranchPrompt = async ({ text }) => {
   if (!text.startsWith("FIRSTMATE TASK CONTINUATION:")) return;
   prompts += 1;
@@ -6309,12 +6318,43 @@ globalThis.__fmOnBranchPrompt = async ({ text }) => {
     command("fm-task-state.sh", ["update-progress", "drift-task", "--progress", JSON.stringify({
       acceptance: "The exact terminal disposition is retained", current_state: "A material nonterminal revision appeared",
       remaining_gap: "The changed work needs reconciliation", next_step: "Reconcile the changed task revision",
+      continuation: { kind: "action", owner: "same-worker-inbox", review_at: "", effect_id: "" },
     })]);
     return;
   }
   if (text.includes("evidence-task")) {
     command("fm-tasks-axi.sh", ["update", "evidence-task", "--note", "new terminal evidence arrived during reporting"]);
     command("fm-tasks-axi.sh", ["archive", "evidence-task"]);
+    return;
+  }
+  if (text.includes("receipt-task")) {
+    const branchSession = globalThis.__fmSessions.at(-1);
+    const bash = branchSession.options.customTools.find((tool) => tool.name === "bash");
+    const report = branchSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
+    const sent = await bash.execute("receipt-send", {
+      command: "bin/fm-send.sh receipt-task --idempotent 'Run the exact acknowledged continuation fixture'",
+    }, undefined, undefined, {});
+    if (sent.isError) throw new Error(`receipt fixture send failed: ${JSON.stringify(sent)}`);
+    const beforeAck = await report.execute("receipt-before-ack", {
+      task: "receipt-task", verdict: "routine", summary: "instruction enqueued but not acknowledged", silent: true,
+    }, undefined, undefined, {});
+    unacknowledgedWasVisible = !beforeAck.isError && !beforeAck.content[0].text.includes("retained quietly");
+    const inbox = `${home}/state/receipt-task.inbox`;
+    const record = readdirSync(inbox).find((name) => /^\d+\.msg$/.test(name));
+    if (!record) throw new Error("receipt fixture has no unhandled inbox record");
+    renameSync(`${inbox}/${record}`, `${inbox}/handled/${record}`);
+    const meta = `${home}/state/receipt-task.meta`;
+    const currentMeta = readFileSync(meta, "utf8");
+    writeFileSync(meta, currentMeta.replace("spawn_gen=g-receipt-task", "spawn_gen=g-stale-replacement"));
+    const staleAck = await report.execute("receipt-stale-ack", {
+      task: "receipt-task", verdict: "routine", summary: "stale-generation acknowledgement", silent: true,
+    }, undefined, undefined, {});
+    staleGenerationWasVisible = !staleAck.isError && !staleAck.content[0].text.includes("retained quietly");
+    writeFileSync(meta, currentMeta);
+    const afterAck = await report.execute("receipt-after-ack", {
+      task: "receipt-task", verdict: "routine", summary: "generation-bound instruction acknowledged", silent: true,
+    }, undefined, undefined, {});
+    acknowledgedWasQuiet = !afterAck.isError && afterAck.content[0].text.includes("retained quietly");
   }
 };
 
@@ -6364,6 +6404,20 @@ await settle(() => outcomeScript(["list", "--recent", "20"]).split("\n").some((l
 if ((globalThis.__fmSessionManagers ?? []).flatMap((manager) => manager.getEntries())
   .some((entry) => entry.customType === "fm-task-continuation-terminal-settlement" && entry.data.task === "evidence-task")) {
   throw new Error("a terminal transition with new task evidence was silenced as archival-only");
+}
+
+seed("receipt-task");
+command("fm-task-state.sh", ["update-progress", "receipt-task", "--progress", JSON.stringify({
+  acceptance: "The continuation is acknowledged by the current executor generation",
+  current_state: "The finite worker turn stopped before the requested continuation",
+  remaining_gap: "The exact continuation has not started",
+  next_step: "Run the exact acknowledged continuation fixture",
+  continuation: { kind: "action", owner: "same-worker-inbox", review_at: "", effect_id: "" },
+})]);
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => acknowledgedWasQuiet, "receipt-confirmed continuation prompt and acknowledgement");
+if (!unacknowledgedWasVisible || !staleGenerationWasVisible || !acknowledgedWasQuiet) {
+  throw new Error(`action receipt gate did not distinguish enqueue, stale generation, and current-generation acknowledgement: ${JSON.stringify({unacknowledgedWasVisible, staleGenerationWasVisible, acknowledgedWasQuiet})}`);
 }
 process.exit(0);
 EOF
@@ -6753,6 +6807,14 @@ EOF
 case "${FM_PI_BRANCH_TEST_CASE:-}" in
   ida-routing)
     test_branch_dispatch_routes_only_identity_bound_ida_results
+    exit 0
+    ;;
+  native-continuation)
+    test_native_compact_continuation_with_installed_session_manager
+    exit 0
+    ;;
+  continuation-archive)
+    test_continuation_archive_during_report_settlement
     exit 0
     ;;
 esac

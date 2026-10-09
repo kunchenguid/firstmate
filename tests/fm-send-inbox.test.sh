@@ -143,7 +143,7 @@ test_branch_compact_progress_routes_exact_next_step() {
   printf 'spawn_gen=s1\n' >> "$dir/home/state/t1.meta"
   token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 \
-    --progress '{"acceptance":"The accepted checks pass","current_state":"The checkpoint is ready","remaining_gap":"Validation has not started","next_step":"Start the existing no-mistakes run"}' >/dev/null \
+    --progress '{"acceptance":"The accepted checks pass","current_state":"The checkpoint is ready","remaining_gap":"Validation has not started","next_step":"Start the existing no-mistakes run","continuation":{"kind":"action","owner":"same-worker-inbox","review_at":"","effect_id":""}}' >/dev/null \
     || fail 'compact progress fixture failed'
   token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
   printf '%s\n' "$$" > "$dir/home/state/.lock"
@@ -178,7 +178,7 @@ test_branch_compact_progress_routes_exact_next_step() {
   current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1) \
     || fail 'updated compact progress read failed'
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 \
-    --progress '{"acceptance":"The accepted checks pass","current_state":"A later material checkpoint is ready","remaining_gap":"Validation still has not started","next_step":"Start the existing no-mistakes run"}' >/dev/null \
+    --progress '{"acceptance":"The accepted checks pass","current_state":"A later material checkpoint is ready","remaining_gap":"Validation still has not started","next_step":"Start the existing no-mistakes run","continuation":{"kind":"action","owner":"same-worker-inbox","review_at":"","effect_id":""}}' >/dev/null \
     || fail 'same-text material progress update failed'
   token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
   branch_env="FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}"
@@ -215,6 +215,22 @@ test_branch_compact_progress_routes_exact_next_step() {
     || fail 'descriptive progress was incorrectly coupled to executor generation'
   count=$(find "$dir/home/state/t1.inbox" -name '*.msg' -type f | wc -l | tr -d ' ')
   [ "$count" = 3 ] || fail "new executor generation did not receive its own effect-owner inbox record"
+
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 \
+    --progress '{"acceptance":"The accepted checks pass","current_state":"A write outcome is unknown","remaining_gap":"The existing effect needs exact readback","next_step":"Inspect the recorded provider effect without replay","continuation":{"kind":"readback","owner":"provider readback owner","review_at":"","effect_id":"provider-run-17"}}' >/dev/null \
+    || fail 'exact-effect readback fixture failed'
+  token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
+  branch_env="FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}"
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Inspect the recorded provider effect without replay"
+  rc=$?
+  expect_code 6 "$rc" "exact-effect readback replay"
+  assert_contains "$(cat "$err")" 'wait and exact-effect readback require reconciliation, not replay' \
+    'readback continuation entered the action-delivery path'
+  count=$(find "$dir/home/state/t1.inbox" -name '*.msg' -type f | wc -l | tr -d ' ')
+  [ "$count" = 3 ] || fail "readback continuation created a fourth inbox effect"
   pass 'Branch compact progress keeps one descriptive identity while the effect owner independently binds delivery to executor generation'
 }
 
