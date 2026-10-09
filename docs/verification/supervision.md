@@ -650,19 +650,16 @@ tests/fm-watch-arm.test.sh
 ### Quiet-mode ownership on omp
 
 While `state/.afk` exists quiet mode must have exactly one supervisor: `bin/fm-supervise-daemon.sh` running the watcher one-shot.
-The failure this guards is the omp watch extension (or the supervision host in its place) restarting a long-running watcher beside the daemon, which double-wokes main per wake and broke classification in the daemon log.
-The fix gates `.omp/extensions/fm-primary-omp-watch.ts` a daemon owner exists while `state/.afk` exists, and the daemon refuses to start beside a live non-child watcher holding `state/.watch.lock`, surfacing a `watcher collision` line rather than an indefinite restart loop.
-Verified on 2026-10-09 on macOS 25.6.0 arm64 in a named Herdr lab session on a disposable FM_HOME:
+The failure this guards is the omp watch extension (or the supervision host in its place) restarting a long-running watcher beside the daemon, which double-woke main per wake and broke classification in the daemon log.
+The fix lives in `.omp/extensions/fm-primary-omp-watch.ts`: while `state/.afk` exists every arm attempt stands down instead of launching a child, a watcher armed before the flag appeared exits one-shot at its next wake and its queued record is left to the daemon rather than delivered to main as a continuity failure, and the extension re-arms itself at the next session event once the flag is gone.
+The daemon keeps its pre-existing handoff: its one-shot child reports `watcher: already running` while the pre-quiet watcher still holds `state/.watch.lock`, and the daemon idles until that watcher exits.
 
 | Case | Observed |
 | --- | --- |
-| Fake external watcher (pid alive, `state/.watch.lock` recorded) under `state/.afk` | `bin/fm-supervise-daemon.sh` exited 2 before watching, logged `watcher collision: watch lock already held by pid=<pid> watcher-path=... command=...; refusing to start quiet supervision while state/.afk exists; stop that watcher or remove the state/.afk flag if quiet mode is not live`, left no `state/.supervise-daemon.pid` |
-| Daemon-owned watcher lock or absent lock | the daemon starts and owns supervision as before; its own one-shot watcher child re-takes the lock between polls without tripping the guard |
 | Quiet one-shot hand-off through the watcher | `tests/fm-watch-triage.test.sh`: `test_quiet_mode_watcher_hands_status_off_to_quiet_daemon` - the watcher exits after enqueueing one `signal:` wake for the daemon |
-| Daemon collision unit guard | `tests/fm-watch-triage.test.sh`: `test_quiet_daemon_refuses_a_competing_external_watcher` - the daemon refuses with the collision line and leaves no pidfile under the planted external lock |
-| `npx -y shellcheck bin/fm-supervise-daemon.sh tests/fm-watch-triage.test.sh` | clean (informational only) |
+| Extension stand-down, silent hand-off, and re-arm | `tests/fm-omp-harness.test.sh`: `test_watch_extension_stands_down_for_the_daemon_and_rearms` - under `state/.afk` the tool launches no arm and reports the daemon owner; a child whose watcher exits one-shot after the flag appears delivers no follow-up and starts no successor; once the flag is removed the next session event re-arms without a tool call |
 
-Evidence scripts and the lab transcript live in the task's private report directory; the refresh commands for these guarantees are the two triage tests above plus `tests/fm-daemon.test.sh`, `tests/fm-supervision-host.test.sh`, and `tests/fm-watch-arm.test.sh`.
+The refresh commands for these guarantees are the two tests above plus `tests/fm-daemon.test.sh`, `tests/fm-supervision-host.test.sh`, and `tests/fm-watch-arm.test.sh`.
 
 ### Non-Pi primaries
 

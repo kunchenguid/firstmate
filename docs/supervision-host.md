@@ -33,8 +33,7 @@ Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, or Codex primary: aw
   Main stays parked unless the host hands the wake back.
 - `/afk` launches no away daemon on a home of those harnesses that runs the host, because the host is the away session there.
 - `/quiet` enters nothing where the attended host runs, and elsewhere launches the daemon; see [Quiet mode](#quiet-mode).
-While the daemon's flag `state/.afk` exists, the host stands aside exactly as the plain arm does.
-A competing firstmate arm that keeps long-running watcher cycles alive beside the daemon is a hard refusal to start quiet mode rather than a negotiation between owners; the daemon's collision check survives only in that failure surface.
+  While the daemon's flag `state/.afk` exists, the host stands aside exactly as the plain arm does.
 - Pi keeps its in-process branch whatever the file says, and no Pi engine is built.
 - Kimi has no primary supervision protocol, so it has no arm owner to run the host.
 

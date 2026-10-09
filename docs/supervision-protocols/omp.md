@@ -19,6 +19,8 @@ When this session owns supervision and away mode is not active:
    A redundant call while the extension owns an arm child or scheduled retry is an ownership-based `watcher: unchanged` no-op, not an independent health claim.
 11. Never use shell `&` for watcher supervision.
    The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the pre-tool seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_OMP_TURNEND_EXT__`).
+12. While `state/.afk` exists (quiet or away mode) the daemon owns supervision: the extension launches no arm child, a child armed before the flag appeared stands down at its next close without delivering that wake here, and `fm_watch_arm_omp` is an ownership-based `watcher: unchanged` no-op.
+   Once the flag is gone the extension re-arms itself at the next session event, so ending quiet or away mode needs no `fm_watch_arm_omp` call either.
 
 The turn-end guard on omp is structural, not advisory: `__FM_OMP_TURNEND_EXT__` answers omp's blocking `session_stop` hook, and when `bin/fm-turnend-guard.sh` returns 2 it forces one continuation carrying the guard text, bounded to one per turn by the `stop_hook_active` flag omp sets on the continuation's own stop.
 An interrupted turn never raises `session_stop`, so a supervisor-initiated interrupt is not guarded; `bin/fm-control.sh` owns that postcondition.

@@ -327,34 +327,9 @@ message_is_injection() {  # <message-text> [state]
   fm_operational_doorbell_kind "$msg" "$state" record_kind
 }
 
-# When a live long-running watcher holds state/.watch.lock under state/.afk
-# and is NOT this daemon's own one-shot child, quiet mode has two owners.
-# That is the omp extension or the supervision host restarting side by side
-# with the daemon's one-shot watcher, not a takeover to negotiate; refuse the
-# start so the failure surfaces. The daemon's own watcher one-shot also takes
-# state/.watch.lock while it cycles, so ownership is discriminated by watching
-# the lock holder against the current daemon's pid and its watcher child.
-fm_super_watch_owner_conflicts() {
-  local state=$1 lockdir lock_pid lock_path claim_note daemon_pid
-  daemon_pid=$$
-  lockdir="$state/.watch.lock"
-  [ -e "$lockdir" ] || return 1
-  lock_pid=$(cat "$lockdir/pid" 2>/dev/null || return 1)
-  [ -n "$lock_pid" ] || return 1
-  fm_pid_alive "$lock_pid" || return 1
-  [ "$lock_pid" = "$daemon_pid" ] && return 1
-  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
-  claim_note=$(
-    ps -p "$lock_pid" -o command= 2>/dev/null \
-      | tr -s '[:space:]' ' ' \
-      | sed 's/^ *//; s/ *$//' \
-      | cut -c1-240
-  )
-  [ -n "$claim_note" ] || claim_note="unknown command"
-  printf 'watch lock already held by pid=%s watcher-path=%s command=%s\n' "$lock_pid" "$lock_path" "$claim_note"
-  return 0
-}
-
+# strip_injection_marker: remove a current typed away envelope, the landed
+# untyped FIRSTMATE_OP prefix, or the legacy bare sentinel. Current grammar is
+# delegated to its owner rather than reimplemented here.
 strip_injection_marker() {  # <message-text>
   local msg=$1 body
   if fm_operational_input_body "$msg" body; then
@@ -1885,18 +1860,6 @@ fm_super_main() {
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
-  fi
-  # Entering daemon mode never tolerates a competing long-running watcher
-  # under .afk: quiet mode on omp must not leave the extension or host
-  # restarting side by side with the daemon's one-shot watcher.
-  if [ -e "$STATE/.afk" ]; then
-    # shellcheck disable=SC2034 # Logged in the refusal below.
-    if conflict_line="$(fm_super_watch_owner_conflicts "$STATE")"; then
-      echo "watcher collision: $conflict_line; refusing to start quiet supervision while state/.afk exists; stop that watcher or remove the state/.afk flag if quiet mode is not live" >&2
-      fm_lock_release "$LOCK" 2>/dev/null || true
-      rm -f "$PIDFILE" 2>/dev/null || true
-      exit 2
-    fi
   fi
 
   local afk_status="off"

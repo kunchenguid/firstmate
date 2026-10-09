@@ -83,6 +83,7 @@ type ExtensionAPI = {
 type ArmResult = {
   ok: boolean;
   message: string;
+  standDown?: true;
 };
 
 type LockOwnership = "owned" | "missing" | "other";
@@ -119,6 +120,7 @@ type SessionGeneration = {
   cleanupTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
+  daemonStandDown: boolean;
   seq: number;
   pendingActionables: PendingActionableClose[];
   cleanupFailure: string;
@@ -482,6 +484,7 @@ function createGeneration(): SessionGeneration {
     cleanupTimer: null,
     retryFailures: 0,
     restoring: false,
+    daemonStandDown: false,
     seq: 0,
     pendingActionables: [],
     cleanupFailure: "",
@@ -775,6 +778,17 @@ export default function (pi: ExtensionAPI) {
             releaseClaim();
             return;
           }
+          if (restoration.standDown) {
+            settleClaim("delivered");
+            pending.delivered = true;
+            try {
+              finishPendingActionable(owner, pending);
+            } catch (error) {
+              surfaceCleanupFailure(owner, error);
+            }
+            releaseClaim();
+            continue;
+          }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
           const delivered = await deliverActionableWake(owner, message, pending, restoration.recovery);
           if (!delivered) {
@@ -882,11 +896,13 @@ export default function (pi: ExtensionAPI) {
   async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<{
     failure: string;
     recovery?: { generation: string; watcherPid: string };
+    standDown?: true;
   }> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       if (!generationIsLive(owner)) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
+      if (replacement.standDown) return { failure: "", standDown: true };
       const successorChild = owner.child;
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
         return { failure: "", recovery: armRecovery.get(successorChild) };
@@ -936,12 +952,20 @@ export default function (pi: ExtensionAPI) {
 
   // The daemon's flag is the sole authority selecting daemon ownership: while
   // it exists quiet mode and away mode run the watcher one-shot through the
-  // daemon, and this extension's arm host and the supervision host both stand
-  // down. bin/fm-supervise-daemon.sh owns the collision check that proves the
-  // handoff, so recurring automation disputes surface as a real refusal rather
-  // than an indefinite retry loop.
+  // daemon (bin/fm-supervise-daemon.sh), and this extension's arm and the
+  // supervision host both stand down. A watcher armed before the flag appeared
+  // exits one-shot at its next wake, and the daemon drains the wake it queued.
   function daemonOwnerActive(): boolean {
     return existsSync(`${state}/.afk`);
+  }
+
+  function rearmAfterDaemonStandDown(owner: SessionGeneration): void {
+    if (!owner.daemonStandDown || !generationIsLive(owner) || daemonOwnerActive()) return;
+    owner.daemonStandDown = false;
+    const result = activateOwnedWatch(owner);
+    if (!result.ok) {
+      surfaceFailure(owner, `watcher: FAILED - omp extension could not re-arm after the daemon released supervision\n${result.message}`);
+    }
   }
 
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
@@ -967,13 +991,15 @@ export default function (pi: ExtensionAPI) {
         message: `watcher: unchanged - omp extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
       };
     }
-    const id = ++owner.seq;
     if (daemonOwnerActive()) {
+      owner.daemonStandDown = true;
       return {
         ok: true,
+        standDown: true,
         message: `watcher: unchanged - the daemon owns supervision while state/.afk exists (quiet or away mode); no omp extension arm is running; ${repairOnlyHint}`,
       };
     }
+    const id = ++owner.seq;
     const hostMode = hostModeEnabled();
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -992,6 +1018,7 @@ export default function (pi: ExtensionAPI) {
     });
     armHostMode.set(armChild, hostMode);
     owner.child = armChild;
+    owner.daemonStandDown = false;
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -1090,12 +1117,6 @@ export default function (pi: ExtensionAPI) {
     replacementCoordinator.receiver = receiveReplacementActionable;
     let pending: PendingActionableClose[] = [];
     let loadFailure = "";
-    if (daemonOwnerActive()) {
-      return {
-        ok: true,
-        message: `watcher: unchanged - the daemon owns supervision while state/.afk exists (quiet or away mode); no omp extension arm is running; ${repairOnlyHint}`,
-      };
-    }
     try {
       pending = loadReplacementHandoff();
     } catch (error) {
@@ -1122,11 +1143,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on?.("before_agent_start", (event) => {
     consumeWake(generation, String((event as { prompt?: unknown })?.prompt ?? ""));
+    rearmAfterDaemonStandDown(generation);
   });
   pi.on?.("message_start", (event) => {
+    rearmAfterDaemonStandDown(generation);
     const message = (event as { message?: { role?: unknown; content?: unknown } })?.message;
     if (!message || message.role !== "user") return;
     consumeWake(generation, userMessageText(message.content));
+  });
+  pi.on?.("turn_end", () => {
+    rearmAfterDaemonStandDown(generation);
   });
 
   pi.on?.("session_start", async () => {
