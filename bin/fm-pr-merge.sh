@@ -290,6 +290,29 @@ caller_requested_auto_merge() {
   return "$requested"
 }
 
+# Whether the caller's own extra arguments supplied a commit body, in either the
+# -b / --body or -F / --body-file form.
+caller_has_body_arg() {
+  local arg pending=false
+  for arg in "$@"; do
+    if [ "$pending" = true ]; then
+      return 0
+    fi
+    case "$arg" in
+      -b|-F|--body|--body-file) pending=true ;;
+      -b*|-F*|--body=*|--body-file=*) return 0 ;;
+      --*) ;;
+      -[!-]*)
+        case "$arg" in
+          *b*|*F*) return 0 ;;
+        esac
+        ;;
+    esac
+  done
+  [ "$pending" = true ] && return 0
+  return 1
+}
+
 reject_repo_overrides() {
   local arg
   for arg in "$@"; do
@@ -397,7 +420,9 @@ MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 
 MERGE_CONTROL_LOCK=
 MERGE_META_LOCK=
+FM_PR_SQUASH_BODY_FILE=
 merge_control_cleanup() {
+  [ -z "$FM_PR_SQUASH_BODY_FILE" ] || rm -f "$FM_PR_SQUASH_BODY_FILE" "$FM_PR_SQUASH_BODY_FILE.orig"
   [ -z "$MERGE_META_LOCK" ] || fm_lock_release "$MERGE_META_LOCK" || true
   fm_afk_contract_lock_release || true
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
@@ -1308,6 +1333,48 @@ github_report_unmerged_outcome() {
   github_report_queue_rules
 }
 
+github_fetch_squash_body() {
+  local body
+  # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
+  body=$(gh api graphql \
+    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){viewerMergeBodyText(mergeType:SQUASH)}}}' \
+    -F "owner=$PR_OWNER" -F "repo=$PR_REPO" -F "number=$PR_NUMBER" \
+    --jq '.data.repository.pullRequest.viewerMergeBodyText // ""' 2>/dev/null) || return 1
+  printf '%s' "$body"
+}
+
+# Read the server-side squash body GitHub proposes to synthesize, strip any
+# AI co-author trailers from it, and write the sanitized body to a temp file.
+# A body with nothing to strip leaves FM_PR_SQUASH_BODY_FILE empty, so GitHub's
+# own body is kept. Returns nonzero only when the body could not be sanitized.
+github_sanitize_squash_body() {
+  local raw_body
+  FM_PR_SQUASH_BODY_FILE=
+  raw_body=$(github_fetch_squash_body) || return 1
+  [ -n "$raw_body" ] || return 0
+
+  FM_PR_SQUASH_BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-pr-squash-body.XXXXXX") || {
+    FM_PR_SQUASH_BODY_FILE=
+    return 1
+  }
+  printf '%s\n' "$raw_body" > "$FM_PR_SQUASH_BODY_FILE"
+  cp "$FM_PR_SQUASH_BODY_FILE" "$FM_PR_SQUASH_BODY_FILE.orig"
+
+  if ! "$SCRIPT_DIR/fm-git-strip-ai-trailers.sh" "$FM_PR_SQUASH_BODY_FILE"; then
+    rm -f "$FM_PR_SQUASH_BODY_FILE" "$FM_PR_SQUASH_BODY_FILE.orig"
+    FM_PR_SQUASH_BODY_FILE=
+    return 1
+  fi
+
+  if cmp -s "$FM_PR_SQUASH_BODY_FILE.orig" "$FM_PR_SQUASH_BODY_FILE"; then
+    rm -f "$FM_PR_SQUASH_BODY_FILE" "$FM_PR_SQUASH_BODY_FILE.orig"
+    FM_PR_SQUASH_BODY_FILE=
+    return 0
+  fi
+  rm -f "$FM_PR_SQUASH_BODY_FILE.orig"
+  return 0
+}
+
 gitlab_confirm_merged() {
   local json state
   if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
@@ -1376,6 +1443,19 @@ case "$PROVIDER" in
         printf 'error: mergeability for %s is still being computed by GitHub; retry shortly\n' "$URL" >&2
       fi
       exit 1
+    fi
+    if { [ "${#merge_args[@]}" -gt 0 ] && [ "${merge_args[0]}" = --squash ]; } \
+      || [ "$FM_PR_GITHUB_CALLER_METHOD" = squash ]; then
+      if ! caller_has_body_arg "$@" \
+        && [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/keep-ai-trailers" ] \
+        && [ ! -L "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/keep-ai-trailers" ]; then
+        if ! github_sanitize_squash_body; then
+          printf 'warning: could not sanitize the GitHub squash body for %s; merging with GitHub'"'"'s default body, which may carry AI co-author trailers\n' \
+            "$URL" >&2
+        elif [ -n "$FM_PR_SQUASH_BODY_FILE" ]; then
+          merge_args+=(--body-file "$FM_PR_SQUASH_BODY_FILE")
+        fi
+      fi
     fi
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.

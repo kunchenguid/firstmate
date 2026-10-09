@@ -1054,6 +1054,56 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# Binding release and hooks-directory removal may not diverge, and the rule is
+# what the binding names - never a point-in-time slot flag. Direction one: a
+# successor spawn that already rebound the pooled slot keeps its binding while
+# this task's own strip directory is deleted.
+test_teardown_releases_only_the_binding_naming_its_hooks_dir() {
+  local dir id=bound-task other=successor-task want
+  dir=$(make_case hooks-successor)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$dir/home/state/$id.git-hooks" "$dir/worktree" \
+    || fail "installing this task's strip dir failed"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$dir/home/state/$other.git-hooks" "$dir/worktree" \
+    || fail "installing the successor's strip dir failed"
+  want="$(cd "$dir/home/state" && pwd -P)/$other.git-hooks"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of a task whose slot was rebound failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.git-hooks" "teardown left this task's strip dir behind"
+  assert_present "$dir/home/state/$other.git-hooks" "teardown removed the successor's strip dir"
+  assert_equals "$want" "$(git -C "$dir/worktree" config --get core.hooksPath)" \
+    "teardown released a binding that names some other directory"
+  pass "fm-teardown: only the binding naming the removed hooks directory is released"
+}
+
+# Direction two: this task's own binding names the directory being deleted
+# while the slot has already been handed to another task, so the flag says
+# "not ours" - the binding still has to go with the directory, or the pooled
+# slot keeps pointing at a deleted hooks dir and runs no hooks at all.
+test_teardown_releases_its_binding_even_when_the_slot_moved_on() {
+  local dir id=stale-bound other=reassigned-task
+  dir=$(make_case hooks-reassigned)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$dir/home/state/$id.git-hooks" "$dir/worktree" \
+    || fail "installing this task's strip dir failed"
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of a task whose slot moved on failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.git-hooks" "teardown left this task's strip dir behind"
+  assert_equals "" "$(git -C "$dir/worktree" config --get core.hooksPath)" \
+    "the pooled slot still points core.hooksPath at the deleted strip dir"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "reassigned slot with this task's binding"
+  pass "fm-teardown: its binding is released with its hooks dir even when the slot already moved on"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1442,6 +1492,8 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
+test_teardown_releases_only_the_binding_naming_its_hooks_dir
+test_teardown_releases_its_binding_even_when_the_slot_moved_on
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

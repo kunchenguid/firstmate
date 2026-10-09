@@ -83,6 +83,30 @@ test_human_at_a_vendor_domain_is_kept() {
   pass "a human co-author at a vendor domain survives; only the exact bot address is stripped"
 }
 
+# The incident PR's squash footer carried the fleet's own identity, so the
+# message layer must know that exact identity - and only that identity, never a
+# human whose name merely contains "firstmate".
+test_fleet_identity_trailer_is_stripped() {
+  local repo hooks body
+  repo="$TMP_ROOT/fleet-identity"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-fleet-identity"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  with_hooks_env "$hooks" git -C "$repo" commit -q \
+    --trailer 'Co-authored-by: firstmate-worker <worker@firstmate.local>' \
+    --trailer 'Co-authored-by: Firstmate Consulting <jane@partner.example>' \
+    -m 'fix: fleet identity'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "worker@firstmate.local" "the fleet worker address survived the strip"
+  assert_not_contains "$body" "firstmate-worker" "the fleet worker name survived the strip"
+  assert_contains "$body" "Co-authored-by: Firstmate Consulting <jane@partner.example>" \
+    "a human co-author whose name merely contains firstmate was stripped"
+  assert_contains "$body" "fix: fleet identity" "subject was rewritten"
+  pass "the fleet's firstmate-worker trailer is stripped while a human firstmate-named co-author survives"
+}
+
 test_hook_manager_cannot_displace_the_strip() {
   local repo hooks target body
   if [ "$(id -u)" = 0 ]; then
@@ -259,9 +283,12 @@ test_unresolvable_project_hookspath_still_refuses() {
   make_repo "$repo"
   printf 'note\n' >>"$repo/README.md"
   git -C "$repo" add README.md
-  git -C "$repo" config core.hooksPath '~fm-no-such-user-6171/hooks'
   hooks="$TMP_ROOT/hooks-unresolvable"
-  "$STRIP" install "$hooks" "$repo" || fail "install should succeed with an unresolvable core.hooksPath"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  # Set after install: install writes the worktree binding, and git versions
+  # differ on whether any config read or write survives an unexpandable value.
+  # This case is about the commit-time lookup, which must refuse.
+  git -C "$repo" config core.hooksPath '~fm-no-such-user-6171/hooks'
   head=$(git -C "$repo" rev-parse HEAD)
   err=$(with_hooks_env "$hooks" git -C "$repo" commit -q -m 'fix: unresolvable hooksPath' 2>&1) &&
     fail "a commit succeeded although the repository's hooks directory cannot be resolved"
@@ -356,9 +383,516 @@ test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   pass "commit-msg file mode strips the trailer and keeps the subject"
 }
 
+# The pane-side GIT_CONFIG_* override reaches only processes descended from the
+# launch. The no-mistakes pipeline commits from a shared daemon started outside
+# any pane, so these cases deliberately run git with no GIT_CONFIG_* at all and
+# still require a clean commit object.
+test_commit_outside_the_pane_environment_is_still_stripped() {
+  local repo wt hooks body
+  repo="$TMP_ROOT/daemon-repo"
+  wt="$TMP_ROOT/daemon-wt"
+  hooks="$TMP_ROOT/hooks-daemon"
+  make_repo "$repo"
+  git -C "$repo" worktree add -q "$wt" -b task
+  "$STRIP" install "$hooks" "$wt" || fail "install should succeed on a linked worktree"
+  printf 'note\n' >>"$wt/README.md"
+  git -C "$wt" add README.md
+  git -C "$wt" commit -q --trailer 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>' \
+    -m 'no-mistakes(review): pipeline fix'
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "noreply@anthropic.com" "a commit made without the pane environment kept the AI trailer"
+  pass "a commit made without the pane environment is still stripped"
+}
+
+test_full_branch_history_carries_no_ai_trailer() {
+  local repo wt hooks found
+  repo="$TMP_ROOT/history-repo"
+  wt="$TMP_ROOT/history-wt"
+  hooks="$TMP_ROOT/hooks-history"
+  make_repo "$repo"
+  git -C "$repo" worktree add -q "$wt" -b task
+  "$STRIP" install "$hooks" "$wt" || fail "install should succeed"
+  # Thirteen commits, alternating the two casings and both launch paths, so the
+  # assertion below is a full-history scan rather than a shallow tip check.
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13; do
+    printf 'line %s\n' "$i" >>"$wt/README.md"
+    git -C "$wt" add README.md
+    if [ $((i % 2)) -eq 0 ]; then
+      with_hooks_env "$hooks" git -C "$wt" commit -q \
+        --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m "feat: pane commit $i"
+    else
+      git -C "$wt" commit -q \
+        --trailer 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>' -m "no-mistakes(review): daemon commit $i"
+    fi
+  done
+  assert_equals 13 "$(git -C "$wt" rev-list --count main..task)" "the fixture should carry thirteen branch commits"
+  found=$(git -C "$wt" log --format=%B main..task | grep -ci 'co-authored-by' || true)
+  assert_equals 0 "$found" "the pushed branch history still carries an AI trailer"
+  pass "no AI trailer survives anywhere in the branch history"
+}
+
+test_binding_does_not_reach_the_primary_checkout() {
+  local repo wt hooks body
+  repo="$TMP_ROOT/isolation-repo"
+  wt="$TMP_ROOT/isolation-wt"
+  hooks="$TMP_ROOT/hooks-isolation"
+  make_repo "$repo"
+  git -C "$repo" worktree add -q "$wt" -b task
+  "$STRIP" install "$hooks" "$wt" || fail "install should succeed"
+  assert_equals "" "$(git -C "$repo" config --get core.hooksPath)" "the task binding leaked into the primary checkout"
+  printf 'primary\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -q --trailer 'Co-authored-by: Mike Sewell <maikunari@protonmail.com>' -m 'fix: primary work'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_contains "$body" "maikunari@protonmail.com" "the primary checkout lost a human co-author"
+  pass "the worktree binding does not reach the primary checkout"
+}
+
+test_unbind_releases_the_worktree_binding() {
+  local repo wt hooks successor
+  repo="$TMP_ROOT/unbind-repo"
+  wt="$TMP_ROOT/unbind-wt"
+  hooks="$TMP_ROOT/hooks-unbind"
+  successor="$TMP_ROOT/hooks-successor"
+  make_repo "$repo"
+  git -C "$repo" worktree add -q "$wt" -b task
+  "$STRIP" install "$hooks" "$wt" || fail "install should succeed"
+  assert_equals "$hooks" "$(git -C "$wt" config --get core.hooksPath)" "install did not bind the worktree"
+  "$STRIP" unbind "$wt" "$hooks" || fail "unbind should succeed"
+  assert_equals "" "$(git -C "$wt" config --get core.hooksPath)" "unbind left the worktree pointing at the strip directory"
+  "$STRIP" unbind "$wt" "$hooks" || fail "unbind should be idempotent"
+  # A successor spawn has rebound the slot to its own directory: releasing
+  # this task's directory must leave that binding alone, and a binding for a
+  # directory this caller never owned is never released either.
+  "$STRIP" install "$hooks" "$wt" || fail "reinstall should succeed"
+  "$STRIP" install "$successor" "$wt" || fail "installing a successor's directory should succeed"
+  "$STRIP" unbind "$wt" "$hooks" || fail "unbind of another directory should succeed"
+  assert_equals "$successor" "$(git -C "$wt" config --get core.hooksPath)" \
+    "unbind released a binding that names a different directory"
+  "$STRIP" unbind "$wt" "$TMP_ROOT/hooks-never-created" || fail "unbind of a missing directory should succeed"
+  assert_equals "$successor" "$(git -C "$wt" config --get core.hooksPath)" \
+    "unbind released a binding for a hooks directory that does not exist"
+  "$STRIP" unbind "$wt" "$successor" || fail "unbind should succeed"
+  assert_equals "" "$(git -C "$wt" config --get core.hooksPath)" \
+    "unbind did not release the binding naming its argument"
+  "$STRIP" unbind "$TMP_ROOT/no-such-worktree" "$hooks" || fail "unbind of a missing worktree should be a silent no-op"
+  pass "unbind releases only the binding naming its hooks directory, silently otherwise"
+}
+
+test_release_unbinds_then_deletes_the_hooks_dir() {
+  local repo wt hooks
+  repo="$TMP_ROOT/release-repo"
+  wt="$TMP_ROOT/release-wt"
+  hooks="$TMP_ROOT/hooks-release"
+  make_repo "$repo"
+  git -C "$repo" worktree add -q "$wt" -b task
+  "$STRIP" install "$hooks" "$wt" || fail "install should succeed"
+  assert_equals "$hooks" "$(git -C "$wt" config --get core.hooksPath)" "install did not bind the worktree"
+  "$STRIP" release "$wt" "$hooks" || fail "release should succeed"
+  assert_equals "" "$(git -C "$wt" config --get core.hooksPath)" \
+    "release left the worktree bound to the directory it deleted"
+  [ ! -e "$hooks" ] || fail "release did not delete the hooks directory"
+  "$STRIP" release "$wt" "$hooks" || fail "release of an already-released directory should be a no-op"
+  pass "release unbinds the binding that names the directory, then deletes it"
+}
+
+test_plain_clone_worktree_is_bound_too() {
+  local repo hooks body
+  repo="$TMP_ROOT/clone-repo"
+  hooks="$TMP_ROOT/hooks-clone"
+  make_repo "$repo"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed on a main worktree"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: secondmate home commit'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "a secondmate home clone kept the AI trailer"
+  pass "a plain clone is bound the same way a linked worktree is"
+}
+
+# --- no-mistakes mirror delivery -------------------------------------------
+#
+# The pipeline commits its fix rounds in run worktrees whose worktree-scoped
+# core.hooksPath points at the mirror hooks directory, so these cases build
+# exactly that shape: a bare mirror carrying live pre-receive and post-receive
+# push-authorization hooks, a linked run worktree bound worktree-scoped to that
+# directory, and git run with no GIT_CONFIG_* at all - the daemon's
+# environment, not a pane's.
+
+# One "<entry> <hash>" line per entry of a hooks directory, sorted, so a case
+# can prove an install left every pre-existing file byte-identical.
+snapshot_dir() {
+  local dir=$1 entry
+  for entry in "$dir"/*; do
+    [ -e "$entry" ] || continue
+    if [ -f "$entry" ]; then
+      printf '%s %s\n' "${entry##*/}" "$(git hash-object -- "$entry")"
+    else
+      printf '%s other\n' "${entry##*/}"
+    fi
+  done | sort
+}
+
+make_nm_shape() {  # <root> [mirror] [seed] [run-worktree]: echoes the mirror hooks dir
+  local root=$1 mirror=${2:-"$1/mirror.git"} seed=${3:-"$1/seed"} wt=${4:-"$1/run-wt"}
+  [ -d "$seed" ] || make_repo "$seed"
+  git clone -q --bare "$seed" "$mirror"
+  printf '#!/bin/sh\nexit 0\n' >"$mirror/hooks/pre-receive"
+  printf '#!/bin/sh\nexit 0\n' >"$mirror/hooks/post-receive"
+  chmod 500 "$mirror/hooks/pre-receive" "$mirror/hooks/post-receive"
+  # The daemon's own gate isolation, mirrored exactly: worktree config on, the
+  # bare's hooks dir pinned in its per-worktree config, and core.bare relocated
+  # out of shared scope. Without that last move git leaks core.bare=true into
+  # linked worktrees and refuses to run in them at all.
+  git -C "$mirror" config extensions.worktreeConfig true
+  git -C "$mirror" config --worktree core.hookspath "$mirror/hooks"
+  git -C "$mirror" config --worktree core.bare true
+  git -C "$mirror" config --local --unset core.bare
+  git -C "$mirror" worktree add -q "$wt" -b task
+  git -C "$wt" config --worktree core.hooksPath "$mirror/hooks"
+  printf '%s' "$mirror/hooks"
+}
+
+nm_shape_commit() {  # <worktree> <subject> <trailer>
+  printf 'note\n' >>"$1/README.md"
+  git -C "$1" add README.md
+  git -C "$1" commit -q --trailer "$3" -m "$2"
+}
+
+test_mirror_commit_msg_covers_a_pipeline_commit() {
+  local root hooks wt before after line body
+  root="$TMP_ROOT/mirror-strip"
+  hooks=$(make_nm_shape "$root") || fail "could not build the no-mistakes-shaped fixture"
+  wt="$root/run-wt"
+  before=$(snapshot_dir "$hooks")
+  "$STRIP" install-mirror "$hooks" || fail "install-mirror should succeed on a live mirror hooks directory"
+  [ -x "$hooks/commit-msg" ] || fail "install-mirror did not write an executable commit-msg"
+  after=$(snapshot_dir "$hooks")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    assert_contains "$after" "$line" "install-mirror changed a pre-existing mirror entry: $line"
+  done <<<"$before"
+  # A second install must write nothing at all: with the directory read-only
+  # any write attempt fails the install outright, and the snapshot below catches
+  # a rewrite of what is already there.
+  chmod u-w "$hooks"
+  "$STRIP" install-mirror "$hooks" || fail "a second install-mirror should succeed without writing"
+  chmod u+w "$hooks"
+  assert_equals "$after" "$(snapshot_dir "$hooks")" "a second install changed the mirror hooks directory"
+  nm_shape_commit "$wt" 'no-mistakes(review): fix round' \
+    'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>' ||
+    fail "the pipeline-shaped commit should succeed"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "noreply@anthropic.com" "the AI trailer reached the pipeline commit object"
+  assert_contains "$body" "no-mistakes(review): fix round" "the subject was rewritten"
+  nm_shape_commit "$wt" 'no-mistakes(review): human co-author' \
+    'Co-authored-by: Jane Doe <jane@example.com>' || fail "the human co-author commit should succeed"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_contains "$body" "Co-authored-by: Jane Doe <jane@example.com>" "a human co-author was stripped"
+  pass "a commit in a no-mistakes run worktree is stripped through the mirror commit-msg"
+}
+
+test_mirror_commit_msg_fails_open_for_a_broken_strip() {
+  local root hooks wt strip_copy body
+  root="$TMP_ROOT/mirror-failopen"
+  hooks=$(make_nm_shape "$root") || fail "could not build the no-mistakes-shaped fixture"
+  wt="$root/run-wt"
+  strip_copy="$root/strip-copy.sh"
+  cp "$STRIP" "$strip_copy"
+  chmod 500 "$strip_copy"
+  "$strip_copy" install-mirror "$hooks" || fail "install-mirror should succeed from a copy of the script"
+  rm -f "$strip_copy"
+  printf '#!/bin/sh\nexit 1\n' >"$strip_copy"
+  chmod 500 "$strip_copy"
+  nm_shape_commit "$wt" 'no-mistakes(review): strip errors' \
+    'Co-authored-by: Cursor <cursoragent@cursor.com>' ||
+    fail "a strip that errors must not block the pipeline commit"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_contains "$body" "cursoragent@cursor.com" "an erroring strip changed the message"
+  rm -f "$strip_copy"
+  nm_shape_commit "$wt" 'no-mistakes(review): strip missing' \
+    'Co-authored-by: Cursor <cursoragent@cursor.com>' ||
+    fail "a missing strip must not block the pipeline commit"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_contains "$body" "cursoragent@cursor.com" "a missing strip changed the message"
+  pass "the mirror commit-msg fails open when the strip errors or is missing"
+}
+
+test_mirror_commit_msg_chains_the_prior_hook() {
+  local root hooks wt body
+  root="$TMP_ROOT/mirror-chain"
+  hooks=$(make_nm_shape "$root") || fail "could not build the no-mistakes-shaped fixture"
+  wt="$root/run-wt"
+  cat >"$hooks/commit-msg" <<SH
+#!/bin/sh
+printf 'ran\\n' > "$root/prior.ran"
+exit 0
+SH
+  chmod 500 "$hooks/commit-msg"
+  "$STRIP" install-mirror "$hooks" || fail "install-mirror should chain an existing commit-msg"
+  [ -f "$hooks/commit-msg.fm-prev" ] || fail "the prior hook was not parked as the chained copy"
+  chmod u-w "$hooks"
+  "$STRIP" install-mirror "$hooks" || fail "a second install-mirror with a chain should succeed without writing"
+  chmod u+w "$hooks"
+  nm_shape_commit "$wt" 'no-mistakes(review): chained' \
+    'Co-authored-by: Cursor <cursoragent@cursor.com>' || fail "the chained commit should succeed"
+  [ -f "$root/prior.ran" ] || fail "the mirror's prior commit-msg hook did not run"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "the AI trailer survived a chained install"
+  pass "install-mirror chains the prior hook so it still runs after the strip"
+}
+
+test_install_mirror_refuses_an_unchainable_hook() {
+  local root hooks rc
+  root="$TMP_ROOT/mirror-refuse"
+  hooks=$(make_nm_shape "$root") || fail "could not build the no-mistakes-shaped fixture"
+  printf '#!/bin/sh\nexit 0\n' >"$hooks/side-target"
+  chmod 500 "$hooks/side-target"
+  ln -s "$hooks/side-target" "$hooks/commit-msg"
+  rc=0
+  "$STRIP" install-mirror "$hooks" 2>/dev/null || rc=$?
+  assert_equals 1 "$rc" "install-mirror must refuse a commit-msg it cannot chain safely"
+  [ -L "$hooks/commit-msg" ] || fail "install-mirror replaced the unchainable commit-msg"
+  assert_equals "$hooks/side-target" "$(readlink "$hooks/commit-msg")" "the unchainable commit-msg was rewritten"
+  [ ! -e "$hooks/commit-msg.fm-prev" ] || fail "install-mirror parked a hook it refused to chain"
+  pass "install-mirror refuses an unchainable commit-msg instead of overwriting it"
+}
+
+# A Firstmate copy can move - a re-seeded home - so an installed hook must
+# repair itself rather than keep pointing at a strip that no longer exists,
+# which fail-open would otherwise turn into silent non-coverage.
+test_install_mirror_refreshes_a_stale_strip_path() {
+  local root hooks wt first second body
+  root="$TMP_ROOT/mirror-refresh"
+  hooks=$(make_nm_shape "$root") || fail "could not build the no-mistakes-shaped fixture"
+  wt="$root/run-wt"
+  first="$root/strip-first.sh"
+  second="$root/strip-second.sh"
+  cp "$STRIP" "$first"
+  chmod 500 "$first"
+  "$first" install-mirror "$hooks" || fail "the first install should succeed"
+  cp "$STRIP" "$second"
+  chmod 500 "$second"
+  rm -f "$first"
+  "$second" install-mirror "$hooks" || fail "the refreshing install should succeed"
+  nm_shape_commit "$wt" 'no-mistakes(review): refreshed' \
+    'Co-authored-by: Cursor <cursoragent@cursor.com>' || fail "the refreshed commit should succeed"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "the hook still pointed at the moved strip copy"
+  pass "an install from a moved Firstmate copy repairs the installed mirror hook"
+}
+
+# Every fleet delivery for a mirror converges on this one writer, and several
+# crew-state processes poll the same repository at once: without the lock, two
+# deliveries that both saw a foreign commit-msg park it and then park each
+# other's hook over it, destroying the foreign hook silently.
+test_concurrent_install_mirror_keeps_the_foreign_hook() {
+  local root hooks wt marker round i pid body
+  local -a pids
+  root="$TMP_ROOT/mirror-concurrent"
+  hooks=$(make_nm_shape "$root") || fail "could not build the no-mistakes-shaped fixture"
+  wt="$root/run-wt"
+  marker="$root/foreign.ran"
+  for round in 1 2 3 4 5; do
+    rm -f "$marker" "$hooks/commit-msg" "$hooks/commit-msg.fm-prev"
+    printf '#!/bin/sh\nprintf foreign > "%s"\nexit 0\n' "$marker" >"$hooks/commit-msg"
+    chmod 500 "$hooks/commit-msg"
+    pids=()
+    for i in 1 2 3 4 5 6; do
+      "$STRIP" install-mirror "$hooks" &
+      pids+=("$!")
+    done
+    for pid in "${pids[@]}"; do
+      wait "$pid" || fail "round $round: a concurrent install-mirror failed"
+    done
+    nm_shape_commit "$wt" "no-mistakes(review): round $round" \
+      'Co-authored-by: Cursor <cursoragent@cursor.com>' ||
+      fail "round $round: the commit should succeed"
+    [ -f "$marker" ] || fail "round $round: concurrent deliveries lost the foreign commit-msg"
+    body=$(git -C "$wt" log -1 --format=%B)
+    assert_not_contains "$body" "cursoragent@cursor.com" \
+      "round $round: the AI trailer survived a concurrent install"
+  done
+  pass "concurrent install-mirror deliveries keep the foreign commit-msg and the strip"
+}
+
+# A pre-existing lock is never stolen, whatever its age - an age-based steal
+# is not owner-checked and could let two deliveries double-park the foreign
+# commit-msg - and a delivery that completes leaves no lock at process exit.
+test_mirror_install_lock_skips_at_any_age() {
+  local root hooks lock wt body
+  root="$TMP_ROOT/mirror-lock"
+  hooks=$(make_nm_shape "$root") || fail "could not build the no-mistakes-shaped fixture"
+  wt="$root/run-wt"
+  lock="${hooks}.fm-install.lock"
+  mkdir "$lock" || fail "could not seed a live install lock"
+  "$STRIP" install-mirror "$hooks" || fail "a live lock must still return success"
+  [ ! -e "$hooks/commit-msg" ] || fail "delivery installed while another process held the lock"
+  touch -t 202001010000 "$lock" || fail "could not age the lock"
+  "$STRIP" install-mirror "$hooks" || fail "an old lock must still return success"
+  [ -d "$lock" ] || fail "delivery stole a pre-existing lock instead of skipping"
+  [ ! -e "$hooks/commit-msg" ] || fail "delivery installed despite a pre-existing lock"
+  rm -rf "$lock"
+  "$STRIP" install-mirror "$hooks" || fail "delivery should run once the lock is gone"
+  [ -x "$hooks/commit-msg" ] || fail "delivery never ran once the lock was gone"
+  [ ! -d "$lock" ] || fail "a completed delivery left its lock behind"
+  nm_shape_commit "$wt" 'no-mistakes(review): after release' \
+    'Co-authored-by: Cursor <cursoragent@cursor.com>' || fail "the commit after release should succeed"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "the released lock left no strip in place"
+  pass "the install lock is skipped at any age and leaves nothing behind after delivery"
+}
+
+# The traps are the adopted remedy for a signal-terminated delivery: once the
+# lock is held, TERM and INT must both release it. A grep shim widens the
+# window inside the critical section so the signal lands while the lock is
+# held, and the exit status proves the trap path ran rather than a normal
+# completion.
+test_mirror_install_lock_is_released_by_signals() {
+  local root hooks lock fakebin real_grep pid rc waited sig expected
+  root="$TMP_ROOT/mirror-signals"
+  hooks=$(make_nm_shape "$root") || fail "could not build the no-mistakes-shaped fixture"
+  lock="${hooks}.fm-install.lock"
+  printf '#!/bin/sh\nexit 0\n' >"$hooks/commit-msg"
+  chmod 500 "$hooks/commit-msg"
+  real_grep=$(command -v grep) || fail "grep is required for this test"
+  fakebin="$root/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nsleep 2\nexec %s "$@"\n' "$real_grep" >"$fakebin/grep"
+  chmod +x "$fakebin/grep"
+  # Monitor mode: without it a non-interactive shell starts background jobs
+  # with SIGINT already ignored, and an ignored signal cannot be trapped, so
+  # the INT case could never reach its trap.
+  set -m
+  for sig in TERM INT; do
+    case "$sig" in
+    TERM) expected=143 ;;
+    INT) expected=130 ;;
+    esac
+    PATH="$fakebin:$PATH" "$STRIP" install-mirror "$hooks" &
+    pid=$!
+    waited=0
+    while [ ! -d "$lock" ] && [ "$waited" -lt 60 ]; do
+      sleep 0.05
+      waited=$((waited + 1))
+    done
+    [ -d "$lock" ] || fail "$sig: the delivery never took the lock"
+    kill "-$sig" "$pid" || fail "$sig: could not signal the delivery"
+    rc=0
+    wait "$pid" || rc=$?
+    [ ! -d "$lock" ] || fail "$sig: the trap did not release the install lock"
+    assert_equals "$expected" "$rc" "$sig: the delivery did not exit through its trap"
+  done
+  set +m
+  pass "the install lock is released when a delivery is terminated by TERM or INT"
+}
+
+# The delivery boundary itself: bin/fm-nm-run-lib.sh resolves the mirror from
+# the repository the run is for, so these drive the library's own entry point
+# against a state.sqlite it owns, then require the stripped commit object.
+test_nm_run_lib_delivers_the_strip_to_the_mirror() {
+  local root clone other nm mirror hooks wt line body rc before after
+  root="$TMP_ROOT/nm-lib-delivery"
+  clone="$root/task-repo"
+  make_repo "$clone"
+  other="$root/other-repo"
+  make_repo "$other"
+  nm="$root/nm-home"
+  mirror="$nm/repos/repo1234abcd.git"
+  mkdir -p "$nm/repos"
+  python3 - "$nm/state.sqlite" "$(cd "$clone" && pwd -P)" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE)")
+    db.execute("INSERT INTO repos VALUES (?, ?)", ("repo1234abcd", sys.argv[2]))
+PY
+  wt="$root/run-wt"
+  hooks=$(make_nm_shape "$root" "$mirror" "$clone") ||
+    fail "could not build the no-mistakes-shaped fixture"
+  before=$(snapshot_dir "$hooks")
+  export NM_HOME="$nm"
+  # shellcheck source=bin/fm-nm-run-lib.sh
+  . "$ROOT/bin/fm-nm-run-lib.sh"
+  fm_nm_ensure_mirror_commit_msg "$clone" ||
+    fail "fm_nm_ensure_mirror_commit_msg should succeed for a registered repository"
+  [ -x "$hooks/commit-msg" ] || fail "the library did not deliver the mirror commit-msg"
+  after=$(snapshot_dir "$hooks")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    assert_contains "$after" "$line" "delivery changed a pre-existing mirror entry: $line"
+  done <<<"$before"
+  nm_shape_commit "$wt" 'no-mistakes(review): delivered by the library' \
+    'Co-authored-by: Cursor <cursoragent@cursor.com>' || fail "the delivered commit should succeed"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "the AI trailer survived the library delivery"
+  rc=0
+  fm_nm_ensure_mirror_commit_msg "$root/not-a-repo" || rc=$?
+  assert_equals 0 "$rc" "a path that is not a repository must not fail the caller"
+  rm -f "$nm/state.sqlite"
+  rc=0
+  fm_nm_ensure_mirror_commit_msg "$other" || rc=$?
+  assert_equals 0 "$rc" "an unreadable runs database must not fail the caller"
+  [ -x "$hooks/commit-msg" ] || fail "a failed lookup removed the delivered hook"
+  unset NM_HOME
+  pass "fm-nm-run-lib.sh delivers the strip to the registered mirror and fails open"
+}
+
+# no-mistakes answers "which repo does this run belong to" by looking the
+# worktree's own top-level path up FIRST and falling back to the main root
+# (its findRepo), and every run persists the repo_id that lookup chose. A
+# linked worktree carrying its own repos row must therefore receive the strip
+# in its own mirror: delivering to the main clone's mirror instead leaves the
+# run worktrees this worktree's runs actually commit in uncovered.
+test_delivery_follows_the_linked_worktree_own_repo_row() {
+  local root clone slot nm slot_mirror main_mirror wt body
+  root="$TMP_ROOT/nm-lib-precedence"
+  clone="$root/main-clone"
+  make_repo "$clone"
+  slot="$root/slot"
+  git -C "$clone" worktree add -q "$slot" -b slotwork
+  nm="$root/nm-home"
+  mkdir -p "$nm/repos"
+  slot_mirror="$nm/repos/slotmirror0001.git"
+  main_mirror="$nm/repos/mainclone0001.git"
+  python3 - "$nm/state.sqlite" "$(cd "$clone" && pwd -P)" "$(cd "$slot" && pwd -P)" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE)")
+    db.execute("INSERT INTO repos VALUES (?, ?)", ("mainclone0001", sys.argv[2]))
+    db.execute("INSERT INTO repos VALUES (?, ?)", ("slotmirror0001", sys.argv[3]))
+PY
+  make_nm_shape "$root" "$slot_mirror" "$clone" "$root/slot-run-wt" >/dev/null ||
+    fail "could not build the linked worktree's mirror fixture"
+  make_nm_shape "$root" "$main_mirror" "$clone" "$root/main-run-wt" >/dev/null ||
+    fail "could not build the main clone's mirror fixture"
+  export NM_HOME="$nm"
+  # shellcheck source=bin/fm-nm-run-lib.sh
+  . "$ROOT/bin/fm-nm-run-lib.sh"
+  fm_nm_ensure_mirror_commit_msg "$slot" ||
+    fail "delivering for a linked worktree that carries its own repo row should succeed"
+  [ -x "$slot_mirror/hooks/commit-msg" ] ||
+    fail "the linked worktree's own repo row did not receive the mirror commit-msg"
+  [ ! -e "$main_mirror/hooks/commit-msg" ] ||
+    fail "delivery went to the main clone's mirror instead of the linked worktree's own"
+  wt="$root/slot-run-wt"
+  nm_shape_commit "$wt" 'no-mistakes(review): slot mirror delivery' \
+    'Co-authored-by: Cursor <cursoragent@cursor.com>' ||
+    fail "a commit in the linked worktree's own run worktree should succeed"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" \
+    "the commit in the linked worktree's own mirror kept the AI trailer"
+  unset NM_HOME
+  pass "delivery follows the linked worktree's own repos row, not its main clone's"
+}
+
 test_cursor_trailer_does_not_reach_the_commit_object
 test_human_coauthor_is_kept
 test_human_at_a_vendor_domain_is_kept
+test_fleet_identity_trailer_is_stripped
 test_hook_manager_cannot_displace_the_strip
 test_reinstall_replaces_a_read_only_install
 test_previous_commit_msg_hook_still_runs
@@ -372,5 +906,21 @@ test_valueless_project_hookspath_still_refuses
 test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
 test_strip_msgfile_alone_does_not_rewrite_author_fields
+test_commit_outside_the_pane_environment_is_still_stripped
+test_full_branch_history_carries_no_ai_trailer
+test_binding_does_not_reach_the_primary_checkout
+test_unbind_releases_the_worktree_binding
+test_release_unbinds_then_deletes_the_hooks_dir
+test_plain_clone_worktree_is_bound_too
+test_mirror_commit_msg_covers_a_pipeline_commit
+test_mirror_commit_msg_fails_open_for_a_broken_strip
+test_mirror_commit_msg_chains_the_prior_hook
+test_install_mirror_refuses_an_unchainable_hook
+test_install_mirror_refreshes_a_stale_strip_path
+test_concurrent_install_mirror_keeps_the_foreign_hook
+test_mirror_install_lock_skips_at_any_age
+test_mirror_install_lock_is_released_by_signals
+test_nm_run_lib_delivers_the_strip_to_the_mirror
+test_delivery_follows_the_linked_worktree_own_repo_row
 
 echo "# all fm-git-strip-ai-trailers tests passed"

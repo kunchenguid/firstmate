@@ -1448,8 +1448,7 @@ spawn_abort_cleanup() {
     { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
     fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
     if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-      chmod u+w "$GIT_HOOKS_DIR" 2>/dev/null || true
-      rm -rf "$GIT_HOOKS_DIR" 2>/dev/null || true
+      "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" release "${WT:-}" "$GIT_HOOKS_DIR" 2>/dev/null || true
     fi
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi

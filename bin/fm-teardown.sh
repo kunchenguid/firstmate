@@ -2643,7 +2643,7 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup hooks_dirs hooks_dir owner_wt
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -2662,6 +2662,20 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    # This branch releases only the bindings naming the strip directories -
+    # never the directories themselves - because the return is fallible: a
+    # failed return retains the home with those directories still in it, and
+    # they are what the live panes' GIT_CONFIG core.hooksPath names. Same
+    # enumeration as the deleting branch below, so leftovers whose task record
+    # was never published and nested records the meta-driven loops never visit
+    # are covered here too.
+    hooks_dirs=$(find "$abs_home_path/state" -type d -name '*.git-hooks' 2>/dev/null || true)
+    while IFS= read -r hooks_dir; do
+      [ -n "$hooks_dir" ] || continue
+      owner_wt=$(fm_meta_get "${hooks_dir%.git-hooks}.meta" worktree 2>/dev/null)
+      [ -n "$owner_wt" ] || owner_wt=$(cat "$hooks_dir/.fm-worktree" 2>/dev/null || true)
+      "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" unbind "$owner_wt" "$hooks_dir" || true
+    done <<<"$hooks_dirs"
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
@@ -2670,6 +2684,18 @@ remove_firstmate_home() {
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
+  # This branch removes the home outright, strip directories included, so each
+  # binding naming one is released and that directory deleted first - the same
+  # release the other deletion sites use, over the same enumeration: leftovers
+  # whose task record was never published and nested records the meta-driven
+  # loops never visit.
+  hooks_dirs=$(find "$abs_home_path/state" -type d -name '*.git-hooks' 2>/dev/null || true)
+  while IFS= read -r hooks_dir; do
+    [ -n "$hooks_dir" ] || continue
+    owner_wt=$(fm_meta_get "${hooks_dir%.git-hooks}.meta" worktree 2>/dev/null)
+    [ -n "$owner_wt" ] || owner_wt=$(cat "$hooks_dir/.fm-worktree" 2>/dev/null || true)
+    "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" release "$owner_wt" "$hooks_dir" || true
+  done <<<"$hooks_dirs"
   if safe_rm_rf "$abs_home_path" "$label"; then
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
@@ -3304,8 +3330,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/$child_id.devin-config.json" \
       "$sub_state/.$child_id.branch-outcome-index"
-    chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
-    rm -rf "$sub_state/$child_id.git-hooks"
+    "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" release "$child_wt" "$sub_state/$child_id.git-hooks" || true
   done
 }
 
@@ -3787,9 +3812,13 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 # state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
-# read-only by its installer.
-chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
-rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
+# read-only by its installer. `release` removes it only after releasing the
+# worktree-scoped core.hooksPath binding that names it - so a reused pool
+# worktree never points at a deleted directory and silently loses the
+# project's own hooks, while a binding that already names something else (a
+# successor's) is left alone, whatever the slot-ownership flags said.
+"$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" release "$WT" "$STATE/$ID.git-hooks" || true
+rm -rf "$STATE/$ID.inbox"
 # A presentation journal the close path left behind is orphaned once the
 # recorded pane is proven gone (the Herdr gate above) unless it still names a
 # live projected workspace - a version 2 binding of some other pane, or a

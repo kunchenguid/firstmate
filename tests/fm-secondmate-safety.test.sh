@@ -1556,13 +1556,20 @@ test_fm_send_refuses_bare_window_without_home_meta() {
 }
 
 test_secondmate_teardown_retires_empty_home() {
-  local home subhome subhome_abs fakebin log lease fmroot
+  local home subhome subhome_abs fakebin log lease fmroot binding_wt
   home="$TMP_ROOT/teardown-home"
   subhome="$TMP_ROOT/teardown-subhome"
   fmroot="$TMP_ROOT/teardown-fmroot"
   make_firstmate_git_root "$fmroot"
   git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
   mkdir -p "$home/state" "$home/data" "$subhome/state"
+  binding_wt="$TMP_ROOT/teardown-binding-wt"
+  fm_git_init_commit "$binding_wt"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$subhome/state/leftover.git-hooks" \
+    "$binding_wt" || fail "could not seed a recordless leftover strip dir"
+  assert_equals "$(cd "$subhome/state" && pwd -P)/leftover.git-hooks" \
+    "$(git -C "$binding_wt" config --worktree --get core.hooksPath)" \
+    "the seeded leftover strip dir is not bound to its surviving worktree"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
@@ -1588,6 +1595,8 @@ EOF
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null || fail "teardown did not release the secondmate home lease via treehouse return"
   [ ! -e "$lease" ] || fail "teardown left the secondmate home lease held after retirement"
   [ ! -d "$subhome" ] || fail "teardown did not remove the retired secondmate home"
+  assert_equals "" "$(git -C "$binding_wt" config --worktree --get core.hooksPath)" \
+    "the treehouse home removal left the surviving worktree bound to a deleted strip dir"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
   pass "secondmate teardown retires empty homes and releases routing"
@@ -1856,7 +1865,7 @@ EOF
 }
 
 test_secondmate_teardown_refuses_failed_leased_home_return() {
-  local home subhome subhome_abs fakebin log fmroot err rc sweep_log rearm_log backup
+  local home subhome subhome_abs fakebin log fmroot err rc sweep_log rearm_log backup binding_wt
   home="$TMP_ROOT/teardown-return-fail-home"
   subhome="$TMP_ROOT/teardown-return-fail-subhome"
   fmroot="$TMP_ROOT/teardown-return-fail-fmroot"
@@ -1866,6 +1875,17 @@ test_secondmate_teardown_refuses_failed_leased_home_return() {
   make_firstmate_git_root "$fmroot"
   git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
   mkdir -p "$home/state" "$home/data" "$subhome/state/procevent"
+  # The retained-home remedy path: a recordless leftover strip directory bound
+  # to a surviving worktree, present when the treehouse return FAILS. The
+  # identity-guarded unbind must run ahead of that fallible return - binding
+  # released - while the directory and the home stay intact for the retry.
+  binding_wt="$TMP_ROOT/teardown-return-fail-binding-wt"
+  fm_git_init_commit "$binding_wt"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$subhome/state/leftover.git-hooks" \
+    "$binding_wt" || fail "could not seed a recordless leftover strip dir"
+  assert_equals "$(cd "$subhome/state" && pwd -P)/leftover.git-hooks" \
+    "$(git -C "$binding_wt" config --worktree --get core.hooksPath)" \
+    "the seeded leftover strip dir is not bound to its surviving worktree"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   printf 'adapter=lavish\nargc=1\nargv:\n/bin/true\n' > "$subhome/state/procevent/source.source"
   install_fake_process_event_sweep "$subhome" "$sweep_log"
@@ -1898,8 +1918,14 @@ EOF
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null || fail "teardown did not try to return the leased home"
   grep -F 'treehouse return failed for secondmate home' "$err" >/dev/null || fail "teardown did not report failed leased home return"
   [ -d "$subhome" ] || fail "teardown removed a leased home after return failed"
+  assert_equals "" "$(git -C "$binding_wt" config --worktree --get core.hooksPath)" \
+    "failed leased-home return left the surviving worktree bound to the strip dir"
+  [ -d "$subhome/state/leftover.git-hooks" ] \
+    || fail "failed leased-home return deleted the strip dir it must preserve for retry"
   [ -e "$subhome/state/procevent/source.source" ] || fail "failed leased-home return did not restore the source registration"
   grep -Fx "$subhome_abs" "$rearm_log" >/dev/null || fail "failed leased-home return did not rearm restored process-event sources"
+  [ -d "$subhome/state/leftover.git-hooks" ] \
+    || fail "the retained home lost its strip dir after the second failed run"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared meta after leased home return failed"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null || fail "teardown removed registry route after leased home return failed"
 
@@ -1942,6 +1968,9 @@ EOF
   fm_git_init_commit "$TMP_ROOT/plain-clone-teardown-child-wt"
   "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$subhome/state/aborted-child.git-hooks" \
     "$TMP_ROOT/plain-clone-teardown-child-wt" || fail "could not seed an aborted child's read-only strip dir"
+  assert_equals "$(cd "$subhome/state" && pwd -P)/aborted-child.git-hooks" \
+    "$(git -C "$TMP_ROOT/plain-clone-teardown-child-wt" config --worktree --get core.hooksPath)" \
+    "the seeded strip dir is not bound to its surviving worktree"
   fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-teardown-fake")
   log="$TMP_ROOT/plain-clone-teardown-fake/tmux.log"
 
@@ -1951,6 +1980,8 @@ EOF
     || fail "teardown failed for plain-clone secondmate home"
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null && fail "teardown tried to return a plain-clone home through treehouse"
   [ ! -d "$subhome" ] || fail "teardown did not remove the plain-clone secondmate home"
+  assert_equals "" "$(git -C "$TMP_ROOT/plain-clone-teardown-child-wt" config --worktree --get core.hooksPath)" \
+    "home removal left the surviving worktree bound to the deleted strip dir"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta for plain-clone home"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove plain-clone registry route"
   pass "secondmate teardown raw-removes plain-clone homes, including a leaked read-only strip dir"
