@@ -5,8 +5,7 @@
 # while /proc starttime stays fixed, so the lock's recorded start stopped
 # matching, ensure treated a healthy worker as dead, and every remote command
 # nohup-started another supervisor. fm_remote_job_process_start now reads the
-# clock-stable /proc starttime when it exists, and the Linux start path hands a
-# live legacy-identity worker of this root over to one replacement.
+# clock-stable /proc starttime when it exists.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,7 +21,6 @@ mkdir -p "$FIXTURE_ROOT/bin" "$ACCOUNT_HOME"
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$FIXTURE_ROOT/bin/"
 printf 'fixture\n' > "$FIXTURE_ROOT/AGENTS.md"
 WORKER="$FIXTURE_ROOT/bin/fm-remote-job-worker.sh"
-OTHER_PID=
 
 # The disposable state root keeps every case away from a production
 # ~/.firstmate/remote-job.
@@ -46,7 +44,6 @@ supervisor_count() { fixture_pids supervisors | wc -l | tr -d '[:space:]'; }
 
 cleanup() {
   local pid
-  [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   for pid in $(fixture_pids all); do kill -KILL "$pid" 2>/dev/null || true; done
   fm_test_cleanup
 }
@@ -129,30 +126,6 @@ stop_fixture_worker() {
   rm -rf -- "$STATE_ROOT"
 }
 
-test_drifted_lock_start_does_not_pile_supervisors() {
-  local bad old new
-  has_proc || { pass "drifted-lock supervisor count skipped without /proc"; return; }
-  for bad in 'Mon Jan  1 00:00:00 2001' 'corrupt start'; do
-    stop_fixture_worker
-    ensure_worker
-    [ "$(supervisor_count)" = 1 ] || fail "a fresh ensure left $(supervisor_count) supervisors"
-    old=$(cat "$LOCK/pid")
-    case "$(cat "$LOCK/start")" in proc-starttime=*) ;; *) fail "worker did not record a /proc token" ;; esac
-    printf '%s\n' "$bad" > "$LOCK/start"
-    ensure_worker
-    [ "$(supervisor_count)" = 1 ] || fail "'$bad' lock start piled up $(supervisor_count) supervisors"
-    new=$(cat "$LOCK/pid")
-    [ "$new" != "$old" ] || fail "the legacy-start worker was not handed over"
-    wait_gone "$old" || fail "the legacy-start worker survived its handoff"
-    case "$(cat "$LOCK/start")" in proc-starttime=*) ;; *) fail "replacement did not record a /proc token" ;; esac
-    ensure_worker
-    ensure_worker
-    [ "$(cat "$LOCK/pid")" = "$new" ] || fail "repeated ensure replaced the upgraded worker"
-    [ "$(supervisor_count)" = 1 ] || fail "repeated ensure piled up $(supervisor_count) supervisors"
-  done
-  pass "a live worker with a drifted or corrupt lock start is replaced once, never piled on"
-}
-
 test_dead_owner_with_stale_ready_gets_one_replacement() {
   local old pid
   stop_fixture_worker
@@ -169,80 +142,21 @@ test_dead_owner_with_stale_ready_gets_one_replacement() {
   pass "a dead owner with a stale heartbeat yields exactly one replacement"
 }
 
-test_legacy_upgrade_never_signals_an_unrelated_pid() {
-  local bad_command
+test_repeated_ensure_never_piles_supervisors() {
+  local pid i
+  has_proc || { pass "repeated-ensure supervisor count skipped without /proc"; return; }
   stop_fixture_worker
-  sleep 30 &
-  OTHER_PID=$!
-  fm_remote_job_prepare_state "$ACCOUNT_HOME" || fail "could not prepare state"
-  mkdir -p "$LOCK"
-  for bad_command in "$(fm_remote_job_process_command "$OTHER_PID")" "/bin/bash $WORKER --serve"; do
-    printf '%s\n' "$OTHER_PID" > "$LOCK/pid"
-    printf '%s\n' 'Mon Jan  1 00:00:00 2001' > "$LOCK/start"
-    printf '%s\n' "$bad_command" > "$LOCK/command"
-    printf '%s\n' "$OTHER_PID" > "$STATE_ROOT/worker.pid"
-    touch -t 200001010000 "$STATE_ROOT/worker.ready" "$LOCK"
-    if fm_remote_job_legacy_owner_pid "$FIXTURE_ROOT" >/dev/null 2>&1; then
-      fail "an unrelated live pid was nominated for the legacy handoff"
-    fi
+  ensure_worker
+  pid=$(cat "$LOCK/pid")
+  case "$(cat "$LOCK/start")" in proc-starttime=*) ;; *) fail "worker did not record a /proc token" ;; esac
+  i=0
+  while [ "$i" -lt 5 ]; do
+    i=$((i + 1))
     ensure_worker
-    kill -0 "$OTHER_PID" 2>/dev/null || fail "the legacy handoff signaled an unrelated live pid"
-    [ "$(cat "$LOCK/pid")" != "$OTHER_PID" ] || fail "the replacement adopted an unrelated pid"
-    stop_fixture_worker
-    mkdir -p "$LOCK"
+    [ "$(supervisor_count)" = 1 ] || fail "ensure call $i left $(supervisor_count) supervisors"
   done
-  kill "$OTHER_PID" 2>/dev/null || true
-  wait "$OTHER_PID" 2>/dev/null || true
-  OTHER_PID=
-  pass "the legacy handoff never signals a live pid that is not this root's worker"
-}
-
-test_legacy_inflight_handoff_keeps_one_supervisor() {
-  local id job i
-  has_proc || { pass "legacy claim handoff skipped without /proc"; return; }
-  stop_fixture_worker
-  cat > "$FIXTURE_ROOT/bin/fm-count-job.sh" <<'SH'
-#!/bin/bash
-printf 'x\n' >> "$1"
-sleep 8
-SH
-  chmod 755 "$FIXTURE_ROOT/bin/fm-count-job.sh"
-  # The worker only runs commands tracked by the root's git index.
-  if [ ! -d "$FIXTURE_ROOT/.git" ]; then
-    git -C "$FIXTURE_ROOT" init -q -b main || fail "could not initialize the fixture root"
-    git -C "$FIXTURE_ROOT" config user.email test@example.com
-    git -C "$FIXTURE_ROOT" config user.name Test
-  fi
-  git -C "$FIXTURE_ROOT" add AGENTS.md bin || fail "could not track the fixture job"
-  git -C "$FIXTURE_ROOT" commit -qm 'fixture job' || fail "could not commit the fixture job"
-  : > "$TMP_ROOT/count"
-  ensure_worker
-  id=$(fm_remote_job_stage "$ACCOUNT_HOME" "$FIXTURE_ROOT" "$TMP_ROOT/home" fm-count-job.sh "$TMP_ROOT/count" </dev/null) \
-    || fail "could not stage the job: ${FM_REMOTE_JOB_ERROR:-no diagnostic}"
-  job="$FM_REMOTE_JOB_JOBS/$id"
-  i=0
-  while [ ! -s "$job/.claim/group_start" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
-  [ -s "$job/.claim/group_start" ] || fail "the job never recorded a running group"
-  # The group is recorded before it is armed, so wait for the job's own side
-  # effect to know it is really running before its records are made legacy.
-  i=0
-  while [ ! -s "$TMP_ROOT/count" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
-  [ -s "$TMP_ROOT/count" ] || fail "the job never started running"
-  printf '%s\n' 'Mon Jan  1 00:00:00 2001' | tee "$LOCK/start" "$job/.claim/supervisor_start" "$job/.claim/group_start" >/dev/null
-  [ ! -e "$job/.claim/owner_start" ] || printf '%s\n' 'Mon Jan  1 00:00:00 2001' > "$job/.claim/owner_start"
-  touch -t 200001010000 "$STATE_ROOT/worker.ready" "$LOCK"
-  sleep 30 &
-  OTHER_PID=$!
-  ensure_worker
-  [ "$(supervisor_count)" = 1 ] || fail "legacy in-flight handoff left $(supervisor_count) supervisors"
-  kill -0 "$OTHER_PID" 2>/dev/null || fail "the legacy handoff signaled an unrelated live pid"
-  ensure_worker
-  [ "$(supervisor_count)" = 1 ] || fail "a later ensure piled up $(supervisor_count) supervisors"
-  kill -0 "$OTHER_PID" 2>/dev/null || fail "a later ensure signaled an unrelated live pid"
-  kill "$OTHER_PID" 2>/dev/null || true
-  wait "$OTHER_PID" 2>/dev/null || true
-  OTHER_PID=
-  pass "a legacy in-flight handoff leaves a ready worker, one supervisor, and no unrelated pid signaled"
+  [ "$(cat "$LOCK/pid")" = "$pid" ] || fail "repeated ensure replaced a healthy worker"
+  pass "repeated ensure against a healthy worker keeps exactly one supervisor"
 }
 
 test_fake_proc_token_is_stable_and_parses_comm
@@ -250,8 +164,6 @@ test_token_changes_with_starttime
 test_malformed_proc_stat_and_pid_are_rejected
 test_lstart_fallback_without_proc
 test_dead_owner_with_stale_ready_gets_one_replacement
-test_legacy_upgrade_never_signals_an_unrelated_pid
-test_drifted_lock_start_does_not_pile_supervisors
-test_legacy_inflight_handoff_keeps_one_supervisor
+test_repeated_ensure_never_piles_supervisors
 
 echo "ALL TESTS PASSED"

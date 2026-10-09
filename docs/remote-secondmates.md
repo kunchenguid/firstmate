@@ -83,7 +83,9 @@ After that bootstrap, every non-doctor `fm-on.sh` target runs through that worke
 It never runs in the SSH process or a Herdr pane.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 Linux ownership records use the clock-stable `/proc` starttime when it is available, because `ps` start times can drift on hosts such as WSL2 and would otherwise make a healthy worker look dead.
-The next readiness check on a host whose worker still records a legacy start hands that one live worker of the configured code root over to a single replacement.
+A worker started before this update records the old start format, so restart it once by hand after updating, while no job is in flight.
+On the host, with the remote account home and the updated code root, run `bash -c ". <code-root>/bin/fm-remote-job-lib.sh; fm_remote_job_stop_worker_tree \"\$(cat ~/.firstmate/remote-job/worker.pid)\""`.
+The next remote command, or `fm-on.sh <route> fm-remote-doctor.sh --fix`, then starts a fresh worker.
 [`bin/fm-remote-job-lib.sh`](../bin/fm-remote-job-lib.sh) owns the start identity format and the handoff checks.
 The [`fm-remote-job-worker.sh` header](../bin/fm-remote-job-worker.sh) owns dispatch cadence and the quiet-scan latency for work arriving after its post-activity burst.
 Active-command and result waits use a separate sampling interval; the [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns its defaults, overrides, and completion, cancellation, and timeout latency contract.
