@@ -41,6 +41,14 @@ PLAN_ONLY_TOOLS='TaskCreate TaskUpdate'
 # assumed.
 PLAN_ONLY_NEAR_MISSES='TaskCreateAgent TaskCreateWorktree TaskUpdateAgent RemoteTaskCreate Task TaskCreator'
 
+# Messaging a session that already exists, and listing those sessions. Both
+# match a delegation stem but create no work this session would own.
+PEER_MESSAGE_TOOLS='SendMessage ListAgents'
+
+# Names the peer-message and listing exclusions must NOT release: each contains
+# an excluded name and would be let through by a substring match.
+PEER_MESSAGE_NEAR_MISSES='SendMessageAndSpawn SendMessages RemoteSendMessage ListAgentsSpawn SpawnListAgents'
+
 run_tool() {
   local tool=$1 rc=0
   shift
@@ -81,6 +89,7 @@ test_guard_denies_every_currently_known_delegation_tool() {
     case "$tool" in
       TaskOutput|TaskStop|TaskGet|TaskList|CronList) continue ;;
       TaskCreate|TaskUpdate) continue ;;
+      SendMessage) continue ;;
     esac
     expect_deny "known delegation tool" "$tool"
   done
@@ -132,6 +141,19 @@ test_plan_only_exclusion_is_exact_name() {
     expect_deny "plan-only near miss" "$tool"
   done
   pass "the plan-only exclusion releases exactly two names and nothing that merely contains them"
+}
+
+test_guard_allows_peer_messaging() {
+  # A recipient session already exists and owns its own lifetime, so messaging
+  # it or listing it leaves no unaccounted work in this home.
+  local tool
+  for tool in $PEER_MESSAGE_TOOLS; do
+    expect_allow "peer-message tool" "$tool"
+  done
+  for tool in $PEER_MESSAGE_NEAR_MISSES; do
+    expect_deny "peer-message near miss" "$tool"
+  done
+  pass "the guard allows messaging and listing existing sessions, by exact name only"
 }
 
 test_guard_never_classifies_mcp_tools() {
@@ -281,6 +303,7 @@ test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
 test_guard_allows_session_local_todo_tools
 test_plan_only_exclusion_is_exact_name
+test_guard_allows_peer_messaging
 test_guard_never_classifies_mcp_tools
 test_deny_message_defers_to_intake_classification
 test_escape_hatch_allows_deliberate_use

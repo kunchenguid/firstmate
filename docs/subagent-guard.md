@@ -47,12 +47,12 @@ agent  subagent  task  workflow  cron  schedul  worktree
 delegate  spawn  dispatch  handoff  remote  sendmessage  monitor
 ```
 
-Three exclusions keep the shape test from producing false positives.
+Four exclusions keep the shape test from producing false positives.
 
 - A name beginning `mcp__` is never classified.
   An MCP server chooses its own tool names, a task or agent noun there is common, and it has no bearing on fleet dispatch.
-- `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, and `killshell` are allowed.
-  These observe or stop work that already exists rather than creating it, and denying them at this layer could strand already-running work with no way to inspect or end it.
+- `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, `killshell`, and `listagents` are allowed.
+  These observe or stop work that already exists, or list sessions that already exist, rather than creating it, and denying them at this layer could strand already-running work with no way to inspect or end it.
   A Claude primary's optional local deny list may still remove them from the schema.
   The shipped guard stays narrower on purpose so it can never be the reason a runaway task cannot be stopped.
 - `PLAN_ONLY_TOOLS`: the exact names `taskcreate` and `taskupdate` are allowed.
@@ -60,9 +60,15 @@ Three exclusions keep the shape test from producing false positives.
   That list has no executor: it spawns no agent, allocates no worktree, registers no schedule, and starts nothing that could outlive the session or escape a firstmate guard.
   So it is not the "work, agent, schedule, or isolated workspace that firstmate would not know about" the guard exists to stop, and the stem match on `task` is a false positive rather than a policy.
   The cost of the false positive was concrete: the primary could not track its own plan, and the deny text told it to run `bin/fm-brief.sh` and `bin/fm-spawn.sh` to create a todo entry.
+- `PEER_MESSAGE_TOOLS`: the exact name `sendmessage` is allowed.
+  It delivers text to a session that already exists and owns its own lifetime, such as a peer primary, the captain's own session, or another fleet's firstmate.
+  That recipient is not work this session created, so it has no missing fleet record in this home and does not die with this session.
+  It can also resume and re-task an in-process subagent this session already has, including one a forked or background `Skill` started with no tool call this guard sees, so allowing it lets the primary extend that Skill-started work.
+  A recipient name gives no reliable signal for telling a peer session from an in-process subagent, so the guard stays exact-name and accepts that gap, recorded under "Known residual gap".
+  The cost of the false positive was concrete: a primary that needed to coordinate with a peer session could only ask the captain to relay by hand, and the only way out was `FM_ALLOW_SUBAGENT=1`, which also releases every work-creating tool.
 
-Both exclusion lists match the whole normalized name, never a substring, so neither can widen by accident: `TaskCreateAgent` and `RemoteTaskCreate` stay denied.
-Folding the two lists together would be the drift risk, because the observe-or-stop rationale is not true of a tool that writes.
+All three exclusion lists match the whole normalized name, never a substring, so none can widen by accident: `TaskCreateAgent`, `RemoteTaskCreate`, `SendMessageAndSpawn`, and `ListAgentsSpawn` stay denied.
+Folding the lists together would be the drift risk, because each rationale is untrue of the others' tools.
 
 The shipped guard fires on every delegation-shaped name that reaches it, including future names that no deny list knows about yet.
 That future-name behavior is the reason the tracked matcher must match all tools and let the script filter.
@@ -81,7 +87,6 @@ Claude primaries should add this deny list in untracked per-home local settings,
       "RemoteTrigger",
       "Monitor",
       "ScheduleWakeup",
-      "SendMessage",
       "EnterWorktree",
       "ExitWorktree",
       "CronCreate",
@@ -113,6 +118,7 @@ In particular `TaskOutput`, `TaskStop`, `TaskGet`, `TaskList`, and `CronList` on
 The hook deliberately allows those five, so the shipped guard can never strand a runaway task with no way to inspect or end it, and it allows `TaskCreate` and `TaskUpdate` too, so it can never be the reason the primary cannot track its own plan.
 The two session-local todo tools are no longer recommended for local denial at all, because they write only the harness's session-local todo list, which has no executor and spawns nothing, so removing them from the schema removes no delegation power.
 Denying them there would instead reproduce at a stronger layer the exact false positive the shipped guard now avoids, leaving anyone who adopts this list verbatim unable to let a primary track its own plan.
+`SendMessage` is not on the recommended list for the same reason the hook allows it: messaging a session that already exists creates no new work, with the Skill-started subagent exception recorded under "Known residual gap".
 Narrowing the list further, including the five observe-or-stop names, is the captain's call, and this local list is the only layer that can remove a todo tool from the primary's schema.
 
 `permissions.allow` is a pre-approval list, not an availability list, so there is no fail-closed positive allowlist available.
@@ -354,7 +360,7 @@ The live consequence is confirmed by the shipped-guard result above: Claude hono
 ## Automated validation
 
 `tests/fm-subagent-pretool-check.test.sh` owns the acceptance matrix and is registered in the `pure-contract-unit` family in `bin/fm-test-run.sh`.
-It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
+It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, peer-message, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release, and of the peer-message and listing exclusions against five near-miss names a substring widening would release; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
 
 Run:
 
@@ -382,3 +388,7 @@ The durable fix for that class is to make the guards treat "the primary is doing
 That would catch this class on any harness, including work created through `Bash`.
 This change fences only the Claude tool surface.
 That is a separate change to `bin/fm-supervision-lib.sh` and `bin/fm-turnend-guard.sh` and is out of scope here.
+
+The `SendMessage` allowance leaves one accepted gap.
+A forked or background `Skill` can start an in-process subagent with no tool call this guard sees, and `SendMessage` can then resume and re-task it, so the primary can extend that work with no fleet record and it still dies with the session.
+Telling that subagent apart from a peer session by recipient name has no reliable signal, so the guard stays exact-name rather than inspecting recipients.

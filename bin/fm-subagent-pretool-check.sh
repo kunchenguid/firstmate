@@ -63,7 +63,7 @@ DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate sp
 # or end it. A local Claude deny list may still remove these from the
 # schema; this shipped guard deliberately stays narrower so it can never be the
 # reason a runaway task cannot be stopped.
-OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell'
+OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell listagents'
 
 # Exact lowercase tool names that match a stem above but create no RUNNABLE
 # work. These write only the harness's session-local todo list, which has no
@@ -77,6 +77,20 @@ OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput kil
 # contract untrue. Both lists are exact-name, never substring, so neither can
 # widen by accident.
 PLAN_ONLY_TOOLS='taskcreate taskupdate'
+
+# Exact lowercase tool names that match a stem above but only deliver text to a
+# session that already exists and owns its own lifetime: a peer primary, a
+# captain's session, or another fleet's firstmate. Such a recipient is not work
+# this session created, so it has no missing fleet record here and does not die
+# with this session. A send can also resume and re-task an in-process subagent
+# this session already has, and a forked or background Skill can start one with
+# no tool call this guard sees, so allowing this lets the primary extend that
+# Skill-started work. A recipient name gives no reliable signal for telling a
+# peer session from an in-process subagent, so this stays exact-name.
+# A separate list because neither the observe-or-stop nor the plan-only
+# rationale describes it; exact-name, so a variant that merely contains it, such
+# as SendMessageAndSpawn, still matches its stem and stays denied.
+PEER_MESSAGE_TOOLS='sendmessage'
 
 TOOL=""
 TOOL_SET=0
@@ -152,7 +166,7 @@ case "$TOOL" in
   mcp__*) exit 0 ;;
 esac
 
-for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
+for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS $PEER_MESSAGE_TOOLS; do
   [ "$NORMALIZED" != "$allowed" ] || exit 0
 done
 
