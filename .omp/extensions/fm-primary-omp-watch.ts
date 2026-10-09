@@ -21,6 +21,10 @@
 //   - The Pi supervision branch is out of scope for omp: every actionable wake
 //     is delivered to main, so no branch offer is made and no calm presentation
 //     hooks exist.
+//   - While state/.afk exists (quiet or away mode) the daemon owns supervision
+//     and this extension stands down instead of arming, then re-arms itself
+//     once the flag is gone; daemonOwnerActive and rearmAfterDaemonStandDown
+//     below own that contract. Pi keeps its in-process branch under the flag.
 //   - The arming tool is fm_watch_arm_omp and its human fallback
 //     /fm-watch-arm-omp; the loaded-build marker is state/.omp-watch-extension-loaded.
 //   - Supervision host: a home opted in with config/supervision-host
