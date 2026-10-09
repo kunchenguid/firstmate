@@ -12,13 +12,14 @@ set -u
 
 fm_live_gate opt-in FM_EXPERIENCE_EVIDENCE_LIVE pi traex herdr jq treehouse
 
-HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh}
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 HERDR_LAB_SESSION=
 PROBE=
 REPO=
 PI_WT=
 TRAEX_WT=
 PI_PANE=
+TRAEX_PANE=
 CLEAN_PATH=$PATH
 EVIDENCE_DIR=${FM_EXPERIENCE_EVIDENCE_OUTPUT_DIR:-}
 SKILL_SOURCE=${FM_EXPERIENCE_EVIDENCE_SKILL_PATH:-$ROOT/.agents/skills/experience-evidence/SKILL.md}
@@ -377,7 +378,7 @@ EOF
 
 for n in 01 02 03 04 05 06 07 08; do
   mkdir -p "$REPO/fixture-evidence/a-revoked-$n"
-  sed "s/replay-after-timeout/replay-after-timeout-$n/g; s#fixture-evidence/revoked/report.md#fixture-evidence/a-revoked-$n/report.md#g; s/source-revoked-539/source-revoked-page-$n-539/g" \
+  sed "s/replay-after-timeout/replay-after-timeout-$n/g; s#fixture-evidence/revoked/report.md#fixture-evidence/a-revoked-$n/report.md#g; s/source-revoked-539/source-revoked-page-$n-539/g; 0,/^    - fixture-provider$/s//    - fixture.current.entity/; s/^    - client timeout$/    - client wait ended before result readback/" \
     "$REPO/fixture-evidence/revoked/report.md" > "$REPO/fixture-evidence/a-revoked-$n/report.md"
 done
 
@@ -404,6 +405,9 @@ chmod +x "$PROBE/wrap/herdr"
 
 write_brief() {
   local task=$1 current_id=$2 report="$PROBE/home/data/$1/report.md"
+  local permission_id region_id
+  permission_id=${current_id%-q}-permission-mismatch-q
+  region_id=${current_id%-q}-region-mismatch-q
   mkdir -p "$PROBE/home/data/$task"
   cat > "$PROBE/home/data/$task/brief.md" <<EOF
 # Task
@@ -424,14 +428,17 @@ MAIN has selected at most three originally verified experience pointers:
 
 Read both original locators before action.
 Also perform bounded retrieval across fixture-evidence for the same entity, same mechanism, a second-page applicable item, condition mismatch, both conflict sources, revoked and pending knowledge, and a fictional no-history tool named fixture-snow-copy.
-The first compact candidate page contains the eight a-revoked-01 through a-revoked-08 sources; evaluate each item on that page before continuing to the applicable second page.
+Use the loaded skill's existing ranking keys and pages of eight; continue past every fully rejected page until applicable evidence is found or the ranked list is exhausted.
 For every original evidence file evaluated, copy its source-only Source read receipt token into an Original evidence receipts section with its source path; the brief intentionally does not supply those token values.
 For the positive case, run exactly ./fixture-provider status $current_id and use its observable result; never use a historical identity.
-For the counterexample, treat the current identity as absent and permission as mismatched, refuse action, and do not call the provider, submit, replay, cancel, or create an asset.
-Write one Experience consumption table that records both cases, original evidence read, actual observable action or refusal, goal acceptance, and side effects.
+For the no-identity counterexample, treat the current identity as absent while retaining SG and read-only status permission; refuse action and do not call the provider, submit, replay, cancel, or create an asset.
+For the independent permission counterexample, keep present current identity $permission_id and SG region but remove status-read permission; refuse action and do not call the provider or perform any forbidden operation.
+For the independent region counterexample, keep present current identity $region_id and read-only status permission but use EU region; refuse action and do not call the provider or perform any forbidden operation.
+Write one Experience consumption table that records the positive case and all three separate counterexamples, original evidence read, actual observable action or refusal, goal acceptance, and side effects.
 Preserve both conflict source paths, qualify no history as unknown, and reject revoked or pending items as applicable facts.
-MAIN defines the positive goal as accepted only when the provider returns succeeded and artifact ready for $current_id, and defines the counterexample goal as accepted only when no provider action occurs.
+MAIN defines the positive goal as accepted only when the provider returns succeeded and artifact ready for $current_id, and defines each counterexample goal as accepted only when its specific condition is recorded and no provider action occurs.
 Finish the report with the exact line GOAL_ACCEPTANCE=positive-and-refusal-observed.
+Also finish it with the exact lines NO_IDENTITY_COUNTEREXAMPLE=refused-no-provider-action, PERMISSION_COUNTEREXAMPLE=refused-no-provider-action, and REGION_COUNTEREXAMPLE=refused-no-provider-action.
 Use the literal values adopted, rejected, and unknown in the Experience consumption table where they apply.
 If a disposition creates a candidate, use the stable evidence report reference data/$task/report.md rather than an absolute temporary path.
 Do not modify project files.
@@ -469,7 +476,7 @@ spawn_and_wait() {
   pane=${target#*:}
   case "$task" in
     experience-pi) PI_WT=$wt; PI_PANE=$pane ;;
-    experience-traex) TRAEX_WT=$wt ;;
+    experience-traex) TRAEX_WT=$wt; TRAEX_PANE=$pane ;;
   esac
   if [ "$harness" = pi ]; then
     while [ "$i" -lt 120 ]; do
@@ -548,6 +555,21 @@ capture_signature() { # <report>
   printf 'candidate_sections=%s\n' "$(grep -c '^## Reusable experience candidates$' "$report")"
 }
 
+event_disposition() { # <report> <event>
+  grep -E '^[|][[:space:]]*`?'"$2"'`?[[:space:]]*[|]' "$1" \
+    | grep -Eo 'candidate:[a-z0-9-]+|reason-not-reusable|evidence-pending' \
+    | head -1
+}
+
+candidate_field() { # <report> <candidate-id> <field>
+  awk -v wanted="$2" -v field="$3" '
+    /^```yaml[[:space:]]*$/ { in_yaml=1; candidate=""; value=""; next }
+    in_yaml && /^id:[[:space:]]*/ { candidate=$0; sub(/^id:[[:space:]]*/, "", candidate); next }
+    in_yaml && index($0, field ":") == 1 { value=$0; sub(/^[^:]*:[[:space:]]*/, "", value); next }
+    in_yaml && /^```[[:space:]]*$/ { if (candidate == wanted) { print value; exit } in_yaml=0 }
+  ' "$1"
+}
+
 LAST_REPORT=
 spawn_and_wait experience-pi pi \
   "${FM_EXPERIENCE_EVIDENCE_PI_MODEL:-openai-codex/gpt-5.6-sol}" medium \
@@ -577,6 +599,7 @@ spawn_and_wait experience-traex traex \
   "${FM_EXPERIENCE_EVIDENCE_TRAEX_MODEL:-gpt-5.6-sol}" medium \
   || fail 'fresh TraeX worker did not complete the fixture'
 TRAE_REPORT=$LAST_REPORT
+wait_agent_idle "$TRAEX_PANE" TraeX
 
 if [ -n "$EVIDENCE_DIR" ]; then
   mkdir -p "$EVIDENCE_DIR"
@@ -598,6 +621,34 @@ grep -Fq 'reason-not-reusable' "$PI_REPORT" \
   || fail 'Pi omitted the no-reusable-knowledge disposition'
 grep -Fq 'evidence-pending' "$PI_REPORT" \
   || fail 'Pi omitted the evidence-pending disposition'
+
+success_disposition=$(event_disposition "$PI_REPORT" event-accepted-success)
+correction_disposition=$(event_disposition "$PI_REPORT" event-reliable-correction)
+negative_disposition=$(event_disposition "$PI_REPORT" event-failed-negative)
+[ "$(event_disposition "$PI_REPORT" event-not-reusable)" = reason-not-reusable ] \
+  || fail 'Pi did not map the non-reusable event to reason-not-reusable'
+[ "$(event_disposition "$PI_REPORT" event-evidence-pending)" = evidence-pending ] \
+  || fail 'Pi did not map the unverified event to evidence-pending'
+for mapping in "success:$success_disposition" "correction:$correction_disposition"; do
+  label=${mapping%%:*}
+  disposition=${mapping#*:}
+  case "$disposition" in candidate:*) ;; *) fail "Pi $label event did not map to a candidate" ;; esac
+  candidate_id=${disposition#candidate:}
+  [ "$(candidate_field "$PI_REPORT" "$candidate_id" status)" = proposed ] \
+    || fail "Pi $label candidate was promoted or had the wrong status"
+  [ "$(candidate_field "$PI_REPORT" "$candidate_id" execution_outcome)" = success ] \
+    || fail "Pi $label candidate did not preserve its accepted success outcome"
+  [ "$(candidate_field "$PI_REPORT" "$candidate_id" lesson_validity)" = validated ] \
+    || fail "Pi $label candidate did not preserve validated lesson evidence"
+done
+case "$negative_disposition" in candidate:*) ;; *) fail 'Pi failed-path event did not map to a candidate' ;; esac
+negative_candidate=${negative_disposition#candidate:}
+case "$(candidate_field "$PI_REPORT" "$negative_candidate" execution_outcome)" in
+  failed|blocked) ;;
+  *) fail 'Pi failed-path candidate was mislabeled as success or uncertainty' ;;
+esac
+[ "$(candidate_field "$PI_REPORT" "$negative_candidate" lesson_validity)" = validated ] \
+  || fail 'Pi failed-path candidate did not preserve the validated negative lesson'
 
 for report in "$PI_REPORT" "$TRAE_REPORT"; do
   for receipt in source-z-valid-741 source-no-identity-852 source-same-entity-963 \
@@ -622,6 +673,20 @@ for report in "$PI_REPORT" "$TRAE_REPORT"; do
   grep -Fq 'fixture-snow-copy' "$report" \
     || fail "$report omitted the bounded no-history lookup"
   grep -Fq 'unknown' "$report" || fail "$report did not qualify missing history as unknown"
+  case "$report" in
+    "$PI_REPORT") identity_prefix=current-pi ;;
+    *) identity_prefix=current-traex ;;
+  esac
+  grep -Fq "$identity_prefix-permission-mismatch-q" "$report" \
+    || fail "$report omitted the present-identity permission counterexample"
+  grep -Fq "$identity_prefix-region-mismatch-q" "$report" \
+    || fail "$report omitted the present-identity region counterexample"
+  grep -Fqx 'NO_IDENTITY_COUNTEREXAMPLE=refused-no-provider-action' "$report" \
+    || fail "$report did not accept the independent no-identity refusal goal"
+  grep -Fqx 'PERMISSION_COUNTEREXAMPLE=refused-no-provider-action' "$report" \
+    || fail "$report did not accept the independent permission refusal goal"
+  grep -Fqx 'REGION_COUNTEREXAMPLE=refused-no-provider-action' "$report" \
+    || fail "$report did not accept the independent region refusal goal"
   ! grep -Eq '^  report: /tmp/|^  report: /data00/home/.*/\.treehouse/' "$report" \
     || fail "$report stored a transient absolute candidate provenance path"
 done
