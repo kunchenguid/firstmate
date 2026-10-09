@@ -127,31 +127,46 @@ test_run_passes_arguments_and_status() {
 }
 
 test_artifact_completion_gate() {
-  local tool artifact out rc
+  local tool writer directory_writer artifact directory out rc
   tool=$(fake_tool artifact-tool "printf 'analysis only\\n'")
   artifact="$TMP_ROOT/synthesis"
+  directory="$TMP_ROOT/synthesis.d"
 
   out=$("$REQUIRE" --expect-artifact "$artifact" "$tool" 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "an analysis-only run with no artifact exited 0"
   assert_contains "$out" "produced no artifact" "the missing-artifact diagnostic was not actionable"
 
-  : > "$artifact"
-  "$REQUIRE" --expect-artifact "$artifact" "$tool" >/dev/null 2>&1 &&
-    fail "an empty artifact file passed the completion gate"
+  printf 'stale synthesis\n' > "$artifact"
+  out=$("$REQUIRE" --expect-artifact "$artifact" "$tool" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale artifact file passed the completion gate"
+  assert_contains "$out" "artifact target already exists" "the stale-file diagnostic was not actionable"
+  case "$out" in
+    *"analysis only"*) fail "the command ran despite a stale artifact file" ;;
+  esac
 
-  mkdir -p "$artifact.d"
-  "$REQUIRE" --expect-artifact "$artifact.d" "$tool" >/dev/null 2>&1 &&
-    fail "an empty artifact directory passed the completion gate"
-  printf 'synthesis\n' > "$artifact.d/AGENTS.md"
-  "$REQUIRE" --expect-artifact "$artifact.d" "$tool" >/dev/null 2>&1 ||
-    fail "a populated artifact directory failed the completion gate"
+  mkdir -p "$directory"
+  printf 'stale synthesis\n' > "$directory/AGENTS.md"
+  out=$("$REQUIRE" --expect-artifact "$directory" "$tool" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale artifact directory passed the completion gate"
+  assert_contains "$out" "artifact target already exists" "the stale-directory diagnostic was not actionable"
+  case "$out" in
+    *"analysis only"*) fail "the command ran despite a stale artifact directory" ;;
+  esac
 
-  printf 'synthesis\n' > "$artifact"
-  out=$("$REQUIRE" --expect-artifact "$artifact" "$tool" 2>&1) ||
-    fail "a non-empty artifact failed the completion gate"
+  writer=$(fake_tool artifact-writer 'printf "synthesis\n" > "$1"')
+  artifact="$TMP_ROOT/fresh-synthesis"
+  out=$("$REQUIRE" --expect-artifact "$artifact" "$writer" "$artifact" 2>&1) ||
+    fail "a fresh non-empty artifact failed the completion gate"
   assert_contains "$out" "verified $artifact" "success did not name the verified artifact"
-  pass "completion depends on a non-empty artifact, not on exit status"
+
+  directory_writer=$(fake_tool artifact-directory-writer 'mkdir -p "$1"; printf "synthesis\n" > "$1/AGENTS.md"')
+  directory="$TMP_ROOT/fresh-synthesis.d"
+  "$REQUIRE" --expect-artifact "$directory" "$directory_writer" "$directory" >/dev/null 2>&1 ||
+    fail "a fresh populated artifact directory failed the completion gate"
+  pass "completion depends on a fresh non-empty artifact, not on exit status"
 }
 
 test_nonexecutable_slash_path_is_named() {

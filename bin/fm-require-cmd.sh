@@ -14,9 +14,9 @@
 # shell's own "command not found", then reporting on anyway - is what ends a
 # task with neither a result nor a reason.
 #
-# --expect-artifact makes completion depend on the artifact rather than on the
-# command's exit status or on a timeout: a tool that exits 0 after analysis but
-# writes nothing still fails here. A file must exist and be non-empty; a
+# --expect-artifact makes completion depend on a fresh artifact rather than on
+# the command's exit status or on a timeout: a tool that exits 0 after analysis
+# but writes nothing still fails here. A file must exist and be non-empty; a
 # directory must exist and hold at least one entry.
 #
 # Usage: fm-require-cmd.sh [--resolve-only] [--expect-artifact <path>] <command> [args...]
@@ -114,6 +114,11 @@ fi
 
 printf '%s\n' "$EXE"
 [ "$RESOLVE_ONLY" -eq 0 ] || exit 0
+
+if [ -n "$ARTIFACT" ] && { [ -e "$ARTIFACT" ] || [ -L "$ARTIFACT" ]; }; then
+  echo "fm-require-cmd.sh: artifact target already exists at $ARTIFACT; remove it before running" >&2
+  exit 1
+fi
 
 set +e
 "$EXE" "$@"
