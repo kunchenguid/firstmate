@@ -610,7 +610,11 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
   target=${FM_ORCA_RESOLVED_TERMINAL:-$terminal}
   sleep "$settle"
   if [ "$target" != "$terminal" ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
-    fm_backend_orca_send_key_once "$target" Enter >/dev/null 2>&1 || true
+    rc=0
+    fm_backend_orca_check_replacement "$target" enter || rc=$?
+    case "$rc" in
+      0|2) fm_backend_orca_send_key_once "$target" Enter >/dev/null 2>&1 || true ;;
+    esac
     printf 'inbox-deferred'
     return 0
   fi

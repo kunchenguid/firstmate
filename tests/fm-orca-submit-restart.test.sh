@@ -4,8 +4,12 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-orca-submit-restart)
 
-for order in before-text before-enter pending second-enter original-pending original-typed; do
-  for mode in empty draft busy unreadable failure success unknown-after pending-after; do
+for order in before-text before-text-fresh before-enter pending second-enter original-pending original-typed; do
+  for mode in empty draft busy unreadable failure success unknown-after pending-after settle-empty settle-draft settle-dialog settle-busy settle-unreadable; do
+    case "$order/$mode" in
+      before-text-fresh/settle-*) ;;
+      before-text-fresh/*|before-enter/settle-*|pending/settle-*|second-enter/settle-*) continue ;;
+    esac
     case "$order/$mode" in original-*/success) ;; original-*/*) continue ;; esac
     evidence="$TMP_ROOT/$order-$mode"
     mkdir -p "$evidence"
@@ -14,7 +18,7 @@ for order in before-text before-enter pending second-enter original-pending orig
       empty|unreadable) : > "$evidence/composer" ;;
       *) printf doorbell > "$evidence/composer" ;;
     esac
-    [ "$order" != original-typed ] || : > "$evidence/composer"
+    case "$order" in original-typed|before-text-fresh) : > "$evidence/composer" ;; esac
     out=$(bash -c '
       order=$2 mode=$3 evidence=$4
       export FM_HOME="$evidence" FM_STATE_OVERRIDE="$evidence/state" FM_CONFIG_OVERRIDE="$evidence/config"
@@ -22,6 +26,15 @@ for order in before-text before-enter pending second-enter original-pending orig
       . "$1/bin/fm-watch.sh"
       . "$1/bin/backends/orca.sh"
       fm_backend_orca_tool_check() { return 0; }
+      sleep() {
+        if [ "$1" = 0.3 ] && [[ "$mode" = settle-* ]]; then
+          touch "$evidence/settled"
+          case "$mode" in
+            settle-empty) : > "$evidence/composer" ;;
+            settle-draft) printf "new user draft" > "$evidence/composer" ;;
+          esac
+        fi
+      }
       stale() {
         FM_ORCA_LAST_STDERR=terminal_handle_stale
         FM_ORCA_LAST_STDOUT=
@@ -31,7 +44,7 @@ for order in before-text before-enter pending second-enter original-pending orig
       fm_backend_orca_attempt() {
         local terminal=$5 text=$7
         printf "%s text\n" "$terminal" >> "$evidence/inputs"
-        if [ "$terminal" = old ] && [ "$order" = before-text ]; then stale; return 1; fi
+        if [ "$terminal" = old ] && [[ "$order" = before-text* ]]; then stale; return 1; fi
         if [ "$terminal" = live ] || [ "$order" = original-typed ]; then printf "%s" "$text" >> "$evidence/composer"; fi
         printf "%s\n" "$terminal" >> "$evidence/typed"
       }
@@ -65,6 +78,14 @@ for order in before-text before-enter pending second-enter original-pending orig
           body=doorbell
         else
           [ "$mode" != unreadable ] || return 1
+          if [ -f "$evidence/settled" ]; then
+            case "$mode" in
+              settle-unreadable) return 1 ;;
+              settle-dialog)
+                printf "Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm · Esc to cancel\n"
+                return 0 ;;
+            esac
+          fi
           if [ "$mode" = unknown-after ] && [ -f "$evidence/submitted" ]; then return 1; fi
           body=$(cat "$evidence/composer")
         fi
@@ -74,11 +95,11 @@ for order in before-text before-enter pending second-enter original-pending orig
       }
       fm_backend_agent_state() { printf idle; }
       fm_backend_busy_state() {
-        if [ "$mode" = busy ] && [ "$2" = live ]; then printf busy; else printf idle; fi
+        if { [ "$mode" = busy ] || { [ "$mode" = settle-busy ] && [ -f "$evidence/settled" ]; }; } && [ "$2" = live ]; then printf busy; else printf idle; fi
       }
       fm_busy_lines_match() { return 1; }
       fm_backend_composer_state() {
-        if [ "$2" = old ] && { [ "$order" = before-text ] || [ "$order" = before-enter ]; }; then
+        if [ "$2" = old ] && { [[ "$order" = before-text* ]] || [ "$order" = before-enter ]; }; then
           printf empty
         else
           fm_backend_orca_composer_state "$2"
@@ -91,7 +112,7 @@ for order in before-text before-enter pending second-enter original-pending orig
       fm_backend_send_text_submit() { shift; fm_backend_orca_send_text_submit "$@"; }
       rc=0
       fm_task_inbox_ring orca old record || rc=$?
-      if [ "$mode" = pending-after ]; then
+      if [ "$mode" = pending-after ] || [[ "$mode" = settle-* ]]; then
         : > "$FM_CONFIG_OVERRIDE/wait-no-turns"
         rec=$(fm_task_inbox_write "$STATE" t1 "durable steer" fire-and-forget)
         fm_task_inbox_mark_retry "$STATE" t1 "$rec"
@@ -102,10 +123,11 @@ for order in before-text before-enter pending second-enter original-pending orig
         window_is_busy() { return 1; }
         status_own_open_decisions() { return 0; }
         triage_log() { return 0; }
+        held_before=$(cat "$evidence/composer")
         inbox_steer_check old t1
         [ "$(cat "$STATE/t1.inbox/.retry-ring")" = "${rec##*/}" ] || exit 1
         [ -f "$rec" ] || exit 1
-        [ "$(cat "$evidence/composer")" = doorbell ] || exit 1
+        [ "$(cat "$evidence/composer")" = "$held_before" ] || exit 1
       fi
       printf "%s" "$rc"
     ' bash "$ROOT" "$order" "$mode" "$evidence")
@@ -127,7 +149,7 @@ for order in before-text before-enter pending second-enter original-pending orig
       [ "${enters:-0}" -le "$limit" ] || fail "$order/$mode: retried Enter on replacement in the same send"
     fi
     case "$mode" in
-      empty|draft|busy|unreadable)
+      settle-*|empty|draft|busy|unreadable)
         if [ "$mode" != empty ] || [ "$order" != before-text ]; then
           [ ! -f "$evidence/submitted" ] || fail "$order/$mode: protected replacement was submitted"
           assert_not_contains "$(cat "$evidence/inputs")" "live Enter" "$order/$mode: replacement received bare Enter"
@@ -136,4 +158,4 @@ for order in before-text before-enter pending second-enter original-pending orig
     esac
   done
 done
-pass "Orca retargets retain retry marks; original sends retain two Enter attempts"
+pass "Orca gates settled replacement input, retains retry marks and original Enter budget"
