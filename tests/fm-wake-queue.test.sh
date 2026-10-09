@@ -408,7 +408,7 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
   local beat="$dir/state/.last-watcher-beat" sent="$dir/sent"
   local pid i=0 limit=600 met=0
   local marker='' want='' progress='' progress_start='' row_key='' bound=0
-  local body key observed_at=0 first=0 mark=0 mtime
+  local body key observed_at=0 first=0 mark=0 mtime advances=0
   case "$mode" in
     alert|reject|tick)
       ;;
@@ -481,12 +481,17 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
     met=0
     case "$mode" in
       tick)
+        # The watcher touches its beacon once at startup, before the poll loop,
+        # and again at the top of every loop pass. Only a second advance proves
+        # a whole pass (including its queue observation) has completed.
         if [ -e "$beat" ]; then
           mtime=$(stall_watch_beat_epoch "$beat")
           if [ "$first" -eq 0 ]; then
             first=$mtime
           elif [ "$mtime" -gt "$first" ]; then
-            met=1
+            first=$mtime
+            advances=$((advances + 1))
+            [ "$advances" -lt 2 ] || met=1
           fi
         fi
         if [ "$met" -eq 0 ] && ! is_live_non_zombie "$pid" && stall_watch_has_wake "$out"; then
@@ -559,6 +564,7 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
       pid=$!
       first=0
       mark=0
+      advances=0
     fi
     sleep 0.1
     i=$((i + 1))
@@ -2685,7 +2691,7 @@ SH
   [ "$recorded_pid" = "$waiter_pid" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$waiter_pid" ] \
     || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock ownership to its caller"; }
 
-  waiter_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$waiter_pid" 2>/dev/null || true)
+  waiter_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$waiter_pid" 2>/dev/null || true)
   [ -n "$waiter_identity" ] && [ "$(cat "$lock/owner-identity" 2>/dev/null || true)" = "$waiter_pid $waiter_identity" ] \
     || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock identity to its caller"; }
 
@@ -2728,7 +2734,7 @@ test_lock_records_pid_identity_and_reclaims_foreign_holder() {
     || { kill "$holder_pid" 2>/dev/null || true; fail "identity fixture holder never acquired its lock"; }
   [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$holder_pid" ] \
     || { kill "$holder_pid" 2>/dev/null || true; fail "holder pid was not recorded"; }
-  holder_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder_pid" 2>/dev/null || true)
+  holder_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder_pid" 2>/dev/null || true)
   [ -n "$holder_identity" ] \
     || { kill "$holder_pid" 2>/dev/null || true; fail "could not compute the holder identity"; }
   [ "$(cat "$lock/owner-identity" 2>/dev/null || true)" = "$holder_pid $holder_identity" ] \
@@ -2806,15 +2812,14 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   append_wake "$state" signal task.status "signal: $status" \
     || fail "could not seed the presentation-deadline wake"
 
-  # The holder must keep a stable process identity while it holds the lock:
-  # exec'ing sleep would replace this process's command line and make the
-  # recorded owner-identity read as a foreign holder.
+  # Each holder execs sleep while holding its lock: the lock's owner identity is
+  # exec-invariant, so the replaced command line must not read as a foreign holder.
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_acquire_wait "$2"
     printf "ready\n" > "$3"
-    sleep 30 & wait
+    exec sleep 30
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" "$dir/queue.ready" &
   queue_holder=$!
   i=0
@@ -2854,7 +2859,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     . "$1"
     fm_lock_acquire_wait "$2"
     printf "ready\n" > "$3"
-    sleep 30 & wait
+    exec sleep 30
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.status-presentation-lock" "$dir/presentation.ready" &
   presentation_holder=$!
   i=0
@@ -2899,7 +2904,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     . "$1"
     fm_lock_acquire_wait "$2"
     printf "ready\n" > "$3"
-    sleep 30 & wait
+    exec sleep 30
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" "$dir/ack.ready" &
   ack_holder=$!
   i=0

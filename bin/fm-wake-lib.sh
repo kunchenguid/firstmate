@@ -114,6 +114,36 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
+# fm_pid_start_identity <pid>
+# Exec-invariant process identity: the start time alone. exec(2) keeps the pid
+# and start time but replaces the command line, so a lock holder that execs
+# (Bash 5 execs a subshell's final simple command) must still read as itself,
+# while a recycled pid carries a new start time. Prefers Linux-compatible /proc
+# stat field 22 (clock ticks since boot) over ps lstart for the same wall-clock
+# drift reason fm_pid_identity gives.
+fm_pid_start_identity() {
+  local pid=$1 proc_root stat_line out
+  local -a stat_fields
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    case "${stat_fields[19]}" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    printf 'proc-starttime=%s\n' "${stat_fields[19]}"
+    return 0
+  fi
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  out=$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$out" ] || return 1
+  printf 'lstart=%s\n' "$out"
+}
+
 fm_path_mtime() {
   if [ "$_FM_UNAME" = Darwin ]; then
     /usr/bin/stat -f %m "$1" 2>/dev/null
@@ -516,14 +546,15 @@ fm_lock_owner_dir() {
 
 # fm_lock_publish_identity <ownerdir> <pid>
 # Atomically replace the owner record's owner-identity with "<pid> <identity>"
-# so a concurrent fm_lock_holder_alive never reads a torn record or pairs one
-# process's pid with another's identity. An uncomputable identity drops the
-# record, falling back to the liveness-only verdict. This is separate from
-# .watch.lock's raw pid-identity, which fm_watcher_lock_matches_pid owns.
+# (fm_pid_start_identity) so a concurrent fm_lock_holder_alive never reads a
+# torn record or pairs one process's pid with another's identity. An
+# uncomputable identity drops the record, falling back to the liveness-only
+# verdict. This is separate from .watch.lock's raw pid-identity, which
+# fm_watcher_lock_matches_pid owns.
 fm_lock_publish_identity() {
   local ownerdir=$1 pid=$2 tmp
   tmp="$ownerdir/.owner-identity.$$.$RANDOM"
-  if { printf '%s ' "$pid" > "$tmp" && fm_pid_identity "$pid" >> "$tmp"; } 2>/dev/null \
+  if { printf '%s ' "$pid" > "$tmp" && fm_pid_start_identity "$pid" >> "$tmp"; } 2>/dev/null \
     && [ -n "$(sed -n '1s/^[0-9]* //p' "$tmp" 2>/dev/null)" ] \
     && mv -f "$tmp" "$ownerdir/owner-identity" 2>/dev/null; then
     return 0
@@ -680,21 +711,22 @@ fm_pid_is_zombie() {
 # Live-holder verdict for the lock primitives. kill -0 alone cannot tell a
 # zombie or a pid recycled by an unrelated process from the real holder, and
 # treating either as live wedges every waiter forever. The owner record's
-# owner-identity is "<pid> <identity>" (fm_lock_publish_identity). Only positive
-# evidence reclaims a live pid: a record bound to this same pid whose identity
-# differs from the pid's CURRENT identity (as fm_watcher_lock_matches_pid
-# requires for .watch.lock), or a zombie. A record bound to another pid is a
-# handoff in flight, and an absent record or an uncomputable current identity
-# keeps the liveness-only verdict, so neither can steal a live lock.
+# owner-identity is "<pid> <start-identity>" (fm_lock_publish_identity). Only
+# positive evidence reclaims a live pid, and only when the record is bound to
+# this same pid: a zombie, or a start identity that differs from the pid's
+# CURRENT one (a recycled pid). The start identity survives exec, so a holder
+# that execs keeps its lock. A record bound to another pid is a handoff in
+# flight, and an absent record or an uncomputable current identity keeps the
+# liveness-only verdict, so neither can steal a live lock.
 fm_lock_holder_alive() {
   local lockdir=$1 pid=$2 recorded current
   fm_pid_alive "$pid" || return 1
   recorded=$(cat "$lockdir/owner-identity" 2>/dev/null || true)
   [ "${recorded%% *}" = "$pid" ] || return 0
   recorded=${recorded#* }
-  if ! current=$(fm_pid_identity "$pid" 2>/dev/null) || [ -z "$current" ]; then
-    ! fm_pid_is_zombie "$pid"
-    return
+  ! fm_pid_is_zombie "$pid" || return 1
+  if ! current=$(fm_pid_start_identity "$pid" 2>/dev/null) || [ -z "$current" ]; then
+    return 0
   fi
   [ "$current" = "$recorded" ]
 }
