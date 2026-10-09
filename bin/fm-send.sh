@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--captain-answer <task-id>]... [--no-decision] [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -201,8 +201,27 @@
 # manual close command, leaving the decision open to re-surface (the safe
 # direction). A send without the flag never closes anything: a routine steer,
 # working:, or done: event still cannot clear a captain decision. The flag is
-# refused with --key, with an explicit backend target (no task ledger in this
-# home), and with an empty message.
+# refused with --key, an unmapped explicit backend target (no task ledger in
+# this home), and an empty message.
+#
+# When config/captain-decides-findings is present, a decision is answered only
+# by a captain-hold answer record for that exact decision. Every needs-decision
+# key this target ever opened, and every inventory entry, stays open until
+# that record exists; worker resolved/done/failed lines, status notes, and keys
+# a transfer omitted do not settle it. A needs-decision still open in the
+# status log also blocks until an answer send closes it: that send names the
+# key with --resolve-key and the matching --captain-answer <task-id>. A plain
+# steer is refused while any decision is open unless it carries --no-decision.
+# --resolve-key for a key not open in the status log is refused; a held
+# decision is settled by bin/fm-captain-hold.sh answer itself. For a
+# secondmate's parent-channel key captain-hold-<task>-<n>, the answer record is
+# read from the secondmate's own home. Missing, unreadable, closed-unanswered,
+# and unresolved migrated records all stay open. Declarations are recorded in
+# the task status as a log only. The answer-record check is a firstmate
+# attestation, not proof of captain authorship. These checks apply to task
+# metadata reached through a selector or matching explicit endpoint, before
+# local enqueue or remote transport.
+# With the flag absent, existing behavior is unchanged.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -229,6 +248,9 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+CAPTAIN_DECIDES_FINDINGS=0
+[ ! -e "$CONFIG/captain-decides-findings" ] || CAPTAIN_DECIDES_FINDINGS=1
 if [ ! -d "$FM_HOME" ]; then
   echo "error: FM_HOME '$FM_HOME' is not a directory; fm-send cannot resolve this home's state" >&2
   exit 1
@@ -478,6 +500,25 @@ fm_send_add_resolve_key() { # <key>
   esac
   RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
 }
+CAPTAIN_ANSWER_IDS=
+CAPTAIN_ANSWER_USED_IDS=
+NO_DECISION=0
+fm_send_add_captain_answer() { # <task-id>
+  local id=$1
+  case "$id" in
+  '' | *[!A-Za-z0-9._-]*)
+    echo "error: --captain-answer '$id' is not a valid captain-held task id (allowed: A-Z a-z 0-9 . _ -)" >&2
+    return 1
+    ;;
+  esac
+  case " $CAPTAIN_ANSWER_IDS " in
+  *" $id "*)
+    echo "error: duplicate --captain-answer '$id'" >&2
+    return 1
+    ;;
+  esac
+  CAPTAIN_ANSWER_IDS="${CAPTAIN_ANSWER_IDS}${CAPTAIN_ANSWER_IDS:+ }$id"
+}
 while :; do
   case "${1:-}" in
   --resolve-key)
@@ -490,6 +531,24 @@ while :; do
     ;;
   --resolve-key=*)
     fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+    shift
+    ;;
+  --captain-answer)
+    [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] || break
+    [ $# -ge 2 ] || {
+      echo "error: --captain-answer requires a task id" >&2
+      exit 1
+    }
+    fm_send_add_captain_answer "$2" || exit 1
+    shift 2
+    ;;
+  --no-decision)
+    [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] || break
+    [ "$NO_DECISION" = 0 ] || {
+      echo "error: duplicate --no-decision" >&2
+      exit 1
+    }
+    NO_DECISION=1
     shift
     ;;
   --fire-and-forget)
@@ -549,12 +608,43 @@ fi
 # send, is what keeps a mistyped key loud instead of delivering an answer that
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
+CAPTAIN_POLICY_STATUS_FILE=
+CAPTAIN_POLICY_OPEN_SET=
+fm_send_status_open_decisions() { # <status-file>
+  local file=$1 directory=${1%/*}
+  [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || return 1
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ] || return 1
+  fi
+  status_open_decisions "$file"
+}
+CAPTAIN_OPEN_NEEDS_KEYS=
+CAPTAIN_HISTORICAL_NEEDS_KEYS=
+CAPTAIN_POLICY_TASK_ID=
+CAPTAIN_POLICY_INVENTORY=
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$TARGET_META" ]; then
+  CAPTAIN_POLICY_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  CAPTAIN_POLICY_STATUS_FILE="$STATE/$CAPTAIN_POLICY_TASK_ID.status"
+  if ! CAPTAIN_POLICY_OPEN_SET=$(fm_send_status_open_decisions "$CAPTAIN_POLICY_STATUS_FILE"); then
+    echo "error: cannot read or fold decision status file '$CAPTAIN_POLICY_STATUS_FILE'; refusing to send" >&2
+    exit 1
+  fi
+  CAPTAIN_POLICY_INVENTORY=$(fm_meta_get "$TARGET_META" decision_keys)
+  while IFS=$'\t' read -r policy_key policy_verb _policy_summary; do
+    [ "$policy_verb" = needs-decision ] || continue
+    CAPTAIN_OPEN_NEEDS_KEYS="${CAPTAIN_OPEN_NEEDS_KEYS}${CAPTAIN_OPEN_NEEDS_KEYS:+ }$policy_key"
+  done <<EOF
+$CAPTAIN_POLICY_OPEN_SET
+EOF
+fi
+CAPTAIN_OPEN_HELD_KEYS=
+CAPTAIN_OPEN_DECISION_KEYS=
+RESOLVE_DECISION_KEYS=
 # Which ledger each answered key belongs to. A key still open in the status log
 # is owned by the status log: fm-captain-hold's `complete` closes that live copy
 # at the moment it transfers a decision to its durable captain-held task, so
 # "still open in status" and "already held" are the two sides of one transfer,
-# never both at once. Checking the backlog only for keys the status log no
-# longer owns also keeps the common path free of any backlog read.
+# never both at once.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
 RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
@@ -565,18 +655,150 @@ RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 # derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
 # means not closed and still carrying the captain-hold annotations tasks-axi
 # preserves even past a hold-until date.
+FM_SEND_AUTHORITATIVE_HOLD_ID=
+FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
+fm_send_authoritative_hold() {
+  local resolved rc
+  FM_SEND_AUTHORITATIVE_HOLD_ID=
+  FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
+  resolved=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    FM_PREFER_ORIGIN_HOLD="$CAPTAIN_DECIDES_FINDINGS" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" resolve-entry "$1" "$2" 2>/dev/null) || return $?
+  if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$resolved" --distinguish-absent >/dev/null 2>&1; then
+    FM_SEND_AUTHORITATIVE_HOLD_OPEN=1
+  else
+    rc=$?
+    case "$rc" in
+      1) : ;;
+      *) return "$rc" ;;
+    esac
+  fi
+  FM_SEND_AUTHORITATIVE_HOLD_ID=$resolved
+  return 0
+}
+
 fm_send_hold_resolved_id() { # <task-id> <decision-key>
-  local show id state hold_kind
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  for id in "$2" "$1-decision-$2"; do
-    show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || continue
-    state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
-    hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
-    [ "$state" != "done" ] || continue
-    [ "$hold_kind" = captain ] || continue
-    printf '%s\n' "$id"
-    return 0
+  fm_send_authoritative_hold "$1" "$2" || return $?
+  [ "$FM_SEND_AUTHORITATIVE_HOLD_OPEN" = 1 ] || return 1
+  printf '%s\n' "$FM_SEND_AUTHORITATIVE_HOLD_ID"
+}
+
+fm_send_captain_answer_recorded() { # <task-id>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" answer-recorded "$1" >/dev/null
+}
+
+fm_send_add_open_held_key() {
+  case " $CAPTAIN_OPEN_HELD_KEYS " in
+    *" $1 "*) ;;
+    *) CAPTAIN_OPEN_HELD_KEYS="${CAPTAIN_OPEN_HELD_KEYS}${CAPTAIN_OPEN_HELD_KEYS:+ }$1" ;;
+  esac
+}
+
+fm_send_gate_held_key() { # <decision-key>
+  local key=$1 held_rc=0 answer_rc=0 child_home child_id
+  if [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+    case "$key" in
+      captain-hold-?*-[0-9]*)
+        child_id=${key#captain-hold-}
+        child_id=${child_id%-*}
+        child_home=$(fm_meta_get "$TARGET_META" home)
+        if [ -n "$child_home" ] && [ -d "$child_home" ] &&
+          FM_HOME="$child_home" FM_STATE_OVERRIDE="$child_home/state" FM_DATA_OVERRIDE='' \
+            "$SCRIPT_DIR/fm-captain-hold.sh" answer-recorded "$child_id" >/dev/null 2>&1; then
+          return 0
+        fi
+        fm_send_add_open_held_key "$key"
+        return 0
+        ;;
+    esac
+  fi
+  fm_send_authoritative_hold "$CAPTAIN_POLICY_TASK_ID" "$key" || held_rc=$?
+  case "$held_rc" in
+    0)
+      fm_send_captain_answer_recorded "$FM_SEND_AUTHORITATIVE_HOLD_ID" || answer_rc=$?
+      case "$answer_rc" in
+        0) : ;;
+        1) fm_send_add_open_held_key "$key" ;;
+        *) echo "error: cannot verify recorded captain answer for '$key' on $FM_SEND_AUTHORITATIVE_HOLD_ID; refusing to send" >&2; exit 1 ;;
+      esac
+      ;;
+    1) fm_send_add_open_held_key "$key" ;;
+    *) echo "error: cannot verify captain-held decision '$key' for $CAPTAIN_POLICY_TASK_ID; refusing to send" >&2; exit 1 ;;
+  esac
+}
+
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; then
+  local_inventory_keys=()
+  IFS=, read -r -a local_inventory_keys <<< "$CAPTAIN_POLICY_INVENTORY"
+  for inventory_key in "${local_inventory_keys[@]}"; do
+    case "$inventory_key" in
+      ''|*[!A-Za-z0-9._-]*)
+        echo "error: invalid decision_keys inventory in $TARGET_META; refusing to send" >&2
+        exit 1
+        ;;
+    esac
+    fm_send_gate_held_key "$inventory_key"
   done
+fi
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_TASK_ID" ] && [ -e "$CAPTAIN_POLICY_STATUS_FILE" ]; then
+  opened_keys=
+  while IFS= read -r policy_line || [ -n "$policy_line" ]; do
+    status_line_verb "$policy_line" policy_verb
+    [ "$policy_verb" = needs-decision ] || continue
+    policy_key=$(_fm_decision_key "$policy_line") || continue
+    case " $CAPTAIN_HISTORICAL_NEEDS_KEYS " in
+      *" $policy_key "*) ;;
+      *) CAPTAIN_HISTORICAL_NEEDS_KEYS="${CAPTAIN_HISTORICAL_NEEDS_KEYS}${CAPTAIN_HISTORICAL_NEEDS_KEYS:+ }$policy_key" ;;
+    esac
+    case " $opened_keys " in
+      *" $policy_key "*) ;;
+      *) opened_keys="${opened_keys}${opened_keys:+ }$policy_key" ;;
+    esac
+  done < "$CAPTAIN_POLICY_STATUS_FILE"
+  for policy_key in $opened_keys; do
+    if _fm_open_set_has "$CAPTAIN_POLICY_OPEN_SET" "$policy_key" &&
+      [ "$(_fm_open_set_verb "$CAPTAIN_POLICY_OPEN_SET" "$policy_key")" = needs-decision ]; then
+      continue
+    fi
+    case ",$CAPTAIN_POLICY_INVENTORY," in *",$policy_key,"*) continue ;; esac
+    fm_send_gate_held_key "$policy_key"
+  done
+fi
+CAPTAIN_OPEN_DECISION_KEYS=$CAPTAIN_OPEN_NEEDS_KEYS
+for inventory_key in $CAPTAIN_OPEN_HELD_KEYS; do
+  case " $CAPTAIN_OPEN_DECISION_KEYS " in
+    *" $inventory_key "*) ;;
+    *) CAPTAIN_OPEN_DECISION_KEYS="${CAPTAIN_OPEN_DECISION_KEYS}${CAPTAIN_OPEN_DECISION_KEYS:+ }$inventory_key" ;;
+  esac
+done
+
+fm_send_captain_answer_for_key() { # <decision-key>
+  local candidate
+  fm_send_authoritative_hold "$RESOLVE_TASK_ID" "$1" || return $?
+  candidate=$FM_SEND_AUTHORITATIVE_HOLD_ID
+  case " $CAPTAIN_ANSWER_IDS " in
+  *" $candidate "*)
+    case " $CAPTAIN_ANSWER_USED_IDS " in
+    *" $candidate "*) return 1 ;;
+    esac
+    if fm_send_captain_answer_recorded "$candidate"; then
+      CAPTAIN_ANSWER_USED_IDS="${CAPTAIN_ANSWER_USED_IDS}${CAPTAIN_ANSWER_USED_IDS:+ }$candidate"
+      return 0
+    fi
+    ;;
+  esac
+  return 1
+}
+
+fm_send_require_captain_answer() { # <decision-key>
+  local key=$1
+  if fm_send_captain_answer_for_key "$key"; then
+    return 0
+  fi
+  printf "error: --resolve-key '%s' is missing a recorded captain answer for this decision. Record the captain's answer with bin/fm-captain-hold.sh answer <task-id> --decision-file <path>, then name that task with --captain-answer <task-id>; nothing was sent.\n" \
+    "$key" >&2
   return 1
 }
 
@@ -610,9 +832,20 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
     }
 fi
 
+if [ -n "$CAPTAIN_ANSWER_IDS" ]; then
+  [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] || {
+    echo "error: --captain-answer requires config/captain-decides-findings; nothing was sent" >&2
+    exit 1
+  }
+  [ -n "$RESOLVE_KEYS" ] || {
+    echo "error: --captain-answer requires --resolve-key; nothing was sent" >&2
+    exit 1
+  }
+fi
+
 if [ -n "$RESOLVE_KEYS" ]; then
-  if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
-    echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
+  if [ -z "$TARGET_META" ]; then
+    echo "error: --resolve-key needs task metadata from this home; an unmapped explicit backend target has no decision ledger here" >&2
     exit 1
   fi
   if [ "${1:-}" = "--key" ]; then
@@ -625,23 +858,52 @@ if [ -n "$RESOLVE_KEYS" ]; then
   fi
   RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
-  resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  if ! resolve_open_set=$(fm_send_status_open_decisions "$RESOLVE_STATUS_FILE"); then
+    echo "error: cannot read or fold decision status file '$RESOLVE_STATUS_FILE'; refusing to send" >&2
+    exit 1
+  fi
   for k in $RESOLVE_KEYS; do
     case "$resolve_open_set" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
       RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
+      if [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ]; then
+        RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k"
+      else
+        case " $CAPTAIN_HISTORICAL_NEEDS_KEYS " in
+          *" $k "*) RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k" ;;
+        esac
+      fi
       continue
       ;;
     esac
     # Not open in the status log. A decision already transferred to its durable
     # captain-held task is exactly this case, and it is answerable - just
-    # through the other ledger - so check there before refusing.
+    # through the other ledger - so check there before refusing. With the
+    # captain-decision flag the captain's own fm-captain-hold answer settles a
+    # held decision, so there is nothing for this send to relay or close.
+    if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
+      echo "error: --resolve-key '$k': no open decision with that key in $RESOLVE_STATUS_FILE. A captain-held decision is settled only by bin/fm-captain-hold.sh answer; once that record exists, send the captain's answer as a plain steer. Nothing was sent." >&2
+      exit 1
+    fi
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
     echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
+  done
+  if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
+    for k in $RESOLVE_STATUS_KEYS; do
+      case " $CAPTAIN_HISTORICAL_NEEDS_KEYS " in
+        *" $k "*) fm_send_require_captain_answer "$k" || exit 1 ;;
+      esac
+    done
+  fi
+  for answer_id in $CAPTAIN_ANSWER_IDS; do
+    case " $CAPTAIN_ANSWER_USED_IDS " in
+    *" $answer_id "*) : ;;
+    *) echo "error: --captain-answer '$answer_id' does not match a named decision key; nothing was sent" >&2; exit 1 ;;
+    esac
   done
   # The decision-answer partition (the header's "Answering a decision"
   # contract): a key that is an open needs-decision, or already a captain-held
@@ -653,7 +915,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
   RESOLVE_IS_DECISION=0
   [ -z "$RESOLVE_HOLD_KEYS" ] || RESOLVE_IS_DECISION=1
   for k in $RESOLVE_STATUS_KEYS; do
-    [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ] && RESOLVE_IS_DECISION=1
+    if [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ]; then
+      RESOLVE_IS_DECISION=1
+    else
+      case " $CAPTAIN_HISTORICAL_NEEDS_KEYS " in
+        *" $k "*) RESOLVE_IS_DECISION=1 ;;
+      esac
+    fi
   done
   if [ "$RESOLVE_IS_DECISION" -eq 1 ]; then
     fm_lease_forbid_branch "decision answer (fm-send --resolve-key)" --away-relocated
@@ -682,6 +950,47 @@ if [ -n "$RESOLVE_KEYS" ]; then
     fi
   done
 fi
+
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
+  if [ "$NO_DECISION" = 1 ]; then
+    [ -n "$CAPTAIN_OPEN_DECISION_KEYS" ] || {
+      echo "error: --no-decision requires an open decision; nothing was sent" >&2
+      exit 1
+    }
+    for k in $RESOLVE_STATUS_KEYS; do
+      [ "$(_fm_open_set_verb "$CAPTAIN_POLICY_OPEN_SET" "$k")" != needs-decision ] || {
+        echo "error: --no-decision cannot accompany --resolve-key '$k' for an open needs-decision; nothing was sent" >&2
+        exit 1
+      }
+    done
+  elif [ -n "$CAPTAIN_OPEN_DECISION_KEYS" ]; then
+    [ -n "$RESOLVE_DECISION_KEYS" ] || {
+      echo "error: open decision key(s) '$CAPTAIN_OPEN_DECISION_KEYS' require matching --resolve-key and --captain-answer declarations, or --no-decision; nothing was sent" >&2
+      exit 1
+    }
+  fi
+fi
+
+fm_send_log_captain_declaration() {
+  local append_rc=0 key
+  local -a declaration_lines=()
+  [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && {
+    [ -n "$CAPTAIN_OPEN_DECISION_KEYS" ] || [ -n "$RESOLVE_DECISION_KEYS" ]
+  } || return 0
+  if [ "$NO_DECISION" = 1 ]; then
+    declaration_lines+=("note: decision-declaration: no-decision")
+  else
+    for key in $RESOLVE_DECISION_KEYS; do
+      declaration_lines+=("note: decision-declaration: answered-key=$key")
+    done
+  fi
+  fm_wake_status_append_self_announced "$STATE" "$CAPTAIN_POLICY_STATUS_FILE" \
+    "${declaration_lines[@]}" || append_rc=$?
+  if [ "$append_rc" -eq 2 ]; then
+    echo "error: the captain-decision declaration could not be recorded in $CAPTAIN_POLICY_STATUS_FILE; nothing was sent" >&2
+    return 1
+  fi
+}
 
 # Close each answered decision in this home's ledger, only after the answer is
 # durably sent: enqueued on the inbox plane, submit-confirmed on the typed
@@ -712,7 +1021,10 @@ fm_send_close_resolved_keys() { # <answer-text>
     echo "error: the answer was delivered to $T, but the close for decision key(s) '$RESOLVE_STATUS_KEYS' could not be appended to $RESOLVE_STATUS_FILE. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
     return 1
   fi
-  still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  if ! still=$(fm_send_status_open_decisions "$RESOLVE_STATUS_FILE"); then
+    echo "error: the answer was delivered to $T, but decision status file $RESOLVE_STATUS_FILE could not be read to verify the close; do not resend the answer." >&2
+    return 1
+  fi
   for k in $RESOLVE_STATUS_KEYS; do
     case "$still" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
@@ -736,7 +1048,8 @@ fm_send_feed_resolved_holds() { # <answer-text>
   for k in $RESOLVE_HOLD_KEYS; do
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
-  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
+  if ! printf '%s' "$lines" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
     echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
@@ -769,6 +1082,7 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  fm_send_log_captain_declaration || exit 1
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in
@@ -869,7 +1183,8 @@ else
   # marker-prefixed chat rather than a parser command anyway, so no remote
   # text has a typed plane to lose. An explicit backend target stays typed
   # even when it happens to match local metadata: it names an endpoint, not a
-  # task, the same boundary that keeps it unmarked and outside --resolve-key.
+  # task. A mapped explicit endpoint can use that task's decision ledger, but
+  # stays unmarked because it was not selected through its task selector.
   # Classification reads the pre-marker text so a marked secondmate request
   # and a plain crewmate steer classify identically. It deliberately does NOT
   # promise that a marked parser-native secondmate request executes as a parser
@@ -931,6 +1246,12 @@ else
     remote_completion_unknown=0
     REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
     [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
+    fm_send_log_captain_declaration || {
+      fm_lock_release "$REMOTE_META_LOCK"
+      fm_send_known_undelivered_cleanup ||
+        echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+      exit 1
+    }
     # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds.
     # fm_run_timed's 124 means the attempt was killed at the bound with remote
     # completion unknown - the enqueue may have landed - so it exits through
@@ -1032,6 +1353,13 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
+    fm_send_log_captain_declaration || {
+      fm_lock_release "$INBOX_META_LOCK"
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      exit 1
+    }
     if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
@@ -1137,6 +1465,11 @@ else
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
+  fm_send_log_captain_declaration || {
+    fm_send_known_undelivered_cleanup ||
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+    exit 1
+  }
   send_rc=0
   if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
