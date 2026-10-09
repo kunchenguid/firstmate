@@ -2547,7 +2547,7 @@ test_recovery_rejects_a_hardlinked_close_marker() {
   rm "$alias"
   FM_HOME="$home" bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_replay "$FM_HOME/state" "$2" "$FM_HOME/data"' _ "$ROOT" "$marker" \
     || fail 'single-link record could not recover'
-  [ "$(row_state "$case_dir" "$id")" = done ] || fail 'single-link retry did not close the row'
+  [ "$(row_state "$case_dir" "$id")" = 'done' ] || fail 'single-link retry did not close the row'
   assert_absent "$marker" 'successful single-link retry retained its record'
   assert_absent "$meta" 'successful single-link retry retained matching metadata'
   pass 'replay rejects hardlinked completion records without mutation and permits single-link recovery'
