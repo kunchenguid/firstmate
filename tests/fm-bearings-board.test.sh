@@ -624,6 +624,7 @@ test_call_context_fields_are_typed_and_optional() {
     '.opened = "17 Aug"' \
     '.links = {kind: "mr"}' \
     '.links = [{kind: "wiki", label: "page", url: "https://example.com/p"}]' \
+    '.links = [{kind: ["mr", "pr"], label: "page", url: "https://example.com/p"}]' \
     '.links = [{kind: "mr", label: "", url: "https://example.com/p"}]' \
     '.links = [{kind: "mr", label: "mr", url: "javascript:alert(1)"}]' \
     '.links = [{kind: "report", label: "r", path: "data/sync/report.md"}]' \

@@ -408,6 +408,24 @@ test_every_call_card_offers_free_text_whatever_allow_freeform_says() {
   pass "every Captain's Call card offers free text, with freeform_hint as its placeholder"
 }
 
+test_a_credential_card_warns_against_pasting_a_secret_unless_hinted() {
+  local home out
+  home=$(make_home credential)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"sample-login","type":"credential","repo":"sample","title":"Registry login","decide":"Log in?",
+     "options":[{"value":"done","label":"Logged in"}]},
+    {"key":"sample-token","type":"credential","repo":"sample","title":"Deploy token","decide":"Rotate?",
+     "freeform_hint":"say where you stored it","options":[{"value":"done","label":"Rotated"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and ([.cards[] | .freeform] == [
+      [{name: "note", placeholder: "say what you did - never paste a password, token, or key here"}],
+      [{name: "note", placeholder: "say where you stored it"}]])
+  ' >/dev/null || fail "a credential card did not warn against pasting a secret: $out"
+  pass "a credential card warns against pasting a secret, and freeform_hint still wins"
+}
+
 test_a_call_card_context_box_shows_its_dossier_fields_as_text() {
   local home report out
   home=$(make_home dossier)
@@ -487,5 +505,6 @@ test_decision_option_labels_link_their_urls
 test_a_report_preview_keeps_balanced_parentheses_in_link_targets
 test_a_report_preview_renders_the_markdown_and_keeps_markup_as_text
 test_every_call_card_offers_free_text_whatever_allow_freeform_says
+test_a_credential_card_warns_against_pasting_a_secret_unless_hinted
 test_a_call_card_context_box_shows_its_dossier_fields_as_text
 test_a_call_card_without_dossier_fields_falls_back_or_collapses

@@ -215,6 +215,7 @@ validate_payload() {  # <data.json>
     def context_link:
       type == "object"
       and ((keys - ["kind", "label", "url", "path", "state"]) == [])
+      and (.kind | type == "string")
       and (.kind as $kind | ["mr", "pr", "ticket", "report", "doc", "board"] | index($kind) != null)
       and (.label | nonempty_string)
       and (has("url") != has("path"))

@@ -700,7 +700,9 @@ __FM_BEARINGS_BOARD_DATA__
     /* every card offers free text; a note alone is a valid answer */
     var ff = document.createElement("input");
     ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-    ff.placeholder = item.freeform_hint || "or answer in your own words…";
+    ff.placeholder = item.freeform_hint || (item.type === "credential"
+      ? "say what you did - never paste a password, token, or key here"
+      : "or answer in your own words…");
     form.appendChild(ff);
 
     var foot = el("div", "bb-decision__foot");
