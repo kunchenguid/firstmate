@@ -588,7 +588,8 @@ test_record_task_identity_matches_dirname_basename() {
           pending:[{token:$token}],seen:[],verdict:null,observation:null}]}' > "$file"
       tasks+=("$want")
     done
-    expected=$(printf '%s\0' "${tasks[@]}" | jq -Rs 'split("\u0000")[:-1] | sort')
+    # jq 1.6 drops the trailing NUL in raw slurp, so filter empties instead of slicing.
+    expected=$(printf '%s\0' "${tasks[@]}" | jq -Rs 'split("\u0000") | map(select(length > 0)) | sort')
     actual=$(with_home "$home" env FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-contributions.sh" pending | jq '[.[].task] | sort') \
       || fail "records under data root '$data' were refused"
     [ "$actual" = "$expected" ] || fail "data root '$data' named tasks $actual, expected $expected"
