@@ -2403,7 +2403,7 @@ ok - a version 1 record validates, reads its words and scalars with the clause a
 ok - new words over a live version 1 record archive it and write version 2 with the same session start
 ok - enter: the retired --grant flag is refused by name and leaves the standing record alone
 ok - the return brief renders health, the words with the session account, waiting, could-not-fix, handled, and cost from durable records, and the gate shrinks to what the away session could not fix
-ok - while the away-posture record exists any green merge lands under away authority, yolo or not, and attended merges stay untagged
+ok - while the away-posture record exists a green merge is tagged away, yolo or not, and attended merges stay untagged
 ok - under the away-posture record the branch merges a green task, is refused on a red check with or without --allow-red, and is refused at the partition while attended
 ok - the away record does not bypass red checks, and a recorded pr= must match the URL
 ok - no away-record archive or replacement lands between the authority read and the merge

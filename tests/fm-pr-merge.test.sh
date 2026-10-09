@@ -3018,7 +3018,7 @@ test_away_record_permits_any_green_merge_under_away_authority() {
     "away-yolo: the durable outcome did not tag away"
 
   # --attended-override re-enables forge flags for an explicit instruction; it
-  # never skips the record read, and the merge still lands under away authority.
+  # never skips the record read, and the merge is still tagged away.
   case_dir=$(make_case away-attended-override)
   mkdir -p "$case_dir/wt" "$case_dir/home"
   add_gh_mocks "$case_dir" "$head"
@@ -3038,12 +3038,12 @@ test_away_record_permits_any_green_merge_under_away_authority() {
     *"$url") ;;
     *) fail "attended-untagged: the attended outcome carried an authority tag: $(grep -F 'merge landed' "$case_dir/state/.wake-queue")" ;;
   esac
-  pass "while the away-posture record exists any green merge lands under away authority, yolo or not, and attended merges stay untagged"
+  pass "while the away-posture record exists a green merge is tagged away, yolo or not, and attended merges stay untagged"
 }
 
 # While the away-posture record exists main is parked, so the supervision
 # branch actor may reach the merge gate - and meets exactly the gate main
-# would: any task merges green at its live head under away authority, a red
+# would: a task merges green at its live head tagged away, a red
 # one is refused whatever the words say, and without the record the branch is
 # refused at the role partition before any forge call
 # (docs/pi-supervision-branch.md "Postures").

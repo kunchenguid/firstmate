@@ -101,13 +101,14 @@
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
 # an away record exists (a quiet-mode record is a present captain, so its
-# merges stay attended: bin/fm-afk-contract.sh mode) any green merge may
-# proceed under away authority:
-# the record's presence is the whole mechanical fact, and which merge the
-# captain's away words meant is the supervision session's reading
-# (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
-# than being skipped, neither posture releases a captain hold, and away
-# authority lapses when the record is archived.
+# merges stay attended: bin/fm-afk-contract.sh mode) this script permits a
+# green merge mechanically, but the record grants no merge authority:
+# the record's presence is the whole mechanical fact, and whether the
+# captain's away words or the task's own resolved yolo posture cover a merge
+# is the supervision session's reading (bin/fm-branch-prompt.sh "Postures").
+# An unreadable record refuses rather than being skipped, neither posture
+# releases a captain hold, and the away words lapse when the record is
+# archived.
 # The authority read and synchronous forge command share the away record's
 # cross-subsystem lock, which bin/fm-afk-contract.sh owns, closing the common
 # live-owner TOCTOU; failure to take it refuses before the forge call. Async and
