@@ -78,7 +78,8 @@
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
 #
-# New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
+# New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, plus the
+# configured review bots whose author_association is NONE, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
 # before any wake. poll appends ordinary durable check wakes through fm-wake-lib
 # and emits only newly durable signals for the authenticated check to surface.
@@ -120,6 +121,12 @@ case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT" in ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;; esac
 BUDGET_CAP=$((CHECK_TIMEOUT - 3))
+# Review-bot logins whose comments and reviews are findings worth a wake even
+# though GitHub reports their author_association as NONE. The OpenCode reviewer
+# and the Relay review bots are the automated finding sources firstmate
+# monitors; every other bot stays excluded so dependency and housekeeping bots
+# never wake firstmate. Overridable for a fleet whose review bots differ.
+REVIEW_BOTS=${FM_CONTRIBUTIONS_REVIEW_BOTS:-'["opencode-agent[bot]","hh-relay-dev[bot]","hh-relay[bot]","relay-bot-dev[bot]"]'}
 [ "$BUDGET_CAP" -ge 1 ] || BUDGET_CAP=1
 [ "$BUDGET" -le "$BUDGET_CAP" ] || BUDGET=$BUDGET_CAP
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-contributions.XXXXXX")
@@ -274,7 +281,9 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" \
+      --argjson review_bots "$REVIEW_BOTS" '
+      def is_review_bot: (.user.login as $l | $review_bots | index($l)) != null;
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
@@ -287,7 +296,7 @@ observe() { # canonical GitHub URL -> normalized JSON
               status:(if .state == "pending" then "in_progress" else "completed" end),
               conclusion:(if .state == "pending" then null else .state end)} ]),
           events:((($comments[0] | add // [] | map(. + {_signal:"comment"})) + ($reviews | map(. + {_signal:"review"})) + ($inline[0] | add // [] | map(. + {_signal:"review-comment"})))
-            | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+            | map(select(.user.login != $c.user.login and ((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or is_review_bot))
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
                  author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
@@ -299,11 +308,13 @@ observe() { # canonical GitHub URL -> normalized JSON
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" '
+    jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
+      --argjson review_bots "$REVIEW_BOTS" '
+      def is_review_bot: (.user.login as $l | $review_bots | index($l)) != null;
       $core[0] as $c | {state:$c.state,head:null,
         ready:any($c.labels[]; (.name | ascii_downcase) == ($label | ascii_downcase)),
         checks:[],reviews:[],events:($comments[0] | add // []
-          | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+          | map(select(.user.login != $c.user.login and ((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or is_review_bot))
             | {token:("comment:" + (.id|tostring) + ":" + (.updated_at // "")),type:"comment",source:.html_url,
                head:null,author:.user.login,body:(.body // "" | .[:500])})
           + [$timeline[0][] | .[] | select(.event == "labeled" and (.label.name | ascii_downcase) == ($label | ascii_downcase))
