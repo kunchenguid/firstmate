@@ -20,9 +20,6 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LAUNCH="$ROOT/bin/fm-afk-launch.sh"
-START="$ROOT/bin/fm-afk-start.sh"
-CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 # The daemon paths refuse on a Pi primary, so pin a daemon-running harness for
 # every unit below; the Pi refusal has its own units (unit_pi_never_launches_the_daemon).
 # FM_TEST_HARNESS is the launch path's test-only seam (bin/fm-afk-launch.sh
@@ -47,15 +44,32 @@ SLEEPER=$(mktemp "${TMPDIR:-/tmp}/fm-afk-sleeper.XXXXXX")
 printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
 chmod +x "$SLEEPER"
 TRACK_TMUX_SESSIONS=""
+PRIMARY_BASE=
 GLOBAL_CLEANUP() {
   rm -f "$SLEEPER" 2>/dev/null || true
   rm -rf "$OFF_CONFIG" 2>/dev/null || true
+  rm -rf "${PRIMARY_BASE:-}" 2>/dev/null || true
   local s
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
   done
 }
 trap GLOBAL_CLEANUP EXIT
+
+# Supervisor-only entrypoints refuse a linked worktree, so run them from a
+# temporary primary checkout (tests/primary-checkout-helpers.sh).
+# shellcheck source=tests/primary-checkout-helpers.sh
+. "$ROOT/tests/primary-checkout-helpers.sh"
+if ! fm_test_plain_checkout "$ROOT"; then
+  if ! PRIMARY_BASE=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-launch-primary.XXXXXX") ||
+    ! ROOT=$(fm_test_primary_snapshot "$ROOT" "$PRIMARY_BASE"); then
+    printf 'not ok - could not stage a plain primary checkout for this suite\n' >&2
+    exit 1
+  fi
+fi
+LAUNCH="$ROOT/bin/fm-afk-launch.sh"
+START="$ROOT/bin/fm-afk-start.sh"
+CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 
 enter_posture() {  # <home>
   FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$CONTRACT" enter >/dev/null 2>&1

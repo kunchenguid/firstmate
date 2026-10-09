@@ -169,6 +169,11 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  # shellcheck source=bin/fm-primary-scope-lib.sh
+  . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+  fm_primary_supervisor_guard "bin/fm-watch.sh" || exit 1
+fi
 mkdir -p "$STATE"
 # A home that never existed (a state-only test fixture) is not a home that
 # disappeared, so the per-poll home-gone exit below applies only when it did.
