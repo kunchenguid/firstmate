@@ -11,6 +11,7 @@ const {resource,processIdentity,bindOperations,settleMergeReceipt,settleArchived
 const home=path.join(tmp,'home'),pkg=path.join(tmp,'sdk');
 fs.mkdirSync(path.join(home,'state'),{recursive:true});
 fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
+fs.mkdirSync(path.join(home,'config'));fs.writeFileSync(path.join(home,'config/short-agent.json'),'{"provider":"openai-codex","model":"gpt-5.6-luna"}\n');
 fs.mkdirSync(path.join(pkg,'dist/core'),{recursive:true});
 fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({name:'@earendil-works/pi-coding-agent',main:'dist/index.js',type:'module'}));
 fs.writeFileSync(path.join(pkg,'dist/core/http-dispatcher.js'),'export function configureHttpDispatcher() {}');
@@ -53,8 +54,8 @@ service.submit=(...args)=>{const result=originalSubmit(...args);submittedIds.add
 const req=(key,steps=[{action:'sync',project}],goal='run')=>({key,goal,acceptance:'owner receipt',materials:[],operations:{authority:'isolated test fixture',expiresAt:Date.now()+60000,steps}});
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function terminal(id){for(let n=0;n<12000;n++){const s=service.status(id);if(s.finishedAt)return s;await wait(25);}throw Error('task did not terminate');}
-assert.equal(validate({key:'default',goal:'read',acceptance:'answer',materials:[]}).model,'gpt-5.6-luna');
-assert.equal(validate({key:'override',goal:'read',acceptance:'answer',materials:[],provider:'explicit',model:'chosen'}).provider,'explicit');
+assert.deepEqual(validate({key:'configured',goal:'read',acceptance:'answer',materials:[]}),{key:'configured',goal:'read',acceptance:'answer',materials:[]});
+assert.throws(()=>validate({key:'override',goal:'read',acceptance:'answer',materials:[],provider:'explicit',model:'chosen'}),/provider\/model request overrides are unsupported/);
 assert.throws(()=>service.submit(req('unknown',[{action:'restart',task:'foo'}])),/unsupported/);
 const missingAuthority=req('no-authority');delete missingAuthority.operations.authority;assert.throws(()=>service.submit(missingAuthority),/authority/);
 fs.writeFileSync(path.join(home,'state/.lock'),'1');assert.throws(()=>service.submit(req('wrong-primary')),/primary/);fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
@@ -333,6 +334,7 @@ const fetchEvents=fs.readFileSync(fetchLog,'utf8').trim().split('\n');assert.equ
 fs.unlinkSync(path.join(fakebin,'git'));
 const replayHome=path.join(tmp,'cleanup-replay-home'),replayState=path.join(replayHome,'state'),replayData=path.join(replayHome,'data'),replayTask='cleanup-backlog-replay',replayGeneration='g-cleanup-replay';
 for(const directory of [replayHome,replayState,replayData,path.join(replayHome,'config'),path.join(replayData,replayTask),path.join(replayHome,'user-home')])fs.mkdirSync(directory,{recursive:true});
+fs.writeFileSync(path.join(replayHome,'config/short-agent.json'),'{"provider":"openai-codex","model":"gpt-5.6-luna"}\n');
 fs.writeFileSync(path.join(replayHome,'.tasks.toml'),'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\n');
 fs.writeFileSync(path.join(replayData,'backlog.md'),'## In flight\n\n## Queued\n\n## Done\n');
 fs.writeFileSync(path.join(replayState,'.lock'),String(process.pid));
@@ -762,6 +764,7 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   // captain choices pending throughout, including the source task's own hold.
   const auditHome=path.join(tmp,'audit-home'),auditTask='audit-cleanup';
   for(const sub of ['state','data','config',`data/${auditTask}`])fs.mkdirSync(path.join(auditHome,sub),{recursive:true});
+  fs.writeFileSync(path.join(auditHome,'config/short-agent.json'),'{"provider":"openai-codex","model":"gpt-5.6-luna"}\n');
   fs.copyFileSync(path.join(root,'.tasks.toml'),path.join(auditHome,'.tasks.toml'));
   fs.writeFileSync(path.join(auditHome,'data/backlog.md'),'## In flight\n\n## Queued\n\n## Done\n');
   fs.writeFileSync(path.join(auditHome,'state/.lock'),String(process.pid));

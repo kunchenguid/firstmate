@@ -24,7 +24,7 @@ function successfulNotificationBinding(home, id) {
     const dir = path.join(canonicalHome, 'state/short-agents', id);
     const request = json(path.join(dir, 'request.json'));
     const result = json(path.join(dir, 'result.json'));
-    if (![1, 2].includes(request.version) || request.id !== id || result.id !== id || result.state !== 'completed' ||
+    if (![1, 2, 3].includes(request.version) || request.id !== id || result.id !== id || result.state !== 'completed' ||
         result.evidence !== dir || typeof result.summary !== 'string') return null;
     const steps = request.input?.operations?.steps ?? [];
     if (!Array.isArray(steps)) return null;

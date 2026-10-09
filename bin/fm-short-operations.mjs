@@ -374,7 +374,7 @@ function archivedStatusCleanupOperationContext(home,id,index) {
   if(process.env.FM_SUPERVISION_ACTOR&&process.env.FM_SUPERVISION_ACTOR!=='main') fail('cleanup recovery belongs to MAIN');
   if(fs.realpathSync(home)!==home||!/^short-[a-f0-9]{64}$/.test(id??'')) fail('invalid cleanup recovery home/job');
   const dir=path.join(home,'state/short-agents',id),request=read(path.join(dir,'request.json'));
-  if(![1,2].includes(request.version)||request.id!==id||id!=='short-'+createHash('sha256').update(request.input?.key??'').digest('hex')) fail('cleanup recovery request identity changed');
+  if(![1,2,3].includes(request.version)||request.id!==id||id!=='short-'+createHash('sha256').update(request.input?.key??'').digest('hex')) fail('cleanup recovery request identity changed');
   const operations=validateOperations(request.input?.operations),step=operations?.steps?.[index],binding=request.operationBindings?.[index];
   if(!Number.isSafeInteger(index)||index<0||request.operationBindings?.length!==operations?.steps?.length||step?.action!=='cleanup'||binding?.backend!=='herdr'||!binding.spawn_gen||binding.endpoint_task_id!==step.task) fail('cleanup recovery step/task/generation changed');
   const started=read(path.join(dir,'started.json')),result=read(path.join(dir,'result.json'));
@@ -497,7 +497,7 @@ function settleMergeLocked(home,root,id,index,expectedMergeCommit) {
   const dir=path.join(home,'state/short-agents',id);
   const requestFile=path.join(dir,'request.json'),startedFile=path.join(dir,'started.json'),resultFile=path.join(dir,'result.json');
   const request=read(requestFile),started=read(startedFile),resultBytes=fs.readFileSync(resultFile,'utf8'),result=JSON.parse(resultBytes);
-  if(![1,2].includes(request.version)||request.id!==id||!request.input?.operations||!Array.isArray(request.operationBindings)||request.operationBindings.length!==request.input.operations.steps.length) fail('short merge settlement request identity is invalid');
+  if(![1,2,3].includes(request.version)||request.id!==id||!request.input?.operations||!Array.isArray(request.operationBindings)||request.operationBindings.length!==request.input.operations.steps.length) fail('short merge settlement request identity is invalid');
   if(!Number.isSafeInteger(index)||index<0||index>=request.input.operations.steps.length) fail('short merge settlement index is invalid');
   if(!(/^[a-f0-9]{40}$|^[a-f0-9]{64}$/).test(expectedMergeCommit??'')) fail('short merge settlement requires the independently observed merge commit');
   const step=request.input.operations.steps[index],binding=request.operationBindings[index];

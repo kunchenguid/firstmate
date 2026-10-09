@@ -3,9 +3,9 @@
 // status <id> | result <id> | cancel <id> | reconcile | settle-merge <id> <index>:<merge-commit> |
 // settle-cleanup <id> <index>.
 // Requires explicit FM_HOME.
-// Request: {key, goal, acceptance, provider?, model?, materials:[absolute file], operations?, bash?}.
+// Request: {key, goal, acceptance, materials:[absolute file], operations?, bash?}.
 // Legacy budget fields are accepted and ignored so old callers and v1 records remain readable.
-// Default openai-codex/gpt-5.6-luna; explicit overrides never fall back.
+// config/short-agent.json owns the exact provider/model for new requests.
 // fm-short-operations.mjs owns narrow action schemas and receipt mechanics.
 // Store owner: state/short-agents/short-<sha256(key)>/{request,started,result}.json.
 // Acceptance and terminal results are atomically linked immutable files; the
@@ -20,7 +20,7 @@
 import * as fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { validateOperations, bindOperations, executeOperations, processIdentity, operationReceipts, primaryOwner, reconcileOperationReceipts, settleMergeReceipt, settleArchivedStatusCleanup } from './fm-short-operations.mjs';
@@ -57,9 +57,13 @@ function withoutLegacyBudget(input) {
   const { budget: _ignored, ...current } = input;
   return current;
 }
+function withoutModel(input) {
+  const { provider: _provider, model: _model, ...current } = withoutLegacyBudget(input);
+  return current;
+}
 function requestVersion(request) {
   if (request.version === 1) withoutLegacyBudget(request.input);
-  else if (request.version !== 2 || Object.hasOwn(request.input ?? {}, 'budget')) throw Error('unsupported short-agent request version');
+  else if (![2, 3].includes(request.version) || Object.hasOwn(request.input ?? {}, 'budget')) throw Error('unsupported short-agent request version');
   return request;
 }
 function validateBashGrant(grant, live = true) {
@@ -116,17 +120,19 @@ export function snapshot(filename) {
 export function validate(input, liveBash = true) {
   if (!input || typeof input !== 'object') throw Error('request object required');
   const current = withoutLegacyBudget(input);
+  if (Object.hasOwn(current, 'provider') || Object.hasOwn(current, 'model')) throw Error('provider/model request overrides are unsupported; configure config/short-agent.json');
   const { key, goal, acceptance, materials } = current;
-  const provider = input.provider ?? 'openai-codex';
-  const model = input.model ?? 'gpt-5.6-luna';
   text(key, 'key'); text(goal, 'goal'); text(acceptance, 'acceptance');
-  text(provider, 'provider'); text(model, 'model');
   if (!Array.isArray(materials)) throw Error('material files must be an array');
   for (const file of materials) text(file, 'material');
   const operations = validateOperations(input.operations);
   const bash = validateBashGrant(input.bash, liveBash);
   if (operations && bash) throw Error('bash and fixed operation grants cannot be combined');
-  return { key, goal, acceptance, provider, model, materials, ...(operations ? { operations } : {}), ...(bash ? { bash } : {}) };
+  return { key, goal, acceptance, materials, ...(operations ? { operations } : {}), ...(bash ? { bash } : {}) };
+}
+function validateLegacyRetry(input, liveBash = false) {
+  const current = withoutModel(input);
+  return validate(current, liveBash);
 }
 export function sdkEntry() {
   const candidates = process.env.FM_PI_PACKAGE_DIR ? [process.env.FM_PI_PACKAGE_DIR] :
@@ -185,6 +191,34 @@ export class ShortAgents {
     if (!/^short-[a-f0-9]{64}$/.test(id)) throw Error('invalid short-agent id');
     return path.join(this.store, id);
   }
+  configuredModel() {
+    const configFile = path.join(this.home, 'config/short-agent.json');
+    let config;
+    try { config = json(configFile); }
+    catch (error) {
+      if (error.code === 'ENOENT') throw Error(`short-agent config missing: ${configFile}; create it with exactly provider and model fields`);
+      if (error instanceof SyntaxError) throw Error(`short-agent config malformed JSON: ${configFile}`);
+      throw Error(`short-agent config unreadable: ${configFile}: ${error.message}`);
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config) ||
+        Object.keys(config).length !== 2 || !Object.hasOwn(config, 'provider') || !Object.hasOwn(config, 'model')) {
+      throw Error(`short-agent config must contain exactly provider and model fields: ${configFile}`);
+    }
+    const provider = text(config.provider, 'configured provider'), model = text(config.model, 'configured model');
+    let available;
+    try {
+      available = JSON.parse(execFileSync(process.execPath, [script, 'models'], {
+        env: process.env, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024,
+      }));
+    } catch (error) {
+      const detail = String(error.stderr ?? error.message).trim().slice(0, 512);
+      throw Error(`short-agent could not validate configured model through installed Pi runtime: ${detail}`);
+    }
+    if (!Array.isArray(available) || !available.some(item => item?.provider === provider && item?.model === model)) {
+      throw Error(`configured short-agent model ${provider}/${model} is unavailable in the installed Pi runtime or authentication; run 'node bin/fm-short-agent.mjs models' and update ${configFile}`);
+    }
+    return { provider, model };
+  }
   submit(raw, launch = true) {
     const began = performance.now();
     if (!raw || typeof raw !== 'object') throw Error('request object required');
@@ -193,31 +227,38 @@ export class ShortAgents {
     const old = optional(path.join(dir, 'request.json'));
     if (old) {
       requestVersion(old);
-      const input = validate(raw, false);
-      if (JSON.stringify(withoutLegacyBudget(old.input)) !== JSON.stringify(input)) throw Error('duplicate key has different request');
+      if (old.version >= 3 && (Object.hasOwn(raw, 'provider') || Object.hasOwn(raw, 'model'))) {
+        throw Error('provider/model request overrides are unsupported; configure config/short-agent.json');
+      }
+      if (old.version < 3 && Object.hasOwn(raw, 'provider') && raw.provider !== old.input.provider) throw Error('duplicate key has different request');
+      if (old.version < 3 && Object.hasOwn(raw, 'model') && raw.model !== old.input.model) throw Error('duplicate key has different request');
+      const input = validateLegacyRetry(raw, false);
+      if (JSON.stringify(withoutModel(old.input)) !== JSON.stringify(input)) throw Error('duplicate key has different request');
       return { ...this.status(id), duplicate: true, submitMs: performance.now() - began };
     }
-    const input = validate(raw);
+    const callerInput = validate(raw), configured = this.configuredModel();
+    const input = { ...callerInput, ...configured };
     const materials = input.materials.map((file, index) => ({ id: `m${index + 1}`, ...snapshot(file) }));
     if (input.bash) primaryOwner(this.home);
     const operationBindings = bindOperations(this.home, input.operations);
     const bashBinding = bindBashGrant(input.bash);
-    const request = { version: 2, id, input, materials, ...(operationBindings ? { operationBindings } : {}), ...(bashBinding ? { bashBinding } : {}), acceptedAt: Date.now(), nonce: randomUUID(), sdk: sdkEntry() };
+    const request = { version: 3, id, input, materials, ...(operationBindings ? { operationBindings } : {}), ...(bashBinding ? { bashBinding } : {}), acceptedAt: Date.now(), nonce: randomUUID(), sdk: sdkEntry() };
     if (!publish(path.join(dir, 'request.json'), request)) return this.submit(raw, false);
     if (launch) {
-      // No model or SDK initialization occurs on the submit path.
+      // Availability was validated before acceptance; task execution still
+      // starts only in this detached child.
       const child = spawn(process.execPath, [script, '_run', this.home, id], {
         cwd: dir, detached: true, stdio: 'ignore', env: process.env,
       });
       child.on('error', () => this.finish(id, 'interrupted', 'child could not start'));
       child.unref();
     }
-    return { id, state: 'accepted', acceptedAt: request.acceptedAt, submitMs: performance.now() - began, evidence: dir };
+    return { id, state: 'accepted', ...configured, acceptedAt: request.acceptedAt, submitMs: performance.now() - began, evidence: dir };
   }
   finish(id, state, summary, extra = {}) {
     if (!['completed', 'blocked', 'cancelled', 'timeout', 'interrupted', 'budget'].includes(state)) throw Error('invalid terminal state');
-    const dir = this.dir(id); json(path.join(dir, 'request.json'));
-    publish(path.join(dir, 'result.json'), { id, state, summary: String(summary), finishedAt: Date.now(), evidence: dir, ...extra });
+    const dir = this.dir(id), request = requestVersion(json(path.join(dir, 'request.json')));
+    publish(path.join(dir, 'result.json'), { id, state, summary: String(summary), provider: request.input.provider, model: request.input.model, finishedAt: Date.now(), evidence: dir, ...extra });
     return json(path.join(dir, 'result.json'));
   }
   status(id) {
@@ -226,7 +267,7 @@ export class ShortAgents {
     if (result) {
       if (r.input.operations) return { ...result, operations: operationReceipts(dir).map(({ index, action, state }) => ({ index, action, state })) };
       if (r.input.bash) return { ...result, bash: bashEvidence(dir) };
-      return result;
+      return { provider: r.input.provider, model: r.input.model, ...result };
     }
     const started = optional(path.join(dir, 'started.json'));
     let beat = started?.at ?? r.acceptedAt;
@@ -237,7 +278,7 @@ export class ShortAgents {
         return this.finish(id, 'completed', 'All granted steps have verified owner receipts; the final model response was unavailable.');
       return this.finish(id, 'interrupted', 'child lease expired; execution was not replayed; inspect any operation or Bash intents and receipts');
     }
-    return { id, state: started ? 'running' : 'accepted', acceptedAt: r.acceptedAt, evidence: dir };
+    return { id, state: started ? 'running' : 'accepted', provider: r.input.provider, model: r.input.model, acceptedAt: r.acceptedAt, evidence: dir };
   }
   cancel(id) {
     const dir = this.dir(id), request = json(path.join(dir, 'request.json'));
@@ -495,7 +536,7 @@ async function main() {
   const [command, arg, id] = process.argv.slice(2);
   if (command === '_run') return run(arg, id);
   if (command === '--help') {
-    console.log('FM_HOME=/absolute/home node bin/fm-short-agent.mjs models|submit request.json|status id|result id|cancel id|reconcile|settle-merge id index:expected-merge-commit|settle-cleanup id index\nRequest: key, goal, acceptance, optional provider/model (default openai-codex/gpt-5.6-luna), materials (canonical single-link regular files), and either optional fixed operations or optional bash {authority, cwd, scope, exclusions, expiresAt}. Bash uses Pi native Bash in the exact canonical cwd; it is not a path sandbox, so scope and exclusions remain explicit authorization constraints and must not bypass existing merge, sync, cleanup, discard, credential, security, or restart owners. Bash and fixed operations cannot be combined. Legacy budget fields are accepted but ignored. settle-merge is a MAIN-owned, readback-only recovery for a dead Codebase merge executor with an exact retained effect and reservations; it requires an independently observed merge commit and never runs later steps. settle-cleanup is MAIN-owned continuation for an exact archived historical cleanup with the legacy runner-owned effect marker and status refusal plus independent current owner evidence that its endpoint is absent and its copy retained; it preserves the failed result, revalidates task/generation/resource identity and current readback, finishes only idempotent owner bookkeeping, and refuses live, changed, present-endpoint, cross-task-blocked, captain-held, or uncertain evidence. Firstmate applies no wall-clock, request, tool-call, captured-input, or output budget; provider and model context limits still apply. No terminal, worktree, or parent history is inherited.');
+    console.log('FM_HOME=/absolute/home node bin/fm-short-agent.mjs models|submit request.json|status id|result id|cancel id|reconcile|settle-merge id index:expected-merge-commit|settle-cleanup id index\nNew-request model selection comes only from FM_HOME/config/short-agent.json containing exactly {"provider":"...","model":"..."}; submit rejects provider/model fields. Request: key, goal, acceptance, materials (canonical single-link regular files), and either optional fixed operations or optional bash {authority, cwd, scope, exclusions, expiresAt}. Bash uses Pi native Bash in the exact canonical cwd; it is not a path sandbox, so scope and exclusions remain explicit authorization constraints and must not bypass existing merge, sync, cleanup, discard, credential, security, or restart owners. Bash and fixed operations cannot be combined. Legacy budget fields are accepted but ignored. settle-merge is a MAIN-owned, readback-only recovery for a dead Codebase merge executor with an exact retained effect and reservations; it requires an independently observed merge commit and never runs later steps. settle-cleanup is MAIN-owned continuation for an exact archived historical cleanup with the legacy runner-owned effect marker and status refusal plus independent current owner evidence that its endpoint is absent and its copy retained; it preserves the failed result, revalidates task/generation/resource identity and current readback, finishes only idempotent owner bookkeeping, and refuses live, changed, present-endpoint, cross-task-blocked, captain-held, or uncertain evidence. Firstmate applies no wall-clock, request, tool-call, captured-input, or output budget; provider and model context limits still apply. No terminal, worktree, or parent history is inherited.');
     return;
   }
   if (command === 'models') {
