@@ -122,6 +122,36 @@ sha256_file() {
   fi
 }
 
+# Drive the real delta-reader executable across its unchanged-file wait.
+# The recording sleep appends a complete line after the initial empty snapshot,
+# so the next snapshot must deliver it without consuming or modifying the log.
+delta_cadence_case() {
+  local label=$1 override=$2 expected=$3 dir log empty_hash
+  dir="$TMP_ROOT/delta-$label"
+  mkdir -p "$dir/bin" "$dir/home/state"
+  log="$dir/home/state/replies.status"
+  : > "$log"
+  empty_hash=$(sha256_file "$log")
+  cat > "$dir/bin/sleep" <<'SH'
+#!/bin/bash
+printf '%s\n' "$1" >> "$FM_DELTA_SLEEP_LOG"
+printf 'cadence-delivered\n' >> "$FM_DELTA_APPEND_LOG"
+exec /bin/sleep "$@"
+SH
+  chmod +x "$dir/bin/sleep"
+  FM_HOME="$dir/home" PATH="$dir/bin:$PATH" FM_REMOTE_DELTA_POLL_SECONDS="$override" \
+    FM_DELTA_SLEEP_LOG="$dir/sleeps" FM_DELTA_APPEND_LOG="$log" \
+    "$BASH" "$ROOT/bin/fm-remote-delta-read.sh" state/replies.status 0 "$empty_hash" 30 \
+    > "$dir/result" || fail "$label delta reader failed"
+  [ "$(cat "$dir/sleeps")" = "$expected" ] || fail "$label delta reader did not wait $expected seconds"
+  assert_grep 'status=delta' "$dir/result" "$label delta reader did not publish a delta"
+  assert_grep 'cadence-delivered' "$dir/result" "$label delta reader lost the appended complete line"
+  [ "$(cat "$log")" = cadence-delivered ] || fail "$label delta reader changed its source log"
+  pass "$label delta reader waits $expected seconds then delivers a non-destructive complete-line delta"
+}
+delta_cadence_case default '' 0.5
+delta_cadence_case override 0.07 0.07
+
 ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
@@ -627,6 +657,19 @@ assert_grep 'report=data/remote-secondmates/ios/data/reply/writefail.md' "$PAREN
 mirrored_cursor_is_current "the recovered delta did not advance the cursor"
 pass "a failed mirror write never drops status content or advances the cursor"
 
+# The whole-log recapture re-fetches every document the log offers, one remote
+# job at a time, so it needs far more than one await_reply_result budget on a
+# loaded runner. Each attempt is a full wait that re-checks ownership of the
+# source, so the recapture is bounded by RECAPTURE_WAIT_ATTEMPTS of them.
+RECAPTURE_WAIT_ATTEMPTS=3
+await_recapture_result() { # <result-path>
+  local attempt
+  for attempt in $(seq 1 "$RECAPTURE_WAIT_ATTEMPTS"); do
+    await_reply_result "$1" && return 0
+  done
+  return 1
+}
+
 # A source line remains the replay identity even when document availability
 # changes between a successful mirror append and a failed ingestion commit.
 REPLAY_LINE='needs-decision [key=replay-decision]: pick report=data/reply/replay.md'
@@ -673,7 +716,7 @@ assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" $'repl
 stop_reply_listener || fail "the reply listener did not stop before the cursor-loss recapture"
 rm -f "$PARENT/state/remote-replies/ios.cursor"
 GEN=$((GEN + 1))
-await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+await_recapture_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
   || fail "the replay-identity whole-log recapture was not captured"
 assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
   "the replay-identity whole-log recapture was not applied"
@@ -694,6 +737,9 @@ pass "source-line identity survives commit failure and cursor-loss recapture"
 # the reserved key over.
 # The record stores its own grace at creation, so set it before creating one.
 export FM_PENDING_REPLY_GRACE_SECS=0
+# Answer the mate's earlier decisions and blocker first: a recovery repost waits
+# while the mate has one of its own open (tests/fm-pending-reply.test.sh).
+printf 'resolved [key=%s]: answered\n' rough-cut-version ctl default >> "$PARENT/state/ios.status"
 ESCALATED_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios 'confirm the notarization')
 [ -n "$ESCALATED_CORR" ] || fail "could not create the pending-reply record to escalate"
 fm_pending_reply_mark_delivered "$PARENT/state" "$ESCALATED_CORR" \
@@ -934,7 +980,7 @@ mv "$PARENT/state/.wake-queue" "$TMP_ROOT/wake-queue-before-replay" 2>/dev/null 
 stop_reply_listener || fail "the reply listener did not stop before the whole-log recapture"
 rm -f "$PARENT/state/remote-replies/ios.cursor"
 GEN=$((GEN + 1))
-await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+await_recapture_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
   || fail "the cursor-loss recapture was not captured"
 assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
   "the whole-log recapture was not acknowledged by the adapter"
@@ -978,6 +1024,15 @@ assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-arm
 remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
+first_offset=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
+first_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
+first_prefix=$(printf '%.12s' "$first_hash")
+assert_grep "at offset ${first_offset} prefix ${first_prefix} retirements 0" "$PARENT/state/ios.status" \
+  "continuity break did not record the reader position"
+assert_no_grep "prefix ${first_hash}" "$PARENT/state/ios.status" \
+  "continuity break recorded the full prefix hash"
+assert_absent "$PARENT/state/remote-replies/ios.retirements" \
+  "a route that has never been retired gained a retirement count"
 status_line_at_epoch "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" >/dev/null \
   || fail "new continuity escalation has unknown emission time"
 if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -985,6 +1040,26 @@ if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
   grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status"
 fi
 pass "truncation is detected, escalated once, and not silently rebased"
+
+# The break does not advance the cursor, so a later read of the unchanged
+# remote log reports the same break. An operator resolve in between must not
+# make that repeat look like a new break.
+printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator accepted the break' \
+  >> "$PARENT/state/ios.status"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "operator resolve left the continuity decision open"
+rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
+set +e
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" > "$TMP_ROOT/handle-resolved.out" 2>&1
+handle_rc=$?
+set -e
+[ "$handle_rc" -eq 3 ] || fail "repeated continuity handling returned an unexpected status: $handle_rc"
+remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "a repeated continuity break appended again after the operator resolve"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "a repeated continuity break reopened the decision the operator resolved"
+pass "a repeated continuity break after an operator resolve appends nothing"
 
 rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
@@ -998,8 +1073,229 @@ remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" >/dev/null 2>&1 || [ "$
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
+recorded_retirements=$(cat "$PARENT/state/remote-replies/ios.retirements" 2>/dev/null || true)
+[ "$recorded_retirements" = count=1 ] \
+  || fail "adapter retirement did not record its count (got: ${recorded_retirements:-absent})"
 assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "adapter retirement left a caught-up watermark a later route could inherit"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
+
+# Empty the remote log under the committed cursor and handle the break the
+# next blocking source reports. Sets RESULT_BREAK.
+break_repaired_route() { # <label> [expected-handle-status]
+  local label=$1 expected=${2:-3} runner handle_rc
+  stop_reply_listener || fail "the reply listener did not stop before the $label continuity break"
+  : > "$REMOTE/state/parent-replies.status"
+  GEN=$((GEN + 1))
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-$label-break.out" 2>&1 &
+  runner=$!
+  wait "$runner" || fail "the $label continuity break was not captured"
+  RESULT_BREAK=$(find "$PARENT/state/procevent-inbox" -name "$SID.$GEN.result" -print -quit)
+  [ -n "$RESULT_BREAK" ] || fail "the $label continuity break produced no durable result"
+  [ "$(remote_env "$ADAPTER" classify "$RESULT_BREAK")" = continuity-broken ] \
+    || fail "the $label truncation was not classified as a continuity break"
+  set +e
+  remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_BREAK" > "$TMP_ROOT/handle-$label-break.out" 2>&1
+  handle_rc=$?
+  set -e
+  [ "$handle_rc" -eq "$expected" ] || fail "the $label continuity break returned an unexpected status: $handle_rc"
+}
+
+# Close the open continuity decision, put back the log the cursor was committed
+# against with one more line, and let the reader advance over that line. The
+# route is not retired, so the cursor moves only because new bytes were read.
+resolve_and_extend_route() { # <label> <log-content>
+  local label=$1 content=$2 bytes blocked_before
+  blocked_before=$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")
+  printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator accepted the break' \
+    >> "$PARENT/state/ios.status"
+  printf '%s' "$content" > "$REMOTE/state/parent-replies.status"
+  bytes=$(wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+  remote_env "$ADAPTER" arm ios >/dev/null
+  GEN=$((GEN + 1))
+  await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+    || fail "the route extended after the $label break was not read"
+  assert_grep "offset=$bytes" "$PARENT/state/remote-replies/ios.cursor" \
+    "the route extended after the $label break did not advance the cursor"
+  [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq "$blocked_before" ] \
+    || fail "extending the route after the $label break appended a continuity break"
+  [ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+    || fail "extending the route after the $label break reopened the continuity decision"
+}
+
+# The resolved break above stays closed through an unchanged re-read. Repair
+# the log, let the reader advance, and truncate again. The later break is at
+# another reader position, so its line is new and the decision opens again.
+printf 'working: route restored and readable again\n' > "$REMOTE/state/parent-replies.status"
+restored_bytes=$(wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+remote_env "$ADAPTER" arm ios >/dev/null
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the repaired route was not read"
+assert_grep "offset=$restored_bytes" "$PARENT/state/remote-replies/ios.cursor" \
+  "the repaired route did not advance the cursor"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "repairing the route appended a continuity break"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "repairing the route reopened the continuity decision"
+break_repaired_route "second" 3
+RESULT_SECOND=$RESULT_BREAK
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "a later continuity break after repair appended nothing"
+second_offset=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
+second_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
+second_prefix=$(printf '%.12s' "$second_hash")
+assert_grep "at offset ${second_offset} prefix ${second_prefix} retirements 1" "$PARENT/state/ios.status" \
+  "a later continuity break after repair did not record its reader position"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a later continuity break after repair did not reopen the decision"
+remote_env "$ADAPTER" ingest ios "$RESULT_SECOND" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "a repeated read of the later continuity break appended again"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a repeated read of the later continuity break closed the decision"
+pass "a later continuity break after repair and re-advance opens the decision again"
+
+# A line from before the reader position was recorded names the route and the
+# reason only. It does not match the new line, so this same break appends once.
+awk '
+  /blocked \[key=remote-reply-continuity-ios\]/ {
+    sub(/ at offset [0-9]+ prefix [0-9a-f]+( retirements [0-9]+)?$/, "")
+  }
+  { print }
+' "$PARENT/state/ios.status" > "$TMP_ROOT/ios-status-old-format"
+mv "$TMP_ROOT/ios-status-old-format" "$PARENT/state/ios.status"
+printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator accepted the break' \
+  >> "$PARENT/state/ios.status"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "operator resolve left the old-format continuity decision open"
+set +e
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_SECOND" > "$TMP_ROOT/handle-old-format.out" 2>&1
+handle_rc=$?
+set -e
+[ "$handle_rc" -eq 3 ] || fail "a continuity break after an old-format line returned an unexpected status: $handle_rc"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 3 ] \
+  || fail "a continuity break after an old-format line appended nothing"
+assert_grep "at offset ${second_offset} prefix ${second_prefix} retirements 1" "$PARENT/state/ios.status" \
+  "a continuity break after an old-format line did not record the reader position"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a continuity break after an old-format line did not reopen the decision"
+remote_env "$ADAPTER" ingest ios "$RESULT_SECOND" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 3 ] \
+  || fail "a repeated read after the old-format upgrade appended again"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a repeated read after the old-format upgrade closed the decision"
+pass "an old-format continuity line does not swallow the next break"
+
+# No retirement this time. The cursor leaves the escalated offset only because
+# the reader consumed new bytes, and that alone makes the next break new.
+LOG_RESTORED=$'working: route restored and readable again\n'
+LOG_EXTENDED=$LOG_RESTORED$'working: route extended without retirement\n'
+resolve_and_extend_route "second" "$LOG_EXTENDED"
+break_repaired_route "third" 3
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 4 ] \
+  || fail "a later continuity break after the cursor moved without retirement appended nothing"
+moved_offset=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
+moved_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
+moved_prefix=$(printf '%.12s' "$moved_hash")
+assert_grep "at offset ${moved_offset} prefix ${moved_prefix} retirements 1" "$PARENT/state/ios.status" \
+  "a later continuity break after the cursor moved did not record its reader position"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a later continuity break after the cursor moved without retirement did not reopen the decision"
+pass "a later continuity break after the cursor moves without retirement opens the decision again"
+
+# Retire, put the same bytes back, and break at the same offset. The retirement
+# count makes that line new, so the decision opens once. The repeat stays silent.
+printf '%s\n' 'resolved [key=remote-reply-continuity-ios]: operator accepted the break' \
+  >> "$PARENT/state/ios.status"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "operator resolve left the extended continuity decision open"
+remote_env "$ADAPTER" retire ios >/dev/null
+recorded_retirements=$(cat "$PARENT/state/remote-replies/ios.retirements" 2>/dev/null || true)
+[ "$recorded_retirements" = count=2 ] \
+  || fail "the second retirement did not advance the count (got: ${recorded_retirements:-absent})"
+printf '%s' "$LOG_EXTENDED" > "$REMOTE/state/parent-replies.status"
+remote_env "$ADAPTER" arm ios >/dev/null
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the restored route was not read"
+assert_grep "offset=${moved_offset}" "$PARENT/state/remote-replies/ios.cursor" \
+  "restoring the same bytes did not reach the same offset"
+restored_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
+[ "$restored_hash" = "$moved_hash" ] || fail "restoring the same bytes changed the prefix hash"
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 4 ] \
+  || fail "restoring the same bytes appended a continuity break"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "restoring the same bytes reopened the continuity decision"
+break_repaired_route "retired-same" 3
+RESULT_RETIRED=$RESULT_BREAK
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 5 ] \
+  || fail "a continuity break after an identical restore appended nothing"
+assert_grep "at offset ${moved_offset} prefix ${moved_prefix} retirements 2" "$PARENT/state/ios.status" \
+  "a continuity break after an identical restore did not record the new retirement count"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a continuity break after an identical restore did not reopen the decision"
+remote_env "$ADAPTER" ingest ios "$RESULT_RETIRED" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 5 ] \
+  || fail "a repeated read of the break after an identical restore appended again"
+assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
+  $'remote-reply-continuity-ios\t' \
+  "a repeated read of the break after an identical restore closed the decision"
+pass "a continuity break after retirement and an identical restore opens the decision once"
+
+# A directory cannot be removed by rm without -r, for any user. Retirement must
+# fail and leave the count where it was.
+count_before=$(cat "$PARENT/state/remote-replies/ios.retirements")
+rm -f "$PARENT/state/remote-replies/ios.cursor"
+mkdir "$PARENT/state/remote-replies/ios.cursor"
+set +e
+remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-cursor-stuck.out" 2>&1
+retire_rc=$?
+set -e
+[ "$retire_rc" -ne 0 ] || fail "retirement reported success when the cursor could not be removed"
+assert_grep 'cannot remove remote reply cursor' "$TMP_ROOT/retire-cursor-stuck.out" \
+  "retirement did not report the failed cursor removal"
+[ "$(cat "$PARENT/state/remote-replies/ios.retirements")" = "$count_before" ] \
+  || fail "a failed cursor removal increased the retirement count"
+[ -d "$PARENT/state/remote-replies/ios.cursor" ] \
+  || fail "a failed cursor removal removed the cursor"
+pass "a failed cursor removal does not increase the retirement count"
+
+# The count write is the step after removal. Stopping there leaves the old count.
+rm -rf "$PARENT/state/remote-replies/ios.cursor"
+printf 'schema=fm-remote-reply-cursor.v1\noffset=1\nprefix_sha256=%064d\n' 0 \
+  > "$PARENT/state/remote-replies/ios.cursor"
+RETIRE_COUNT_FAIL_BIN="$TMP_ROOT/retire-count-fail-bin"
+mkdir -p "$RETIRE_COUNT_FAIL_BIN"
+REAL_MKTEMP=$(command -v mktemp)
+{
+  cat <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */.retirements.XXXXXX) exit 73 ;;
+esac
+SH
+  printf 'exec %q "$@"\n' "$REAL_MKTEMP"
+} > "$RETIRE_COUNT_FAIL_BIN/mktemp"
+chmod +x "$RETIRE_COUNT_FAIL_BIN/mktemp"
+set +e
+PATH="$RETIRE_COUNT_FAIL_BIN:$PATH" remote_env "$ADAPTER" retire ios \
+  > "$TMP_ROOT/retire-count-stopped.out" 2>&1
+retire_rc=$?
+set -e
+[ "$retire_rc" -ne 0 ] || fail "retirement reported success when the count could not be recorded"
+assert_grep 'cannot record remote reply retirement' "$TMP_ROOT/retire-count-stopped.out" \
+  "retirement did not report the failed count write"
+assert_absent "$PARENT/state/remote-replies/ios.cursor" \
+  "a retirement that stopped after removal left the cursor"
+[ "$(cat "$PARENT/state/remote-replies/ios.retirements")" = "$count_before" ] \
+  || fail "a retirement that stopped after removal changed the count"
+pass "a retirement that stops after removing the cursor leaves the old count"
 
 echo "ALL TESTS PASSED"

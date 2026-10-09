@@ -234,6 +234,61 @@ test_pane_hookspath_does_not_reroute_another_repository() {
   pass "a pane GIT_CONFIG hooksPath still chains the repository git is actually in"
 }
 
+test_empty_project_hookspath_runs_no_repository_hook() {
+  local repo hooks err
+  repo="$TMP_ROOT/empty-hookspath"
+  make_repo "$repo"
+  write_marker_hook "$repo/.git/hooks/pre-commit" default-pre-commit
+  git -C "$repo" config core.hooksPath ''
+  hooks="$TMP_ROOT/hooks-empty"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed with an empty core.hooksPath"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  err=$(with_hooks_env "$hooks" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: empty hooksPath' 2>&1) ||
+    fail "a commit in a repo with an empty core.hooksPath was refused: $err"
+  assert_equals "" "$err" "an empty core.hooksPath commit printed errors"
+  [ -f "$repo/default-pre-commit.ran" ] && fail "a repository hook ran although core.hooksPath is empty"
+  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "Co-authored-by: Cursor" \
+    "Cursor trailer survived an empty-hooksPath commit"
+  pass "an empty project core.hooksPath runs no repository hook and still strips the trailer"
+}
+
+test_unresolvable_project_hookspath_still_refuses() {
+  local repo hooks head err
+  repo="$TMP_ROOT/unresolvable-hookspath"
+  make_repo "$repo"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" config core.hooksPath '~fm-no-such-user-6171/hooks'
+  hooks="$TMP_ROOT/hooks-unresolvable"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed with an unresolvable core.hooksPath"
+  head=$(git -C "$repo" rev-parse HEAD)
+  err=$(with_hooks_env "$hooks" git -C "$repo" commit -q -m 'fix: unresolvable hooksPath' 2>&1) &&
+    fail "a commit succeeded although the repository's hooks directory cannot be resolved"
+  assert_contains "$err" "refusing to skip its pre-commit hook" "the refusal did not name the skipped hook"
+  assert_equals 1 "$(printf '%s\n' "$err" | grep -c 'failed to expand user dir')" "git's lookup error was not shown exactly once"
+  assert_equals "$head" "$(git -C "$repo" rev-parse HEAD)" "a refused commit still moved HEAD"
+  pass "an unresolvable project core.hooksPath still refuses the commit"
+}
+
+test_valueless_project_hookspath_still_refuses() {
+  local repo hooks head err
+  repo="$TMP_ROOT/valueless-hookspath"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-valueless"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed before the valueless key is written"
+  head=$(git -C "$repo" rev-parse HEAD)
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  printf '[core]\n\thooksPath\n' >>"$repo/.git/config"
+  err=$(with_hooks_env "$hooks" git -C "$repo" commit -q -m 'fix: valueless hooksPath' 2>&1) &&
+    fail "a commit succeeded although core.hooksPath has no value"
+  assert_contains "$err" "refusing to skip its pre-commit hook" "the refusal did not name the skipped hook"
+  assert_equals 1 "$(printf '%s\n' "$err" | grep -c "missing value for 'core.hookspath'")" "git's lookup error was not shown exactly once"
+  assert_equals "$head" "$(git -C "$repo" -c core.hooksPath=x rev-parse HEAD)" "a refused commit still moved HEAD"
+  pass "a valueless project core.hooksPath still refuses the commit"
+}
+
 write_refusing_pre_push() {  # <path> <marker>
   cat >"$1" <<SH
 #!/usr/bin/env bash
@@ -311,6 +366,9 @@ test_relative_project_hookspath_still_runs
 test_inherited_hookspath_env_does_not_decide_the_chain
 test_project_hook_generated_after_install_still_runs
 test_pane_hookspath_does_not_reroute_another_repository
+test_empty_project_hookspath_runs_no_repository_hook
+test_unresolvable_project_hookspath_still_refuses
+test_valueless_project_hookspath_still_refuses
 test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
 test_strip_msgfile_alone_does_not_rewrite_author_fields

@@ -15,7 +15,8 @@
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
 #      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
-#      config/startup-memory-budget, and config/trace-context -
+#      config/startup-memory-budget, config/trace-context, and
+#      config/supervision-host-off -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
 #      presentation choice, startup-memory budget, and trace context inherit the
@@ -252,16 +253,17 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+[ -n "${FM_TEST_PS_LOG:-}" ] && printf '%s:%s\n' "$pid" "$field" >> "$FM_TEST_PS_LOG"
 case "$pid:$field" in
   4242:comm=) printf '%s\n' '/opt/test/bin/codex' ;;
   4242:args=) printf '%s\n' 'codex' ;;
   4242:ppid=) printf '%s\n' 1 ;;
-  5252:comm=) printf '%s\n' '-codex' ;;
-  5252:args=) printf '%s\n' '-codex' ;;
-  5252:ppid=) printf '%s\n' 1 ;;
+  5252:comm=) if [ -n "${FM_TEST_PS_LIVENESS_PROBE:-}" ]; then printf '%s\n' '-codex'; else printf '%s\n' '-zsh'; fi ;;
+  5252:args=) if [ -n "${FM_TEST_PS_LIVENESS_PROBE:-}" ]; then printf '%s\n' '-codex'; else printf '%s\n' '-zsh'; fi ;;
+  5252:ppid=) printf '%s\n' 4242 ;;
   *:comm=) printf '%s\n' '-zsh' ;;
   *:args=) printf '%s\n' '-zsh' ;;
-  *:ppid=) printf '%s\n' 4242 ;;
+  *:ppid=) printf '%s\n' "${FM_TEST_PS_PARENT:-4242}" ;;
 esac
 SH
   chmod +x "$fakebin/ps"
@@ -278,8 +280,20 @@ SH
   [ "$got" = 4242 ] || fail "session-lock dash-leading ancestry selected '$got', expected pid 4242"
   [ ! -s "$err" ] || fail "session-lock ancestry wrote basename option noise for literal -zsh: $(cat "$err")"
 
+  # Force the collision: pid 5252 is a real ancestor of the caller. Its
+  # -codex label belongs to the liveness probe only, so the walk must pass
+  # through it as an ordinary shell and still select 4242.
+  err="$dir/fm-session-lock-ancestry-collision.err"
+  collision_log="$dir/fm-session-lock-ancestry-collision.log"
+  got=$(FM_TEST_PS_PARENT=5252 FM_TEST_PS_LOG="$collision_log" PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT" 2>"$err")
+  [ "$got" = 4242 ] || fail "session-lock ancestry with pid 5252 as a real ancestor selected '$got', expected pid 4242"
+  assert_contains "$(cat "$collision_log")" "5252:" \
+    "session-lock collision ancestry did not query pid 5252"
+  [ ! -s "$err" ] || fail "session-lock collision ancestry wrote noise: $(cat "$err")"
+
   err="$dir/fm-session-lock-alive.err"
-  PATH="$fakebin:$BASE_PATH" bash -c \
+  FM_TEST_PS_LIVENESS_PROBE=1 PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 5252' \
     "$ROOT" 2>"$err"; status=$?
   expect_code 0 "$status" "session-lock liveness should accept literal -codex as a harness process name"
@@ -395,17 +409,26 @@ test_propagate_lib() {
   [ "$(cat "$d/home2/config/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
   [ "$(cat "$d/home2/config/backend")" = herdr ] || fail "backend not propagated alongside"
 
-  # 5b. supervision-host is each home's own posture: a primary's off opt-out
-  # never reaches a secondmate, and a secondmate's own file survives a
-  # convergence where the primary has none
-  printf 'off\n' > "$src/supervision-host"
-  propagate_inheritable_config "$src" "$d/home2/config"
-  [ -e "$d/home2/config/supervision-host" ] && fail "a primary's off supervision-host was inherited (must not be)"
+  # 5b. the supervision-host opt-out is inherited and primary-authoritative,
+  # while each home's engine line stays its own: the primary's off reaches the
+  # secondmate and the real gate reads that home as off on a Claude primary
+  # despite its own engine line; clearing the primary's off converges it back on.
+  printf 'claude sonnet\n' > "$src/supervision-host"
   printf 'default haiku\n' > "$d/home2/config/supervision-host"
-  rm -f "$src/supervision-host"
+  : > "$src/supervision-host-off"
   propagate_inheritable_config "$src" "$d/home2/config"
+  [ -f "$d/home2/config/supervision-host-off" ] || fail "a primary's supervision-host-off was not inherited"
+  if bash "$ROOT/bin/fm-supervision-engine-lib.sh" enabled "$d/home2/config" claude; then
+    fail "a secondmate that inherited the primary's opt-out still runs the supervision host"
+  fi
+  rm -f "$src/supervision-host-off"
+  propagate_inheritable_config "$src" "$d/home2/config"
+  [ -e "$d/home2/config/supervision-host-off" ] && fail "clearing the primary's supervision-host-off was not mirrored downstream"
+  bash "$ROOT/bin/fm-supervision-engine-lib.sh" enabled "$d/home2/config" claude \
+    || fail "a secondmate did not converge back on once the primary cleared its opt-out"
   [ "$(cat "$d/home2/config/supervision-host" 2>/dev/null)" = 'default haiku' ] \
-    || fail "a secondmate's own supervision-host was changed by convergence"
+    || fail "a secondmate's own supervision-host engine line was changed by convergence"
+  rm -f "$src/supervision-host"
 
   # 6. nothing to propagate -> destination dir is never created (a true no-op)
   rm -rf "$d/src3" "$d/dest3"
@@ -508,6 +531,7 @@ test_spawn_split_and_inherit() {
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
+  : > "$w/home/config/supervision-host-off"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
@@ -526,6 +550,11 @@ test_spawn_split_and_inherit() {
     || fail "split: home backend not inherited as zellij"
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
+  [ -f "$sm/config/supervision-host-off" ] \
+    || fail "split: home supervision-host-off not inherited"
+  if bash "$ROOT/bin/fm-supervision-engine-lib.sh" enabled "$sm/config" claude; then
+    fail "split: a secondmate spawned under an opted-out primary still runs the supervision host"
+  fi
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
 }
 
