@@ -1820,6 +1820,75 @@ test_legacy_stamp_on_an_armed_poll_record_stays_identity_parseable() {
   pass "a legacy teardown stamp on an armed-poll record lands before the identity block, keeping it parseable"
 }
 
+# Override fakebin/cp so ONLY the armed-poll stamp's pre-stamp backup creation
+# fails (the copy whose DESTINATION is the .legacy-prestamp file); every other
+# cp in the lifecycle still runs the real binary.
+add_failing_legacy_stamp_backup() {
+  local case_dir=$1 real_cp
+  real_cp=$(command -v cp)
+  cat > "$case_dir/fakebin/cp" <<SH
+#!/usr/bin/env bash
+last_operand() {
+  local last=
+  while [ \$# -gt 0 ]; do
+    case "\$1" in
+      --) shift; while [ \$# -gt 0 ]; do last=\$1; shift; done ;;
+      -*) shift ;;
+      *) last=\$1; shift ;;
+    esac
+  done
+  printf '%s' "\$last"
+}
+case "\$(last_operand "\$@")" in *.legacy-prestamp) exit 1 ;; esac
+exec "$real_cp" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/cp"
+}
+
+# When the armed-poll stamp's backup copy itself fails, the record was never
+# written, so teardown must refuse without claiming a rollback failed (that
+# message tells the operator to reconcile the endpoint and re-run with
+# --legacy-record, a detour a plain retry does not need), must leave the record
+# byte-identical with no stray backup, and a plain retry must then succeed.
+test_legacy_stamp_backup_failure_leaves_the_record_untouched_without_a_rollback_error() {
+  local case_dir rc before url head
+  case_dir=$(make_case legacy-backup-fail)
+  write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  url=https://github.com/example/repo/pull/99
+  head=0123456789abcdef0123456789abcdef01234567
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$case_dir/state/task-x1.meta"
+  : > "$case_dir/state/task-x1.check.sh"
+  seed_backlog_in_flight "$case_dir"
+  before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
+  add_failing_legacy_stamp_backup "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-backup-fail: a failed pre-stamp backup must refuse the teardown"
+  grep -q "could not stamp the accepted legacy incarnation" "$case_dir/stderr" \
+    || fail "legacy-backup-fail: the refusal did not name the failed stamp: $(cat "$case_dir/stderr")"
+  if grep -q "could not be rolled back" "$case_dir/stderr"; then
+    fail "legacy-backup-fail: an unwritten stamp was reported as an unrecoverable rollback: $(cat "$case_dir/stderr")"
+  fi
+  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
+    || fail "legacy-backup-fail: the failed backup attempt modified the task record"
+  assert_absent "$case_dir/state/task-x1.meta.legacy-prestamp" \
+    "legacy-backup-fail: a stray pre-stamp backup was left behind"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "legacy-backup-fail: the refusal closed the backlog item anyway"
+
+  rm -f "$case_dir/fakebin/cp"
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "legacy-backup-fail: the plain retry did not succeed: $(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-backup-fail: the retry left the leftover record"
+  [ "$(backlog_row_state "$case_dir")" = done ] \
+    || fail "legacy-backup-fail: the retry did not close the backlog item"
+  pass "a failed pre-stamp backup refuses without a false rollback error, leaves the record untouched, and a plain retry succeeds"
+}
+
 test_legacy_record_never_accepts_a_corrupt_spawn_gen() {
   local case_dir rc
   case_dir=$(make_case legacy-corrupt)
@@ -4762,6 +4831,7 @@ test_legacy_record_teardown_refuses_an_ambiguous_endpoint
 test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails
 test_retained_legacy_stamp_still_faces_the_endpoint_gate
 test_legacy_stamp_on_an_armed_poll_record_stays_identity_parseable
+test_legacy_stamp_backup_failure_leaves_the_record_untouched_without_a_rollback_error
 test_legacy_record_never_accepts_a_corrupt_spawn_gen
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

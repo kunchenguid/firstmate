@@ -546,6 +546,7 @@ TEARDOWN_LEGACY_ENDPOINT=
 TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_LEGACY_PRESTAMP_BACKUP=
+TEARDOWN_LEGACY_STAMP_WRITTEN=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 TEARDOWN_WINDOWLESS=0
@@ -3483,8 +3484,17 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
 # pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
 # (truncate is not, and is absent on stock macOS) - and verifies the restored
 # size before reporting success, so a rollback that cannot be proven complete
-# is reported as not rolled back.
+# is reported as not rolled back. A stamp attempt that never wrote to the
+# record (its backup copy or staging failed first) has nothing to roll back,
+# so it only drops any backup it left and reports success.
 teardown_legacy_stamp_rollback() {
+  if [ "$TEARDOWN_LEGACY_STAMP_WRITTEN" != 1 ]; then
+    if [ -n "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" ]; then
+      rm -f -- "$TEARDOWN_LEGACY_PRESTAMP_BACKUP"
+      TEARDOWN_LEGACY_PRESTAMP_BACKUP=
+    fi
+    return 0
+  fi
   if [ -n "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" ] && [ -f "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" ]; then
     # An armed-poll record was stamped by inserting before the identity block,
     # a rewrite a byte-size truncate cannot recover, so restore the exact
@@ -3509,6 +3519,7 @@ teardown_legacy_stamp_rollback() {
   # abandoned attempt left behind.
   if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
     TEARDOWN_LEGACY_STAMP_FAILED=
+    TEARDOWN_LEGACY_STAMP_WRITTEN=0
     # A record that carries an armed poll (a pr= line) must keep its identity
     # block last for fm_pr_metadata_identity_parse, so its stamp is inserted
     # BEFORE the block rather than appended; that is a rewrite a byte-size
@@ -3517,6 +3528,7 @@ teardown_legacy_stamp_rollback() {
     # append, which the pre-stamp byte size restores.
     if ! grep -q '^pr=' "$META" 2>/dev/null; then
       TEARDOWN_LEGACY_PRESTAMP_SIZE=$(wc -c < "$META" | tr -d ' ')
+      TEARDOWN_LEGACY_STAMP_WRITTEN=1
       if [ -s "$META" ] && [ -n "$(tail -c 1 -- "$META" 2>/dev/null)" ]; then
         printf '\n' >> "$META" || TEARDOWN_LEGACY_STAMP_FAILED=newline
       fi
@@ -3540,7 +3552,7 @@ teardown_legacy_stamp_rollback() {
               { print }
             ' "$META" > "$TEARDOWN_LEGACY_STAMP_TMP" \
             || ! chmod "${TEARDOWN_LEGACY_STAMP_MODE:-600}" "$TEARDOWN_LEGACY_STAMP_TMP" \
-            || ! mv -f -- "$TEARDOWN_LEGACY_STAMP_TMP" "$META"; then
+            || { TEARDOWN_LEGACY_STAMP_WRITTEN=1; ! mv -f -- "$TEARDOWN_LEGACY_STAMP_TMP" "$META"; }; then
             rm -f -- "$TEARDOWN_LEGACY_STAMP_TMP"
             TEARDOWN_LEGACY_STAMP_FAILED=insert
           fi
