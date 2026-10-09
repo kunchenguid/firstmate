@@ -147,7 +147,7 @@ The probe verifies the executable, SG Deep Research agent and raw-session-list r
 
 Before dispatch, create the ordinary private task directory and `brief.md`, then put the instruction in a non-symlinked `0600` or `0400` file below `data/<id>/`.
 The default instruction bound is 262144 bytes (`FM_REMOTE_MAX_INSTRUCTION_BYTES`).
-Submission uses the official domain-restricted `bytedcli --as user mcp --allow-domains ida` server and its `run_command` tool to invoke `ida --region sg deep-research create`.
+Submission uses the official domain-restricted `BYTECLOUD_AUTH_AS=user bytedcli mcp --allow-domains ida` server and its `run_command` tool to invoke `ida --region sg deep-research create`.
 `bin/fm-bytedcli-mcp-call.sh` constructs that command inside a mode-`0600` stdin request so prompt bytes do not enter operating-system argv.
 Raw session list, session get, and cancellation use official `bytedcli --json --as user ida --region sg ...` commands.
 Every iDA-owned bytedcli child resolves the executable from the current `PATH` or the standard user-global npm launcher at `$HOME/.npm-global/bin/bytedcli`, then unsets conventional upper- and lower-case proxy variables because ambient proxies can divert the SG identity endpoint through an incompatible route; this lookup and sanitation are child-local and preserve all unrelated operator environment.

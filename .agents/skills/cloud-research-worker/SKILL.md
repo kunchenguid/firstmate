@@ -104,7 +104,7 @@ Pass `--model <name>` only on `bin/fm-task-dispatch.sh remote-agent/ida` when th
 The dispatcher validates an explicit name against the current official SG model list before task publication or provider mutation, while legacy config model fields never select a new task model.
 Do not pin or refresh a bytedcli version for iDA.
 A legacy `bytedcli_version` in config or durable iDA task state is readable informational metadata only; absence, staleness, and mismatch never block any lifecycle operation.
-The adapter submits only through official domain-restricted `bytedcli --as user mcp --allow-domains ida` and `run_command`, with `ida --region sg deep-research create` constructed inside a mode-`0600` stdin request so private arguments never enter argv.
+The adapter submits only through official domain-restricted `BYTECLOUD_AUTH_AS=user bytedcli mcp --allow-domains ida` and `run_command`, with `ida --region sg deep-research create` constructed inside a mode-`0600` stdin request so private arguments never enter argv.
 Provider reads and cancellation use the official SG `session raw list`, `session get`, and `chat completion close` surfaces.
 All iDA-owned bytedcli children discard conventional ambient proxy variables because they can misroute SG identity, without changing the operator's environment.
 

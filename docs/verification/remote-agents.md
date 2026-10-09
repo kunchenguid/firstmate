@@ -9,6 +9,7 @@ Historical and provider-specific AIME proof remains in [`aime-cloud-worker.md`](
 The base lifecycle was re-verified on 2026-08-24 with installed `bytedcli` 0.130.0.
 Model selection was re-verified on 2026-08-25 with installed `bytedcli` 0.131.0.
 Task-bound terminal and non-empty result readback were re-verified on 2026-08-26 with installed `bytedcli` 0.131.0.
+MCP capability response handling was re-verified on 2026-10-09 with installed `bytedcli` 0.165.0.
 Those versions identify this evidence only; iDA setup and execution do not pin or compare them.
 The read-only base surfaces were:
 
@@ -17,8 +18,8 @@ bytedcli --json --version
 bytedcli --json --as user ida --region sg agent get
 bytedcli --json --as user ida --region sg session raw list --agent-id 14638 --page-size 1
 bytedcli mcp --help
-bytedcli --as user mcp --allow-domains ida
-bytedcli --as user mcp --allow-domains ida --all-tools
+BYTECLOUD_AUTH_AS=user bytedcli mcp --allow-domains ida
+BYTECLOUD_AUTH_AS=user bytedcli mcp --allow-domains ida --all-tools
 ```
 
 The model-selection commands were:
@@ -29,6 +30,7 @@ env -u http_proxy -u https_proxy -u all_proxy -u no_proxy -u HTTP_PROXY -u HTTPS
 ```
 
 The MCP commands were exercised with bounded stdin JSON-RPC for `tools/list`, `list_commands`, and a read-only `run_command`; no private prompt was used in those capability checks.
+The 2026-10-09 check returned exactly one numeric `id:2` response with a `result.content` text block for `list_commands`; the equivalent `bytedcli --as user mcp` order exited successfully without reading stdin because `mcp` was not its first non-option token.
 The installed help declares optional `--model <name>` as a model name returned by `ida model list`.
 The installed `IdaSendOptions`, create handler, service, and client pass that string through `model` into `llmModel`, while an omitted CLI option remains absent at the command boundary.
 The SG model-list response returned structured model names including `auto`, `usecase-frontend-doubao-seed-2.1-pro`, and `usecase-frontend-deepseek-v4-pro`; the implementation validates the current response rather than pinning this observed list.

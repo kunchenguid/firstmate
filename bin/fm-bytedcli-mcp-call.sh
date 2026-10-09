@@ -157,6 +157,7 @@ if ! printf '%s\n' "$line" | jq -e '
     (.result | type == "object")
     and (.result.content | type == "array")
     and all(.result.content[]; type == "object")
+    and ((.result | has("isError") | not) or (.result.isError | type == "boolean"))
   ' >/dev/null 2>&1; then
   jq -n '{status:"error",data:null,error:{code:"MCP_RESPONSE_INVALID",message:"bytedcli MCP returned an invalid tool result"}}'
   exit 1
