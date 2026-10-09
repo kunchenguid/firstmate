@@ -30,7 +30,10 @@
 #            selector, tag, and text. A non-choice freeform comment (`prompt`)
 #            is printed as its own field even when a selector is also present
 #            and even when that comment matches the element text, so typed
-#            words are never dropped. Choice Context data is not a comment.
+#            words are never dropped. Choice Context data is not a comment,
+#            but a nonempty string `note` or `notes` field inside it is the
+#            captain's note on that answer and is printed as its own `note:`
+#            field after the selected option.
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
 #            are reported explicitly.
@@ -706,14 +709,15 @@ cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 # A non-choice annotation that carries a freeform `prompt` prints that comment
 # as its own field; a selector must not hide the typed words, even when the
 # comment matches the captured element text. Choice rows keep Context data
-# out of that field. A pure annotation has no prompt.
+# out of that field, except the note on the answer, which prints as `note:`.
+# A pure annotation has no prompt.
 cmd_read() {
   local file=${1-} lifecycle session_ended
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  perl -e '
+  perl -MJSON::PP -MB -e '
     use strict; use warnings;
     my ($path, $lifecycle, $session_ended) = @ARGV;
     open my $fh, "<", $path or exit 1;
@@ -831,6 +835,25 @@ cmd_read() {
         if ($tag ne "choice" && length $comment) {
           print "prompt:\n";
           emit_body($comment);
+        }
+        if ($tag eq "choice" && $comment =~ /Context data:\s*(\{.*\})/s) {
+          # allow_bignum keeps a huge number from decoding as a plain string.
+          my $data = eval { JSON::PP->new->allow_bignum->decode($1) };
+          my $note;
+          if (ref($data) eq "HASH") {
+            for my $k ("note", "notes") {
+              my $v = $data->{$k};
+              next unless defined($v) && !ref($v);
+              my $flags = B::svref_2object(\$v)->FLAGS;
+              next unless ($flags & B::SVp_POK) && !($flags & (B::SVp_IOK | B::SVp_NOK)) && length $v;
+              $note = $v;
+              last;
+            }
+          }
+          if (defined $note) {
+            print "note:\n";
+            emit_body($note);
+          }
         }
       }
       print "END ANNOTATIONS\n";
