@@ -46,12 +46,15 @@
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
-# base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
+# GitHub or the GitLab proof reader reports a source head containing the current
+# local work, or its content is already present in the up-to-date target branch.
+# This recognizes squash-merge-then-delete-branch flows, where the branch's own
+# commits live nowhere on a remote yet the change is fully on the target.
+# A verified merged GitLab MR selects its literal target for the independent
+# content check, even when the recorded base was a deleted source branch.
+# Otherwise base_branch= (bin/fm-spawn.sh) selects origin's copy of that named
+# base, or the default branch when no base is recorded. A missing named target
+# refuses rather than guessing another branch; metadata is never rewritten.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -59,14 +62,15 @@
 # accepting unlanded edits to the same paths. Teardown still accepts a merged PR
 # whose head contains the current local work (ancestor or equivalent patch ids),
 # or a clean content-in-default tree match. Anything else refuses.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# The review is resolved from the task's recorded pr= when present. GitLab uses
+# fm-pr-lib.sh's proof reader and origin-identity check; an absent source-head
+# object is recovered only through its exact-SHA task-private MR head fetch.
+# A merged state or merge/squash commit ID alone is never landing proof.
+# With no pr= (e.g. a yolo-authorized GitHub merge with no PR CI), GitHub still
+# looks up a merged PR whose head branch matches the worktree's branch and fetches
+# refs/pull/<n>/head when that branch was deleted. GitLab has no no-URL lookup.
+# A forge lookup error falls back to the independent content check; if that is
+# also inconclusive, teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
@@ -1592,12 +1596,12 @@ pr_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# Is the branch's content already present in the selected target? Fetches first,
+# then 3-way merges that target with HEAD: when HEAD introduces nothing the target
+# does not already contain (e.g. its change landed via squash), the merged tree
+# equals the target's tree. This isolates branch-only changes, so unrelated
+# target commits past the merge-base do not count as "added". The header owns
+# target selection; an unavailable target or merge conflict is inconclusive,
 # so the caller refuses rather than guesses.
 content_in_default() {
   local name=${LANDED_MR_TARGET:-${BASE_BRANCH:-}} ref default_tree merged_tree
@@ -1620,8 +1624,8 @@ content_in_default() {
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# selected target (fallback, which also covers no-PR and forge-error paths).
+# Unlanded work and inconclusive evidence both return false.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0

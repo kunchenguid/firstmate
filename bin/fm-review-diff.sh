@@ -4,8 +4,8 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
-# A task whose meta records base_branch= (bin/fm-spawn.sh) compares against
-# origin/<base_branch> instead of the default branch.
+# Unless a live GitLab target is verified below, base_branch= (bin/fm-spawn.sh)
+# selects origin/<base_branch> instead of the default branch.
 # GitHub PRs use freshly fetched refs/pull/<n>/head; a recorded pr_head= is
 # only a fallback when fetch fails. GitLab MRs use a verified live source SHA
 # and refs/merge-requests/<iid>/head in a task-private ref, against the verified
