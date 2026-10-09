@@ -79,6 +79,16 @@
 # Any other watcher, or one that outlives the stop,
 # is attached to exactly as a plain arm attaches.
 #
+# FM_WATCH_ARM_LEFT_RECORD names the record an owner writes ("<pid>\t...")
+# when it leaves this arm running for main with no one reading its close
+# (bin/fm-supervision-host.sh). While that record names this argument-free
+# arm, a cycle that delivers a wake does not end the arm: the wake is already
+# durable in the queue, so the arm re-executes itself in place as a handling
+# successor (same pid and command line, so --take-over still matches it) and
+# the home keeps a live watcher through main's turn. Any other close, a signal,
+# a record that no longer names this arm, or a 20th consecutive re-arm (a
+# condition that closes every cycle at once must not spin) ends it as usual.
+#
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
 # its own supervision cycle on purpose (the supervision host's park boundary,
 # bin/fm-supervision-host.sh). The stopped watcher publishes downtime exactly
@@ -479,6 +489,9 @@ mode=arm
 handling_generation=
 handling_watcher_pid=
 take_over_arm_pid=
+# Only a plain, argument-free arm can re-arm in place as itself (finish_arm).
+LEFT_ARM_ELIGIBLE=0
+[ "$#" -ne 0 ] || LEFT_ARM_ELIGIBLE=1
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
@@ -596,6 +609,26 @@ take_over_cycle() {  # <watcher-pid> <identity>
   return 0
 }
 
+# End this arm with <status>, unless it is an arm left for main (header,
+# FM_WATCH_ARM_LEFT_RECORD) whose cycle just delivered a wake: nothing reads
+# that close, so it re-arms in place - same pid, same command line - and the
+# home keeps a watcher until the next park takes this arm over.
+finish_arm() {  # <status>
+  local left_pid="" rearms
+  if [ "$1" -eq 0 ] && [ "$LEFT_ARM_ELIGIBLE" -eq 1 ] \
+    && [ -f "${FM_WATCH_ARM_LEFT_RECORD:-}" ] && [ ! -L "$FM_WATCH_ARM_LEFT_RECORD" ]; then
+    IFS=$'\t' read -r left_pid _ < "$FM_WATCH_ARM_LEFT_RECORD" 2>/dev/null || true
+    rearms=${FM_WATCH_ARM_LEFT_REARMS:-0}
+    case "$rearms" in ''|*[!0-9]*) rearms=0 ;; esac
+    if [ "$left_pid" = "$ARM_PID" ] && [ "$rearms" -lt 20 ]; then
+      trap - HUP TERM INT
+      export FM_WATCH_PREDECESSOR_ARM_PID=$ARM_PID FM_WATCH_ARM_LEFT_REARMS=$((rearms + 1))
+      exec "$0"
+    fi
+  fi
+  exit "$1"
+}
+
 TAKEN_OVER=0
 if [ "$mode" = take-over ]; then
   mode=arm
@@ -618,7 +651,7 @@ if [ "$mode" = arm ] && healthy_watcher; then
   cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
   report_attached
   attach_and_wait "$HEALTHY_PID"
-  exit $?
+  finish_arm $?
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
@@ -766,20 +799,20 @@ while :; do
       wait "$child"
       rc=$?
       owned_child_finished "$rc"
-      exit $?
+      finish_arm $?
     fi
     # Another watcher won the singleton; our child stood down.
     wait "$child"
     rc=$?
     owned_child_finished "$rc"
-    exit $?
+    finish_arm $?
   fi
   if [ "$child_done" -eq 0 ] && ! fm_pid_alive "$child"; then
     wait "$child"
     rc=$?
     child_done=1
     owned_child_finished "$rc"
-    exit $?
+    finish_arm $?
   fi
   [ "$(date +%s)" -ge "$deadline" ] && break
   sleep 0.2

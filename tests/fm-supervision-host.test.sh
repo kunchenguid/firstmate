@@ -1075,7 +1075,8 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
   assert_grep 'demo.status' "$home/state/.wake-queue" "the wake must stay queued for main"
   assert_re '	pass-through	attended	the main session could not be identified	signal:' "$home/state/.supervision-host.log" \
     "the ledger must record why the close went to main"
-  pass "host: an attended close whose main session cannot be identified reaches main and runs no engine turn"
+  watcher_live "$home" || fail "unidentified: the pass-through left no successor watcher for main's turn: $(cat "$home/state/.supervision-host.log")"
+  pass "host: an attended close whose main session cannot be identified reaches main, runs no engine turn, and keeps a watcher"
 }
 
 # The close is accepted attended as routine, then its task turns main-only (a
@@ -1489,6 +1490,57 @@ test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end() {
   pass "host+hook: a successor close that lands during main's turn is delivered at the next turn end"
 }
 
+# Run the real Claude turn-end guard as main's Stop would, with no wait for the
+# auto-arm, and succeed only when it allows the stop on a live watcher.
+guard_allows_on_a_live_watcher() {  # <home>
+  local home=$1
+  printf '{"session_id":"sess-host-hook","stop_hook_active":false}\n' \
+    | FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$home/fakebin:$PATH" \
+      FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0 "$home/bin/fm-turnend-guard.sh" --claude > "$home/guard.out" 2> "$home/guard.err" \
+    && [ ! -s "$home/guard.out" ] && [ ! -s "$home/guard.err" ]
+}
+
+# The live gap (2026-10-09): the successor a pass-through left closed on its
+# own wake while main's turn still ran, and its arm, with no reader, ended.
+# No watcher held the home until main's turn ended, so the synchronous Stop
+# guard, which the asynchronous auto-arm had not yet claimed for, judged the
+# turn blind, and the next park's fresh cycle announced that gap to main as a
+# "check: rearm-resurface" wake. The left arm now keeps a watcher on the home
+# through main's turn, so the guard allows the stop on the live watcher alone.
+test_successor_keeps_the_home_watched_after_its_own_close() {
+  local home first arm second drained
+  home=$(make_primary_home hook-successor-rearm)
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "successor rearm: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "successor rearm: the first close never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "successor rearm (first)"
+  first=$(cat "$home/state/.watch.lock/pid")
+  arm=$(parent_of "$first")
+  main_drain "$home" >/dev/null
+  append_status "$home" 'which region?' needs-decision
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$first" || fail "fixture: the successor did not close on the later decision"
+  wait_until 250 bash -c 'p=$(cat "$1" 2>/dev/null) && [ "$p" != "$2" ] && kill -0 "$p" 2>/dev/null' _ "$home/state/.watch.lock/pid" "$first" \
+    || fail "successor rearm: no watcher held the home after the successor's own close during main's turn:"$'\n'"$(cat "$home/state/.supervision-host.log")"$'\n'"$(cat "$home/state/.watch-cycle-exits.log" 2>/dev/null)"
+  second=$(cat "$home/state/.watch.lock/pid")
+  [ "$(parent_of "$second")" = "$arm" ] || fail "successor rearm: the new watcher is not the left arm's own (arm $arm)"
+  # The guard allows on a healthy watcher before anything else, and prints
+  # nothing then; give the new watcher its startup to publish its beacon.
+  wait_until 250 guard_allows_on_a_live_watcher "$home" \
+    || fail "successor rearm: the turn-end guard did not allow main's stop on a live watcher: $(cat "$home/guard.err" "$home/guard.out")"
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "successor rearm: main's acknowledgement failed: $MAIN_ACK"
+  turn_end "$home"
+  wait_until 250 hook_exited "$home" || fail "successor rearm: the next turn end never closed: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "successor rearm (next turn end)"
+  drained=$(main_drain "$home")
+  assert_contains "$drained" 'which region?' "the close the left arm absorbed must reach main's drain"
+  ! kill -0 "$arm" 2>/dev/null || fail "successor rearm: the left arm still runs after the next park took its cycle over"
+  pass "host+hook: the successor a pass-through left keeps the home watched after its own close, and that close still reaches main"
+}
+
 # The live loop (2026-10-07): the successor a main-only pass-through leaves
 # for main shared the Stop hook's process group, so Claude's teardown of that
 # group after the exit-2 rewake stopped it mid-turn. The stop published
@@ -1588,6 +1640,7 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   wait_until 150 host_owns_the_only_cycle "$home" \
     || fail "takeover: the next park did not own the home's only watcher cycle (left arm $left_arm, watcher $left_watcher):"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
   ! kill -0 "$left_arm" 2>/dev/null || fail "takeover: the successor arm a pass-through left still runs (pid $left_arm)"
+  [ ! -e "$home/state/.supervision-host-left" ] || fail "takeover: the record of the arm left for main outlived the take-over: $(cat "$home/state/.supervision-host-left")"
   ! kill -0 "$left_watcher" 2>/dev/null || fail "takeover: the successor watcher still runs (pid $left_watcher)"
   sleep 2
   ! hook_exited "$home" || fail "takeover: the takeover woke main: $(cat "$home/hook.err")"
@@ -2992,6 +3045,7 @@ test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
 test_successor_left_at_the_turn_survives_the_hook_process_group_teardown
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
+test_successor_keeps_the_home_watched_after_its_own_close
 test_pass_through_successor_survives_the_hook_process_group_teardown
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park

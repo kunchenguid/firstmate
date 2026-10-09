@@ -1196,6 +1196,60 @@ test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing() {
   pass "watch-arm: --take-over owns a fresh cycle without a recovery wake and still surfaces queued work"
 }
 
+# An arm its owner left for main (FM_WATCH_ARM_LEFT_RECORD naming it) has no
+# reader for its close. Ending there left the home with no watcher until main's
+# turn ended, so the turn-end guard judged that turn blind and the next park's
+# fresh cycle announced the gap as a recovery wake. While the record names it,
+# the arm re-arms in place after a delivered wake - same pid, a new watcher
+# child, the wake still durable - and once the record stops naming it, the
+# next close ends it as usual.
+test_left_arm_rearms_in_place_after_its_own_close() {
+  local dir state fakebin armout record first second i
+  dir=$(make_case left-arm-rearms)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  record="$dir/left-record"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" FM_WATCH_PREDECESSOR_ARM_PID=$$ \
+    FM_WATCH_ARM_LEFT_RECORD="$record" "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt "$REARM_REPORT_POLLS" ] && ! grep -q '^watcher: started pid=' "$armout" 2>/dev/null; do
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started pid=' "$armout" || fail "the left arm did not start a watcher: $(cat "$armout")"
+  first=$(cat "$state/.watch.lock/pid")
+  printf '%s\tfixture-identity\n' "$ARM_PID" > "$record"
+
+  printf 'done: fixture finished during main turn\n' > "$state/demo.status"
+  wait_for_pid_gone "$first" 200 || fail "fixture: the first watcher did not close on the status change"
+  grep -q 'demo.status' "$state/.wake-queue" || fail "the close was not durably queued, so this case proves nothing"
+  i=0
+  while [ "$i" -lt 300 ]; do
+    second=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$second" ] && [ "$second" != "$first" ] && is_live_non_zombie "$second" && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$ARM_PID" || fail "the left arm ended at its own close, leaving no watcher: $(cat "$armout")"
+  if [ -z "$second" ] || [ "$second" = "$first" ] || ! is_live_non_zombie "$second"; then
+    fail "no watcher holds the home after the left arm's close: lock ${second:-none}"
+  fi
+  [ "$(ps -o ppid= -p "$second" 2>/dev/null | tr -d ' ')" = "$ARM_PID" ] \
+    || fail "the new watcher is not the same arm's child, so a take-over of that arm would not match it"
+  ! grep -q '^check: rearm-resurface' "$armout" || fail "the re-armed cycle announced a recovery wake: $(cat "$armout")"
+
+  rm -f "$record"
+  printf 'done: fixture finished again\n' >> "$state/demo.status"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  expect_code 0 "$?" "an arm no longer named by the record ends at its next delivered close"
+  pass "watch-arm: an arm left for main re-arms in place after its own close while the record names it"
+}
+
 # Pause just after handover releases its snapshot locks, then fail the old
 # watcher's secondmate tick write so it exits through cleanup before TERM lands.
 # The ledger and recovery wake are public output contracts, not source probes.
