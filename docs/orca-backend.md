@@ -65,6 +65,7 @@ After resolving a replacement pane, an inbox ring defers if its composer is unre
 An empty replacement may receive the doorbell text, but never a bare inbox Enter. Any inbox Enter on a replacement leaves the send unconfirmed, stops further Enter attempts in that send, and retains the watcher retry mark for a later poll, even if the Enter was accepted. Sends on the original handle retain their two-Enter budget. Duplicate retries are an accepted cost.
 Draft and busy deferral applies to inbox rings; explicit typed text and Enter retain their existing semantics.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
+If typed submission Enter changes terminal endpoints, verification stops without retyping or further Enter attempts. `fm-send.sh` exits 3 with an unconfirmed-submission message directing the caller to inspect the replacement before deciding whether to resend.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.

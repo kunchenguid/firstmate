@@ -2460,6 +2460,14 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
   while :; do
     key_rc=0
     "$send_key_fn" "$target" Enter "$expected_label" || key_rc=$?
+    if [ -n "$resolved_target_var" ] && [ -n "${!resolved_target_var}" ] && [ "${!resolved_target_var}" != "$target" ]; then
+      if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+        printf 'inbox-deferred'
+      else
+        printf 'endpoint-changed'
+      fi
+      return 0
+    fi
     if [ "$key_rc" -ne 0 ]; then
       if [ "$key_rc" -eq 4 ] && [ -n "$resolved_target_var" ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
         printf 'inbox-deferred'
@@ -2467,9 +2475,6 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
         printf 'send-failed'
       fi
       return 0
-    fi
-    if [ -n "$resolved_target_var" ] && [ -n "${!resolved_target_var}" ]; then
-      target=${!resolved_target_var}
     fi
     sleep "$sleep_s"
     state=$("$state_fn" "$target" "$expected_label")
