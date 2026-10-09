@@ -1497,6 +1497,11 @@ pr_number_from_target() {
 ensure_commit_object() {
   local target=$1 commit=$2 n
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+    fm_pr_gitlab_fetch_head "$WT" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$commit" \
+      "refs/fm-teardown/$ID/merge-request/$FM_PR_NUMBER/head" >/dev/null
+    return $?
+  fi
   n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
   git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
@@ -1536,10 +1541,11 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then from the branch name. GitLab proof
+# verifies the target project, live source head and target branch; GitHub keeps
+# its existing branch lookup. A merged state alone never proves local work.
+# A verified GitLab target is retained for the independent content proof.
+LANDED_MR_TARGET=
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
@@ -1548,13 +1554,24 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  remainder=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  head=${remainder%%$'\t'*}
-  resolved_url=${remainder#*$'\t'}
-  [ "$head" != "$remainder" ] || return 1
+  LANDED_MR_TARGET=
+  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+    fm_pr_gitlab_origin_matches "$WT" "$FM_PR_HOST" "$FM_PR_PATH" || return 1
+    fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" proof || return 1
+    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+    state=merged
+    head=$FM_PR_RECORD_HEAD
+    resolved_url=$FM_PR_RECORD_URL
+    LANDED_MR_TARGET=$FM_PR_RECORD_TARGET
+  else
+    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+    state=${view%%$'\t'*}
+    remainder=${view#*$'\t'}
+    [ "$state" != "$view" ] || return 1
+    head=${remainder%%$'\t'*}
+    resolved_url=${remainder#*$'\t'}
+    [ "$head" != "$remainder" ] || return 1
+  fi
   case "$state" in
     MERGED|merged) ;;
     *) return 1 ;;
@@ -1583,7 +1600,7 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name=${BASE_BRANCH:-} ref default_tree merged_tree
+  local name=${LANDED_MR_TARGET:-${BASE_BRANCH:-}} ref default_tree merged_tree
   [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -3475,6 +3492,11 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
     exit 1
   }
+  if ! fm_backlog_completion_preview "$DATA" "$ID" "$BACKLOG_TRANSITION" \
+      "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
+    echo "error: backlog $BACKLOG_TRANSITION preview for $ID failed ($FM_BACKLOG_TRANSITION_ERROR); preserving task and work before cleanup" >&2
+    exit 1
+  fi
 # Roll the accepted legacy incarnation's stamp back to the record's exact
 # pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
 # (truncate is not, and is absent on stock macOS) - and verifies the restored

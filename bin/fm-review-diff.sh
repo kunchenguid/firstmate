@@ -6,14 +6,12 @@
 # the default branch, and local-only projects against the local default branch.
 # A task whose meta records base_branch= (bin/fm-spawn.sh) compares against
 # origin/<base_branch> instead of the default branch.
-# When state/<id>.meta records pr= as a GitHub pull-request URL or a bare
-# number for an open PR, the compare side is ALWAYS a freshly fetched
-# refs/pull/<n>/head by default so review stays current after no-mistakes fix
-# rounds push to the PR. A recorded pr_head= is only a fallback when fetch fails
-# (stale recorded SHAs must never win over a reachable remote PR head). If
-# neither PR head can be resolved, fall back to the local branch with a warning.
-# A GitLab merge request and a Gerrit change expose no comparable ref and record
-# no pr_head, so a task recording one always takes that warning path;
+# GitHub PRs use freshly fetched refs/pull/<n>/head; a recorded pr_head= is
+# only a fallback when fetch fails. GitLab MRs use a verified live source SHA
+# and refs/merge-requests/<iid>/head in a task-private ref, against the verified
+# target branch. Stale recorded SHAs never outrank verified live evidence.
+# If no review head can be resolved, use the local branch with a warning.
+# Gerrit changes still take that warning path;
 # docs/architecture.md owns that fallback. Without pr=, compare the task's
 # immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
 # created before that field existed), or the worktree's checked-out branch when
@@ -26,6 +24,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -144,7 +144,18 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
-  if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
+  PR_HEAD=
+  if fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+    if fm_pr_gitlab_origin_matches "$WT" "$FM_PR_HOST" "$FM_PR_PATH" \
+      && fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" proof; then
+      DEFAULT=$FM_PR_RECORD_TARGET
+      PR_HEAD=$(fm_pr_gitlab_fetch_head "$WT" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+        "$FM_PR_RECORD_HEAD" "refs/fm-review/$ID/merge-request/$FM_PR_NUMBER/head") || PR_HEAD=
+    fi
+  else
+    PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED") || PR_HEAD=
+  fi
+  if [ -n "$PR_HEAD" ]; then
     COMPARE_REF=$PR_HEAD
   else
     echo "warning: PR head unavailable; diff may lag the open PR (using local branch $BRANCH)" >&2

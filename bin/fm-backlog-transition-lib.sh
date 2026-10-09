@@ -44,8 +44,12 @@
 # `state/<id>.backlog-close` first, and removes it once the close lands.
 # The writer and replay share one complete-record validator, and teardown stages
 # that record before destructive cleanup, so it never publishes or acts on a close
-# replay would reject. The validator pins the data path to this home's configured
-# root before any recovery mutation, then re-runs exactly that close.
+# replay would reject. Structural validation remains independent of consumer
+# compatibility: completion previews use the addressed backend before cleanup,
+# metadata removal or retention writes. A positive preview is not a write
+# guarantee; uncertain or failed writes keep the retry record.
+# The validator pins the data path to this home's configured root before any
+# recovery mutation, then re-runs exactly that close.
 # `tasks-axi done` on an already-closed task backfills links
 # without moving the close date, so replay is idempotent. Spawn needs no marker:
 # it publishes the meta first, so a crash
@@ -500,6 +504,7 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
     out=$(cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" 2>&1)
   fi
   command_status=$?
+  FM_BACKLOG_TRANSITION_OUTPUT=$out
   [ "$command_status" -ne 0 ] || return 0
   FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
   if [ -z "$FM_BACKLOG_TRANSITION_ERROR" ]; then
@@ -516,10 +521,9 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
-# tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change URL is recorded on the row as a
-# note instead. The subshell keeps the parse from overwriting a caller's
-# FM_PR_* identity.
+# Gerrit change URLs are not typed review links in tasks-axi, so they are
+# recorded on the row as a note instead. The subshell keeps the parse from
+# overwriting a caller's FM_PR_* identity.
 fm_backlog_pr_is_gerrit_change() {  # <url>
   ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
 }
@@ -586,6 +590,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     esac
     previous_arg=$arg
   done
+  fm_backlog_completion_preview "$authorized_data" "$id" retain "$@" || return 1
   if [ -n "$deliverable" ]; then
     out=$(fm_backlog_row_show "$data" "$id" --full)
     command_status=$?
@@ -644,6 +649,49 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     fm_backlog_mutate "$authorized_data" update "$id" "${row_args[@]}" || return 1
   fi
   fm_backlog_mutate "$authorized_data" reopen "$id"
+}
+
+# Preview the exact close, or the supported artifacts of a retained captain
+# call, through the same backend addressing and Gerrit translation as writes.
+# The help probe prevents an old consumer from silently ignoring --dry-run;
+# the result must also explicitly prove a read-only operation.
+fm_backlog_completion_preview() {  # <data-dir> <id> <close|retain> [flag...]
+  local data=$1 id=$2 mode=$3 verb arg previous='' output
+  local -a row_args=()
+  shift 3
+  case "$mode" in close) verb='done' ;; retain) verb=update ;; *) return 2 ;; esac
+  fm_backlog_tasks_axi_addressing "$data" || return 1
+  if ! (cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi_has_preview "$verb"); then
+    FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb requires --dry-run support; install the published preview-capable release before completion"
+    return 1
+  fi
+  if [ "$mode" = close ]; then
+    if ! fm_backlog_row_probe "$data" "$id"; then
+      FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+      return 1
+    fi
+    if [ "${FM_BACKLOG_ROW_STATE%% *}" != 'done' ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+      FM_BACKLOG_TRANSITION_ERROR="backlog item $id is an unresolved captain call; completion must retain it"
+      return 1
+    fi
+    fm_backlog_done "$data" "$id" "$@" --dry-run --json || return 1
+  else
+    for arg in "$@"; do
+      if fm_backlog_row_artifact_supported "$id" "$previous" "$arg"; then
+        row_args+=("$previous" "$arg")
+      fi
+      previous=$arg
+    done
+    fm_backlog_mutate "$data" update "$id" "${row_args[@]+"${row_args[@]}"}" --dry-run --json || return 1
+  fi
+  output=$FM_BACKLOG_TRANSITION_OUTPUT
+  if ! printf '%s' "$output" | perl -MJSON::PP -e '
+      local $/; my $result = eval { decode_json(<STDIN>) };
+      exit 1 unless ref($result) eq "HASH" && JSON::PP::is_bool($result->{dry_run}) && $result->{dry_run};
+    ' 2>/dev/null; then
+    FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb preview did not return dry_run: true; preserving completion records"
+    return 1
+  fi
 }
 
 fm_backlog_canonical_existing() {
@@ -845,6 +893,7 @@ fm_backlog_dispatch_rollback() {
 fm_backlog_close_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
+  fm_backlog_completion_preview "$data" "$id" close "$@" || return 1
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
   fm_backlog_done "$data" "$id" "$@" || return 1
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
@@ -855,6 +904,7 @@ fm_backlog_close_transition() {
 fm_backlog_retain_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
+  fm_backlog_completion_preview "$data" "$id" retain "$@" || return 1
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
   fm_backlog_retain "$data" "$id" "$@" || return 1
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
@@ -1167,12 +1217,6 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
-    fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
-      "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
-      || return 1
-    cleanup_incomplete=1
-    fm_backlog_atomic_transition remove "$meta" "the interrupted task record" "$state" \
-      || return 1
   fi
   if fm_backlog_row_probe "$data" "$id"; then
     row_state=$FM_BACKLOG_ROW_STATE
@@ -1185,6 +1229,19 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       return 1
     fi
     row_state=
+  fi
+  # Reconcile the row/hold before touching matching metadata. A deterministic
+  # consumer refusal leaves both the original marker and the task intact.
+  if [ -n "$row_state" ] && ! { [ "${row_state%% *}" = 'done' ] && [ "$mode" = retain ]; }; then
+    fm_backlog_completion_preview "$data" "$id" "$mode" "${args[@]+"${args[@]}"}" || return 1
+  fi
+  [ "$mode" = close ] || mode_flags=(--retain)
+  if [ -e "$meta" ]; then
+    fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
+      "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
+      || return 1
+    cleanup_incomplete=1
+    fm_backlog_atomic_transition remove "$meta" "the interrupted task record" "$state" || return 1
   fi
   case "$row_state" in
     done\ *)

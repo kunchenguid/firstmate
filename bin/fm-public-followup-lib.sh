@@ -246,7 +246,7 @@ fm_pf_bound_bytes() {
 # line for a brief or a refusal. Exit 1 for a key with no known format rule.
 fm_pf_deliverable_format() {
   case "$1" in
-    pr_url) printf '%s\n' 'a canonical pull request URL: https://github.com/<owner>/<repo>/pull/<n> (GitHub) or https://<host>/<owner>/<repo>/pulls/<n> (Forgejo), with <n> a positive number without leading zeros and no trailing slash, query, fragment, credentials, or port' ;;
+    pr_url) printf '%s\n' 'a canonical pull request URL: https://github.com/<owner>/<repo>/pull/<n> (GitHub) or https://<host>/<owner>/<repo>/pulls/<n> (Forgejo), or https://<host>/<group[/subgroup...]>/<project>/-/merge_requests/<n> (GitLab), with <n> a positive number without leading zeros and no trailing slash, query, fragment, credentials, or port' ;;
     report_path) printf '%s\n' 'data/<task-id>/report.md, relative to the work home, never an absolute path' ;;
     commit_sha) printf '%s\n' 'a lowercase hex commit SHA of 7 to 64 characters' ;;
     error_code) printf '%s\n' 'a lowercase code of at most 64 characters: a letter, then letters, digits, ".", "_", or "-"' ;;
@@ -303,7 +303,8 @@ fm_pf_deliverable_keys() {
 }
 
 # fm_pf_pr_url_valid <url>: 0 when <url> is byte-for-byte a canonical pull
-# request URL. Mirrors isPrUrl in tasks-axi's pr-url.js: exactly
+# request URL. GitLab uses the canonical parser in fm-pr-lib.sh; the existing
+# GitHub/Forgejo policy mirrors isPrUrl in tasks-axi's pr-url.js: exactly
 # https://github.com/<owner>/<repo>/pull/<n> on github.com, or
 # https://<lowercase-dns-host>/<owner>/<repo>/pulls/<n> on any other host, with
 # <n> positive and without leading zeros. The route and the host decide each
@@ -311,11 +312,23 @@ fm_pf_deliverable_keys() {
 # refused, as are an owner or repo of "." or "..".
 fm_pf_pr_url_valid() {
   local url=$1 rest host owner repo route
+  local LC_ALL=C
+  case "$url" in
+    *'/-/merge_requests/'*)
+      (
+        if ! declare -F fm_pr_url_parse >/dev/null 2>&1; then
+          # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+          . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+        fi
+        fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gitlab ]
+      )
+      return $?
+      ;;
+  esac
   local label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
   local segment='[A-Za-z0-9._-]+'
-  printf '%s\n' "$url" | LC_ALL=C grep -Eq \
-    "^https://${label}(\\.${label})*/${segment}/${segment}/(pull|pulls)/[1-9][0-9]*\$" \
-    || return 1
+  local pattern="^https://${label}(\\.${label})*/${segment}/${segment}/(pull|pulls)/[1-9][0-9]*\$"
+  [[ "$url" =~ $pattern ]] || return 1
   rest=${url#https://}
   host=${rest%%/*}; rest=${rest#*/}
   owner=${rest%%/*}; rest=${rest#*/}

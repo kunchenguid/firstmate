@@ -62,6 +62,12 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
+if command -v tasks-axi >/dev/null 2>&1; then
+  fm_test_tasks_preview_cli "$TMP_ROOT/previewbin"
+  export PATH="$TMP_ROOT/previewbin:$PATH"
+fi
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
@@ -667,6 +673,117 @@ make_path_without_lsof() {  # <case-dir>
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+# A canonical GitLab origin uses a fixture-only transport rewrite. The proof
+# must bind the raw configured origin identity, never the rewritten local path.
+make_gitlab_case() {
+  local case_dir head
+  case_dir=$(make_case "$1")
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" repair.txt landed
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" config remote.origin.url https://gitlab.example.test/group/sub/project.git
+  git -C "$case_dir/project" config "url.$case_dir/origin.git.insteadOf" https://gitlab.example.test/group/sub/project.git
+  printf '%s\n' 'pr=https://gitlab.example.test/group/sub/project/-/merge_requests/7' 'base_branch=deleted-source' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' "{\"iid\":7,\"web_url\":\"https://gitlab.example.test/group/sub/project/-/merge_requests/7\",\"state\":\"merged\",\"sha\":\"$head\",\"diff_refs\":{\"head_sha\":\"$head\"},\"target_branch\":\"release\",\"source_project_id\":22,\"target_project_id\":11}" > "$case_dir/mr.json"
+  printf '%s\n' '{"id":11,"path_with_namespace":"group/sub/project","web_url":"https://gitlab.example.test/group/sub/project"}' > "$case_dir/project.json"
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  'mr view 7 -R https://gitlab.example.test/group/sub/project -F json')
+    cat '$case_dir/mr.json' ;;
+  'api projects/group%2Fsub%2Fproject')
+    cat '$case_dir/project.json' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/glab"
+  printf '%s\n' "$case_dir"
+}
+
+test_gitlab_deleted_source_target_landing() {
+  local case_dir out
+  case_dir=$(make_gitlab_case gitlab-deleted-source)
+  # Squashed content exists only on the actual target, not on default main.
+  git -C "$case_dir/project" checkout -qb release main
+  printf 'landed\n' > "$case_dir/project/repair.txt"
+  git -C "$case_dir/project" add repair.txt
+  git -C "$case_dir/project" commit -qm 'squash repair'
+  git -C "$case_dir/project" push -q origin release
+  # Remove the MR head object from proof by refusing the direct containment
+  # path: an equivalent rebased commit still proves content on release.
+  git -C "$case_dir/wt" commit -q --allow-empty -m 'local equivalent'
+  out=$(run_teardown "$case_dir" 2>&1) || fail "GitLab target proof refused deleted source: $out"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail 'GitLab landed task record survived'
+  pass 'GitLab squash uses verified nondefault target after source deletion'
+}
+
+test_gitlab_landing_refusals_preserve_work() {
+  local case_dir variant out
+  for variant in exact extra dirty untracked identity head target project origin expired; do
+    case_dir=$(make_gitlab_case "gitlab-$variant")
+    cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf 'cleanup\\n' >> '$case_dir/cleanup'
+SH
+    case "$variant" in
+      extra) wt_commit_file "$case_dir" extra.txt unlanded ;;
+      dirty) printf 'dirty\n' >> "$case_dir/wt/repair.txt" ;;
+      untracked) printf 'untracked\n' > "$case_dir/wt/untracked.txt" ;;
+      identity) jq '.iid=8' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json" ;;
+      head) jq '.diff_refs.head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json" ;;
+      target) jq '.target_branch="../main"' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json" ;;
+      project) jq '.id=22' "$case_dir/project.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/project.json" ;;
+      origin) git -C "$case_dir/project" config remote.origin.url https://gitlab.example.test/other/project.git ;;
+      expired) jq '.sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" | .diff_refs.head_sha=.sha' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json" ;;
+    esac
+    if out=$(run_teardown "$case_dir" 2>&1); then
+      [ "$variant" = exact ] || fail "GitLab $variant removed work: $out"
+      [ -f "$case_dir/cleanup" ] || fail 'exact merged GitLab head not cleaned'
+    else
+      [ "$variant" != exact ] || fail "exact merged GitLab head refused: $out"
+      [ -f "$case_dir/state/task-x1.meta" ] && [ -d "$case_dir/wt" ] && [ ! -e "$case_dir/cleanup" ] \
+        || fail "GitLab $variant refusal changed local work/record/endpoint"
+    fi
+  done
+  pass 'GitLab exact merged source head lands; extra, dirty, forged and unavailable proof preserves work'
+}
+
+test_completion_preview_refuses_before_cleanup() {
+  local case_dir scenario real rc
+  real=$(command -v tasks-axi)
+  for scenario in old rejected malformed; do
+    case_dir=$(make_case "completion-preview-$scenario")
+    write_meta "$case_dir" no-mistakes ship
+    seed_backlog_in_flight "$case_dir"
+    if [ "$scenario" = malformed ]; then
+      printf 'pr=https://gitlab.example.test/group/sub/project/-/merge_requests/0\n' >> "$case_dir/state/task-x1.meta"
+    else
+      printf 'pr=https://gitlab.example.test/group/sub/project/-/merge_requests/7\n' >> "$case_dir/state/task-x1.meta"
+    fi
+    cp "$case_dir/state/task-x1.meta" "$case_dir/meta.before"
+    cp "$case_dir/data/backlog.md" "$case_dir/backlog.before"
+    cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ '$scenario' = old ] && [ "\${2:-}" = --help ]; then printf 'usage: no preview\\n'; exit 0; fi
+if [ '$scenario' = rejected ] && [[ " \$* " = *' --dry-run '* ]]; then printf 'error: unsupported preview\\n' >&2; exit 1; fi
+exec '$real' "\$@"
+SH
+    cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf 'cleanup\\n' >> '$case_dir/cleanup'
+SH
+    chmod +x "$case_dir/fakebin/tasks-axi" "$case_dir/fakebin/treehouse"
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$scenario completion preview allowed destructive cleanup"
+    [ ! -e "$case_dir/cleanup" ] && [ ! -e "$case_dir/state/task-x1.backlog-close" ] || fail "$scenario preview ran cleanup or published a retry record"
+    cmp -s "$case_dir/state/task-x1.meta" "$case_dir/meta.before" || fail "$scenario preview changed metadata"
+    cmp -s "$case_dir/data/backlog.md" "$case_dir/backlog.before" || fail "$scenario preview changed backlog"
+    [ -d "$case_dir/wt" ] || fail "$scenario preview removed copy"
+  done
+  pass 'old, unsupported and malformed completion previews refuse before marker publication or cleanup'
 }
 
 test_local_only_fork_remote_allows() {
@@ -1555,7 +1672,7 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   local case_dir rc out
   case_dir=$(make_case windowless-retry)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  add_failing_close_marker_mv "$case_dir"
   seed_backlog_in_flight "$case_dir"
   add_failing_truncate_perl "$case_dir"
 
@@ -1567,8 +1684,7 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   [ "$(legacy_meta_gen_count "$case_dir")" = 1 ] \
     || fail "windowless-retry: the failed attempt did not leave its legacy stamp on the record"
 
-  rm -f "$case_dir/fakebin/perl"
-  sed -i.bak '/^pr=/d' "$case_dir/state/task-x1.meta" && rm -f "$case_dir/state/task-x1.meta.bak"
+  rm -f "$case_dir/fakebin/perl" "$case_dir/fakebin/mv"
   out=$(run_teardown "$case_dir") \
     || fail "windowless-retry: the flag-less retry refused the retained legacy stamp"
   printf '%s\n' "$out" | grep -Fq 'legacy record accepted without spawn_gen: endpoint missing' \
@@ -1658,7 +1774,7 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   local case_dir rc before
   case_dir=$(make_case legacy-stamp-rollback)
   write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  add_failing_close_marker_mv "$case_dir"
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
@@ -1691,6 +1807,19 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   pass "--legacy-record teardown rolls its stamp back when the close marker write fails"
 }
 
+# Fail marker publication after a successful semantic preview, so legacy
+# stamp rollback tests still reach the crash boundary they claim to cover.
+add_failing_close_marker_mv() {
+  local case_dir=$1 real
+  real=$(command -v mv)
+  cat > "$case_dir/fakebin/mv" <<SH
+#!/usr/bin/env bash
+case "\$*" in *'$case_dir/state/task-x1.backlog-close'*) exit 1 ;; esac
+exec '$real' "\$@"
+SH
+  chmod +x "$case_dir/fakebin/mv"
+}
+
 # Override fakebin/perl so ONLY the stamp rollback's truncate fails; every other
 # perl call in the lifecycle still runs the real interpreter, so the abandoned
 # attempt leaves its stamp behind for exactly the reason under test.
@@ -1711,7 +1840,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   local case_dir rc stamped
   case_dir=$(make_case legacy-stamp-retained)
   write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  add_failing_close_marker_mv "$case_dir"
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
@@ -4643,6 +4772,9 @@ test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+test_gitlab_deleted_source_target_landing
+test_gitlab_landing_refusals_preserve_work
+test_completion_preview_refuses_before_cleanup
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note

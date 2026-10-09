@@ -42,6 +42,11 @@ command -v tasks-axi >/dev/null 2>&1 || {
   exit 0
 }
 
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
+fm_test_tasks_preview_cli "$TMP_ROOT/previewbin"
+export PATH="$TMP_ROOT/previewbin:$PATH"
+
 # --- fixture ----------------------------------------------------------------
 
 # fm_tasks_axi_backend reads <addressing-root>/.tasks.toml and otherwise falls
@@ -49,6 +54,91 @@ command -v tasks-axi >/dev/null 2>&1 || {
 # the home itself; a case that relocates its data directory is addressed from
 # that directory's own parent instead, so it pins that root too. Cases that
 # prove a root OUTSIDE the home is refused deliberately leave it unpinned.
+test_completion_preview_crash_boundaries() {
+  local case_dir home id=preview-close marker meta scenario out real rm_real url review_url
+  real=$(command -v tasks-axi)
+  rm_real=$(command -v rm)
+  review_url=https://gitlab.example.test/group/sub/project/-/merge_requests/7
+  [ "${FM_TEST_TASKS_PREVIEW_FIXTURE:-}" != 1 ] || review_url=https://github.com/example/project/pull/7
+  for scenario in old preview-fail missing-ack write-fail retirement-fail success malformed retained; do
+    case_dir=$(make_home "preview-$scenario")
+    home=$(home_of "$case_dir")
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    marker="$home/state/$id.backlog-close"
+    meta="$home/state/$id.meta"
+    printf 'spawn_gen=preview-generation\n' > "$meta"
+    url=$review_url
+    [ "$scenario" != malformed ] || url=https://gitlab.example.test/group/sub/project/-/merge_requests/0
+    if [ "$scenario" = retained ]; then
+      tasks-axi hold "$id" --kind captain --reason 'choose next work' --file "$home/data/backlog.md" >/dev/null || fail 'could not seed captain hold'
+    fi
+    FM_HOME="$home" bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_write "$FM_HOME/state" "$2" "$FM_HOME/data" preview-generation --pr "$3"' _ "$ROOT" "$id" "$url" \
+      || fail 'safe legacy review record staging failed'
+    cp "$marker" "$case_dir/marker.before"
+    cp "$meta" "$case_dir/meta.before"
+    cp "$home/data/backlog.md" "$case_dir/backlog.before"
+    cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ '$scenario' = old ] && [ "\${2:-}" = --help ]; then printf 'usage: no preview\\n'; exit 0; fi
+case " \$* " in
+  *' --dry-run '*)
+    case '$scenario' in
+      preview-fail|retained) printf 'error: preview rejected\\n' >&2; exit 2 ;;
+      missing-ack) printf '{"ok":true}\\n'; exit 0 ;;
+    esac ;;
+  *)
+    if [ '$scenario' = write-fail ] && [ "\${1:-}" = done ] && [ "\${2:-}" != --help ]; then
+      printf 'error: actual write unavailable\\n' >&2; exit 1
+    fi ;;
+esac
+exec '$real' "\$@"
+SH
+    chmod +x "$case_dir/fakebin/tasks-axi"
+    if [ "$scenario" = retirement-fail ]; then
+      cat > "$case_dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+case "\$*" in *'$marker'*) exit 1 ;; esac
+exec '$rm_real' "\$@"
+SH
+      chmod +x "$case_dir/fakebin/rm"
+    fi
+    if out=$(FM_HOME="$home" PATH="$case_dir/fakebin:$PATH" bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_replay "$FM_HOME/state" "$2" "$FM_HOME/data"' _ "$ROOT" "$marker" 2>&1); then
+      [ "$scenario" = success ] || fail "$scenario completion unexpectedly succeeded: $out"
+      [ ! -e "$marker" ] && [ ! -e "$meta" ] || fail 'successful replay retained its records'
+    else
+      [ "$scenario" != success ] || fail "new consumer completion failed: $out"
+      [ -f "$marker" ] || fail "$scenario failure lost retry record"
+      case "$scenario" in
+        old|preview-fail|missing-ack|malformed|retained)
+          if ! { cmp -s "$marker" "$case_dir/marker.before" && cmp -s "$meta" "$case_dir/meta.before" && cmp -s "$home/data/backlog.md" "$case_dir/backlog.before"; }; then
+            fail "$scenario preview mutated records, row, body or hold"
+          fi
+          ;;
+        write-fail)
+          if ! { [ ! -e "$meta" ] && cmp -s "$home/data/backlog.md" "$case_dir/backlog.before"; }; then
+            fail 'actual write failure lost recovery state'
+          fi ;;
+        retirement-fail) [ "$(row_state "$case_dir" "$id")" = 'done' ] || fail 'retirement failure did not occur after real closure' ;;
+      esac
+    fi
+    # A new process resumes from every persisted crash/write failure boundary.
+    rm -f "$case_dir/fakebin/tasks-axi" "$case_dir/fakebin/rm"
+    if [ "$scenario" != malformed ]; then
+      FM_HOME="$home" bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_replay "$FM_HOME/state" "$2" "$FM_HOME/data"' _ "$ROOT" "$marker" \
+        || fail "$scenario retry did not recover"
+      cp "$home/data/backlog.md" "$case_dir/closed.before"
+      FM_HOME="$home" bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_replay "$FM_HOME/state" "$2" "$FM_HOME/data"' _ "$ROOT" "$marker" \
+        || fail "$scenario second replay failed"
+      cmp -s "$home/data/backlog.md" "$case_dir/closed.before" || fail "$scenario repeated replay changed closure date or links"
+      if [ "$scenario" = retained ]; then
+        tasks-axi show "$id" --file "$home/data/backlog.md" | grep -q 'hold_kind: captain' || fail 'retention released captain hold'
+      fi
+    fi
+  done
+  pass 'completion preview failures preserve records; actual writes, crash retries and held retention remain recoverable'
+}
+
 pin_markdown_backend() {  # <addressing-root>
   printf '%s\n' 'backend = "markdown"' > "$1/.tasks.toml"
 }
@@ -227,7 +317,7 @@ break_verb() {  # <case-dir> <verb>
   real=$(command -v tasks-axi)
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
-if [ "\${1:-}" = "$verb" ]; then
+if [ "\${1:-}" = "$verb" ] && [[ " \$* " != *' --dry-run '* ]] && [ "\${2:-}" != --help ]; then
   echo 'error: "backlog is unwritable"' >&2
   exit 1
 fi
@@ -867,12 +957,14 @@ case "\${1:-}" in
     printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
     ;;
   done)
+    if [ "\${2:-}" = --help ]; then printf '%s\n' '--dry-run'; exit 0; fi
     [ "\${2:-}" = "$id" ] || exit 1
     case " \$* " in
       *" --file "*)
         printf '%s\n' 'error: beads done received a markdown file override' >&2
         exit 1
         ;;
+      *" --dry-run "*) printf '{"dry_run":true}\n'; exit 0 ;;
     esac
     printf 'ok: done %s\n' "$id"
     ;;
@@ -2126,7 +2218,9 @@ test_recovery_retry_preserves_incomplete_cleanup_warning() {
   marker="$home/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-warning\narg=--note\narg=local%%20main\n' \
     "$id" "$home/data" > "$marker"
-  break_verb "$case_dir" show
+  # Read/preview refusal now preserves metadata. Fail the actual write to
+  # exercise the post-removal crash boundary and its retained warning.
+  break_verb "$case_dir" 'done'
 
   out=$(run_bootstrap "$case_dir")
   assert_absent "$home/state/$id.meta" \
@@ -3035,6 +3129,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+test_completion_preview_crash_boundaries
 test_backend_resolution_preserves_config_errors
 test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config
