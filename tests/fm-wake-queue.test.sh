@@ -2701,10 +2701,6 @@ SH
   pass "bounded acquire hands ownership to the waiting caller after contention"
 }
 
-# A live-but-stuck presentation lock must not strand the executable drain. The
-# presentation remains retriable on the next pass, while the separate queue
-# mutation lock keeps its blocking all-or-nothing acknowledgement contract.
-
 # A lock owner record carries "<pid> <identity>" beside its pid, so a contender
 # can prove a live pid is NOT the recorded holder - a recycled pid whose
 # identity no longer matches - and reclaim instead of wedging forever on a bare
@@ -2793,6 +2789,10 @@ test_lock_records_pid_identity_and_reclaims_foreign_holder() {
   wait "$holder_pid" 2>/dev/null || true
   pass "lock records owner-identity and reclaims only a live holder whose identity provably does not match"
 }
+
+# A live-but-stuck presentation lock must not strand the executable drain. The
+# presentation remains retriable on the next pass, while the separate queue
+# mutation lock keeps its blocking all-or-nothing acknowledgement contract.
 test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   local dir state status queue_out queue_err first_out first_err second_out second_err replay_out replay_err
   local queue_holder presentation_holder ack_holder i start elapsed rc advisory_count

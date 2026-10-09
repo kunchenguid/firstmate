@@ -19,6 +19,7 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # the holder checks became identity-bound). A wedged marker lock must surface
 # as a bounded, loud failure of the calling transition, never a silent hang.
 FM_MARKER_LOCK_TIMEOUT="${FM_MARKER_LOCK_TIMEOUT:-30}"
+case "$FM_MARKER_LOCK_TIMEOUT" in ''|*[!0-9]*|0) FM_MARKER_LOCK_TIMEOUT=30 ;; esac
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -138,7 +139,7 @@ fm_pid_start_identity() {
     printf 'proc-starttime=%s\n' "${stat_fields[19]}"
     return 0
   fi
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  out=$(TZ=UTC0 LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   out=$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   [ -n "$out" ] || return 1
   printf 'lstart=%s\n' "$out"
@@ -628,9 +629,6 @@ fm_lock_claim() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  # The pid record is final at claim time, so refresh the identity record here
-  # too: fm_lock_holder_alive verifies it whenever it is bound to this pid.
-  fm_lock_publish_identity "$ownerdir" "$mypid" || true
   if ! fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
