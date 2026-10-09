@@ -625,11 +625,10 @@ It sets these limits:
 - A red merge is refused in this posture whatever the words say.
 - No relocation survives the return, because an archived record validates as absent and the words die with it.
 
-### Cleanup after a landed pull request
+### Cleanup after task completion
 
-The ordinary cleanup of a task whose pull request has landed needs no relocation, because it is the branch's own job in both postures.
-`bin/fm-branch-prompt.sh` names the `check: merge landed:` wake, and any later stale or inactive-outcome row on that task, as the moment to attempt `bin/fm-teardown.sh` without `--force`.
-At that moment the branch reports any refusal instead of concluding there is "nothing to recover".
+Ordinary cleanup of landed ships and completed scouts needs no authority relocation; [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) owns the branch's cleanup instructions in both postures, including lease acquisition and refusal reporting.
+The generated prompt includes the [scout-completion](../.agents/skills/scout-completion/SKILL.md) and [captain-hold-lifecycle](../.agents/skills/captain-hold-lifecycle/SKILL.md) policies verbatim so their completion gate reaches hosts without automatic skill loading.
 
 ## Verification
 
@@ -654,6 +653,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 `tests/fm-branch-supervision.test.sh` covers:
 
 - Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
+- The emitted completed-scout cleanup instructions and verbatim completion policies, including incomplete-work boundaries and refusal reporting; these assertions verify prompt delivery, not a model's adherence.
 - Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
