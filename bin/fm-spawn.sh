@@ -1590,6 +1590,13 @@ fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
 }
+# A fresh ship or scout spawn needs its project directory. Refuse before any
+# state is touched: an empty value would later resolve to the caller's cwd,
+# which can be the firstmate home itself.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -z "${POS[1]:-}" ]; then
+  echo "error: missing <project-dir> argument: name the project directory for task $ID (usage: fm-spawn.sh <task-id> <project-dir> ...)" >&2
+  exit 2
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
   BRANCH="$BRANCH_PREFIX$ID"
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
