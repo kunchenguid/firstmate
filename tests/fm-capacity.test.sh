@@ -446,8 +446,9 @@ test_watcher_publishes_only_when_opted_in() {
   stop_watcher "$off"
   assert_present "$off/state/.last-watcher-beat" "the unconfigured watcher must have polled"
   assert_absent "$off/state/lane-capacity.json" "an unconfigured home must publish nothing"
+  # The verdict depends on this real host's probes, so only its presence is asserted.
   assert_equals 'fm-lane-capacity.v1|3|true' \
-    "$(jq -r '"\(.schema)|\(.cap.target)|\(.verdict.admit)"' "$on/state/lane-capacity.json" 2>/dev/null)" \
+    "$(jq -r '"\(.schema)|\(.cap.target)|\(.verdict.admit | type == "boolean")"' "$on/state/lane-capacity.json" 2>/dev/null)" \
     "the opted-in watcher must publish this home's facts"
   pass "the watcher publishes lane facts only for an opted-in home"
 }
