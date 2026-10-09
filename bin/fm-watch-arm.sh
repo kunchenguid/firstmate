@@ -89,9 +89,12 @@
 # a record that no longer names this arm, or a close after at most 20 re-arms
 # (a condition that closes every cycle at once must not spin) ends it as usual.
 # An arm attached to that left arm's watcher does not follow the re-armed one:
-# when the next healthy holder is a child of the same parent as the watcher
-# whose cycle ended, the attached arm reports that cycle's delivered reason and
-# exits 0 (attach_and_wait), so a re-arm in place never hides a close from it.
+# when the next healthy holder is a child of the same live fm-watch-arm.sh
+# parent as the watcher whose cycle ended (only a re-armed left arm starts a
+# second watcher child), the attached arm reports that cycle's delivered reason
+# and exits 0 (attach_and_wait), so a re-arm in place never hides a close from
+# it. Watchers another parent starts back to back, such as the away daemon's,
+# are followed as ordinary successors.
 #
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
 # its own supervision cycle on purpose (the supervision host's park boundary,
@@ -410,6 +413,10 @@ report_rearmed_close() {
   case "$cycle_watcher_ppid" in ''|*[!0-9]*|0|1) return 1 ;; esac
   ppid=$(ps -o ppid= -p "$HEALTHY_PID" 2>/dev/null | tr -d ' ')
   [ "$ppid" = "$cycle_watcher_ppid" ] || return 1
+  case " $(ps -o command= -p "$ppid" 2>/dev/null) " in
+    *" $0 "*|*" $SCRIPT_DIR/fm-watch-arm.sh "*) ;;
+    *) return 1 ;;
+  esac
   cycle_delivered_reason || return 1
   printf '%s\n' "$DELIVERED_REASON"
   cycle_log_append unknown unknown attached-delivered-wake none

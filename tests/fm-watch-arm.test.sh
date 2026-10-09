@@ -1311,6 +1311,57 @@ test_attached_arm_reports_a_left_arm_close_it_re_armed_past() {
   pass "watch-arm: an arm attached to a left arm reports the close that arm re-armed past"
 }
 
+# The same-parent rule belongs to a re-armed left arm only. The away daemon
+# starts its watchers back to back as its own children, and an arm attached to
+# one must keep following the next instead of reporting a wake the daemon is
+# already classifying. A bash loop stands in for that non-arm parent.
+test_attached_arm_follows_a_non_arm_parents_next_watcher() {
+  local dir state fakebin attachout loop first second attached i
+  dir=$(make_case non-arm-parent)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  attachout="$dir/attach.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    bash -c 'while kill -0 "$2" 2>/dev/null; do "$1" > /dev/null 2>&1; done' _ "$WATCH" "$$" &
+  loop=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    first=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$first" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$first" ] || fail "fixture: the stand-in parent's watcher did not take the lock"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" "$WATCH_ARM" > "$attachout" 2>&1 &
+  attached=$!
+  wait_for_file_text "$attachout" "watcher: attached pid=$first" \
+    || fail "the plain arm did not attach to the stand-in parent's watcher: $(cat "$attachout")"
+
+  printf 'done: fixture finished\n' > "$state/demo.status"
+  wait_for_pid_gone "$first" 200 || fail "fixture: the first watcher did not close on the status change"
+  grep -q 'demo.status' "$state/.wake-queue" || fail "the close was not durably queued, so this case proves nothing"
+  i=0
+  while [ "$i" -lt 300 ]; do
+    second=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$second" ] && [ "$second" != "$first" ] && grep -qF "watcher: attached pid=$second" "$attachout" && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=${second:-none}" "$attachout" \
+    || fail "the attached arm did not follow the stand-in parent's next watcher: $(cat "$attachout")"
+  is_live_non_zombie "$attached" || fail "the attached arm ended at a non-arm parent's close: $(cat "$attachout")"
+  ! grep -q '^signal:' "$attachout" || fail "the attached arm reported a wake a non-arm parent owns: $(cat "$attachout")"
+
+  kill "$loop" 2>/dev/null
+  wait "$loop" 2>/dev/null
+  kill "$second" "$attached" 2>/dev/null
+  wait_for_exit "$attached" "$REARM_EXIT_POLLS" || true
+  pass "watch-arm: an attached arm follows a non-arm parent's next watcher instead of reporting its close"
+}
+
 # Pause just after handover releases its snapshot locks, then fail the old
 # watcher's secondmate tick write so it exits through cleanup before TERM lands.
 # The ledger and recovery wake are public output contracts, not source probes.
@@ -1860,4 +1911,5 @@ test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_left_arm_rearms_in_place_after_its_own_close
 test_attached_arm_reports_a_left_arm_close_it_re_armed_past
+test_attached_arm_follows_a_non_arm_parents_next_watcher
 test_opencode_arm_plugin_decides_with_the_shared_predicate

@@ -458,6 +458,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - A take-over that stays quiet after a confirmed TERM, still surfaces queued work and self-exit downtime, and attaches without stopping a cycle the named arm does not own.
 - An arm left for main that re-arms in place, as the same arm's child, after its own delivered close while its owner's record names it, and ends at its next close once the record does not.
 - A plain arm attached to that left arm's watcher, which reports the close the left arm re-armed past and exits 0 instead of following the re-armed watcher as an ordinary successor.
+- A plain arm attached to a watcher whose non-arm parent starts the next one back to back, as the away daemon does, which still follows that next watcher instead of reporting the close.
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.
