@@ -4639,7 +4639,8 @@ SH
 # metadata carries the canonical pr=/pr_head= identity block, written last the
 # way bin/fm-pr-check.sh writes it.
 arm_pr_poll() {  # <home> <id> <url> <head>
-  local home=$1 id=$2 url=$3 head=$4 state="$home/state"
+  local home=$1 id=$2 url=$3 head=$4
+  local state="$home/state"
   mkdir -p "$home/projects/missing-$id"
   fm_write_meta "$state/$id.meta" \
     "window=firstmate:fm-$id" \
