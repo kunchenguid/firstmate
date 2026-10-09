@@ -50,6 +50,7 @@ cat > "$HOME_FIXTURE/data/backlog.md" <<'MARKDOWN'
 
 ## Done
 - [x] completed-task - Accepted completed task (repo: viewer) (kind: ship)
+- [x] completed-newer - Newer completed task (repo: viewer) (kind: ship)
 MARKDOWN
 cat > "$HOME_FIXTURE/data/done-archive.md" <<'MARKDOWN'
 ## Archived 2026-09
@@ -60,8 +61,19 @@ FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add held-task 'Held task' --
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" block held-task --by upstream-task >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add completed-task 'Accepted completed task' --repo viewer --kind ship --start >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add completed-newer 'Newer completed task' --repo viewer --kind ship --start >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-newer >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add archived-task 'Archived historical task' --repo viewer --kind ship --start >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" archive archived-task >/dev/null
+node - "$HOME_FIXTURE/data/completed-task/task.json" "$HOME_FIXTURE/data/completed-newer/task.json" "$HOME_FIXTURE/data/task-one/task.json" <<'NODE'
+import fs from "node:fs";
+const [olderCompleted, newerCompleted, active] = process.argv.slice(2);
+for (const [path, changes] of [
+  [olderCompleted, { closed: "2026-10-01", completion: { verb: "done", date: "2026-10-01" }, updated_at: "2026-10-01T00:00:00Z" }],
+  [newerCompleted, { closed: "2026-10-08", completion: { verb: "done", date: "2026-10-08" }, updated_at: "2026-10-08T00:00:00Z" }],
+  [active, { updated_at: "2026-10-07T00:00:00Z" }],
+]) fs.writeFileSync(path, `${JSON.stringify({ ...JSON.parse(fs.readFileSync(path)), ...changes })}\n`);
+NODE
 mkdir -p "$HOME_FIXTURE/data/cancelled-task" "$HOME_FIXTURE/data/invalid-lifecycle-task"
 cat > "$HOME_FIXTURE/data/cancelled-task/lifecycle.json" <<'JSON'
 {"schema":"fm-task-lifecycle.v2","task_id":"cancelled-task","disposition":"archived","assessment":{"authority_ref":"retained explicit stop"}}
@@ -305,13 +317,14 @@ curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks.
 jq -e '
   (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report" and .documentTypes == ["report","brief"]))
     and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null and .documentTypes == []))
+    and ([.tasks[] | select(.category == "completed") | .id] | .[0:2] == ["completed-newer", "completed-task"])
     and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief" and .documentTypes == ["brief"]))
     and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
     and (.tasks
       | map(.category | if . == "processing" then 0 elif . == "held" then 1 elif . == "completed" then 2 elif . == "history" then 3 else 4 end) as $priorities
       | $priorities == ($priorities | sort))
     and (.tasks | all(.id != "cancelled-task" and .id != "invalid-lifecycle-task"))
-    and (.tasks | all((keys | sort) == (["executionHarness","executionModel","executionState","progress","state","category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","wait","warning"] | sort)))
+    and (.tasks | all((keys | sort) == (["completionAt","executionHarness","executionModel","executionState","progress","state","category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","updatedAt","wait","warning"] | sort)))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve canonical task states or ignore lifecycle-only rows"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-cached.json"

@@ -46,6 +46,27 @@ function taskSortPriority(task) {
     : TASK_CATEGORY_PRIORITY.get(task.category) ?? TASK_CATEGORY_PRIORITY.size;
 }
 
+function taskSortTimestamp(task) {
+  const value = task.category === "completed" || task.category === "history"
+    ? task.completionAt
+    : task.updatedAt;
+  const timestamp = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function compareTasks(left, right) {
+  const priority = taskSortPriority(left) - taskSortPriority(right);
+  if (priority !== 0) return priority;
+  const leftTimestamp = taskSortTimestamp(left);
+  const rightTimestamp = taskSortTimestamp(right);
+  if (leftTimestamp !== null && rightTimestamp !== null && leftTimestamp !== rightTimestamp) {
+    return rightTimestamp - leftTimestamp;
+  }
+  if (leftTimestamp !== null && rightTimestamp === null) return -1;
+  if (leftTimestamp === null && rightTimestamp !== null) return 1;
+  return left.title.localeCompare(right.title);
+}
+
 let taskOverviewCache = null;
 let taskOverviewInFlight = null;
 let taskOverviewRefreshError = null;
@@ -315,6 +336,8 @@ function taskOverview(home, roots, codeRoot) {
       blockedBy: record.unresolved_blocker_ids, progress: record.compact_progress,
       executionHarness: task?.harness || task?.provider || null, executionModel: task?.model || null,
       executionState: task?.current_state?.state || null,
+      completionAt: record.completion?.date || record.done || null,
+      updatedAt: record.updated_at || record.since || null,
       hasDocument: Boolean(document), documentType: document?.source,
       documentTypes: document?.documentTypes, documentModifiedAt: document?.modifiedAt,
     }];
@@ -348,10 +371,10 @@ function taskOverview(home, roots, codeRoot) {
       documentType: item.documentType || null,
       documentTypes: item.documentTypes || [],
       documentModifiedAt: item.documentModifiedAt || null,
+      completionAt: item.completionAt,
+      updatedAt: item.updatedAt,
     };
-  }).sort((left, right) => taskSortPriority(left)
-    - taskSortPriority(right)
-    || left.title.localeCompare(right.title));
+  }).sort(compareTasks);
   return {
     generatedAt: snapshot.generated,
     tasks,
