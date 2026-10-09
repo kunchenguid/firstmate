@@ -438,10 +438,11 @@ test_sweep_leaves_alive_secondmate_untouched() {
   add_sm_home "$w" sm1 firstmate:fm-sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
+  printf '2026-10-09T22:15:00Z\n' > "$w/home/state/.goodnight"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
     "an already-live secondmate should be handled silently"
   [ ! -s "$log" ] || fail "an already-live secondmate must never be killed or respawned: $(cat "$log")"
 
@@ -449,7 +450,7 @@ test_sweep_leaves_alive_secondmate_untouched() {
   assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 already live (backend=tmux)" \
     "verbose diagnostics should identify the already-live outcome"
   [ ! -s "$log" ] || fail "verbose reporting must not touch an already-live secondmate: $(cat "$log")"
-  pass "sweep: an already-live secondmate is untouched and distinguishable in verbose diagnostics"
+  pass "sweep: an already-live secondmate under goodnight stays silent and distinguishable in verbose diagnostics"
 }
 
 test_sweep_respawns_authoritatively_missing_pi_secondmate() {
@@ -656,10 +657,10 @@ probe_remote() {
     ' "$ROOT" "$w/home/state/rsm1.meta" "$mode"
 }
 
-test_goodnight_defers_shared_liveness_and_recovers_after_lift() {
-  local w mode agent_state placement
+test_goodnight_preserves_liveness_and_defers_recovery() {
+  local w mode agent_state placement reply
   for mode in full poll; do
-    for agent_state in dead missing; do
+    for agent_state in alive dead missing; do
       for placement in tmux herdr remote; do
         w=$(make_remote_probe_world "goodnight-$mode-$agent_state-$placement")
         if [ "$placement" != remote ]; then
@@ -673,27 +674,61 @@ printf '%s\n' "$*" >> "$FM_GOODNIGHT_CALL_LOG"
 SH
         chmod +x "$w/code/bin/fm-spawn.sh"
         printf '2026-10-09T22:15:00Z\n' > "$w/home/state/.goodnight"
+        reply=$agent_state
+        if [ "$placement" = remote ] && [ "$agent_state" = alive ]; then
+          reply=$'backend=herdr\nalive'
+        fi
         env STATE="$w/home/state" FM_HOME="$w/home" FM_ROOT="$w/code" \
           FM_SSH_BIN="$w/fakebin/ssh" FM_FAKE_SSH_LOG="$w/ssh.log" \
-          FM_FAKE_REMOTE_REPLY="$agent_state" FM_GOODNIGHT_CALL_LOG="$w/calls.log" \
-          bash -s -- "$ROOT" "$w/home/state/rsm1.meta" "$mode" <<'SH' \
+          FM_FAKE_REMOTE_REPLY="$reply" FM_FAKE_PROBE_STATE="$agent_state" \
+          FM_GOODNIGHT_CALL_LOG="$w/calls.log" \
+          bash -s -- "$ROOT" "$w/home/state/rsm1.meta" "$mode" "$placement" <<'SH' \
           || fail "goodnight liveness failed for $mode $agent_state $placement"
 set -eu
 . "$1/bin/fm-secondmate-liveness-lib.sh"
-fm_backend_agent_state() { printf '%s\n' "$FM_FAKE_REMOTE_REPLY"; }
+fm_backend_agent_state() { printf '%s\n' "$FM_FAKE_PROBE_STATE"; }
 fm_backend_kill() { printf 'kill\n' >> "$FM_GOODNIGHT_CALL_LOG"; }
 fm_remote_readiness_ensure() { printf 'readiness\n' >> "$FM_GOODNIGHT_CALL_LOG"; }
 fm_secondmate_liveness_lock rsm1
 for tick in 1 2 3 4; do
   fm_secondmate_liveness_probe "$2" rsm1 "$3"
-  [ "$FM_SM_LIVE_STATUS" = skipped ] || { echo "hold not skipped on tick $tick" >&2; exit 1; }
-  [ "$FM_SM_LIVE_REASON" = 'goodnight hold active; relaunch deferred' ]
+  [ "$FM_SM_LIVE_STATE" = "$FM_FAKE_PROBE_STATE" ]
+  if [ "$FM_FAKE_PROBE_STATE" = alive ]; then
+    [ "$FM_SM_LIVE_STATUS" = alive ] || { echo "live mate misclassified on tick $tick" >&2; exit 1; }
+    [ -z "$FM_SM_LIVE_REASON" ]
+  else
+    [ "$FM_SM_LIVE_STATUS" = skipped ] || { echo "hold not skipped on tick $tick" >&2; exit 1; }
+    [ "$FM_SM_LIVE_REASON" = 'goodnight hold active; relaunch deferred' ]
+  fi
   [ "$FM_SM_LIVE_KILL" = 0 ]
 done
 [ ! -e "$STATE/.secondmate-relaunch-rsm1" ]
 [ ! -e "$STATE/.secondmate-relaunch-bound-rsm1" ]
-[ ! -e "$FM_GOODNIGHT_CALL_LOG" ]
-[ ! -e "$FM_FAKE_SSH_LOG" ]
+if grep -Eq '^kill$|--secondmate' "$FM_GOODNIGHT_CALL_LOG" 2>/dev/null; then exit 1; fi
+if [ "$4" = remote ]; then
+  expected_calls=4
+  if [ "$3" = full ]; then
+    [ "$(wc -l < "$FM_GOODNIGHT_CALL_LOG")" -eq 4 ]
+    [ "$FM_FAKE_PROBE_STATE" != alive ] || expected_calls=8
+  else
+    [ ! -e "$FM_GOODNIGHT_CALL_LOG" ]
+  fi
+  [ "$(wc -l < "$FM_FAKE_SSH_LOG")" -eq "$expected_calls" ]
+else
+  [ ! -e "$FM_GOODNIGHT_CALL_LOG" ]
+  [ ! -e "$FM_FAKE_SSH_LOG" ]
+fi
+if [ "$FM_FAKE_PROBE_STATE" = alive ]; then
+  if [ "$4:$3" = remote:full ]; then
+    export FM_FAKE_REMOTE_REPLY=$'backend=tmux\nalive'
+    fm_secondmate_liveness_probe "$2" rsm1 "$3"
+    [ "$FM_SM_LIVE_STATE" = alive ]
+    [ "$FM_SM_LIVE_STATUS" = skipped ]
+    [ "$FM_SM_LIVE_REASON" = "alive remote endpoint is recorded on backend 'tmux'; migrate or retire it explicitly" ]
+  fi
+  fm_secondmate_liveness_unlock rsm1
+  exit 0
+fi
 rm "$STATE/.goodnight"
 fm_secondmate_liveness_probe "$2" rsm1 "$3"
 [ "$FM_SM_LIVE_STATUS" = relaunchable ]
@@ -701,6 +736,7 @@ fm_secondmate_liveness_probe "$2" rsm1 "$3"
 if fm_secondmate_liveness_relaunch "$2" rsm1; then exit 1; fi
 [ "$FM_SM_LIVE_STATUS" = skipped ]
 [ "$FM_SM_LIVE_REASON" = 'goodnight hold active; relaunch deferred' ]
+[ "$FM_SM_LIVE_STATE" = "$FM_FAKE_PROBE_STATE" ]
 [ ! -e "$STATE/.secondmate-relaunch-rsm1" ]
 if grep -Eq '^kill$|--secondmate' "$FM_GOODNIGHT_CALL_LOG" 2>/dev/null; then exit 1; fi
 rm "$STATE/.goodnight"
@@ -718,7 +754,7 @@ SH
       done
     done
   done
-  pass "goodnight defers full and poll liveness without recovery accounting; lifting restores recovery"
+  pass "goodnight preserves live probes and defers absent mates without recovery accounting; lifting restores recovery"
 }
 
 test_remote_poll_probe_maps_states() {
@@ -784,7 +820,7 @@ test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 test_sweep_skips_mate_whose_liveness_lock_is_held
 test_sweep_refuses_relaunch_on_ledger_errors
-test_goodnight_defers_shared_liveness_and_recovers_after_lift
+test_goodnight_preserves_liveness_and_defers_recovery
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
 

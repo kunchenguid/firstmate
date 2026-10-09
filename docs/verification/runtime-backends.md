@@ -20,16 +20,29 @@ Observed output:
 ok - goodnight defers new spawns and batches before backend allocation until the hold is lifted
 ok - fm_goodnight_active holds on empty, malformed, and dangling records and clears only on absence
 ok - goodnight allows recorded in-flight relaunch through fm-control while fresh dispatch remains deferred
-ok - goodnight defers full and poll liveness without recovery accounting; lifting restores recovery
+ok - goodnight preserves live probes and defers absent mates without recovery accounting; lifting restores recovery
 ```
 
 The spawn regression selects tmux, Herdr, zellij, Orca, and cmux for ships, scouts, secondmates, raw commands, and batches, observing exit 76 before backend allocation.
 The control regression relaunches a recorded in-flight task with the marker present, observes a completed transaction with its worktree and endpoint preserved, and then observes exit 76 for a fresh spawn while the hold remains active.
-The shared liveness regression exercises `full` and `poll` modes with dead and missing tmux, Herdr, and remote endpoints.
-Repeated probes during the hold return `skipped` before the caller's attempt-bound checks, without endpoint operations or attempt ledger changes, and a hold entered after probing also defers relaunch before its mutations.
+The shared liveness regression exercises `full` and `poll` modes with alive, dead, and missing tmux, Herdr, and remote endpoints.
+Alive endpoints retain their classification during the hold, and full remote probes retain readiness and route-drift checks.
+Repeated dead and missing probes during the hold preserve their raw state and return `skipped` before the caller's attempt-bound checks, without killing or respawning endpoints or changing attempt ledgers; a hold entered after probing also defers relaunch before its mutations.
 After lifting, the same endpoint remains recoverable and records one attempt and a successful relaunch.
 These cases verify the scheduling boundary with a stubbed backend and no real harness.
 The [goodnight skill](../../.agents/skills/goodnight/SKILL.md) owns the policy; `bin/fm-spawn.sh` owns the refusal mechanics.
+
+The liveness subject can also be refreshed on its own with the same Bash version:
+
+```sh
+bash bin/fm-test-run.sh --jobs 1 tests/fm-secondmate-liveness.test.sh
+```
+
+Its startup case observed:
+
+```text
+ok - sweep: an already-live secondmate under goodnight stays silent and distinguishable in verbose diagnostics
+```
 
 The startup subject returned exit 0 with the same Bash version when run alongside the spawn subject:
 

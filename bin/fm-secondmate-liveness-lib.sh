@@ -138,10 +138,6 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
   fm_sm_live_require_locks || return 1
-  if fm_goodnight_active "$STATE"; then
-    FM_SM_LIVE_REASON="goodnight hold active; relaunch deferred"
-    return 0
-  fi
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
@@ -202,6 +198,10 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
         FM_SM_LIVE_LINE="remote secondmate $id already live (host=$remote_host)"
         ;;
       dead|missing)
+        if fm_goodnight_active "$STATE"; then
+          FM_SM_LIVE_REASON="goodnight hold active; relaunch deferred"
+          return 0
+        fi
         FM_SM_LIVE_STATUS=relaunchable
         FM_SM_LIVE_CAUSE="remote endpoint $agent_state on its configured host"
         FM_SM_LIVE_WHERE="host=$remote_host"
@@ -234,6 +234,10 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
       FM_SM_LIVE_LINE="secondmate $id already live (backend=$backend)"
       ;;
     dead|missing)
+      if fm_goodnight_active "$STATE"; then
+        FM_SM_LIVE_REASON="goodnight hold active; relaunch deferred"
+        return 0
+      fi
       FM_SM_LIVE_STATUS=relaunchable
       if [ "$agent_state" = dead ]; then
         FM_SM_LIVE_KILL=1
