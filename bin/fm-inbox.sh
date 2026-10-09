@@ -23,7 +23,7 @@
 #   fm-inbox.sh note [--request-id <id>] [--json] [--] <text>...
 #   fm-inbox.sh note [--request-id <id>] [--json] -   (body from stdin)
 #   fm-inbox.sh announce [--json] <id>
-#   fm-inbox.sh reply [--json] <id> <text>... | reply [--json] <id> -
+#   fm-inbox.sh reply [--json] [--] <id> <text>... | reply [--json] <id> -
 #   fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
 #   fm-inbox.sh ready
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
@@ -47,8 +47,8 @@
 # the duplicate wake this contract exists to remove. Notes written from here on
 # carry `announce_marker=1`, which is what makes a missing marker mean "not
 # announced" rather than "not known". Receipts report that state as null.
-# A note body is text, not options: only the flags above are parsed, anything
-# else starting with `--` begins the body, and `--` ends option parsing.
+# A note body is text, not options: only the flags above are parsed, an unknown
+# option starting with `--` is refused, and `--` ends option parsing.
 # Human `note`/`list`/`drain` output and exit conventions stay as they were when
 # those flags are omitted: a saved note whose wake fails still exits 1. With
 # --request-id or --json, a saved-but-unannounced note exits 3 so a caller can
@@ -483,6 +483,8 @@ cmd_note() {
         ;;
       --) shift; break ;;
       -h|--help) die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)" ;;
+      ---*) break ;;
+      --*) die "unknown option for note: $1" ;;
       *) break ;;
     esac
   done
@@ -588,20 +590,43 @@ next_reply_seq() {
 }
 
 cmd_reply() {
-  local json=0 id body path staging seq
-  if [ "${1:-}" = "--json" ]; then
-    json=1
-    shift
-  fi
+  local json=0 id="" body path staging seq from_stdin=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      -h|--help) die "usage: fm-inbox.sh reply [--json] [--] <id> <text>... (or: reply [--json] <id> -)" ;;
+      --) shift; break ;;
+      --*) die "unknown option for reply: $1" ;;
+      *) break ;;
+    esac
+  done
   id=${1:-}
-  [ -n "$id" ] || die "usage: fm-inbox.sh reply [--json] <id> <text>... (or: reply [--json] <id> -)"
+  [ -n "$id" ] || die "usage: fm-inbox.sh reply [--json] [--] <id> <text>... (or: reply [--json] <id> -)"
+  case "$id" in
+    -h|--help) die "usage: fm-inbox.sh reply [--json] [--] <id> <text>... (or: reply [--json] <id> -)" ;;
+    --*) die "unknown option for reply: $id" ;;
+  esac
   shift
+  if [ "$#" -eq 0 ]; then
+    die "usage: fm-inbox.sh reply [--json] [--] <id> <text>... (or: reply [--json] <id> -)"
+  fi
+  case "$1" in
+    -h|--help) die "usage: fm-inbox.sh reply [--json] [--] <id> <text>... (or: reply [--json] <id> -)" ;;
+  esac
+  if [ "$1" = "-" ]; then
+    [ "$#" -eq 1 ] || die "usage: fm-inbox.sh reply [--json] <id> -"
+    from_stdin=1
+  elif [ "$1" = "--" ]; then
+    shift
+    [ "$#" -gt 0 ] || die "usage: fm-inbox.sh reply [--json] [--] <id> <text>... (or: reply [--json] <id> -)"
+  else
+    case "$1" in
+      --*) die "unknown option for reply: $1" ;;
+    esac
+  fi
   valid_note_id "$id" || die "invalid note id"
   path=$(note_path "$id") || die "no such note: $id"
-  if [ "$#" -eq 0 ]; then
-    die "usage: fm-inbox.sh reply [--json] <id> <text>... (or: reply [--json] <id> -)"
-  elif [ "$1" = "-" ]; then
-    [ "$#" -eq 1 ] || die "usage: fm-inbox.sh reply [--json] <id> -"
+  if [ "$from_stdin" -eq 1 ]; then
     body=$(cat; printf .)
     body=${body%.}
   else
