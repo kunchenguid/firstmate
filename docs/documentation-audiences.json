@@ -587,6 +587,10 @@
     {
       "path": ".agents/skills/gm/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/gn/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }
