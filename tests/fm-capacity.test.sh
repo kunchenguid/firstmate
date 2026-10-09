@@ -127,6 +127,16 @@ test_invalid_target_is_reported() {
     "invalid target must not be guessed"
   assert_contains "$out" 'fm-capacity: config/lane-capacity must hold one non-negative integer' \
     "invalid target must name the problem"
+  local bad
+  for bad in '3\n4\n' '1 2\n' '99999999999999999999\n'; do
+    printf "$bad" > "$home/config/lane-capacity"
+    out=$(run_capacity "$home" "$fakebin"); rc=$?
+    expect_code 1 "$rc" "invalid target $bad"
+    assert_contains "$out" 'reason=invalid-target' "target '$bad' must be rejected"
+  done
+  printf '  3 \n' > "$home/config/lane-capacity"
+  out=$(run_capacity "$home" "$fakebin"); rc=$?
+  assert_contains "$out" 'target=3' "surrounding whitespace is tolerated"
   pass "a malformed target is reported, not guessed"
 }
 
