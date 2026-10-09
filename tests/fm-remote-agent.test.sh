@@ -2293,5 +2293,4 @@ test_retirement_pairs_backlog_and_preserves_failed_close
 test_aime_compatibility_and_local_unchanged
 test_remote_aime_dispatch_metadata
 test_followup_active_recovery
-printf '# fm-remote-agent.test.sh: all assertions passed\n
-' 
+printf '# fm-remote-agent.test.sh: all assertions passed\n'
