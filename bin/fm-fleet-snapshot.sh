@@ -293,7 +293,7 @@ backlog_json() {  # canonical data/<task>/task.json projection
         hold_reason:(.hold.reason // null),hold_kind:(.hold.kind // null),
         hold_until:(.hold.until // .deferred_until // null),
         hold_set:(.hold.set // null),blocked_by:(.blocked_by[0] // null),blocked_by_ids:.blocked_by,
-        unresolved_blocker_ids:$unresolved,blocked_reason:null,since:.created,merged:null,reported:null,
+        unresolved_blocker_ids:$unresolved,blocked_reason:null,since:.created,updated_at:.updated_at,merged:null,reported:null,
         done:.closed,completion:.completion,
         links:(.links|to_entries|map(.value)),pr_url:(.links.pr // null),report_path:(.links.report // null),
         local_note:null,raw:null,body_lines:(.body|split("\n")),body_excerpt:(.body[:240]),

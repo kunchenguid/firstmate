@@ -82,6 +82,19 @@ FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$ARCHIVED_ID" 'Dashboard archived task' --repo viewer --kind ship --start >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" archive "$ARCHIVED_ID" >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" update-progress-view "$REPORT_ID" --progress '{"acceptance":"All contracts pass","current_state":"Recorded current action <img id=progress-unsafe src=x onerror=alert(1)>","remaining_gap":"Finish behavioral verification","next_step":"Refresh canonical progress"}' >/dev/null
+node - "$HOME_FIXTURE/data/$REPORT_ID/task.json" "$HOME_FIXTURE/data/$FIRST_REPORT_ID/task.json" "$HOME_FIXTURE/data/tall-task-01/task.json" "$HOME_FIXTURE/data/tall-task-02/task.json" "$HOME_FIXTURE/data/completed-task/task.json" <<'NODE'
+import fs from "node:fs";
+const [report, firstReport, tallOne, tallTwo, completed] = process.argv.slice(2);
+for (const [path, updatedAt] of [[report, "2026-10-08T00:00:00Z"], [firstReport, "2026-10-07T00:00:00Z"], [tallOne, "2026-10-06T00:00:00Z"], [tallTwo, "not-a-timestamp"]]) {
+  const record = JSON.parse(fs.readFileSync(path));
+  record.updated_at = updatedAt;
+  fs.writeFileSync(path, `${JSON.stringify(record)}\n`);
+}
+const completedRecord = JSON.parse(fs.readFileSync(completed));
+completedRecord.completion = { verb: "done", date: "2026-10-09" };
+completedRecord.updated_at = "2026-10-01T00:00:00Z";
+fs.writeFileSync(completed, `${JSON.stringify(completedRecord)}\n`);
+NODE
 printf 'kind=ship\nharness=codex\nmodel=gpt-6.1-sol\nspawn_gen=browser-fixture-g1\n' > "$HOME_FIXTURE/state/$REPORT_ID.meta"
 printf 'kind=ship\nharness=pi\nmodel=claude-sonnet-4-6\nspawn_gen=browser-fixture-g2\n' > "$HOME_FIXTURE/state/$FIRST_REPORT_ID.meta"
 cat > "$FIRST_SHORT_DIR/journal.jsonl" <<'JSONL'
@@ -260,6 +273,8 @@ await page.route("**/api/tasks*", async route => {
           ...task,
           id: `completed-copy-${String(index + 1).padStart(2, "0")}`,
           title: `Dashboard completed task copy ${String(index + 1).padStart(2, "0")}`,
+          completionAt: "2026-10-01",
+          updatedAt: "2026-10-09T00:00:00Z",
         })),
       ]);
       body.tasks.push({
@@ -375,6 +390,8 @@ try {
   if (!await page.locator('nav [data-route="dashboard"]').evaluate(element => element.classList.contains("active"))) throw new Error("Dashboard navigation identity was not active");
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4) throw new Error("processing task category was not rendered");
+  const processingOrder = await page.locator('#sessions .task-card[data-category="processing"] small:first-of-type').allTextContents();
+  if (processingOrder.slice(0, 4).join(",") !== `${process.env.VIEWER_REPORT_ID},${process.env.VIEWER_FIRST_REPORT_ID},tall-task-01,tall-task-02`) throw new Error(`processing cards were not ordered by updated time with invalid values last: ${processingOrder.join(",")}`);
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count() !== 1) throw new Error("completed task counter was not rendered");
   const activeCards = page.locator('#sessions .task-card[data-category="processing"]');
   if (await activeCards.locator(".task-progress").count() !== 4) throw new Error("multiple active goals lost their progress summaries");
@@ -407,6 +424,8 @@ try {
     .filter(card => card.textContent.includes("Needs reconciliation") || card.textContent.includes("Dashboard completed task"))
     .map(card => card.textContent.includes("Needs reconciliation") ? "reconciliation" : "completed"));
   if (sharedCompletedOrder[0] !== "completed" || sharedCompletedOrder.at(-1) !== "reconciliation") throw new Error(`completed and reconciliation tasks did not share title ordering: ${sharedCompletedOrder.join(",")}`);
+  const completedOrder = await page.locator('#sessions .task-card[data-category="completed"] strong').allTextContents();
+  if (completedOrder[0] !== "Dashboard completed task" || completedOrder[1] !== "Dashboard completed task copy 01") throw new Error(`completed cards ignored completion time when update time conflicted: ${completedOrder.slice(0, 2).join(",")}`);
   await completedCounter.click();
   if (await page.locator('#sessions .task-card').count() !== 42) throw new Error("combined Completed counter did not filter both task groups");
   if (await page.locator('#sessions .task-card[data-category="completed"]').count() !== 41) throw new Error("completed filter changed completed task membership");
