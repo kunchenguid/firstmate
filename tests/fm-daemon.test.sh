@@ -1059,6 +1059,23 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+# The watcher names the task in a parenthetical after the window, so the daemon
+# must still resolve the window up to the first " (" and classify it unchanged.
+test_handle_wake_task_named_stale_resolves_window() {
+  local dir state key win
+  dir=$(make_supercase handle-task-named-stale)
+  state="$dir/state"
+  win="sess:fm-held-w10-named"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-named.status"
+  key=$(printf '%s' "held-w10-named" | tr ':/.' '___')
+  date +%s > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win (task=held-w10-named)" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "a task-named stale wake did not resolve its window to the paused task"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a task-named stale wake kept the wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a task-named stale wake for a declared pause escalated"
+  pass "handle_wake resolves the window from a task-named stale wake and classifies it unchanged"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -3246,6 +3263,7 @@ test_stale_paused_classifies_pause
 test_stale_pause_survives_a_foreign_resolved_line
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_handle_wake_task_named_stale_resolves_window
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
