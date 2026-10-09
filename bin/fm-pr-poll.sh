@@ -202,7 +202,7 @@ case "$provider" in
     [ "$url" = "https://$host/$path/pulls/$number" ] || exit 0
     # tea addresses an instance only through a named login: a repository slug
     # carries no host, and without --login tea reads its default login's
-    # instance, so the login whose URL's host is this host is resolved from the
+    # instance, so the login whose URL is exactly https://<host> is resolved from the
     # login list on every run, the same resolution bin/fm-pr-check.sh refused
     # to arm without. No login for the host keeps this poll silent rather than
     # reading another instance.
@@ -218,13 +218,7 @@ case "$provider" in
       case "$cand" in
         '"'*'"') cand=${cand#\"}; cand=${cand%\"} ;;
       esac
-      case "$url" in
-        https://*) url=${url#https://} ;;
-        http://*) url=${url#http://} ;;
-        *) continue ;;
-      esac
-      url=${url%/}
-      if [ "${url%%/*}" = "$host" ]; then
+      if [ "${url%/}" = "https://$host" ]; then
         login=$cand
         break
       fi

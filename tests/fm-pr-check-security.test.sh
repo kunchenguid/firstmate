@@ -2231,6 +2231,16 @@ test_forgejo_merge_watch() {
   ! grep -qF -- "$url" "$dir/tea.log" \
     || fail "the poll passed the pull request URL to tea"
 
+  # Only a login whose URL is exactly https://<host> is pinned: a login for an
+  # instance under a URL subpath on the same host, or a cleartext http login,
+  # is never read through, so the poll stays silent even for a merged record.
+  for value in https://forgejo.example/forgejo http://forgejo.example; do
+    out=$(FM_TEST_TEA_LOGIN_URL="$value" FM_TEST_TEA_MERGED=true run_poll "$dir")
+    [ -z "$out" ] || fail "Forgejo poll read through the login $value"
+  done
+  out=$(FM_TEST_TEA_LOGIN_URL=https://forgejo.example/ FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll did not pin a login whose URL has a trailing slash"
+
   # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
   # the stored URL exactly, and a swapped host resolves no tea login either.
   printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" elsewhere.example o/r 7 \
@@ -2293,6 +2303,18 @@ EOF
     *) fail "arming without a login did not name the missing login" ;;
   esac
   [ ! -e "$state/task-c.check.sh" ] || fail "a loginless arming left a poll armed"
+  for value in https://forgejo.example/forgejo http://forgejo.example; do
+    set +e
+    out=$(FM_TEST_TEA_LOGIN_URL="$value" run_check_entry "$dir" task-c "$url" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "arming pinned the tea login $value"
+    case "$out" in
+      *"requires a tea login for forgejo.example"*) ;;
+      *) fail "arming through the login $value did not name the missing login" ;;
+    esac
+    [ ! -e "$state/task-c.check.sh" ] || fail "arming through the login $value left a poll armed"
+  done
   write_task_meta "$dir" task-d
   set +e
   out=$(FM_TEST_TEA_PULL_MISSING=1 \

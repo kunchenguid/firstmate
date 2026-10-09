@@ -328,9 +328,9 @@ fm_pr_json_draft_state() {  # <pull-request-json>
 # instance only by login name: a repository slug carries no host, and without
 # --login tea silently reads its default login's instance, which the URL never
 # names. fm_pr_forgejo_tea_login reads `tea logins list --output csv` output,
-# matches the login whose URL's host part is the validated host so an instance
-# served under a URL subpath still matches, and prints that login name or
-# returns 1; bin/fm-pr-check.sh and bin/fm-pr-merge.sh refuse rather than read
+# matches the login whose URL is exactly https://<validated host> (an optional
+# trailing slash aside; an http:// login or one served under a URL subpath
+# never matches), and prints that login name or returns 1; bin/fm-pr-check.sh and bin/fm-pr-merge.sh refuse rather than read
 # through a login they could not pin, and bin/fm-pr-poll.sh repeats the same
 # resolution inline because it runs without this library and stays silent.
 fm_pr_forgejo_tea_login() {  # <logins-csv> <host>
@@ -346,13 +346,7 @@ fm_pr_forgejo_tea_login() {  # <logins-csv> <host>
     case "$login" in
       '"'*'"') login=${login#\"}; login=${login%\"} ;;
     esac
-    case "$url" in
-      https://*) url=${url#https://} ;;
-      http://*) url=${url#http://} ;;
-      *) continue ;;
-    esac
-    url=${url%/}
-    if [ "${url%%/*}" = "$want" ]; then
+    if [ "${url%/}" = "https://$want" ]; then
       printf '%s\n' "$login"
       return 0
     fi

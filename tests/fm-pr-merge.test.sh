@@ -2297,6 +2297,20 @@ test_forgejo_method_flags_map_to_the_endpoint_style() {
   [ "$body" = "{\"Do\":\"rebase-merge\",\"head_commit_id\":\"$FR_HEAD\"}" ] \
     || fail "forgejo-method-value: the method value did not become the endpoint's Do: '$body'"
 
+  for style in rebase-merge fast-forward-only; do
+    case_dir=$(make_forgejo_case "forgejo-flag-$style")
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FR_URL" -- "--$style" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "forgejo-flag-$style: the --$style flag should merge"
+    body=$(cat "$case_dir/forgejo-merge-body")
+    [ "$body" = "{\"Do\":\"$style\",\"head_commit_id\":\"$FR_HEAD\"}" ] \
+      || fail "forgejo-flag-$style: the flag did not become the endpoint's Do: '$body'"
+  done
+
   case_dir=$(make_forgejo_case forgejo-bad-method)
   set +e
   run_pr_merge "$case_dir" task-x1 "$FR_URL" -- --method manually-merged \
@@ -2346,13 +2360,21 @@ test_forgejo_missing_tool_refuses_before_recording() {
 
 test_forgejo_unpinnable_or_unreadable_pull_refuses() {
   local case_dir rc name
-  for name in logins-fail other-host pull-fails not-an-object; do
+  for name in logins-fail other-host subpath-login http-login pull-fails not-an-object; do
     case_dir=$(make_forgejo_case "forgejo-unreadable-$name")
     case "$name" in
       logins-fail) : > "$case_dir/tea-logins-fail" ;;
       other-host)
         printf 'Name,URL,SSHHost,User,Default\nother,https://elsewhere.example,,bob,false\n' \
           > "$case_dir/tea-logins.csv" ;;
+      subpath-login)
+        printf 'Name,URL,SSHHost,User,Default\n%s,https://%s/forgejo,,captain,true\n' \
+          "$FR_LOGIN" "$FR_HOST" > "$case_dir/tea-logins.csv"
+        write_tea_config "$case_dir" "$FR_LOGIN" "https://$FR_HOST/forgejo" ;;
+      http-login)
+        printf 'Name,URL,SSHHost,User,Default\n%s,http://%s,,captain,true\n' \
+          "$FR_LOGIN" "$FR_HOST" > "$case_dir/tea-logins.csv"
+        write_tea_config "$case_dir" "$FR_LOGIN" "http://$FR_HOST" ;;
       pull-fails) : > "$case_dir/tea-pull-fails" ;;
       not-an-object) printf '[]\n' > "$case_dir/pull.json" ;;
     esac
@@ -2368,7 +2390,7 @@ test_forgejo_unpinnable_or_unreadable_pull_refuses() {
       logins-fail)
         assert_grep 'could not read the tea login list' "$case_dir/stderr" \
           "forgejo-unreadable-$name: refusal did not name the unreadable login list" ;;
-      other-host)
+      other-host|subpath-login|http-login)
         assert_grep "requires a tea login for $FR_HOST" "$case_dir/stderr" \
           "forgejo-unreadable-$name: refusal did not name the missing login" ;;
       pull-fails)
@@ -2378,8 +2400,8 @@ test_forgejo_unpinnable_or_unreadable_pull_refuses() {
         assert_grep "could not read the state of $FR_URL through tea" "$case_dir/stderr" \
           "forgejo-unreadable-$name: refusal did not name the unreadable state" ;;
     esac
-    [ -z "$(forgejo_merge_line "$case_dir/curl.log")" ] \
-      || fail "forgejo-unreadable-$name: a merge was attempted on an unreadable pull request"
+    [ ! -s "$case_dir/curl.log" ] \
+      || fail "forgejo-unreadable-$name: the instance API was called on an unreadable pull request"
     assert_no_grep "pr=$FR_URL" "$case_dir/state/task-x1.meta" \
       "forgejo-unreadable-$name: a PR reference was recorded before the pull request proved readable"
   done
@@ -2597,6 +2619,20 @@ test_forgejo_no_statuses_still_merges() {
   expect_code 0 "$rc" "forgejo-no-checks: a repository with no checks should merge"
   assert_grep "verified: $FR_URL is merged" "$case_dir/stdout" \
     "forgejo-no-checks: the merge was not proved"
+
+  case_dir=$(make_forgejo_case forgejo-null-statuses)
+  printf '{"state":"","sha":"%s","total_count":0,"statuses":null}\n' "$FR_HEAD" \
+    > "$case_dir/forgejo-status.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-null-statuses: a head whose statuses are null should merge"
+  assert_grep "verified: $FR_URL is merged" "$case_dir/stdout" \
+    "forgejo-null-statuses: the merge was not proved"
   pass "fm-pr-merge treats a Forgejo head with no statuses as a repository without checks"
 }
 

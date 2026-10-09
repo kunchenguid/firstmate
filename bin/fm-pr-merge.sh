@@ -108,8 +108,8 @@
 # status at the exact current head is green - "success", or no statuses at all,
 # which is a repository without checks rather than a red one. Every failing
 # condition is reported, not just the first. The instance comes from the
-# pinned tea login's own URL in tea's configuration, so an instance served
-# under a URL subpath is addressed correctly, and that login's API token
+# pinned tea login's own URL in tea's configuration, which must be exactly
+# https://<host> of the pull request URL, and that login's API token
 # authorizes both curl calls through a header file curl reads, never through
 # this script's arguments. A login whose token is not in tea's config - an
 # OAuth-stored login - cannot authorize the endpoint and is refused by name.
@@ -414,7 +414,24 @@ fi
 # anything.
 FM_PR_FORGEJO_DO=
 if [ "$PROVIDER" = forgejo ]; then
-  forgejo_method=$(caller_merge_method "$@")
+  forgejo_method=
+  forgejo_pending=false
+  for arg in "$@"; do
+    if [ "$forgejo_pending" = true ]; then
+      forgejo_method=$arg
+      forgejo_pending=false
+      continue
+    fi
+    case "$arg" in
+      --merge|--rebase|--rebase-merge|--squash|--fast-forward-only) forgejo_method=${arg#--} ;;
+      --method) forgejo_pending=true ;;
+      --method=*) forgejo_method=${arg#--method=} ;;
+      *)
+        echo "error: a Forgejo merge takes no forge arguments beyond the merge-style flags --merge, --rebase, --rebase-merge, --squash and --fast-forward-only (or --method <style>)" >&2
+        exit 2
+        ;;
+    esac
+  done
   case "$forgejo_method" in
     '') ;;
     merge|rebase|rebase-merge|squash|fast-forward-only) FM_PR_FORGEJO_DO=$forgejo_method ;;
@@ -424,21 +441,6 @@ if [ "$PROVIDER" = forgejo ]; then
       exit 2
       ;;
   esac
-  forgejo_skip_next=false
-  for arg in "$@"; do
-    if [ "$forgejo_skip_next" = true ]; then
-      forgejo_skip_next=false
-      continue
-    fi
-    case "$arg" in
-      --merge|--rebase|--squash|--method=*) ;;
-      --method) forgejo_skip_next=true ;;
-      *)
-        echo "error: a Forgejo merge takes no forge arguments beyond the merge-style flags --merge, --rebase, --rebase-merge, --squash and --fast-forward-only" >&2
-        exit 2
-        ;;
-    esac
-  done
 fi
 FM_PR_AWAY_POSTURE=false
 
@@ -648,8 +650,8 @@ FORGEJO_RESPONSE=
 # One call to the pinned login's Forgejo instance through curl. tea has no
 # command for the merge or for the combined-status read, which is why curl is
 # the client for exactly those two calls and nothing else. The API root comes
-# from the login's own URL in tea's config, so an instance served under a URL
-# subpath is addressed correctly. The login's token reaches curl through a
+# from the login's own URL in tea's config, which must be exactly
+# https://<host> of the pull request URL. The login's token reaches curl through a
 # header file with restrictive permissions rather than an argument, so it
 # never appears in a process listing; that file is removed before returning.
 # The body lands in $FORGEJO_RESPONSE and the HTTP status code in
@@ -717,9 +719,9 @@ forgejo_verify_mergeable() {
 $fields
 FIELDS
   case "$login_url" in
-    https://*/*|https://*|http://*/*|http://*) ;;
+    "https://$PR_HOST"|"https://$PR_HOST/") ;;
     *)
-      echo "error: the tea login $FM_PR_FORGEJO_LOGIN carries no instance URL, so the Forgejo merge endpoint cannot be addressed" >&2
+      echo "error: the tea login $FM_PR_FORGEJO_LOGIN does not carry the instance URL https://$PR_HOST, so the Forgejo merge endpoint cannot be addressed" >&2
       return 1
       ;;
   esac
@@ -800,9 +802,9 @@ FIELDS
     refusals="$refusals  - the combined commit status at head $live_head could not be read
 "
   elif ! status_fields=$(jq -r '
-      if type == "object" and (.statuses | type) == "array" then
+      if type == "object" and has("statuses") and ((.statuses // []) | type) == "array" then
         "state=" + ((.state // "") | tostring),
-        "count=" + ((.statuses | length) | tostring)
+        "count=" + ((.statuses // [] | length) | tostring)
       else
         error("status payload is not a combined status")
       end' "$FORGEJO_RESPONSE" 2>/dev/null); then
