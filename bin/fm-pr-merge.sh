@@ -7,7 +7,8 @@
 # host and path, so any instance works and no host is hardcoded. A Forgejo
 # pull request is read through the tea CLI its watch already pins and merged
 # through the instance's own REST endpoint, because tea has no merge command
-# and no combined-status read; curl is the client for exactly those two calls.
+# and no combined-status or repository-settings read; curl is the client for
+# exactly those calls.
 # A Gerrit change
 # is refused outright: that adapter is read-only, and the refusal at the parse
 # below owns why.
@@ -110,7 +111,7 @@
 # condition is reported, not just the first. The instance comes from the
 # pinned tea login's own URL in tea's configuration, which must be exactly
 # https://<host> of the pull request URL, and that login's API token
-# authorizes both curl calls through a header file curl reads, never through
+# authorizes every curl call through a header file curl reads, never through
 # this script's arguments. A login whose token is not in tea's config - an
 # OAuth-stored login - cannot authorize the endpoint and is refused by name.
 # Reading and proving that state needs tea, jq and curl, and any one absent
@@ -648,8 +649,9 @@ FM_PR_FORGEJO_TOKEN=
 FORGEJO_RESPONSE=
 
 # One call to the pinned login's Forgejo instance through curl. tea has no
-# command for the merge or for the combined-status read, which is why curl is
-# the client for exactly those two calls and nothing else. The API root comes
+# command for the merge, the combined-status read, or the repository's
+# default_merge_style read, which is why curl is the client for exactly those
+# calls and nothing else. The API root comes
 # from the login's own URL in tea's config, which must be exactly
 # https://<host> of the pull request URL. The login's token reaches curl through a
 # header file with restrictive permissions rather than an argument, so it
