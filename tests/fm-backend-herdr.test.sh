@@ -3719,6 +3719,18 @@ test_normalize_key() {
 
 # --- capture / send_key / kill / current_path --------------------------------
 
+# Text-format recent reads trigger herdr's alt-screen wheel harvest; every
+# recent/recent-unwrapped pane read must be ANSI. Visible reads unaffected.
+assert_capture_recent_reads_ansi() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *$'\x1f''pane'$'\x1f''read'$'\x1f'*$'\x1f''--source'$'\x1f''recent'*)
+        case "$line" in *$'\x1f''--format'$'\x1f''ansi'*) ;; *) fail "capture issued a text-format recent read: '$line'" ;; esac ;;
+    esac
+  done < "$1"
+}
+
 test_capture_calls_pane_read() {
   local dir log resp fb out
   dir="$TMP_ROOT/capture"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3730,9 +3742,46 @@ test_capture_calls_pane_read() {
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 250' "$ROOT" )
   [ "$out" = $'line one\nline two\nline three' ] || fail "capture did not pass through pane read output, got '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250' \
-    "capture did not call pane read with the right pane id and line bound"
-  pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N' with the session set"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250'$'\x1f''--format'$'\x1f''ansi' \
+    "capture did not call pane read with the right pane id, line bound, and ansi format"
+  assert_capture_recent_reads_ansi "$log"
+  pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N --format ansi' with the session set"
+}
+
+test_capture_strips_ansi_without_text_read() {
+  local dir log resp fb out
+  # A text-format `recent` read beyond the viewport makes herdr wheel-scroll an
+  # idle alternate-screen agent to harvest history (herdr issue #2669), so the
+  # capture must read ANSI and strip it locally, never issue a text read.
+  dir="$TMP_ROOT/capture-ansi"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\033[1;31mred\033[0m tail\n\033[?25lUPPER\033[38:2::1:2:3m ok\033[0m\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 40' "$ROOT" )
+  [ "$out" = $'red tail\nUPPER ok' ] || fail "capture did not strip ANSI escapes to plain text, got '$(printf '%s' "$out" | od -c | head -5)'"
+  assert_contains "$(cat "$log")" $'\x1f''--format'$'\x1f''ansi' "capture must read with --format ansi"
+  assert_not_contains "$(cat "$log")" $'\x1f''--format'$'\x1f''text' "capture must never issue a text-format read"
+  assert_capture_recent_reads_ansi "$log"
+  pass "fm_backend_herdr_capture: reads ANSI (skipping herdr's alt-screen wheel harvest) and strips it to plain text"
+}
+
+test_capture_falls_back_to_visible_text_without_ansi() {
+  local dir log resp fb out status
+  # A herdr build rejecting --format ansi must not fall back to a text recent
+  # read (that read triggers the alt-screen wheel harvest); visible never does.
+  dir="$TMP_ROOT/capture-ansi-fallback"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '2\n' > "$resp/1.exit"
+  printf 'v1\nv2\nv3\nv4\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" )
+  status=$?
+  expect_code 0 "$status" "capture should succeed via the visible fallback"
+  [ "$out" = $'v3\nv4' ] || fail "capture fallback did not trim visible read to requested lines, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''visible' \
+    "capture fallback did not issue a visible read"
+  assert_capture_recent_reads_ansi "$log"
+  pass "fm_backend_herdr_capture: falls back to a trimmed text visible read, never a text recent read"
 }
 
 test_capture_works_around_small_lines_bug() {
@@ -3749,6 +3798,7 @@ test_capture_works_around_small_lines_bug() {
   [ "$out" = $'d\ne' ] || fail "a small --lines request should still return the last N lines (trimmed locally), got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''--lines'$'\x1f''200' \
     "capture should request a generous fetch (>=200), never the caller's small N, from herdr's own --lines flag"
+  assert_capture_recent_reads_ansi "$log"
   pass "fm_backend_herdr_capture: works around the verified small-N '--lines' bug by over-fetching and trimming locally"
 }
 
@@ -3756,6 +3806,7 @@ test_capture_preserves_pane_read_failure() {
   local dir log resp fb out status
   dir="$TMP_ROOT/capture-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '1\n' > "$resp/1.exit"
+  printf '1\n' > "$resp/2.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" 2>&1 )
@@ -6012,6 +6063,8 @@ test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read
+test_capture_strips_ansi_without_text_read
+test_capture_falls_back_to_visible_text_without_ansi
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
