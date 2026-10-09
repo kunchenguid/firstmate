@@ -114,10 +114,12 @@ import {
   afkPostureRecordPresent,
   awayPostureTailFor,
   branchWakePrompt,
+  completionSeqsToWithhold,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
   scopeForUnreadWake,
+  wakeTriggerOwnsCompletion,
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
@@ -1512,6 +1514,14 @@ ${context.command}
         // rows are store-first and the durable queue keeps them.
         const afk = afkPostureRecordPresent(state);
         const scope = scopeForUnreadWake(state, heartbeat, afk);
+        // A completion that still needs a supervisor, including one appended
+        // after this close was accepted, is main-owned while attended. Throw
+        // so the watcher delivers the original wake to main. A co-present
+        // completion on a different task stays queued and does not bounce this
+        // close. Away, the branch keeps the row.
+        if (!afk && wakeTriggerOwnsCompletion(scope, message)) {
+          throw new Error("a completion that still needs a supervisor is main-owned");
+        }
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
@@ -1573,6 +1583,14 @@ ${context.command}
           throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
         }
         recordDurableBranchReport(branchForWake.generation, branchForWake.selectionRevision);
+        // Recheck before the grant is released. A granted signal whose span
+        // became a completion during the turn stays queued; throwing hands
+        // that wake to main. An ordinary unacked progress row is not in this
+        // set and does not bounce the close.
+        const withheld = completionSeqsToWithhold(state);
+        if (withheld.length > 0) {
+          throw new Error(`granted completion rows stayed queued for main: ${withheld.join(" ")}`);
+        }
         if (!(await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration)))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }

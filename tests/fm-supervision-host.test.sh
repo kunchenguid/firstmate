@@ -2957,6 +2957,255 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
 test_claude_stop_hook_notifies_when_closed_announced_successor_downtime_restore_fails
+# A newly presented completion stays main's while attended, on a main home and
+# on two secondmate home names, with no project-name condition. Progress and an
+# unchanged stale observation stay the branch's. A completion appended after
+# the branch was granted the row is withheld from that turn's acknowledgement.
+test_completion_handoff_is_main_owned_while_attended() {
+  local name home state out rc seq_busy seq_note seq_intake generation withheld
+  local GRANT="$ROOT/bin/fm-wake-grant.sh" DRAIN="$ROOT/bin/fm-wake-drain.sh"
+
+  scope_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1; }
+
+  for name in main harbor keel; do
+    home="$TMP_ROOT/completion-$name"
+    state="$home/state"
+    mkdir -p "$state" "$home/projects/approved"
+    for task in intake credential revision progress note; do
+      printf 'project=%s\nwindow=%s-window\nkind=ship\nmode=no-mistakes\n' \
+        "$home/projects/approved" "$task" > "$state/$task.meta"
+    done
+    printf 'kind=scout\nmode=no-mistakes\n' >> "$state/revision.meta"
+    printf 'working: step one\n' > "$state/progress.status"
+    printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/intake.status"
+    printf 'done [at=1791535311]: committed cc38b3d, 707 tests\n' > "$state/credential.status"
+    printf 'done [at=1791501698]: revision complete and a recheck is next\n' > "$state/revision.status"
+    printf 'note: nothing for the supervisor to continue\n' > "$state/note.status"
+    append_wake "$state" signal progress.status "signal: $state/progress.status"
+    append_wake "$state" signal intake.status "signal: $state/intake.status"
+    append_wake "$state" signal credential.status "signal: $state/credential.status"
+    append_wake "$state" signal revision.status "signal: $state/revision.status"
+    append_wake "$state" stale progress "stale: progress"
+
+    out=$(FM_HOME="$home" node "$DISPATCH" scope)
+    [ "$(scope_field "$out" status)" = safe ] || fail "$name: a mixed queue was not safe: $out"
+    [ "$(scope_field "$out" rows)" = "1 5" ] || fail "$name: progress and the stale observation were not the branch rows: $out"
+    [ "$(scope_field "$out" completion_rows)" = "2 3 4" ] || fail "$name: the three completions were not main-owned: $out"
+    [ "$(scope_field "$out" tasks)" = progress ] || fail "$name: the branch claim named more than the progress task: $out"
+
+    out=$(printf 'signal: %s\n' "$state/intake.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 0 ] || fail "$name: a validation handoff was offered to the branch"
+    out=$(printf 'signal: %s %s\n' "$state/intake.status" "$state/credential.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 0 ] || fail "$name: two coalesced completions stayed on the branch"
+    out=$(printf 'signal: %s\n' "$state/progress.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 1 ] || fail "$name: a progress trigger was bounced by a co-present completion: $out"
+    out=$(printf 'stale: progress\n' | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 1 ] || fail "$name: an unchanged stale observation was treated as a completion: $out"
+    out=$(printf 'signal: %s\n' "$state/intake.status" | FM_HOME="$home" node "$DISPATCH" offer --afk)
+    [ "$(scope_field "$out" eligible)" = 1 ] || fail "$name: away posture did not keep the handoff on the branch"
+    printf '%s\n' "$out" | grep -qx 'completion_rows=' \
+      || fail "$name: away posture still excluded the handoff: $out"
+
+    # A missing or dead lease does not make the completion the branch's.
+    rm -f "$state/intake.lease"
+    out=$(printf 'signal: %s\n' "$state/intake.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 0 ] || fail "$name: a missing lease let the branch take the handoff"
+    printf '99999\n' > "$state/intake.lease"
+    out=$(printf 'signal: %s\n' "$state/intake.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 0 ] || fail "$name: an expired lease let the branch take the handoff"
+
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task intake); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: validation handoff classified as $out (exit $rc)"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task credential); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: legacy implementation done classified as $out (exit $rc)"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task revision); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: scout revision classified as $out (exit $rc)"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task progress); rc=$?
+    [ "$rc" -eq 1 ] && [ "$out" = continued ] || fail "$name: progress classified as $out (exit $rc)"
+    printf 'note: still waiting on the supervisor\n' >> "$state/intake.status"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task intake); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a trailing note retired the handoff ($out exit $rc)"
+    printf 'working [at=1791535400]: validation started\n' >> "$state/credential.status"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task credential); rc=$?
+    [ "$rc" -eq 1 ] && [ "$out" = continued ] || fail "$name: a working continuation stayed owned ($out exit $rc)"
+    # A second process re-reads the same span. Nothing here is cached across restarts.
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task revision); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a restarted read lost the scout revision ($out exit $rc)"
+  done
+
+  home="$TMP_ROOT/completion-unreadable"
+  state="$home/state"
+  mkdir -p "$state"
+  printf 'project=%s/projects/approved\nwindow=gone-window\nkind=ship\nmode=no-mistakes\n' "$home" > "$state/gone.meta"
+  ln -s missing.status "$state/gone.status"
+  append_wake "$state" signal gone.status "signal: $state/gone.status"
+  out=$(FM_HOME="$home" node "$DISPATCH" scope)
+  [ "$(scope_field "$out" status)" = unsafe ] || fail "an unreadable status span was not refused: $out"
+  [ "$(scope_field "$out" corrupted)" = 1 ] || fail "an unreadable status span was not a corrupt scan: $out"
+  out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task gone); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = unreadable ] || fail "an unreadable status span classified as $out (exit $rc)"
+  rm -f "$state/.wake-queue"
+  out=$(FM_HOME="$home" node "$DISPATCH" scope)
+  [ "$(scope_field "$out" status)" = unsafe ] || fail "a missing wake queue was treated as readable: $out"
+
+  home="$TMP_ROOT/completion-withhold"
+  state="$home/state"
+  mkdir -p "$state" "$home/projects/approved"
+  for task in busy note intake; do
+    printf 'project=%s\nwindow=%s-window\nkind=ship\nmode=no-mistakes\n' \
+      "$home/projects/approved" "$task" > "$state/$task.meta"
+  done
+  printf 'working: step one\n' > "$state/busy.status"
+  printf 'note: routine follow-up\n' > "$state/note.status"
+  printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/intake.status"
+  append_wake "$state" signal busy.status "signal: $state/busy.status"
+  append_wake "$state" signal note.status "signal: $state/note.status"
+  append_wake "$state" signal intake.status "signal: $state/intake.status"
+  seq_busy=$(awk -F '\t' '$4 == "busy.status" { print $2; exit }' "$state/.wake-queue")
+  seq_note=$(awk -F '\t' '$4 == "note.status" { print $2; exit }' "$state/.wake-queue")
+  seq_intake=$(awk -F '\t' '$4 == "intake.status" { print $2; exit }' "$state/.wake-queue")
+  [ -n "$seq_busy" ] && [ -n "$seq_note" ] && [ -n "$seq_intake" ] || fail "fixture: withhold queue did not record its rows"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" handoff-grant || fail "fixture: grant activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish handoff-grant "$seq_busy" "$seq_note" \
+    || fail "fixture: grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$home/drain.out" 2> "$home/drain.err" \
+    || fail "branch drain failed: $(cat "$home/drain.err")"
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$home/drain.err")
+  [ -n "$generation" ] || fail "branch drain omitted its recovery generation: $(cat "$home/drain.err")"
+  printf 'needs-validation [at=1791535500]: committed while the branch turn ran\n' >> "$state/busy.status"
+  withheld=$(FM_HOME="$home" node "$DISPATCH" withhold-acked)
+  [ "$withheld" = "$seq_busy" ] || fail "the mid-turn completion was not withheld (got ${withheld:-none}, want $seq_busy)"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
+    --ack-through "$seq_note" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+  grep -Fq $'\t'"signal"$'\t'"busy.status"$'\t' "$state/.wake-queue" \
+    || fail "acknowledgement consumed the completion appended during the turn"
+  grep -Fq $'\t'"signal"$'\t'"intake.status"$'\t' "$state/.wake-queue" \
+    || fail "acknowledgement consumed a completion the branch was never granted"
+  grep -Fq $'\t'"signal"$'\t'"note.status"$'\t' "$state/.wake-queue" \
+    && fail "acknowledgement left the routine note queued"
+  ln -sfn /tmp "$state/.branch-eligible-rows"
+  rc=0
+  FM_HOME="$home" node "$DISPATCH" withhold-acked >/dev/null 2>"$home/withhold.err" || rc=$?
+  [ "$rc" -eq 3 ] || fail "an unreadable grant snapshot was not refused (exit $rc): $(cat "$home/withhold.err")"
+  pass "completion handoffs stay main-owned while attended, including a line appended during the branch turn"
+}
+
+# A routine report cannot retire a completion the supervisor still has to
+# continue. An explicit working continuation wins over a stale handoff marker.
+# While away the upgraded outcome stays in the store and main stays parked.
+test_routine_report_cannot_retire_a_pending_handoff() {
+  local home state out rc real_node fake
+  home="$TMP_ROOT/completion-report"
+  state="$home/state"
+  mkdir -p "$state" "$home/projects/approved" "$state/handoff-continuations"
+  printf 'project=%s\nwindow=intake-window\nkind=ship\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/intake.meta"
+  printf 'project=%s\nwindow=credential-window\nkind=ship\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/credential.meta"
+  printf 'project=%s\nwindow=revision-window\nkind=scout\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/revision.meta"
+  printf 'project=%s\nwindow=harbor-window\nkind=ship\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/harbor.meta"
+  printf 'project=%s\nwindow=opaque-window\nkind=ship\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/opaque.meta"
+  printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/intake.status"
+  printf 'turn=t1\nrows=1\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: intake.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
+    --task intake --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a routine report on an owned handoff was refused: $out"
+  assert_contains "$out" "[captain]" "a routine report retired a validation handoff: $out"
+  assert_not_contains "$out" "silent" "a retired handoff stayed a silent routine outcome: $out"
+  grep -q '"verdict":"captain"' "$state/branch-outcomes.jsonl" \
+    || fail "the upgraded handoff was not stored as captain: $(cat "$state/branch-outcomes.jsonl")"
+
+  printf 'working [at=1791535400]: validation started\n' >> "$state/intake.status"
+  printf 'turn=t2\nrows=1\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: intake.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t2 "$REPORT" \
+    --task intake --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a continued handoff report was refused: $out"
+  assert_contains "$out" "[routine]" "a working continuation was upgraded: $out"
+  assert_contains "$out" "silent" "a continued routine outcome was not silent: $out"
+
+  printf 'done [at=1791535311]: committed cc38b3d, 707 tests\n' > "$state/credential.status"
+  FM_HOME="$home" bash -c '
+    set -e
+    . "$1"
+    ident=$(_fm_open_decisions_file_ident "$2/credential.status")
+    size=$(_fm_status_file_size "$2/credential.status")
+    size=${size//[[:space:]]/}
+    status_commit_presentation_snapshot "$2" "$(printf "%s\t%s\t%s\n" credential "$size" "$ident")"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$state" || fail "fixture: could not commit the presentation cursor"
+  printf 'deadbeef\n' > "$state/handoff-continuations/credential.open"
+  out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task credential); rc=$?
+  [ "$rc" -eq 1 ] && [ "$out" = none ] || fail "a consumed span was still classified as $out (exit $rc)"
+  printf 'turn=t3\nrows=2\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: credential.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t3 "$REPORT" \
+    --task credential --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a consumed handoff with an open marker was refused: $out"
+  assert_contains "$out" "[captain]" "an open handoff marker let a routine report retire the completion: $out"
+
+  printf 'working [at=1791535600]: validation started\n' >> "$state/credential.status"
+  printf 'turn=t4\nrows=2\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: credential.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t4 "$REPORT" \
+    --task credential --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a continued span over a stale marker was refused: $out"
+  assert_contains "$out" "silent" "a stale marker upgraded a span that already continued: $out"
+
+  printf 'note: nothing pending\n' > "$state/opaque.status"
+  real_node=$(command -v node)
+  fake="$home/fake-node"
+  mkdir -p "$fake"
+  cat > "$fake/node" <<EOF
+#!/usr/bin/env bash
+exit 9
+EOF
+  chmod +x "$fake/node"
+  printf 'turn=t5\nrows=3\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: opaque.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(PATH="$fake:$PATH" FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t5 "$REPORT" \
+    --task opaque --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a report that could not read completion ownership was refused: $out"
+  assert_contains "$out" "[captain]" "a failed ownership read stayed routine: $out"
+  [ -n "$real_node" ] || fail "fixture: node disappeared"
+
+  printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/harbor.status"
+  printf 'turn=t6\nrows=4\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: harbor.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t6 "$REPORT" \
+    --task harbor --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a second home name's handoff report was refused: $out"
+  assert_contains "$out" "[captain]" "a handoff on another home name stayed routine: $out"
+
+  printf 'turn=t7\nrows=\ntasks=\nunscoped=1\nwake=heartbeat\nposture=attended\n' > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t7 "$REPORT" \
+    --task fleet --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a fleet routine report was refused: $out"
+  assert_contains "$out" "silent" "a fleet review was upgraded as if it were a handoff: $out"
+
+  FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  printf 'needs-validation [at=1791501698]: revision complete and a recheck is next\n' > "$state/revision.status"
+  printf 'turn=t8\nrows=5\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: revision.status\nposture=away\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t8 "$REPORT" \
+    --task revision --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "an away report on an owned handoff was refused: $out"
+  assert_contains "$out" "[captain]" "away posture let a routine report retire the handoff: $out"
+  assert_contains "$out" "it waits in the outcome store for MAIN" "away posture did not leave the outcome for the return: $out"
+  if [ -f "$state/.wake-queue" ] && grep -q 'supervision-host-return' "$state/.wake-queue"; then
+    fail "away posture queued a return wake and would unpark main: $(cat "$state/.wake-queue")"
+  fi
+  pass "a routine report cannot retire a pending handoff, and away posture leaves the obligation without unparking main"
+}
+
+test_completion_handoff_is_main_owned_while_attended
+test_routine_report_cannot_retire_a_pending_handoff
 test_park_exit_probe_uses_half_second_child_sleeps
 test_report_surface_enforces_actor_turn_and_scope
 test_report_after_the_return_is_queued_for_main

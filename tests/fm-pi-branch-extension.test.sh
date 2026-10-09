@@ -4992,14 +4992,14 @@ function expectRoute(label, presented, span, toBranch) {
 }
 
 const hold = "needs-decision [at=1790000000] [key=old-hold]: deferred captain call\n";
-expectRoute("unrelated open hold plus a routine merged line", hold,
-  "done [at=1790000100]: sample-a PR merged\n", true);
+expectRoute("unrelated open hold plus a routine note", hold,
+  "note [at=1790000100]: sample-a follow-up\n", true);
 expectRoute("unrelated open hold stamped with a readable time", "needs-decision [at=10:00] [key=old-hold]: waiting\n",
-  "done: sample-a PR merged\n", true);
+  "note: sample-a follow-up\n", true);
 expectRoute("routine note that only mentions an open key in prose", hold,
-  "done: sample-a merged, unrelated to [key=old-hold]\n", true);
+  "note: sample-a follow-up, unrelated to [key=old-hold]\n", true);
 expectRoute("mixed routine and decision span", hold,
-  "done: sample-b PR merged\nneeds-decision [key=new-call]: pick an option\n", false);
+  "note: sample-b follow-up\nneeds-decision [key=new-call]: pick an option\n", false);
 expectRoute("same-key update to an open decision", hold,
   "working [key=old-hold]: still gathering evidence\n", false);
 expectRoute("same-key update behind a readable time stamp", hold,
@@ -5015,14 +5015,15 @@ expectRoute("resolution after a bare resolved word left the unkeyed decision ope
 expectRoute("captain-held declaration", "working: history\n", "captain-held [key=parked]: deferred to Monday\n", false);
 
 // The host decides the whole close through the offer rule, which must agree.
-stage("mate", hold, "done: sample-c PR merged\n");
+stage("mate", hold, "note: sample-c follow-up\n");
 if (!branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).eligible) {
   throw new Error("the attended-host offer kept a routine second-mate close on main behind an unrelated hold");
 }
 
 // Without a readable cursor the whole log is the span, so routing falls back
-// toward main rather than guessing.
-stage("mate", hold, "done: sample-d PR merged\n");
+// toward main rather than guessing. The new span is a note, so ineligibility
+// comes from the open hold and not from completion ownership.
+stage("mate", hold, "note: sample-d follow-up\n");
 rmSync(`${state}/.status-presentation-cursor`);
 if (verdicts().some(Boolean)) throw new Error("a missing presentation cursor did not fall back to the whole log");
 
@@ -5032,7 +5033,7 @@ for (const [order, queue, signalSeq, staleSeq] of [
   ["stale first", "1\t1\tstale\tmate\tstale: mate\n1\t2\tsignal\tmate.status\tsignal: mate.status", "2", "1"],
   ["signal first", "1\t1\tsignal\tmate.status\tsignal: mate.status\n1\t2\tstale\tmate\tstale: mate", "1", "2"],
 ]) {
-  stage("mate", hold, "done: sample-e PR merged\n");
+  stage("mate", hold, "note: sample-e follow-up\n");
   writeFileSync(`${state}/.wake-queue`, queue);
   for (const attendedHost of [false, true]) {
     const scope = scopeForUnreadWake(state, false, false, attendedHost);
@@ -5042,11 +5043,76 @@ for (const [order, queue, signalSeq, staleSeq] of [
   }
 }
 
-// Single-task crewmate logs are unchanged: Pi judges only the row payload, and
-// the attended host keeps its whole-log rule.
-stage("crew", hold, "done: routine follow-up\n");
+// Single-task crewmate logs are unchanged for a non-completion span: Pi judges
+// only the row payload, and the attended host keeps its whole-log rule.
+stage("crew", hold, "note: routine follow-up\n");
 const [crewPi, crewHost] = verdicts();
 if (!crewPi || crewHost) throw new Error(`crewmate signal routing changed: pi=${crewPi} host=${crewHost}`);
+
+// A completion that still needs a supervisor is main-owned on both paths,
+// including Pi's offer, which does not pass the attended-host decision fold.
+// The lines are the FrontDesk and Lovie shapes. Nothing here matches a project name.
+expectRoute("validation handoff", "working: history\n",
+  "needs-validation [at=1791534938]: committed c118078, 706 tests\n", false);
+expectRoute("legacy implementation done", "working: history\n",
+  "done [at=1791535311]: committed cc38b3d, 707 tests\n", false);
+expectRoute("scout revision", "working: history\n",
+  "done [at=1791501698]: revision complete and a recheck is next\n", false);
+expectRoute("failure", "working: history\n",
+  "failed [at=1791501800]: the build broke\n", false);
+expectRoute("note does not retire a handoff in the same span", "working: history\n",
+  "needs-validation [at=1791534938]: committed c118078, 706 tests\nnote: still waiting on the supervisor\n", false);
+expectRoute("working after a consumed handoff is the continuation",
+  "needs-validation [at=1791534938]: committed c118078, 706 tests\n",
+  "working [at=1791535000]: validation started\n", true);
+
+stage("mate", "working: history\n", "needs-validation [at=1791534938]: committed c118078, 706 tests\n");
+if (branchOfferForWake(state, `signal: ${state}/mate.status`, false, false).eligible) {
+  throw new Error("Pi offered a validation handoff to the branch while attended");
+}
+const awayOffer = branchOfferForWake(state, `signal: ${state}/mate.status`, true, false);
+if (!awayOffer.eligible || awayOffer.scope.completionSeqs.length !== 0) {
+  throw new Error(`away posture did not keep the handoff on the branch: ${JSON.stringify(awayOffer)}`);
+}
+
+stage("crew", "working: history\n", "needs-validation [at=1791534938]: committed c118078, 706 tests\n");
+const [crewCompletionPi, crewCompletionHost] = verdicts();
+if (crewCompletionPi || crewCompletionHost) {
+  throw new Error(`a crewmate validation handoff reached the branch: pi=${crewCompletionPi} host=${crewCompletionHost}`);
+}
+
+writeFileSync(`${state}/progress.meta`, `project=${process.env.FM_HOME}/projects/approved\nwindow=progress-window\nkind=ship\n`);
+writeFileSync(`${state}/progress.status`, "working: step one\n");
+writeFileSync(`${state}/other.meta`, `project=${process.env.FM_HOME}/projects/approved\nwindow=other-window\nkind=scout\n`);
+writeFileSync(`${state}/other.status`, "done [at=1791501698]: revision complete and a recheck is next\n");
+stage("mate", "working: history\n", "needs-validation [at=1791534938]: committed c118078, 706 tests\n");
+writeFileSync(`${state}/.wake-queue`, [
+  "1\t1\tsignal\tprogress.status\tsignal: progress.status",
+  "1\t2\tsignal\tmate.status\tsignal: mate.status",
+  "1\t3\tsignal\tother.status\tsignal: other.status",
+].join("\n"));
+for (const attendedHost of [false, true]) {
+  const mixed = scopeForUnreadWake(state, false, false, attendedHost);
+  if (mixed.eligibleSeqs.join(",") !== "1" || mixed.completionSeqs.join(",") !== "2,3") {
+    throw new Error(`mixed batch mis-routed: ${JSON.stringify(mixed)}`);
+  }
+}
+if (!branchOfferForWake(state, `signal: ${state}/progress.status`, false, false).eligible) {
+  throw new Error("a progress trigger was bounced by a co-present completion");
+}
+if (branchOfferForWake(state, `signal: ${state}/mate.status ${state}/other.status`, false, false).eligible) {
+  throw new Error("a coalesced completion trigger stayed on the branch");
+}
+writeFileSync(`${state}/.wake-queue`, "1\t1\theartbeat\theartbeat\theartbeat\n1\t2\tsignal\tmate.status\tsignal: mate.status\n");
+const heartbeat = branchOfferForWake(state, "heartbeat", false, false);
+if (!heartbeat.eligible || heartbeat.scope.completionSeqs.join(",") !== "2") {
+  throw new Error(`a co-present completion bounced the heartbeat: ${JSON.stringify(heartbeat)}`);
+}
+writeFileSync(`${state}/.wake-queue`, "1\t1\tstale\tmate\tstale: mate\n");
+const stale = scopeForUnreadWake(state, false, false, false);
+if (!stale.eligibleSeqs.includes("1") || stale.completionSeqs.length !== 0) {
+  throw new Error(`a stale observation was treated as a completion: ${JSON.stringify(stale)}`);
+}
 process.exit(0);
 EOF
   status=$?

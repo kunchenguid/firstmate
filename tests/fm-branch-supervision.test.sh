@@ -69,6 +69,10 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
+  case "$out_a" in
+    *"A completion that still needs a supervisor step, including a validation handoff, a scout revision that needs a recheck, or a ready branch or pull request, is verdict captain while attended."*"While away, perform that continuation through the guarded scripts or leave a durable captain outcome, and never a silent routine success."*) ;;
+    *) fail "branch prompt lost the completion handoff rule" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
