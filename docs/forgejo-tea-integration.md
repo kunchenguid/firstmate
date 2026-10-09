@@ -55,7 +55,9 @@ index,state
 1,merged
 ```
 
-The merge watch (`bin/fm-pr-poll.sh`) therefore reads `tea pulls list ... -o csv`, not `tea pulls <n>`, and filters to the matching index client-side.
+A list read is bounded by `--limit`, so a watched pull request older than that window would never be seen merged.
+The merge watch (`bin/fm-pr-poll.sh`), the terminal-run PR detail (`bin/fm-crew-state.sh`), and teardown's merged-PR proof (`bin/fm-teardown.sh`) therefore read the one pull request by number through `tea api ... /repos/{owner}/{repo}/pulls/{n}`, the same REST record the merge path below reads, and accept only a record whose `merged` field is a boolean (`fm_pr_forgejo_read_record` in `bin/fm-pr-lib.sh`).
+**Not verified here:** that by-number read was not re-run against the evidence instance; it relies on the same `tea api` pull request record whose `state`, `merged`, and `head.sha` fields the merge path's read-back below did verify.
 
 ## Why the login is resolved fresh, and how
 
@@ -96,8 +98,8 @@ $ tea login list --output json
 ]
 ```
 
-`bin/fm-pr-check.sh`, `bin/fm-pr-poll.sh`, and `bin/fm-pr-merge.sh` each independently match the validated PR host against this list's bare hostnames (stripping scheme and port) and refuse when zero or more than one login matches, rather than guessing.
-`bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it re-derives this match on every poll instead of trusting a name recorded anywhere durable; the other two duplicate the same match deliberately, for the same reason.
+Every Forgejo read matches the validated PR host against this list's bare hostnames (stripping scheme and port) and refuses when zero or more than one login matches, rather than guessing.
+`fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy and re-derives the match on every poll instead of trusting a name recorded anywhere durable.
 
 ## URL shape
 
@@ -172,7 +174,10 @@ This was the single most consequential finding of this verification pass: a naiv
 
 ## Pre-merge conditions
 
-Read live from `tea api ... /repos/{owner}/{repo}/pulls/{n}` (`state`, `mergeable`, `head.sha`) and `tea api ... /repos/{owner}/{repo}/commits/{sha}/status` (the combined commit status).
+Read live from `tea api ... /repos/{owner}/{repo}/pulls/{n}` (`state`, `mergeable`, `draft`, `head.sha`) and `tea api ... /repos/{owner}/{repo}/commits/{sha}/status?limit=50&page={p}` (the combined commit status).
+The combined-status endpoint computes its `state` from one page of the latest status per context, so every page is read until an empty one and the head is green only when each non-empty page reads `success`.
+A positive `draft` reading refuses; an instance too old to report the field still refuses a work-in-progress merge server side.
+`tea api` passes a query string through unchanged, because it builds the request URL by plain concatenation onto the login's `/api/v1` base.
 An already-merged pull request is correctly refused for a second merge attempt:
 
 ```
@@ -197,7 +202,7 @@ error: refusing to merge ...
   - the combined commit status is "none", not success
 ```
 
-**Not verified here:** the shape of a populated (non-empty) combined-status response from a real Forgejo Actions run.
+**Not verified here:** the shape of a populated (non-empty) combined-status response from a real Forgejo Actions run, its pagination, and the pull request `draft` field.
 Standing up a Forgejo Actions runner was out of scope for this pass; the merge gate requires the combined status's `state` field to read exactly `success`, matching GitHub's and GitLab's own state enums, and refuses on anything else including an unrecognized value - the same fail-safe-refuse posture as every other condition here.
 
 ## Registered `tea login`s used
