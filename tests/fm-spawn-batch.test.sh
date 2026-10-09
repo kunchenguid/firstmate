@@ -32,7 +32,7 @@ run_spawn() {
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); the
 # batch path takes one shared pair of flags for every pair.
 run_ship_spawn() {
-  run_spawn "$@" --mode direct-PR --yolo off
+  run_spawn "$@" --mode direct-PR --yolo off --no-issue
 }
 
 # Every pair in a batch is dispatched even though the first one fails; the loop
@@ -43,7 +43,7 @@ test_batch_dispatches_every_pair() {
   status=$?
   [ "$status" -ne 0 ] || fail "batch with missing briefs should exit non-zero"
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-a-z1 (projects/none-a)' >/dev/null \
-    || fail "first pair was not dispatched/reported"
+    || fail "first pair was not dispatched/reported: $out"
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-b-z2 (projects/none-b)' >/dev/null \
     || fail "second pair was not dispatched/reported (loop stopped early?)"
   pass "batch dispatch re-execs and reports every id=repo pair"
@@ -89,13 +89,13 @@ test_projects_path_scoping() {
     if [ "$use_override" = yes ]; then
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
-        "$SPAWN" "$id" projects/alpha codex --mode direct-PR --yolo off 2>&1)
+        "$SPAWN" "$id" projects/alpha codex --mode direct-PR --yolo off --no-issue 2>&1)
     else
       mkdir -p "$home/projects/alpha"
       git -C "$home/projects/alpha" init -q || fail "$label: could not initialize home project fixture"
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
-        "$SPAWN" "$id" projects/alpha codex --mode direct-PR --yolo off 2>&1)
+        "$SPAWN" "$id" projects/alpha codex --mode direct-PR --yolo off --no-issue 2>&1)
     fi
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn with missing brief should fail"

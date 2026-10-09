@@ -22,7 +22,7 @@
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
-# Usage: fm-promote.sh <task-id> --mode <direct-PR|local-only> --yolo <on|off>
+# Usage: fm-promote.sh <task-id> --mode <direct-PR|local-only> --yolo <on|off> [--issue <github-issue-url>|--no-issue]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +35,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
@@ -52,6 +54,9 @@ MODE=
 YOLO=
 MODE_SET=0
 YOLO_SET=0
+ISSUE_URL=
+ISSUE_SET=0
+NO_ISSUE=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -62,6 +67,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      issue) ISSUE_URL=$a; ISSUE_SET=1 ;;
     esac
     want_value=
     continue
@@ -71,6 +77,9 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --issue) want_value=issue ;;
+    --issue=*) ISSUE_URL=${a#--issue=}; ISSUE_SET=1 ;;
+    --no-issue) NO_ISSUE=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -92,6 +101,24 @@ case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
 esac
+if [ "$ISSUE_SET" = 1 ] && [ "$NO_ISSUE" = 1 ]; then
+  echo "error: --issue and --no-issue are mutually exclusive" >&2
+  exit 1
+fi
+if [ "$MODE" = direct-PR ] && [ "$ISSUE_SET" != 1 ] && [ "$NO_ISSUE" != 1 ]; then
+  echo "error: direct-PR promotion requires --issue <github-issue-url> or explicit --no-issue" >&2
+  exit 1
+fi
+if [ "$MODE" = local-only ] && { [ "$ISSUE_SET" = 1 ] || [ "$NO_ISSUE" = 1 ]; }; then
+  echo "error: --issue and --no-issue apply only to direct-PR promotions" >&2
+  exit 1
+fi
+if [ "$ISSUE_SET" = 1 ]; then
+  printf '%s\n' "$ISSUE_URL" | grep -Eq '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*$' || {
+    echo "error: --issue must be a canonical GitHub issue URL with a positive issue number" >&2
+    exit 1
+  }
+fi
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
@@ -138,6 +165,28 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+if [ "$ISSUE_SET" = 1 ]; then
+  PROJECT=$(fm_meta_get "$META" project)
+  ORIGIN=$(git -C "$PROJECT" remote get-url origin 2>/dev/null || true)
+  ISSUE_REPO=${ISSUE_URL#https://github.com/}
+  ISSUE_REPO=${ISSUE_REPO%/issues/*}
+  ORIGIN_REPO=$(fm_pr_github_repo_from_origin "$ORIGIN" 2>/dev/null || true)
+  [ -n "$ORIGIN_REPO" ] && [ "$ISSUE_REPO" = "$ORIGIN_REPO" ] || {
+    echo "error: issue repository must match the project GitHub origin ($ORIGIN)" >&2
+    exit 1
+  }
+  OPERATOR_LOGIN_FILE="$FM_HOME/config/github-operator-login"
+  [ -r "$OPERATOR_LOGIN_FILE" ] || {
+    echo "error: issue-linked promotion requires a readable config/github-operator-login" >&2
+    exit 1
+  }
+  OPERATOR_LOGIN=$(sed -n '1p' "$OPERATOR_LOGIN_FILE" | tr -d '\r\n')
+  case "$OPERATOR_LOGIN" in ''|*[!A-Za-z0-9-]*) echo "error: config/github-operator-login must contain one GitHub login" >&2; exit 1 ;; esac
+  gh issue edit "$ISSUE_URL" --add-assignee "$OPERATOR_LOGIN" >/dev/null || {
+    echo "error: could not assign issue $ISSUE_URL to $OPERATOR_LOGIN; promotion stopped before changing the task" >&2
+    exit 1
+  }
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -242,11 +291,13 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^issue=' -e '^no_issue=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  [ "$ISSUE_SET" != 1 ] || echo "issue=$ISSUE_URL"
+  [ "$NO_ISSUE" != 1 ] || echo "no_issue=1"
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"

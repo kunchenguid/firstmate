@@ -43,6 +43,8 @@ Pull-request rules read the URL recorded in task metadata and require the GitHub
 `bin/fm-stuck-board.sh` owns the signal rules, config parsing, and breach episodes, while the helper headers own exact commands and output.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
+For issue-linked direct-PR ship tasks, `config/github-operator-login` names the GitHub login assigned during pickup; pass the canonical issue URL with `fm-spawn.sh --issue`, which records it in task metadata for the PR-ready closing-reference check.
+Every direct-PR ship needs `--issue` or the explicit `--no-issue` opt-out, while scouts and local-only tasks are exempt.
 `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.

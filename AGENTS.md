@@ -80,6 +80,7 @@ config/repo-concurrency  optional positive local task limit for one project Firs
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = the configured tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), herdr has its own required CI lane (docs/herdr-backend.md), while zellij, orca, and cmux remain experimental with no dedicated real-backend CI lane (docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; inherited by secondmate homes under the primary-authoritative contract in secondmate-provisioning
 config/treehouse-root  optional per-home Treehouse pool root for ship and scout worktrees; LOCAL, gitignored, and not inherited; see docs/configuration.md "Treehouse pool root"
+config/github-operator-login  optional GitHub login assigned to issues when an issue-linked ship task is picked up; LOCAL, gitignored; see docs/configuration.md
 config/calm     Calm presentation preference shared by the Pi extension and the Claude Code mod; LOCAL, gitignored, and not inherited; see docs/configuration.md "Calm preference"
 config/supervision-branch-model config/supervision-branch-effort  Pi supervision-branch model and reasoning-effort pins written by /supervision-model; LOCAL, gitignored, independently settable, and not inherited; see docs/configuration.md "Pi supervision branch model and effort"
 config/startup-memory-budget     primary-authoritative per-home startup-memory budget; LOCAL, gitignored, materialized as 7,500 estimated tokens by locked primary bootstrap and inherited into secondmate homes; see docs/configuration.md "Startup memory budget"
@@ -340,6 +341,7 @@ Fill the task subsections according to section 11.
 ### Dispatch and supervision handoff
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
+Every direct-PR ship carries a GitHub issue URL or the explicit `--no-issue` opt-out; issue-linked ships must pass their canonical issue URL with `--issue` so pickup assigns the configured operator and PR readiness can enforce its closing reference.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.

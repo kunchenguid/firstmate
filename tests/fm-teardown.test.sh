@@ -147,6 +147,7 @@ write_meta() {
     "kind=$kind" \
     "mode=$mode" \
     "spawn_gen=teardown-test-task-x1"
+  [ "$mode" != direct-PR ] || printf 'no_issue=1\n' >> "$case_dir/state/task-x1.meta"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -220,10 +221,13 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *baseRefName*) printf 'main\n'; exit 0 ;;
+      *defaultBranchRef*) printf 'main\n'; exit 0 ;;
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
+  "repo view") printf 'main\n'; exit 0 ;;
 esac
 echo "error: pull request not found" >&2
 exit 1

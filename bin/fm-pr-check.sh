@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task only after required issue metadata, GitHub's default
+# base branch, and any required issue closing reference pass validation.
+# Store one canonical pr=<url> and the forge's exact pr_head=<sha> when available,
+# then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -41,6 +43,68 @@ META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
+fi
+
+# Issue-linked tasks may be marked PR-ready only when GitHub's own closing
+# keyword syntax will close the recorded issue on merge.
+TASK_ISSUE=$(grep '^issue=' "$META" | tail -1 | cut -d= -f2- || true)
+TASK_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+TASK_NO_ISSUE=$(grep '^no_issue=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$TASK_MODE" = direct-PR ] && [ -z "$TASK_ISSUE" ] && [ "$TASK_NO_ISSUE" != 1 ]; then
+  echo "error: direct-PR task metadata must record issue=<github-issue-url> or no_issue=1" >&2
+  exit 1
+fi
+if [ -n "$TASK_ISSUE" ] && [ "$TASK_NO_ISSUE" = 1 ]; then
+  echo "error: task metadata cannot record both issue= and no_issue=1" >&2
+  exit 1
+fi
+if [ "$TASK_MODE" = local-only ] && { [ -n "$TASK_ISSUE" ] || [ "$TASK_NO_ISSUE" = 1 ]; }; then
+  echo "error: local-only task metadata cannot carry issue= or no_issue=1" >&2
+  exit 1
+fi
+if [ "$PROVIDER" = github ]; then
+  command -v gh >/dev/null 2>&1 || { echo "error: verifying the pull request base requires gh on PATH" >&2; exit 1; }
+  PR_BASE=$(gh pr view "$URL" --json baseRefName -q .baseRefName 2>/dev/null) || {
+    echo "error: could not read pull request base branch" >&2
+    exit 1
+  }
+  DEFAULT_BRANCH=$(gh repo view "$PROJECT_PATH" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null) || {
+    echo "error: could not read the GitHub repository default branch" >&2
+    exit 1
+  }
+  [ -n "$DEFAULT_BRANCH" ] && [ "$PR_BASE" = "$DEFAULT_BRANCH" ] || {
+    echo "error: PR base ${PR_BASE:-unknown} is not the repository default branch ${DEFAULT_BRANCH:-unknown}" >&2
+    exit 1
+  }
+fi
+if [ -n "$TASK_ISSUE" ]; then
+  case "$TASK_ISSUE" in
+    https://github.com/*/*/issues/[1-9]*) ;;
+    *) echo "error: task issue metadata is invalid" >&2; exit 1 ;;
+  esac
+  ISSUE_PART=${TASK_ISSUE#https://github.com/}
+  ISSUE_REPO=${ISSUE_PART%%/issues/*}
+  ISSUE_NUMBER=${ISSUE_PART##*/}
+  case "$ISSUE_PART" in */issues/[1-9]*) ;; *) echo "error: task issue metadata is invalid" >&2; exit 1 ;; esac
+  case "$ISSUE_NUMBER" in *[!0-9]*|'') echo "error: task issue metadata is invalid" >&2; exit 1 ;; esac
+  if [ "$PROVIDER" != github ] || [ "$PROJECT_PATH" != "$ISSUE_REPO" ]; then
+    echo "error: task issue and pull request must belong to the same GitHub repository" >&2
+    exit 1
+  fi
+  command -v gh >/dev/null 2>&1 || { echo "error: verifying the PR closing reference requires gh on PATH" >&2; exit 1; }
+  PR_BODY=$(gh pr view "$URL" --json body -q .body 2>/dev/null) || {
+    echo "error: could not read pull request body to verify its issue closing reference" >&2
+    exit 1
+  }
+  ISSUE_REPO_REGEX=$(printf '%s' "$ISSUE_REPO" | sed 's/[][(){}.^$?+*|\\]/\\&/g')
+  CLOSING_KEYWORDS='(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)'
+  LOCAL_CLOSING_PATTERN="(^|[^[:alnum:]_])${CLOSING_KEYWORDS}[[:space:]]*:?[[:space:]]*#${ISSUE_NUMBER}([^0-9]|$)"
+  REPO_CLOSING_PATTERN="(^|[^[:alnum:]_])${CLOSING_KEYWORDS}[[:space:]]*:?[[:space:]]*${ISSUE_REPO_REGEX}#${ISSUE_NUMBER}([^0-9]|$)"
+  if ! printf '%s\n' "$PR_BODY" | grep -Eiq "$LOCAL_CLOSING_PATTERN" \
+    && ! printf '%s\n' "$PR_BODY" | grep -Eiq "$REPO_CLOSING_PATTERN"; then
+    echo "error: PR body must contain Closes #${ISSUE_NUMBER} for task issue ${TASK_ISSUE}" >&2
+    exit 1
+  fi
 fi
 
 # A prior exact merged result may have queued its durable wake immediately

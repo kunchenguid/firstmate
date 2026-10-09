@@ -18,6 +18,26 @@
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
 FM_PR_PROVIDER=
+
+# fm_pr_github_repo_from_origin: print owner/repository for a supported GitHub
+# origin URL, or return failure for any other remote.
+fm_pr_github_repo_from_origin() {  # <origin>
+  local origin=$1 path
+  case "$origin" in
+    https://github.com/*) path=${origin#https://github.com/} ;;
+    ssh://git@github.com/*) path=${origin#ssh://git@github.com/} ;;
+    git@github.com:*) path=${origin#git@github.com:} ;;
+    *) return 1 ;;
+  esac
+  path=${path%.git}
+  case "$path" in
+    */* )
+      case "${path#*/}" in */*|'') return 1 ;; esac
+      printf '%s\n' "$path"
+      ;;
+    *) return 1 ;;
+  esac
+}
 FM_PR_URL=
 FM_PR_HOST=
 FM_PR_PATH=
