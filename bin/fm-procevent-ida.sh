@@ -191,13 +191,20 @@ session_payload_has_marker() { # <structured session get>
   ' "$file" >/dev/null 2>&1
 }
 
-session_observation() { # <id> <session-id> <kind> [recorded-task-id]
+session_observation() { # <id> <session-id> <kind> [recorded-task-id] [authenticated-readback]
   local id=$1 session_id=$2 kind=$3 expected_task_id=${4:-$IDA_STATE_TASK_ID}
   local root out err task_summary task_id task_count task_found task_status status_kind allow_untagged
   local answer answer_file availability terminal ambiguous=false class="" agent_id agent_name
   local result_kind="" artifact_reference=null structured structured_state=empty receipt_bound=false
   root=$(temp_root); out="$root/get.out"; err="$root/get.err"
-  run_ida_json "$out" "$err" session get --session-id "$session_id"
+  if [ -n "${5:-}" ]; then
+    # Unknown-followup recovery already authenticated this private response.
+    # Reuse it so a message rewrite or transient second read cannot lose proof.
+    out=$5
+    IDA_READ_ERROR=
+  else
+    run_ida_json "$out" "$err" session get --session-id "$session_id"
+  fi
   class=$IDA_READ_ERROR
   [ -n "$class" ] || class=$(fm_ida_session_response_error "$out" "$session_id")
   if [ -n "$class" ]; then
@@ -527,7 +534,7 @@ observe_or_submit() ( # <id> <allow-submit:true|false>
     root=$(temp_root)
     trap 'rm -rf -- "$root"' EXIT
     if fm_ida_followup_recover "$root"; then
-      session_observation "$id" "$IDA_STATE_SESSION_ID" reconcile "$IDA_RECOVERY_TASK"
+      session_observation "$id" "$IDA_STATE_SESSION_ID" reconcile "$IDA_RECOVERY_TASK" "$root/recovery-get"
     else
       # End this source generation after bounded diagnosis, not an unlimited
       # read loop. The exact class tells MAIN which repair/escalation to act on.

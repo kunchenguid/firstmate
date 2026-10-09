@@ -2079,6 +2079,7 @@ test_followup_identity_and_unknown_submission() {
 
 test_followup_active_recovery() {
   local home fakebin id=ida-active-recovery mode before after state_sha result
+  local FM_IDA_FAKE_MODE=success
   home=$(new_home active-recovery); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   local REMOTE_TASK_ID=80001
@@ -2120,15 +2121,20 @@ test_followup_active_recovery() {
   jq -e '.ambiguous==true and .terminal==false and .error_class=="followup-read-retry-exhausted-unavailable"' "$home/exhausted" >/dev/null || fail 'source erased exhausted read classification'
   "$ROOT/bin/fm-procevent-ida.sh" terminal "$home/exhausted" || fail 'exhausted unknown source would rearm indefinitely'
   # Source used to return ambiguity without reading a recoverable marker.
+  before=$(grep -c 'argv:.*session get ' "$home/bytedcli.log")
   FM_HOME="$home" FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
     FM_IDA_FAKE_SESSION_ID=70001 FM_IDA_FAKE_TASK_ID=80002 FM_IDA_FAKE_MODE=success FM_IDA_FAKE_MARKER_TASK_SHAPE=normalized \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-procevent-ida.sh" observe "$id" > "$home/observation"
   jq -e '.ambiguous==false and .task_id_remote=="80002"' "$home/observation" >/dev/null || fail "source did not actively recover exact marker identity: $(cat "$home/observation")"
+  after=$(grep -c 'argv:.*session get ' "$home/bytedcli.log")
+  [ "$((after-before))" = 1 ] || fail 'source discarded its authenticated read and fetched the session twice'
   result=$(FM_IDA_FAKE_MARKER_TASK_SHAPE=normalized run_ida "$home" "$fakebin" state "$id")
   [[ "$result" == *'recovery=confirmed'* ]] || fail 'task-state remained passive despite recoverable evidence'
+  mv "$home/state/$id.meta" "$home/prior.meta"
   FM_IDA_FAKE_MODE=zero FM_IDA_FAKE_TRANSIENT_ONCE="$home/transient-once" FM_IDA_FAKE_MARKER_TASK_SHAPE=normalized \
     run_ida "$home" "$fakebin" adopt "$id" >/dev/null || fail 'adopt did not recover after one transient read failure'
   wait_phase "$home" "$id" terminal-success
+  assert_present "$home/state/$id.meta" 'unknown-followup adoption lost metadata reconstruction'
   jq -e '.generation==2 and .provider_state.task_id=="80002"' "$(state_file "$home" "$id")" >/dev/null || fail 'adopt lost exact generation identity'
   [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 2 ] || fail 'diagnosis or adopt repeated create'
   assert_grep 'resolved [key=ida-followup-recovery]' "$home/state/$id.status" 'recovered identity left repair blocker open'
@@ -2286,6 +2292,6 @@ test_cancellation_and_retirement_authority
 test_retirement_pairs_backlog_and_preserves_failed_close
 test_aime_compatibility_and_local_unchanged
 test_remote_aime_dispatch_metadata
-printf '# fm-remote-agent.test.sh: all assertions passed\n'
-
 test_followup_active_recovery
+printf '# fm-remote-agent.test.sh: all assertions passed\n
+' 

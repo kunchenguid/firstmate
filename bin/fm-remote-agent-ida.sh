@@ -378,14 +378,14 @@ cmd_adopt() (
   local id=${1-} lock root observation patch
   [ "$#" -eq 1 ] || usage
   fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+  if [ ! -f "$STATE/$id.meta" ]; then fm_remote_meta_write "$id" ida "$REMOTE_STATE_TASK_TYPE" || die "cannot repair missing iDA metadata";
+  else fm_remote_meta_validate "$id" ida "$REMOTE_STATE_TASK_TYPE" || die "iDA metadata does not match durable state"; fi
   if jq -e '.provider_state.followup_action_id != null and .provider_state.task_id == null' "$REMOTE_STATE_FILE" >/dev/null; then
     cmd_followup "$id" --action-id "$(jq -r '.provider_state.followup_action_id' "$REMOTE_STATE_FILE")" \
       --expected-terminal-generation "$(jq -r '.provider_state.parent_generation' "$REMOTE_STATE_FILE")" \
       --instructions "$REMOTE_STATE_INSTRUCTION_FILE"
     return $?
   fi
-  if [ ! -f "$STATE/$id.meta" ]; then fm_remote_meta_write "$id" ida "$REMOTE_STATE_TASK_TYPE" || die "cannot repair missing iDA metadata";
-  else fm_remote_meta_validate "$id" ida "$REMOTE_STATE_TASK_TYPE" || die "iDA metadata does not match durable state"; fi
   case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure|terminal-cancelled) printf 'already-terminal: %s phase=%s\n' "$id" "$REMOTE_STATE_PHASE"; return ;; esac
   lock=$(fm_remote_task_lock_path "$id")
   fm_lock_acquire_wait "$lock" || die "cannot lock iDA task"
