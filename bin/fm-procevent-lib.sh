@@ -1255,6 +1255,33 @@ fm_procevent_handled_marker() {
   printf '%s/%s.%s.handled\n' "$(fm_procevent_inbox_dir "$1")" "$2" "$3"
 }
 
+# The optional home recorder (config/procevent-recorder; bin/fm-procevent.sh's
+# header owns the contract). Its presence alone turns on the record gate below,
+# so a recorder that exists but cannot be trusted or run still blocks
+# acknowledgement instead of letting a capture pass unrecorded.
+fm_procevent_recorder_file() {  # <state>
+  printf '%s/procevent-recorder\n' "${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(dirname "$1")}/config}"
+}
+
+fm_procevent_recorder_configured() {  # <state>
+  local f; f=$(fm_procevent_recorder_file "$1")
+  [ -e "$f" ] || [ -L "$f" ]
+}
+
+# fm_procevent_recorded_marker <state> <source-id> <sequence>
+fm_procevent_recorded_marker() {
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" = 1 ]; then
+    printf './%s.%s.recorded\n' "$2" "$3"
+    return
+  fi
+  printf '%s/%s.%s.recorded\n' "$(fm_procevent_inbox_dir "$1")" "$2" "$3"
+}
+
+fm_procevent_is_recorded() {  # <state> <source-id> <sequence>
+  local marker; marker=$(fm_procevent_recorded_marker "$1" "$2" "$3")
+  [ -f "$marker" ] && [ ! -L "$marker" ]
+}
+
 # fm_procevent_is_handled <state> <source-id> <sequence>
 fm_procevent_is_handled() {
   local marker; marker=$(fm_procevent_handled_marker "$1" "$2" "$3")
@@ -1271,7 +1298,8 @@ fm_procevent_is_handled() {
 # announcing a result never blocks it from being re-announced, only this does.
 # 0 = newly recorded (first-ever handling for this generation, safe to perform
 # a paired effect that has not yet run), 1 = already recorded (repeat call; do
-# not repeat a paired effect), 2 = error.
+# not repeat a paired effect), 2 = error, 3 = refused because this home has a
+# recorder and the capture has no record yet (see the record gate below).
 fm_procevent_mark_handled() {
   local state=$1 id=$2 seq=$3 inbox result adapter_file marker tmp
   fm_procevent_source_id_valid "$id" || return 2
@@ -1287,6 +1315,15 @@ fm_procevent_mark_handled() {
   [ -f "$adapter_file" ] && [ ! -L "$adapter_file" ] || return 2
   marker=$(fm_procevent_handled_marker "$state" "$id" "$seq")
   [ ! -L "$marker" ] || return 2
+  [ -f "$marker" ] && return 1
+  # Record gate: with a home recorder configured, a built-in capture is never
+  # acknowledged before its record exists (status 3). Extension captures use
+  # the pinned inbox and are never fed to the recorder, so they are exempt.
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" != 1 ] \
+    && fm_procevent_recorder_configured "$state" \
+    && ! fm_procevent_is_recorded "$state" "$id" "$seq"; then
+    return 3
+  fi
   tmp=$(umask 077; mktemp "$inbox/.handled.XXXXXX") || return 2
   if ! chmod 0600 "$tmp"; then
     rm -f -- "$tmp"
