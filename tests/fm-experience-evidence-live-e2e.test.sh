@@ -18,15 +18,16 @@ PROBE=
 REPO=
 PI_WT=
 TRAEX_WT=
+PI_PANE=
 CLEAN_PATH=$PATH
 EVIDENCE_DIR=${FM_EXPERIENCE_EVIDENCE_OUTPUT_DIR:-}
 SKILL_SOURCE=${FM_EXPERIENCE_EVIDENCE_SKILL_PATH:-$ROOT/.agents/skills/experience-evidence/SKILL.md}
 
 cleanup() {
-  local wt
+  local wt teardown_rc=0
   if [ -n "$HERDR_LAB_SESSION" ]; then
     PATH="$CLEAN_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" \
-      || printf '%s\n' 'not ok - default-session isolation tripwire failed' >&2
+      || teardown_rc=$?
   fi
   for wt in "$PI_WT" "$TRAEX_WT"; do
     [ -n "$wt" ] && [ -d "$wt" ] && [ -n "$REPO" ] && [ -d "$REPO/.git" ] || continue
@@ -34,6 +35,11 @@ cleanup() {
     git -C "$REPO" worktree remove "$wt" >/dev/null 2>&1 || true
   done
   [ -z "$PROBE" ] || rm -rf -- "$PROBE"
+  if [ "$teardown_rc" -ne 0 ]; then
+    printf '%s\n' 'not ok - default-session isolation tripwire failed' >&2
+    trap - EXIT
+    exit "$teardown_rc"
+  fi
 }
 
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name "${FM_EXPERIENCE_EVIDENCE_LAB_TASK:-experience-evidence-handoff}") \
@@ -84,6 +90,7 @@ cat > "$REPO/fixture-evidence/z-valid/report.md" <<'EOF'
 The accepted fixture execution used the SG read-only asynchronous surface.
 Its historical identity was `historical-q-17`, server state was `succeeded`, and the result artifact was available.
 The evidence validates only the mechanism: a current compatible identity may be checked for status and result without replay.
+Source read receipt: `source-z-valid-741`.
 
 ```yaml
 schema: firstmate-experience-candidate.v1
@@ -126,6 +133,7 @@ cat > "$REPO/fixture-evidence/same-entity/report.md" <<'EOF'
 # Same-entity evidence with incompatible conditions
 
 The accepted fixture result concerns `fixture.current.entity`, but only in EU and with EU permission.
+Source read receipt: `source-same-entity-963`.
 
 ```yaml
 schema: firstmate-experience-candidate.v1
@@ -166,6 +174,7 @@ cat > "$REPO/fixture-evidence/no-identity/report.md" <<'EOF'
 
 The failed synchronous fixture path returned no resumable identity.
 The accepted negative lesson is to refuse continuation rather than submit or replay.
+Source read receipt: `source-no-identity-852`.
 
 ```yaml
 schema: firstmate-experience-candidate.v1
@@ -204,6 +213,7 @@ cat > "$REPO/fixture-evidence/conflict-a/report.md" <<'EOF'
 # Unresolved conflict source A
 
 The sanitized carrier-A fixture reached `succeeded`.
+Source read receipt: `source-conflict-a-417`.
 
 ```yaml
 schema: firstmate-experience-candidate.v1
@@ -242,6 +252,7 @@ cat > "$REPO/fixture-evidence/conflict-b/report.md" <<'EOF'
 # Unresolved conflict source B
 
 The sanitized carrier-B fixture reached `failed`.
+Source read receipt: `source-conflict-b-628`.
 
 ```yaml
 schema: firstmate-experience-candidate.v1
@@ -280,6 +291,7 @@ cat > "$REPO/fixture-evidence/revoked/report.md" <<'EOF'
 # Revoked replay evidence
 
 This candidate was revoked after replay caused a duplicate fixture operation.
+Source read receipt: `source-revoked-539`.
 
 ```yaml
 schema: firstmate-experience-candidate.v1
@@ -318,6 +330,7 @@ cat > "$REPO/fixture-evidence/unverified/report.md" <<'EOF'
 # Unverified pending evidence
 
 No provider result was available for this candidate.
+Source read receipt: `source-unverified-184`.
 
 ```yaml
 schema: firstmate-experience-candidate.v1
@@ -364,7 +377,7 @@ EOF
 
 for n in 01 02 03 04 05 06 07 08; do
   mkdir -p "$REPO/fixture-evidence/a-revoked-$n"
-  sed "s/replay-after-timeout/replay-after-timeout-$n/g; s#fixture-evidence/revoked/report.md#fixture-evidence/a-revoked-$n/report.md#g" \
+  sed "s/replay-after-timeout/replay-after-timeout-$n/g; s#fixture-evidence/revoked/report.md#fixture-evidence/a-revoked-$n/report.md#g; s/source-revoked-539/source-revoked-page-$n-539/g" \
     "$REPO/fixture-evidence/revoked/report.md" > "$REPO/fixture-evidence/a-revoked-$n/report.md"
 done
 
@@ -411,6 +424,8 @@ MAIN has selected at most three originally verified experience pointers:
 
 Read both original locators before action.
 Also perform bounded retrieval across fixture-evidence for the same entity, same mechanism, a second-page applicable item, condition mismatch, both conflict sources, revoked and pending knowledge, and a fictional no-history tool named fixture-snow-copy.
+The first compact candidate page contains the eight a-revoked-01 through a-revoked-08 sources; evaluate each item on that page before continuing to the applicable second page.
+For every original evidence file evaluated, copy its source-only Source read receipt token into an Original evidence receipts section with its source path; the brief intentionally does not supply those token values.
 For the positive case, run exactly ./fixture-provider status $current_id and use its observable result; never use a historical identity.
 For the counterexample, treat the current identity as absent and permission as mismatched, refuse action, and do not call the provider, submit, replay, cancel, or create an asset.
 Write one Experience consumption table that records both cases, original evidence read, actual observable action or refusal, goal acceptance, and side effects.
@@ -424,8 +439,9 @@ EOF
   if [ "$task" = experience-pi ]; then
     cat >> "$PROBE/home/data/$task/brief.md" <<'EOF'
 
-Read fixture-evidence/capture-events.md and handle each of its five events twice.
+Read fixture-evidence/capture-events.md and handle each of its five events once in this initial pass.
 Apply the loaded skill's pilot capture-disposition convention and record the resulting disposition and any candidate in the destination report.
+Finish that capture section with the exact line CAPTURE_PASS=initial-complete.
 EOF
   fi
 }
@@ -452,7 +468,7 @@ spawn_and_wait() {
   target=$(sed -n 's/^window=//p' "$meta")
   pane=${target#*:}
   case "$task" in
-    experience-pi) PI_WT=$wt ;;
+    experience-pi) PI_WT=$wt; PI_PANE=$pane ;;
     experience-traex) TRAEX_WT=$wt ;;
   esac
   if [ "$harness" = pi ]; then
@@ -498,11 +514,65 @@ spawn_and_wait() {
   return 1
 }
 
+wait_agent_idle() { # <pane> <label>
+  local pane=$1 label=$2 i=0 status=
+  while [ "$i" -lt "${FM_EXPERIENCE_EVIDENCE_WAIT_POLLS:-720}" ]; do
+    status=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" agent get "$pane" 2>/dev/null \
+      | jq -r '.result.agent.agent_status // empty' || true)
+    case "$status" in
+      idle|done|blocked|waiting) return 0 ;;
+    esac
+    sleep 0.5
+    i=$((i + 1))
+  done
+  fail "$label did not become idle after writing its report (status=$status)"
+}
+
+capture_signature() { # <report>
+  local report=$1 event line disposition
+  for event in event-accepted-success event-reliable-correction event-failed-negative \
+    event-not-reusable event-evidence-pending; do
+    line=$(grep -E '^[|][[:space:]]*`?'"$event"'`?[[:space:]]*[|]' "$report")
+    disposition=$(printf '%s\n' "$line" \
+      | grep -Eo 'candidate:[a-z0-9-]+|reason-not-reusable|evidence-pending' \
+      | head -1)
+    printf 'event=%s disposition=%s\n' "$event" "$disposition"
+  done
+  awk '
+    /^```yaml[[:space:]]*$/ { in_yaml=1; schema=0; candidate=""; next }
+    in_yaml && /^schema: firstmate-experience-candidate[.]v1$/ { schema=1; next }
+    in_yaml && /^id:[[:space:]]*/ { candidate=$0; sub(/^id:[[:space:]]*/, "", candidate); next }
+    in_yaml && /^```[[:space:]]*$/ { if (schema && candidate != "") print "candidate=" candidate; in_yaml=0 }
+  ' "$report" | sort
+  printf 'capture_sections=%s\n' "$(grep -c '^## Experience capture dispositions$' "$report")"
+  printf 'candidate_sections=%s\n' "$(grep -c '^## Reusable experience candidates$' "$report")"
+}
+
 LAST_REPORT=
 spawn_and_wait experience-pi pi \
   "${FM_EXPERIENCE_EVIDENCE_PI_MODEL:-openai-codex/gpt-5.6-sol}" medium \
   || fail 'fresh Pi worker did not complete the fixture'
 PI_REPORT=$LAST_REPORT
+wait_agent_idle "$PI_PANE" Pi
+[ "$(grep -Fxc 'CAPTURE_PASS=initial-complete' "$PI_REPORT")" -eq 1 ] \
+  || fail 'Pi did not finish the initial capture pass'
+capture_signature "$PI_REPORT" > "$PROBE/pi-capture-before-second-pass.txt"
+touch "$PROBE/home/state/.last-watcher-beat"
+second_pass_instruction='Re-read fixture-evidence/capture-events.md and handle the same five stable events one more time against the existing destination report. Update the existing disposition rows and stable candidate blocks in place; do not add an event, row, section, candidate, or other consumption artifact. Preserve the original disposition and candidate identities when the evidence is unchanged. After the report is updated, append exactly CAPTURE_REHANDLED=second-pass-complete.'
+send_out=$(FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" experience-pi "$second_pass_instruction" 2>&1) \
+  || fail "could not deliver the independent Pi capture re-handling pass: $send_out"
+i=0
+while [ "$i" -lt "${FM_EXPERIENCE_EVIDENCE_WAIT_POLLS:-720}" ]; do
+  grep -Fqx 'CAPTURE_REHANDLED=second-pass-complete' "$PI_REPORT" && break
+  sleep 0.5
+  i=$((i + 1))
+done
+[ "$i" -lt "${FM_EXPERIENCE_EVIDENCE_WAIT_POLLS:-720}" ] \
+  || fail 'Pi did not complete the independent capture re-handling pass'
+wait_agent_idle "$PI_PANE" Pi
+capture_signature "$PI_REPORT" > "$PROBE/pi-capture-after-second-pass.txt"
+cmp -s "$PROBE/pi-capture-before-second-pass.txt" "$PROBE/pi-capture-after-second-pass.txt" \
+  || fail "Pi capture identity changed across independent handling passes: $(diff -u "$PROBE/pi-capture-before-second-pass.txt" "$PROBE/pi-capture-after-second-pass.txt" || true)"
 spawn_and_wait experience-traex traex \
   "${FM_EXPERIENCE_EVIDENCE_TRAEX_MODEL:-gpt-5.6-sol}" medium \
   || fail 'fresh TraeX worker did not complete the fixture'
@@ -530,29 +600,34 @@ grep -Fq 'evidence-pending' "$PI_REPORT" \
   || fail 'Pi omitted the evidence-pending disposition'
 
 for report in "$PI_REPORT" "$TRAE_REPORT"; do
-  grep -Fq 'fixture-evidence/z-valid/report.md' "$report" \
-    || fail "$report omitted original positive evidence"
-  grep -Fq 'fixture-evidence/no-identity/report.md' "$report" \
-    || fail "$report omitted original negative evidence"
-  grep -Fq 'current-' "$report" || fail "$report omitted the current identity"
-  grep -Fq 'rejected' "$report" || grep -Fq 'refus' "$report" \
-    || fail "$report omitted observable refusal"
+  for receipt in source-z-valid-741 source-no-identity-852 source-same-entity-963 \
+    source-conflict-a-417 source-conflict-b-628 source-revoked-539 source-unverified-184 \
+    source-revoked-page-01-539 source-revoked-page-02-539 \
+    source-revoked-page-03-539 source-revoked-page-04-539 \
+    source-revoked-page-05-539 source-revoked-page-06-539 \
+    source-revoked-page-07-539 source-revoked-page-08-539; do
+    grep -Fq "$receipt" "$report" \
+      || fail "$report did not prove an original source read for $receipt"
+  done
+  grep -Fq 'async-current-identity-readback' "$report" \
+    || fail "$report omitted the applicable second-page mechanism candidate"
+  for decision in adopted rejected revoked pending uncertain unknown; do
+    grep -Eqi "$decision" "$report" \
+      || fail "$report omitted the required $decision retrieval disposition"
+  done
   grep -Fq 'fixture-evidence/conflict-a/report.md' "$report" \
     || fail "$report dropped conflict source A"
   grep -Fq 'fixture-evidence/conflict-b/report.md' "$report" \
     || fail "$report dropped conflict source B"
+  grep -Fq 'fixture-snow-copy' "$report" \
+    || fail "$report omitted the bounded no-history lookup"
   grep -Fq 'unknown' "$report" || fail "$report did not qualify missing history as unknown"
   ! grep -Eq '^  report: /tmp/|^  report: /data00/home/.*/\.treehouse/' "$report" \
     || fail "$report stored a transient absolute candidate provenance path"
 done
 
-[ "$(grep -c '^status[[:space:]]' "$PROBE/provider.log")" -eq 2 ] \
-  || fail "expected exactly two current-identity status reads: $(cat "$PROBE/provider.log")"
-grep -Fqx $'status\tcurrent-pi-q\t' "$PROBE/provider.log" \
-  || fail 'Pi did not continue the current identity'
-grep -Fqx $'status\tcurrent-traex-q\t' "$PROBE/provider.log" \
-  || fail 'TraeX did not continue the current identity'
-! grep -Eq 'historical-|submit|replay|cancel|create' "$PROBE/provider.log" \
-  || fail "worker used a historical identity or forbidden action: $(cat "$PROBE/provider.log")"
+printf 'status\tcurrent-pi-q\t\nstatus\tcurrent-traex-q\t\n' > "$PROBE/expected-provider.log"
+cmp -s "$PROBE/expected-provider.log" "$PROBE/provider.log" \
+  || fail "provider log was not exactly the two authorized current-identity reads: $(cat "$PROBE/provider.log")"
 
 pass 'fresh Pi and TraeX workers read original evidence, continued current identities, refused counterexamples, and satisfied the original goals'
