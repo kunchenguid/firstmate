@@ -2843,7 +2843,7 @@ SH
   pass "raw droid launch bypasses template-only jq and settings generation"
 }
 
-test_droid_threads_custom_model_and_dynamic_effort_through_settings() {
+test_droid_threads_native_model_and_dynamic_effort_through_settings() {
   local rec id out status launch settings turnend
   id=profile-droid-z20
   rec=$(make_spawn_case profile-droid droid "$id")
@@ -2862,12 +2862,27 @@ test_droid_threads_custom_model_and_dynamic_effort_through_settings() {
   turnend="$(cd "$HOME_DIR/state" && pwd -P)/$id.turn-ended"
   assert_contains "$launch" "droid --settings '$settings' --auto high" \
     "droid launch did not use its process-only settings merge"
-  jq -e '.sessionDefaultSettings.model == "custom:GPT-5.6-Sol-0" and .sessionDefaultSettings.reasoningEffort == "dynamic" and .sessionDefaultSettings.autonomyLevel == "high"' "$settings" >/dev/null \
-    || fail "droid settings did not map the custom model id and retain dynamic effort"
+  jq -e '.sessionDefaultSettings.model == "gpt-5.6-sol" and .sessionDefaultSettings.reasoningEffort == "dynamic" and .sessionDefaultSettings.autonomyLevel == "high"' "$settings" >/dev/null \
+    || fail "droid settings rewrote the requested native model id or lost dynamic effort"
   jq -e --arg turnend "$turnend" \
     '.hooks.Stop[0].hooks[0] == {"type":"command","command":("touch '\''" + $turnend + "'\''")}' "$settings" >/dev/null \
     || fail "droid settings lost the Stop turn-end hook"
-  pass "droid receives custom model and dynamic effort through settings alongside its Stop hook"
+  pass "droid retains the exact native model despite a colliding custom alias, alongside dynamic effort and Stop"
+}
+
+test_droid_retains_explicit_custom_registry_id() {
+  local rec id out status settings
+  id=profile-droid-native-custom
+  rec=$(make_spawn_case profile-droid-native-custom droid "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness droid --model custom:GPT-5.6-Sol-0 --effort high)
+  status=$?
+  expect_code 0 "$status" "explicit custom registry id should succeed"
+  settings="$HOME_DIR/state/$id.droid-settings.json"
+  jq -e '.sessionDefaultSettings.model == "custom:GPT-5.6-Sol-0"' "$settings" >/dev/null || fail 'Droid rewrote the explicit custom registry id'
+  assert_meta_profile "$HOME_DIR/state/$id.meta" droid custom:GPT-5.6-Sol-0 high
+  pass 'Droid passes exact custom registry ids without provider alias lookup'
 }
 
 test_droid_stop_hook_quotes_apostrophe_paths() {
@@ -3010,7 +3025,10 @@ test_droid_settings_cleanup_after_launch_failure_before_commit() {
     || fail "launch failure retained provisional task metadata"
   [ ! -e "$HOME_DIR/state/$id.droid-settings.json" ] \
     || fail "launch failure retained settings after provisional metadata rolled back"
-  pass "droid settings roll back with provisional metadata after launch failure"
+  [ ! -e "$HOME_DIR/state/$id.droid-trust" ] || fail "launch failure retained a trust receipt"
+  jq -e --arg path "$WT_DIR" '.trustedFolders | has($path) | not' "$HOME_DIR/user-home/.factory/settings.json" >/dev/null \
+    || fail "launch failure retained newly acquired worktree trust"
+  pass "droid settings and newly acquired trust roll back with provisional metadata after launch failure"
 }
 
 
@@ -3052,7 +3070,8 @@ test_droid_scout_trust_and_profile
 test_droid_secondmate_refuses_before_launch
 
 test_raw_droid_launch_does_not_use_template_settings
-test_droid_threads_custom_model_and_dynamic_effort_through_settings
+test_droid_threads_native_model_and_dynamic_effort_through_settings
+test_droid_retains_explicit_custom_registry_id
 test_droid_stop_hook_quotes_apostrophe_paths
 test_droid_requires_jq_before_allocating_backend
 test_droid_settings_failure_precedes_backend_allocation

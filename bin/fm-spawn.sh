@@ -1678,6 +1678,7 @@ T3CODE_PROJECT_ID=
 T3CODE_MODEL_SELECTION=
 HERDR_LEASED=0
 DROID_SETTINGS_CLEANUP=
+DROID_TRUST_PENDING=0
 DROID_SETTINGS_TMP=
 DROID_SETTINGS_PATH=
 DROID_SETTINGS_STAGED=0
@@ -1910,6 +1911,14 @@ spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
     if ! spawn_fresh_commit_rollback; then
+      status=1
+    fi
+  fi
+  if [ "$status" -ne 0 ] && [ "$DROID_TRUST_PENDING" = 1 ] &&
+    [ "${RELAUNCH:-0}" -ne 1 ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    if ! "$FM_ROOT/bin/fm-droid-trust.sh" --rollback "$STATE/$ID.droid-trust" >/dev/null; then
+      echo "error: aborted spawn retained Droid trust receipt for recovery: $STATE/$ID.droid-trust" >&2
       status=1
     fi
   fi
@@ -3879,19 +3888,9 @@ effort_flag_for_harness() {
 }
 
 droid_model_reference() {
-  local model=$1 settings ref
-  [ -n "$model" ] && [ "$model" != default ] || return 0
-  settings="$HOME/.factory/settings.json"
-  ref=
-  if [ -f "$settings" ]; then
-    # A custom model's registry id, not its provider-facing model field, pins the
-    # custom provider in sessionDefaultSettings. Read only those two fields; the
-    # same file may contain credentials that must never enter firstmate state.
-    ref=$(jq -r --arg model "$model" \
-      '[.customModels[]? | select(.model == $model) | .id][0] // empty' \
-      "$settings" 2>/dev/null || true)
-  fi
-  printf '%s' "${ref:-$model}"
+  [ -n "$1" ] && [ "$1" != default ] || return 0
+  # Native catalog and custom registry ids are passed without alias inference.
+  printf '%s' "$1"
 }
 
 droid_effort_value() {
@@ -6220,12 +6219,11 @@ spawn_assert_agent_worktree
 # so the refusal names the endpoint the same way they do and leaves nothing else
 # behind.
 if [ "$DROID_TEMPLATE" -eq 1 ]; then
-  "$FM_ROOT/bin/fm-droid-trust.sh" "$WT" "$PROJ_ABS" >/dev/null || {
+  DROID_TRUST_PENDING=1
+  "$FM_ROOT/bin/fm-droid-trust.sh" --receipt "$STATE/$ID.droid-trust" "$WT" "$PROJ_ABS" >/dev/null || {
     echo "error: could not register Droid trust for the isolated worktree $WT; refusing launch" >&2
     exit 1
   }
-  # Keep cleanup ownership across a later switch to another harness.
-  touch "$STATE/$ID.droid-trust" || exit 1
 fi
 
 # agy gates a fresh worktree or secondmate home behind its own folder-trust

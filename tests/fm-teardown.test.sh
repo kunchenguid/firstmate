@@ -736,9 +736,8 @@ test_droid_teardown_removes_task_trust() {
   mkdir -p "$trust_home/.factory"
   store="$trust_home/.factory/settings.json"
   printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
-  HOME="$trust_home" "$ROOT/bin/fm-droid-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null || fail 'teardown trust setup failed'
+  HOME="$trust_home" "$ROOT/bin/fm-droid-trust.sh" --receipt "$case_dir/state/task-x1.droid-trust" "$case_dir/wt" "$case_dir/project" >/dev/null || fail 'teardown trust setup failed'
   # The receipt survives a harness switch; current harness alone is insufficient.
-  touch "$case_dir/state/task-x1.droid-trust"
   HOME="$trust_home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || fail 'Droid teardown failed'
   jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'teardown retained task trust or changed unrelated settings'
   [ ! -e "$case_dir/state/task-x1.droid-trust" ] || fail 'teardown left its trust receipt'

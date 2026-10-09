@@ -107,3 +107,74 @@ HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$
 if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/project" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'cleanup accepted the primary checkout'; fi
 [ "$(cat "$store")" = "$before" ] || fail 'scope refusal changed trust during cleanup'
 pass 'Droid trust cleanup removes only task paths and is idempotent'
+
+# The crew classifier remains separate from primary-session lock ownership.
+if fm_harness_process_matches droid droid; then fail 'Droid acquired primary-session identity'; fi
+if fm_harness_path_name /opt/droid/droid; then fail 'Droid path acquired primary-session identity'; fi
+pass 'Droid crew detection does not enable primary-session lock ownership'
+
+receipt="$TMP_ROOT/state/task.droid-trust"
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'receipt registration failed'
+jq -e --arg path "$physical" '.schema == "fm-droid-trust.v1" and .paths == [$path] and (.acquired | has($path))' "$receipt" >/dev/null || fail 'receipt did not record acquired exact path'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/null || fail 'acquired trust rollback failed'
+[ ! -e "$receipt" ] || fail 'rollback retained receipt'
+jq -e --arg path "$physical" '.trustedFolders | has($path) | not' "$store" >/dev/null || fail 'rollback retained acquired trust'
+# A grant predating this spawn must survive its failure.
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'existing grant setup failed'
+before=$(cat "$store")
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'existing grant receipt failed'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/null || fail 'existing grant rollback failed'
+[ "$(cat "$store")" = "$before" ] || fail 'rollback removed pre-existing trust'
+# Preserve a grant another writer changed after acquisition.
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'changed grant setup failed'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'changed grant receipt failed'
+jq --arg path "$physical" '.trustedFolders[$path].trustedAt = "changed-by-user"' "$store" > "$store.new"
+mv "$store.new" "$store"
+before=$(cat "$store")
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/null || fail 'changed grant rollback failed'
+[ "$(cat "$store")" = "$before" ] || fail 'rollback removed a grant changed by another writer'
+pass 'Droid receipts roll back only unchanged newly acquired grants'
+
+# The successor can use a physical spelling and any harness. Its receipt must
+# survive retirement of the original metadata and disappearance of the copy.
+ln -s "$TMP_ROOT/task" "$TMP_ROOT/task-alias"
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task-alias" "$TMP_ROOT/project" >/dev/null || fail 'logical alias registration failed'
+printf 'worktree=%s\nharness=claude\n' "$physical" > "$TMP_ROOT/state/successor.meta"
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$receipt" "$TMP_ROOT/state" task >/dev/null || fail 'trust transfer failed'
+[ ! -e "$receipt" ] && [ -f "$TMP_ROOT/state/successor.droid-trust" ] || fail 'cleanup ownership was lost during transfer'
+jq -e --arg physical "$physical" --arg logical "$TMP_ROOT/task-alias" '.trustedFolders | has($physical) and has($logical)' "$store" >/dev/null || fail 'live successor lost trust'
+git -C "$TMP_ROOT/project" worktree remove --force "$TMP_ROOT/task"
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$TMP_ROOT/state/successor.droid-trust" "$TMP_ROOT/state" successor >/dev/null || fail 'vanished worktree trust retirement failed'
+jq -e '.otherSetting == "preserve" and .trustedFolders == {"/already-trusted":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'final retirement retained aliases or lost other settings'
+[ ! -e "$TMP_ROOT/state/successor.droid-trust" ] || fail 'final retirement retained receipt'
+pass 'Droid cleanup transfers to a non-Droid successor and retires aliases after worktree removal'
+
+# Concurrent helpers reached through different symlinks share the resolved
+# store lock. Repeated registrations and removals must never lose each other.
+mkdir -p "$TMP_ROOT/alias-user/.factory"
+ln -s "$store" "$TMP_ROOT/alias-user/.factory/settings.json"
+for i in 1 2 3 4; do
+  git -C "$TMP_ROOT/project" worktree add -q "$TMP_ROOT/concurrent-$i" -b "concurrent-$i"
+done
+for round in 1 2 3; do
+  pids=()
+  for i in 1 2 3 4; do
+    user="$TMP_ROOT/user"
+    [ "$((i % 2))" -eq 0 ] || user="$TMP_ROOT/alias-user"
+    HOME="$user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/concurrent-$i" "$TMP_ROOT/project" >/dev/null &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid" || fail 'concurrent registration failed'; done
+  jq -e '.trustedFolders | length == 5' "$store" >/dev/null || fail 'concurrent registration lost trust'
+  pids=()
+  for i in 1 2 3 4; do
+    user="$TMP_ROOT/user"
+    [ "$((i % 2))" -eq 0 ] || user="$TMP_ROOT/alias-user"
+    HOME="$user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/concurrent-$i" "$TMP_ROOT/project" >/dev/null &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid" || fail 'concurrent removal failed'; done
+  jq -e '.trustedFolders == {"/already-trusted":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'concurrent removal restored retired trust'
+done
+[ -L "$TMP_ROOT/alias-user/.factory/settings.json" ] || fail 'atomic write replaced the settings symlink'
+pass 'Droid concurrent settings transactions serialize across symlinked stores'

@@ -3460,9 +3460,12 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 
 remove_droid_task_trust() {  # <meta> <state> <id> <worktree> <project>
   local meta=$1 state=$2 id=$3 wt=$4 project=$5
-  if [ -f "$state/$id.droid-trust" ] || [ "$(meta_value "$meta" harness)" = droid ]; then
-    "$SCRIPT_DIR/fm-droid-trust.sh" --remove "$wt" "$project" >/dev/null || return 1
-    rm -f "$state/$id.droid-trust"
+  if [ ! -e "$state/$id.droid-trust" ] && [ "$(meta_value "$meta" harness)" = droid ]; then
+    # Capture exact paths for a task created before receipt-based registration.
+    "$SCRIPT_DIR/fm-droid-trust.sh" --receipt "$state/$id.droid-trust" "$wt" "$project" >/dev/null || return 1
+  fi
+  if [ -e "$state/$id.droid-trust" ] || [ -L "$state/$id.droid-trust" ]; then
+    "$SCRIPT_DIR/fm-droid-trust.sh" --retire "$state/$id.droid-trust" "$state" "$id" >/dev/null || return 1
   fi
 }
 
@@ -3521,7 +3524,9 @@ cleanup_firstmate_home_children() {
       fi
     fi
     teardown_export_records "$sub_state" "$child_id" || return 1
-    if [ "$child_kind" = secondmate ]; then
+    if [ "$child_kind" != secondmate ]; then
+      remove_droid_task_trust "$child_meta" "$sub_state" "$child_id" "$child_wt" "$child_proj" || return 1
+    fi    if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
@@ -3531,7 +3536,6 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        remove_droid_task_trust "$child_meta" "$sub_state" "$child_id" "$child_wt" "$child_proj" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
@@ -3551,7 +3555,6 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        remove_droid_task_trust "$child_meta" "$sub_state" "$child_id" "$child_wt" "$child_proj" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3592,7 +3595,7 @@ cleanup_firstmate_home_children() {
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
-      "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.droid-settings.json" "$sub_state/$child_id.droid-trust" "$sub_state/$child_id.omp-ext.ts" \
+      "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.droid-settings.json" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
@@ -3988,9 +3991,9 @@ if [ "$BACKEND" = t3code ]; then
   }
 fi
 
-# Revoke exact-worktree Droid trust while git identity can still be proved,
-# before returning or deleting the slot. A reassigned slot belongs to its new task.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree && [ -d "$WT" ]; then
+# Retire stored trust ownership even for a missing or reassigned pooled slot.
+# The helper transfers cleanup when another recorded task still uses that path.
+if [ "$KIND" != secondmate ]; then
   remove_droid_task_trust "$META" "$STATE" "$ID" "$WT" "$PROJ" || exit 1
 fi
 
@@ -4141,7 +4144,7 @@ teardown_retire_status "$STATE" "$ID" || exit 1
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.droid-settings.json" "$STATE/$ID.droid-trust" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.droid-settings.json" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
