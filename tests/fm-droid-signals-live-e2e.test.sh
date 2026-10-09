@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Credentialed Droid drift guard: exact ancestry, busy footer, Stop hook,
-# composer delivery, interrupt, exit, and scout relaunch through fm-control
+# composer delivery, interrupt, exit, scout relaunch, and Fish-backed ship exit
+# through fm-control
 # in an isolated tmux server and HOME.
 # Opt-in because this submits real prompts; no shared backend is driven.
 # FM_DROID_LIVE_MODEL optionally selects an authenticated model; otherwise the
@@ -9,9 +10,10 @@ set -u
 unset FM_BUSY_REGEX
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-fm_live_gate opt-in FM_DROID_SIGNALS_LIVE droid tmux jq treehouse tasks-axi
+fm_live_gate opt-in FM_DROID_SIGNALS_LIVE droid tmux jq treehouse tasks-axi fish
 DROID_BIN=$(command -v droid)
 REAL_TMUX=$(command -v tmux)
+FISH_BIN=$(command -v fish)
 VERSION=$("$DROID_BIN" --version)
 LAB=$(fm_test_tmproot fm-droid-signals)
 SOCKET="fm-droid-signals-$$"
@@ -67,7 +69,7 @@ submit() {
 prompt="Use Execute to run bash '$ROOT/bin/fm-harness.sh' > '$LAB/state/identity'; run sleep 8 after that command succeeds. Add 12345 and 67890 and reply only with the sum."
 # Start the CLI directly: typing this long command before a shell has entered
 # raw mode can truncate it at the terminal's canonical input limit.
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s droid-signals -n droid -c "$LAB/task" -x 140 -y 45 \
+"$REAL_TMUX" -L "$SOCKET" -f /dev/null new-session -d -s droid-signals -n droid -c "$LAB/task" -x 140 -y 45 \
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
   -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u FM_OMP_HARNESS \
   FM_TASK_ID=droid-signals HOME="$LAB/home" FM_HOME="$LAB/home" \
@@ -186,6 +188,7 @@ scout_id="droid-recovery-$$"
   unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
   "$REAL_TMUX" -L "$SOCKET" new-session -d -s firstmate -x 140 -y 45 -c "$LAB/project" \
     "$SHELL" --noprofile --norc || fail 'cannot create scout endpoint'
+  "$REAL_TMUX" -L "$SOCKET" set-option -g default-shell "$SHELL"
   export TMUX
   TMUX=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t firstmate '#{socket_path},#{pid},0')
   "$ROOT/bin/fm-spawn.sh" "$scout_id" "$LAB/project" --scout --harness droid --effort dynamic \
@@ -217,4 +220,47 @@ scout_id="droid-recovery-$$"
   "$ROOT/bin/fm-captain-hold.sh" complete "$scout_id" --none || fail 'cannot inventory the completed arithmetic report'
   "$ROOT/bin/fm-teardown.sh" "$scout_id" || fail 'recovered scout teardown failed'
   pass "Droid $VERSION public scout relaunch completes a replacement turn with dynamic effort"
+
+  # Treehouse launches the ship through tmux's default shell. Fish can remain
+  # pane_current_command even while Droid owns the foreground input.
+  "$REAL_TMUX" -L "$SOCKET" set-option -g default-shell "$FISH_BIN"
+  ship_id="droid-fish-$$"
+  report="$LAB/fleet/data/$ship_id/report.md"
+  mkdir -p "$LAB/fleet/data/$ship_id"
+  printf '# Task\n## Captain'\''s intent\nCalculate 12345 + 67890. Use Execute to write only the sum to "%s" and reply with it. Do not change project files, start validation, or perform other tasks.\n\n## Firstmate spec\nVerify launch only.\n' \
+    "$report" > "$LAB/fleet/data/$ship_id/brief.md"
+  "$ROOT/bin/fm-spawn.sh" "$ship_id" "$LAB/project" --harness droid --effort dynamic --mode no-mistakes --yolo off \
+    || fail 'public Fish-backed ship launch failed'
+  TARGET="firstmate:fm-$ship_id"
+  for _ in $(seq 1 180); do
+    [ ! -f "$LAB/fleet/state/$ship_id.turn-ended" ] || break
+    sleep 1
+  done
+  [ -f "$LAB/fleet/state/$ship_id.turn-ended" ] && [ "$(tr -d '[:space:]' < "$report")" = 80235 ] \
+    || fail 'Fish-backed ship did not complete its report and Stop hook'
+  for _ in $(seq 1 30); do
+    capture | fm_busy_droid_tail_busy || break
+    sleep 1
+  done
+  PATH="$LAB/shim:$PATH" fm_tmux_pane_is_droid "$TARGET" || fail 'Fish-backed pane lacks exact foreground Droid identity'
+  current=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{pane_current_command}')
+  cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{cursor_y}')
+  printf 'DROID_FISH_IDLE command=%s cursor=%s\n' "$current" "$cy"
+  [ "$(PATH="$LAB/shim:$PATH" fm_tmux_composer_state "$TARGET")" = empty ] \
+    || fail 'Fish-backed idle composer was not proven empty'
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l 'unsent draft'
+  if "$ROOT/bin/fm-control.sh" "$ship_id" exit > "$LAB/draft-exit.log" 2>&1; then
+    fail 'Fish-backed exit accepted an unsent draft'
+  fi
+  capture | grep -q 'unsent draft' || fail 'Fish-backed refused exit lost the draft'
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" C-u
+  for _ in $(seq 1 30); do
+    [ "$(PATH="$LAB/shim:$PATH" fm_tmux_composer_state "$TARGET")" != empty ] || break
+    sleep 1
+  done
+  "$ROOT/bin/fm-control.sh" "$ship_id" exit || fail 'idle Fish-backed ship exit through fm-control failed'
+  if PATH="$LAB/shim:$PATH" fm_tmux_pane_is_droid "$TARGET"; then
+    fail 'Fish-backed ship retained a foreground Droid after exit'
+  fi
+  pass "Droid $VERSION public Fish-backed ship exit preserves drafts and stops the idle agent"
 )

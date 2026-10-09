@@ -77,6 +77,9 @@ test_droid_parked_cursor() (
   for name in droid android claude; do cp "$(command -v bash)" "$lab/bin/$name"; done
   cat > "$lab/shim/tmux" <<SH
 #!/usr/bin/env bash
+if [ "\${FM_DROID_MASK_COMMAND:-0}" = 1 ]; then
+  case "\$*" in *'#{pane_current_command}') printf 'fish\\n'; exit 0 ;; esac
+fi
 exec "$real_tmux" -L "$socket" "\$@"
 SH
   chmod +x "$lab/shim/tmux"
@@ -98,6 +101,17 @@ SH
     [ "$name" != droid ] || want=empty
     verdict=$(PATH="$lab/shim:$PATH" fm_tmux_composer_state "$name")
     [ "$verdict" = "$want" ] || fail "$name parked composer classified $verdict, expected $want"
+    # Blind tmux's name while leaving the real tty and processes intact, as
+    # Fish-backed launches can report the shell instead of its Droid child.
+    tty=$("$real_tmux" -L "$socket" display-message -p -t "$name" '#{pane_tty}')
+    foreground=$(LC_ALL=C ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm= | while read -r pgid tpgid comm; do
+      [ "$pgid" != "$tpgid" ] || printf '%s\n' "${comm##*/}"
+    done)
+    printf '%s\n' "$foreground" | grep -qx "$name" || fail "$name fixture lacks exact foreground kernel identity"
+    current=$(PATH="$lab/shim:$PATH" FM_DROID_MASK_COMMAND=1 tmux display-message -p -t "$name" '#{pane_current_command}')
+    [ "$current" = fish ] || fail 'tmux command signal was not blinded'
+    verdict=$(PATH="$lab/shim:$PATH" FM_DROID_MASK_COMMAND=1 fm_tmux_composer_state "$name")
+    [ "$verdict" = "$want" ] || fail "$name with Fish command classified $verdict, expected $want"
     "$real_tmux" -L "$socket" kill-session -t "$name"
   done
   # Preserve user text and refuse a newer shell composer despite Droid identity.
@@ -117,10 +131,32 @@ SH
       sleep 0.1
     done
     [ "$current" = droid ] || fail 'refusal fixture lacks live Droid identity'
-    verdict=$(PATH="$lab/shim:$PATH" fm_tmux_composer_state droid)
+    verdict=$(PATH="$lab/shim:$PATH" FM_DROID_MASK_COMMAND=1 fm_tmux_composer_state droid)
     [ "$verdict" = "$want" ] || fail "$variant Droid composer classified $verdict, expected $want"
     "$real_tmux" -L "$socket" kill-session -t droid
   done
+  # A background Droid must not authorize input to the foreground shell,
+  # even when the old rendered composer remains on screen.
+  printf '%s\n' "$idle" > "$lab/screen"
+  "$real_tmux" -L "$socket" new-session -d -s background -x 40 -y 10 \
+    bash --noprofile --norc -m -c '"$1" -c "while :; do sleep 1; done" & cat "$2"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/bin/droid" "$lab/screen" \
+    || fail 'cannot start background Droid fixture'
+  for _ in $(seq 1 100); do
+    cy=$("$real_tmux" -L "$socket" display-message -p -t background '#{cursor_y}')
+    [ "$cy" != 7 ] || break
+    sleep 0.1
+  done
+  [ "$cy" = 7 ] || fail 'background fixture did not park its cursor below the box'
+  pane=$(PATH="$lab/shim:$PATH" fm_tmux_composer_capture background)
+  [ "$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')" = empty ] \
+    || fail 'background fixture lacks a structurally empty stale composer'
+  tty=$("$real_tmux" -L "$socket" display-message -p -t background '#{pane_tty}')
+  background=$(LC_ALL=C ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm= | while read -r pgid tpgid comm; do
+    [ "${comm##*/}" != droid ] || [ "$pgid" = "$tpgid" ] || printf 'background\n'
+  done)
+  [ "$background" = background ] || fail 'fixture did not isolate Droid in a background process group'
+  verdict=$(PATH="$lab/shim:$PATH" FM_DROID_MASK_COMMAND=1 fm_tmux_composer_state background)
+  [ "$verdict" = unknown ] || fail "background Droid authorized stale composer as $verdict"
   pass 'Droid parked cursor uses composer structure without relaxing other process or input guards'
 )
 test_droid_parked_cursor || exit 1
