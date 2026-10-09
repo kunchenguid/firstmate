@@ -495,6 +495,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
 Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
+The seed label must be `1` or exactly `1 · <basename of the creation cwd>`; Firstmate re-polls for up to about 3 seconds while Herdr settles a transient relabel, and leaves the tab open if it never settles.
 A working seed pane is never closed.
 
 This created-versus-adopted gate is a destructive safety boundary.

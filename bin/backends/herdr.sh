@@ -1873,12 +1873,23 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # labeled.
 #
 # Defense in depth on top of that gate (not the primary safety mechanism):
-# re-verify <seeded_tab_id> is still present, still carries label "1" (a
-# human could have renamed or repurposed it in the interim), and refuse to
-# close it if its pane hosts an actively working agent per herdr's own
-# agent-state detection (`agent get`) - belt-and-suspenders against any other
-# unforeseen path landing a live agent in a tab this function was about to
-# close.
+# re-verify <seeded_tab_id> is still present and carries label "1" or Herdr's
+# cwd-derived "1 · <basename of <created_cwd>>", the cwd the workspace was
+# created in (any other label, including a different "1 · " suffix, indicates
+# a human rename or repurpose), and refuse to close it if its pane hosts an actively working
+# agent per herdr's own agent-state detection (`agent get`) - belt-and-suspenders
+# against any other unforeseen path landing a live agent in a tab this function
+# was about to close.
+#
+# Settle-then-verify: Herdr relabels the seeded tab from its pane's foreground
+# process cwd, and live 0.9.1 briefly shows a transient label such as
+# "1 · path_helper" (a login-shell helper) before settling on the creation
+# cwd's basename about a second after `workspace create`. So the label check
+# re-polls `tab list` every 0.25s for up to FM_BACKEND_HERDR_SEEDED_LABEL_POLLS
+# (default 12, about 3s) samples: long enough to cover the observed ~1s
+# relabel with margin, short enough that a genuinely renamed tab delays the
+# spawn by at most ~3s. It only waits for an accepted label; it never widens
+# what is accepted. A label that never settles leaves the tab alone.
 #
 # Verified real-herdr behavior (not modeled by the canned-response fake-CLI
 # unit tests; modeled by make_herdr_statefake): closing a workspace's LAST
@@ -1887,14 +1898,22 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # workspace - callers only invoke it once at least one other (real task) tab
 # exists alongside it, never right after workspace creation - and this
 # function independently re-checks the tab count as a second layer.
-fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [focus-preserving]
-  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label pane_id agent_out agent_status
+fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [direct|focus-preserving] [<created_cwd>]
+  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} created_cwd=${5:-} tabs tab_count current_label pane_id agent_out agent_status
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_SEEDED_LABEL_POLLS:-12}
   [ -n "$tab_id" ] || return 0
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
-  tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
-  case "$tab_count" in ''|*[!0-9]*|0|1) return 0 ;; esac
-  current_label=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .label' 2>/dev/null)
-  [ "$current_label" = "1" ] || return 0
+  while :; do
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
+    tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
+    case "$tab_count" in ''|*[!0-9]*|0|1) return 0 ;; esac
+    current_label=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .label' 2>/dev/null)
+    [ -n "$current_label" ] || return 0
+    [ "$current_label" = 1 ] && break
+    [ -n "$created_cwd" ] && [ "$current_label" = "1 · $(basename -- "$created_cwd")" ] && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || return 0
+    sleep 0.25
+  done
   pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 0
   [ -n "$pane_id" ] || return 0
   agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null)
@@ -2502,9 +2521,11 @@ fm_backend_herdr_agent_alive() {  # <target>
 # fm_backend_herdr_workspace_prune_seeded_default_tab for the incident and
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
-# case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+# case. <seeded_default_tab_cwd> (5th arg) is the cwd container_ensure created
+# that workspace in, so the prune can recognize Herdr's cwd-derived relabel.
+# Echoes "<tab_id> <pane_id>" on success.
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [<seeded_default_tab_cwd>]
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} seeded_cwd=${5:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2533,7 +2554,7 @@ EOF
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
-  [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
+  [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id" direct "$seeded_cwd"
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
@@ -2648,7 +2669,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     "$session" \
     "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
     "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
-    focus-preserving; then
+    focus-preserving "$cwd"; then
     echo "error: herdr presentation seeded-tab prune refused a focus-unsafe close; leaving its journal quarantined" >&2
     return 1
   fi
