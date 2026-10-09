@@ -319,8 +319,14 @@ cmd_followup() (
       task=$(jq -r '.data.task_id // empty | tostring' "$output")
     fi
     if [ -z "$task" ]; then
-      detail_session=$(jq -r '.error.details | (.session_id? // .sessionId? // empty) | tostring' "$output" 2>/dev/null)
-      detail_task=$(jq -r '.error.details | (.task_id? // .taskId? // empty) | tostring' "$output" 2>/dev/null)
+      detail_session=$(jq -r '
+        [.error.details.session_id?, .error.details.sessionId?]
+        | map(select(. != null) | tostring) | unique
+        | if length == 1 then .[0] else empty end' "$output" 2>/dev/null)
+      detail_task=$(jq -r '
+        [.error.details.task_id?, .error.details.taskId?]
+        | map(select(. != null) | tostring) | unique
+        | if length == 1 then .[0] else empty end' "$output" 2>/dev/null)
       if [ "$detail_session" = "$session" ] && fm_ida_numeric_id "$detail_task"; then
         task=$detail_task
       fi
