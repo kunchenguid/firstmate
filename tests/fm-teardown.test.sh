@@ -1884,7 +1884,7 @@ test_legacy_stamp_backup_failure_leaves_the_record_untouched_without_a_rollback_
     || fail "legacy-backup-fail: the plain retry did not succeed: $(cat "$case_dir/stderr2")"
   assert_absent "$case_dir/state/task-x1.meta" \
     "legacy-backup-fail: the retry left the leftover record"
-  [ "$(backlog_row_state "$case_dir")" = done ] \
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "legacy-backup-fail: the retry did not close the backlog item"
   pass "a failed pre-stamp backup refuses without a false rollback error, leaves the record untouched, and a plain retry succeeds"
 }
