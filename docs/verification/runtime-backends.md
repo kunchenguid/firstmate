@@ -11,7 +11,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 Verified on 2026-10-09 with GNU Bash 5.3.9 on Linux using the portable public-interface regression:
 
 ```sh
-bash bin/fm-test-run.sh --jobs 1 tests/fm-spawn-batch.test.sh tests/fm-control-relaunch.test.sh
+bash bin/fm-test-run.sh --jobs 1 tests/fm-spawn-batch.test.sh tests/fm-control-relaunch.test.sh tests/fm-secondmate-liveness.test.sh
 ```
 
 Observed output:
@@ -19,12 +19,15 @@ Observed output:
 ```text
 ok - goodnight defers new spawns and batches before backend allocation until the hold is lifted
 ok - fm_goodnight_active holds on empty, malformed, and dangling records and clears only on absence
-ok - goodnight and goodmorning are discoverable with the required trigger metadata
 ok - goodnight allows recorded in-flight relaunch through fm-control while fresh dispatch remains deferred
+ok - goodnight defers full and poll liveness without recovery accounting; lifting restores recovery
 ```
 
 The spawn regression selects tmux, Herdr, zellij, Orca, and cmux for ships, scouts, secondmates, raw commands, and batches, observing exit 76 before backend allocation.
 The control regression relaunches a recorded in-flight task with the marker present, observes a completed transaction with its worktree and endpoint preserved, and then observes exit 76 for a fresh spawn while the hold remains active.
+The shared liveness regression exercises `full` and `poll` modes with dead and missing tmux, Herdr, and remote endpoints.
+Repeated probes during the hold return `skipped` before the caller's attempt-bound checks, without endpoint operations or attempt ledger changes, and a hold entered after probing also defers relaunch before its mutations.
+After lifting, the same endpoint remains recoverable and records one attempt and a successful relaunch.
 These cases verify the scheduling boundary with a stubbed backend and no real harness.
 The [goodnight skill](../../.agents/skills/goodnight/SKILL.md) owns the policy; `bin/fm-spawn.sh` owns the refusal mechanics.
 

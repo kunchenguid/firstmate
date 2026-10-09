@@ -63,10 +63,11 @@ FM_SM_LIVE_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # supervisor (the other sweep, or a racing tick) is mid-episode on this mate;
 # callers skip and let that episode finish rather than probe a moving target.
 # The lock helpers live in bin/fm-wake-lib.sh, which creates the state
-# directory when sourced; load it only when a lock is actually taken so that
-# sourcing this library stays side-effect free for read-only bootstrap runs.
+# directory when sourced; lazy loading keeps this library's sourcing
+# side-effect free for read-only bootstrap runs.
 fm_sm_live_require_locks() {
-  command -v fm_lock_try_acquire >/dev/null 2>&1 && return 0
+  command -v fm_lock_try_acquire >/dev/null 2>&1 &&
+    command -v fm_goodnight_active >/dev/null 2>&1 && return 0
   # shellcheck source=bin/fm-wake-lib.sh
   . "$FM_SM_LIVE_LIB_DIR/fm-wake-lib.sh"
 }
@@ -136,6 +137,11 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
+  fm_sm_live_require_locks || return 1
+  if fm_goodnight_active "$STATE"; then
+    FM_SM_LIVE_REASON="goodnight hold active; relaunch deferred"
+    return 0
+  fi
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
@@ -267,6 +273,12 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
   local meta=$1 id=$2 timeout=${3:-}
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
+  if fm_goodnight_active "$STATE"; then
+    FM_SM_LIVE_STATUS=skipped
+    FM_SM_LIVE_REASON="goodnight hold active; relaunch deferred"
+    FM_SM_LIVE_RC=1
+    return 1
+  fi
   if ! fm_secondmate_liveness_recent_attempts "$id" 0 >/dev/null; then
     FM_SM_LIVE_STATUS=skipped
     FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unreadable; endpoint left $FM_SM_LIVE_STATE"

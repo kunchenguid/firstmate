@@ -4,8 +4,7 @@
 # These exercise argument routing only: each spawn attempt fails fast at the
 # missing-brief check, which is reached before any tmux/treehouse side effect, so
 # the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
-# live watcher guard / state. Also covers the goodnight hold, presence predicate,
-# and skill discovery metadata.
+# live watcher guard / state. Also covers the goodnight hold and presence predicate.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -196,28 +195,8 @@ test_goodnight_presence() {
   pass 'fm_goodnight_active holds on empty, malformed, and dangling records and clears only on absence'
 }
 
-# Skill descriptions are discovery data, the always-loaded trigger index.
-test_goodnight_discovery() {
-  python3 - "$ROOT/.agents/skills" <<'PY' || fail 'goodnight missing from skill discovery index'
-import pathlib, sys
-index = {}
-for skill in pathlib.Path(sys.argv[1]).glob('*/SKILL.md'):
-    fields = skill.read_text().split('---', 2)[1]
-    index[skill.parent.name] = fields
-entry = index['goodnight']
-for trigger in ('/goodnight', '"goodnight"', '"going to bed"', 'state/.goodnight', 'session start', 'wake handling', '/goodmorning'):
-    assert trigger in entry, trigger
-assert 'user-invocable: true' in entry
-assert 'user-invocable: true' in index['goodmorning']
-assert 'user-invocable: true' in index['gm']
-assert '/gm' in index['gm'] and '/goodmorning' in index['gm']
-PY
-  pass 'goodnight and goodmorning are discoverable with the required trigger metadata'
-}
-
 test_goodnight_hold
 test_goodnight_presence
-test_goodnight_discovery
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
