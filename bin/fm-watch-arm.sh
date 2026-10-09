@@ -332,6 +332,17 @@ wait_for_healthy_successor() {
   done
 }
 
+note_own_continuity_gap() {
+  local bound deadline
+  bound=${FM_WATCHER_CONTINUITY_BOUND_SECS:-180}
+  case "$bound" in ''|*[!0-9]*) bound=180 ;; esac
+  deadline=$(( $(date +%s) + bound ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 0.2
+  done
+  fm_watcher_continuity_note "$STATE" watcher-continuity-main "this home" "$WATCH" "$FM_HOME"
+}
+
 fail_unexplained_cycle() {
   echo "watcher: FAILED - cycle ended without an actionable reason"
   return 1
@@ -720,6 +731,7 @@ owned_child_finished() {
       return 0
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
+    note_own_continuity_gap || true
     return 1
   fi
 

@@ -839,40 +839,30 @@ handoff_one() { # <id> <meta>
   now=$(reconcile_now)
   proof=
   state_rc=0
-  for item in "${open_fps[@]}"; do
-    observed=${item#*|}
-    case "$observed" in ''|*[!0-9]*) continue ;; esac
-    [ "$now" -ge "$observed" ] || continue
-    age=$((now - observed))
-    [ "$age" -ge "$FM_HANDOFF_IDLE_SECS" ] || continue
-    if [ -z "$proof" ] && [ "$state_rc" -eq 0 ]; then
-      state_line=$(fm_run_timed 5 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
-        "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
-      case "$state_line" in
-        *'source: run-step'*)
-          case "$state_line" in
-            *'review ('*|*'fix_review'*) proof='review-started' ;;
-            *) proof='attributed-run' ;;
-          esac
-          ;;
-      esac
-    fi
-    break
-  done
-  if [ -n "$proof" ]; then
-    evidence_rc=0
-    handoff_continuation_evidence "source: $proof" "$proof" || evidence_rc=$?
-    if [ "$evidence_rc" -eq 0 ]; then
-      reason='run-step'
-      [ "$proof" = 'review-started' ] && reason='review-started'
-      for item in "${open_fps[@]}"; do
-        handoff_clear_record "${item%%|*}" "$reason" "" || return 1
-      done
-    elif [ "$evidence_rc" -ne 1 ]; then
-      return 1
-    else
-      proof=
-    fi
+  if [ "$state_rc" -eq 0 ]; then
+    state_line=$(fm_run_timed 5 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+      "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
+    case "$state_line" in
+      *'source: run-step'*)
+        case "$state_line" in
+          *'review ('*|*'fix_review'*) proof='review-started' ;;
+          *) proof='attributed-run' ;;
+        esac
+        ;;
+    esac
+  fi
+  evidence_rc=0
+  handoff_continuation_evidence "source: ${proof:-none}" "${proof:-none}" || evidence_rc=$?
+  if [ "$evidence_rc" -eq 0 ]; then
+    reason='run-step'
+    [ "$proof" = 'review-started' ] && reason='review-started'
+    for item in "${open_fps[@]}"; do
+      handoff_clear_record "${item%%|*}" "$reason" "" || return 1
+    done
+  elif [ "$evidence_rc" -ne 1 ]; then
+    return 1
+  else
+    proof=
   fi
   if [ -n "$proof" ]; then
     rm -f -- "$HANDOFF_DIR/$id.open" || return 1
@@ -909,7 +899,7 @@ handoff_one() { # <id> <meta>
 # home runs this same pass on its own children. Parent publication is a
 # different path and does not clear these records.
 handoff_pass() {
-  local meta id lock
+  local meta id lock rc
   [ ! -L "$HANDOFF_DIR" ] || return 1
   mkdir -p "$HANDOFF_DIR" || return 1
   [ ! -L "$HANDOFF_DIR" ] || return 1
@@ -920,10 +910,12 @@ handoff_pass() {
     [ "$(meta_field "$meta" kind)" != secondmate ] || continue
     lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$lock" || continue
+    rc=0
     if [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(meta_field "$meta" kind)" != secondmate ]; then
-      handoff_one "$id" "$meta" || true
+      handoff_one "$id" "$meta" || rc=$?
     fi
     fm_lock_release "$lock"
+    [ "$rc" -eq 0 ] || return "$rc"
   done
 }
 

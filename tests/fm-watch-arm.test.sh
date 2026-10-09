@@ -1859,6 +1859,51 @@ test_arm_notes_a_cycle_that_ended_without_a_successor() {
   pass "the arm notes one missing-successor gap, then continues the existing start path"
 }
 
+install_quiet_cycle_arm() { # <dir>
+  local dir=$1 bindir="$1/cycle-bin"
+  mkdir -p "$bindir"
+  cp "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-path-lib.sh" "$bindir/"
+  cat > "$bindir/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+state=${FM_STATE_OVERRIDE:?}
+mkdir -p "$state/.watch.lock"
+printf '%s\n' "$$" > "$state/.watch.lock/pid"
+printf '%s\n' "${FM_HOME:?}" > "$state/.watch.lock/fm-home"
+printf '%s\n' "$0" > "$state/.watch.lock/watcher-path"
+fm_pid_identity "$$" > "$state/.watch.lock/pid-identity"
+touch "$state/.last-watcher-beat"
+sleep 0.4
+exit 0
+SH
+  chmod +x "$bindir"/*
+}
+
+test_owned_arm_queues_its_own_missing_successor_after_the_bound() {
+  local dir state bindir status
+  dir=$(make_case owned-cycle-continuity)
+  state="$dir/state"
+  bindir="$dir/cycle-bin"
+  install_quiet_cycle_arm "$dir"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_WATCHER_CONTINUITY_BOUND_SECS=1 FM_GUARD_GRACE=1 \
+    "$bindir/fm-watch-arm.sh" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" 150
+  status=$?
+  expect_code 1 "$status" "a clean owned watcher close without a successor must fail"
+  grep -q "watcher-continuity-main-$ARM_PID-" "$state/.wake-queue" \
+    || fail "the owned arm did not queue its continuity check: $(cat "$dir/arm.out")"
+  [ "$(grep -c 'watcher-continuity-main-' "$state/.wake-queue")" = 1 ] \
+    || fail "the owned arm queued its continuity check more than once"
+  grep -q 'successor=none' "$state/.watch-cycle-exits.log" \
+    || fail "the owned arm did not record its missing successor"
+  pass "an owned arm queues one continuity check after its child exits without a successor"
+}
+
 test_arm_stop_does_not_note_a_continuity_gap() {
   local dir state out status
   dir=$(make_case continuity-stop)
@@ -1965,6 +2010,7 @@ test_parent_watcher_notes_a_local_mates_missing_successor() {
 
 test_watcher_continuity_gap_is_a_missing_successor
 test_arm_notes_a_cycle_that_ended_without_a_successor
+test_owned_arm_queues_its_own_missing_successor_after_the_bound
 test_arm_stop_does_not_note_a_continuity_gap
 test_live_watcher_with_a_fresh_beacon_is_not_a_continuity_gap
 test_parent_watcher_notes_a_local_mates_missing_successor

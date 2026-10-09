@@ -1222,9 +1222,62 @@ test_handoff_idle_records_the_episode_and_alerts_once() {
   grep -q 'handoff-idle-quiet-' "$MAIN/state/.wake-queue" \
     && fail "a young handoff queued a check"
   grep -qx quiet "$WORLD/crew-state.log" \
-    && fail "current state was read before the handoff bound"
+    || fail "current state was not read before the handoff bound"
   [ ! -s "$WORLD/forge.log" ] || fail "handoff reconciliation invoked a forge or send command: $(cat "$WORLD/forge.log")"
   pass "an idle handoff is one durable episode per home, alerted once until its check is consumed and the bound elapses again"
+}
+
+test_handoff_idle_records_early_attributed_continuation_latency() {
+  local home record saved_now=$HANDOFF_NOW
+  make_world handoff-early-continuation
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" intake "needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests" inc-early-1
+  HANDOFF_NOW=$HANDOFF_OLD
+  FM_FAKE_CREW_SOURCE=fake FM_FAKE_CREW_STATE=working scan_handoff "$home"
+  record=$(one_record "$home" intake) || fail "the young handoff was not recorded"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "a young handoff without continuation evidence cleared"
+  [ "$(handoff_field "$record" alerted)" = 0 ] \
+    || fail "a young handoff without continuation evidence alerted"
+
+  HANDOFF_NOW=$((HANDOFF_OLD + 69))
+  FM_FAKE_CREW_SOURCE=run-step FM_FAKE_CREW_STATE=working scan_handoff "$home"
+  HANDOFF_NOW=$saved_now
+  [ "$(handoff_field "$record" clear_reason)" = run-step ] \
+    || fail "an attributed validation run did not clear the handoff"
+  [ "$(handoff_field "$record" latency_secs)" = 69 ] \
+    || fail "early continuation latency was not recorded at first observation"
+  [ "$(handoff_wake_count "$home")" = 0 ] \
+    || fail "an early attributed continuation queued an idle alert"
+  [ ! -e "$home/state/handoff-continuations/intake.open" ] \
+    || fail "an early attributed continuation left the handoff open"
+  pass "an attributed validation run clears a young handoff with observed latency"
+}
+
+test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable() {
+  local home rc lock
+  make_world handoff-unreadable-continuation
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" intake $'needs-validation [at=1700000000]: committed c118078, 706 tests\nworking [at=1700000160]: validation started' inc-unreadable-1
+  cat > "$WORLD/fakebin/node" <<'EOF'
+#!/usr/bin/env bash
+exit 98
+EOF
+  chmod +x "$WORLD/fakebin/node"
+  rc=0
+  scan_handoff "$home" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreadable continuation predicate let the scan succeed"
+  lock=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_meta_lock_path "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/intake.meta") \
+    || fail "could not resolve the task lock"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" \
+    || fail "the failed continuation read left the task lock held"
+  pass "an unreadable continuation predicate fails the scan after releasing its task lock"
 }
 
 test_handoff_idle_clears_only_on_continuation() {
@@ -1549,12 +1602,14 @@ test_handoff_idle_bound_refuses_out_of_range() {
 }
 
 test_handoff_idle_records_the_episode_and_alerts_once
+test_handoff_idle_records_early_attributed_continuation_latency
 test_handoff_idle_clears_only_on_continuation
 test_handoff_idle_skips_final_deliveries_and_secondmates
 test_handoff_idle_rejects_a_bare_pr_as_final_delivery
 test_handoff_idle_rejects_an_unverified_green_followup
 test_handoff_idle_uses_only_positional_status_timestamps
 test_handoff_ignores_an_unterminated_completion_line
+test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan
 test_handoff_idle_bound_refuses_out_of_range
