@@ -91,6 +91,8 @@ EOF
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
+    "issue=https://github.com/kunchenguid/firstmate/issues/34" \
+    "decision_keys=hold-a,hold-b" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
   # A working ship task proves it through its own semantic busy-state record
@@ -161,6 +163,8 @@ test_fixture_snapshot_json() {
     .tasks[] | select(.id == "ship-task")
     | .current_state.state == "working"
       and .current_state.source == "pane"
+      and .issue == "https://github.com/kunchenguid/firstmate/issues/34"
+      and .decision_keys == ["hold-a","hold-b"]
       and .pr.url == "https://github.com/kunchenguid/firstmate/pull/9"
       and .backlog.body_excerpt == "Preserve this detail for bearings."
       and .hints.pending_decision == false
@@ -1090,9 +1094,44 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_home_summary_projects_issue_bindings_and_hold_owners() {
+  local home fakebin out fixture_gen
+  home=$(make_home summary-issue-bindings)
+  mkdir -p "$home/projects/child"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] child-worker - Child worker (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] held-choice - Pick an API (repo: alpha) (kind: captain) (hold: choose an API) (hold-kind: captain)
+
+## Done
+EOF
+  fm_write_meta "$home/state/child-worker.meta" \
+    "window=firstmate:fm-child-worker" "worktree=$home/projects/child" \
+    "project=alpha" "harness=claude" "kind=ship" \
+    "issue=https://github.com/example/alpha/issues/36" \
+    "decision_keys=held-choice"
+  fixture_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" child-worker)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" child-worker busy --gen "$fixture_gen" \
+    --source claude-hook --event user-prompt-submit
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .active_children[0].id == "child-worker"
+      and .active_children[0].issue == "https://github.com/example/alpha/issues/36"
+      and .active_children[0].decision_keys == ["held-choice"]
+      and ([.decisions_open[] | select(.key == "held-choice")][0].target_task_id == "child-worker")
+      and ([.queued[] | select(.id == "held-choice")][0].captain_actionable == true)
+  ' >/dev/null || fail "secondmate summary lost issue or held-decision ownership: $out"
+  pass "secondmate summary projects issue bindings and captain-hold answer owners"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
+test_home_summary_projects_issue_bindings_and_hold_owners
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure

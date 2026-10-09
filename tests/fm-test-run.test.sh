@@ -124,6 +124,8 @@ init_changed_fixture_repo() {
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
+  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-console.test.sh"
+  chmod +x "$repo/tests/fm-console.test.sh"
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
@@ -132,6 +134,8 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
+  : >"$repo/bin/fm-console.py"
+  : >"$repo/bin/fm-console.sh"
   : >"$repo/bin/unmapped-source.sh"
   # A shared top-level test fixture read by two suites in different families,
   # beside a tests/ file nothing reads at all.
@@ -310,6 +314,17 @@ test_changed_dependency_selection_and_unmapped_failure() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/bin/fm-console.py"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-console.test.sh" "console Python source selects its behavior test"
+  git -C "$repo" add bin/fm-console.py
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm console-python-change
+  printf '\n' >>"$repo/bin/fm-console.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-console.test.sh" "console launcher selects its behavior test"
+  git -C "$repo" add bin/fm-console.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm console-launcher-change
 
   printf '\n' >>"$repo/tests/lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

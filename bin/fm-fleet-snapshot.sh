@@ -846,6 +846,8 @@ task_json_lines() {
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg project "$project" \
+      --arg issue "$(meta_value "$meta" issue)" \
+      --arg decision_keys "$(meta_value "$meta" decision_keys)" \
       --arg worktree "$worktree" \
       --arg home "$home" \
       --arg projects "$projects" \
@@ -878,6 +880,8 @@ task_json_lines() {
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
+        issue:($issue | if . == "" then null else . end),
+        decision_keys:($decision_keys | split(",") | map(select(. != ""))),
         spawn_gen:($spawn_gen | if . == "" then null else . end),
         backend:$backend,
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
@@ -988,13 +992,14 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file> <produ
               (.state == "in_flight" and .current_role == "held"
                and (.id as $id
                     | any($tasks[]; .id == $id and .current_state.state == "working") | not)))) ]) as $queued_all
-    | ([ $queued_all[]
-         | select(.captain_actionable == true)
-         | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
-            reason:(.hold_reason | trunc(160)),
-            hold_until:(.hold_until // null),
-            hold_bucket:(.hold_bucket // null),
-            hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
+    | ([ $queued_all[] as $hold
+         | select($hold.captain_actionable == true)
+         | {id:$hold.id,key:$hold.id,verb:"captain-hold",summary:($hold.title | trunc(160)),
+            reason:($hold.hold_reason | trunc(160)),
+            hold_until:($hold.hold_until // null),
+            hold_bucket:($hold.hold_bucket // null),
+            hold_age_days:($hold.hold_age_days // null),source:"backlog",
+            target_task_id:([$tasks[] | select((.decision_keys // []) | index($hold.id)) | .id][0] // null)} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             kind:((.kind // null) | if . == null then null else trunc(40) end),
@@ -1043,11 +1048,13 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file> <produ
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
+            issue:(.issue // null),pr_url:(.pr.url // null),
+            decision_keys:(.decision_keys // []),
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status",target_task_id:$t.id} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),
@@ -1101,20 +1108,25 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file> <produ
         product_decision_count:$product_decisions.total,
         product_decision_omitted:$product_decisions.omitted,
         holds:$holds_all[:$queued_n],
-        queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
-          blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
-          blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
-          unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
-          blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
-          hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
-          hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
-          hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
-          hold_bucket:(.hold_bucket // null),
-          hold_age_days:(.hold_age_days // null),
-          captain_actionable:(.captain_actionable // false),
-          repo:((.repo // null) | if . == null then null else trunc(120) end),
-          kind:((.kind // null) | if . == null then null else trunc(40) end),
-          since:((.since // null) | if . == null then null else trunc(40) end)}]
+        queued:([$queued_all[] as $row
+          | ([$tasks[] | select(.id == $row.id)][0] // {}) as $task
+          | {id:($row.id | trunc(120)),title:($row.title | trunc(120)),
+          blocked_by:(($row.blocked_by // null) | if . == null then null else trunc(120) end),
+          blocked_by_ids:(($row.blocked_by_ids // []) | map(trunc(120))),
+          unresolved_blocker_ids:(($row.unresolved_blocker_ids // []) | map(trunc(120))),
+          blocked_reason:(($row.blocked_reason // null) | if . == null then null else trunc(160) end),
+          hold_reason:(($row.hold_reason // null) | if . == null then null else trunc(160) end),
+          hold_kind:(($row.hold_kind // null) | if . == null then null else trunc(40) end),
+          hold_until:(($row.hold_until // null) | if . == null then null else trunc(40) end),
+          hold_bucket:($row.hold_bucket // null),
+          hold_age_days:($row.hold_age_days // null),
+          captain_actionable:($row.captain_actionable // false),
+          repo:(($row.repo // null) | if . == null then null else trunc(120) end),
+          kind:(($row.kind // null) | if . == null then null else trunc(40) end),
+          since:(($row.since // null) | if . == null then null else trunc(40) end),
+          issue:($task.issue // $row.issue // null),
+          pr_url:($task.pr.url // $row.pr_url // null),
+          decision_keys:($task.decision_keys // [])}]
           | ((map(select(.captain_actionable != true)) | newest_filed_first)
              + (map(select(.captain_actionable == true)) | newest_filed_first))
           | .[:$queued_n]),

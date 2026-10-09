@@ -145,6 +145,23 @@ test_answer_send_closes_open_decision() {
   pass "fm-send --resolve-key: the answer send itself closes the open decision"
 }
 
+test_answer_text_may_begin_with_option_token() {
+  local dir fb log home rc
+  dir="$TMP_ROOT/option-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home option-answer)
+  fm_write_meta "$home/state/t-option.meta" "window=sess:fm-option" "kind=ship"
+  printf 'needs-decision [key=answer-format]: choose a response\n' > "$home/state/t-option.status"
+
+  run_send "$fb" "$home" "$log" t-option --resolve-key answer-format -- "--resolve-key is answer text"; rc=$?
+  expect_code 0 "$rc" "an answer beginning with an option-looking token should succeed after --"
+  grep -qF -- '--resolve-key is answer text' "$home/state/t-option.inbox/001.msg" \
+    || fail "option-looking answer text should reach the worker unchanged"
+  grep -F 'resolved [key=answer-format]: answered: --resolve-key is answer text' "$home/state/t-option.status" >/dev/null \
+    || fail "the decision close should preserve option-looking answer text"
+  pass "fm-send --resolve-key: a leading option token remains answer text after --"
+}
+
 # The answerer's close is this home's own bookkeeping: it must not re-wake the
 # session that wrote it, while any other writer's later line on the same task
 # still must. Both directions are read through the production seen-signature
@@ -723,6 +740,7 @@ test_remote_reserved_pending_reply_key_closes_locally() {
 }
 
 test_answer_send_closes_open_decision
+test_answer_text_may_begin_with_option_token
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id> | --fire-and-forget=<delivery-id> | --fire-and-forget-auto] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id> | --fire-and-forget=<delivery-id> | --fire-and-forget-auto] [--] <text...>
 #   The explicit forms ("--fire-and-forget <id>" or "--fire-and-forget=<id>")
 #   always require and validate a nonempty 16-lowercase-hex id, exactly as
 #   before: the next token is never guessed at, so a mistyped id can never be
@@ -463,8 +463,9 @@ if [ -n "$TARGET_META" ]; then
 fi
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
-# must precede --key or the message text; everything after the last flag is the
-# message exactly as before, so ordinary sends are byte-identical.
+# must precede --key or the message text; `--` ends option parsing so answer
+# text may begin with an option-looking token.
+# Ordinary sends remain byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
 # Set instead of FIRE_AND_FORGET_ID by --fire-and-forget-auto. The id is
@@ -541,6 +542,10 @@ while :; do
     }
     FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
     shift
+    ;;
+  --)
+    shift
+    break
     ;;
   *) break ;;
   esac

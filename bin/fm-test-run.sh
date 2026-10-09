@@ -276,7 +276,7 @@ family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
-    fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
+    fm-brief.test.sh|fm-console.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
@@ -693,6 +693,7 @@ tests/fm-classify-decision-key.test.sh 1167
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 21
 tests/fm-claude-stop-autoarm.test.sh 60709
 tests/fm-cmux-claude-composer-live-e2e.test.sh 23
+tests/fm-console.test.sh 2000
 tests/fm-codex-continuity-live-e2e.test.sh 21
 tests/fm-composer-matrix-live-e2e.test.sh 23
 tests/fm-control-relaunch.test.sh 48210
@@ -1336,6 +1337,9 @@ families_for_changed_path() {
       # Only this script wraps each suite in run_script_bounded's fixture Git
       # isolation, and only a standalone-family script proves it.
       printf '%s\n' "__script__:fm-test-fixtures.test.sh"
+      ;;
+    bin/fm-console.py|bin/fm-console.sh)
+      printf '%s\n' "__script__:fm-console.test.sh"
       ;;
     bin/fm-test-isolation-proof.sh)
       # Same reason as the runner above: the proof drives every
