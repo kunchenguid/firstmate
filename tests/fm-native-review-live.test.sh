@@ -4,6 +4,8 @@
 # project checkout:
 #   FM_NATIVE_REVIEW_LIVE=codex FM_NATIVE_REVIEW_MODEL=<model> \
 #     FM_NATIVE_REVIEW_EFFORT=<effort> tests/fm-native-review-live.test.sh
+# Set FM_NATIVE_REVIEW_LIVE_ARTIFACT_DIR to preserve the evidence, conflicting
+# fixture config, and attempt record outside the self-cleaning fixture root.
 set -eu
 
 # shellcheck source=tests/lib.sh
@@ -62,4 +64,12 @@ assert_grep "model: $MODEL" "$output" "installed reviewer did not override the i
 assert_no_grep 'model: gpt-6-astra' "$output" "inherited review_model overrode the explicit reviewer selection"
 assert_grep "Candidate: \`$candidate\`" "$output" "live evidence omitted the exact candidate"
 assert_grep 'INTENT_CONFORMANCE: pass' "$output" "installed reviewer did not pass the isolated candidate"
+if [ -n "${FM_NATIVE_REVIEW_LIVE_ARTIFACT_DIR:-}" ]; then
+  [ -d "$FM_NATIVE_REVIEW_LIVE_ARTIFACT_DIR" ] \
+    || fail "FM_NATIVE_REVIEW_LIVE_ARTIFACT_DIR must name an existing directory"
+  cp "$output" "$FM_NATIVE_REVIEW_LIVE_ARTIFACT_DIR/live-conflicting-review-model-evidence.md"
+  cp "$fixture_codex_home/config.toml" "$FM_NATIVE_REVIEW_LIVE_ARTIFACT_DIR/live-conflicting-review-model-config.toml"
+  cp "$fixture_home/data/live-review/native-review-attempt-1.record" \
+    "$FM_NATIVE_REVIEW_LIVE_ARTIFACT_DIR/live-conflicting-review-model-attempt.record"
+fi
 pass "installed $HARNESS native review binds identity, intent, and final response"
