@@ -1076,4 +1076,364 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 
+# Idle-after-handoff records. The clock is the reconcile override, so a stamped
+# completion can be old while file mtimes stay in the future and the slower
+# terminal cadence does not also call current-state.
+HANDOFF_NOW=1700000180
+HANDOFF_OLD=1700000000
+HANDOFF_CONT=1700000160
+HANDOFF_YOUNG=1700000100
+
+handoff_field() { # <record> <key>
+  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+handoff_wake_count() { # <home>
+  local n
+  n=$(grep -c 'handoff-idle-' "$1/state/.wake-queue" 2>/dev/null || true)
+  printf '%s\n' "${n:-0}"
+}
+
+one_record() { # <home> <task>
+  local record found=
+  for record in "$1/state/handoff-continuations"/*.record; do
+    [ -f "$record" ] || continue
+    [ "$(handoff_field "$record" task_id)" = "$2" ] || continue
+    if [ -n "$found" ]; then
+      return 2
+    fi
+    found=$record
+  done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+records_for() { # <home> <task>
+  local record
+  for record in "$1/state/handoff-continuations"/*.record; do
+    [ -f "$record" ] || continue
+    [ "$(handoff_field "$record" task_id)" = "$2" ] || continue
+    printf '%s\n' "$record"
+  done
+}
+
+records_for_count() { # <home> <task>
+  records_for "$1" "$2" | wc -l | tr -d ' '
+}
+
+drop_handoff_wakes() { # <home>
+  local queue="$1/state/.wake-queue"
+  [ -f "$queue" ] || return 0
+  grep -v 'handoff-idle-' "$queue" > "$queue.kept" || true
+  mv "$queue.kept" "$queue"
+}
+
+set_record_field() { # <record> <key> <value>
+  awk -v key="$2" -v value="$3" '
+    index($0, key "=") == 1 { print key "=" value; next }
+    { print }
+  ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+install_handoff_fakes() {
+  local tool
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "$WORLD/crew-state.log"
+printf 'state: %s · source: %s\n' "\${FM_FAKE_CREW_STATE:-unknown}" "\${FM_FAKE_CREW_SOURCE:-fake}"
+EOF
+  chmod +x "$WORLD/fakebin/fm-crew-state.sh"
+  for tool in no-mistakes fm-send; do
+    cat > "$WORLD/fakebin/$tool" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$(basename "$0")" >> "${FM_FORGE_LOG:?}"
+exit 97
+EOF
+    chmod +x "$WORLD/fakebin/$tool"
+  done
+}
+
+scan_handoff() { # <home>
+  FM_INACTIVE_RECONCILE_NOW=$HANDOFF_NOW FM_HANDOFF_IDLE_SECS=180 run_reconcile "$1"
+}
+
+test_handoff_idle_records_the_episode_and_alerts_once() {
+  local name home record fp8 key line
+  line="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  make_world handoff-alert
+  install_handoff_fakes
+  mkdir -p "$WORLD/harbor"/{state,data,config,projects} "$WORLD/keel"/{state,data,config,projects}
+  : > "$WORLD/crew-state.log"
+  for name in main harbor keel; do
+    if [ "$name" = main ]; then
+      home=$MAIN
+    else
+      home="$WORLD/$name"
+      printf '%s\n' "$name" > "$home/.fm-secondmate-home"
+    fi
+    write_child "$home" intake "$line" "inc-$name-1"
+    scan_handoff "$home"
+    record=$(one_record "$home" intake) || fail "$name: handoff record missing"
+    [ "$(handoff_field "$record" schema)" = fm-handoff-continuation.v1 ] \
+      || fail "$name: record schema drifted: $(cat "$record")"
+    [ "$(handoff_field "$record" incarnation)" = "inc-$name-1" ] \
+      || fail "$name: record lost the incarnation"
+    [ "$(handoff_field "$record" completion_line)" = "$line" ] \
+      || fail "$name: record changed the completion line"
+    [ "$(handoff_field "$record" observed_epoch)" = "$HANDOFF_OLD" ] \
+      || fail "$name: record did not keep the completion stamp"
+    [ "$(handoff_field "$record" bound_secs)" = 180 ] || fail "$name: record bound was not 180"
+    [ "$(handoff_field "$record" alerted)" = 1 ] || fail "$name: the alert was not recorded"
+    [ -n "$(handoff_field "$record" last_alert_epoch)" ] || fail "$name: alert time was not recorded"
+    [ -z "$(handoff_field "$record" cleared_epoch)" ] || fail "$name: the alert cleared the episode"
+    fp8=$(basename "$record" .record)
+    key="handoff-idle-intake-${fp8:0:8}"
+    grep -Fq "$key" "$home/state/.wake-queue" || fail "$name: wake key $key missing"
+    grep -Fq "check: handoff idle: task=intake still needs a supervisor continuation after 180s" \
+      "$home/state/.wake-queue" || fail "$name: wake payload drifted"
+    [ "$(handoff_wake_count "$home")" = 1 ] || fail "$name: first scan queued more than one handoff check"
+    grep -Fxq "$fp8" "$home/state/handoff-continuations/intake.open" \
+      || fail "$name: the open marker was not written at first observation"
+
+    scan_handoff "$home"
+    [ "$(handoff_wake_count "$home")" = 1 ] || fail "$name: a queued check was sent again"
+    [ "$(records_for_count "$home" intake)" = 1 ] || fail "$name: a rescan minted a second episode"
+
+    drop_handoff_wakes "$home"
+    scan_handoff "$home"
+    [ "$(handoff_wake_count "$home")" = 0 ] \
+      || fail "$name: a consumed check was requeued inside the bound"
+    [ -f "$home/state/handoff-continuations/intake.open" ] \
+      || fail "$name: consuming the check retired the episode"
+
+    set_record_field "$record" last_alert_epoch 1
+    scan_handoff "$home"
+    [ "$(handoff_wake_count "$home")" = 1 ] \
+      || fail "$name: an elapsed bound after a consumed check did not requeue"
+    [ "$(records_for_count "$home" intake)" = 1 ] || fail "$name: the requeue minted a second episode"
+  done
+
+  write_child "$MAIN" quiet "needs-validation [at=$HANDOFF_YOUNG]: committed c118078, 706 tests" inc-quiet-1
+  scan_handoff "$MAIN"
+  record=$(one_record "$MAIN" quiet) || fail "a young handoff was not recorded"
+  [ "$(handoff_field "$record" alerted)" = 0 ] || fail "a young handoff alerted before the bound"
+  [ -f "$MAIN/state/handoff-continuations/quiet.open" ] \
+    || fail "a young handoff did not get its marker at first observation"
+  grep -q 'handoff-idle-quiet-' "$MAIN/state/.wake-queue" \
+    && fail "a young handoff queued a check"
+  grep -qx quiet "$WORLD/crew-state.log" \
+    && fail "current state was read before the handoff bound"
+  [ ! -s "$WORLD/forge.log" ] || fail "handoff reconciliation invoked a forge or send command: $(cat "$WORLD/forge.log")"
+  pass "an idle handoff is one durable episode per home, alerted once until its check is consumed and the bound elapses again"
+}
+
+test_handoff_idle_clears_only_on_continuation() {
+  local home record before after verb uncleared
+  local completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  make_world handoff-clear
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" intake "$completion" inc-clear-1
+  mkdir -p "$home/state/intake.inbox" "$home/state/terminal-outcomes"
+  printf 'doorbell\n' > "$home/state/intake.inbox/001.msg"
+  printf 'task_id=intake\nstate=done\n' > "$home/state/terminal-outcomes/old.reported"
+  printf '%s\n' '{"verdict":"routine","summary":"implementation done"}' > "$home/state/branch-outcomes.jsonl"
+  printf '%s\n%s\n%s\n' \
+    "$completion" \
+    "note [at=$HANDOFF_CONT]: parent already has the receipt" \
+    "resolved [at=$HANDOFF_CONT]: closed a different question" \
+    > "$home/state/intake.status"
+  scan_handoff "$home"
+  record=$(one_record "$home" intake) || fail "noise retired the handoff before any continuation"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "a note, resolve, inbox, receipt, or routine outcome cleared the handoff"
+  [ -f "$home/state/handoff-continuations/intake.open" ] || fail "an open handoff lost its marker"
+
+  printf '%s\n' "working [at=$HANDOFF_CONT]: validation started" >> "$home/state/intake.status"
+  scan_handoff "$home"
+  [ "$(handoff_field "$record" clear_reason)" = "status:working" ] \
+    || fail "working did not clear the handoff: $(cat "$record")"
+  [ "$(handoff_field "$record" latency_secs)" = $((HANDOFF_CONT - HANDOFF_OLD)) ] \
+    || fail "latency was not the continuation stamp minus the completion"
+  [ "$(handoff_field "$record" cleared_epoch)" = "$HANDOFF_NOW" ] \
+    || fail "clear time was not the reconcile clock"
+  [ ! -e "$home/state/handoff-continuations/intake.open" ] || fail "a cleared handoff left its marker"
+
+  before=$(handoff_field "$record" cleared_epoch)
+  printf '%s\n' "$completion" > "$home/state/intake.status"
+  scan_handoff "$home"
+  after=$(handoff_field "$record" cleared_epoch)
+  [ "$before" = "$after" ] || fail "the same completion line reopened a cleared episode"
+  [ ! -e "$home/state/handoff-continuations/intake.open" ] || fail "a cleared episode recreated its marker"
+  [ "$(records_for_count "$home" intake)" = 1 ] || fail "a rescan minted a second episode for the same completion"
+
+  for verb in paused needs-decision blocked captain-held; do
+    write_child "$home" "$verb" "$completion" "inc-$verb-1"
+    printf '%s\n%s\n' "$completion" "$verb [at=$HANDOFF_CONT]: continued" > "$home/state/$verb.status"
+    scan_handoff "$home"
+    record=$(one_record "$home" "$verb") || fail "$verb did not keep a record"
+    [ "$(handoff_field "$record" clear_reason)" = "status:$verb" ] \
+      || fail "$verb did not clear the handoff: $(cat "$record")"
+    [ "$(handoff_field "$record" latency_secs)" = $((HANDOFF_CONT - HANDOFF_OLD)) ] \
+      || fail "$verb latency was wrong"
+  done
+
+  write_child "$home" final "$completion" inc-final-1
+  printf '%s\n%s\n' "$completion" \
+    "done [at=$HANDOFF_CONT]: PR https://example.test/o/r/pull/9 checks green" \
+    > "$home/state/final.status"
+  scan_handoff "$home"
+  record=$(one_record "$home" final) || fail "a ci-ready follow-up left no record of the handoff it closed"
+  [ "$(handoff_field "$record" clear_reason)" = "status:done" ] \
+    || fail "a ci-ready done did not clear the earlier handoff"
+
+  write_child "$home" pair "$completion" inc-pair-1
+  printf '%s\n%s\n' \
+    "$completion" \
+    "done [at=$HANDOFF_OLD]: committed cc38b3d, 707 tests" \
+    > "$home/state/pair.status"
+  scan_handoff "$home"
+  [ "$(records_for_count "$home" pair)" = 2 ] || fail "two handoffs collapsed into one episode"
+  [ -f "$home/state/handoff-continuations/pair.open" ] || fail "two open handoffs left no marker"
+  FM_FAKE_CREW_SOURCE=run-step FM_FAKE_CREW_STATE=working scan_handoff "$home"
+  uncleared=0
+  while IFS= read -r record; do
+    [ "$(handoff_field "$record" clear_reason)" = run-step ] || uncleared=1
+    [ "$(handoff_field "$record" latency_secs)" = $((HANDOFF_NOW - HANDOFF_OLD)) ] || uncleared=1
+  done < <(records_for "$home" pair)
+  [ "$uncleared" -eq 0 ] || fail "an active pipeline did not clear every open handoff for the task"
+  [ ! -e "$home/state/handoff-continuations/pair.open" ] || fail "a pipeline clear left the marker"
+
+  write_child "$home" pane "$completion" inc-pane-1
+  FM_FAKE_CREW_SOURCE=pane FM_FAKE_CREW_STATE=working scan_handoff "$home"
+  record=$(one_record "$home" pane) || fail "pane evidence dropped the handoff record"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "a busy pane cleared a handoff that has not continued"
+
+  write_child "$home" plain 'needs-validation: committed c118078, 706 tests' inc-plain-1
+  scan_handoff "$home"
+  record=$(one_record "$home" plain) || fail "an unstamped handoff was not recorded"
+  [ "$(handoff_field "$record" observed_epoch)" = "$HANDOFF_NOW" ] \
+    || fail "an unstamped handoff did not use the first-seen clock"
+  before=$(cksum "$record")
+  scan_handoff "$home"
+  after=$(cksum "$record")
+  [ "$before" = "$after" ] || fail "a rescan changed the identity of the same unstamped handoff"
+  [ ! -s "$WORLD/forge.log" ] || fail "a continuation scan invoked a forge or send command"
+  pass "a handoff clears on a continuation or an active pipeline, and the same completion line does not reopen it"
+}
+
+test_handoff_idle_skips_final_deliveries_and_secondmates() {
+  local home id line
+  local plain="done [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  make_world handoff-skip
+  install_handoff_fakes
+  home=$MAIN
+  mkdir -p "$WORLD/harbor-home"
+
+  write_child "$home" ship-direct "$plain" inc-direct-1
+  awk '$0 ~ /^mode=/ { print "mode=direct-PR"; next } { print }' \
+    "$home/state/ship-direct.meta" > "$home/state/ship-direct.meta.tmp"
+  mv "$home/state/ship-direct.meta.tmp" "$home/state/ship-direct.meta"
+  write_child "$home" ship-local "$plain" inc-local-1
+  awk '$0 ~ /^mode=/ { print "mode=local-only"; next } { print }' \
+    "$home/state/ship-local.meta" > "$home/state/ship-local.meta.tmp"
+  mv "$home/state/ship-local.meta.tmp" "$home/state/ship-local.meta"
+  write_child "$home" ship-ready \
+    "done [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/3 checks green" inc-ready-1
+  write_child "$home" ship-published \
+    "done [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/3 published for review" inc-published-1
+  write_child "$home" ship-mergeable \
+    "done [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/153 open, green, mergeable" inc-mergeable-1
+  write_child "$home" ship-mentioned \
+    "done [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/3 revision landed" inc-mentioned-1
+  write_child "$home" ship-empty "$plain" inc-empty-1
+  awk '$0 !~ /^mode=/ { print }' "$home/state/ship-empty.meta" > "$home/state/ship-empty.meta.tmp"
+  mv "$home/state/ship-empty.meta.tmp" "$home/state/ship-empty.meta"
+  write_child "$home" ship-validation \
+    "needs-validation [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/3 committed c118078, 706 tests" \
+    inc-validation-1
+  write_child "$home" ship-failed \
+    "failed [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/3 broke" inc-failed-1
+  write_child "$home" ship-scout \
+    "done [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/3 revision complete and a recheck is next" \
+    inc-scout-1
+  awk '$0 ~ /^kind=/ { print "kind=scout"; next } { print }' \
+    "$home/state/ship-scout.meta" > "$home/state/ship-scout.meta.tmp"
+  mv "$home/state/ship-scout.meta.tmp" "$home/state/ship-scout.meta"
+  fm_write_secondmate_meta "$home/state/harbor.meta" "$WORLD/harbor-home"
+  printf '%s\n' "needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests" > "$home/state/harbor.status"
+  write_child "$home" keel "$plain" inc-keel-1
+
+  scan_handoff "$home"
+  for id in ship-direct ship-local ship-ready ship-published ship-mergeable ship-mentioned harbor; do
+    [ "$(records_for_count "$home" "$id")" = 0 ] || fail "$id opened a handoff episode"
+  done
+  for id in ship-empty ship-validation ship-failed ship-scout keel; do
+    [ "$(records_for_count "$home" "$id")" = 1 ] || fail "$id did not open a handoff episode"
+    [ -z "$(handoff_field "$(one_record "$home" "$id")" cleared_epoch)" ] || fail "$id was cleared without a continuation"
+  done
+  pass "final deliveries and a secondmate record stay off the handoff path; validation, failure, scout, and empty-mode dones stay on it"
+}
+
+test_parent_publication_does_not_clear_local_continuation() {
+  local harbor keel
+  make_world parent-pub
+  install_handoff_fakes
+  bind_secondmate local
+  write_child "$MATE" harbor \
+    "needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests" inc-harbor-1
+  write_child "$MATE" keel \
+    "done [at=$HANDOFF_OLD]: committed cc38b3d, 707 tests" inc-keel-1
+  scan_handoff "$MATE"
+  scan_handoff "$MATE"
+  harbor=$(one_record "$MATE" harbor) || fail "the validation handoff was not recorded in the secondmate home"
+  keel=$(one_record "$MATE" keel) || fail "the legacy done handoff was not recorded in the secondmate home"
+  [ -z "$(handoff_field "$harbor" cleared_epoch)" ] || fail "publishing cleared the validation handoff"
+  [ -z "$(handoff_field "$keel" cleared_epoch)" ] || fail "publishing the legacy done cleared its local continuation"
+  grep -q 'child-outcome-keel-done' "$MAIN/state/mate.status" \
+    || fail "the legacy done was not published to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  if grep -q 'needs-validation' "$MAIN/state/mate.status" 2>/dev/null; then
+    fail "the validation handoff was published as a parent terminal line: $(cat "$MAIN/state/mate.status")"
+  fi
+  if grep -q 'child-outcome-harbor' "$MAIN/state/mate.status" 2>/dev/null; then
+    fail "the validation handoff got a parent outcome key"
+  fi
+  [ ! -s "$WORLD/forge.log" ] || fail "parent publication invoked a forge or send command"
+  pass "a parent publication leaves the local continuation open, and a validation handoff is not a parent terminal line"
+}
+
+test_handoff_directory_symlink_fails_the_scan() {
+  local rc
+  make_world handoff-symlink
+  mkdir -p "$WORLD/elsewhere"
+  ln -s "$WORLD/elsewhere" "$MAIN/state/handoff-continuations"
+  rc=0
+  scan_handoff "$MAIN" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a symlinked handoff directory was accepted"
+  [ -z "$(find "$WORLD/elsewhere" -type f)" ] \
+    || fail "the scan followed the handoff symlink"
+  pass "a symlinked handoff directory fails the scan without being followed"
+}
+
+test_handoff_idle_bound_refuses_out_of_range() {
+  local value rc err
+  err="$TMP_ROOT/handoff-bound.err"
+  for value in 0 1801 abc; do
+    rc=0
+    FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$TMP_ROOT/bound-state" FM_HANDOFF_IDLE_SECS="$value" \
+      "$RECON" scan >/dev/null 2>"$err" || rc=$?
+    [ "$rc" -eq 2 ] || fail "FM_HANDOFF_IDLE_SECS=$value exited $rc: $(cat "$err" 2>/dev/null)"
+    grep -q 'FM_HANDOFF_IDLE_SECS' "$err" || fail "the refusal did not name the bound: $(cat "$err" 2>/dev/null)"
+  done
+  pass "the handoff bound accepts only a whole number from 1 to 1800"
+}
+
+test_handoff_idle_records_the_episode_and_alerts_once
+test_handoff_idle_clears_only_on_continuation
+test_handoff_idle_skips_final_deliveries_and_secondmates
+test_parent_publication_does_not_clear_local_continuation
+test_handoff_directory_symlink_fails_the_scan
+test_handoff_idle_bound_refuses_out_of_range
+
 echo "all inactive reconciliation tests passed"

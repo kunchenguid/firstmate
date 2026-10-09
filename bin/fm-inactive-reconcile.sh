@@ -85,6 +85,26 @@
 #
 # The scan reads only durable local state and fm-crew-state.sh; it never invokes
 # gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+#
+# Every scan, including one the cadence gate then skips, also keeps the
+# idle-after-handoff record under state/handoff-continuations/. One record per
+# task incarnation and exact completion line. It is not a parent delivery:
+# publishing a child outcome upstream does not clear it, and this pass never
+# sends the validation command. needs-validation is not a terminal ledger line,
+# so the ledger-first path does not publish it. A legacy no-mistakes done
+# handoff still publishes when the named-head gate accepts it, and the local
+# continuation record stays until the continuation itself is evident.
+# A ship done note that already names a PR stays on that terminal path.
+# Kind and mode are required either way, so a missing PR is not itself the test.
+# FM_HANDOFF_IDLE_SECS (default 180, valid 1..1800) is the provisional bound.
+# 180 is the existing secondmate queue-stall bound. The two measured
+# completion-to-next-park paths took 69 and 87 seconds, and completion
+# classification took 40-48 seconds, so three minutes clears those paths.
+# Those are small samples. Each record stores latency_secs when it clears so
+# the bound can be set from data. A still-open episode queues one check, and
+# queues it again only after another bound once that check has left the queue,
+# so a routine dismissal cannot hide it and a restart cannot mint a second
+# episode or resend a command.
 set -u
 export LC_ALL=C
 
@@ -129,6 +149,19 @@ if [ "$FM_INACTIVE_RECONCILE_BUDGET_SECS" -gt 30 ]; then
   printf 'fm-inactive-reconcile: FM_INACTIVE_RECONCILE_BUDGET_SECS must be a whole number from 1 to 30\n' >&2
   exit 2
 fi
+# See the header. 180 is provisional, not a measured service percentile.
+FM_HANDOFF_IDLE_SECS=${FM_HANDOFF_IDLE_SECS:-180}
+case "$FM_HANDOFF_IDLE_SECS" in
+  ''|*[!0-9]*)
+    printf 'fm-inactive-reconcile: FM_HANDOFF_IDLE_SECS must be a whole number from 1 to 1800\n' >&2
+    exit 2
+    ;;
+esac
+if [ "$FM_HANDOFF_IDLE_SECS" -lt 1 ] || [ "$FM_HANDOFF_IDLE_SECS" -gt 1800 ]; then
+  printf 'fm-inactive-reconcile: FM_HANDOFF_IDLE_SECS must be a whole number from 1 to 1800\n' >&2
+  exit 2
+fi
+HANDOFF_DIR="$STATE/handoff-continuations"
 
 if [ "$(uname)" = Darwin ]; then
   file_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
@@ -599,10 +632,273 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
   done
 }
 
+# 0 when this status event is a completion that still needs a local supervisor
+# continuation. Direct-PR and local-only done lines, and a no-mistakes done
+# that already reports CI-ready or published-for-review, are final deliveries
+# and return 1. needs-validation and failed always return 0. A scout done
+# returns 0. A legacy no-mistakes ship done that is not one of those final
+# reports returns 0.
+handoff_is_completion() { # <verb> <line> <kind> <mode>
+  local verb=$1 line=$2 kind=$3 mode=$4 note
+  case "$verb" in
+    needs-validation|failed) return 0 ;;
+    done) ;;
+    *) return 1 ;;
+  esac
+  case "$kind" in
+    scout) return 0 ;;
+    ship) ;;
+    *) return 1 ;;
+  esac
+  case "$mode" in
+    direct-PR|local-only) return 1 ;;
+    no-mistakes|'') ;;
+    *) return 1 ;;
+  esac
+  note=$(status_line_note "$line")
+  fm_dod_note_reports_ci_ready "$note" && return 1
+  fm_dod_note_reports_published_change "$note" && return 1
+  # A ship done note that already names a PR is the terminal path's delivery,
+  # including a green mergeable PR that is not spelled "checks green".
+  # Kind and mode were already required, so a missing PR is not the test.
+  if fm_dod_pr_url_from_done_note "$note" >/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+# 0 when this event is evidence the open handoff continued: working, paused,
+# an explicit hold, or a final done. A later note, or another completion, is
+# not that evidence.
+handoff_clears() { # <verb> <line> <kind> <mode>
+  local verb=$1 line=$2
+  case "$verb" in
+    working|needs-decision|blocked|captain-held) return 0 ;;
+  esac
+  if status_is_paused "$line"; then
+    return 0
+  fi
+  if [ "$verb" = "done" ]; then
+    handoff_is_completion "$verb" "$line" "$3" "$4" && return 1
+    return 0
+  fi
+  return 1
+}
+
+handoff_line_epoch() { # <line>
+  printf '%s\n' "$1" | sed -n 's/.*\[at=\([0-9][0-9]*\)\].*/\1/p' | head -n 1
+}
+
+handoff_record_path() { # <fingerprint>
+  printf '%s/%s.record\n' "$HANDOFF_DIR" "$1"
+}
+
+handoff_value() { # <record> <key>
+  [ -f "$1" ] && [ ! -L "$1" ] || return 0
+  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+handoff_set() { # <record> <key> <value>
+  local record=$1 key=$2 value=$3 tmp line
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  tmp=$(mktemp "$HANDOFF_DIR/.field.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "${key}="*) continue ;;
+    esac
+    printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  done < "$record"
+  printf '%s=%s\n' "$key" "$value" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$record" || { rm -f "$tmp"; return 1; }
+}
+
+handoff_ensure() { # <fingerprint> <task> <incarnation> <line> <observed-epoch>
+  local fingerprint=$1 task=$2 incarnation=$3 line=$4 observed=$5 path tmp
+  path=$(handoff_record_path "$fingerprint")
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    return 0
+  fi
+  [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  tmp=$(mktemp "$HANDOFF_DIR/.record.XXXXXX") || return 1
+  {
+    printf 'schema=fm-handoff-continuation.v1\n'
+    printf 'task_id=%s\n' "$task"
+    printf 'incarnation=%s\n' "$incarnation"
+    printf 'completion_line=%s\n' "$(clean_field "$line")"
+    printf 'observed_epoch=%s\n' "$observed"
+    printf 'bound_secs=%s\n' "$FM_HANDOFF_IDLE_SECS"
+    printf 'alerted=0\n'
+    printf 'last_alert_epoch=\n'
+    printf 'cleared_epoch=\n'
+    printf 'latency_secs=\n'
+    printf 'clear_reason=\n'
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+}
+
+handoff_clear_record() { # <fingerprint> <reason> <continuation-epoch>
+  local fingerprint=$1 reason=$2 when=$3 path observed latency now
+  path=$(handoff_record_path "$fingerprint")
+  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  [ -z "$(handoff_value "$path" cleared_epoch)" ] || return 0
+  observed=$(handoff_value "$path" observed_epoch)
+  now=$(reconcile_now)
+  case "$when" in
+    ''|*[!0-9]*) when=$now ;;
+  esac
+  case "$observed" in
+    ''|*[!0-9]*) observed=$when ;;
+  esac
+  if [ "$when" -lt "$observed" ]; then
+    latency=0
+  else
+    latency=$((when - observed))
+  fi
+  handoff_set "$path" cleared_epoch "$now" || return 1
+  handoff_set "$path" latency_secs "$latency" || return 1
+  handoff_set "$path" clear_reason "$reason" || return 1
+}
+
+handoff_marker_write() { # <task> <fingerprint>
+  local task=$1 fingerprint=$2 tmp marker
+  marker="$HANDOFF_DIR/$task.open"
+  [ ! -L "$marker" ] || return 1
+  tmp=$(mktemp "$HANDOFF_DIR/.open.XXXXXX") || return 1
+  printf '%s\n' "$fingerprint" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+}
+
+handoff_one() { # <id> <meta>
+  local id=$1 meta=$2 status kind mode incarnation line verb fingerprint observed
+  local -a open_fps=()
+  local now age key alerted last_alert state_line state_rc path item fp
+  local clearer_epoch run_step=0 marker
+  status="$STATE/$id.status"
+  [ -f "$status" ] && [ ! -L "$status" ] || return 0
+  kind=$(meta_field "$meta" kind)
+  mode=$(meta_field "$meta" mode)
+  incarnation=$(meta_incarnation "$meta")
+  valid_id "$incarnation" || incarnation=unknown
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    verb=$(status_line_verb "$line")
+    _fm_status_verb_recognized "$verb" || continue
+    if handoff_is_completion "$verb" "$line" "$kind" "$mode"; then
+      fingerprint=$(sha256_text "$incarnation|$id|$line")
+      observed=$(handoff_line_epoch "$line")
+      case "$observed" in
+        ''|*[!0-9]*) observed=$(handoff_value "$(handoff_record_path "$fingerprint")" observed_epoch) ;;
+      esac
+      case "$observed" in
+        ''|*[!0-9]*) observed=$(reconcile_now) ;;
+      esac
+      handoff_ensure "$fingerprint" "$id" "$incarnation" "$line" "$observed" || return 1
+      # A cleared episode stays closed. The same completion line must not
+      # reopen on the next scan, restart, or note appended after it.
+      if [ -z "$(handoff_value "$(handoff_record_path "$fingerprint")" cleared_epoch)" ]; then
+        open_fps+=("$fingerprint|$observed")
+      fi
+    elif handoff_clears "$verb" "$line" "$kind" "$mode"; then
+      clearer_epoch=$(handoff_line_epoch "$line")
+      for item in "${open_fps[@]+"${open_fps[@]}"}"; do
+        fp=${item%%|*}
+        handoff_clear_record "$fp" "status:$verb" "$clearer_epoch" || return 1
+      done
+      open_fps=()
+    fi
+  done < "$status"
+  if [ "${#open_fps[@]}" -eq 0 ]; then
+    marker="$HANDOFF_DIR/$id.open"
+    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      rm -f -- "$marker" || return 1
+    fi
+    return 0
+  fi
+  handoff_marker_write "$id" "${open_fps[${#open_fps[@]}-1]%%|*}" || return 1
+  now=$(reconcile_now)
+  run_step=0
+  state_rc=0
+  for item in "${open_fps[@]}"; do
+    observed=${item#*|}
+    case "$observed" in ''|*[!0-9]*) continue ;; esac
+    [ "$now" -ge "$observed" ] || continue
+    age=$((now - observed))
+    [ "$age" -ge "$FM_HANDOFF_IDLE_SECS" ] || continue
+    if [ "$run_step" -eq 0 ] && [ "$state_rc" -eq 0 ]; then
+      state_line=$(fm_run_timed 5 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+        "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
+      case "$state_line" in
+        *'source: run-step'*) run_step=1 ;;
+      esac
+    fi
+    break
+  done
+  if [ "$run_step" -eq 1 ]; then
+    for item in "${open_fps[@]}"; do
+      handoff_clear_record "${item%%|*}" run-step "" || return 1
+    done
+    rm -f -- "$HANDOFF_DIR/$id.open" || return 1
+    return 0
+  fi
+  for item in "${open_fps[@]}"; do
+    fingerprint=${item%%|*}
+    observed=${item#*|}
+    case "$observed" in ''|*[!0-9]*) continue ;; esac
+    [ "$now" -ge "$observed" ] || continue
+    age=$((now - observed))
+    [ "$age" -ge "$FM_HANDOFF_IDLE_SECS" ] || continue
+    path=$(handoff_record_path "$fingerprint")
+    [ -z "$(handoff_value "$path" cleared_epoch)" ] || continue
+    key="handoff-idle-$id-${fingerprint:0:8}"
+    if queue_key_exists "$key"; then
+      continue
+    fi
+    alerted=$(handoff_value "$path" alerted)
+    last_alert=$(handoff_value "$path" last_alert_epoch)
+    case "$last_alert" in ''|*[!0-9]*) last_alert=0 ;; esac
+    if [ "$alerted" = 1 ] && [ $((now - last_alert)) -lt "$FM_HANDOFF_IDLE_SECS" ]; then
+      continue
+    fi
+    if fm_wake_append check "$key" \
+      "check: handoff idle: task=$id still needs a supervisor continuation after ${age}s"; then
+      handoff_set "$path" alerted 1 || return 1
+      handoff_set "$path" last_alert_epoch "$now" || return 1
+    fi
+  done
+}
+
+# Every direct ordinary crewmate. A persistent secondmate is skipped: that
+# home runs this same pass on its own children. Parent publication is a
+# different path and does not clear these records.
+handoff_pass() {
+  local meta id lock
+  [ ! -L "$HANDOFF_DIR" ] || return 1
+  mkdir -p "$HANDOFF_DIR" || return 1
+  [ ! -L "$HANDOFF_DIR" ] || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    valid_id "$id" || continue
+    [ "$(meta_field "$meta" kind)" != secondmate ] || continue
+    lock=$(fm_meta_lock_path "$meta") || continue
+    fm_lock_try_acquire "$lock" || continue
+    if [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(meta_field "$meta" kind)" != secondmate ]; then
+      handoff_one "$id" "$meta" || true
+    fi
+    fm_lock_release "$lock"
+  done
+}
+
 scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
+  # Before the cadence gate, so a 180-second handoff bound is not stuck
+  # behind the 900-second terminal scan.
+  handoff_pass || return 1
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
     ledger_pass
