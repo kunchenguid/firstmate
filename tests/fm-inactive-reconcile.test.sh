@@ -1307,6 +1307,45 @@ test_handoff_idle_survives_a_replaced_status_log() {
   pass "a replaced status log preserves a handoff until attributed continuation"
 }
 
+test_handoff_idle_replay_keeps_later_completion_open() {
+  local home first second record first_record= second_record= fp8 key
+  make_world handoff-replay-order
+  install_handoff_fakes
+  home=$MAIN
+  first="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  second="needs-validation [at=$HANDOFF_OLD]: committed c118079, 707 tests"
+  write_child "$home" intake "$first" inc-replay-1
+  printf '%s\n%s\n%s\n' \
+    "$first" \
+    "needs-decision [at=$HANDOFF_CONT] [key=hold]: an explicit hold" \
+    "$second" \
+    > "$home/state/intake.status"
+  scan_handoff "$home"
+  while IFS= read -r record; do
+    case "$(handoff_field "$record" completion_line)" in
+      "$first") first_record=$record ;;
+      "$second") second_record=$record ;;
+    esac
+  done < <(records_for "$home" intake)
+  [ -n "$first_record" ] || fail "the earlier completion was not recorded"
+  [ -n "$second_record" ] || fail "the later completion was not recorded"
+  [ "$(handoff_field "$first_record" clear_reason)" = status:needs-decision ] \
+    || fail "the explicit hold did not clear the earlier completion"
+  [ -z "$(handoff_field "$second_record" cleared_epoch)" ] \
+    || fail "the first replay scan cleared the later completion"
+
+  scan_handoff "$home"
+  [ -z "$(handoff_field "$second_record" cleared_epoch)" ] \
+    || fail "a historical hold cleared the later completion on replay"
+  fp8=$(basename "$second_record" .record)
+  key="handoff-idle-intake-${fp8:0:8}"
+  grep -Fxq "$fp8" "$home/state/handoff-continuations/intake.open" \
+    || fail "a replayed hold retired the later completion marker"
+  grep -Fq "$key" "$home/state/.wake-queue" \
+    || fail "the later completion did not remain eligible for an idle alert"
+  pass "status replay clears only completions pending at the continuation line"
+}
+
 test_handoff_idle_clears_only_on_continuation() {
   local home record before after verb uncleared
   local completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
@@ -1638,6 +1677,7 @@ test_handoff_idle_uses_only_positional_status_timestamps
 test_handoff_ignores_an_unterminated_completion_line
 test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable
 test_handoff_idle_survives_a_replaced_status_log
+test_handoff_idle_replay_keeps_later_completion_open
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan
 test_handoff_idle_bound_refuses_out_of_range

@@ -786,7 +786,7 @@ handoff_marker_write() { # <task> <fingerprint>
 
 handoff_one() { # <id> <meta>
   local id=$1 meta=$2 status kind mode incarnation line verb fingerprint observed record known
-  local -a open_fps=()
+  local -a open_fps=() stored_fps=()
   local now age key alerted last_alert state_line state_rc path item fp
   local clearer_epoch marker proof='' reason='' evidence_rc=0
   status="$STATE/$id.status"
@@ -802,7 +802,7 @@ handoff_one() { # <id> <meta>
     fingerprint=${record##*/}
     fingerprint=${fingerprint%.record}
     observed=$(handoff_value "$record" observed_epoch)
-    open_fps+=("$fingerprint|$observed")
+    stored_fps+=("$fingerprint|$observed")
   done
   # A line with no trailing newline is still being appended. Reading only
   # newline-terminated lines keeps a partial needs-validation from becoming
@@ -841,6 +841,16 @@ handoff_one() { # <id> <meta>
       fi
     done < "$status"
   fi
+  for item in "${stored_fps[@]+"${stored_fps[@]}"}"; do
+    fp=${item%%|*}
+    path=$(handoff_record_path "$fp")
+    [ -z "$(handoff_value "$path" cleared_epoch)" ] || continue
+    known=0
+    for record in "${open_fps[@]+"${open_fps[@]}"}"; do
+      [ "${record%%|*}" = "$fp" ] && known=1
+    done
+    [ "$known" -eq 1 ] || open_fps+=("$item")
+  done
   if [ "${#open_fps[@]}" -eq 0 ]; then
     marker="$HANDOFF_DIR/$id.open"
     if [ -f "$marker" ] && [ ! -L "$marker" ]; then
