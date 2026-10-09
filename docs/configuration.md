@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [away default words](#away-default-words-configafk-default-words), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -362,6 +362,7 @@ The wrapper still passes through the documented direct transition `tasks-axi sta
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
 
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
+A ship whose `--yolo` differs from the project's registered posture launches only with a `--posture-reason`, which the spawn records in the task record and, under this gate, appends to the item's body as one `Posture deviation:` line once the item is In flight; a manual-backend home records that reason in the note by hand ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh) header).
 
 ### Which backlog receives a transition
 
@@ -535,6 +536,16 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
+
+## Away default words (config/afk-default-words)
+
+The optional local, gitignored `config/afk-default-words` file holds standing away words the captain does not want to retype at every `/afk`.
+With it present and non-blank, `bin/fm-afk-launch.sh enter` records its text verbatim as the mandate of a plain `/afk` that carries no words, and prepends it to the words of an `/afk` that does (the file's text, then one newline, then the captain's words exactly as given).
+Either way the entry prints a `Default away words:` line after the read-back, and the read-back shows the whole recorded mandate.
+A plain `/afk` while a record of the same mode already stands remains a refresh that leaves the standing record untouched.
+An absent or blank file changes nothing.
+The file is composed into the record before `bin/fm-afk-contract.sh` writes it; nothing parses the words, and destructive, irreversible, and security-sensitive actions stay non-pre-authorizable whatever they say.
+The file is a home-local preference and is not inherited by secondmate homes.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 

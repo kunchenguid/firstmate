@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--posture-reason <text>] [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -29,6 +29,21 @@
 #   than becoming intent. That library owns the parsing and intent rules. When
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
+#   --yolo is additionally compared with the project's REGISTERED yolo posture
+#   (bin/fm-project-mode.sh's second word; an unregistered project reads as
+#   off). A ship spawn whose --yolo differs from it in either direction REFUSES
+#   unless --posture-reason '<one line>' states why this task deviates - a
+#   current explicit captain instruction, or an intake judgment firstmate can
+#   state - so a standing +yolo cannot be silently dropped to off, and off cannot
+#   be silently raised to on. The reason is recorded as posture_reason= in
+#   state/<id>.meta and, under the automatic backlog transition gate
+#   (docs/configuration.md "Automatic dispatch and completion"), appended to the
+#   task's backlog body as one "Posture deviation:" line once the item is In
+#   flight; a manual-backend home records it in the note by hand. The flag is
+#   also accepted with a mode rigor downgrade, and refused when the spawn
+#   deviates from the registry in neither way, so it cannot become boilerplate.
+#   It is refused on scouts, secondmates, and relaunches (a relaunch reuses the
+#   recorded posture and carries the recorded reason forward).
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
@@ -697,6 +712,9 @@ EFFORT=
 BACKEND_ARG=
 MODE=
 YOLO=
+POSTURE_REASON=
+POSTURE_REASON_SET=0
+STANDING_YOLO=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
 HARNESS_SET=0
@@ -747,6 +765,10 @@ for a in "$@"; do
     yolo)
       YOLO=$a
       YOLO_SET=1
+      ;;
+    posture-reason)
+      POSTURE_REASON=$a
+      POSTURE_REASON_SET=1
       ;;
     branch-prefix)
       BRANCH_PREFIX=$a
@@ -809,6 +831,11 @@ for a in "$@"; do
     YOLO=${a#--yolo=}
     YOLO_SET=1
     ;;
+  --posture-reason) want_value="posture-reason" ;;
+  --posture-reason=*)
+    POSTURE_REASON=${a#--posture-reason=}
+    POSTURE_REASON_SET=1
+    ;;
   --branch-prefix) want_value="branch-prefix" ;;
   --branch-prefix=*)
     BRANCH_PREFIX=${a#--branch-prefix=}
@@ -855,6 +882,25 @@ done
   echo "error: --yolo requires a non-empty value" >&2
   exit 1
 }
+if [ "$POSTURE_REASON_SET" -eq 1 ]; then
+  case "$POSTURE_REASON" in
+  '' | *[![:space:]]*) ;;
+  *)
+    POSTURE_REASON=
+    ;;
+  esac
+  [ -n "$POSTURE_REASON" ] || {
+    echo "error: --posture-reason requires one non-empty line stating why this task's posture deviates from the registry" >&2
+    exit 1
+  }
+  # The task record is line-keyed, so the reason is one line.
+  case "$POSTURE_REASON" in
+  *$'\n'* | *$'\r'*)
+    echo "error: --posture-reason must be a single line; it is recorded as one task-record line and one backlog note line" >&2
+    exit 1
+    ;;
+  esac
+fi
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
@@ -899,6 +945,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   [ "$YOLO_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2
+    exit 1
+  }
+  [ "$POSTURE_REASON_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded yolo posture and carries its recorded reason forward; --posture-reason cannot restate it" >&2
     exit 1
   }
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
@@ -948,6 +998,10 @@ else
     }
     [ "$YOLO_SET" -eq 0 ] || {
       echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      exit 1
+    }
+    [ "$POSTURE_REASON_SET" -eq 0 ] || {
+      echo "error: --posture-reason applies only to ship spawns; a scout and a secondmate carry no delivery posture to deviate from" >&2
       exit 1
     }
     [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
@@ -3314,9 +3368,32 @@ if [ "$KIND" = ship ]; then
   # unregistered project resolves to the same no-mistakes standing default, which
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
+  MODE_DOWNGRADE=0
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
+    MODE_DOWNGRADE=1
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+  # The registered yolo posture is the captain's standing merge authority for the
+  # project, so a task that differs from it in either direction must carry the
+  # reason, not just a notice: a +yolo project spawned with --yolo off held every
+  # overnight merge for a captain who had already said to merge tested work
+  # (2026-10-08/09), and off raised to on hands out merge authority the captain
+  # never registered. A relaunch reuses the recorded posture, whose reason was
+  # recorded when it was first decided, so the gate runs only for a fresh spawn.
+  STANDING_YOLO=$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME" 2>/dev/null | cut -d' ' -f2) || STANDING_YOLO=
+  case "$STANDING_YOLO" in on | off) ;; *) STANDING_YOLO=off ;; esac
+  if [ "$RELAUNCH" -eq 0 ]; then
+    if [ "$YOLO" != "$STANDING_YOLO" ]; then
+      if [ "$POSTURE_REASON_SET" -eq 0 ]; then
+        echo "error: $ID cannot launch with --yolo $YOLO: $PROJ_NAME registers yolo=$STANDING_YOLO in data/projects.md, the captain's standing merge authority; spawn again with --posture-reason '<why this task deviates: the captain's current instruction, or the intake judgment you can state>' to record the deviation, or pass --yolo $STANDING_YOLO" >&2
+        exit 1
+      fi
+      echo "notice: $ID ships yolo=$YOLO while $PROJ_NAME registers yolo=$STANDING_YOLO; recorded reason: $POSTURE_REASON" >&2
+    elif [ "$POSTURE_REASON_SET" -eq 1 ] && [ "$MODE_DOWNGRADE" -eq 0 ]; then
+      echo "error: --posture-reason was given for $ID but mode=$MODE yolo=$YOLO deviates from the registered posture of $PROJ_NAME in neither mode rigor nor yolo; a reason with nothing to explain would let the flag become boilerplate, so drop it" >&2
+      exit 1
+    fi
   fi
   # The registered ship-branch prefix (bin/fm-project-mode.sh) is the captain's
   # answer to "should this project's branches read as firstmate-authored", so a
@@ -5092,6 +5169,7 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ -z "$POSTURE_REASON" ] || echo "posture_reason=$POSTURE_REASON"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
@@ -5690,6 +5768,16 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   trap - HUP INT TERM
   echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
+fi
+# The recorded posture deviation reaches the backlog item's note once the row is
+# In flight. The task record above is the authoritative copy, so a note that
+# cannot be written is reported for a hand edit rather than unwinding a worker
+# that is already running.
+if [ "$BACKLOG_TRANSITION" = 1 ] && [ "$RELAUNCH" -eq 0 ] && [ -n "$POSTURE_REASON" ]; then
+  if ! fm_backlog_append_body_line "$DATA" "$ID" \
+    "Posture deviation: yolo=$YOLO (registered yolo=$STANDING_YOLO) mode=$MODE - $POSTURE_REASON"; then
+    echo "warning: the posture deviation reason for $ID is recorded in its task record but could not be added to its backlog note ($FM_BACKLOG_TRANSITION_ERROR); add it by hand" >&2
+  fi
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0

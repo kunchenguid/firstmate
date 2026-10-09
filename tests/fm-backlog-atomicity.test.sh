@@ -791,6 +791,29 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   pass "dispatch publishes the record and moves the backlog item In flight in one run"
 }
 
+
+# A recorded posture deviation reaches both durable places in the dispatch run:
+# the task record carries posture_reason=, and the In-flight item's body ends
+# with one Posture deviation line (an unregistered project registers yolo=off).
+test_dispatch_records_the_posture_reason() {
+  local case_dir id out body
+  id=atomic-dispatch-reason
+  case_dir=$(make_home dispatch-reason "$id")
+  add_item "$case_dir" "$id"
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo on \
+    --posture-reason 'captain said to merge tested work without asking') || fail "spawn failed: $out"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_grep 'posture_reason=captain said to merge tested work without asking' \
+    "$(home_of "$case_dir")/state/$id.meta" "the task record does not carry the posture reason"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "spawn reported success with its backlog item still $(row_state "$case_dir" "$id")"
+  body=$(tasks-axi show "$id" --full --file "$(backlog_of "$case_dir")" 2>/dev/null)
+  assert_contains "$body" 'Posture deviation: yolo=on (registered yolo=off) mode=no-mistakes - captain said to merge tested work without asking' \
+    "the backlog item body does not carry the posture deviation line"
+  assert_not_contains "$out" "could not be added to its backlog note" "the note write was reported as failed"
+  pass "dispatch records a posture deviation in the task record and the backlog note"
+}
+
 test_dispatch_omits_the_file_for_a_beads_show() {
   local case_dir home id out
   id=atomic-dispatch-beads-b1
@@ -3040,6 +3063,7 @@ test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config
 test_captain_hold_preserves_relocated_backlog_on_backend_error
 test_dispatch_moves_the_item_in_flight_in_the_same_run
+test_dispatch_records_the_posture_reason
 test_dispatch_omits_the_file_for_a_beads_show
 test_a_leftover_markdown_symlink_does_not_brick_a_beads_home
 test_completion_omits_the_file_for_a_beads_done

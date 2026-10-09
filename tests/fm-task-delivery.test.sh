@@ -194,6 +194,96 @@ ROWS
   pass "fm-spawn: a rigor downgrade against the registered posture is announced, never blocked"
 }
 
+
+# The registered yolo posture is the captain's standing merge authority, so a
+# ship whose --yolo differs from it in either direction launches only with a
+# --posture-reason, which the spawn then announces; a matching posture stays
+# quiet, and a reason with nothing to explain is refused so the flag cannot
+# become boilerplate. A mode rigor downgrade may carry the reason too.
+test_spawn_requires_a_posture_reason_for_a_yolo_deviation() {
+  local rec home proj fakebin out status label registry mode yolo reason expect n=0
+  while IFS='|' read -r label registry mode yolo reason expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    rec=$(make_home "yolo-gate-$n" "$registry")
+    IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+    write_brief "$home" "delivery-yolo-$n" "$mode"
+    case "$registry" in *forge=gerrit*)
+      sed -i.bak 's/^Delivery contract: mode=.*$/& forge=gerrit/' "$home/data/delivery-yolo-$n/brief.md"
+      rm -f "$home/data/delivery-yolo-$n/brief.md.bak" ;;
+    esac
+    if [ -n "$reason" ]; then
+      out=$(run_spawn "$home" "$fakebin" "delivery-yolo-$n" "$proj" claude --mode "$mode" --yolo "$yolo" --posture-reason "$reason")
+    else
+      out=$(run_spawn "$home" "$fakebin" "delivery-yolo-$n" "$proj" claude --mode "$mode" --yolo "$yolo")
+    fi
+    status=$?
+    case "$expect" in
+      refused)
+        [ "$status" -ne 0 ] || fail "$label: a yolo deviation without a reason launched"
+        assert_contains "$out" "cannot launch with --yolo $yolo" "$label: the refusal did not name the deviating flag"
+        assert_contains "$out" "spawn again with --posture-reason" "$label: the refusal did not name the flag that records the reason"
+        assert_absent "$home/state/delivery-yolo-$n.meta" "$label: the refused spawn still recorded a task" ;;
+      recorded)
+        assert_not_contains "$out" "cannot launch with --yolo" "$label: a reasoned deviation was refused"
+        assert_contains "$out" "ships yolo=$yolo while proj registers yolo=" "$label: the reasoned deviation was not announced"
+        assert_contains "$out" "recorded reason: $reason" "$label: the announcement did not carry the reason" ;;
+      quiet)
+        assert_not_contains "$out" "cannot launch with --yolo" "$label: a matching posture was refused"
+        assert_not_contains "$out" "ships yolo=" "$label: a matching posture was announced as a deviation"
+        assert_not_contains "$out" "deviates from the registered posture" "$label: a matching posture was refused as boilerplate" ;;
+      boilerplate)
+        [ "$status" -ne 0 ] || fail "$label: a reason with nothing to explain launched"
+        assert_contains "$out" "deviates from the registered posture of proj in neither mode rigor nor yolo" \
+          "$label: the needless reason was not refused by name" ;;
+      downgrade)
+        assert_not_contains "$out" "cannot launch with --yolo" "$label: a reasoned rigor downgrade was refused"
+        assert_not_contains "$out" "deviates from the registered posture" "$label: a reason for a rigor downgrade was refused as boilerplate"
+        assert_contains "$out" "less rigor than the captain's standing posture" "$label: the rigor downgrade lost its notice" ;;
+    esac
+  done <<'ROWS'
+registered +yolo dropped to off|- proj [no-mistakes +yolo] - fixture (added 2026-01-01)|no-mistakes|off||refused
+registered +yolo dropped to off with a reason|- proj [no-mistakes +yolo] - fixture (added 2026-01-01)|no-mistakes|off|captain said to hold merges today|recorded
+registered off raised to on|- proj [no-mistakes] - fixture (added 2026-01-01)|no-mistakes|on||refused
+registered off raised to on with a reason|- proj [no-mistakes] - fixture (added 2026-01-01)|no-mistakes|on|captain said to merge this one green|recorded
+registered +yolo shipped on|- proj [no-mistakes +yolo] - fixture (added 2026-01-01)|no-mistakes|on||quiet
+registered off shipped off|- proj [direct-PR] - fixture (added 2026-01-01)|direct-PR|off||quiet
+unregistered project raised to on|- other [no-mistakes +yolo] - fixture (added 2026-01-01)|no-mistakes|on||refused
+gerrit +yolo registers as off|- proj [no-mistakes +yolo forge=gerrit] - fixture (added 2026-01-01)|no-mistakes|off||quiet
+reason with nothing to explain|- proj [no-mistakes +yolo] - fixture (added 2026-01-01)|no-mistakes|on|habit|boilerplate
+reason for a rigor downgrade alone|- proj [no-mistakes] - fixture (added 2026-01-01)|direct-PR|off|internal tooling per captain|downgrade
+ROWS
+  pass "fm-spawn: a yolo posture that differs from the registry needs a recorded reason in either direction"
+}
+
+# The reason is one task-record line, and only a ship has a posture to deviate
+# from, so the flag's shape and audience are refused before any registry read.
+test_posture_reason_is_one_line_and_ship_only() {
+  local rec home proj fakebin out status
+  rec=$(make_home posture-shape "- proj [no-mistakes +yolo] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" delivery-shape-1 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" delivery-shape-1 "$proj" claude --mode no-mistakes --yolo off --posture-reason '   ')
+  status=$?
+  [ "$status" -ne 0 ] || fail "a blank posture reason launched"
+  assert_contains "$out" "--posture-reason requires one non-empty line" "a blank reason was not refused by name"
+  out=$(run_spawn "$home" "$fakebin" delivery-shape-1 "$proj" claude --mode no-mistakes --yolo off --posture-reason "$(printf 'line one\nline two')")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a multi-line posture reason launched"
+  assert_contains "$out" "--posture-reason must be a single line" "a multi-line reason was not refused by name"
+  assert_absent "$home/state/delivery-shape-1.meta" "a refused reason shape still recorded a task"
+  write_brief "$home" delivery-shape-2
+  out=$(run_spawn "$home" "$fakebin" delivery-shape-2 "$proj" claude --scout --posture-reason 'scouts have no posture')
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout accepted a posture reason"
+  assert_contains "$out" "--posture-reason applies only to ship spawns" "the scout refusal did not name the flag"
+  pass "fm-spawn: --posture-reason is one line and refused off a ship spawn"
+}
+
 # A scout's deliverable is a report, so it records no delivery posture at all;
 # teardown already treats an absent mode as the most protective one.
 test_scout_records_no_delivery_posture() {
@@ -1628,6 +1718,8 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
+test_spawn_requires_a_posture_reason_for_a_yolo_deviation
+test_posture_reason_is_one_line_and_ship_only
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
