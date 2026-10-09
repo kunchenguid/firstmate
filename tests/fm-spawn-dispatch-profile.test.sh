@@ -114,6 +114,7 @@ run_spawn() {
     FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    CODEX_HOME="$home/codex-home" \
     GROK_HOME="$home/grok-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
@@ -432,6 +433,21 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout() {
   pass "active crew-dispatch profile requires an explicit harness for scout spawns"
 }
 
+# codex_launch_argv <launch> [VAR=val ...]: run a captured codex launch the way
+# its pane would, with a fake codex, and print the argv codex received.
+codex_launch_argv() {
+  local launch=$1 argv="$CASE_DIR/codex.argv"
+  shift
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" > "$FM_FAKE_CODEX_ARGV"
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+  rm -f "$argv"
+  fm_eval_launch "$launch" "$WT_DIR" "$FAKEBIN_DIR" "FM_FAKE_CODEX_ARGV=$argv" "$@" >/dev/null 2>&1
+  cat "$argv" 2>/dev/null
+}
+
 test_active_dispatch_profile_allows_explicit_harness() {
   local rec id out status launch
   id=profile-explicit-z13
@@ -445,8 +461,8 @@ test_active_dispatch_profile_allows_explicit_harness() {
   expect_code 0 "$status" "explicit harness should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  launch=$(codex_launch_argv "$(cat "$LAUNCH_LOG")")
+  assert_contains "$launch" $'--model\ngpt-5\n-c\nmodel_reasoning_effort="high"\n--dangerously-bypass-approvals-and-sandbox' \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -538,43 +554,68 @@ test_codex_threads_model_and_effort() {
   status=$?
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  launch=$(codex_launch_argv "$(cat "$LAUNCH_LOG")")
+  assert_contains "$launch" $'--model\ngpt-5\n-c\nmodel_reasoning_effort="high"\n--dangerously-bypass-approvals-and-sandbox' \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_threads_model_and_max_effort() {
-  local rec id out status launch
-  id=profile-codex-max-z4
-  rec=$(make_spawn_case profile-codex-max codex "$id")
-  read_case_record "$rec"
+test_codex_catalog_effort() {
+  local name model effort catalog expected rec id out status launch pane_home base_path
+  while IFS='|' read -r name model effort catalog expected; do
+    id="profile-codex-$name-z4"
+    rec=$(make_spawn_case "profile-codex-$name" codex "$id")
+    read_case_record "$rec"
+    # The spawning process sees a catalog granting astra max; only the worker's
+    # own CODEX_HOME may decide the launched effort flag.
+    mkdir -p "$HOME_DIR/codex-home"
+    printf '%s\n' '{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"max"}]}]}' \
+      > "$HOME_DIR/codex-home/models_cache.json"
+    pane_home="$CASE_DIR/pane-codex-home"
+    mkdir -p "$pane_home" "$CASE_DIR/nojq"
+    base_path=/usr/bin:/bin:/usr/sbin:/sbin
+    case "$catalog" in
+      missing) ;;
+      malformed) printf '%s\n' '{' > "$pane_home/models_cache.json" ;;
+      nojq)
+        printf '%s\n' '{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"low"}]}]}' \
+          > "$pane_home/models_cache.json"
+        printf '#!/bin/sh\nexit 127\n' > "$CASE_DIR/nojq/jq"
+        chmod +x "$CASE_DIR/nojq/jq"
+        base_path="$CASE_DIR/nojq:$base_path"
+        ;;
+      *) printf '%s\n' "$catalog" > "$pane_home/models_cache.json" ;;
+    esac
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max)
-  status=$?
-  expect_code 0 "$status" "codex Luna spawn with max effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread Luna's max reasoning effort config"
-  pass "codex Luna receives --model and model_reasoning_effort max profile flags"
-}
-
-test_codex_omits_max_effort_for_unsupported_model() {
-  local rec id out status launch
-  id=profile-codex-max-unsupported-z4b
-  rec=$(make_spawn_case profile-codex-max-unsupported codex "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
-  status=$?
-  expect_code 0 "$status" "codex spawn with an unsupported model max effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported model max reasoning effort"
-  pass "codex omits max for models without the catalog capability"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort "$effort")
+    status=$?
+    expect_code 0 "$status" "codex $name spawn should succeed"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" codex "$model" "$effort"
+    launch=$(FM_TEST_BASE_PATH="$base_path" codex_launch_argv "$(cat "$LAUNCH_LOG")" "CODEX_HOME=$pane_home")
+    assert_contains "$launch" $'--model\n'"$model" "codex $name must preserve the model flag"
+    if [ "$expected" = flag ]; then
+      assert_contains "$launch" $'-c\nmodel_reasoning_effort="'"$effort"'"' "codex $name must emit the supported effort"
+    else
+      assert_not_contains "$launch" "model_reasoning_effort" "codex $name must record and omit unsupported effort"
+    fi
+    pass "codex catalog effort: $name ($expected)"
+  done <<'CASES'
+astra-max|gpt-6-astra|max|{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"max"}]}]}|flag
+future-max|future-model|max|{"models":[{"slug":"future-model","supported_reasoning_levels":[{"effort":"max"}]}]}|flag
+unlisted-max|unlisted|max|{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"max"}]}]}|omit
+unlisted-high|unlisted|high|{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"max"}]}]}|flag
+unsupported-max|gpt-6-astra|max|{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"high"}]}]}|omit
+unsupported-high|gpt-6-astra|high|{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"low"}]}]}|omit
+null-levels-high|gpt-6-astra|high|{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":null}]}|flag
+absent-levels-high|gpt-6-astra|high|{"models":[{"slug":"gpt-6-astra"}]}|flag
+null-levels-max|gpt-6-astra|max|{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":null}]}|omit
+missing-max|gpt-6-astra|max|missing|omit
+missing-luna-max|gpt-5.6-luna|max|missing|omit
+missing-high|gpt-6-astra|high|missing|flag
+malformed-max|gpt-6-astra|max|malformed|omit
+nojq-high|gpt-6-astra|high|nojq|flag
+nojq-max|gpt-6-astra|max|nojq|omit
+CASES
 }
 
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
@@ -2203,8 +2244,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_threads_model_and_max_effort
-test_codex_omits_max_effort_for_unsupported_model
+test_codex_catalog_effort
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
 test_grok_threads_model_and_reasoning_effort

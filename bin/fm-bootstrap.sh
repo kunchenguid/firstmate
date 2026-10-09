@@ -1066,7 +1066,7 @@ crew_dispatch_validate() {
   else
     verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
   fi
-  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --argjson codex_levels "$("$SCRIPT_DIR/fm-harness.sh" codex-effort-catalog)" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
     def effort_ok($h; $m; $e):
@@ -1074,7 +1074,7 @@ crew_dispatch_validate() {
       elif ($e | type) != "string" then false
       elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and $m == "gpt-5.6-luna"))
+      elif $h == "codex" then (["low","medium","high","xhigh","max"] | index($e)) != null and (if ($m | type) == "string" and $m != "default" and ($codex_levels | type) == "object" and ($codex_levels | has($m)) then ($codex_levels[$m] | index($e)) != null else (["low","medium","high","xhigh"] | index($e)) != null end)
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "agy" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
