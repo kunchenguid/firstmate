@@ -105,7 +105,7 @@ forge_home() {
   mkdir -p "$home/forge" "$home/root/bin" "$home/wt"
   printf '#!/bin/sh\nexit 0\n' > "$home/root/bin/fm-guard.sh"
   chmod +x "$home/root/bin/fm-guard.sh"
-  printf 'worktree=%s/wt\nkind=ship\n' "$home" > "$home/state/delivery.meta"
+  printf 'worktree=%s/wt\nkind=ship\nmode=direct-PR\nno_issue=1\n' "$home" > "$home/state/delivery.meta"
   chmod 600 "$home/state/delivery.meta"
   record "$home" delivery 8 open mergeable
   printf '%s\n' "$HEAD_A" > "$home/forge/head"
@@ -118,6 +118,8 @@ forge_home() {
 #!/usr/bin/env bash
 set -eu
 case "$*" in
+  'pr view '*baseRefName*) printf 'main\n' ;;
+  'repo view '*) printf 'main\n' ;;
   'pr view '*headRefOid,reviewDecision*)
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;

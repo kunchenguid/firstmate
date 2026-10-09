@@ -1154,7 +1154,7 @@ test_direct_pr_requires_an_issue_or_explicit_opt_out_for_codex_and_claude() {
     id="missing-issue-$harness-r1"
     rec=$(make_spawn_case "missing-issue-$harness" "$harness" "$id")
     read_case_record "$rec"
-    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode direct-PR --yolo off)
+    out=$(FM_TEST_SPAWN_ADD_NO_ISSUE=0 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode direct-PR --yolo off)
     status=$?
     expect_code 1 "$status" "$harness direct-PR without an issue should be refused: $out"
     assert_contains "$out" 'require --issue' "$harness refusal did not name the missing issue requirement"

@@ -260,7 +260,8 @@ fm_test_run_spawn() {
       --issue|--issue=*|--no-issue) issue_choice=1 ;;
     esac
   done
-  if [ "$direct_pr" = 1 ] && [ "$issue_choice" = 0 ]; then
+  if [ "$direct_pr" = 1 ] && [ "$issue_choice" = 0 ] \
+    && [ "${FM_TEST_SPAWN_ADD_NO_ISSUE:-1}" != 0 ]; then
     set -- "$@" --no-issue
   fi
   # Claude and Codex spawns pre-register trust in the launching user's own
