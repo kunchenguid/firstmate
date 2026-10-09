@@ -216,6 +216,7 @@ cmd_dispatch() {
 cmd_followup() (
   local id=${1-} action='' expected='' instructions='' lock meta_lock root sha marker provider session parent_task
   local baseline output task='' current_action current_generation old_generation rc=0 old_report preserved_report record
+  local capability_code capability_class
   [ -n "$id" ] || usage; shift
   fm_remote_task_id_valid "$id" || die 'invalid task id'
   while [ "$#" -gt 0 ]; do
@@ -273,7 +274,17 @@ cmd_followup() (
     # shellcheck source=bin/fm-task-disposition-lib.sh
     . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
     fm_task_disposition_effect_guard "$DATA" "$id" 'remote followup' || exit $?
-    fm_run_timed 30 "$SCRIPT_DIR/fm-bytedcli-mcp-call.sh" capabilities-followup > "$root/capabilities" 2> "$root/error" || die 'unsupported-continuation: official same-session create/list/get capability unavailable'
+    if ! fm_run_timed 30 "$SCRIPT_DIR/fm-bytedcli-mcp-call.sh" capabilities-followup > "$root/capabilities" 2> "$root/error"; then
+      fm_ida_normalize_error "$root/capabilities" "$root/error" "$root/capability-error"
+      capability_code=$(jq -r '.error.code // ""' "$root/capability-error")
+      capability_class=$(fm_remote_error_classify "$root/capability-error")
+      case "$capability_code" in
+        MCP_CAPABILITY_UNSUPPORTED|MCP_TOOL_UNSUPPORTED)
+          die 'unsupported-continuation: official same-session create/list/get capability unavailable'
+          ;;
+        *) die "followup capability unavailable: $capability_class; no request issued" ;;
+      esac
+    fi
     fm_run_bash_timeout 30 fm_ida_run_bytedcli --json --as user ida --region sg deep-research list --session-id "$session" > "$root/baseline" 2> "$root/error" || die 'cannot establish original turn baseline'
     fm_ida_structured_success "$root/baseline" || die 'turn baseline unavailable'
     baseline=$(jq -ce '.data.tasks | select(type=="array") | map(.task_id | tostring) | unique' "$root/baseline") || die 'turn list schema unavailable'

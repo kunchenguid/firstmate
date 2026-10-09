@@ -125,10 +125,19 @@ args=" $* "
 case "$args" in
   *" --version "*) error UNEXPECTED_VERSION_PROBE 'iDA must not probe bytedcli version'; exit 1 ;;
   *" mcp --allow-domains ida "*)
+    printf 'mcp-auth-env:%s\n' "${BYTECLOUD_AUTH_AS:-unset}" >>"$log"
+    # Current bytedcli identifies its long-lived MCP command from the first
+    # non-option argv token. The former `--as user mcp` order therefore exits
+    # cleanly without reading stdin; this fixture preserves that regression.
+    [ "${BYTECLOUD_AUTH_AS:-}" = user ] || exit 0
     if [ "${FM_IDA_FAKE_MCP_AUTH_FAIL:-0}" = 1 ]; then
       printf 'sso ticket expired: HTTP 401\n' >&2
       exit 1
     fi
+    case "$mode" in
+      mcp-empty) exit 0 ;;
+      mcp-malformed) printf 'not-json\n'; exit 0 ;;
+    esac
     while IFS= read -r line; do
       request_id=$(printf '%s\n' "$line" | jq -r '.id // empty' 2>/dev/null || true)
       method=$(printf '%s\n' "$line" | jq -r '.method // empty' 2>/dev/null || true)
@@ -138,6 +147,28 @@ case "$args" in
         tools/call)
           tool=$(printf '%s\n' "$line" | jq -r '.params.name')
           printf 'tool:%s\n' "$tool" >>"$log"
+          case "$mode" in
+            mcp-wrong-id)
+              printf '{"jsonrpc":"2.0","id":"%s","result":{"content":[]}}\n' "$request_id"
+              continue
+              ;;
+            mcp-tool-auth)
+              printf '{"jsonrpc":"2.0","id":%s,"error":{"code":403,"message":"permission denied"}}\n' "$request_id"
+              continue
+              ;;
+            mcp-result-auth)
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"HTTP 403 forbidden"}],"isError":true}}\n' "$request_id"
+              continue
+              ;;
+            mcp-invalid-result)
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"content":{}}}\n' "$request_id"
+              continue
+              ;;
+            mcp-malformed-iserror)
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"bytedcli ida deep-research create --content --name --model --timeout-ms"}],"isError":"true"}}\n' "$request_id"
+              continue
+              ;;
+          esac
           if [ "$tool" = list_commands ]; then
             if [ "${FM_IDA_FAKE_NO_MODEL_CAPABILITY:-0}" = 1 ]; then model_option=; else model_option=' --model <name>'; fi
             if [ "${FM_IDA_FAKE_NO_FOLLOWUP:-0}" = 1 ]; then
@@ -152,6 +183,9 @@ bytedcli ida deep-research get — Options: --session-id <id> --task-id <id>
 bytedcli ida deep-research create — Options: --session-id <id> --no-wait
 bytedcli ida chat completion close — Options: --session-id <id>' "$model_option" | jq -Rs .)
             printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":%s}],"isError":false}}\n' "$request_id" "$text"
+            if [ "$mode" = mcp-duplicate ]; then
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":%s}],"isError":false}}\n' "$request_id" "$text"
+            fi
             continue
           fi
           [ "$tool" = run_command ] || exit 19
@@ -389,6 +423,74 @@ dispatch_ida() {
   FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
   FM_IDA_FAKE_MODE="${FM_IDA_FAKE_MODE:-success}" PATH="$fakebin:$BASE_PATH" \
     "$DISPATCH" remote-agent/ida "$id" --instructions "$home/data/$id/instructions.txt" "$@"
+}
+
+run_mcp_helper() {
+  local home=$1 fakebin=$2 mode=$3
+  FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+  FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+  FM_IDA_FAKE_MODE="$mode" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-bytedcli-mcp-call.sh" capabilities
+}
+
+run_mcp_create_helper() {
+  local home=$1 fakebin=$2 mode=$3 arguments
+  arguments="$home/mcp-create-arguments.json"
+  jq -n '{content:"fixture only",name:"firstmate:mcp-response:0123456789abcdef",timeoutMs:"30000"}' >"$arguments"
+  chmod 0600 "$arguments"
+  FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+  FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+  FM_IDA_FAKE_MODE="$mode" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-bytedcli-mcp-call.sh" ida_deep_research_create "$arguments"
+}
+
+test_mcp_response_contract() {
+  local home fakebin out rc mode expected
+  home=$(new_home mcp-response); fakebin=$(make_fake_bytedcli "$home")
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+
+  out=$(run_mcp_helper "$home" "$fakebin" success) \
+    || fail 'current bytedcli MCP response fixture was not accepted'
+  printf '%s\n' "$out" | jq -e '
+    .status == "success" and .error == null
+    and .data.command == "bytedcli ida deep-research create"
+  ' >/dev/null || fail 'valid structured MCP tool response lost its capability projection'
+  assert_grep 'argv:mcp --allow-domains ida' "$home/bytedcli.log" \
+    'MCP command was not the first non-option argument'
+  assert_grep 'mcp-auth-env:user' "$home/bytedcli.log" \
+    'MCP subprocess did not retain the required user identity'
+  assert_no_grep 'argv:--as user mcp ' "$home/bytedcli.log" \
+    'MCP invocation retained the clean-exit-before-stdin argument order'
+
+  for mode in mcp-empty mcp-malformed mcp-duplicate mcp-wrong-id mcp-invalid-result mcp-malformed-iserror; do
+    case "$mode" in
+      mcp-empty) expected=MCP_RESPONSE_MISSING ;;
+      mcp-malformed|mcp-wrong-id|mcp-invalid-result|mcp-malformed-iserror) expected=MCP_RESPONSE_INVALID ;;
+      mcp-duplicate) expected=MCP_RESPONSE_AMBIGUOUS ;;
+    esac
+    rc=0
+    out=$(run_mcp_helper "$home" "$fakebin" "$mode") || rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode MCP response was accepted"
+    printf '%s\n' "$out" | jq -e --arg code "$expected" \
+      '.status == "error" and .data == null and .error.code == $code' >/dev/null \
+      || fail "$mode MCP response lost its bounded error classification"
+  done
+
+  for mode in mcp-tool-auth mcp-result-auth; do
+    rc=0
+    out=$(run_mcp_helper "$home" "$fakebin" "$mode") || rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode MCP denial was accepted"
+    printf '%s\n' "$out" | jq -e '.error.code == "MCP_TOOL_AUTH"' >/dev/null \
+      || fail "$mode MCP denial lost its auth classification"
+  done
+  rc=0
+  out=$(run_mcp_create_helper "$home" "$fakebin" renamed-empty) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'structured create error was reported as success'
+  printf '%s\n' "$out" | jq -e --argjson session "$SESSION_ID" --argjson task "$REMOTE_TASK_ID" '
+    .status == "error" and .error.code == "IDA_EMPTY_RESULT"
+    and .error.details.session_id == $session and .error.details.task_id == $task
+  ' >/dev/null || fail 'structured create error lost its provider code or submission identity'
+  pass 'MCP owner keeps user identity, accepts one structured result, and rejects missing, malformed, duplicate, mismatched, or denied responses'
 }
 
 test_artifact_discovery_projects_before_stdout() {
@@ -1766,6 +1868,9 @@ test_followup_identity_and_unknown_submission() {
   printf 'Read existing artifacts only; retain the original query identities. Supply the missing CSV link.\n' > "$home/data/$id/followup.txt"
   chmod 600 "$home/data/$id/followup.txt"
   local REMOTE_TASK_ID=80002
+  if FM_IDA_FAKE_MODE=mcp-tool-auth run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/auth.out" 2>&1; then fail 'denied continuation capability accepted'; fi
+  assert_grep 'followup capability unavailable: auth; no request issued' "$home/auth.out" 'followup owner erased the capability denial classification'
+  [ "$(phase_of "$home" "$id")" = terminal-success ] || fail 'capability denial changed the terminal provider state'
   if FM_IDA_FAKE_NO_FOLLOWUP=1 run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/unsupported.out" 2>&1; then fail 'unsupported continuation accepted'; fi
   assert_grep 'unsupported-continuation' "$home/unsupported.out" 'missing capability reason'
   [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 1 ] || fail 'capability refusal created a remote turn'
@@ -1908,6 +2013,10 @@ test_terminal_disposition_guards_remote_effects() {
 }
 
 case "${FM_REMOTE_TEST_CASE:-}" in
+  mcp)
+    test_mcp_response_contract
+    exit 0
+    ;;
   compatibility)
     test_aime_compatibility_and_local_unchanged
     test_remote_aime_dispatch_metadata
@@ -1936,6 +2045,7 @@ case "${FM_REMOTE_TEST_CASE:-}" in
     ;;
 esac
 
+test_mcp_response_contract
 test_followup_identity_and_unknown_submission
 test_terminal_disposition_guards_remote_effects
 test_artifact_discovery_projects_before_stdout
