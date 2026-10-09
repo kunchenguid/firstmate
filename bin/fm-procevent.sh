@@ -207,6 +207,17 @@
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
+# A home may also keep its own durable record of what a capture carried, such as
+# a feedback ledger that must never depend on an agent remembering to file it.
+# An optional captain-private `config/procevent-recorder` (a regular, single-link,
+# mode-0700 file) is run after capture as `<recorder> <adapter> <source-id>
+# <result-file>`, before the result is announced, so the record exists before
+# anyone can acknowledge the capture. It is the same best-effort, silenced,
+# never-acknowledging seam as the feeds above: a missing or invalid recorder, or
+# one that fails, leaves the capture published and unhandled, and only a zero
+# exit prints `recorder-fed:`. The recorder owns every rule about what it keeps,
+# including refusing a capture it has already recorded.
+#
 # A runner is bound to the HOME that owns it, not to the one session that armed
 # it: a persistent source is meant to outlive that session, so reconcile stops a
 # runner whose source is retired in a live home, and this lease is the backstop
@@ -479,6 +490,17 @@ feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
   printf '%s\n' "$rows" \
     | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
         --source-id "$id" --source "the captured result $id sequence $seq" >/dev/null 2>&1
+}
+
+# Pass a captured result to this home's optional recorder (see the recorder note
+# in the header). Never acknowledges and never suppresses the wake.
+feed_home_recorder() {  # <adapter> <source-id> <result-file>
+  local adapter=$1 id=$2 result=$3 recorder device
+  recorder="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/procevent-recorder"
+  [ -f "$recorder" ] && [ ! -L "$recorder" ] || return 1
+  device=$(fm_pr_file_device "$recorder") || return 1
+  fm_pr_private_file_valid "$recorder" 700 "$device" || return 1
+  "$recorder" "$adapter" "$id" "$result" </dev/null >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>
@@ -1375,6 +1397,10 @@ EOF
   if [ "$extension_owner" -eq 0 ] \
     && feed_keyed_answers "$adapter" "$id" "$durable"; then
     printf 'answers-fed: %s\n' "$id"
+  fi
+  if [ "$extension_owner" -eq 0 ] \
+    && feed_home_recorder "$adapter" "$id" "$durable"; then
+    printf 'recorder-fed: %s\n' "$id"
   fi
 
   # A self-announcing adapter's autohandle announces through its own durable

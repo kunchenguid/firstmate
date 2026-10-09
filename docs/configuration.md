@@ -1947,6 +1947,15 @@ This start-to-start governor is a no-op after a normally blocking poll but caps 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so retire the source, then arm it again to adopt this retry policy.
 
+**Record captures with a home recorder (config/procevent-recorder)**
+
+The optional local, gitignored `config/procevent-recorder` lets a home keep its own durable record of every captured result, such as a feedback ledger, without depending on an agent remembering to file it.
+It must be a regular, single-link, mode-`0700` file; any other file is never run.
+After each built-in capture and before the result is announced, the runner runs it as `<recorder> <adapter> <source-id> <result-file>` and prints `recorder-fed: <source-id>` only on a zero exit.
+It never acknowledges a result or suppresses its wake, and a missing, untrusted, or failing recorder leaves the capture published and unhandled exactly as before.
+The recorder owns what it keeps and must refuse a result it has already recorded, so the handler always runs it once more on the result before `handled`: a recorded result is refused harmlessly, and one the runner could not record gets its retry.
+`bin/fm-procevent.sh`'s header owns the seam.
+
 ### Crew-hosted Lavish review boards
 
 **Arm and confirm a listener**
