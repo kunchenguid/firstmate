@@ -46,10 +46,9 @@ State the list's actual path and any open decision that prevents current work fr
 
 ## While the hold exists
 
-- Spawn no new worker, scout, or secondmate, and perform no relaunch or recovery restart.
-  `bin/fm-spawn.sh` enforces this boundary; its header and help own the refusal code and the explicit per-spawn override flag.
-  Use that override only when the captain explicitly authorizes that exact spawn during the hold, record the authorization in the task note, and leave the hold active for everything else.
-  An away mandate, routine recovery, or queued item is not such an override.
+- Spawn no new worker, scout, or secondmate; relaunching a recorded task to finish work already in hand remains allowed.
+  `bin/fm-spawn.sh` enforces this boundary; its header and help own the refusal mechanics.
+  To dispatch new work during the hold, lift with `/gm`, spawn, and re-enter with `/gn`.
 - Let an implementation worker finish its current build and commit, then stop at its implementation `done` handoff.
   If its selected delivery path requires a validation pipeline that has not started, do not send `/no-mistakes` or hand it to a reviewer.
   Record `stopped before pipeline` in the task note and morning list, with starting its selected pipeline as its first action tomorrow.

@@ -196,11 +196,9 @@
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   capacity.
-#   Goodnight: while state/.goodnight exists, every spawn (including relaunch
-#   and secondmate recovery) refuses with exit 76 before worker allocation.
-#   --goodnight-override bypasses this hold for this invocation only, on the
-#   captain's explicit per-spawn instruction; no environment bypass exists.
-#   Batch invocations carry the flag to each pair and also refuse with exit 76.
+#   Goodnight: while state/.goodnight exists, new spawns refuse with exit 76
+#   before worker allocation, including batches and --secondmate spawns.
+#   --relaunch continues an existing recorded task through its usual checks.
 #   The goodnight skill owns entry, the morning list, and scheduling policy.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
@@ -713,7 +711,6 @@ BASE_BRANCH=
 BASE_BRANCH_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
-GOODNIGHT_OVERRIDE=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
@@ -782,7 +779,6 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
-  --goodnight-override) GOODNIGHT_OVERRIDE=1 ;;
   --herdr-resume-lock-wait) HERDR_RESUME_LOCK_WAIT=1 ;;
   --harness) want_value=harness ;;
   --harness=*)
@@ -836,8 +832,8 @@ done
   echo "error: --$want_value requires a value" >&2
   exit 1
 }
-if fm_goodnight_active "$STATE" && [ "$GOODNIGHT_OVERRIDE" -eq 0 ]; then
-  echo "deferred: goodnight is active ($STATE/.goodnight); spawn waits for /goodmorning or an explicit captain-authorized --goodnight-override" >&2
+if [ "$RELAUNCH" -eq 0 ] && fm_goodnight_active "$STATE"; then
+  echo "deferred: goodnight is active ($STATE/.goodnight); new dispatch waits for /goodmorning or /gm" >&2
   exit 76
 fi
 # Run the watcher guard only after the scheduling hold has been checked.
@@ -1569,7 +1565,6 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
-  [ "$GOODNIGHT_OVERRIDE" -eq 0 ] || shared_args+=(--goodnight-override)
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;

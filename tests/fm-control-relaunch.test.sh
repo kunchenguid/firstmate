@@ -390,6 +390,30 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_goodnight_allows_recorded_relaunch_and_defers_new_dispatch() {
+  local dir out rc
+  dir=$(new_case goodnight goodnight-rl)
+  add_ship_task "$dir" goodnight-rl claude
+  printf '2026-10-09T22:15:00Z\n' > "$dir/home/state/.goodnight"
+
+  out=$(run_control "$dir" goodnight-rl relaunch --note "finish the current build"); rc=$?
+  expect_code 0 "$rc" "goodnight must allow relaunch of a recorded in-flight task"$'\n'"$out"
+  [ "$(journal_field "$dir" goodnight-rl phase)" = complete ] \
+    || fail "goodnight relaunch did not complete its transaction"
+  [ "$(meta_field "$dir" goodnight-rl worktree)" = "$dir/wt" ] \
+    || fail "goodnight relaunch did not preserve the worktree"
+  [ "$(meta_field "$dir" goodnight-rl window)" = "fmses:fm-goodnight-rl" ] \
+    || fail "goodnight relaunch did not preserve the endpoint"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "goodnight relaunch left the agent stopped"
+  [ -f "$dir/home/state/.goodnight" ] || fail "relaunch lifted goodnight"
+
+  out=$(run_spawn "$dir" goodnight-new "$dir/proj" --mode no-mistakes --yolo off); rc=$?
+  expect_code 76 "$rc" "goodnight must still defer fresh dispatch after relaunch"$'\n'"$out"
+  [ ! -e "$dir/home/state/goodnight-new.meta" ] || fail "goodnight published a new task"
+  pass "goodnight allows recorded in-flight relaunch through fm-control while fresh dispatch remains deferred"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -2489,6 +2513,7 @@ SH
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_goodnight_allows_recorded_relaunch_and_defers_new_dispatch
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

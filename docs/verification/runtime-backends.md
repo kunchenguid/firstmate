@@ -11,21 +11,22 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 Verified on 2026-10-09 with GNU Bash 5.3.9 on Linux using the portable public-interface regression:
 
 ```sh
-bash bin/fm-test-run.sh tests/fm-spawn-batch.test.sh
+bash bin/fm-test-run.sh --jobs 1 tests/fm-spawn-batch.test.sh tests/fm-control-relaunch.test.sh
 ```
 
 Observed output:
 
 ```text
-ok - goodnight refuses all spawn paths before backend allocation; explicit override is per invocation and carried through batches
+ok - goodnight defers new spawns and batches before backend allocation until the hold is lifted
 ok - fm_goodnight_active holds on empty, malformed, and dangling records and clears only on absence
 ok - goodnight and goodmorning are discoverable with the required trigger metadata
+ok - goodnight allows recorded in-flight relaunch through fm-control while fresh dispatch remains deferred
 ```
 
-The regression selects tmux, Herdr, zellij, Orca, and cmux for ships, scouts, secondmates, relaunches, and batches, observing exit 76 before backend allocation.
-Override cases reach the ordinary missing-brief refusal, including both batch children, while the next invocation still sees the hold.
-This verifies the scheduling boundary without starting a real backend or harness.
-The [goodnight skill](../../.agents/skills/goodnight/SKILL.md) owns the policy; `bin/fm-spawn.sh` owns the flag and refusal mechanics.
+The spawn regression selects tmux, Herdr, zellij, Orca, and cmux for ships, scouts, secondmates, raw commands, and batches, observing exit 76 before backend allocation.
+The control regression relaunches a recorded in-flight task with the marker present, observes a completed transaction with its worktree and endpoint preserved, and then observes exit 76 for a fresh spawn while the hold remains active.
+These cases verify the scheduling boundary with a stubbed backend and no real harness.
+The [goodnight skill](../../.agents/skills/goodnight/SKILL.md) owns the policy; `bin/fm-spawn.sh` owns the refusal mechanics.
 
 The startup subject returned exit 0 with the same Bash version when run alongside the spawn subject:
 

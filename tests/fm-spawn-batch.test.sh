@@ -4,8 +4,8 @@
 # These exercise argument routing only: each spawn attempt fails fast at the
 # missing-brief check, which is reached before any tmux/treehouse side effect, so
 # the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
-# live watcher guard / state. Also covers the goodnight hold and per-invocation
-# override, presence predicate, and skill discovery metadata.
+# live watcher guard / state. Also covers the goodnight hold, presence predicate,
+# and skill discovery metadata.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -158,7 +158,7 @@ test_goodnight_hold() {
   # The common guard must run before every backend's allocator or probe.
   for backend in tmux herdr zellij orca cmux; do
     for args in 'ship projects/none --mode no-mistakes --yolo off' \
-      'scout projects/none --scout' 'mate --secondmate' 'ship --relaunch' \
+      'scout projects/none --scout' 'mate --secondmate' 'raw projects/none echo' \
       'batch-a=projects/none batch-b=projects/none --mode direct-PR --yolo off'; do
       # shellcheck disable=SC2086 # Intentional argument table.
       out=$(goodnight_spawn "$home" $args --backend "$backend")
@@ -170,22 +170,10 @@ test_goodnight_hold() {
   [ ! -e "$home/state/ship.meta" ] || fail 'hold published worker metadata'
   [ ! -e "$home/data/ship" ] || fail 'hold created task material'
 
-  out=$(goodnight_spawn "$home" bypass projects/none --mode no-mistakes --yolo off --goodnight-override)
-  status=$?
-  [ "$status" -eq 1 ] || fail "override did not reach ordinary missing-brief validation: $out"
-  assert_contains "$out" 'task bypass has no brief' 'override was not accepted'
-  out=$(goodnight_spawn "$home" bypass-a=projects/none bypass-b=projects/none --mode direct-PR --yolo off --goodnight-override)
-  assert_contains "$out" 'task bypass-a has no brief' 'batch override not passed to first child'
-  assert_contains "$out" 'task bypass-b has no brief' 'batch override not passed to second child'
-  [ -e "$home/state/.goodnight" ] || fail 'override lifted global hold'
-  out=$(goodnight_spawn "$home" after projects/none --scout)
-  status=$?
-  [ "$status" -eq 76 ] || fail 'per-spawn override leaked into next invocation'
-
   rm "$home/state/.goodnight"
   out=$(goodnight_spawn "$home" morning projects/none --scout)
   assert_contains "$out" 'task morning has no brief' 'lifting marker did not restore ordinary validation'
-  pass 'goodnight refuses all spawn paths before backend allocation; explicit override is per invocation and carried through batches'
+  pass 'goodnight defers new spawns and batches before backend allocation until the hold is lifted'
 }
 
 test_goodnight_presence() {
