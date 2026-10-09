@@ -1,8 +1,8 @@
 ---
 name: goodnight
 description: >-
-  Quiesce the fleet when the captain says /goodnight, "goodnight", or "going to bed", or state/.goodnight exists at session start or wake handling.
-  Finish work already in hand, hold new dispatch and follow-up operations, and maintain the morning list; /goodmorning or /gm lifts the hold.
+  Load when the captain invokes /goodnight, /gn, /goodmorning, or /gm, uses plain-language entry or lift phrases such as "goodnight" or "going to bed", or state/.goodnight exists at session start or wake handling.
+  Finish work already in hand, hold new dispatch and follow-up operations, and maintain the morning list; the procedures below distinguish immediate commands from plain-language requests that need confirmation.
 user-invocable: true
 metadata:
   internal: true
@@ -17,7 +17,8 @@ Keep the existing supervision session running while work is under way, including
 
 ## Entry and durable handoff
 
-Enter in the same turn as the request, without waiting for another go.
+An explicit `/goodnight` or `/gn` enters the hold in the same turn, without waiting for another go.
+For a plain-language entry phrase, ask one confirming question and enter only if the answer authorizes it.
 Write `state/.goodnight` atomically with one UTC entry timestamp from `date -u '+%Y-%m-%dT%H:%M:%SZ'` followed by a newline.
 Presence activates the hold: malformed or unreadable contents never mean permission to dispatch.
 On a repeated entry, preserve the original timestamp and handoff rather than resetting the date or overwriting notes.
@@ -76,9 +77,10 @@ At session start with the marker present, read the digest's morning-list path an
 Starting a session, ordinary chat, returning from `/afk`, and leaving `/quiet` do not lift it.
 Honor a lock-refused session's read-only boundary: it cannot enter, lift, or update the hold.
 
-An explicit `/goodmorning`, `/gm`, or a plain request to lift goodnight authorizes lifting it immediately.
+An explicit `/goodmorning` or `/gm` authorizes lifting the hold in the same turn.
+For a plain-language lift phrase, ask one confirming question and lift only if the answer authorizes it.
 Read the active morning list before removing `state/.goodnight`, retain the list, and report that new dispatch can resume.
-Route the explicit lift to the secondmates that entered goodnight and reconcile their replies through the parent channel, retaining any undelivered lift in the list.
-If the list is missing or unreadable, disclose that gap and reconstruct checkpoints from task records before acting on deferred work; explicit lifting still permits removing the marker.
+Route the authorized lift to the secondmates that entered goodnight and reconcile their replies through the parent channel, retaining any undelivered lift in the list.
+If the list is missing or unreadable, disclose that gap and reconstruct checkpoints from task records before acting on deferred work; authorized lifting still permits removing the marker.
 Then reconcile each deferred item against current task and decision records before resuming it, so an already-finished operation is not repeated.
 If no marker exists, report that goodnight is already off and resume only work already authorized.
