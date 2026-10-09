@@ -1640,7 +1640,10 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   wait_until 150 host_owns_the_only_cycle "$home" \
     || fail "takeover: the next park did not own the home's only watcher cycle (left arm $left_arm, watcher $left_watcher):"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
   ! kill -0 "$left_arm" 2>/dev/null || fail "takeover: the successor arm a pass-through left still runs (pid $left_arm)"
-  [ ! -e "$home/state/.supervision-host-left" ] || fail "takeover: the record of the arm left for main outlived the take-over: $(cat "$home/state/.supervision-host-left")"
+  # The park drops the record when it streams the first cycle's ready line,
+  # up to one poll after that cycle already owns the home.
+  wait_until 100 bash -c '[ ! -e "$1" ]' _ "$home/state/.supervision-host-left" \
+    || fail "takeover: the record of the arm left for main outlived the take-over: $(cat "$home/state/.supervision-host-left")"
   ! kill -0 "$left_watcher" 2>/dev/null || fail "takeover: the successor watcher still runs (pid $left_watcher)"
   sleep 2
   ! hook_exited "$home" || fail "takeover: the takeover woke main: $(cat "$home/hook.err")"
