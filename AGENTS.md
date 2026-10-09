@@ -338,7 +338,7 @@ Fill the task subsections according to section 11.
 ### Dispatch and supervision handoff
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
-For a ship tied to a GitHub issue, pass its canonical issue URL with `--issue` so pickup assigns the configured operator and the task record can enforce the PR closing reference.
+Every direct-PR ship carries a GitHub issue URL or the explicit `--no-issue` opt-out; issue-linked ships must pass their canonical issue URL with `--issue` so pickup assigns the configured operator and PR readiness can enforce its closing reference.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.

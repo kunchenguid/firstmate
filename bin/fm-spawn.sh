@@ -2,7 +2,7 @@
 # shellcheck disable=SC2031 # Registry parsers return output globals to same-shell callers.
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <direct-PR|local-only> --yolo <on|off> [--issue <github-issue-url>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <direct-PR|local-only> --yolo <on|off> [--issue <github-issue-url>|--no-issue] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -24,6 +24,9 @@
 #   single login in config/github-operator-login through `gh issue edit`.
 #   That file is required for issue-linked ships and accepts alphanumeric and
 #   hyphen characters only.
+#   Every direct-PR ship must pass --issue or the explicit --no-issue opt-out.
+#   --issue and --no-issue apply only to direct-PR ships; local-only tasks and
+#   scouts are exempt, and issue URLs must match the project's GitHub origin.
 #   `config/project-memory` is resolved here at launch time; only adapters with
 #   verified access to the mapped external directory receive its pointer.
 #   When the explicit mode carries less rigor than the project's standing posture,
@@ -539,6 +542,7 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 ISSUE_URL=
+NO_ISSUE=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -547,6 +551,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 ISSUE_SET=0
+NO_ISSUE_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -649,6 +654,7 @@ for a in "$@"; do
     ISSUE_URL=${a#--issue=}
     ISSUE_SET=1
     ;;
+  --no-issue) NO_ISSUE=1; NO_ISSUE_SET=1 ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -699,6 +705,10 @@ if [ "$ISSUE_SET" -eq 1 ]; then
   case "$ISSUE_NUMBER" in *[!0-9]*|'') echo "error: --issue must include a positive issue number" >&2; exit 1 ;; esac
   [ "$KIND" = ship ] || { echo "error: --issue applies only to ship tasks" >&2; exit 1; }
 fi
+[ "$ISSUE_SET" -eq 0 ] || [ "$NO_ISSUE_SET" -eq 0 ] || {
+  echo "error: --issue and --no-issue are mutually exclusive" >&2
+  exit 1
+}
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -745,6 +755,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded issue; --issue cannot override it" >&2
     exit 1
   }
+  [ "$NO_ISSUE_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded issue choice; --no-issue cannot override it" >&2
+    exit 1
+  }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -773,6 +787,20 @@ else
       exit 1
       ;;
     esac
+    case "$MODE" in
+      direct-PR)
+        [ "$ISSUE_SET" -eq 1 ] || [ "$NO_ISSUE_SET" -eq 1 ] || {
+          echo "error: direct-PR ship spawns require --issue <github-issue-url> or the explicit --no-issue opt-out" >&2
+          exit 1
+        }
+        ;;
+      local-only)
+        [ "$ISSUE_SET" -eq 0 ] && [ "$NO_ISSUE_SET" -eq 0 ] || {
+          echo "error: --issue and --no-issue apply only to direct-PR ship tasks" >&2
+          exit 1
+        }
+        ;;
+    esac
   else
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
@@ -780,6 +808,10 @@ else
     }
     [ "$YOLO_SET" -eq 0 ] || {
       echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      exit 1
+    }
+    [ "$ISSUE_SET" -eq 0 ] && [ "$NO_ISSUE_SET" -eq 0 ] || {
+      echo "error: --issue and --no-issue apply only to direct-PR ship tasks" >&2
       exit 1
     }
   fi
@@ -1358,7 +1390,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   fi
   rc=0
   shared_args=()
-  [ "$ISSUE_SET" -eq 0 ] || shared_args+=(--issue "$ISSUE_URL")
+  [ "$ISSUE_SET" -eq 0 ] || { echo "error: --issue cannot be applied to a batch spawn; launch each issue-linked task separately" >&2; exit 1; }
+  [ "$NO_ISSUE_SET" -eq 0 ] || shared_args+=(--no-issue)
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
@@ -1600,6 +1633,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   ISSUE_URL=$(fm_meta_get "$RELAUNCH_META" issue)
+  [ "$(fm_meta_get "$RELAUNCH_META" no_issue)" != 1 ] || NO_ISSUE=1
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -3354,6 +3388,26 @@ fi
 # A linked GitHub issue is part of the durable task record. Assignment is an
 # idempotent pickup action and happens before any endpoint or worktree exists.
 if [ "$RELAUNCH" -eq 0 ] && [ -n "$ISSUE_URL" ]; then
+  PROJECT_REMOTE=$(git -C "$PROJ_ABS" remote get-url origin 2>/dev/null || true)
+  case "$PROJECT_REMOTE" in
+    https://github.com/*) PROJECT_REMOTE_PATH=${PROJECT_REMOTE#https://github.com/} ;;
+    ssh://git@github.com/*) PROJECT_REMOTE_PATH=${PROJECT_REMOTE#ssh://git@github.com/} ;;
+    git@github.com:*) PROJECT_REMOTE_PATH=${PROJECT_REMOTE#git@github.com:} ;;
+    *) echo "error: --issue requires the project origin to be a GitHub repository" >&2; exit 1 ;;
+  esac
+  PROJECT_REMOTE_PATH=${PROJECT_REMOTE_PATH%.git}
+  case "$PROJECT_REMOTE_PATH" in
+    */*)
+      PROJECT_REMOTE_OWNER=${PROJECT_REMOTE_PATH%%/*}
+      PROJECT_REMOTE_REPO=${PROJECT_REMOTE_PATH#*/}
+      case "$PROJECT_REMOTE_REPO" in */*|'') echo "error: project origin is not a canonical GitHub repository" >&2; exit 1 ;; esac
+      ;;
+    *) echo "error: project origin is not a canonical GitHub repository" >&2; exit 1 ;;
+  esac
+  [ "$ISSUE_REPO" = "$PROJECT_REMOTE_OWNER/$PROJECT_REMOTE_REPO" ] || {
+    echo "error: issue repository $ISSUE_REPO does not match project GitHub origin $PROJECT_REMOTE_OWNER/$PROJECT_REMOTE_REPO" >&2
+    exit 1
+  }
   OPERATOR_LOGIN_FILE="$CONFIG/github-operator-login"
   if [ ! -f "$OPERATOR_LOGIN_FILE" ] || [ -L "$OPERATOR_LOGIN_FILE" ] || [ ! -r "$OPERATOR_LOGIN_FILE" ]; then
     echo "error: issue-linked spawn requires a readable config/github-operator-login" >&2
@@ -4575,7 +4629,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project project_memory harness kind mode yolo issue tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project project_memory harness kind mode yolo issue no_issue tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4590,6 +4644,7 @@ preserve_relaunch_meta() {
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$ISSUE_URL" ] || echo "issue=$ISSUE_URL"
+  [ "$NO_ISSUE" != 1 ] || echo "no_issue=1"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
