@@ -752,6 +752,7 @@ A local standalone-clone home cannot receive a primary-local commit through that
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+Codex secondmates require a CLI that accepts `--no-daemon`; the [Codex adapter reference](../.agents/skills/harness-adapters/references/harness/codex.md#hook-trust) owns the launch and hook contract, with [installed CLI verification](verification/runtime-backends.md#codex-secondmate-execution-isolation).
 
 ### Harness restrictions and credentials
 

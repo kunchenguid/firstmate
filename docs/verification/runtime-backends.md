@@ -695,6 +695,25 @@ It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact fl
 It spends no model tokens, so it runs by default wherever Codex is installed.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
 
+### Codex secondmate execution isolation
+
+Verified on 2026-10-07 on macOS with codex-cli 0.160.1:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+Relevant output:
+
+```text
+ok - codex codex-cli 0.160.1 rejects shared-server attachment for the emitted secondmate launch without disabling hooks
+```
+
+The guard executes the generated secondmate flags against the installed CLI and confirms that an explicit remote-server selection is refused before startup.
+It requires no model request or running daemon and uses a disposable Codex home.
+`bin/fm-spawn.sh` owns the isolation flag; the remote environment regression in `tests/fm-spawn-compact-adviser-disable-remote.test.sh` also executes the delivered launch and checks the home, Herdr identity, hook posture, and daemon selection in both allowlist postures.
+`tests/fm-control-relaunch.test.sh` checks that guarded secondmate relaunch rebuilds the same isolation and retains hooks.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
