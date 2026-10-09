@@ -35,6 +35,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --expect-artifact)
       [ "$#" -ge 2 ] || { usage; exit 1; }
+      [ -n "$2" ] || { echo "fm-require-cmd.sh: artifact path must not be empty" >&2; exit 1; }
       ARTIFACT=$2
       shift
       ;;
@@ -129,7 +130,11 @@ set -e
 if [ -n "$ARTIFACT" ]; then
   OK=1
   if [ -d "$ARTIFACT" ]; then
-    [ -n "$(ls -A -- "$ARTIFACT" 2>/dev/null)" ] || OK=0
+    (
+      shopt -s nullglob dotglob
+      entries=("$ARTIFACT"/*)
+      [ "${#entries[@]}" -gt 0 ]
+    ) || OK=0
   else
     [ -s "$ARTIFACT" ] || OK=0
   fi

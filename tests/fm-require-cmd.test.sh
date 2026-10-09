@@ -132,6 +132,14 @@ test_artifact_completion_gate() {
   artifact="$TMP_ROOT/synthesis"
   directory="$TMP_ROOT/synthesis.d"
 
+  out=$("$REQUIRE" --expect-artifact "" "$tool" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an empty artifact path exited 0"
+  assert_contains "$out" "artifact path must not be empty" "the empty-artifact diagnostic was not actionable"
+  case "$out" in
+    *"analysis only"*) fail "the command ran with an empty artifact path" ;;
+  esac
+
   out=$("$REQUIRE" --expect-artifact "$artifact" "$tool" 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "an analysis-only run with no artifact exited 0"
@@ -164,10 +172,12 @@ test_artifact_completion_gate() {
   assert_contains "$out" "verified $artifact" "success did not name the verified artifact"
 
   # shellcheck disable=SC2016 # The fixture body must retain the child's $1 literally.
-  directory_writer=$(fake_tool artifact-directory-writer 'mkdir -p "$1"; printf "synthesis\n" > "$1/AGENTS.md"')
+  directory_writer=$(fake_tool artifact-directory-writer '/bin/mkdir -p "$1"; printf "synthesis\n" > "$1/.synthesis"')
   directory="$TMP_ROOT/fresh-synthesis.d"
-  "$REQUIRE" --expect-artifact "$directory" "$directory_writer" "$directory" >/dev/null 2>&1 ||
-    fail "a fresh populated artifact directory failed the completion gate"
+  mkdir -p "$TMP_ROOT/no-ls"
+  ln -s "$BASH" "$TMP_ROOT/no-ls/bash"
+  PATH="$TMP_ROOT/no-ls" "$BASH" "$REQUIRE" --expect-artifact "$directory" "$directory_writer" "$directory" >/dev/null 2>&1 ||
+    fail "a fresh populated artifact directory failed the completion gate without ls on PATH"
   pass "completion depends on a fresh non-empty artifact, not on exit status"
 }
 
