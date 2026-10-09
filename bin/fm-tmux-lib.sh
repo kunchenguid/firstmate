@@ -195,10 +195,13 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # `unknown`. Reclassify that pane the way every cursorless backend already
   # classifies it, letting the bottom-most shape win, which is the same rule
   # herdr, zellij, cmux, orca, and tern use for every harness including this one.
-  # Gated on Cursor's own structural process identity, never on the verdict
-  # alone, so the strict blank-row posture that owns `unknown` for every other
-  # harness is untouched.
-  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
+  # Droid also parks its cursor below the input box after a completed turn.
+  # Gate that read on its exact foreground command, so shells and other
+  # harnesses retain the strict cursor guard. Both reads still require the
+  # shared classifier to prove the composer empty before allowing input.
+  if [ "$verdict" = unknown ] \
+     && { fm_tmux_pane_is_cursor "$target" \
+          || [ "$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null)" = droid ]; }; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
   # Cortex Code parks its terminal cursor in the first column of the blank row

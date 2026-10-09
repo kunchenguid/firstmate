@@ -3759,7 +3759,7 @@ Refresh the credentialed guard with:
 FM_DROID_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-droid-signals-live-e2e.test.sh
 ```
 
-Exact observed guard output:
+Observed guard assertions:
 
 ```text
 ok - Droid 0.237.0 independent working signals match the scoped busy guard
@@ -3770,6 +3770,7 @@ ok - Droid 0.237.0 single Escape interrupts a running turn
 ok - Droid 0.237.0 /quit exits the agent
 DROID_LIVE_RESULT version=0.237.0 detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass
 ok - Droid 0.237.0 exact-worktree trust is retired after exit
+ok - Droid 0.237.0 public scout relaunch completes a replacement turn with dynamic effort
 ```
 
 Droid stores folder trust in the persistent `trustedFolders` object in `~/.factory/settings.json`; adding that field to a process-only `--settings` file did not suppress the fresh-folder dialog on 0.233.0.
@@ -3779,6 +3780,9 @@ The working spinner row and interrupt hint each classify busy when the other is 
 It also proves `Auto (High)` survives inherited medium-autonomy user session defaults when the process settings pin the template's autonomy.
 The native `/settings` surface confirms the requested model and `Dynamic` reasoning level are overridden by the runtime settings file.
 The guard retains the configured session model unless `FM_DROID_LIVE_MODEL` selects another authenticated model.
+The tmux composer check uses the real cursor and exact foreground process identity, including Droid's cursor below the input box after Stop.
+The public scout scenario launches through `fm-spawn`, relaunches through `fm-control`, and requires a fresh computed report and Stop event from the replacement with recorded `dynamic` effort before exit and teardown.
+That scenario requires Treehouse and compatible `tasks-axi` (0.2.6 in this verification).
 The portable guards refresh with:
 
 ```sh

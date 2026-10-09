@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Credentialed Droid drift guard: exact ancestry, busy footer, Stop hook,
-# composer delivery, interrupt, and exit in an isolated tmux server and HOME.
+# composer delivery, interrupt, exit, and scout relaunch through fm-control
+# in an isolated tmux server and HOME.
 # Opt-in because this submits real prompts; no shared backend is driven.
 # FM_DROID_LIVE_MODEL optionally selects an authenticated model; otherwise the
 # configured session model is retained while reasoning is pinned to dynamic.
@@ -8,7 +9,7 @@ set -u
 unset FM_BUSY_REGEX
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-fm_live_gate opt-in FM_DROID_SIGNALS_LIVE droid tmux jq
+fm_live_gate opt-in FM_DROID_SIGNALS_LIVE droid tmux jq treehouse tasks-axi
 DROID_BIN=$(command -v droid)
 REAL_TMUX=$(command -v tmux)
 VERSION=$("$DROID_BIN" --version)
@@ -17,11 +18,18 @@ SOCKET="fm-droid-signals-$$"
 TARGET=droid-signals:droid
 cleanup() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  if [ -n "${scout_id:-}" ] && [ -f "$LAB/fleet/state/$scout_id.meta" ]; then
+    HOME="$LAB/home" FM_HOME="$LAB/fleet" "$ROOT/bin/fm-teardown.sh" "$scout_id" >/dev/null 2>&1 || true
+  fi
+  chmod -R u+w "$LAB" 2>/dev/null || true
   rm -rf -- "$LAB"
+  fm_test_cleanup
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fail() { printf 'not ok - Droid %s: %s\n' "$VERSION" "$1" >&2; exit 1; }
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
+fm_tasks_axi_compatible || fail "scout teardown requires compatible tasks-axi (>= $FM_TASKS_AXI_MIN)"
 # Read credentials into a private throwaway HOME without exposing their bytes.
 mkdir -p "$LAB/home/.factory" "$LAB/workspace" "$LAB/state"
 chmod 700 "$LAB/home" "$LAB/home/.factory"
@@ -49,8 +57,6 @@ git -C "$LAB/workspace" worktree add -q "$LAB/task" -b guard
 HOME="$LAB/home" "$ROOT/bin/fm-droid-trust.sh" "$LAB/task" "$LAB/workspace" >/dev/null || fail 'exact-worktree trust registration failed'
 
 printf '# Droid guard\nOnly execute the explicit verification commands in the prompt.\n' > "$LAB/task/AGENTS.md"
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s droid-signals -n droid -c "$LAB/task" -x 140 -y 45 \
-  || fail 'cannot create isolated tmux server'
 capture() { "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" -S -60; }
 submit() {
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l "$1" || fail 'cannot type prompt'
@@ -59,9 +65,15 @@ submit() {
 # The sum proves a model response rather than matching the echoed prompt.
 # The detection command writes into the lab, and the sleep holds a real busy turn.
 prompt="Use Execute to run bash '$ROOT/bin/fm-harness.sh' > '$LAB/state/identity'; run sleep 8 after that command succeeds. Add 12345 and 67890 and reply only with the sum."
-printf -v command 'env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u FM_OMP_HARNESS FM_TASK_ID=droid-signals HOME=%q FM_HOME=%q FM_STATE_OVERRIDE=%q FM_ROOT_OVERRIDE=%q %q --settings %q --auto high %q' \
-  "$LAB/home" "$LAB/home" "$LAB/state" "$ROOT" "$DROID_BIN" "$LAB/state/settings.json" "$prompt"
-submit "$command"
+# Start the CLI directly: typing this long command before a shell has entered
+# raw mode can truncate it at the terminal's canonical input limit.
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s droid-signals -n droid -c "$LAB/task" -x 140 -y 45 \
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+  -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u FM_OMP_HARNESS \
+  FM_TASK_ID=droid-signals HOME="$LAB/home" FM_HOME="$LAB/home" \
+  FM_STATE_OVERRIDE="$LAB/state" FM_ROOT_OVERRIDE="$ROOT" \
+  "$DROID_BIN" --settings "$LAB/state/settings.json" --auto high "$prompt" \
+  || fail 'cannot create isolated tmux server'
 busy=0
 for _ in $(seq 1 180); do
   screen=$(capture) || fail 'cannot capture real Droid viewport'
@@ -100,8 +112,16 @@ printf '%s' "$screen" | grep -q '80,\?235' || fail 'computed response not observ
 if printf '%s' "$screen" | fm_busy_droid_tail_busy; then fail 'idle turn retains the busy footer'; fi
 printf '%s' "$screen" | grep -q 'Auto (High)' || fail 'template autonomy lost to user session defaults'
 pass "Droid $VERSION trusted worktree brief runs, exact ancestry detects Droid, and Stop fires"
-caps=$'styled=0\ncursor=0\nidentity=0'
-verdict=$(fm_composer_classify_screen "$caps" "$screen")
+mkdir -p "$LAB/shim"
+cat > "$LAB/shim/tmux" <<SH
+#!/usr/bin/env bash
+exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+SH
+chmod +x "$LAB/shim/tmux"
+# Exercise the backend's actual cursor and foreground identity, not a
+# cursorless approximation of the vendor's rendered screen.
+. "$ROOT/bin/fm-tmux-lib.sh"
+verdict=$(PATH="$LAB/shim:$PATH" fm_tmux_composer_state "$TARGET")
 [ "$verdict" = empty ] || fail "idle composer classified $verdict"
 pass "Droid $VERSION idle composer permits delivery"
 submit /settings
@@ -146,3 +166,55 @@ HOME="$LAB/home" "$ROOT/bin/fm-droid-trust.sh" --remove "$LAB/task" "$LAB/worksp
 physical=$(cd "$LAB/task" && pwd -P)
 jq -e --arg logical "$LAB/task" --arg physical "$physical" '.trustedFolders | has($logical) == false and has($physical) == false' "$LAB/home/.factory/settings.json" >/dev/null || fail 'native settings retained task trust'
 printf 'ok - Droid %s exact-worktree trust is retired after exit\n' "$VERSION"
+
+# Verify recovery through the same public lifecycle entrypoints as a scout.
+scout_id="droid-recovery-$$"
+(
+  "$ROOT/bin/fm-lab-home.sh" create "$LAB/fleet" >/dev/null || fail 'cannot create scout lab home'
+  git clone -q "$LAB/workspace" "$LAB/project" || fail 'cannot create scout project'
+  git -C "$LAB/project" config user.name guard
+  git -C "$LAB/project" config user.email guard@local
+  printf 'tmux\n' > "$LAB/fleet/config/backend"
+  printf 'manual\n' > "$LAB/fleet/config/backlog-backend"
+  mkdir -p "$LAB/fleet/data/$scout_id"
+  report="$LAB/fleet/data/$scout_id/report.md"
+  printf '# Task\nCalculate 12345 + 67890. Use Execute to write only the sum to %s and reply with it. Do not perform other tasks.\n' \
+    "$report" > "$LAB/fleet/data/$scout_id/brief.md"
+  export HOME="$LAB/home" FM_HOME="$LAB/fleet" TREEHOUSE_ROOT="$LAB/pool"
+  export SHELL
+  SHELL=$(command -v bash)
+  unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
+  "$REAL_TMUX" -L "$SOCKET" new-session -d -s firstmate -x 140 -y 45 -c "$LAB/project" \
+    "$SHELL" --noprofile --norc || fail 'cannot create scout endpoint'
+  export TMUX
+  TMUX=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t firstmate '#{socket_path},#{pid},0')
+  "$ROOT/bin/fm-spawn.sh" "$scout_id" "$LAB/project" --scout --harness droid --effort dynamic \
+    || fail 'public scout launch failed'
+  TARGET="firstmate:fm-$scout_id"
+  wait_scout_idle() {
+    for _ in $(seq 1 180); do
+      if [ -f "$LAB/fleet/state/$scout_id.turn-ended" ] \
+         && [ "$(PATH="$LAB/shim:$PATH" fm_tmux_composer_state "$TARGET")" = empty ] \
+         && ! capture | fm_busy_droid_tail_busy; then
+        return 0
+      fi
+      sleep 1
+    done
+    return 1
+  }
+  wait_scout_idle || fail 'scout did not complete its first turn with an empty composer'
+  [ "$(tr -d '[:space:]' < "$report")" = 80235 ] || fail 'scout did not write the computed result'
+  # The replacement must produce a new report and Stop event, not reuse either.
+  rm "$report" "$LAB/fleet/state/$scout_id.turn-ended"
+  "$ROOT/bin/fm-control.sh" "$scout_id" relaunch --note 'Repeat the original arithmetic verification and write the report again; do not perform other tasks.' \
+    || fail 'idle scout relaunch through fm-control failed'
+  wait_scout_idle || fail 'replacement scout did not complete its turn with an empty composer'
+  [ "$(tr -d '[:space:]' < "$report")" = 80235 ] || fail 'replacement scout did not write the computed result'
+  jq -e '.sessionDefaultSettings.reasoningEffort == "dynamic"' "$LAB/fleet/state/$scout_id.droid-settings.json" >/dev/null \
+    || fail 'replacement lost the recorded dynamic effort'
+  "$ROOT/bin/fm-control.sh" "$scout_id" exit || fail 'replacement scout exit through fm-control failed'
+  # The verified arithmetic-only report leaves no captain decision pending.
+  "$ROOT/bin/fm-captain-hold.sh" complete "$scout_id" --none || fail 'cannot inventory the completed arithmetic report'
+  "$ROOT/bin/fm-teardown.sh" "$scout_id" || fail 'recovered scout teardown failed'
+  pass "Droid $VERSION public scout relaunch completes a replacement turn with dynamic effort"
+)
