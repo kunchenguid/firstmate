@@ -51,10 +51,27 @@ function taskSortTimestamp(task) {
     ? [task.completionAt, task.updatedAt]
     : [task.updatedAt];
   for (const value of candidates) {
-    const timestamp = typeof value === "string" ? Date.parse(value) : NaN;
+    const timestamp = parseTaskTimestamp(value);
     if (Number.isFinite(timestamp)) return timestamp;
   }
   return null;
+}
+
+function parseTaskTimestamp(value) {
+  if (typeof value !== "string") return NaN;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))?$/);
+  if (!match) return NaN;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const calendar = new Date(Date.UTC(year, month - 1, day));
+  if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== day) return NaN;
+  if (match[4]) {
+    const offset = value.match(/[+-](\d{2}):(\d{2})$/);
+    if (offset && (Number(offset[1]) > 23 || Number(offset[2]) > 59)) return NaN;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : NaN;
 }
 
 function compareTasks(left, right) {
@@ -339,7 +356,7 @@ function taskOverview(home, roots, codeRoot) {
       blockedBy: record.unresolved_blocker_ids, progress: record.compact_progress,
       executionHarness: task?.harness || task?.provider || null, executionModel: task?.model || null,
       executionState: task?.current_state?.state || null,
-      completionAt: record.completion?.date || record.done || null,
+      completionAt: record.completion?.date || null,
       updatedAt: record.updated_at || record.since || null,
       hasDocument: Boolean(document), documentType: document?.source,
       documentTypes: document?.documentTypes, documentModifiedAt: document?.modifiedAt,
