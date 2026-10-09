@@ -26,6 +26,21 @@ Wake and watcher state mechanics remain with their named scripts and reference s
 
 `FM_SHORT_AGENT_ENABLED=1` enables the Pi-primary short-task tools; [the current-use guide](short-agents.md) owns setup, examples, provider-limit distinctions, and recovery.
 `config/short-agent.json` is the single home-owned provider/model selection for new short-task submissions; the CLI owner's `--help` and the current-use guide own its exact schema and setup.
+
+## Native review selection (config/native-review.json)
+
+`config/native-review.json` independently selects the reviewer used by future `review-PR` invocations and never changes the coding worker's harness, model, effort, metadata, backend, or running process.
+It is a regular non-symlinked JSON file in the effective Firstmate home with exactly this schema:
+
+```json
+{"schema":"fm-native-review-config.v1","harness":"codex","model":"<current-codex-model>","effort":"<supported-effort>"}
+```
+
+The supported harness is `codex`; the model and effort must both appear together in the current Codex model capability cache, and effort is one of `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` when that model advertises it.
+Before reserving a task attempt, `bin/fm-native-review.sh` verifies the installed command surface, model cache, `codex login status`, and live Codex quota through `bin/fm-quota.mjs`.
+Missing, unsafe, malformed, unsupported, unauthenticated, or quota-blocked selection fails closed without using the coding worker's harness or a default model.
+A brief may authorize one complete invocation-local selection with `--review-harness codex --model <name> --effort <level>`; partial explicit selection is refused, and omission uses only the home file.
+Review evidence records coding harness, reviewer harness, explicit model, and effective effort separately, while historical evidence remains unchanged.
 `state/short-agents/` holds their runner-owned records, whose lifecycle format is owned by `bin/fm-short-agent.mjs` and operation grants/receipts by `bin/fm-short-operations.mjs`.
 
 ## Feishu current-Pi channel

@@ -57,7 +57,7 @@ Run these stages in order, distinguishing the first delivery through a newly cre
 8. Independently read back the PPE, deployment, artifact, region, control plane, BOE setting, and deployed candidate identities, then start the required API or end-to-end test once through the authenticated BITS browser UI against that exact deployment.
 9. Read back the browser-started task and pipeline-run identity and monitor that exact run to a completed successful result, with Firstmate responsible for judging whether the API Test passed.
 10. When the API Test requires a fix, repeat the smallest fix -> commit -> exact source push -> independent source-head verification -> same-PPE deployment -> API Test loop until Firstmate judges the test passed.
-11. Only after the required test succeeds against the verified candidate, run the recorded supported harness's native review through `bin/fm-native-review.sh` on that same candidate.
+11. Only after the required test succeeds against the verified candidate, run the configured native reviewer through `bin/fm-native-review.sh` on that same candidate.
 12. Treat a review as valid only when it binds the task's immutable intent, exact base, and tested candidate; the original task may launch at most two attempts under `AGENTS.md` section 7.
 
 If a native-review fix changes tracked code or another build input, the changed head is a new candidate and the earlier deployment and test evidence no longer qualify it.

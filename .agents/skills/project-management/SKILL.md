@@ -69,7 +69,7 @@ The captain's request to create that local project authorizes this local initial
 ## Initialize
 
 Verify the selected harness and runtime backend required by the standing posture, but do not install a project-local review pipeline.
-For `review-PR`, a task may dispatch only to a harness with a verified native review command; `bin/fm-native-review.sh` provides the exact failure when the selected harness lacks that capability.
+For `review-PR`, coding-worker dispatch is independent of the configured native reviewer; `bin/fm-native-review.sh` provides the exact failure when reviewer configuration or capability is unavailable.
 Do not create a commit merely because project intake ran.
 
 ## Remove

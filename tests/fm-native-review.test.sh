@@ -10,7 +10,7 @@ TMP_ROOT=$(fm_test_tmproot fm-native-review)
 make_case() {
   local harness=$1 dir
   dir=$(mktemp -d "$TMP_ROOT/$harness.XXXXXX") || fail "could not create native-review fixture"
-  mkdir -p "$dir/home/data/task" "$dir/home/state" "$dir/bin" "$dir/repo"
+  mkdir -p "$dir/home/data/task" "$dir/home/state" "$dir/home/config" "$dir/codex" "$dir/bin" "$dir/repo"
   git -C "$dir/repo" init -q
   git -C "$dir/repo" config user.email test@example.com
   git -C "$dir/repo" config user.name test
@@ -22,6 +22,8 @@ make_case() {
   git -C "$dir/repo" commit -qam candidate
   git -C "$dir/repo" rev-parse HEAD >"$dir/candidate"
   printf 'worktree=%s\nharness=%s\n' "$dir/repo" "$harness" >"$dir/home/state/task.meta"
+  printf '%s\n' '{"schema":"fm-native-review-config.v1","harness":"codex","model":"gpt-6.1-sol","effort":"xhigh"}' >"$dir/home/config/native-review.json"
+  printf '%s\n' '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"xhigh"}]}]}' >"$dir/codex/models_cache.json"
   cat >"$dir/home/data/task/brief.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -34,52 +36,86 @@ EOF
 }
 
 write_reviewer() {
-  local dir=$1 name=$2 conclusion=${3:-pass}
-  cat >"$dir/bin/$name" <<EOF
+  local dir=$1 conclusion=${2:-pass}
+  cat >"$dir/bin/codex" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then echo '$name test-version'; exit 0; fi
-[ "\${1:-}" = review ] || exit 91
-[ "\${2:-}" = -c ] || exit 92
-[ "\${3:-}" = "\${3#developer_instructions=}" ] && exit 93
-[ "\${4:-}" = --base ] || exit 94
+set -eu
+if [ "\${1:-}" = --version ]; then echo 'codex test-version'; exit 0; fi
+if [ "\${1:-}" = --help ]; then echo 'Usage: codex --model MODEL'; exit 0; fi
+if [ "\${1:-}" = login ] && [ "\${2:-}" = status ]; then
+  [ "\${FM_TEST_REVIEW_AUTH:-ok}" = ok ] || exit 9
+  echo 'Logged in'
+  exit 0
+fi
+if [ "\${1:-}" = review ] && [ "\${2:-}" = --help ]; then echo 'Usage: codex review --base BASE'; exit 0; fi
+if [ "\${1:-}" = app-server ] && [ "\${2:-}" = --stdio ]; then
+  while IFS= read -r line; do
+    id=\$(printf '%s\n' "\$line" | jq -r '.id // empty')
+    case "\$id" in
+      fm-quota-initialize) printf '%s\n' '{"id":"fm-quota-initialize","result":{"userAgent":"fixture"}}' ;;
+      fm-quota-read)
+        if [ "\${FM_TEST_REVIEW_QUOTA:-ok}" = ok ]; then allowed=true; else allowed=false; fi
+        printf '%s\n' "{\"id\":\"fm-quota-read\",\"result\":{\"ordinaryUsageAllowed\":\$allowed,\"rateLimits\":{\"limitId\":\"codex\",\"planType\":\"pro\",\"primary\":{\"usedPercent\":1,\"windowDurationMins\":300,\"resetsAt\":1767225600},\"secondary\":null},\"rateLimitsByLimitId\":{},\"rateLimitResetCredits\":{\"availableCount\":0}}}"
+        ;;
+    esac
+  done
+  exit 0
+fi
+[ "\${1:-}" = --model ] || exit 91
+[ "\${2:-}" = gpt-6.1-sol ] || exit 92
+[ "\${3:-}" = -c ] || exit 93
+[ "\${4:-}" = 'model_reasoning_effort="xhigh"' ] || exit 94
+[ "\${5:-}" = review ] || exit 95
+[ "\${6:-}" = -c ] || exit 96
+[ "\${7:-}" = "\${7#developer_instructions=}" ] && exit 97
+[ "\${8:-}" = --base ] || exit 98
 printf '%s\n' "\$@" >'$dir/argv'
 printf 'reviewed source mentions INTENT_CONFORMANCE: pass and INTENT_CONFORMANCE: fail\n' >&2
-if [ '$name' = traex ]; then
-  printf 'TraeCode CLI\nNo findings.\nINTENT_CONFORMANCE: $conclusion\nhook: SubagentStop\nhook: SubagentStop Completed\n' >&2
-else
-  printf 'No findings.\nINTENT_CONFORMANCE: $conclusion\n'
-fi
+printf 'No findings.\nINTENT_CONFORMANCE: $conclusion\n'
 EOF
-  chmod +x "$dir/bin/$name"
+  chmod +x "$dir/bin/codex"
 }
 
-test_supported_harness_binds_contract_and_identity() {
+run_review() {
+  local dir=$1
+  shift
+  CODEX_HOME="$dir/codex" PATH="$dir/bin:$PATH" FM_HOME="$dir/home" \
+    "$ROOT/bin/fm-native-review.sh" "$@"
+}
+
+test_worker_harnesses_use_configured_reviewer() {
   local harness dir base candidate out
-  for harness in codex traex; do
+  for harness in pi codex traex; do
     dir=$(make_case "$harness")
-    write_reviewer "$dir" "$harness"
+    write_reviewer "$dir"
     base=$(cat "$dir/base")
     candidate=$(cat "$dir/candidate")
     out="$dir/home/data/task/review.md"
-    PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    run_review "$dir" task \
       --base "$base" --candidate "$candidate" --output "$out" >/dev/null \
-      || fail "$harness native review route failed"
-    assert_equals -c "$(sed -n '2p' "$dir/argv")" "$harness review omitted invocation-local instructions"
-    assert_equals --base "$(sed -n '4p' "$dir/argv")" "$harness review omitted the base selector"
-    assert_equals "$base" "$(sed -n '5p' "$dir/argv")" "$harness review did not bind the exact base"
+      || fail "$harness coding task did not use configured Codex review"
+    assert_equals --model "$(sed -n '1p' "$dir/argv")" "$harness review omitted explicit model selection"
+    assert_equals gpt-6.1-sol "$(sed -n '2p' "$dir/argv")" "$harness review selected the wrong model"
+    assert_equals 'model_reasoning_effort="xhigh"' "$(sed -n '4p' "$dir/argv")" "$harness review omitted effective effort"
+    assert_equals --base "$(sed -n '8p' "$dir/argv")" "$harness review omitted the base selector"
+    assert_equals "$base" "$(sed -n '9p' "$dir/argv")" "$harness review did not bind the exact base"
     assert_grep "$candidate" "$out" "$harness evidence did not bind the exact candidate"
+    assert_grep "Coding harness: \`$harness\`" "$out" "$harness coding identity was not retained separately"
+    assert_grep "Reviewer harness: \`codex\`" "$out" "$harness evidence omitted reviewer identity"
+    assert_grep "Reviewer model: \`gpt-6.1-sol\`" "$out" "$harness evidence omitted reviewer model"
+    assert_grep "Reviewer effort: \`xhigh\`" "$out" "$harness evidence omitted reviewer effort"
     assert_grep "Preserve the requested behavior" "$dir/argv" "$harness review did not receive Captain intent"
     assert_grep "Do not widen scope" "$dir/argv" "$harness review did not receive Firstmate acceptance scope"
     assert_grep "Do not run session/bootstrap lifecycle commands" "$dir/argv" "$harness review omitted its bounded-review constraint"
     assert_grep "INTENT_CONFORMANCE: pass" "$out" "$harness evidence omitted its intent conclusion"
   done
-  pass "native review: Codex and TraeX receive exact identity and task intent"
+  pass "native review: Pi, Codex, and TraeX coding tasks use the configured Codex reviewer"
 }
 
 test_ordinary_brief_edit_rebinds_review_intent() {
   local dir base candidate out
   dir=$(make_case codex)
-  write_reviewer "$dir" codex
+  write_reviewer "$dir"
   cat >"$dir/home/data/task/brief.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -94,7 +130,7 @@ EOF
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   out="$dir/home/data/task/ordinary-edit-review.md"
-  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  run_review "$dir" task \
     --base "$base" --candidate "$candidate" --output "$out" >/dev/null \
     || fail "native review rejected an ordinarily edited brief"
   assert_grep '\u786e\u8ba4\u4e0d\u662f\u901a\u8fc7\u679a\u4e3e\u7684\u65b9\u5f0f' "$dir/argv" \
@@ -106,26 +142,84 @@ EOF
   pass "native review: ordinary brief edits replace the review Intent"
 }
 
-test_missing_capability_fails_actionably() {
+test_missing_or_invalid_configuration_fails_actionably() {
   local dir base candidate out rc=0
   dir=$(make_case pi)
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  rm "$dir/home/config/native-review.json"
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" 2>&1) || rc=$?
-  expect_code 3 "$rc" "Pi without native review must be an unsupported review route"
-  assert_contains "$out" "select codex or traex for review-PR" "Pi refusal was not actionable"
-  pass "native review: missing harness capability fails actionably"
+  expect_code 3 "$rc" "missing native review configuration must fail"
+  assert_contains "$out" "native review configuration is missing or unsafe" "missing configuration refusal was not actionable"
+  assert_absent "$dir/argv" "missing configuration silently invoked the coding harness"
+
+  printf '%s\n' '{"schema":"fm-native-review-config.v1","harness":"traex","model":"gpt-6.1-sol","effort":"xhigh"}' >"$dir/home/config/native-review.json"
+  rc=0
+  out=$(run_review "$dir" task --base "$base" --candidate "$candidate" 2>&1) || rc=$?
+  expect_code 3 "$rc" "unsupported configured reviewer must fail"
+  assert_contains "$out" "unsupported configured native review harness: traex" "unsupported reviewer refusal was not actionable"
+  assert_absent "$dir/argv" "unsupported configuration silently invoked another harness"
+  pass "native review: missing or invalid configuration fails without fallback"
+}
+
+test_explicit_selection_and_capability_failures() {
+  local dir base candidate out rc=0
+  dir=$(make_case traex)
+  write_reviewer "$dir"
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  rm "$dir/home/config/native-review.json"
+  run_review "$dir" task --base "$base" --candidate "$candidate" \
+    --output "$dir/home/data/task/explicit.md" \
+    --review-harness codex --model gpt-6.1-sol --effort xhigh >/dev/null \
+    || fail "complete explicit native review selection was rejected"
+  assert_grep "Reviewer model: \`gpt-6.1-sol\`" "$dir/home/data/task/explicit.md" \
+    "explicit reviewer selection was not recorded"
+
+  rm "$dir/codex/models_cache.json"
+  rm -f "$dir/argv"
+  printf '%s\n' 'next candidate' >>"$dir/repo/file"
+  git -C "$dir/repo" commit -qam next
+  candidate=$(git -C "$dir/repo" rev-parse HEAD)
+  rc=0
+  out=$(run_review "$dir" task --base "$base" --candidate "$candidate" \
+    --review-harness codex --model gpt-6.1-sol --effort xhigh 2>&1) || rc=$?
+  expect_code 3 "$rc" "missing model capability cache must fail"
+  assert_contains "$out" "model capability cache is missing or unsafe" "missing capability refusal was not actionable"
+  assert_absent "$dir/argv" "missing model capability silently invoked Codex review"
+  pass "native review: complete explicit selection works and missing capability fails without fallback"
+}
+
+test_auth_and_quota_fail_without_fallback() {
+  local dir base candidate out rc=0
+  dir=$(make_case pi)
+  write_reviewer "$dir"
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  out=$(FM_TEST_REVIEW_AUTH=unavailable run_review "$dir" task \
+    --base "$base" --candidate "$candidate" 2>&1) || rc=$?
+  expect_code 3 "$rc" "unavailable Codex authentication must fail"
+  assert_contains "$out" "Codex authentication is unavailable" "authentication refusal was not actionable"
+  assert_absent "$dir/argv" "authentication failure silently fell back to the Pi coding harness"
+
+  rc=0
+  out=$(FM_TEST_REVIEW_QUOTA=unavailable run_review "$dir" task \
+    --base "$base" --candidate "$candidate" 2>&1) || rc=$?
+  expect_code 3 "$rc" "unavailable Codex quota must fail"
+  assert_contains "$out" "quota does not currently allow ordinary usage" "quota refusal was not actionable"
+  assert_absent "$dir/argv" "quota failure silently fell back to the Pi coding harness"
+  pass "native review: Codex authentication and quota failures do not fall back"
 }
 
 test_moving_or_uncommitted_candidate_is_refused() {
   local dir base candidate out rc=0
   dir=$(make_case traex)
-  write_reviewer "$dir" traex
+  write_reviewer "$dir"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   printf 'dirty\n' >>"$dir/repo/file"
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" 2>&1) || rc=$?
   expect_code 2 "$rc" "an uncommitted candidate must be refused"
   assert_contains "$out" "clean committed candidate" "dirty-candidate refusal was not actionable"
@@ -135,11 +229,11 @@ test_moving_or_uncommitted_candidate_is_refused() {
 test_candidate_change_during_review_is_refused() {
   local dir base candidate out rc=0
   dir=$(make_case traex)
-  write_reviewer "$dir" traex
-  sed -i "/if \[ 'traex' = traex \]/ i printf 'changed during review\\n' >> '$dir/repo/file'" "$dir/bin/traex"
+  write_reviewer "$dir"
+  sed -i "/printf 'No findings/ i printf 'changed during review\\n' >> '$dir/repo/file'" "$dir/bin/codex"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" 2>&1) || rc=$?
   expect_code 2 "$rc" "a candidate changed during review must be refused"
   assert_contains "$out" "changed while native review was running" "post-review candidate refusal was not actionable"
@@ -149,11 +243,11 @@ test_candidate_change_during_review_is_refused() {
 test_untracked_candidate_input_is_refused() {
   local dir base candidate out rc=0
   dir=$(make_case traex)
-  write_reviewer "$dir" traex
+  write_reviewer "$dir"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   printf 'untracked build input\n' >"$dir/repo/generated.conf"
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" 2>&1) || rc=$?
   rm -f "$dir/repo/generated.conf"
   expect_code 2 "$rc" "an untracked candidate input must be refused"
@@ -164,7 +258,7 @@ test_untracked_candidate_input_is_refused() {
 test_promoted_ship_uses_current_ship_contract() {
   local dir base candidate out
   dir=$(make_case traex)
-  write_reviewer "$dir" traex
+  write_reviewer "$dir"
   cat >"$dir/home/data/task/ship-instructions.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -186,7 +280,7 @@ PY
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   out="$dir/home/data/task/promoted-review.md"
-  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  run_review "$dir" task \
     --base "$base" --candidate "$candidate" --output "$out" >/dev/null \
     || fail "promoted native review route failed"
   assert_grep "Deliver the promoted implementation" "$dir/argv" "promoted review omitted current Captain intent"
@@ -199,7 +293,7 @@ PY
 test_legacy_promoted_ship_uses_normalized_intent() {
   local dir base candidate
   dir=$(make_case traex)
-  write_reviewer "$dir" traex
+  write_reviewer "$dir"
   cat >"$dir/home/data/task/brief.md" <<'EOF'
 # Task
 Legacy unsectioned scout instructions.
@@ -214,7 +308,7 @@ Apply the current promoted acceptance contract.
 EOF
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
-  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  run_review "$dir" task \
     --base "$base" --candidate "$candidate" >/dev/null \
     || fail "legacy promoted native review route failed"
   assert_grep "Preserve the normalized legacy request" "$dir/argv" "legacy promoted review omitted normalized Captain intent"
@@ -224,12 +318,12 @@ EOF
 test_structured_result_marker_is_accepted() {
   local dir base candidate output
   dir=$(make_case codex)
-  write_reviewer "$dir" codex
+  write_reviewer "$dir"
   sed -i "s/printf 'No findings.\\\\nINTENT_CONFORMANCE: pass\\\\n'/printf 'Summary. INTENT_CONFORMANCE: pass\\\\n\\\\nFull review comments:\\\\nNone.\\\\n'/" "$dir/bin/codex"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   output="$dir/home/data/task/structured.md"
-  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  run_review "$dir" task \
     --base "$base" --candidate "$candidate" --output "$output" >/dev/null \
     || fail "structured native review result was refused"
   assert_grep "Full review comments:" "$output" "structured native review evidence was truncated"
@@ -239,11 +333,11 @@ test_structured_result_marker_is_accepted() {
 test_output_must_resolve_under_task_directory() {
   local dir base candidate escaped link original_brief rc=0 out
   dir=$(make_case traex)
-  write_reviewer "$dir" traex
+  write_reviewer "$dir"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   escaped="$dir/home/data/escaped.md"
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" \
     --output "$dir/home/data/task/../../escaped.md" 2>&1) || rc=$?
   expect_code 2 "$rc" "a traversal review output must be refused"
@@ -253,14 +347,14 @@ test_output_must_resolve_under_task_directory() {
   link="$dir/home/data/task/linked"
   ln -s "$dir/home/data" "$link"
   rc=0
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" --output "$link/symlink-escaped.md" 2>&1) || rc=$?
   expect_code 2 "$rc" "a symlink-escaped review output must be refused"
   assert_absent "$dir/home/data/symlink-escaped.md" "symlink review output escaped the task directory"
 
   original_brief=$(cat "$dir/home/data/task/brief.md")
   rc=0
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" --output "$dir/home/data/task/brief.md" 2>&1) || rc=$?
   expect_code 2 "$rc" "a review output that replaces its task contract must be refused"
   assert_contains "$out" "must not replace task contract input" "contract-overwrite refusal was not actionable"
@@ -271,11 +365,11 @@ test_output_must_resolve_under_task_directory() {
 test_missing_conclusion_is_refused() {
   local dir base candidate out rc=0
   dir=$(make_case codex)
-  write_reviewer "$dir" codex omitted
+  write_reviewer "$dir" omitted
   sed -i 's/INTENT_CONFORMANCE:/NO_CONCLUSION:/g' "$dir/bin/codex"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" 2>&1) || rc=$?
   expect_code 1 "$rc" "review without an intent-conformance conclusion must fail"
   assert_contains "$out" "exactly one explicit intent-conformance conclusion" "missing-conclusion refusal was not actionable"
@@ -285,11 +379,11 @@ test_missing_conclusion_is_refused() {
 test_failing_conclusion_preserves_evidence_and_stops_delivery() {
   local dir base candidate output out rc=0
   dir=$(make_case traex)
-  write_reviewer "$dir" traex fail
+  write_reviewer "$dir" fail
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   output="$dir/home/data/task/review-failed.md"
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" --output "$output" 2>&1) || rc=$?
   expect_code 1 "$rc" "an intent-conformance failure must stop delivery"
   assert_contains "$out" "does not conform to the accepted intent" "failed review did not explain the delivery boundary"
@@ -300,17 +394,17 @@ test_failing_conclusion_preserves_evidence_and_stops_delivery() {
 test_original_task_review_attempts_are_capped_at_two() {
   local dir base candidate second third out rc=0 calls
   dir=$(make_case codex)
-  write_reviewer "$dir" codex
+  write_reviewer "$dir"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
-  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  run_review "$dir" task \
     --base "$base" --candidate "$candidate" --output "$dir/home/data/task/first.md" >/dev/null \
     || fail "first native review attempt failed"
 
   printf 'second candidate\n' >> "$dir/repo/file"
   git -C "$dir/repo" commit -qam second
   second=$(git -C "$dir/repo" rev-parse HEAD)
-  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  run_review "$dir" task \
     --base "$base" --candidate "$second" --output "$dir/home/data/task/renamed-second.md" >/dev/null \
     || fail "second native review attempt failed after a candidate change"
 
@@ -318,7 +412,7 @@ test_original_task_review_attempts_are_capped_at_two() {
   git -C "$dir/repo" commit -qam third
   third=$(git -C "$dir/repo" rev-parse HEAD)
   rc=0
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$third" --output "$dir/home/data/task/third.md" 2>&1) || rc=$?
   expect_code 4 "$rc" "a third review attempt for the original task must be refused"
   assert_contains "$out" "attempt limit reached for original task task (2/2)" "third-attempt refusal omitted the stable task boundary"
@@ -332,12 +426,12 @@ test_original_task_review_attempts_are_capped_at_two() {
 test_existing_review_evidence_counts_toward_cap() {
   local dir base candidate out rc=0
   dir=$(make_case traex)
-  write_reviewer "$dir" traex
+  write_reviewer "$dir"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   printf '# Native review evidence\n\nHistorical attempt one.\n' > "$dir/home/data/task/old-name.md"
   printf '# Native review evidence\n\nHistorical attempt two.\n' > "$dir/home/data/task/renamed-history.md"
-  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+  out=$(run_review "$dir" task \
     --base "$base" --candidate "$candidate" 2>&1) || rc=$?
   expect_code 4 "$rc" "historical review evidence must prevent an automatic third attempt"
   assert_contains "$out" "attempt limit reached for original task task (2/2)" "historical-attempt refusal was not actionable"
@@ -345,9 +439,11 @@ test_existing_review_evidence_counts_toward_cap() {
   pass "native review: retained historical attempts cannot be reset"
 }
 
-test_supported_harness_binds_contract_and_identity
+test_worker_harnesses_use_configured_reviewer
 test_ordinary_brief_edit_rebinds_review_intent
-test_missing_capability_fails_actionably
+test_missing_or_invalid_configuration_fails_actionably
+test_explicit_selection_and_capability_failures
+test_auth_and_quota_fail_without_fallback
 test_moving_or_uncommitted_candidate_is_refused
 test_candidate_change_during_review_is_refused
 test_untracked_candidate_input_is_refused

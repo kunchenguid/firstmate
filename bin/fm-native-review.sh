@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Run the selected worker harness's native review against an exact committed
-# base/candidate pair and the task's actual immutable intent snapshot.
+# Run a configured native reviewer against an exact committed base/candidate
+# pair and the task's actual immutable intent snapshot.
 #
-# Usage: fm-native-review.sh <task-id> --base <commit> --candidate <commit> [--output <path>]
+# Usage: fm-native-review.sh <task-id> --base <commit> --candidate <commit>
+#          [--output <path>]
+#          [--review-harness codex --model <name> --effort <level>]
 #
-# The task's recorded harness is authoritative. Codex and TraeX expose native
-# `review --base`; Pi does not currently expose a native review command and is
-# refused with an actionable diagnostic. The worktree must be clean and its
-# HEAD must equal the candidate, so the vendor cannot silently review a moving
-# or uncommitted target. The output is accepted only when the reviewer states
-# an explicit intent-conformance conclusion. Each original task may launch at
+# Normal operation reads config/native-review.json from the effective home.
+# A task may instead provide all three explicit reviewer axes for a bounded
+# invocation. The coding worker's recorded harness remains evidence only and
+# never selects the reviewer. The worktree must be clean and its HEAD must
+# equal the candidate, so the vendor cannot silently review a moving or
+# uncommitted target. The output is accepted only when the reviewer states an
+# explicit intent-conformance conclusion. Each original task may launch at
 # most two native-review attempts; task-local attempt records make retries and
 # candidate changes consume the same bounded history.
 set -eu
@@ -19,12 +22,13 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 
 usage() {
-  echo "usage: fm-native-review.sh <task-id> --base <commit> --candidate <commit> [--output <path>]" >&2
+  echo "usage: fm-native-review.sh <task-id> --base <commit> --candidate <commit> [--output <path>] [--review-harness codex --model <name> --effort <level>]" >&2
 }
 
 ID=${1:-}
@@ -33,11 +37,17 @@ shift
 BASE=
 CANDIDATE=
 OUTPUT=
+REVIEW_HARNESS=
+MODEL=
+EFFORT=
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) [ $# -ge 2 ] || { usage; exit 2; }; BASE=$2; shift 2 ;;
     --candidate) [ $# -ge 2 ] || { usage; exit 2; }; CANDIDATE=$2; shift 2 ;;
     --output) [ $# -ge 2 ] || { usage; exit 2; }; OUTPUT=$2; shift 2 ;;
+    --review-harness) [ $# -ge 2 ] || { usage; exit 2; }; REVIEW_HARNESS=$2; shift 2 ;;
+    --model) [ $# -ge 2 ] || { usage; exit 2; }; MODEL=$2; shift 2 ;;
+    --effort) [ $# -ge 2 ] || { usage; exit 2; }; EFFORT=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -67,6 +77,41 @@ WORKTREE=$(sed -n 's/^worktree=//p' "$META" | tail -1)
 HARNESS=$(sed -n 's/^harness=//p' "$META" | tail -1)
 [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] || { echo "error: task $ID has no usable worktree" >&2; exit 2; }
 [ -n "$HARNESS" ] || { echo "error: task $ID has no recorded harness" >&2; exit 2; }
+
+explicit_axes=0
+[ -z "$REVIEW_HARNESS$MODEL$EFFORT" ] || explicit_axes=1
+if [ "$explicit_axes" -eq 1 ]; then
+  [ -n "$REVIEW_HARNESS" ] && [ -n "$MODEL" ] && [ -n "$EFFORT" ] || {
+    echo "error: explicit native review selection requires --review-harness, --model, and --effort together" >&2
+    exit 2
+  }
+else
+  REVIEW_CONFIG="$CONFIG/native-review.json"
+  [ -f "$REVIEW_CONFIG" ] && [ ! -L "$REVIEW_CONFIG" ] && [ -r "$REVIEW_CONFIG" ] || {
+    echo "error: native review configuration is missing or unsafe: $REVIEW_CONFIG" >&2
+    exit 3
+  }
+  REVIEW_HARNESS=$(jq -er '
+      if keys == ["effort", "harness", "model", "schema"]
+         and .schema == "fm-native-review-config.v1"
+         and (.harness | type == "string" and length > 0)
+         and (.model | type == "string" and length > 0)
+         and (.effort | type == "string" and length > 0)
+      then .harness else error("invalid native review config") end
+    ' "$REVIEW_CONFIG" 2>/dev/null) \
+      || { echo "error: invalid native review configuration: $REVIEW_CONFIG" >&2; exit 3; }
+  MODEL=$(jq -r '.model' "$REVIEW_CONFIG")
+  EFFORT=$(jq -r '.effort' "$REVIEW_CONFIG")
+fi
+
+[ "$REVIEW_HARNESS" = codex ] || {
+  echo "error: unsupported configured native review harness: $REVIEW_HARNESS; supported: codex" >&2
+  exit 3
+}
+case "$EFFORT" in
+  low | medium | high | xhigh | max | ultra) ;;
+  *) echo "error: unsupported Codex native review effort: $EFFORT" >&2; exit 3 ;;
+esac
 
 BASE_FULL=$(git -C "$WORKTREE" rev-parse --verify "$BASE^{commit}" 2>/dev/null) \
   || { echo "error: review base does not resolve to a commit: $BASE" >&2; exit 2; }
@@ -146,24 +191,51 @@ mkdir -p "$(dirname "$OUTPUT")"
 TMP=$(mktemp "$(dirname "$OUTPUT")/.native-review.XXXXXX")
 trap 'rm -f "$TMP"' EXIT HUP INT TERM
 
-case "$HARNESS" in
-  codex) COMMAND=codex ;;
-  traex) COMMAND=traex ;;
-  pi)
-    echo "error: harness pi has no verified native review command; select codex or traex for review-PR" >&2
-    exit 3
-    ;;
-  *)
-    echo "error: harness $HARNESS has no supported native review route; select codex or traex" >&2
-    exit 3
-    ;;
-esac
+COMMAND=codex
 command -v "$COMMAND" >/dev/null 2>&1 || {
-  echo "error: native review executable is unavailable for harness $HARNESS: $COMMAND" >&2
+  echo "error: native review executable is unavailable for reviewer $REVIEW_HARNESS: $COMMAND" >&2
   exit 3
 }
 
 VERSION=$($COMMAND --version 2>&1 | head -1)
+CODEX_HELP=$($COMMAND --help 2>&1) || {
+  echo "error: Codex native review capability check failed: codex --help" >&2
+  exit 3
+}
+REVIEW_HELP=$($COMMAND review --help 2>&1) || {
+  echo "error: Codex native review capability check failed: codex review --help" >&2
+  exit 3
+}
+case "$CODEX_HELP" in *--model*) ;; *) echo "error: installed Codex does not advertise --model" >&2; exit 3 ;; esac
+case "$REVIEW_HELP" in *--base*) ;; *) echo "error: installed Codex review does not advertise --base" >&2; exit 3 ;; esac
+
+MODEL_CACHE="${CODEX_HOME:-$HOME/.codex}/models_cache.json"
+[ -f "$MODEL_CACHE" ] && [ ! -L "$MODEL_CACHE" ] && [ -r "$MODEL_CACHE" ] || {
+  echo "error: Codex model capability cache is missing or unsafe: $MODEL_CACHE" >&2
+  exit 3
+}
+jq -e --arg model "$MODEL" --arg effort "$EFFORT" '
+  any(.models[]?; .slug == $model and any(.supported_reasoning_levels[]?; .effort == $effort))
+' "$MODEL_CACHE" >/dev/null 2>&1 || {
+  echo "error: Codex model capability cache does not advertise model=$MODEL effort=$EFFORT: $MODEL_CACHE" >&2
+  exit 3
+}
+AUTH_STATUS=$($COMMAND login status 2>&1) || {
+  echo "error: Codex authentication is unavailable; codex login status failed: $AUTH_STATUS" >&2
+  exit 3
+}
+QUOTA_RC=0
+QUOTA=$(node "$SCRIPT_DIR/fm-quota.mjs" --json --provider codex 2>&1) || QUOTA_RC=$?
+if [ "$QUOTA_RC" -ne 0 ]; then
+  QUOTA_DETAIL=$(printf '%s\n' "$QUOTA" | jq -r '.providers.codex.error // empty' 2>/dev/null || true)
+  [ -n "$QUOTA_DETAIL" ] || QUOTA_DETAIL=$QUOTA
+  echo "error: Codex quota is unavailable: $QUOTA_DETAIL" >&2
+  exit 3
+fi
+printf '%s\n' "$QUOTA" | jq -e '.providers.codex.status == "ok" and .providers.codex.ordinary_usage_allowed == true' >/dev/null 2>&1 || {
+  echo "error: Codex quota does not currently allow ordinary usage" >&2
+  exit 3
+}
 
 # Reserve one of the task's two review attempts immediately before invoking the
 # vendor. The per-attempt files are the durable native-review record: changing
@@ -210,7 +282,10 @@ while [ -z "$ATTEMPT_RECORD" ]; do
     printf 'attempt=%s\n' "$ATTEMPT"
     printf 'base=%s\n' "$BASE_FULL"
     printf 'candidate=%s\n' "$CANDIDATE_FULL"
-    printf 'harness=%s\n' "$HARNESS"
+    printf 'coding_harness=%s\n' "$HARNESS"
+    printf 'review_harness=%s\n' "$REVIEW_HARNESS"
+    printf 'model=%s\n' "$MODEL"
+    printf 'effort=%s\n' "$EFFORT"
     printf 'output=%s\n' "$OUTPUT"
   } > "$ATTEMPT_RECORD") 2>/dev/null; then
     ATTEMPT_RECORD=
@@ -221,60 +296,20 @@ PROMPT_CONFIG=$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))
 RESULT=$(mktemp "$(dirname "$OUTPUT")/.native-review-result.XXXXXX")
 TRACE=$(mktemp "$(dirname "$OUTPUT")/.native-review-trace.XXXXXX")
 trap 'rm -f "$TMP" "$RESULT" "$TRACE"' EXIT HUP INT TERM
-# Current Codex and TraeX review CLIs make the target selector and positional
-# prompt mutually exclusive. Pass the immutable contract through the supported
+# The current Codex review CLI makes the target selector and positional prompt
+# mutually exclusive. Pass the immutable contract through the supported
 # invocation-local developer-instructions setting while retaining --base as the
 # native diff selector. JSON string syntax is valid TOML basic-string syntax and
 # preserves newlines without shell evaluation.
 REVIEW_RC=0
-REVIEW_TERMINATED=0
-if [ "$HARNESS" = traex ]; then
-  # TraeX writes its final response to stderr inside an explicit CLI frame,
-  # alongside runtime and hook traces. Its current installed runtime can also
-  # remain alive after SubagentStop has completed, so stop only that completed
-  # review process and accept the signal status only when the complete frame is
-  # present. Never parse marker examples from the surrounding trace.
-  (cd "$WORKTREE" && "$COMMAND" review \
-    -c "developer_instructions=$PROMPT_CONFIG" --base "$BASE_FULL") >"$RESULT" 2>"$TRACE" &
-  REVIEW_PID=$!
-  while kill -0 "$REVIEW_PID" 2>/dev/null; do
-    if grep -qx 'hook: SubagentStop Completed' "$TRACE"; then
-      REVIEW_TERMINATED=1
-      kill -TERM "$REVIEW_PID" 2>/dev/null || true
-      break
-    fi
-    sleep 0.2
-  done
-  wait "$REVIEW_PID" || REVIEW_RC=$?
-  python3 - "$TRACE" >"$RESULT" <<'PY' || REVIEW_RC=1
-import sys
-
-lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
-starts = [index for index, line in enumerate(lines) if line == 'TraeCode CLI']
-if not starts or 'hook: SubagentStop Completed' not in lines[starts[-1] + 1:]:
-    raise SystemExit(1)
-start = starts[-1] + 1
-try:
-    end = lines.index('hook: SubagentStop', start)
-except ValueError:
-    raise SystemExit(1)
-result = '\n'.join(lines[start:end]).strip()
-if not result:
-    raise SystemExit(1)
-print(result)
-PY
-  if [ "$REVIEW_TERMINATED" -eq 1 ] && [ "$REVIEW_RC" -eq 143 ]; then
-    REVIEW_RC=0
-  fi
-else
-  (cd "$WORKTREE" && "$COMMAND" review \
-    -c "developer_instructions=$PROMPT_CONFIG" --base "$BASE_FULL") >"$RESULT" 2>"$TRACE" \
-    || REVIEW_RC=$?
-fi
+(cd "$WORKTREE" && "$COMMAND" --model "$MODEL" \
+  -c "model_reasoning_effort=\"$EFFORT\"" review \
+  -c "developer_instructions=$PROMPT_CONFIG" --base "$BASE_FULL") >"$RESULT" 2>"$TRACE" \
+  || REVIEW_RC=$?
 if [ "$REVIEW_RC" -ne 0 ]; then
   cat "$RESULT" >&2
   cat "$TRACE" >&2
-  echo "error: $HARNESS native review failed for $BASE_FULL..$CANDIDATE_FULL" >&2
+  echo "error: $REVIEW_HARNESS native review failed for $BASE_FULL..$CANDIDATE_FULL" >&2
   exit 1
 fi
 POST_HEAD=$(git -C "$WORKTREE" rev-parse HEAD)
@@ -305,7 +340,10 @@ CONTRACT_SHA=$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')
 {
   printf '# Native review evidence\n\n'
   printf -- "- Task: \`%s\`\n" "$ID"
-  printf -- "- Harness: \`%s\`\n" "$HARNESS"
+  printf -- "- Coding harness: \`%s\`\n" "$HARNESS"
+  printf -- "- Reviewer harness: \`%s\`\n" "$REVIEW_HARNESS"
+  printf -- "- Reviewer model: \`%s\`\n" "$MODEL"
+  printf -- "- Reviewer effort: \`%s\`\n" "$EFFORT"
   printf -- "- Runtime: \`%s\`\n" "$VERSION"
   printf -- "- Base: \`%s\`\n" "$BASE_FULL"
   printf -- "- Candidate: \`%s\`\n" "$CANDIDATE_FULL"

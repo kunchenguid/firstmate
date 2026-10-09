@@ -45,7 +45,7 @@ It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after 
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
 A crewmate picking up such a brief should load the skill even if the brief predates this instruction.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
-For Firstmate-managed work, `bin/fm-native-review.sh` binds the exact base, committed candidate, and task contract to the recorded Codex or TraeX native review command.
+For Firstmate-managed work, `bin/fm-native-review.sh` binds the exact base, committed candidate, and task contract to the independently configured native reviewer.
 For behavioral verification, reach for `bin/fm-test-run.sh` with the subjects you care about rather than chaining `bash tests/a.test.sh && bash tests/b.test.sh`, because a list of script paths gets the same bounded concurrency as `--changed`.
 
 Check and test the toolbelt before pushing:

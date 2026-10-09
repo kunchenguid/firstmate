@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Opt-in credentialed smoke test for the installed Codex/TraeX native-review
-# interfaces. It uses isolated temporary repositories and never changes a
-# project checkout. Run one harness at a time:
-#   FM_NATIVE_REVIEW_LIVE=codex tests/fm-native-review-live.test.sh
-#   FM_NATIVE_REVIEW_LIVE=traex tests/fm-native-review-live.test.sh
+# Opt-in credentialed smoke test for the installed configured Codex native
+# reviewer. It uses an isolated temporary repository and never changes a
+# project checkout:
+#   FM_NATIVE_REVIEW_LIVE=codex FM_NATIVE_REVIEW_MODEL=<model> \
+#     FM_NATIVE_REVIEW_EFFORT=<effort> tests/fm-native-review-live.test.sh
 set -eu
 
 # shellcheck source=tests/lib.sh
@@ -11,11 +11,14 @@ set -eu
 
 HARNESS=${FM_NATIVE_REVIEW_LIVE:-}
 case "$HARNESS" in
-  '') skip "set FM_NATIVE_REVIEW_LIVE=codex or traex for the credentialed native-review smoke test" ;;
-  codex|traex) ;;
-  *) fail "FM_NATIVE_REVIEW_LIVE must be codex or traex" ;;
+  '') skip "set FM_NATIVE_REVIEW_LIVE=codex with model and effort for the credentialed native-review smoke test" ;;
+  codex) ;;
+  *) fail "FM_NATIVE_REVIEW_LIVE must be codex" ;;
 esac
 command -v "$HARNESS" >/dev/null 2>&1 || fail "$HARNESS is not installed"
+MODEL=${FM_NATIVE_REVIEW_MODEL:-}
+EFFORT=${FM_NATIVE_REVIEW_EFFORT:-}
+[ -n "$MODEL" ] && [ -n "$EFFORT" ] || fail "FM_NATIVE_REVIEW_MODEL and FM_NATIVE_REVIEW_EFFORT are required"
 
 TMP_ROOT=$(fm_test_tmproot "fm-native-review-live-$HARNESS")
 home="$TMP_ROOT/home"
@@ -43,8 +46,11 @@ EOF
 
 output="$home/data/live-review/evidence.md"
 FM_HOME="$home" "$ROOT/bin/fm-native-review.sh" live-review \
-  --base "$base" --candidate "$candidate" --output "$output"
-assert_grep "Harness: \`$HARNESS\`" "$output" "live evidence omitted the installed harness"
+  --base "$base" --candidate "$candidate" --output "$output" \
+  --review-harness "$HARNESS" --model "$MODEL" --effort "$EFFORT"
+assert_grep "Reviewer harness: \`$HARNESS\`" "$output" "live evidence omitted the installed reviewer harness"
+assert_grep "Reviewer model: \`$MODEL\`" "$output" "live evidence omitted the explicit reviewer model"
+assert_grep "Reviewer effort: \`$EFFORT\`" "$output" "live evidence omitted the effective reviewer effort"
 assert_grep "Candidate: \`$candidate\`" "$output" "live evidence omitted the exact candidate"
 assert_grep 'INTENT_CONFORMANCE: pass' "$output" "installed reviewer did not pass the isolated candidate"
 pass "installed $HARNESS native review binds identity, intent, and final response"
