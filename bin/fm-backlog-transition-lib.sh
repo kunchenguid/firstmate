@@ -942,6 +942,10 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   FM_BACKLOG_CLOSE_VALIDATED_MODE=close
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
   fm_backlog_record_present "$marker" "pending-close record" "$state" || return 1
+  if [ "$(fm_pr_file_link_count "$marker")" != 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="pending-close record must have exactly one link at $marker"
+    return 1
+  fi
   raw_bytes=$(fm_backlog_bytes_of_file "$marker" 2>/dev/null) || {
     FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
     return 1

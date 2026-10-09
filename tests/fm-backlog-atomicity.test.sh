@@ -2519,6 +2519,40 @@ test_recovery_rejects_invalid_close_arguments() {
   pass "recovery rejects close-marker arguments outside its protocol"
 }
 
+test_recovery_rejects_a_hardlinked_close_marker() {
+  local case_dir home id=atomic-marker-hardlink marker meta alias out
+  case_dir=$(make_home marker-hardlink)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  marker="$home/state/$id.backlog-close"
+  meta="$home/state/$id.meta"
+  alias="$case_dir/marker-alias"
+  printf 'spawn_gen=spawn-hardlink\n' > "$meta"
+  FM_HOME="$home" bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_write "$FM_HOME/state" "$2" "$FM_HOME/data" spawn-hardlink --note "local main"' _ "$ROOT" "$id" \
+    || fail 'could not stage hardlink fixture'
+  ln "$marker" "$alias"
+  cp "$marker" "$case_dir/marker.before"
+  cp "$meta" "$case_dir/meta.before"
+  cp "$home/data/backlog.md" "$case_dir/backlog.before"
+
+  if out=$(FM_HOME="$home" bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_replay "$FM_HOME/state" "$2" "$FM_HOME/data"' _ "$ROOT" "$marker" 2>&1); then
+    fail "replay accepted a hardlinked close marker: $out"
+  fi
+  cmp -s "$meta" "$case_dir/meta.before" || fail 'hardlinked replay changed matching metadata'
+  cmp -s "$home/data/backlog.md" "$case_dir/backlog.before" || fail 'hardlinked replay changed the backlog'
+  cmp -s "$marker" "$case_dir/marker.before" || fail 'hardlinked replay changed or retired its retry record'
+  cmp -s "$alias" "$case_dir/marker.before" || fail 'hardlinked replay changed its alias'
+
+  rm "$alias"
+  FM_HOME="$home" bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_close_marker_replay "$FM_HOME/state" "$2" "$FM_HOME/data"' _ "$ROOT" "$marker" \
+    || fail 'single-link record could not recover'
+  [ "$(row_state "$case_dir" "$id")" = done ] || fail 'single-link retry did not close the row'
+  assert_absent "$marker" 'successful single-link retry retained its record'
+  assert_absent "$meta" 'successful single-link retry retained matching metadata'
+  pass 'replay rejects hardlinked completion records without mutation and permits single-link recovery'
+}
+
 test_recovery_rejects_a_symlinked_close_marker() {
   local case_dir id marker payload out rc=0
   id=atomic-marker-symlink-b12
@@ -3206,6 +3240,7 @@ test_recovery_rejects_raw_control_bytes
 test_recovery_rejects_malformed_pr_urls
 test_failed_close_replay_is_not_started_as_live_work
 test_recovery_rejects_invalid_close_arguments
+test_recovery_rejects_a_hardlinked_close_marker
 test_recovery_rejects_a_symlinked_close_marker
 test_recovery_drops_a_close_for_a_newer_meta_incarnation
 test_recovery_rejects_a_legacy_close_without_an_incarnation
