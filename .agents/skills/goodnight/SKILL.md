@@ -48,7 +48,9 @@ State the list's actual path and any open decision that prevents current work fr
 
 - Spawn no new worker, scout, or secondmate; relaunching a recorded task to finish work already in hand remains allowed.
   `bin/fm-spawn.sh` enforces this boundary; its header and help own the refusal mechanics.
-  To dispatch new work during the hold, lift with `/gm`, spawn, and re-enter with `/gn`.
+  `/gm` lifts the hold for the whole fleet, including secondmates and deferred items.
+  There is no one-off exception.
+  If the captain wants new work during the hold, lift it with `/gm`, accepting that deferred work may resume until `/gn` re-enters the hold.
 - Let an implementation worker finish its current build and commit, then stop at its implementation `done` handoff.
   If its selected delivery path requires a validation pipeline that has not started, do not send `/no-mistakes` or hand it to a reviewer.
   Record `stopped before pipeline` in the task note and morning list, with starting its selected pipeline as its first action tomorrow.
