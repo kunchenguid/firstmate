@@ -117,9 +117,11 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # (the 2026-09-07 away-window audit). A worker that knows when its wait clears
 # names it with `until` (status_paused_until below) and is rechecked at that
 # time or this cadence bound, whichever comes first. Both consumers read
-# FM_PAUSE_RESURFACE_SECS with this default so
-# the cadence has one owner. An item held for the captain is not rechecked at all
-# while the away-posture record exists (bin/fm-watch.sh owns that rule).
+# FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner.
+# bin/fm-watch.sh may suppress a due repeat when its unchanged status and open
+# decision set were already presented; this does not change the away daemon.
+# An item held for the captain is not rechecked at all while the away-posture
+# record exists (bin/fm-watch.sh owns that rule).
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=14400
 
