@@ -436,7 +436,11 @@ passed_pr_detail() {
     && [ "$FM_PR_RETIRE_HOST" = "$host" ] \
     && [ "$FM_PR_RETIRE_PATH" = "$path" ] \
     && [ "$FM_PR_RETIRE_NUMBER" = "$number" ]; then
-    printf 'run passed: PR merged'
+    if [ "$FM_PR_RETIRE_RESULT" = merged ]; then
+      printf 'run passed: PR merged'
+    else
+      printf 'run passed: PR closed'
+    fi
     return
   fi
   if [ "${FM_CREW_STATE_NO_FORGE:-0}" = 1 ]; then

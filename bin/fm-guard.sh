@@ -179,6 +179,7 @@ fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
 checks=$FM_SUP_CHECKS
+watches=$FM_SUP_WATCHES
 needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
 fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
@@ -249,6 +250,8 @@ elif [ "$watcher_healthy" = false ]; then
         printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
       elif [ "$checks" -gt 0 ]; then
         printf '●  %s registered custom check(s), but %s.\n' "$checks" "$watcher_cause"
+      elif [ "$watches" -gt 0 ]; then
+        printf '●  %s kept merge watch(es), but %s.\n' "$watches" "$watcher_cause"
       else
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
       fi

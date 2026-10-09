@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Shared durable, supervisor-facing outcome publication for a confirmed merge.
+# Shared durable, supervisor-facing outcome publication for a confirmed
+# terminal PR outcome: a merge, or a close without merging.
 #
-# Both a merge performed by this home and a merge detected by its existing poll
-# use this operation, so neither outcome depends on an agent remembering it.
-# This operation publishes the poll's local actionable row; the watcher
-# immediately delivers that row as observation handling, not a second outcome
-# path.
+# Both a merge performed by this home and a terminal state detected by its
+# existing poll use these operations, so no outcome depends on an agent
+# remembering it. Each operation publishes the poll's local actionable row;
+# the watcher immediately delivers that row as observation handling, not a
+# second outcome path.
 #
 # The destination is the home's role, never the caller's choice:
 #   - a secondmate home reports upward on its parent channel, resolved and
@@ -16,11 +17,11 @@
 # No new state file and no new transport are involved.
 #
 # Normal operation deduplicates the task's latest canonical PR identity through
-# the merge-notification marker owned by bin/fm-pr-lib.sh. Main-home wake keys
-# also include that PR identity so distinct PRs for a reused task remain
+# the terminal-notification markers owned by bin/fm-pr-lib.sh. Main-home wake
+# keys also include that PR identity so distinct PRs for a reused task remain
 # distinct in queue presentation. The outcome is published before the marker
 # is committed, so a failed commit stays eligible for at-least-once retry and
-# may rarely duplicate rather than leave a merge silent.
+# may rarely duplicate rather than leave an outcome silent.
 #
 # Sourced by bin/fm-pr-merge.sh, bin/fm-watch.sh, and tests. No side effects on
 # source beyond its sourced libraries.
@@ -33,6 +34,8 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+# shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+FM_PR_CLOSED_OUTCOME_ALREADY_RECORDED=false
 
 # fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin> [authority]
 #
@@ -111,5 +114,65 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   fm_lock_release "$lock"
   # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
   [ ! -e "${FM_CONFIG_OVERRIDE:-$home/config}/fleet-ledger" ] || [ "$status" -ne 0 ] || FM_HOME=$home FM_STATE_OVERRIDE=$state "$_FM_MERGE_OUTCOME_LIB_DIR/fm-fleet-ledger.sh" merged "$id" pr "$FM_PR_URL" || true
+  return "$status"
+}
+
+# fm_pr_closed_outcome_report <home> <state> <task-id> <pr-url>
+#
+# The non-merge terminal twin of fm_merge_outcome_report: the poll proved the
+# PR was closed without merging. There is no <origin> or <authority> argument
+# because this path is only ever reached from the poll, so the outcome always
+# wakes this home after any upward hop a secondmate's routing needs. The
+# role routing, return codes, duplicate suppression (through the
+# closed-notification marker under its own lock), and publish-before-commit
+# ordering all match the merge operation.
+fm_pr_closed_outcome_report() {  # <home> <state> <task-id> <pr-url>
+  local home=$1 state=$2 id=$3 url=$4
+  local self_rc=0 destination='' line lock status=0
+  local provider host path number
+  # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  FM_PR_CLOSED_OUTCOME_ALREADY_RECORDED=false
+  fm_pr_task_id_valid "$id" || return 2
+  fm_pr_url_parse "$url" || return 2
+  provider=$FM_PR_PROVIDER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+
+  if destination=$(fm_parent_channel_destination "$home" "$state"); then
+    line="failed [key=closed-$id]: $id PR closed without merging $FM_PR_URL"
+  else
+    self_rc=$?
+    [ "$self_rc" -eq 1 ] || return 3
+    destination=''
+  fi
+
+  STATE=$state
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
+  lock="$state/$id.pr-poll-closed-notified.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if fm_pr_poll_closed_already_notified "$state" "$id" \
+    "$provider" "$host" "$path" "$number"; then
+    # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+    FM_PR_CLOSED_OUTCOME_ALREADY_RECORDED=true
+    fm_lock_release "$lock"
+    return 0
+  fi
+
+  if [ -n "$destination" ]; then
+    fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    fm_wake_append check "closed-$id-$FM_PR_URL" \
+      "check: PR closed without merging: $id $FM_PR_URL" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    fm_pr_poll_closed_mark_notified "$state" "$id" \
+      "$provider" "$host" "$path" "$number" || status=1
+  fi
+  fm_lock_release "$lock"
   return "$status"
 }

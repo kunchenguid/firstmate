@@ -57,6 +57,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -204,6 +206,40 @@ write_meta() {
     "kind=$kind" \
     "mode=$mode" \
     "spawn_gen=teardown-test-task-x1"
+}
+
+# Seed the fixture an armed merge poll leaves: the recorded pr=/pr_head task
+# identity plus the three validated poll artifacts, built through the record
+# owner's public helpers rather than hand-written bytes.
+seed_ship_pr_poll() {  # <case_dir> <url>
+  local case_dir=$1 url=$2
+  printf 'pr=%s\npr_head=%s\n' "$url" 0123456789abcdef0123456789abcdef01234567 \
+    >> "$case_dir/state/task-x1.meta"
+  fm_pr_url_parse "$url" || fail "merge-watch fixture URL was unparseable: $url"
+  fm_pr_poll_prepare "$case_dir/state" task-x1 "$FM_PR_PROVIDER" "$url" \
+    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the merge-poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the merge-poll fixture"
+}
+
+# The keep decision reads the PR live through the provider record readers;
+# FM_TEST_PR_STATE steers this stub's `gh api graphql` answer, and leaving it
+# unset makes the whole read fail the way a dead forge does.
+write_forge_state_gh_stub() {  # <case_dir>
+  cat > "$1/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" api graphql "*)
+    [ -n "${FM_TEST_PR_STATE:-}" ] || exit 1
+    merged=false
+    [ "$FM_TEST_PR_STATE" = MERGED ] && merged=true
+    printf 'state=%s\nmerged=%s\n' "$FM_TEST_PR_STATE" "$merged"
+    exit 0 ;;
+  *" pr view "*) echo "error: pull request not found" >&2; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/gh"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -667,6 +703,118 @@ make_path_without_lsof() {  # <case-dir>
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+test_teardown_keeps_merge_watch_for_open_pr() {
+  local case_dir suffix
+  case_dir=$(make_case merge-watch-open)
+  write_meta "$case_dir" no-mistakes ship
+  # The ordinary cleanup this feature exists for: a QA-passed worker whose PR
+  # branch is pushed, so the landed-work gate passes with no --force.
+  wt_commit "$case_dir" "ship work awaiting merge"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  seed_ship_pr_poll "$case_dir" https://github.com/o/r/pull/7
+  # Residue from a previous incarnation of this id - the task meta is still the
+  # authoritative binding, so a stale record must yield to the fresh keep
+  # rather than silently blocking it.
+  fm_pr_url_parse https://github.com/o/r/pull/9 \
+    || fail "stale merge-watch fixture URL was unparseable"
+  fm_pr_merge_watch_publish "$case_dir/state" task-x1 "$FM_PR_PROVIDER" \
+    https://github.com/o/r/pull/9 "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+    || fail "could not seed the stale merge-watch record"
+  write_forge_state_gh_stub "$case_dir"
+
+  FM_TEST_PR_STATE=OPEN run_teardown "$case_dir" > "$case_dir/stdout"
+  assert_grep "merge watch kept: https://github.com/o/r/pull/7" "$case_dir/stdout" \
+    "open-PR teardown did not report the kept merge watch"
+  fm_pr_merge_watch_valid "$case_dir/state" task-x1 \
+    || fail "open-PR teardown left no valid merge-watch record"
+  fm_pr_merge_watch_parse "$case_dir/state/task-x1.merge-watch" \
+    || fail "kept merge-watch record did not parse"
+  [ "$FM_PR_WATCH_URL" = https://github.com/o/r/pull/7 ] \
+    && [ "$FM_PR_WATCH_PROVIDER" = github ] \
+    && [ "$FM_PR_WATCH_HOST" = github.com ] \
+    && [ "$FM_PR_WATCH_PATH" = o/r ] \
+    && [ "$FM_PR_WATCH_NUMBER" = 7 ] \
+    || fail "kept merge-watch record carries the wrong identity"
+  fm_pr_poll_artifacts_valid "$case_dir/state" task-x1 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "open-PR teardown did not keep the armed poll valid"
+  for suffix in check.sh pr-poll pr-poll-registration; do
+    [ -f "$case_dir/state/task-x1.$suffix" ] && [ ! -L "$case_dir/state/task-x1.$suffix" ] \
+      || fail "open-PR teardown lost poll artifact task-x1.$suffix"
+  done
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "open-PR teardown left the task meta behind"
+  pass "teardown of a ship task with an open PR keeps the poll as a home-owned merge watch"
+}
+
+test_teardown_merged_pr_keeps_no_watch() {
+  local case_dir suffix
+  case_dir=$(make_case merge-watch-merged)
+  write_meta "$case_dir" no-mistakes ship
+  seed_ship_pr_poll "$case_dir" https://github.com/o/r/pull/7
+  write_forge_state_gh_stub "$case_dir"
+
+  FM_TEST_PR_STATE=MERGED run_teardown "$case_dir" --force > "$case_dir/stdout"
+  [ ! -e "$case_dir/state/task-x1.merge-watch" ] \
+    || fail "merged-PR teardown published a merge watch"
+  ! grep -F "merge watch not kept" "$case_dir/stdout" >/dev/null \
+    || fail "merged-PR teardown reported a merged PR as a watch that was not kept"
+  for suffix in check.sh pr-poll pr-poll-registration; do
+    [ ! -e "$case_dir/state/task-x1.$suffix" ] \
+      || fail "merged-PR teardown kept poll artifact task-x1.$suffix"
+  done
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "merged-PR teardown left the task meta behind"
+  pass "teardown of a ship task with a merged PR keeps no watch, removes every artifact, and stays silent"
+}
+
+test_teardown_without_recorded_pr_keeps_no_watch() {
+  local case_dir
+  case_dir=$(make_case merge-watch-no-pr)
+  write_meta "$case_dir" local-only ship
+
+  run_teardown "$case_dir" --force > /dev/null
+  [ ! -e "$case_dir/state/task-x1.merge-watch" ] \
+    || fail "teardown without a recorded pr= published a merge watch"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "teardown without a recorded pr= left the task meta behind"
+  pass "teardown of a ship task with no recorded pr= keeps no watch"
+}
+
+test_teardown_closed_pr_keeps_no_watch() {
+  local case_dir
+  case_dir=$(make_case merge-watch-closed)
+  write_meta "$case_dir" no-mistakes ship
+  seed_ship_pr_poll "$case_dir" https://github.com/o/r/pull/7
+  write_forge_state_gh_stub "$case_dir"
+
+  FM_TEST_PR_STATE=CLOSED run_teardown "$case_dir" --force > "$case_dir/stdout"
+  [ ! -e "$case_dir/state/task-x1.merge-watch" ] \
+    || fail "closed-PR teardown published a merge watch"
+  ! grep -F "merge watch not kept" "$case_dir/stdout" >/dev/null \
+    || fail "closed-PR teardown reported a closed PR as a watch that was not kept"
+  [ ! -e "$case_dir/state/task-x1.check.sh" ] \
+    || fail "closed-PR teardown kept the armed poll"
+  pass "teardown of a ship task whose PR closed without merging keeps no watch and stays silent"
+}
+
+test_teardown_forge_read_error_keeps_no_watch() {
+  local case_dir
+  case_dir=$(make_case merge-watch-error)
+  write_meta "$case_dir" no-mistakes ship
+  seed_ship_pr_poll "$case_dir" https://github.com/o/r/pull/7
+  write_forge_state_gh_stub "$case_dir"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout"
+  assert_grep "merge watch not kept: https://github.com/o/r/pull/7 (forge state unreadable)" \
+    "$case_dir/stdout" \
+    "teardown on a failed forge read printed no not-kept line"
+  [ ! -e "$case_dir/state/task-x1.merge-watch" ] \
+    || fail "teardown published a merge watch on a failed forge read"
+  [ ! -e "$case_dir/state/task-x1.check.sh" ] \
+    || fail "teardown on a failed forge read kept the armed poll"
+  pass "a forge read error during teardown keeps no watch, says so, and still cleans up"
 }
 
 test_local_only_fork_remote_allows() {
@@ -4748,3 +4896,8 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_teardown_keeps_merge_watch_for_open_pr
+test_teardown_merged_pr_keeps_no_watch
+test_teardown_without_recorded_pr_keeps_no_watch
+test_teardown_closed_pr_keeps_no_watch
+test_teardown_forge_read_error_keeps_no_watch

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
-# It emits exactly one merged line for a merged change and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# It emits exactly one terminal line for a change that reaches a terminal
+# state: "merged" for a merged change and "closed" for one definitively closed
+# without merging (GitHub CLOSED, GitLab closed, Gerrit ABANDONED). It stays
+# silent on every other state and on every error, so a failed lookup can never
+# be read as a terminal result. Whether a "closed" line is terminal is
+# bin/fm-watch.sh's decision, not this program's: it acts on one only for a
+# kept merge watch. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, and gerrit-axi for Gerrit, so an upstream checkout needs no extra
@@ -67,6 +71,7 @@ case "$provider" in
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
     [ "$state" = MERGED ] && printf '%s\n' merged
+    [ "$state" = CLOSED ] && printf '%s\n' closed
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -102,11 +107,13 @@ case "$provider" in
     # to git for the current repository, and the watcher runs in no repository.
     # The state is read from glab's own field output rather than its JSON,
     # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
+    # JSON processor; only an exact "merged" or "closed" is terminal, so a
+    # changed format or an unreadable merge request stays silent instead of
+    # reporting an outcome.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    [ "$state" = closed ] && printf '%s\n' closed
     ;;
   gerrit)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -170,6 +177,7 @@ case "$provider" in
         error("invalid gerrit record")
       end' 2>/dev/null) || exit 0
     [ "$status" = MERGED ] && printf '%s\n' merged
+    [ "$status" = ABANDONED ] && printf '%s\n' closed
     ;;
   *) exit 0 ;;
 esac
