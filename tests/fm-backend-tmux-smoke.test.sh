@@ -6,6 +6,11 @@
 # this repo fakes tmux; this one is the one place that talks to a REAL tmux
 # server, isolated on a private socket (`-L`) so it never touches the host's
 # actual sessions.
+#
+# The final section extends that to fm_backend_tmux_container_ensure's
+# server-BIRTH environment, which only a real server can show: it reproduces
+# the color-control leak as a control, then proves the adapter's own birth is
+# clean (docs/verification/runtime-backends.md, "Server birth environment").
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,10 +35,19 @@ command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-backend-smoke-$$"
 SHIM_DIR=
+# The launch-environment section below births its own servers on their own
+# private sockets, so they are tracked and torn down here too.
+EXTRA_SOCKETS=
+EXTRA_DIR=
 trap cleanup_all EXIT
 
 cleanup_all() {
+  local extra
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  for extra in ${EXTRA_SOCKETS:-}; do
+    "$REAL_TMUX" -L "$extra" kill-server >/dev/null 2>&1 || true
+  done
+  [ -n "${EXTRA_DIR:-}" ] && rm -rf "$EXTRA_DIR"
   [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
 }
 
@@ -169,5 +183,139 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- container_ensure's server-birth launch environment ---------------------
+#
+# A secondmate or agent can launch firstmate under NO_COLOR=1. Outside tmux
+# with no server running, fm_backend_tmux_container_ensure's `new-session`
+# BIRTHS the server, which hands its startup environment to every window
+# created afterwards, and NO_COLOR is not in tmux's default
+# `update-environment` set, so a later client attach cannot repair it.
+#
+# The control half proves that inheritance is real before the fixed half
+# claims to have blocked it. Both use their own private sockets, because the
+# section above already birthed this file's main server.
+
+EXTRA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke-env.XXXXXX")
+
+# The launcher environment an agent-started firstmate can carry, plus one
+# unrelated variable that must survive any scrub.
+pollute_color_env() {
+  unset TMUX
+  export NO_COLOR=1 FORCE_COLOR=0 CLICOLOR=0 CLICOLOR_FORCE=1 FM_TMUX_LAUNCH_SENTINEL=kept
+}
+
+# A `tmux` shim bound to <socket>, so bin/backends/tmux.sh's bare `tmux ...`
+# calls reach that private server rather than this file's or the host's.
+# Each caller registers its socket in EXTRA_SOCKETS itself, because this
+# function is used in command substitution and an assignment here would die
+# with that subshell, leaving the server it births alive after cleanup.
+make_socket_shim() {  # <socket> -> prints the shim dir
+  local sock=$1 dir="$EXTRA_DIR/shim-$1"
+  mkdir -p "$dir"
+  cat > "$dir/tmux" <<SH
+#!/usr/bin/env bash
+exec "$REAL_TMUX" -L "$sock" "\$@"
+SH
+  chmod +x "$dir/tmux"
+  printf '%s' "$dir"
+}
+
+# The real environment of a window created on <socket>'s server - the same
+# inheritance every crew window gets.
+birthed_window_env() {  # <socket> -> prints that window's environment
+  local sock=$1 out="$EXTRA_DIR/env-$1.txt" i=0
+  # Drop any previous probe's output for this socket first: otherwise a second
+  # probe can read the stale file before the new window truncates it and prove
+  # nothing about the window it just created.
+  rm -f "$out"
+  "$REAL_TMUX" -L "$sock" new-window -d -t firstmate: "env > '$out'" \
+    || fail "could not create the environment probe window on socket $sock"
+  while [ "$i" -lt 100 ]; do
+    [ -s "$out" ] && { cat "$out"; return 0; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "the environment probe window on socket $sock never reported"
+}
+
+CONTROL_SOCKET="fm-backend-smoke-control-$$"
+EXTRA_SOCKETS="$EXTRA_SOCKETS ${CONTROL_SOCKET}"
+control_shim=$(make_socket_shim "$CONTROL_SOCKET")
+(
+  pollute_color_env
+  # shellcheck disable=SC2030,SC2031  # scoping the shim to this subshell is the point
+  export PATH="$control_shim:$PATH"
+  tmux new-session -d -s firstmate
+) || fail "control: could not birth a tmux server under the polluted environment"
+control_env=$(birthed_window_env "$CONTROL_SOCKET") \
+  || fail "control: the environment probe on socket $CONTROL_SOCKET failed"
+case "$control_env" in
+  *NO_COLOR=1*) : ;;
+  *) fail "control: this tmux does not propagate NO_COLOR from the birth environment, so the assertions below prove nothing" ;;
+esac
+pass "real tmux: an unscrubbed server birth really does hand NO_COLOR to every later window"
+
+FIXED_SOCKET="fm-backend-smoke-fixed-$$"
+EXTRA_SOCKETS="$EXTRA_SOCKETS ${FIXED_SOCKET}"
+fixed_shim=$(make_socket_shim "$FIXED_SOCKET")
+ensured=$(
+  pollute_color_env
+  # shellcheck disable=SC2030,SC2031  # scoping the shim to this subshell is the point
+  export PATH="$fixed_shim:$PATH"
+  fm_backend_tmux_container_ensure
+) || fail "fm_backend_tmux_container_ensure failed under a color-polluted launcher environment"
+[ "$ensured" = firstmate ] || fail "container_ensure should echo 'firstmate', got '$ensured'"
+
+fixed_env=$(birthed_window_env "$FIXED_SOCKET") \
+  || fail "container_ensure: the environment probe on socket $FIXED_SOCKET failed"
+for name in NO_COLOR FORCE_COLOR CLICOLOR CLICOLOR_FORCE; do
+  case "$fixed_env" in
+    *"$name"=*) fail "container_ensure leaked $name into the long-lived tmux server it birthed" ;;
+  esac
+done
+case "$fixed_env" in
+  *FM_TMUX_LAUNCH_SENTINEL=kept*) : ;;
+  *) fail "container_ensure removed an unrelated launch environment variable" ;;
+esac
+pass "real tmux: fm_backend_tmux_container_ensure scrubs color control from the server it births, leaving unrelated launch environment intact"
+
+# Reuse is only reuse if it is the SAME server under the SAME scrubbed
+# environment: a restart (defeating this PR's scrub state) or a color variable
+# leaking into the windows the server hands out afterwards would still echo
+# 'firstmate'. Record the server pid before the second call so a restart is
+# visible, then probe a fresh window's environment exactly like the first-birth
+# loop above.
+server_pid_before=$("$REAL_TMUX" -L "$FIXED_SOCKET" display-message -p '#{pid}') \
+  || fail "could not read the tmux server pid on socket $FIXED_SOCKET before the reuse call"
+reused=$(
+  pollute_color_env
+  # shellcheck disable=SC2030,SC2031  # scoping the shim to this subshell is the point
+  export PATH="$fixed_shim:$PATH"
+  fm_backend_tmux_container_ensure
+) || fail "a second container_ensure against the existing session failed"
+[ "$reused" = firstmate ] || fail "the reuse path should echo 'firstmate', got '$reused'"
+server_pid_after=$("$REAL_TMUX" -L "$FIXED_SOCKET" display-message -p '#{pid}') \
+  || fail "could not read the tmux server pid on socket $FIXED_SOCKET after the reuse call"
+[ "$server_pid_after" = "$server_pid_before" ] \
+  || fail "the reuse call restarted the tmux server (pid $server_pid_before -> $server_pid_after)"
+pass "real tmux: a second container_ensure reuses the existing session instead of birthing another server"
+
+reused_env=$(birthed_window_env "$FIXED_SOCKET") \
+  || fail "the reuse path's environment probe on socket $FIXED_SOCKET failed"
+[ -n "$reused_env" ] \
+  || fail "the reuse path's environment probe on socket $FIXED_SOCKET reported no environment"
+for name in NO_COLOR FORCE_COLOR CLICOLOR CLICOLOR_FORCE; do
+  case "$reused_env" in
+    *"$name"=*) fail "the reuse path let $name into the environment inherited by later windows" ;;
+  esac
+done
+pass "real tmux: the reuse path leaves the scrubbed server environment clean for windows born after it"
+
 cleanup_all
+for sock in "$CONTROL_SOCKET" "$FIXED_SOCKET"; do
+  if "$REAL_TMUX" -L "$sock" list-sessions >/dev/null 2>&1; then
+    fail "cleanup left the tmux server on socket $sock running"
+  fi
+done
+pass "real tmux: cleanup kills every private server this test births"
 trap - EXIT
