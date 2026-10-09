@@ -26,6 +26,18 @@ Do not wait for `/stow` to create the first durable candidate.
 Decide whether the evidence is likely to change a later intake, diagnosis, or bounded execution choice beyond this one task.
 If it is not reusable, leave the task report as ordinary evidence and do not add a candidate.
 
+### Asynchronous identity-continuation pilot disposition
+
+For the asynchronous execution-identity continuation pilot, record one capture disposition in the owning task report for every trigger above, including when no candidate is created.
+Use one `## Experience capture dispositions` section with a compact table containing the stable event key, accepted event and evidence locator, disposition, and reason.
+The disposition is exactly one of `candidate:<id>`, `reason-not-reusable`, or `evidence-pending`.
+An accepted success, an accepted reliable correction, or a validated negative lesson from a failed path may use `candidate:<id>` when the evidence is reusable; keep the candidate's execution outcome truthful and never turn a failed or uncertain execution into success.
+Use `reason-not-reusable` when the accepted event adds no lesson beyond this task, and `evidence-pending` when acceptance or the reusable claim still lacks required evidence.
+The event key is derived from the accepted event and evidence identity rather than the handling attempt.
+Repeated handling updates the same disposition row and the same stable candidate id, if any, instead of appending another row, section, or candidate block.
+When a pilot disposition creates or updates a candidate, keep the v1 stable `data/<task-id>/report.md` evidence reference and exclude absolute worktree or transient fixture paths.
+This pilot record is a coverage receipt, not another candidate schema, and does not promote or activate a rule.
+
 When the report owner is still active and the existing task scope permits evidence maintenance, steer that owner to update the report before acceptance.
 Otherwise Firstmate may maintain this private task evidence directly without changing project code or the task record.
 Never create a parallel candidate file when the report can hold the candidate.
@@ -220,7 +232,23 @@ Honcho may supplement discovery only when an already available official Honcho t
 Treat a Honcho result only as a lead to a local report path and repeat the local report readback above before using the claim.
 If Honcho is absent, unavailable, or cannot resolve a local source, continue with local lookup without blocking and do not copy its data into another store.
 
-### 4. Empty result fallback
+### 4. Hand off and record pilot consumption
+
+For an asynchronous execution-identity continuation pilot task, MAIN may put at most three originally verified applicable experience pointers in the ordinary brief's existing `## Firstmate spec`.
+Each pointer states the candidate id and version, owning report and evidence locators, claim, applicability and anti-conditions, authority available in the present task, and the explicit boundary between the present execution identity and every historical identity.
+Use the existing spec slot; do not copy full report evidence into the brief or treat the pointer as authority to submit, replay, cancel, request permission, or change an asset.
+
+The worker reads every pointed-to original evidence locator before acting and records observable use or refusal in the destination task report.
+Use one `## Experience consumption` section with a compact table containing current conditions; candidate id, version, and source locator; adopted or rejected reason; original evidence read; observable worker action; actual goal acceptance; and side effects.
+Record the current execution identity only in this destination report.
+Historical identities remain evidence and must never be substituted for the current identity.
+When there is no current identity, or region, permission, carrier, surface, or another evidenced condition mismatches, record refusal and perform no submit, replay, cancellation, or asset mutation.
+Preserve both source pointers for unresolved conflicts, qualify unknown evidence as unknown, and reject revoked or unverified candidates as applicable facts.
+An older report with no consumption record is `unknown`, never proof that no experience was used.
+Repeated handling of the same current task and candidate version updates the same row rather than adding another consumption artifact.
+MAIN retains final applicability judgment and semantic acceptance of the current task; a worker action, provider success, or model self-rating does not establish goal acceptance by itself.
+
+### 5. Empty result fallback
 
 If no structured candidate matches, search ordinary `report.md` files with the same exact-entity and tool-plus-symptom routes and read only the small set of likely reports.
 Use the following locator to score every matching path before keeping eight for evidence readback.

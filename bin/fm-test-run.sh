@@ -337,7 +337,7 @@ family_for_basename() {
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-profile-array-dispatch-live-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|fm-stow-local-skill-live-e2e.test.sh|\
-    fm-readable-documents-live-e2e.test.sh)
+    fm-readable-documents-live-e2e.test.sh|fm-experience-evidence-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend.test.sh|fm-retired-backends.test.sh|\
@@ -623,6 +623,7 @@ tests/fm-composer-matrix-live-e2e.test.sh 23
 tests/fm-control-relaunch.test.sh 48210
 tests/fm-control.test.sh 54301
 tests/fm-documentation-audiences.test.sh 732
+tests/fm-experience-evidence-live-e2e.test.sh 25
 tests/fm-feishu-channel.test.sh 3500
 tests/fm-feishu-processed-cleanup.test.sh 1000
 tests/fm-extension-binding.test.sh 7398
@@ -1461,6 +1462,10 @@ families_for_changed_path() {
     .agents/skills/profile-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    .agents/skills/experience-evidence/SKILL.md)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' __script__:fm-experience-evidence-live-e2e.test.sh
       ;;
     .agents/skills/harness-adapters/SKILL.md|.agents/skills/harness-adapters/references/*)
       printf '%s\n' pure-contract-unit
