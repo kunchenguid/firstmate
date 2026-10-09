@@ -2475,15 +2475,19 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
     state=$("$state_fn" "$target" "$expected_label")
     # The first Enter can open a picker. A later Enter would confirm it.
     if fm_composer_blocking_dialog_noted >/dev/null; then
-      printf 'unknown'
-      return 0
+      state=unknown
     fi
     case "$state" in
-      pending|pending-unproven) ;;
-      *) printf '%s' "$state"; return 0 ;;
+      pending|pending-unproven)
+        i=$((i + 1))
+        [ "$i" -ge "$retries" ] || continue
+        ;;
     esac
-    i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf '%s' "$state"; return 0; }
+    if [ "$state" != empty ] && [ -n "$resolved_target_var" ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+      state=inbox-deferred
+    fi
+    printf '%s' "$state"
+    return 0
   done
 }
 

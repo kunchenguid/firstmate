@@ -378,7 +378,7 @@ fm_backend_orca_resolve_live_terminal() {  # <stale-terminal-id>
 }
 
 fm_backend_orca_check_replacement() {
-  local cap dialog cstate
+  local cap dialog cstate action=${2:-literal}
   if ! cap=$(fm_backend_orca_composer_capture "$1" 2>/dev/null); then
     if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
       FM_ORCA_RESOLVED_TERMINAL=$1
@@ -395,7 +395,13 @@ fm_backend_orca_check_replacement() {
     # The old endpoint's advisory read cannot authorize replacement input.
     # Unknown content must wait for a later ring, never receive text or Enter.
     case "$cstate" in
-      empty|pending) ;;
+      empty)
+        if [ "$action" = enter ]; then
+          FM_ORCA_RESOLVED_TERMINAL=$1
+          return 4
+        fi
+        ;;
+      pending) ;;
       *) FM_ORCA_RESOLVED_TERMINAL=$1; return 4 ;;
     esac
     if printf '%s' "$cap" | fm_busy_lines_match \
@@ -562,7 +568,7 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
       case "$key" in
         Enter|enter)
           check_rc=0
-          fm_backend_orca_check_replacement "$live" || check_rc=$?
+          fm_backend_orca_check_replacement "$live" enter || check_rc=$?
           case "$check_rc" in 0|2) ;; *) return "$check_rc" ;; esac
           ;;
       esac

@@ -4,70 +4,103 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-orca-submit-restart)
 
-for mode in draft busy unreadable failure success; do
-  mkdir -p "$TMP_ROOT/$mode"
-  out=$(bash -c '
-    . "$1/bin/backends/orca.sh"
-    . "$1/bin/fm-task-inbox-lib.sh"
-    mode=$2
-    evidence=$3
-    fm_backend_orca_tool_check() { return 0; }
-    fm_backend_orca_send_literal() {
-      FM_ORCA_RESOLVED_TERMINAL=
-      printf "%s" "$2" > "$evidence/typed"
-    }
-    fm_backend_orca_send_key_once() {
-      printf "%s\n" "$1" >> "$evidence/enters"
-      if [ "$1" = old ]; then
+for order in before-text before-enter pending second-enter; do
+  for mode in empty draft busy unreadable failure success unknown-after pending-after; do
+    evidence="$TMP_ROOT/$order-$mode"
+    mkdir -p "$evidence"
+    case "$mode" in
+      draft) printf 'protected draft' > "$evidence/composer" ;;
+      empty|unreadable) : > "$evidence/composer" ;;
+      *) printf doorbell > "$evidence/composer" ;;
+    esac
+    out=$(bash -c '
+      . "$1/bin/backends/orca.sh"
+      . "$1/bin/fm-task-inbox-lib.sh"
+      order=$2 mode=$3 evidence=$4
+      fm_backend_orca_tool_check() { return 0; }
+      stale() {
         FM_ORCA_LAST_STDERR=terminal_handle_stale
         FM_ORCA_LAST_STDOUT=
         FM_ORCA_LAST_RC=1
         return 1
-      fi
-      if [ "$mode" = failure ]; then
-        FM_ORCA_LAST_RC=1
-        return 1
-      fi
-    }
-    fm_backend_orca_resolve_live_terminal() { printf live; }
-    fm_backend_orca_composer_capture() {
-      printf "%s\n" "$1" >> "$evidence/reads"
-      [ "$1" = live ] || return 1
-      [ "$mode" != unreadable ] || return 1
-      if [ "$mode" = draft ]; then
-        printf "❯ protected draft\n"
-      else
-        printf "❯\n"
-      fi
-    }
-    fm_backend_agent_state() { printf idle; }
-    fm_backend_busy_state() {
-      if [ "$mode" = busy ]; then printf busy; else printf idle; fi
-    }
-    fm_busy_lines_match() { return 1; }
-    fm_backend_composer_state() { printf empty; }
-    fm_task_inbox_doorbell_line() { printf doorbell; }
-    fm_task_inbox_composer_holds() { return 1; }
-    fm_backend_send_text_submit() {
-      shift
-      fm_backend_orca_send_text_submit "$@"
-    }
-    rc=0
-    fm_task_inbox_ring orca old record || rc=$?
-    printf "%s" "$rc"
-  ' bash "$ROOT" "$mode" "$TMP_ROOT/$mode")
-  case "$mode" in
-    draft|busy|unreadable) expected=1 ;;
-    failure) expected=2 ;;
-    success) expected=0 ;;
-  esac
-  [ "$out" = "$expected" ] || fail "$mode: expected ring status $expected, got $out"
-  [ "$(cat "$TMP_ROOT/$mode/typed")" = doorbell ] || fail "$mode: text was not accepted once"
-  if [ "$mode" = success ]; then
-    [ "$(cat "$TMP_ROOT/$mode/enters")" = $'old\nlive' ] || fail "replacement Enter was not sent"
-    [ "$(cat "$TMP_ROOT/$mode/reads")" = $'live\nlive' ] || fail "verification did not read the replacement"
-  elif [ "$mode" != failure ]; then
-    [ "$(cat "$TMP_ROOT/$mode/enters")" = old ] || fail "$mode: protected replacement received Enter"
-  fi
+      }
+      fm_backend_orca_attempt() {
+        local terminal=$5 text=$7
+        printf "%s text\n" "$terminal" >> "$evidence/inputs"
+        if [ "$terminal" = old ] && [ "$order" = before-text ]; then stale; return 1; fi
+        if [ "$terminal" = live ]; then printf "%s" "$text" >> "$evidence/composer"; fi
+        printf "%s\n" "$terminal" >> "$evidence/typed"
+      }
+      fm_backend_orca_send_key_once() {
+        printf "%s Enter\n" "$1" >> "$evidence/inputs"
+        if [ "$1" = old ]; then
+          if [ "$order" = second-enter ] && [ ! -f "$evidence/first-enter" ]; then
+            touch "$evidence/first-enter"
+            return 0
+          fi
+          stale
+          return 1
+        fi
+        if [ "$mode" = failure ]; then FM_ORCA_LAST_RC=1; return 1; fi
+        cat "$evidence/composer" >> "$evidence/submitted"
+        [ "$mode" = pending-after ] || : > "$evidence/composer"
+      }
+      fm_backend_orca_resolve_live_terminal() { printf live; }
+      fm_backend_orca_composer_capture() {
+        local body rule
+        printf "%s\n" "$1" >> "$evidence/reads"
+        if [ "$1" = old ]; then
+          body=doorbell
+        else
+          [ "$mode" != unreadable ] || return 1
+          if [ "$mode" = unknown-after ] && [ -f "$evidence/submitted" ]; then return 1; fi
+          body=$(cat "$evidence/composer")
+        fi
+        printf -v rule "%*s" "$((${#body} + 4))" ""
+        rule=${rule// /─}
+        printf "╭%s╮\n│ > %s │\n╰%s╯\n" "$rule" "$body" "$rule"
+      }
+      fm_backend_agent_state() { printf idle; }
+      fm_backend_busy_state() {
+        if [ "$mode" = busy ] && [ "$2" = live ]; then printf busy; else printf idle; fi
+      }
+      fm_busy_lines_match() { return 1; }
+      fm_backend_composer_state() {
+        if [ "$2" = old ] && { [ "$order" = before-text ] || [ "$order" = before-enter ]; }; then
+          printf empty
+        else
+          fm_backend_orca_composer_state "$2"
+        fi
+      }
+      fm_backend_capture() { fm_backend_orca_composer_capture "$2"; }
+      fm_backend_source() { return 0; }
+      fm_task_inbox_doorbell_line() { printf doorbell; }
+      fm_backend_send_key() { shift; fm_backend_orca_send_key "$@"; }
+      fm_backend_send_text_submit() { shift; fm_backend_orca_send_text_submit "$@"; }
+      rc=0
+      fm_task_inbox_ring orca old record || rc=$?
+      printf "%s" "$rc"
+    ' bash "$ROOT" "$order" "$mode" "$evidence")
+    expected=1
+    case "$mode" in
+      failure) expected=2 ;;
+      success) expected=0 ;;
+      empty) [ "$order" != before-text ] || expected=0 ;;
+    esac
+    [ "$out" = "$expected" ] || fail "$order/$mode: expected status $expected, got $out"
+    if [ "$expected" = 0 ]; then
+      [ "$(cat "$evidence/submitted")" = doorbell ] || fail "$order/$mode: own doorbell was not submitted exactly once"
+      [ ! -s "$evidence/composer" ] || fail "$order/$mode: composer did not clear"
+      [ "$(tail -n 1 "$evidence/reads")" = live ] || fail "$order/$mode: verification missed the replacement"
+    fi
+    case "$mode" in
+      empty|draft|busy|unreadable)
+        if [ "$mode" != empty ] || [ "$order" != before-text ]; then
+          [ ! -f "$evidence/submitted" ] || fail "$order/$mode: protected replacement was submitted"
+          assert_not_contains "$(cat "$evidence/inputs")" "live Enter" "$order/$mode: replacement received bare Enter"
+        fi
+        ;;
+    esac
+  done
 done
-pass "Orca submit restart preserves deferral, failure, and replacement verification"
+pass "Orca restart orders require own doorbell submission or defer"
