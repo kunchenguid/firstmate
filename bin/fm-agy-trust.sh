@@ -9,7 +9,7 @@
 #   <project>   the primary checkout that worktree belongs to
 #   [agy-bin]   selected executable; required to resolve Windows agy under WSL
 # Native launches (including an omitted agy-bin) use
-# ${HOME}/.gemini/antigravity-cli/settings.json and Linux worktree paths.
+# ${HOME}/.gemini/antigravity-cli/settings.json and native worktree paths.
 # A selected PE executable uses %USERPROFILE%\.gemini\antigravity-cli\settings.json
 # and wslpath-translated Windows/UNC worktree paths, not the Linux store.
 # Resolve cmd.exe from PATH, then the conventional C:\Windows\System32 path
