@@ -45,6 +45,7 @@ make_case() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=direct-PR"
+  printf 'no_issue=1\n' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' \
     'state=MERGED' \
     'merged=true' \
@@ -149,12 +150,14 @@ case "${1:-} ${2:-}" in
         fi
         exit 0
         ;;
+      *"baseRefName"*) sed -n 's/^base=//p' "$FM_TEST_GH_OUTCOME"; exit 0 ;;
       *headRefOid*)
         cat "$FM_TEST_GH_HEAD"
         exit 0
         ;;
     esac
     ;;
+  "repo view") sed -n 's/^base=//p' "$FM_TEST_GH_OUTCOME"; exit 0 ;;
   "pr merge")
     if [ -n "${FM_TEST_META_AT_MERGE:-}" ] && [ -f "${FM_STATE_OVERRIDE:-}/task-x1.meta" ]; then
       cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"

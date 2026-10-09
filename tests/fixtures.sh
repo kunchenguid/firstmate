@@ -243,10 +243,27 @@ make_spawn_fakebin() {
 # CLAUDE_CONFIG_DIR, ...) are inherited. FM_TEST_PROJECTS_OVERRIDE can replace
 # the default projects directory for a case that exercises path resolution.
 # Does not add --mode/--yolo; ship tests that need a delivery contract pass those
-# flags themselves.
+# flags themselves. A direct-PR fixture without an issue-specific assertion gets
+# the explicit --no-issue opt-out so its test remains focused on its own contract.
 fm_test_run_spawn() {
-  local home=$1 pane=$2 fakebin=$3
+  local home=$1 pane=$2 fakebin=$3 direct_pr=0 issue_choice=0 expect_mode=0 arg
   shift 3
+  for arg in "$@"; do
+    if [ "$expect_mode" = 1 ]; then
+      [ "$arg" != direct-PR ] || direct_pr=1
+      expect_mode=0
+      continue
+    fi
+    case "$arg" in
+      --mode) expect_mode=1 ;;
+      --mode=direct-PR) direct_pr=1 ;;
+      --issue|--issue=*|--no-issue) issue_choice=1 ;;
+    esac
+  done
+  if [ "$direct_pr" = 1 ] && [ "$issue_choice" = 0 ] \
+    && [ "${FM_TEST_SPAWN_ADD_NO_ISSUE:-1}" != 0 ]; then
+    set -- "$@" --no-issue
+  fi
   # Claude and Codex spawns pre-register trust in the launching user's own
   # vendor store, so every spawn here runs against a throwaway HOME; without it
   # a suite could write the developer's real ~/.claude.json or Codex config.

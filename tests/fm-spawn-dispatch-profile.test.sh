@@ -70,6 +70,20 @@ make_spawn_case() {
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
 
+install_fake_github_origin() {
+  local fakebin=$1 real_git
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$#" -eq 5 ] && [ "\$1" = -C ] && [ "\$3" = remote ] && [ "\$4" = get-url ] && [ "\$5" = origin ]; then
+  printf '%s\\n' "\$FM_TEST_GITHUB_ORIGIN"
+  exit 0
+fi
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fakebin/git"
+}
+
 enable_dispatch_profile() {
   local home=$1
   printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
@@ -103,7 +117,7 @@ run_spawn() {
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
-  run_spawn "$@" --mode direct-PR --yolo off
+  run_spawn "$@" --mode direct-PR --yolo off --no-issue
 }
 
 read_case_record() {
@@ -170,7 +184,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with relative home overrides should succeed"
@@ -199,7 +213,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$relative_id" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1
+      "$SPAWN" "$relative_id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with relative FM_HOME defaults should succeed"
@@ -219,7 +233,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1
+      "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed"
@@ -247,7 +261,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled overrides should succeed"
@@ -269,7 +283,7 @@ test_unresolvable_relative_overrides_fail_loudly() {
     cd "$CASE_DIR" || exit 1
     FM_ROOT_OVERRIDE='' FM_HOME=missing-home \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue 2>&1
   )
   status=$?
   expect_code 1 "$status" "spawn with an unresolvable relative home should fail"
@@ -280,7 +294,7 @@ test_unresolvable_relative_overrides_fail_loudly() {
     cd "$CASE_DIR" || exit 1
     FM_ROOT_OVERRIDE='' FM_HOME=home \
       FM_STATE_OVERRIDE=missing-state FM_DATA_OVERRIDE=home/data \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue 2>&1
   )
   status=$?
   expect_code 1 "$status" "spawn with an unresolvable relative state override should fail"
@@ -291,7 +305,7 @@ test_unresolvable_relative_overrides_fail_loudly() {
     cd "$CASE_DIR" || exit 1
     FM_ROOT_OVERRIDE='' FM_HOME=home \
       FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=missing-data \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue 2>&1
   )
   status=$?
   expect_code 1 "$status" "spawn with an unresolvable relative data override should fail"
@@ -657,7 +671,7 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
     rec=$(make_spawn_case "$id" "$harness" "$id")
     read_case_record "$rec"
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-      --harness "$harness" --model codex-native/gpt-6-astra --effort ultra --mode "$mode" --yolo off)
+      --harness "$harness" --model codex-native/gpt-6-astra --effort ultra --mode "$mode" --yolo off --no-issue)
     expect_code 0 "$?" "native Ultra spawn failed: $out"
     assert_meta_profile "$HOME_DIR/state/$id.meta" "$harness" codex-native/gpt-6-astra ultra
     launch=$(cat "$LAUNCH_LOG")
@@ -801,7 +815,7 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1)
+    "$SPAWN" "$id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue 2>&1)
   status=$?
   expect_code 1 "$status" "a missing pi-signed executable should refuse the spawn"
   assert_contains "$out" "pi-signed executable not found on PATH" \
@@ -1108,6 +1122,134 @@ test_malformed_project_memory_registry_refuses_spawn() {
   pass "malformed project-memory registry is reported before launch or task publication"
 }
 
+test_issue_linked_ship_is_assigned_and_recorded() {
+  local rec id out status issue_url
+  id=issue-pickup-r1
+  issue_url=https://github.com/example/project/issues/43
+  rec=$(make_spawn_case issue-pickup codex "$id")
+  read_case_record "$rec"
+  install_fake_github_origin "$FAKEBIN_DIR"
+  printf 'morecoffeyplease\n' > "$HOME_DIR/config/github-operator-login"
+  cat > "$FAKEBIN_DIR/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_ASSIGN_LOG"
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/gh"
+  out=$(FM_TEST_ASSIGN_LOG="$CASE_DIR/assign.log" FM_TEST_GITHUB_ORIGIN=ssh://git@github.com/example/project.git \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --mode direct-PR --yolo off --issue "$issue_url")
+  status=$?
+  expect_code 0 "$status" "issue-linked ship spawn should succeed: $out"
+  assert_grep 'issue edit https://github.com/example/project/issues/43 --add-assignee morecoffeyplease' "$CASE_DIR/assign.log" \
+    "issue pickup did not assign the configured GitHub login"
+  assert_grep 'issue=https://github.com/example/project/issues/43' "$HOME_DIR/state/$id.meta" \
+    "spawn task record omitted its GitHub issue URL"
+  pass "issue-linked ship pickup assigns the configured login and records the issue URL"
+}
+
+test_direct_pr_requires_an_issue_or_explicit_opt_out_for_codex_and_claude() {
+  local harness rec id out status
+  for harness in codex claude; do
+    id="missing-issue-$harness-r1"
+    rec=$(make_spawn_case "missing-issue-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(FM_TEST_SPAWN_ADD_NO_ISSUE=0 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode direct-PR --yolo off)
+    status=$?
+    expect_code 1 "$status" "$harness direct-PR without an issue should be refused: $out"
+    assert_contains "$out" 'require --issue' "$harness refusal did not name the missing issue requirement"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$harness missing-issue refusal published task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$harness missing-issue refusal launched a worker"
+  done
+  pass "Codex and Claude direct-PR ships refuse missing issues before launch or task publication"
+}
+
+test_no_issue_opt_out_and_local_only_issue_rules() {
+  local rec id out status
+  id=no-issue-opt-out-r1
+  rec=$(make_spawn_case no-issue-opt-out codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode direct-PR --yolo off --no-issue)
+  status=$?
+  expect_code 0 "$status" "explicit no-issue opt-out should allow direct-PR spawn: $out"
+  assert_grep 'no_issue=1' "$HOME_DIR/state/$id.meta" "explicit opt-out was not recorded in task metadata"
+
+  id=local-only-issue-r1
+  rec=$(make_spawn_case local-only-issue codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode local-only --yolo off --issue https://github.com/example/project/issues/43)
+  status=$?
+  expect_code 1 "$status" "local-only ship should refuse --issue: $out"
+  assert_contains "$out" 'apply only to direct-PR' "local-only issue refusal was not specific"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "local-only issue refusal published task metadata"
+  pass "the explicit no-issue opt-out is recorded and local-only ships reject issue flags"
+}
+
+test_issue_assignment_failure_stops_before_worktree_allocation() {
+  local rec id issue_url out status
+  id=issue-assignment-failure-r1
+  issue_url=https://github.com/example/project/issues/43
+  rec=$(make_spawn_case issue-assignment-failure codex "$id")
+  read_case_record "$rec"
+  install_fake_github_origin "$FAKEBIN_DIR"
+  printf 'morecoffeyplease\n' > "$HOME_DIR/config/github-operator-login"
+  cat > "$FAKEBIN_DIR/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_ASSIGN_LOG"
+exit 1
+SH
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'treehouse invoked\n' >> "$FM_TEST_TREEHOUSE_LOG"
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/gh" "$FAKEBIN_DIR/treehouse"
+  out=$(FM_TEST_ASSIGN_LOG="$CASE_DIR/assign.log" FM_TEST_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_TEST_GITHUB_ORIGIN=https://github.com/example/project.git \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --mode direct-PR --yolo off --issue "$issue_url")
+  status=$?
+  expect_code 1 "$status" "a failed issue assignment should refuse the spawn: $out"
+  assert_contains "$out" 'could not assign GitHub issue' "assignment failure did not explain the refusal"
+  [ ! -e "$CASE_DIR/treehouse.log" ] || fail "failed issue assignment reached worktree allocation"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "failed issue assignment published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "failed issue assignment launched a worker"
+  pass "a failed issue assignment stops before worktree, metadata, or launch side effects"
+}
+
+test_issue_repo_must_match_project_github_origin() {
+  local rec id out status
+  id=issue-repo-mismatch-r1
+  rec=$(make_spawn_case issue-repo-mismatch codex "$id")
+  read_case_record "$rec"
+  install_fake_github_origin "$FAKEBIN_DIR"
+  printf 'morecoffeyplease\n' > "$HOME_DIR/config/github-operator-login"
+  out=$(FM_TEST_ASSIGN_LOG="$CASE_DIR/assign.log" FM_TEST_GITHUB_ORIGIN=https://github.com/example/another-project.git \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --mode direct-PR --yolo off --issue https://github.com/example/project/issues/43)
+  status=$?
+  expect_code 1 "$status" "an issue from a different repository should be refused: $out"
+  assert_contains "$out" 'does not match project GitHub origin' "repository mismatch refusal was not specific"
+  [ ! -e "$CASE_DIR/assign.log" ] || fail "repository mismatch attempted to assign the issue"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "repository mismatch published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "repository mismatch launched a worker"
+  pass "issue-linked spawn refuses an issue from a different GitHub repository before assignment"
+}
+
+test_issue_is_refused_in_batch_mode() {
+  local rec id out status
+  id=issue-batch-r1
+  rec=$(make_spawn_case issue-batch codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id=$PROJ_DIR" "${id}-two=$PROJ_DIR" \
+    --mode direct-PR --yolo off --issue https://github.com/example/project/issues/43)
+  status=$?
+  expect_code 1 "$status" "issue-linked batch spawn should be refused: $out"
+  assert_contains "$out" 'cannot be applied to a batch' "batch issue refusal was not specific"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "issue batch refusal published task metadata"
+  pass "issue-linked tasks must be spawned individually"
+}
+
 # Execute the actual emitted command in a synthetic pane environment: the
 # fake backend records delivery, while real shells exercise the env boundary.
 # No developer environment or credential values are inspected by these probes.
@@ -1363,6 +1505,8 @@ SH
     chmod +x "$FAKEBIN_DIR/codex"
     if [ "$kind" = scout ]; then
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    elif [ "$kind" = direct-PR ]; then
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off --no-issue)
     else
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off)
     fi
@@ -1550,5 +1694,11 @@ test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_project_memory_claude_settings_and_codex_brief
 test_malformed_project_memory_registry_refuses_spawn
+test_issue_linked_ship_is_assigned_and_recorded
+test_direct_pr_requires_an_issue_or_explicit_opt_out_for_codex_and_claude
+test_no_issue_opt_out_and_local_only_issue_rules
+test_issue_assignment_failure_stops_before_worktree_allocation
+test_issue_repo_must_match_project_github_origin
+test_issue_is_refused_in_batch_mode
 
 echo "# all fm-spawn-dispatch-profile tests passed"
