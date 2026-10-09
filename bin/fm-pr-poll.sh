@@ -7,9 +7,9 @@
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit branch
-# additionally needs jq, which bin/fm-pr-check.sh refuses to arm a Gerrit watch
-# without.
+# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
+# branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
+# watches without.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -192,6 +192,7 @@ case "$provider" in
     done
     [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
     command -v tea >/dev/null 2>&1 || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
     # tea addresses a repo by slug only; the host comes from a named login
     # rather than a URL the way gh and glab take one, so the login registered
     # for this exact host is resolved fresh on every poll rather than trusted
@@ -211,16 +212,18 @@ case "$provider" in
       '
     ) || exit 0
     [ -n "$login" ] || exit 0
-    # tea has no single-PR field selector: "tea pulls <n>" always renders a
-    # free-text detail view regardless of -f/-o, so the list form is used
-    # instead and filtered to the one matching index. A repo with more open
-    # and closed pull requests than this limit can page past a very old one;
-    # that PR then stays silently unmerged here until it is inside the window,
-    # which is the same fail-safe-silent behavior as every other error above.
-    raw=$(tea pulls list --login "$login" --repo "$owner/$repo" --state all \
-      -f index,state -o csv --limit 50 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | awk -F, -v n="$number" 'NR > 1 && $1 == n { print $2 }')
-    [ "$state" = merged ] && printf '%s\n' merged
+    # tea's single-PR view ignores field selection, so the one pull request
+    # is read by number from the REST record through "tea api", which keeps
+    # the credential inside tea. "tea api" exits 0 on an HTTP error with the
+    # error body as output, so only a boolean merged field of true wakes this
+    # poll and every other reading stays silent.
+    merged=$(tea api --login "$login" --repo "$owner/$repo" \
+      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
+        if type == "object" and (.merged | type) == "boolean"
+        then .merged | tostring
+        else error("invalid pull request record")
+        end' 2>/dev/null) || exit 0
+    [ "$merged" = true ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

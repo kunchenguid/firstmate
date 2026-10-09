@@ -1995,6 +1995,64 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
 # merge request into a merge. Its evidence against the public fixture project
 # https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
 # docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
+# A Forgejo pull request is followed by number through "tea api" on the one
+# login registered for its host. Only a boolean merged field of true wakes the
+# poll: tea api exits 0 on an HTTP error with the error body as output, so an
+# error body, an unmerged record, a tea failure, and an ambiguous login all
+# stay silent, and the read never depends on how many newer pull requests the
+# repository has.
+test_forgejo_merge_watch() {
+  local dir state out url value
+  dir=$(make_case forgejo-merge-watch)
+  state="$dir/home/state"
+  url=https://forgejo.example/o/r/pulls/7
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[\n'
+  printf '  {\n    "name": "main",\n    "url": "https://forgejo.example"\n  }'
+  if [ -n "${FM_TEST_TEA_SECOND_LOGIN:-}" ]; then
+    printf ',\n  {\n    "name": "other",\n    "url": "https://forgejo.example"\n  }'
+  fi
+  printf '\n]\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+[ -z "${FM_TEST_TEA_FAIL:-}" ] || exit 1
+case "${FM_TEST_TEA_PULL:-open}" in
+  merged) printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n' ;;
+  error) printf '{"message":"The target couldn'"'"'t be found.","url":"x"}\n' ;;
+  *) printf '{"state":"open","merged":false,"head":{"sha":"abc"}}\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tea"
+  ln -sf "$(command -v jq)" "$dir/fakebin/jq"
+  : > "$dir/tea.log"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" forgejo.example o/r 7 "$POLL" \
+    || fail "could not prepare a Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Forgejo poll"
+
+  for value in open error; do
+    out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=$value run_poll "$dir")
+    [ -z "$out" ] || fail "Forgejo poll emitted for a $value reading"
+  done
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged FM_TEST_TEA_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted after a tea failure"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged FM_TEST_TEA_SECOND_LOGIN=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted with an ambiguous tea login"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
+
+  grep -qF -- "api --login main --repo o/r /repos/{owner}/{repo}/pulls/7" "$dir/tea.log" \
+    || fail "the poll did not read the one pull request by number on the host's login"
+  ! grep -qF -- "pulls list" "$dir/tea.log" \
+    || fail "the poll scanned a pull request list instead of reading by number"
+  pass "Forgejo poll reads one pull request by number through tea api and wakes only on merged true"
+}
+
 test_gitlab_merge_watch() {
   local dir state out rc url value noglab entry bindir name
   dir=$(make_case gitlab-merge-watch)
@@ -3465,6 +3523,7 @@ SH
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_forgejo_merge_watch
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree

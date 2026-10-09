@@ -1081,6 +1081,86 @@ FIELDS
   FM_PR_RECORD_MERGED=$merged
 }
 
+# tea addresses a repo by slug only and takes the host from a named login, so
+# the one login registered for <host> is printed by name, and zero or several
+# matches fail rather than pick one. bin/fm-pr-poll.sh keeps its own copy of
+# this match because the watcher body sources nothing.
+fm_pr_forgejo_login() {  # <host>
+  command -v tea >/dev/null 2>&1 || return 1
+  tea login list --output json 2>/dev/null | awk -F'"' -v h="$1" '
+    /"name":/ { name = $4 }
+    /"url":/ {
+      u = $4
+      sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
+      sub(/\/.*$/, "", u)
+      sub(/:[0-9]+$/, "", u)
+      if (u == h) { print name; n++ }
+    }
+    END { exit (n == 1) ? 0 : 1 }
+  '
+}
+
+# The state, merged flag, and head commit of one Forgejo pull request, read
+# from the REST record through "tea api" so the credential never leaves tea.
+# "tea api" exits 0 on an HTTP error and prints the error body instead, so
+# only a record whose state, merged, and head.sha fields all have the expected
+# types is accepted; anything else returns 1 for an honest unknown.
+fm_pr_forgejo_read_record() {  # <host> <path> <number>
+  local host=$1 path=$2 number=$3 login json fields line
+  local total=0 named=0 state='' merged='' head=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  FM_PR_RECORD_HEAD=
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  login=$(fm_pr_forgejo_login "$host") || return 1
+  [ -n "$login" ] || return 1
+  if ! json=$(tea api --login "$login" --repo "$path" \
+      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null) || [ -z "$json" ]; then
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type) == "string" and .state != ""
+        and (.merged | type) == "boolean" and (.head.sha | type) == "string"
+      then
+        "state=" + .state,
+        "merged=" + (.merged | tostring),
+        "head=" + .head.sha
+      else
+        error("invalid pull request record")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      head=*) head=${line#head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail and bin/fm-teardown.sh.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+  # Consumed by bin/fm-teardown.sh pr_is_merged.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_HEAD=$head
+}
+
 # gerrit-axi resolves its server from the current directory's origin remote
 # first, so the host is passed explicitly from the parsed identity and a read
 # outside a clone still reaches the right server. A change number is

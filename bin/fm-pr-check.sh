@@ -100,8 +100,8 @@ if [ "$PROVIDER" = gerrit ]; then
   fi
 fi
 
-# Refuse to arm a Forgejo watch with no tea on PATH, for the same reason as
-# the GitLab case above. tea also addresses a repo by slug only, resolving the
+# Refuse to arm a Forgejo watch with no tea or jq on PATH, for the same reason
+# as the GitLab and Gerrit cases above. tea also addresses a repo by slug only, resolving the
 # host from a named "tea login" rather than from the URL the way gh and glab
 # do, so a poll can only ever succeed when exactly one registered login
 # matches this host; refuse now rather than watch something that can never
@@ -110,21 +110,11 @@ fi
 # dependency, so it re-derives the same match at every poll instead of
 # trusting a name recorded here.
 if [ "$PROVIDER" = forgejo ]; then
-  if ! command -v tea >/dev/null 2>&1; then
-    echo "error: watching a Forgejo pull request requires tea on PATH" >&2
+  if ! command -v tea >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching a Forgejo pull request requires tea and jq on PATH" >&2
     exit 1
   fi
-  tea login list --output json 2>/dev/null | awk -F'"' -v h="$HOST" '
-      /"name":/ { name = $4 }
-      /"url":/ {
-        u = $4
-        sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
-        sub(/\/.*$/, "", u)
-        sub(/:[0-9]+$/, "", u)
-        if (u == h) { print name; n++ }
-      }
-      END { exit (n == 1) ? 0 : 1 }
-    ' >/dev/null || {
+  fm_pr_forgejo_login "$HOST" >/dev/null || {
     echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
     exit 1
   }
