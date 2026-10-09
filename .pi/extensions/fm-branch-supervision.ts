@@ -763,6 +763,34 @@ export default function (pi: ExtensionAPI) {
   let branchProgressSnapshots: Record<string, string> = {};
   let branchEffectAuthorityNeeded = new Set<string>();
   let branchTaskObservations: Record<string, { key?: string; state?: string; reason?: string }> = {};
+  function compactActionReceipt(task: string, token: string): boolean {
+    try {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(task) || !/^[a-f0-9]{64}$/.test(token)) return false;
+      const meta = join(state, `${task}.meta`);
+      const metaStat = lstatSync(meta);
+      if (!metaStat.isFile() || metaStat.isSymbolicLink()) return false;
+      const generation = readFileSync(meta, "utf8").split("\n")
+        .find((line) => line.startsWith("spawn_gen="))?.slice("spawn_gen=".length) || "";
+      if (!generation) return false;
+      const handled = join(state, `${task}.inbox`, "handled");
+      const handledStat = lstatSync(handled);
+      if (!handledStat.isDirectory() || handledStat.isSymbolicLink()) return false;
+      for (const name of readdirSync(handled).filter((entry) => /^\d+\.msg$/.test(entry)).sort()) {
+        const record = join(handled, name);
+        const recordStat = lstatSync(record);
+        if (!recordStat.isFile() || recordStat.isSymbolicLink()) continue;
+        const fields: Record<string, string> = {};
+        for (const line of readFileSync(record, "utf8").split("\n")) {
+          if (line === "--") break;
+          const split = line.indexOf("=");
+          if (split > 0) fields[line.slice(0, split)] = line.slice(split + 1);
+        }
+        if (fields.schema === "fm-task-inbox.v1" && fields.idempotency === token &&
+            fields.execution_generation === generation) return true;
+      }
+    } catch { /* Missing, unsafe, stale-generation, or conflicting evidence is not a receipt. */ }
+    return false;
+  }
   async function compactResumeSnapshot(task: string): Promise<string> {
     try {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(task)) throw new Error("invalid task id");
@@ -1665,7 +1693,21 @@ export default function (pi: ExtensionAPI) {
             }
             const before = branchProgressSnapshots[task];
             const after = await compactResumeSnapshot(task);
-            safeRoutineContinuation = Boolean(before) && Boolean(after) && !branchEffectAuthorityNeeded.has(task);
+            const actionContinuation = progress.continuation?.kind === "action";
+            const actionReceipt = !actionContinuation || compactActionReceipt(task, progressToken);
+            let actionStarted = !actionContinuation;
+            if (actionContinuation && actionReceipt) {
+              const metaText = readFileSync(join(state, `${task}.meta`), "utf8");
+              const harness = metaText.split("\n").find((line) => line.startsWith("harness="))?.slice("harness=".length) || "";
+              const executionGeneration = metaText.split("\n").find((line) => line.startsWith("spawn_gen="))?.slice("spawn_gen=".length) || "";
+              const started = await runCommandAsync("bash", ["-c",
+                '. "$1"; harness=$4; expected_gen=$5; current_gen=$(fm_busy_current_gen "$2" "$3") || exit 1; [ "$current_gen" = "$expected_gen" ] || exit 1; record=$(fm_busy_record_read "$2" "$3") || exit 1; read -r busy_state busy_source _ <<< "$record"; [ "$busy_state" = busy ] && fm_busy_source_trusted "$harness" "$busy_source"',
+                "fm-action-start", join(fmRoot, "bin/fm-busy-lib.sh"), state, task, harness, executionGeneration],
+              { env: scriptEnv, maxBuffer: 64 * 1024 });
+              actionStarted = started.status === 0;
+            }
+            safeRoutineContinuation = Boolean(before) && Boolean(after) && actionReceipt && actionStarted &&
+              !branchEffectAuthorityNeeded.has(task);
             continuationChange = after === before ? "none" : "material";
             if (branchEffectAuthorityNeeded.has(task)) verdict = "captain";
           }
@@ -2278,7 +2320,7 @@ ${context.command}
         task: offer.task, admission: offer.admission, generation: acceptedGeneration,
         record_token: progress.record_token, goal: progress.goal, acceptance: progress.acceptance,
         current_state: progress.current_state, remaining_gap: progress.remaining_gap,
-        next_step: progress.next_step, task_state: progress.task_state,
+        next_step: progress.next_step, continuation: progress.continuation, task_state: progress.task_state,
         task_held: progress.task_held, task_blocked: progress.task_blocked,
         executor_state: offer.progress.executor_state,
       });
@@ -2310,7 +2352,7 @@ ${context.command}
       try {
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This reads the canonical per-task business and progress record; it is not a queue wake or a rich lifecycle grant.\n` +
-          `Compare the goal and acceptance method with actual task artifacts and current executor state. The exact current MAIN-authored next_step may continue the same worker with bin/fm-send.sh <task> --idempotent '<exact next_step>'; the task selector comes before --idempotent and the message must be the complete next_step verbatim. Any other same-task text remains unauthorized. Route cross-task work back to MAIN for the durable handoff owner. ` +
+          `Compare the goal and acceptance method with actual task artifacts and current executor state. Only continuation kind action owned by same-worker-inbox may continue that worker with bin/fm-send.sh <task> --idempotent '<exact next_step>'; the task selector comes before --idempotent and the message must be the complete next_step verbatim. Silent advancement requires the generation-bound inbox record to be acknowledged under handled/. A wait requests reconciliation only when due, and readback inspects its exact effect_id without replay. Any other same-task text remains unauthorized. Route cross-task work back to MAIN for the stable-id durable handoff owner. ` +
           `For an implementation checkpoint, inspect the same worker and its exact-candidate native-review evidence. If an exact continuation is required but no existing operation owner binds its payload, target, and executor generation, report that required effect to MAIN instead of sending it. ` +
           `The worker owns native review, corrections, tests, and branch custody; the review must bind the committed base and candidate plus the accepted intent. MAIN owns authority-bearing findings and final semantic acceptance. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
@@ -2318,7 +2360,7 @@ ${context.command}
           `MAIN alone updates progress and accepts the goal. Do not replay uncertain effects, revive stopped/archived/parked work, merge, clean up, add reviewers, or broaden authority. A changed task brief invalidates this admission. Stop after at most eight tool calls.\n` +
           JSON.stringify({ task: offer.task, goal: progress.goal, acceptance: progress.acceptance,
             current_state: progress.current_state, remaining_gap: progress.remaining_gap,
-            next_step: progress.next_step, task_state: progress.task_state,
+            next_step: progress.next_step, continuation: progress.continuation, task_state: progress.task_state,
             task_held: progress.task_held, task_blocked: progress.task_blocked,
             executor_state: offer.progress.executor_state,
             record_token: progress.record_token }));

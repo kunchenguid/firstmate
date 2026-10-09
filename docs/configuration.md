@@ -272,7 +272,7 @@ Cancelling only the effort picker keeps the standing effort choice and still app
 ## Task records
 
 Each task has one canonical business record at `data/<task>/task.json`.
-That record owns the task ID, goal/title, body, phase, kind, repository, priority, hold/defer/dependency facts, artifact links, retained notes, completion/archive disposition, and the four goal-progress fields.
+That record owns the task ID, goal/title, body, phase, kind, repository, priority, hold/defer/dependency facts, artifact links, retained notes, completion/archive disposition, and compact goal progress including its optional structured continuation.
 [`fm-task-record.py`](../bin/fm-task-record.py) owns validation, same-directory atomic publication, single-task reads, and one-process list/filter aggregation.
 [`fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) is the thin task CRUD command used by task and lifecycle callers; task commands do not run tasks-axi or write a shared backlog.
 [`fm-fleet-snapshot.sh`](../bin/fm-fleet-snapshot.sh) uses one canonical inventory per query and adds runtime observations only for in-flight records with execution metadata.

@@ -227,8 +227,9 @@ if [ -n "$TARGET_META" ]; then
         }
         printf '%s' "$branch_current_progress" | jq -e \
           '.task_state == "in_flight" and .task_held == "no" and .task_blocked == "no" and
-           .remaining_gap != "" and .next_step != ""' >/dev/null || {
-          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact task progress no longer permits continuation" >&2; exit 6;
+           .remaining_gap != "" and .next_step != "" and .continuation.kind == "action" and
+           .continuation.owner == "same-worker-inbox"' >/dev/null || {
+          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact task progress does not authorize action delivery; wait and exact-effect readback require reconciliation, not replay" >&2; exit 6;
         }
         COMPACT_PROGRESS_TOKEN=$branch_progress_token
         COMPACT_PROGRESS_PAYLOAD_SHA=$(printf '%s' "$branch_current_progress" | python3 -c \
@@ -597,7 +598,9 @@ else
         exit 1
       }
       if [ "$(printf '%s' "$branch_locked_progress" | jq -r '.record_token')" != "$COMPACT_PROGRESS_TOKEN" ] ||
-        [ "$branch_locked_payload_sha" != "$COMPACT_PROGRESS_PAYLOAD_SHA" ]; then
+        [ "$branch_locked_payload_sha" != "$COMPACT_PROGRESS_PAYLOAD_SHA" ] ||
+        [ "$(printf '%s' "$branch_locked_progress" | jq -r '.continuation.kind // ""')" != action ] ||
+        [ "$(printf '%s' "$branch_locked_progress" | jq -r '.continuation.owner // ""')" != same-worker-inbox ]; then
         fm_lock_release "$INBOX_META_LOCK"
         echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$INBOX_TASK_ID: task intent, progress, or executor generation changed after branch admission" >&2
         exit 6

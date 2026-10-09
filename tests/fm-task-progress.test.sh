@@ -64,7 +64,7 @@ expect_code 6 "$rc" "blank progress completion guard"
 assert_grep 'not MAIN-accepted' "$TMP_ROOT/blank-acceptance.err" \
   "blank progress authorized cleanup without semantic acceptance"
 
-record='{"acceptance":"The requested behavior passes","current_state":"Implementation exists","remaining_gap":"Review remains","next_step":"Run review"}'
+record='{"acceptance":"The requested behavior passes","current_state":"Implementation exists","remaining_gap":"Review remains","next_step":"Run review","continuation":{"kind":"action","owner":"MAIN review owner","review_at":"","effect_id":""}}'
 second_before=$(sha256sum "$second" | awk '{print $1}')
 updated=$("$STATE" update-progress first --progress "$record") || fail "progress update failed"
 printf '%s' "$updated" | jq -e '.goal=="Keep the first outcome moving" and .next_step=="Run review"' >/dev/null \
@@ -88,18 +88,55 @@ assert_contains "$out" "task progress belongs to MAIN" "MAIN-only refusal was lo
 
 rc=0
 out=$("$STATE" update-progress first --progress \
-  '{"acceptance":"line one\nline two","current_state":"state","remaining_gap":"gap","next_step":"step"}' 2>&1) || rc=$?
+  '{"acceptance":"line one\nline two","current_state":"state","remaining_gap":"gap","next_step":"step","continuation":{"kind":"action","owner":"MAIN review owner","review_at":"","effect_id":""}}' 2>&1) || rc=$?
 expect_code 6 "$rc" "multiline progress update"
 assert_contains "$out" 'must be one line' 'multiline progress was not bounded'
+rc=0
+out=$("$STATE" update-progress first --progress \
+  '{"acceptance":"The result is reviewed","current_state":"Implementation exists","remaining_gap":"Review remains","next_step":"Run review"}' 2>&1) || rc=$?
+expect_code 6 "$rc" "ownerless open progress update"
+assert_contains "$out" 'must include continuation' 'new open progress accepted legacy ownerless prose'
+legacy_home="$TMP_ROOT/legacy-progress"
+mkdir -p "$legacy_home/data" "$legacy_home/state"
+FM_HOME="$legacy_home" FM_DATA_OVERRIDE="$legacy_home/data" FM_STATE_OVERRIDE="$legacy_home/state" \
+  "$TASKS" add legacy-open "Legacy open progress" --kind scout --start >/dev/null || fail "legacy fixture add failed"
+jq '.progress={"acceptance":"Legacy acceptance","current_state":"Legacy intermediate result","remaining_gap":"Legacy gap","next_step":"Legacy prose step"}' \
+  "$legacy_home/data/legacy-open/task.json" > "$legacy_home/data/legacy-open/task.json.next"
+mv "$legacy_home/data/legacy-open/task.json.next" "$legacy_home/data/legacy-open/task.json"
+legacy_read=$(FM_HOME="$legacy_home" FM_DATA_OVERRIDE="$legacy_home/data" FM_STATE_OVERRIDE="$legacy_home/state" \
+  "$STATE" progress legacy-open) || fail "legacy four-field progress was not readable"
+printf '%s' "$legacy_read" | jq -e '.recorded==true and .continuation==null and .next_step=="Legacy prose step"' >/dev/null \
+  || fail "legacy progress was not normalized as reconciliation-only"
+FM_HOME="$legacy_home" FM_DATA_OVERRIDE="$legacy_home/data" FM_STATE_OVERRIDE="$legacy_home/state" \
+  "$TASKS" archive legacy-open >/dev/null || fail "legacy fixture archive failed"
+wait_record='{"acceptance":"The provider result is reconciled","current_state":"Waiting for a simulated review checkpoint","remaining_gap":"The existing result needs review","next_step":"Read the simulated result without replay","continuation":{"kind":"wait","owner":"provider readback owner","review_at":"2099-01-01T00:00:00Z","effect_id":""}}'
+wait_updated=$("$STATE" update-progress first --progress "$wait_record") || fail "structured wait progress failed"
+printf '%s' "$wait_updated" | jq -e '.continuation.kind=="wait" and .continuation.owner=="provider readback owner"' >/dev/null \
+  || fail "structured wait checkpoint was not retained in canonical progress"
+rc=0
+out=$("$STATE" update-progress first --progress \
+  '{"acceptance":"The result is reconciled","current_state":"Waiting","remaining_gap":"Review remains","next_step":"Review it","continuation":{"kind":"wait","owner":"review owner","review_at":"2099-02-31T00:00:00Z","effect_id":""}}' 2>&1) || rc=$?
+expect_code 6 "$rc" "invalid wait checkpoint"
+assert_contains "$out" 'not a real UTC timestamp' 'invalid wait checkpoint entered canonical progress'
+rc=0
+out=$("$STATE" update-progress first --progress \
+  '{"acceptance":"The result is reconciled","current_state":"Unknown write","remaining_gap":"Readback remains","next_step":"Read it","continuation":{"kind":"readback","owner":"effect owner","review_at":"","effect_id":""}}' 2>&1) || rc=$?
+expect_code 6 "$rc" "readback without effect identity"
+assert_contains "$out" 'requires an exact effect_id' 'identity-free readback entered canonical progress'
+rc=0
+out=$("$STATE" update-progress first --progress \
+  '{"acceptance":"The result is accepted","current_state":"Accepted","remaining_gap":"","next_step":"","continuation":{"kind":"action","owner":"worker","review_at":"","effect_id":""}}' 2>&1) || rc=$?
+expect_code 6 "$rc" "accepted progress retaining continuation"
+assert_contains "$out" 'must clear continuation' 'accepted goal retained executable continuation state'
 oversized=$(printf 'x%.0s' $(seq 1 1201))
 oversized_json=$(jq -cn --arg value "$oversized" \
-  '{acceptance:$value,current_state:"state",remaining_gap:"gap",next_step:"step"}')
+  '{acceptance:$value,current_state:"state",remaining_gap:"gap",next_step:"step",continuation:{kind:"action",owner:"MAIN review owner",review_at:"",effect_id:""}}')
 rc=0
 out=$("$STATE" update-progress first --progress "$oversized_json" 2>&1) || rc=$?
 expect_code 6 "$rc" "oversized progress update"
 assert_contains "$out" 'exceeds 1200 UTF-8 bytes' 'oversized progress was not bounded'
 
-changed='{"acceptance":"The requested behavior passes","current_state":"A later result exists","remaining_gap":"Final review remains","next_step":"Run final review"}'
+changed='{"acceptance":"The requested behavior passes","current_state":"A later result exists","remaining_gap":"Final review remains","next_step":"Run final review","continuation":{"kind":"action","owner":"MAIN review owner","review_at":"","effect_id":""}}'
 before=$(sha256sum "$first" | awk '{print $1}')
 out=$(FM_TASK_RECORD_TEST_FAIL_BEFORE_REPLACE=1 "$STATE" update-progress first --progress "$changed" 2>&1)
 rc=$?
@@ -158,7 +195,7 @@ expect_code 6 "$rc" "Done task without MAIN acceptance"
 assert_grep 'not MAIN-accepted' "$TMP_ROOT/done-without-acceptance.err" \
   "Done disposition bypassed MAIN semantic acceptance"
 
-done_record='{"acceptance":"The requested behavior passes","current_state":"The outcome is accepted","remaining_gap":"","next_step":""}'
+done_record='{"acceptance":"The requested behavior passes","current_state":"The outcome is accepted","remaining_gap":"","next_step":"","continuation":null}'
 "$STATE" update-progress first --progress "$done_record" >/dev/null || fail "acceptance update failed"
 "$TASKS" hold first --reason "accepted result still has a captain call" --kind captain >/dev/null \
   || fail "accepted hold failed"

@@ -2,7 +2,7 @@
 
 A worker run can end before the requested outcome is complete.
 Firstmate therefore resumes work from the task's canonical `data/<task>/task.json` record.
-That one record stores both the business identity and the acceptance method, current state, remaining gap, and next step.
+That one record stores both the business identity and the acceptance method, current state, remaining gap, next step, and structured continuation owner.
 MAIN compares each material result with those fields and routes the next authorized action until the acceptance method is satisfied.
 
 A worker return, process exit, report, passing test, pull request, merge, or empty inbox is evidence. None of those events accepts the goal by itself.
@@ -12,14 +12,17 @@ A worker return, process exit, report, passing test, pull request, merge, or emp
 [`fm-task-record.py`](../bin/fm-task-record.py) owns the canonical task record and its atomic writes.
 [`fm-task-state.sh`](../bin/fm-task-state.sh) exposes its public commands:
 
-- `progress <task>` reads the task title and four progress fields.
-- `update-progress <task> --progress '<json>'` publishes a material MAIN-authored update.
+- `progress <task>` reads the task title and compact progress projection.
+- `update-progress <task> --progress '<json>'` publishes a material MAIN-authored update, including the structured continuation when a goal remains open.
 - `progress-list` discovers tasks eligible for supervision.
 
 There is no separate `fm-state-update` command in this repository.
 The existing `fm-task-state.sh update-progress` command and Pi's existing `fm_task_continuation` tool remain the public update owners; this change replaces their expensive shared-backlog implementation rather than introducing another progress system.
 
 The task record contains only the business and progress fields current behavior consumes.
+An open record written through `fm_task_continuation` classifies its continuation as `action`, `wait`, or `readback`, names the existing owner, and records either a UTC review checkpoint or an exact effect identity where that kind requires one.
+Historical four-field progress remains readable but is reconciliation-only until MAIN records the missing structured continuation.
+New progress writes never create that legacy shape: an open update requires a structured continuation, while an accepted update explicitly records `continuation: null`.
 There is no shared canonical backlog, persisted aggregate index, second progress mirror, evidence ledger, goal scheduler, assessment state machine, or model-maintained coordination record.
 
 MAIN is the only writer and updates the record only after a material change.
@@ -49,7 +52,16 @@ Only MAIN may clear both `remaining_gap` and `next_step`, and it clears them onc
 Delivery, merge authority, decisions, and cleanup retain their own records and guards instead of becoming a new business goal gap.
 A captain hold remains an independent disposition constraint: cleanup verifies its decision inventory and retains the held task row, but the hold does not revoke an already recorded semantic acceptance.
 
-Healthy unchanged execution and deliberate external waits stay quiet. A material result with an authorized remaining gap continues through an existing worker or action owner. The same task-record token and executor observation receives at most two unchanged continuation offers, then one visible coordination escalation, then no further offer until its record, executor, or disposition materially changes. The delivery receipts are existing Pi transcript entries, carry the exact operational home, and are recovered from prior same-cwd session files only when that home also matches after `/new` replaces the transcript. This pacing bounds duplicate observation; it is not a task retry limit, a second task store, or a reason to abandon authorized work.
+Healthy unchanged execution and deliberate external waits stay quiet.
+An `action` owned by `same-worker-inbox` may enter that inbox path only for the exact MAIN-authored text, and quiet advancement requires both its token-bound inbox record under `handled/` with the current executor generation and current executor evidence that the continuation started.
+Missing or unparseable executor evidence returns to MAIN for reconciliation before any action or readback routing.
+An action naming any other existing owner returns to MAIN for that owner's interface and receipt/start verification.
+A `wait` stays quiet before its RFC3339 UTC `review_at`, then emits one reconciliation request to its named owner; that due request never authorizes replay of the awaited effect.
+A `readback` requires an exact `effect_id` and cannot enter the action-delivery path.
+A failed terminal execution requests one materially different authorized diagnosis or recovery instead of remaining labelled as a self-clearing wait or replaying the failed action.
+The same task-record token and executor observation receives at most two unchanged continuation offers, then one visible coordination escalation, then no further offer until its record, executor, or disposition materially changes.
+The delivery receipts are existing Pi transcript entries, carry the exact operational home, and are recovered from prior same-cwd session files only when that home also matches after `/new` replaces the transcript.
+This pacing bounds duplicate observation; it is not a task retry limit, a second task store, or a reason to abandon authorized work.
 
 If an existing owner refuses and no supported action remains, MAIN replaces the unexecutable next step with an existing canonical hold. The hold names who is responsible, the exact action or decision required, and the observable condition that clears it. A task blocker uses the task-record hold owner; a captain decision uses the captain-hold owner. A material result, changed executor evidence, or cleared disposition re-enters ordinary continuation. Continued pursuit never broadens authority or replays an uncertain effect.
 
@@ -65,7 +77,9 @@ Acknowledging a presented notification does not enroll or reconcile another goal
 Re-presenting unchanged work does not create a second goal wake.
 Topic switches and reloads recover from the canonical task record rather than transcript history.
 
-`fm_task_continuation` exposes `read`, `update`, and `hold`. `hold` does not execute an action or invent authority; it records the existing blocker or captain-decision disposition only after supported actions are exhausted.
+`fm_task_continuation` exposes `read`, `update`, and `hold`.
+`update` requires structured continuation for an open goal and requires `continuation: null` when MAIN accepts it.
+`hold` does not execute an action or invent authority; it records the existing blocker or captain-decision disposition only after supported actions are exhausted.
 When requirements change, MAIN edits the original `brief.md` through its ordinary file tools so `## Captain's intent` contains the consolidated processed requirement while the rest of the task contract remains intact.
 The edited prose preserves the intended scope without claiming to be a verbatim quote, and MAIN separately refreshes compact progress and relays the change to the worker.
 There is no dedicated intent-update tool, source-message selector, mapping, receipt, or intent history.
