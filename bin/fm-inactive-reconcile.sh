@@ -658,12 +658,6 @@ handoff_is_completion() { # <verb> <line> <kind> <mode>
   note=$(status_line_note "$line")
   fm_dod_note_reports_ci_ready "$note" && return 1
   fm_dod_note_reports_published_change "$note" && return 1
-  # A ship done note that already names a PR is the terminal path's delivery,
-  # including a green mergeable PR that is not spelled "checks green".
-  # Kind and mode were already required, so a missing PR is not the test.
-  if fm_dod_pr_url_from_done_note "$note" >/dev/null; then
-    return 1
-  fi
   return 0
 }
 
@@ -686,7 +680,7 @@ handoff_clears() { # <verb> <line> <kind> <mode>
 }
 
 handoff_line_epoch() { # <line>
-  printf '%s\n' "$1" | sed -n 's/.*\[at=\([0-9][0-9]*\)\].*/\1/p' | head -n 1
+  status_line_at_epoch "$1"
 }
 
 handoff_record_path() { # <fingerprint>

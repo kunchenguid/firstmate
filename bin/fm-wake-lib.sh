@@ -203,18 +203,19 @@ fm_watcher_healthy() {
   return 0
 }
 
-# fm_watcher_continuity_gap <state-dir> [bound-secs]
+# fm_watcher_continuity_gap <state-dir> [bound-secs] [watch-path] [home]
 # Print one line "episode=<arm>-<ended> ended_at=<epoch> idle=<secs>" when the
 # last cycle record in <state-dir>/.watch-cycle-exits.log is successor=none,
-# that end is at least <bound> seconds old (default FM_WATCHER_CONTINUITY_BOUND_SECS,
-# else 180), the beacon is missing or at least FM_GUARD_GRACE old, and the lock
-# pid is dead or absent. Print nothing for a recorded successor, a fresh beacon,
-# or a live lock pid: an idle live session is not this gap. The bound is the
-# same provisional 180-second family as the secondmate queue-stall bound.
+# that end is at least <bound> seconds old (default
+# FM_WATCHER_CONTINUITY_BOUND_SECS, else 180), and no fresh identity-matched
+# watcher holds the lock. Print nothing for a recorded successor or healthy
+# watcher. The bound is the same provisional 180-second family as the
+# secondmate queue-stall bound.
 # Returns 1 only when the log exists but cannot be read.
 fm_watcher_continuity_gap() {
   local state=$1 bound=${2:-${FM_WATCHER_CONTINUITY_BOUND_SECS:-180}}
-  local log last successor ended_at arm_pid now idle beat_age pid grace
+  local watch_path=${3:-} home=${4:-$FM_HOME}
+  local log last successor ended_at arm_pid now idle grace
   case "$bound" in ''|*[!0-9]*) bound=180 ;; esac
   log="$state/.watch-cycle-exits.log"
   [ -e "$log" ] || return 0
@@ -235,11 +236,7 @@ fm_watcher_continuity_gap() {
   case "$arm_pid" in ''|*[!A-Za-z0-9._-]*) arm_pid=unknown ;; esac
   grace=${FM_GUARD_GRACE:-300}
   case "$grace" in ''|*[!0-9]*) grace=300 ;; esac
-  beat_age=$(fm_path_age "$state/.last-watcher-beat")
-  case "$beat_age" in ''|*[!0-9-]*) beat_age=999999 ;; esac
-  [ "$beat_age" -ge "$grace" ] || return 0
-  pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  if fm_pid_alive "$pid"; then
+  if [ -n "$watch_path" ] && fm_watcher_healthy "$state" "$watch_path" "$grace" "$home"; then
     return 0
   fi
   fm_epoch_seconds_to now
@@ -249,7 +246,7 @@ fm_watcher_continuity_gap() {
   printf 'episode=%s-%s ended_at=%s idle=%s\n' "$arm_pid" "$ended_at" "$ended_at" "$idle"
 }
 
-# fm_watcher_continuity_note <watched-state> <key-prefix> <subject>
+# fm_watcher_continuity_note <watched-state> <key-prefix> <subject> [watch-path] [home]
 # Queue one check on THIS home's wake queue when <watched-state> has the gap
 # above. <key-prefix> is the episode identity's stable head (no spaces).
 # The same episode is not queued again while that check is still queued, nor
@@ -258,12 +255,12 @@ fm_watcher_continuity_gap() {
 # A gap that has closed drops the note. This never starts, stops, or signals
 # a watcher. Returns 1 only when the check could not be queued.
 fm_watcher_continuity_note() {
-  local watched=$1 prefix=$2 subject=$3
+  local watched=$1 prefix=$2 subject=$3 watch_path=${4:-} home=${5:-$FM_HOME}
   local bound gap episode idle key marker now recorded_episode recorded_at tmp
   case "$prefix" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   bound=${FM_WATCHER_CONTINUITY_BOUND_SECS:-180}
   case "$bound" in ''|*[!0-9]*) bound=180 ;; esac
-  gap=$(fm_watcher_continuity_gap "$watched" "$bound") || return 0
+  gap=$(fm_watcher_continuity_gap "$watched" "$bound" "$watch_path" "$home") || return 0
   marker="$STATE/.continuity-note-$prefix"
   if [ -z "$gap" ]; then
     if [ -f "$marker" ] && [ ! -L "$marker" ]; then

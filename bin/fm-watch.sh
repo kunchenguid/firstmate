@@ -1067,7 +1067,7 @@ secondmate_watcher_continuity_tick() {
     [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || continue
     [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] || continue
     [ -d "$home/state" ] && [ ! -L "$home/state" ] || continue
-    fm_watcher_continuity_note "$home/state" "watcher-continuity-$task" "mate=$task" || return 1
+    fm_watcher_continuity_note "$home/state" "watcher-continuity-$task" "mate=$task" "$WATCH_PATH" "$home" || return 1
   done
   return 0
 }

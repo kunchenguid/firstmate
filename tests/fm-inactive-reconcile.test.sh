@@ -1366,14 +1366,59 @@ test_handoff_idle_skips_final_deliveries_and_secondmates() {
   write_child "$home" keel "$plain" inc-keel-1
 
   scan_handoff "$home"
-  for id in ship-direct ship-local ship-ready ship-published ship-mergeable ship-mentioned harbor; do
+  for id in ship-direct ship-local ship-ready ship-published harbor; do
     [ "$(records_for_count "$home" "$id")" = 0 ] || fail "$id opened a handoff episode"
   done
-  for id in ship-empty ship-validation ship-failed ship-scout keel; do
+  for id in ship-empty ship-validation ship-failed ship-scout ship-mergeable ship-mentioned keel; do
     [ "$(records_for_count "$home" "$id")" = 1 ] || fail "$id did not open a handoff episode"
     [ -z "$(handoff_field "$(one_record "$home" "$id")" cleared_epoch)" ] || fail "$id was cleared without a continuation"
   done
-  pass "final deliveries and a secondmate record stay off the handoff path; validation, failure, scout, and empty-mode dones stay on it"
+  pass "canonical final deliveries and a secondmate record stay off the handoff path; validation, failure, scout, and nonfinal done reports stay on it"
+}
+
+test_handoff_idle_rejects_a_bare_pr_as_final_delivery() {
+  local home completion record fp8 key
+  completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  make_world handoff-bare-pr
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" intake "$completion" inc-bare-pr-1
+  scan_handoff "$home"
+  record=$(one_record "$home" intake) || fail "the validation handoff was not recorded"
+  fp8=$(basename "$record" .record)
+  key="handoff-idle-intake-${fp8:0:8}"
+  grep -Fq "$key" "$home/state/.wake-queue" || fail "the validation handoff did not queue its idle alert"
+
+  printf '%s\n' "done [at=$HANDOFF_CONT]: PR https://example.test/o/r/pull/9 revision landed" >> "$home/state/intake.status"
+  scan_handoff "$home"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "a bare PR report cleared the validation handoff"
+  grep -Fq "$key" "$home/state/.wake-queue" \
+    || fail "a bare PR report retired the validation idle alert"
+  pass "a bare PR report remains a validation handoff rather than final delivery"
+}
+
+test_handoff_idle_uses_only_positional_status_timestamps() {
+  local home record
+  make_world handoff-timestamp
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" stamped \
+    "needs-validation [at=$HANDOFF_YOUNG]: compared [at=1] output" inc-stamped-1
+  write_child "$home" unstamped \
+    "needs-validation: compared [at=1] output" inc-unstamped-1
+  scan_handoff "$home"
+  record=$(one_record "$home" stamped) || fail "the stamped handoff was not recorded"
+  [ "$(handoff_field "$record" observed_epoch)" = "$HANDOFF_YOUNG" ] \
+    || fail "a timestamp in note prose replaced the event timestamp"
+  [ "$(handoff_field "$record" alerted)" = 0 ] \
+    || fail "a timestamp in note prose triggered an early idle alert"
+  record=$(one_record "$home" unstamped) || fail "the unstamped handoff was not recorded"
+  [ "$(handoff_field "$record" observed_epoch)" = "$HANDOFF_NOW" ] \
+    || fail "a timestamp in note prose stamped an unstamped event"
+  [ "$(handoff_field "$record" alerted)" = 0 ] \
+    || fail "a timestamp in note prose triggered an early alert for an unstamped event"
+  pass "only a positional event timestamp controls handoff timing"
 }
 
 test_parent_publication_does_not_clear_local_continuation() {
@@ -1432,6 +1477,8 @@ test_handoff_idle_bound_refuses_out_of_range() {
 test_handoff_idle_records_the_episode_and_alerts_once
 test_handoff_idle_clears_only_on_continuation
 test_handoff_idle_skips_final_deliveries_and_secondmates
+test_handoff_idle_rejects_a_bare_pr_as_final_delivery
+test_handoff_idle_uses_only_positional_status_timestamps
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan
 test_handoff_idle_bound_refuses_out_of_range

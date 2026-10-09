@@ -1719,35 +1719,35 @@ write_gap_log() { # <state> [successor]
     "$successor" > "$1/.watch-cycle-exits.log"
 }
 
-run_continuity_gap() { # <watched> [grace]
-  FM_STATE_OVERRIDE="$1" FM_WATCHER_CONTINUITY_BOUND_SECS=1 FM_GUARD_GRACE="${2:-1}" \
+run_continuity_gap() { # <watched> <home> [grace]
+  FM_STATE_OVERRIDE="$1" FM_WATCHER_CONTINUITY_BOUND_SECS=5 FM_GUARD_GRACE="${3:-1}" \
     bash -c '
       . "$1"
-      if ! fm_watcher_continuity_gap "$2"; then
+      if ! fm_watcher_continuity_gap "$2" "" "$3" "$4"; then
         exit 1
       fi
-    ' _ "$ROOT/bin/fm-wake-lib.sh" "$1"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$WATCH" "$2"
 }
 
-run_continuity_note() { # <queue-state> <watched> <prefix> <subject>
-  FM_STATE_OVERRIDE="$1" FM_WATCHER_CONTINUITY_BOUND_SECS=1 FM_GUARD_GRACE=1 \
+run_continuity_note() { # <queue-state> <watched> <prefix> <subject> <home>
+  FM_STATE_OVERRIDE="$1" FM_WATCHER_CONTINUITY_BOUND_SECS=5 FM_GUARD_GRACE=1 \
     bash -c '
       . "$1"
-      fm_watcher_continuity_note "$2" "$3" "$4"
-    ' _ "$ROOT/bin/fm-wake-lib.sh" "$2" "$3" "$4"
+      fm_watcher_continuity_note "$2" "$3" "$4" "$5" "$6"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$2" "$3" "$4" "$WATCH" "$5"
 }
 
 test_watcher_continuity_gap_is_a_missing_successor() {
-  local dir state out rc key
+  local dir state out rc key pid identity
   dir=$(make_case continuity-gap)
   state="$dir/state"
   write_gap_log "$state"
-  out=$(run_continuity_gap "$state") || fail "a successor=none cycle was not a gap"
+  out=$(run_continuity_gap "$state" "$dir") || fail "a successor=none cycle was not a gap"
   case "$out" in
     "episode=15024-1000 ended_at=1000 idle="*) ;;
     *) fail "gap line drifted: $out" ;;
   esac
-  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" "$dir" \
     || fail "the continuity note could not be queued"
   key="watcher-continuity-main-15024-1000"
   grep -Fq "$key" "$state/.wake-queue" || fail "the continuity check was not queued"
@@ -1756,13 +1756,13 @@ test_watcher_continuity_gap_is_a_missing_successor() {
   grep -Fq "successor=none" "$state/.wake-queue" || fail "the payload omitted successor=none"
   [ -f "$state/.continuity-note-watcher-continuity-main" ] || fail "the episode marker was not written"
 
-  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" "$dir" \
     || fail "a repeat while the check is queued failed"
   [ "$(grep -c "$key" "$state/.wake-queue")" = 1 ] || fail "a queued continuity check was duplicated"
 
   grep -v "$key" "$state/.wake-queue" > "$state/.wake-queue.kept" || true
   mv "$state/.wake-queue.kept" "$state/.wake-queue"
-  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" "$dir" \
     || fail "a consumed check inside the bound failed"
   grep -Fq "$key" "$state/.wake-queue" && fail "acking the check resolved the gap"
   [ -f "$state/.continuity-note-watcher-continuity-main" ] \
@@ -1771,33 +1771,45 @@ test_watcher_continuity_gap_is_a_missing_successor() {
   awk 'index($0, "alerted_at=") == 1 { print "alerted_at=1"; next } { print }' \
     "$state/.continuity-note-watcher-continuity-main" > "$state/.continuity-note.tmp"
   mv "$state/.continuity-note.tmp" "$state/.continuity-note-watcher-continuity-main"
-  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" "$dir" \
     || fail "a repeat after the bound failed"
   grep -Fq "$key" "$state/.wake-queue" || fail "an unresolved gap was not requeued after the bound"
 
   printf '%s\n' 'successor=attached:9 ended_at=1000' >> "$state/.watch-cycle-exits.log"
   # The reader uses the last cycle line. A non-none successor closes the gap.
   write_gap_log "$state" "attached:9"
-  run_continuity_note "$state" "$state" watcher-continuity-main "this home" \
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" "$dir" \
     || fail "a closed gap failed the note"
   [ ! -e "$state/.continuity-note-watcher-continuity-main" ] \
     || fail "a recorded successor left the episode marker in place"
 
   write_gap_log "$state"
   touch "$state/.last-watcher-beat"
-  out=$(run_continuity_gap "$state" 300)
-  [ -z "$out" ] || fail "a fresh beacon was treated as a missing successor: $out"
+  out=$(run_continuity_gap "$state" "$dir" 300) || fail "a fresh orphan beacon resolved the missing successor"
   mkdir -p "$state/.watch.lock"
-  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid") \
+    || fail "could not identify the live fixture process"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "${identity}stale" > "$state/.watch.lock/pid-identity"
+  out=$(run_continuity_gap "$state" "$dir") || fail "a reused PID identity resolved the missing successor"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   rm -f "$state/.last-watcher-beat"
-  out=$(run_continuity_gap "$state")
-  [ -z "$out" ] || fail "a live lock pid was treated as a missing successor: $out"
+  out=$(run_continuity_gap "$state" "$dir") || fail "a stale beacon resolved the missing successor"
+  touch "$state/.last-watcher-beat"
+  out=$(run_continuity_gap "$state" "$dir")
+  [ -z "$out" ] || fail "a fresh identity-matched watcher was treated as a missing successor: $out"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   rm -rf "$state/.watch.lock"
 
   rm -f "$state/.wake-queue"
   mkdir -p "$state/.continuity-note-watcher-continuity-main"
   rc=0
-  run_continuity_note "$state" "$state" watcher-continuity-main "this home" || rc=$?
+  run_continuity_note "$state" "$state" watcher-continuity-main "this home" "$dir" || rc=$?
   [ "$rc" -eq 0 ] || fail "a marker-write failure after the check was queued returned $rc"
   grep -Fq "$key" "$state/.wake-queue" || fail "the check was lost when the marker could not be written"
   rm -rf "$state/.continuity-note-watcher-continuity-main"
@@ -1805,14 +1817,14 @@ test_watcher_continuity_gap_is_a_missing_successor() {
   rm -f "$state/.watch-cycle-exits.log"
   mkdir "$state/.watch-cycle-exits.log"
   rc=0
-  run_continuity_gap "$state" >/dev/null || rc=$?
+  run_continuity_gap "$state" "$dir" >/dev/null || rc=$?
   [ "$rc" -eq 1 ] || fail "an unreadable cycle log returned $rc"
   rc=0
-  run_continuity_note "$state" "$state" watcher-continuity-keel "mate=keel" || rc=$?
+  run_continuity_note "$state" "$state" watcher-continuity-keel "mate=keel" "$dir" || rc=$?
   [ "$rc" -eq 0 ] || fail "an unreadable cycle log failed the note ($rc)"
   grep -q 'watcher-continuity-keel' "$state/.wake-queue" \
     && fail "an unreadable cycle log queued a continuity check"
-  pass "a missing successor is one bounded continuity episode, and a fresh beacon or live lock is not"
+  pass "a missing successor stays open until a fresh identity-matched watcher or successor proves continuity"
 }
 
 test_arm_notes_a_cycle_that_ended_without_a_successor() {
