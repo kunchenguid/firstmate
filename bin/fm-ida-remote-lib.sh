@@ -184,7 +184,7 @@ fm_ida_structured_success() {
 # Read-only CLI calls preserve local failure categories without exposing stderr.
 # Recognized transient stderr is classified in place and never persisted.
 fm_ida_read_error_classify() { # <stdout-file> <stderr-file> <exit-code>; empty means success
-  local out=$1 err=$2 rc=$3 class
+  local out=$1 err=$2 rc=$3 class code
   case "$rc" in
     126) printf 'cli-not-executable\n'; return ;;
     127) printf 'cli-not-found\n'; return ;;
@@ -202,9 +202,21 @@ fm_ida_read_error_classify() { # <stdout-file> <stderr-file> <exit-code>; empty 
     printf 'response-invalid-json\n'
   elif jq -e 'type == "object" and .status == "error"
       and (.error | type == "object")
-      and (.error.code | type == "string")
+      and (.error.code | type == "string" or type == "number")
       and (.error.message | type == "string")' "$out" >/dev/null 2>&1; then
-    fm_remote_error_classify "$out"
+    # Official bytedcli HttpError envelopes retain numeric HTTP codes, while
+    # its iDA schema parser uses a named response error. Neither is a local
+    # executable failure, and schema errors must not masquerade as outages.
+    code=$(jq -r '.error.code | tostring' "$out")
+    case "$code" in
+      408) printf 'timeout\n' ;;
+      429) printf 'rate-limited\n' ;;
+      425|500|502|503|504) printf 'unavailable\n' ;;
+      401|403) printf 'auth\n' ;;
+      404) printf 'remote-not-found\n' ;;
+      IDA_API_RESPONSE_ERROR) printf 'response-invalid-structure\n' ;;
+      *) fm_remote_error_classify "$out" ;;
+    esac
   elif [ "$rc" -ne 0 ]; then
     printf 'cli-exit-error\n'
   elif ! jq -e 'type == "object" and .status == "success"
@@ -229,6 +241,83 @@ fm_ida_local_read_error() { # <error-class>
     cli-not-executable|cli-not-found|cli-exit-error|response-empty|response-invalid-json|response-invalid-structure|session-identity-mismatch) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+
+# Unknown followups use one bounded diagnosis in every existing entry point.
+# At most two session-get reads (retry only transient errors), then one raw
+# session-info control read. Info proves reachability, NEVER a turn identity.
+# Only the existing exact same-message marker binding can recover a turn.
+# Caller owns private scratch cleanup; no raw bytes or prompts leave it.
+fm_ida_followup_recover() { # <private-scratch-dir>; sets IDA_RECOVERY_*
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  local root=$1 out="$1/recovery-get" err="$1/recovery-error" rc attempt task baseline
+  IDA_RECOVERY_TASK=$IDA_STATE_TASK_ID
+  IDA_RECOVERY_CLASS=
+  IDA_RECOVERY_INFO=not-needed
+  IDA_RECOVERY_READS=0
+  IDA_RECOVERY_OUTCOME=confirmed
+  [ -z "$IDA_RECOVERY_TASK" ] || return 0
+  IDA_RECOVERY_OUTCOME=identity-unproven
+  for attempt in 1 2; do
+    rc=0
+    fm_run_bash_timeout 30 fm_ida_run_bytedcli --json --as user ida --region sg session get --session-id "$IDA_STATE_SESSION_ID" >"$out" 2>"$err" || rc=$?
+    IDA_RECOVERY_READS=$attempt
+    IDA_RECOVERY_CLASS=$(fm_ida_read_error_classify "$out" "$err" "$rc")
+    [ -n "$IDA_RECOVERY_CLASS" ] || IDA_RECOVERY_CLASS=$(fm_ida_session_response_error "$out" "$IDA_STATE_SESSION_ID")
+    case "$IDA_RECOVERY_CLASS" in
+      timeout|unavailable|rate-limited) [ "$attempt" = 2 ] || continue ;;
+    esac
+    break
+  done
+  if [ -z "$IDA_RECOVERY_CLASS" ]; then
+    task=$(jq -r --arg prefix "[Firstmate session marker: $IDA_STATE_MARKER]" '
+      [.data.messages[] | select(.type==0 and (.text|type)=="string")
+        | select(.text==$prefix or (.text|startswith($prefix+"\n")))
+        | {normalized:(.task_result.task_id? // null),raw:(.deep_research_content.taskId? // null)}]
+      | if any(.[]; .normalized != null and .raw != null and (.normalized|tostring) != (.raw|tostring)) then []
+        else [.[] | (.normalized // .raw) | select(.!=null) | tostring] | unique end
+      | if length==1 then .[0] else empty end' "$out")
+    baseline=$(jq -c '.provider_state.baseline_task_ids' "$REMOTE_STATE_FILE")
+    if fm_ida_numeric_id "$task" && printf '%s' "$baseline" | jq -e --arg task "$task" 'index($task)==null' >/dev/null; then
+      IDA_RECOVERY_TASK=$task
+      IDA_RECOVERY_OUTCOME=confirmed
+      return 0
+    fi
+    IDA_RECOVERY_CLASS=followup-turn-identity-unproven
+  elif fm_ida_local_read_error "$IDA_RECOVERY_CLASS"; then
+    IDA_RECOVERY_OUTCOME=local-repair-required
+  else
+    IDA_RECOVERY_OUTCOME=read-retry-exhausted
+  fi
+  rc=0
+  fm_run_bash_timeout 30 fm_ida_run_bytedcli --json --as user ida --region sg session info --session-id "$IDA_STATE_SESSION_ID" >"$root/recovery-info" 2>"$err" || rc=$?
+  IDA_RECOVERY_INFO=$(fm_ida_read_error_classify "$root/recovery-info" "$err" "$rc")
+  if [ -z "$IDA_RECOVERY_INFO" ]; then
+    if jq -e --arg sid "$IDA_STATE_SESSION_ID" '
+      [.data.session.id?, .data.session.sessionId?] | map(select(.!=null) | tostring) | unique | .==[$sid]
+      ' "$root/recovery-info" >/dev/null; then IDA_RECOVERY_INFO=reachable-no-turn-link
+    else IDA_RECOVERY_INFO=session-identity-mismatch; fi
+  fi
+  return 1
+}
+
+fm_ida_followup_diagnosis() { # <task-id>; follows fm_ida_followup_recover
+  jq -n --arg id "$1" --arg session "$IDA_STATE_SESSION_ID" --arg task "$IDA_RECOVERY_TASK" \
+    --arg outcome "$IDA_RECOVERY_OUTCOME" --arg class "$IDA_RECOVERY_CLASS" \
+    --arg info "$IDA_RECOVERY_INFO" --argjson reads "$IDA_RECOVERY_READS" \
+    --slurpfile state "$REMOTE_STATE_FILE" '
+    {schema:"fm-ida-followup-diagnosis.v1",task_id:$id,session_id:$session,
+     generation:$state[0].generation,action_id:$state[0].provider_state.followup_action_id,
+     outcome:$outcome,task_id_remote:(if $task=="" then null else $task end),
+     error_class:(if $class=="" then null else $class end),session_get_attempts:$reads,session_info:$info,
+     next_action:(if $outcome=="confirmed" then "adopt"
+       elif $outcome=="local-repair-required" then "repair-local-readback-then-diagnose"
+       elif $outcome=="read-retry-exhausted" then "resolve-read-failure-then-diagnose"
+       else "obtain-authenticated-receipt-or-request-task-link" end),
+     recovery_command:["fm-remote-agent-ida.sh",(if $outcome=="confirmed" then "adopt" else "diagnose" end),$id],
+     provider_write_performed:false}'
 }
 
 fm_ida_normalize_error() {

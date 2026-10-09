@@ -298,7 +298,13 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
     fi
     jq -cn --argjson rows "$rows" '{status:"success",data:{sessions:{sessionList:$rows,page:1,page_size:100}},error:null}'
     ;;
+  *" ida --region sg session info "*)
+    success "{\"session\":{\"id\":$session,\"sessionId\":$session}}"
+    ;;
   *" ida --region sg session get "*)
+    if [ -n "${FM_IDA_FAKE_TRANSIENT_ONCE:-}" ] && mkdir "$FM_IDA_FAKE_TRANSIENT_ONCE" 2>/dev/null; then
+      error HTTP_503 'service unavailable'; exit 1
+    fi
     case "$mode" in
       get-launch-126) printf 'PRIVATE_LOCAL_STDERR token=synthetic-secret\n' >&2; exit 126 ;;
       get-launch-127) printf 'PRIVATE_LOCAL_STDERR token=synthetic-secret\n' >&2; exit 127 ;;
@@ -311,6 +317,8 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
       get-stderr-unavailable) printf 'network request failed: HTTP 503 token=synthetic-secret\n' >&2; exit 1 ;;
       get-provider-error) error INTERNAL_ERROR 'temporary provider read failure'; exit 1 ;;
       get-unavailable) error HTTP_503 'service unavailable'; exit 1 ;;
+      get-official-503) printf '%s\n' '{"status":"error","data":null,"error":{"code":503,"status_code":503,"message":"HTTP 503"}}'; exit 1 ;;
+      get-official-schema) error IDA_API_RESPONSE_ERROR 'IDA session detail response is incomplete.'; exit 1 ;;
       get-auth) error AUTH_REQUIRED 'authentication required'; exit 1 ;;
     esac
     [ "$mode" != list-unavailable ] || { error HTTP_503 'service unavailable'; exit 1; }
@@ -1103,13 +1111,13 @@ test_timeout_reconciliation_and_no_duplicate() {
 
 test_local_readback_failure_and_recovery() {
   local mode class home fakebin id source mode_file sha marker provider state first status before tries expected_phase recovery_seq
-  for mode in launch-126 launch-127 empty malformed multiple exit-error structure session-mismatch; do
+  for mode in launch-126 launch-127 empty malformed multiple exit-error structure official-schema session-mismatch; do
     case "$mode" in
       launch-126|launch-127) class=cli-exit-error ;;
       empty) class=response-empty ;;
       malformed|multiple) class=response-invalid-json ;;
       exit-error) class=cli-exit-error ;;
-      structure) class=response-invalid-structure ;;
+      structure|official-schema) class=response-invalid-structure ;;
       session-mismatch) class=session-identity-mismatch ;;
     esac
     id="ida-local-$mode"; source="ida-$id"
@@ -2070,6 +2078,74 @@ test_followup_identity_and_unknown_submission() {
   pass 'lost followup response remains unknown; replay performs reads only and never repeats create'
 }
 
+
+test_followup_active_recovery() {
+  local home fakebin id=ida-active-recovery mode before after state_sha result
+  local FM_IDA_FAKE_MODE=success
+  home=$(new_home active-recovery); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  local REMOTE_TASK_ID=80001
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'recovery initial dispatch'
+  wait_phase "$home" "$id" terminal-success
+  printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  REMOTE_TASK_ID=80002
+  if FM_IDA_FAKE_MODE=timeout-created run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/uncertain" 2>&1; then
+    fail 'lost response without marker binding reported success'
+  fi
+  assert_grep 'bounded diagnosis exhausted' "$home/uncertain" 'unknown submission skipped active diagnosis'
+  assert_grep 'ida-followup-recovery' "$home/state/$id.status" 'unknown submission did not wake MAIN with the repair gap'
+  state_sha=$(shasum -a 256 "$(state_file "$home" "$id")")
+  for mode in get-unavailable get-official-503 get-malformed get-official-schema success; do
+    before=$(grep -c 'argv:.*session get ' "$home/bytedcli.log")
+    FM_IDA_FAKE_MODE="$mode" run_ida "$home" "$fakebin" diagnose "$id" > "$home/diagnosis" || fail 'read-only diagnosis failed'
+    after=$(grep -c 'argv:.*session get ' "$home/bytedcli.log")
+    case "$mode" in
+      get-unavailable|get-official-503)
+        [ "$((after-before))" = 2 ] || fail 'transient diagnosis did not bound retries at two'
+        jq -e '.outcome=="read-retry-exhausted" and .error_class=="unavailable" and .next_action=="resolve-read-failure-then-diagnose"' "$home/diagnosis" >/dev/null || fail 'transient failure mislabeled as missing evidence' ;;
+      get-malformed)
+        [ "$((after-before))" = 1 ] || fail 'local invalid JSON was blindly polled'
+        jq -e '.outcome=="local-repair-required" and .error_class=="response-invalid-json"' "$home/diagnosis" >/dev/null || fail 'local repair gap not classified' ;;
+      get-official-schema)
+        [ "$((after-before))" = 1 ] || fail 'official schema failure was blindly polled'
+        jq -e '.outcome=="local-repair-required" and .error_class=="response-invalid-structure"' "$home/diagnosis" >/dev/null || fail 'official schema failure was mislabeled as a provider outage' ;;
+      success)
+        jq -e '.outcome=="identity-unproven" and .next_action=="obtain-authenticated-receipt-or-request-task-link"' "$home/diagnosis" >/dev/null || fail 'unlinked new task was inferred' ;;
+    esac
+    jq -e '.session_info=="reachable-no-turn-link" and .task_id_remote==null and .provider_write_performed==false' "$home/diagnosis" >/dev/null || fail 'control-plane alternative did not preserve identity boundary'
+    [ "$state_sha" = "$(shasum -a 256 "$(state_file "$home" "$id")")" ] || fail 'diagnose mutated original unknown record'
+    assert_no_grep 'PRIVATE_' "$home/diagnosis" 'diagnosis leaked provider bytes'
+  done
+  before=$(wc -l < "$home/bytedcli.log")
+  run_ida "$home" "$fakebin" state "$id" --durable-only >/dev/null
+  [ "$before" = "$(wc -l < "$home/bytedcli.log")" ] || fail 'durable-only startup performed recovery reads'
+  FM_HOME="$home" FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+    FM_IDA_FAKE_SESSION_ID=70001 FM_IDA_FAKE_TASK_ID=80002 FM_IDA_FAKE_MODE=get-unavailable \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-procevent-ida.sh" source "$id" > "$home/exhausted"
+  jq -e '.ambiguous==true and .terminal==false and .error_class=="followup-read-retry-exhausted-unavailable"' "$home/exhausted" >/dev/null || fail 'source erased exhausted read classification'
+  "$ROOT/bin/fm-procevent-ida.sh" terminal "$home/exhausted" || fail 'exhausted unknown source would rearm indefinitely'
+  # Source used to return ambiguity without reading a recoverable marker.
+  before=$(grep -c 'argv:.*session get ' "$home/bytedcli.log")
+  FM_HOME="$home" FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+    FM_IDA_FAKE_SESSION_ID=70001 FM_IDA_FAKE_TASK_ID=80002 FM_IDA_FAKE_MODE=success FM_IDA_FAKE_MARKER_TASK_SHAPE=normalized \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-procevent-ida.sh" observe "$id" > "$home/observation"
+  jq -e '.ambiguous==false and .task_id_remote=="80002"' "$home/observation" >/dev/null || fail "source did not actively recover exact marker identity: $(cat "$home/observation")"
+  after=$(grep -c 'argv:.*session get ' "$home/bytedcli.log")
+  [ "$((after-before))" = 1 ] || fail 'source discarded its authenticated read and fetched the session twice'
+  result=$(FM_IDA_FAKE_MARKER_TASK_SHAPE=normalized run_ida "$home" "$fakebin" state "$id")
+  [[ "$result" == *'recovery=confirmed'* ]] || fail 'task-state remained passive despite recoverable evidence'
+  mv "$home/state/$id.meta" "$home/prior.meta"
+  FM_IDA_FAKE_MODE=zero FM_IDA_FAKE_TRANSIENT_ONCE="$home/transient-once" FM_IDA_FAKE_MARKER_TASK_SHAPE=normalized \
+    run_ida "$home" "$fakebin" adopt "$id" >/dev/null || fail 'adopt did not recover after one transient read failure'
+  wait_phase "$home" "$id" terminal-success
+  assert_present "$home/state/$id.meta" 'unknown-followup adoption lost metadata reconstruction'
+  jq -e '.generation==2 and .provider_state.task_id=="80002"' "$(state_file "$home" "$id")" >/dev/null || fail 'adopt lost exact generation identity'
+  [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 2 ] || fail 'diagnosis or adopt repeated create'
+  assert_grep 'resolved [key=ida-followup-recovery]' "$home/state/$id.status" 'recovered identity left repair blocker open'
+  pass 'unknown followup actively diagnoses bounded read/local failures and recovers through its existing owner without create'
+}
+
 test_terminal_disposition_guards_remote_effects() {
   local home fakebin id rc creates
 
@@ -2168,6 +2244,14 @@ case "${FM_REMOTE_TEST_CASE:-}" in
     test_remote_aime_dispatch_metadata
     exit 0
     ;;
+  readback)
+    test_local_readback_failure_and_recovery
+    exit 0
+    ;;
+  recovery)
+    test_followup_active_recovery
+    exit 0
+    ;;
   followup)
     test_followup_identity_and_unknown_submission
     exit 0
@@ -2217,4 +2301,5 @@ test_cancellation_and_retirement_authority
 test_retirement_pairs_backlog_and_preserves_failed_close
 test_aime_compatibility_and_local_unchanged
 test_remote_aime_dispatch_metadata
+test_followup_active_recovery
 printf '# fm-remote-agent.test.sh: all assertions passed\n'
