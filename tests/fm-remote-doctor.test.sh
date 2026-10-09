@@ -156,6 +156,7 @@ EOF
       *)
         cat > "$loaded" <<EOF
 path = $FM_FAKE_PLIST
+pid = $FM_FAKE_JOB_PID
 program = $FM_FAKE_LOGIN_SHELL
 arguments = {
 	$FM_FAKE_LOGIN_SHELL
@@ -309,7 +310,7 @@ doctor() {
     FM_FAKE_HERDR_BIN="$CASE_BIN/herdr" \
     FM_FAKE_HERDR_SOCKET="$CASE_STATE/herdr.sock" \
     FM_FAKE_GUARD="$GUARD" \
-    FM_FAKE_AQUA_PID="$AQUA_HOLDER_PID" \
+    FM_FAKE_AQUA_PID="$AQUA_HOLDER_PID" FM_FAKE_JOB_PID="$$" \
     FM_FAKE_PLIST="$CASE_PLIST" \
     FM_FAKE_JOB_PLIST="$CASE_JOB_PLIST" \
     FM_FAKE_JOB_WORKER="$ROOT/bin/fm-remote-job-worker.sh" \
@@ -633,9 +634,9 @@ assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is 
 
 printf '%s\n' "$WORKER_HOLDER_PID" > "$CASE_STATE/socket-owner"
 doctor
-expect_code 0 "$DOCTOR_RC" "the gui-only remote-job worker owner was not reported ready"
-assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $WORKER_HOLDER_PID, worker)" \
-  "the gui-only worker was not recognized"
+expect_code 1 "$DOCTOR_RC" "a gui-only remote-job worker owner without a live guard was reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $WORKER_HOLDER_PID born in the Aqua login session (worker) without a live guard" \
+  "the unsupervised worker owner was not tagged fixable"
 
 printf '%s\n' "$SSH_HOLDER_PID" > "$CASE_STATE/socket-owner"
 : > "$CASE_LAUNCHCTL_LOG"

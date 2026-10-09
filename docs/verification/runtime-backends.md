@@ -1184,7 +1184,29 @@ Its `ProgramArguments` ran `/run/current-system/sw/bin/zsh -l -c "exec /etc/prof
 No other herdr process existed for that session, and after 15 seconds the job remained running with pid 4806.
 After a guarded `herdr session stop`, the job reported `state = not running` and `last exit code = 0`, and it stayed at rest through the throttle interval.
 A second `launchctl kickstart -k gui/501/dev.fm-rca.herdr-fg` started pid 45574, which was also the new socket owner.
-This proves that `herdr server` remains in the foreground as the launchd job, so the guard's final `exec` supplies the intended supervision and the earlier server that survived `launchctl bootout` was the unrelated SSH-bridge-born process.
+This proves that a directly exec'd `herdr server` is the launchd job itself, and that the earlier server that survived `launchctl bootout` was the unrelated SSH-bridge-born process.
+
+### fm-remote detached server daemon
+
+Measured 2026-10-08 on macOS (Darwin 27.0.0) with Herdr 0.9.3.
+Herdr reports `capabilities.detached_server_daemon` as `getsid(0) == getpid()` for the server process (`src/platform/mod.rs`, `current_process_is_detached_server_daemon`), and `herdr machine add` refuses a remote server that reports `false` (`src/remote/attach.rs`).
+A launchd job is a process-group leader but not a session leader, so a server exec'd directly by the launch agent reported `false`.
+`bin/fm-remote-herdr-guard.sh` therefore starts the server as a background child that calls `setsid` through perl and then execs herdr, and waits on it.
+It forwards TERM, INT and HUP to that child and exits with its status.
+Before the exec, the child forks a watcher into the server's new session, out of reach of a SIGKILL of the guard's process group.
+When the guard pid is gone, the watcher sends TERM to the server and sends KILL after 10 seconds if the server is still its parent; it exits as soon as the server is gone.
+So a SIGKILL of the guard (launchd's `ExitTimeOut` escalation on `bootout` or `kickstart -k`, an OOM kill, or a manual `kill -9`) does not leave the server running without a supervisor.
+launchd can start the next guard while that watcher still stops the old server.
+The guard exits 0 for an Aqua-born server only when the server's parent is the running pid of the launchd job named by its `XPC_SERVICE_NAME`, that is a live guard.
+Any other Aqua-born server, including that old one, goes through the stop, wait and start takeover, so the session always ends with a supervised server.
+The child keeps the launch agent's Aqua audit session and environment.
+
+A throwaway Aqua agent `dev.firstmate.lab.<lab-session>` in `gui/501`, with the same `ProgramArguments` shape as the doctor renders and a named non-default lab session, ran the changed guard.
+`herdr status server --json` reported `"detached_server_daemon":true` for it.
+A pane started in that session ran `security show-keychain-info ~/Library/Keychains/login.keychain-db` and printed `no-timeout` with `rc=0`.
+`kill -9` of the server pid made the guard exit 137, launchd restarted the guard after the throttle interval, and the new server again reported `true` with the same workspace listed.
+`launchctl kickstart -k gui/501/<label>` stopped the server through the forwarded TERM and the restarted guard started a new one, still reporting `true` with the workspace restored.
+The guard's own refusal to start a second server is the unchanged socket-owner check that runs before `start_server`.
 
 `bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh` pins the resulting decision table against real marker-carrying processes, and `tests/fm-remote-doctor.test.sh` pins the doctor's verdicts on the same markers.
 
