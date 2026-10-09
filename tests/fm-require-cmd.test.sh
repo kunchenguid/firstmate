@@ -37,6 +37,24 @@ test_slash_command_is_taken_as_a_path() {
   pass "a command written as a path resolves to itself"
 }
 
+test_directories_do_not_resolve() {
+  local explicit path out rc
+  explicit="$TMP_ROOT/explicit-command"
+  path="$TMP_ROOT/path"
+  mkdir -p "$explicit" "$path/path-command"
+
+  out=$("$REQUIRE" --resolve-only "$explicit" 2>&1)
+  rc=$?
+  [ "$rc" -eq 127 ] || fail "an explicit directory resolved successfully (got $rc)"
+  assert_contains "$out" "not an executable file" "the explicit-directory diagnostic was unclear"
+
+  out=$(PATH="$path" "$BASH" "$REQUIRE" --resolve-only path-command 2>&1)
+  rc=$?
+  [ "$rc" -eq 127 ] || fail "a PATH directory resolved successfully (got $rc)"
+  assert_contains "$out" "no executable found" "the PATH-directory diagnostic was unclear"
+  pass "directories do not resolve as commands"
+}
+
 test_npx_cache_resolves() {
   local home out
   home="$TMP_ROOT/home"
@@ -125,6 +143,7 @@ test_nonexecutable_slash_path_is_named() {
 
 test_path_command_resolves
 test_slash_command_is_taken_as_a_path
+test_directories_do_not_resolve
 test_npx_cache_resolves
 test_unavailable_command_is_actionable
 test_resolve_only_does_not_run

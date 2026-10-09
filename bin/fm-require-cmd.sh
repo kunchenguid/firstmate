@@ -76,13 +76,13 @@ done
 EXE=""
 case "$CMD" in
   */*)
-    if [ -x "$CMD" ]; then
+    if [ -f "$CMD" ] && [ -x "$CMD" ]; then
       EXE=$CMD
     fi
     ;;
   *)
     found=$(command -v "$CMD" 2>/dev/null) || found=""
-    if [ -n "$found" ] && [ -x "$found" ]; then
+    if [ -n "$found" ] && [ -f "$found" ] && [ -x "$found" ]; then
       EXE=$found
     else
       for dir in "${SEARCH[@]}"; do
