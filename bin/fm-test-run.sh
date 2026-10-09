@@ -1679,7 +1679,11 @@ families_for_changed_path() {
     docs/fm-test-isolation-proof.json)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/*|.gitattributes|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    AGENTS.md)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' "__script__:fm-instruction-budget.test.sh"
+      ;;
+    .github/*|.gitattributes|.tasks.toml|CLAUDE.md|CONTRIBUTING.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
