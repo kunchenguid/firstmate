@@ -55,6 +55,7 @@
 # Otherwise base_branch= (bin/fm-spawn.sh) selects origin's copy of that named
 # base, or the default branch when no base is recorded. A missing named target
 # refuses rather than guessing another branch; metadata is never rewritten.
+# docs/architecture.md owns that provider boundary.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git

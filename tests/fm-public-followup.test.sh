@@ -45,7 +45,7 @@ EOF
 # command that staged its job. Stop it before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
 pf_test_cleanup() {
-  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid attempt worker_state
   if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
     kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
     wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
@@ -53,7 +53,21 @@ pf_test_cleanup() {
   fi
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+      # This worker is detached, so wait(1) cannot reap it. TERM begins a
+      # shutdown that still writes job state; deleting its fixture immediately
+      # races those writes and can make rm fail with "Directory not empty".
+      for ((attempt=0; attempt<100; attempt++)); do
+        worker_state=$(ps -p "$pid" -o stat= 2>/dev/null) || worker_state=
+        case "$worker_state" in ''|*Z*) break ;; esac
+        sleep 0.1
+      done
+      case "$worker_state" in
+        ''|*Z*) ;;
+        *) printf 'not ok - fixture remote worker %s did not stop before cleanup\n' "$pid" >&2; return 1 ;;
+      esac
+    fi
   fi
   fm_test_cleanup
 }
