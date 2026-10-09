@@ -492,10 +492,13 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # agents` while subagents run; verified live through tmux, both hints read
 # from omp's composer-hints table). Ghost stripping removes the dim label but
 # keeps the bright key cell, so the key cell is judged as the remnant of the
-# anchored hint; a key cell is one or two tokens (`󰘶 󰌒`, `shift+tab`).
+# anchored hint. Only the captured nerd pair `󰘶 󰌒` and a single-token key
+# cell are accepted: a free second token would let one typed word before a
+# one-token key cell read as the hint, and a false `empty` is the dangerous
+# direction.
 # FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^[^[:space:]]+([[:space:]]+[^[:space:]]+)?[[:space:]]+(to change thinking effort|to see [0-9]+ running agents?)$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^(󰘶 󰌒|[^[:space:]]+)[[:space:]]+to change thinking effort$|^[^[:space:]]+[[:space:]]+to see [0-9]+ running agents?$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed

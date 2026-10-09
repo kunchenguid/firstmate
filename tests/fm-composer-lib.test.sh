@@ -534,6 +534,16 @@ test_matrix_omp_corner_prompt_row() {
   out=$(classify 0 '╰─'); [ "$out" = empty ] || fail "bare omp corner should read empty, got '$out'"
   out=$(classify 0 '╰─ hello'); [ "$out" = pending ] || fail "omp corner with text should read pending, got '$out'"
   out=$(classify 0 '' '' sensitive '╰─'); [ "$out" = empty ] || fail "a ghost-stripped omp corner must remain empty, got '$out'"
+  # The hint remnant is the captured nerd pair or a single key token, never a
+  # typed word plus a one-token key cell: a draft must not read empty.
+  out=$(classify 0 "$key_a $key_b" "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive "$key_a $key_b to change thinking effort" 0 1)
+  [ "$out" = empty ] || fail "the stripped nerd-pair hint remnant should read empty, got '$out'"
+  out=$(classify 0 'shift+tab' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive 'shift+tab to change thinking effort' 0 1)
+  [ "$out" = empty ] || fail "a single-token key cell remnant should read empty, got '$out'"
+  out=$(classify 0 'hi shift+tab' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive 'hi shift+tab to change thinking effort' 0 1)
+  [ "$out" = pending ] || fail "a typed word before a one-token key cell must read pending, got '$out'"
+  out=$(classify 1 'I want to see 3 running agents' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive 'I want to see 3 running agents' 1 0)
+  [ "$out" = pending ] || fail "typed text ending in the running-agents label on a plain bordered row must read pending, got '$out'"
   # Fresh session, hint on the prompt row. Rows: 0 tip, 1 blank, 2 status,
   # 3 prompt (cursor), 4-5 blank.
   screen="$head"$'\n'"$status"$'\n'"$prompt_hint"$'\n\n'
