@@ -184,6 +184,7 @@ case "${1:-}" in
     exit 0
     ;;
   new-window)
+    [ ! -e "$(dirname "$0")/fail-new-window" ] || exit 1
     name=
     previous=
     for arg in "$@"; do
@@ -199,6 +200,9 @@ case "${1:-}" in
     ;;
   has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
+    if [ -e "$(dirname "$0")/fail-gotmp-send" ]; then
+      case "$*" in *GOTMPDIR*) exit 1 ;; esac
+    fi
     prev=
     for a in "$@"; do
       if [ "$prev" = "-l" ]; then
