@@ -21,10 +21,11 @@
 #   fm-lease.sh check <task>
 #       Print "<actor> <pid> <epoch> <live|stale>" for a held lease, or
 #       nothing (exit 1) when the task is unleased.
-#   fm-lease.sh release-actor --actor main|branch
-#       Drop every lease the named actor holds; the Pi branch extension runs
-#       this at generation activation so a replaced branch conversation's
-#       leases never outlive it.
+#   fm-lease.sh release-actor --actor main|branch [--holder-pid <pid>]
+#       Drop every lease the named actor holds. With --holder-pid, require
+#       that live pid to still hold state/.lock under the command lock and
+#       release only its leases. Pi uses this at generation activation and
+#       prompt settlement, so late cleanup cannot release a successor's work.
 #   fm-lease.sh sweep
 #       Remove every provably stale lease in this home. Run at session start
 #       (a lease held by a dead actor is cleared at session start); safe to
@@ -32,7 +33,8 @@
 #
 # The default actor is $FM_SUPERVISION_ACTOR (else main); when --actor is
 # supplied for a mutation, it must name that calling actor. Exit codes: 0 ok,
-# 1 check-miss, 2 usage, 6 refused (other actor holds or actor mismatch).
+# 1 check-miss, 2 usage, 6 refused (other actor holds, actor mismatch, or the
+# expected holder no longer owns the live session lock).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +52,7 @@ fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
 trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
 
 usage() {
-  echo "usage: fm-lease.sh claim|release <task> [--actor main|branch] | release-actor --actor main|branch | check <task> | sweep" >&2
+  echo "usage: fm-lease.sh claim|release <task> [--actor main|branch] | release-actor --actor main|branch [--holder-pid <pid>] | check <task> | sweep" >&2
   exit 2
 }
 
@@ -84,10 +86,16 @@ case "$CMD" in
     ;;
   release-actor)
     ACTOR=
+    RELEASE_HOLDER_PID=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --actor)
           ACTOR=${2:-}
+          shift 2 || usage
+          ;;
+        --holder-pid)
+          RELEASE_HOLDER_PID=${2:-}
+          case "$RELEASE_HOLDER_PID" in ''|0|1|*[!0-9]*) usage ;; esac
           shift 2 || usage
           ;;
         *) usage ;;
@@ -167,12 +175,20 @@ case "$CMD" in
       echo "error: release-actor refused - the $CALLER supervision actor cannot release leases as $ACTOR" >&2
       exit "$FM_LEASE_REFUSE_EXIT"
     fi
+    if [ -n "$RELEASE_HOLDER_PID" ]; then
+      LOCK_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
+      if [ "$LOCK_PID" != "$RELEASE_HOLDER_PID" ] || ! kill -0 "$RELEASE_HOLDER_PID" 2>/dev/null; then
+        echo "error: release-actor refused - expected holder $RELEASE_HOLDER_PID no longer owns the live session lock" >&2
+        exit "$FM_LEASE_REFUSE_EXIT"
+      fi
+    fi
     for LEASE in "$STATE"/.lease-*; do
       [ -e "$LEASE" ] || continue
       case "$LEASE" in *.lock) continue ;; esac
       TASK=${LEASE##*/.lease-}
       fm_lease_valid_id "$TASK" || continue
       if fm_lease_read "$TASK" && [ "$FM_LEASE_ACTOR" = "$ACTOR" ]; then
+        [ -z "$RELEASE_HOLDER_PID" ] || [ "$FM_LEASE_PID" = "$RELEASE_HOLDER_PID" ] || continue
         rm -f -- "$LEASE"
       fi
     done

@@ -2169,6 +2169,7 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
 In TUI mode, its `/supervision-model` model list is drawn with Pi's own `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder` through the extension context's `ui.custom` surface, which is what bounds and searches a long catalog.
 
+
 Processing-retry visibility was verified on 2026-09-27 against Pi 0.87.1 with a local intercepted provider stream, without credentials or an external provider request:
 
 ```sh
@@ -2204,6 +2205,30 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 - Historical custom-message provider conversion: on 2026-08-26, `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against installed `@earendil-works/pi-coding-agent` 0.84.1 printed `ok - real Pi SDK 0.84.1 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model`.
   The guard passes a typed captain outcome and a plain rendered routine note through Pi's exported `convertToLlm`, proves that `customType` and `display` are not model-visible identity, and classifies the resulting provider text with `bin/fm-operational-input.sh`.
   This evidence explains the superseded model-relay path but is no longer the captain-delivery contract.
+
+### Settled-turn reservation cleanup
+
+Verified on 2026-10-09 on macOS arm64 with Node v26.10.0, TypeScript 5.9.3 on `PATH`, and the installed importable Pi SDK 0.85.1:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-branch-supervision.test.sh tests/fm-pi-branch-extension.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bash bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+bash bin/fm-test-run.sh tests/fm-pi-primary-types.test.sh
+```
+
+The portable regressions exercise the real lease CLI and guarded mutations with a live holder PID, an old claim timestamp, held concurrent turns, a replaced holder, and failed cleanup.
+The SDK guard intercepts transport locally, claims a reservation during a real provider turn, proves main is refused while that turn is active, and observes cleanup after Pi settles the provider error without throwing.
+No credentials or external provider requests are used.
+The lease contract remains owned by [`bin/fm-lease-lib.sh`](../../bin/fm-lease-lib.sh); the CLI header owns holder-bound release mechanics.
+Observed output:
+
+```text
+ok - success, abort, provider failure, and missing reports release live-PID leases while active turns and main leases stay protected
+ok - failed turn cleanup rejects delivery and retries at the next owner boundary; late old-generation cleanup preserves replacement leases and reload drains in-flight cleanup
+ok - holder-bound cleanup preserves main leases and refuses a replaced session before releasing branch leases
+ok - real Pi SDK 0.85.1 rejects a post-construction 429 to watcher-owned main delivery without losing its durable row or retaining its live-PID lease
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
+```
 
 ### 2026-08-28 Pi 0.84.4 SDK compatibility refresh
 

@@ -176,8 +176,8 @@ Every accepted path that cannot reach a working branch rejects its settlement to
 The watcher retains delivery ownership and routes the wake to main as a follow-up, which counts as delivered once Pi accepts it.
 A broken branch declines later offers, so they take that path directly.
 
-After wake rows are claimed, a branch prompt counts as handled only when `fm_branch_report` appends a durable outcome before that prompt settles.
-A settled provider error, or a settled prompt with no report, releases the grant and rejects delivery ownership back to the watcher.
+After wake rows are claimed, a branch prompt counts as handled only when `fm_branch_report` appends a durable outcome before successful prompt settlement and settled-turn lease cleanup succeeds.
+A settled provider error, a settled prompt with no report, or failed lease cleanup releases the grant and rejects delivery ownership back to the watcher.
 
 #### Report scoping
 
@@ -304,7 +304,7 @@ That queue is what preserves these guarantees:
 - The durable append happens before anything visible.
 - Deliveries run one at a time, in sequence order.
 - The read cursor advances before the next reader sees a row.
-- Each generation gets one ownership activation.
+- Each generation's ownership activation and settled-turn lease cleanup run in the same queue; failed lease cleanup invalidates activation for retry at the next owner boundary.
 
 Cancellation is preserved by the generation and lock-ownership rechecks the awaits are placed around.
 A session replaced mid-delivery fails the next recheck rather than acting into the session that replaced it.

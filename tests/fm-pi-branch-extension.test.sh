@@ -2719,6 +2719,212 @@ EOF
   pass "a co-present needs-decision row neither vetoes nor falsely settles routine branch delivery"
 }
 
+test_branch_turn_settlement_releases_leases_without_stealing_active_work() {
+  local repo home out status
+  repo="$TMP_ROOT/turn-lease-root"
+  home="$TMP_ROOT/turn-lease-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, realRoot, defaultSessionCtx }; })()`);
+const { dispatch, fire, settle, home, realRoot, defaultSessionCtx } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const env = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_LEASE_HOLDER_PID: String(process.pid) };
+function lease(actor, ...args) {
+  return spawnSync("bash", [`${realRoot}/bin/fm-lease.sh`, ...args], {
+    encoding: "utf8", env: { ...env, FM_SUPERVISION_ACTOR: actor },
+  });
+}
+function expectStatus(result, status, label) {
+  if (result.status !== status) throw new Error(`${label}: exit ${result.status}: ${result.stdout} ${result.stderr}`);
+}
+function mainAction(status) {
+  const result = spawnSync("bash", ["-c", `
+    source "$FM_ROOT_OVERRIDE/bin/fm-lease-lib.sh"
+    STATE="$FM_STATE_OVERRIDE"
+    trap fm_lease_guard_release EXIT
+    fm_lease_guard branch-driver fixture-action
+    printf 'main action\\n' >> "$STATE/action-log"
+  `], { encoding: "utf8", env: { ...env, FM_SUPERVISION_ACTOR: "main" } });
+  expectStatus(result, status, "main guarded action");
+}
+await fire("session_start", {}, defaultSessionCtx);
+expectStatus(lease("main", "claim", "main-active"), 0, "unrelated main claim");
+const mainLease = readFileSync(`${home}/state/.lease-main-active`, "utf8");
+let finishPrompt;
+let started = 0;
+let mode = "success";
+globalThis.__fmExecuteBranchBash = (context) => {
+  const result = spawnSync("bash", ["-c", context.command], { cwd: context.cwd, env: context.env, encoding: "utf8" });
+  expectStatus(result, 0, "real branch tool lease claim");
+  return { content: [{ type: "text", text: result.stdout }], details: undefined };
+};
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const thisMode = mode;
+  const bash = session.options.customTools.find((tool) => tool.name === "bash");
+  await bash.execute("claim", { command: "bin/fm-lease.sh claim branch-driver" });
+  // Age cannot distinguish this live active turn from the incident's abandoned lease.
+  writeFileSync(`${home}/state/.lease-branch-driver`, `branch\t${process.pid}\t1791450821\n`);
+  expectStatus(lease("main", "sweep"), 0, "live-PID sweep");
+  if (!existsSync(`${home}/state/.lease-branch-driver`)) throw new Error("sweep stole an active old lease");
+  expectStatus(lease("main", "claim", "branch-driver"), 6, "concurrent main claim");
+  mainAction(6);
+  if (thisMode === "success") {
+    const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+    const result = await report.execute("report", { task: "branch-driver", verdict: "routine", summary: "handled" }, undefined, undefined, {});
+    if (result.isError) throw new Error(`report failed: ${JSON.stringify(result)}`);
+    mainAction(6); // Reporting alone is not the end of the branch's work.
+  }
+  started += 1;
+  await new Promise((resolve) => { finishPrompt = resolve; });
+  if (thisMode === "throw") throw new Error("fixture prompt aborted");
+  if (thisMode === "provider") session.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "fixture provider failure" });
+};
+for (const nextMode of ["success", "throw", "provider", "no-report"]) {
+  mode = nextMode;
+  const before = started;
+  const offer = dispatch(`signal: ${mode}`);
+  if (!offer.accepted) throw new Error(`refused ${mode} wake`);
+  let earlyFailure;
+  const outcome = offer.settlement.then(() => null, (error) => { earlyFailure = error; return error; });
+  await settle(() => started === before + 1 || earlyFailure, `${mode} claimed branch turn`);
+  if (earlyFailure) throw earlyFailure;
+  finishPrompt();
+  const failure = await outcome;
+  if (mode === "success" ? failure !== null : !(failure instanceof Error)) throw new Error(`wrong ${mode} outcome: ${failure}`);
+  if (existsSync(`${home}/state/.lease-branch-driver`)) throw new Error(`${mode} settled turn retained its live-PID lease`);
+  if (readFileSync(`${home}/state/.lease-main-active`, "utf8") !== mainLease) throw new Error("cleanup stole main's concurrent reservation");
+  process.kill(process.pid, 0); // The original lease holder is still alive.
+  mainAction(0);
+}
+// Queue a second turn while the first owns the task. Its lease must survive
+// the first settlement, and main must still be refused until the second ends.
+mode = "success";
+const before = started;
+const first = dispatch("signal: first concurrent wake");
+await settle(() => started === before + 1, "first concurrent turn");
+const second = dispatch("signal: queued concurrent wake");
+finishPrompt();
+await first.settlement;
+await settle(() => started === before + 2, "second concurrent turn");
+mainAction(6);
+if (!existsSync(`${home}/state/.lease-branch-driver`)) throw new Error("prior cleanup stole the next turn's lease");
+finishPrompt();
+await second.settlement;
+mainAction(0);
+if (readFileSync(`${home}/state/action-log`, "utf8").trim().split("\n").length !== 5) throw new Error("a refused main action mutated state");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "branch settlement must release only completed work: $out"
+  pass "success, abort, provider failure, and missing reports release live-PID leases while active turns and main leases stay protected"
+}
+
+test_branch_lease_cleanup_retries_failure_and_skips_replaced_generations() {
+  local repo home fakebin real_bash out status
+  repo="$TMP_ROOT/cleanup-failure-root"
+  home="$TMP_ROOT/cleanup-failure-home"
+  fakebin="$home/fakebin"
+  real_bash=$(command -v bash)
+  mkdir -p "$home/state" "$home/config" "$fakebin"
+  install_pi_branch_extension_fixture "$repo"
+  cat > "$fakebin/bash" <<'SH'
+#!/bin/sh
+if [ "$1" = "$FM_TEST_LEASE_SCRIPT" ] && [ "$2" = release-actor ] && [ -e "$FM_TEST_FAIL_MARKER" ]; then
+  rm "$FM_TEST_FAIL_MARKER"
+  exit 7
+fi
+if [ "$1" = "$FM_TEST_LEASE_SCRIPT" ] && [ "$2" = release-actor ] && [ -e "$FM_TEST_FAIL_MARKER.pause" ]; then
+  : > "$FM_TEST_FAIL_MARKER.entered"
+  i=0
+  while [ -e "$FM_TEST_FAIL_MARKER.pause" ] && [ "$i" -lt 500 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ ! -e "$FM_TEST_FAIL_MARKER.pause" ] || exit 8
+fi
+exec "$FM_TEST_REAL_BASH" "$@"
+SH
+  chmod +x "$fakebin/bash"
+  PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_REAL_BASH="$real_bash" FM_TEST_LEASE_SCRIPT="$ROOT/bin/fm-lease.sh" \
+    FM_TEST_FAIL_MARKER="$home/state/fail-cleanup" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, realRoot, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, home, realRoot, defaultSessionCtx } = globalThis.__t;
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+function claim(task) {
+  const result = spawnSync("bash", [`${realRoot}/bin/fm-lease.sh`, "claim", task], {
+    encoding: "utf8", env: { ...process.env, FM_HOME: home, FM_SUPERVISION_ACTOR: "branch", FM_LEASE_HOLDER_PID: String(process.pid) },
+  });
+  if (result.status !== 0) throw new Error(`claim failed: ${result.stderr}`);
+}
+await fire("session_start", {}, defaultSessionCtx);
+let finishPrompt;
+let started = 0;
+globalThis.__fmOnBranchPrompt = async () => {
+  claim("branch-driver");
+  started += 1;
+  await new Promise((resolve) => { finishPrompt = resolve; });
+};
+const failed = dispatch("signal: failed cleanup");
+const failedResult = failed.settlement.then(() => null, (error) => error);
+await settle(() => started === 1, "first turn claim");
+writeFileSync(process.env.FM_TEST_FAIL_MARKER, "fail once\n");
+finishPrompt();
+const cleanupError = await failedResult;
+if (!(cleanupError instanceof Error) || !cleanupError.message.includes("could not release the settled branch turn's task leases")) {
+  throw new Error(`cleanup failure was hidden: ${cleanupError}`);
+}
+if (!existsSync(`${home}/state/.lease-branch-driver`)) throw new Error("failed cleanup pretended to release a lease");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) throw new Error("cleanup failure retained the wake grant");
+await fire("turn_end", {}, defaultSessionCtx);
+if (existsSync(`${home}/state/.lease-branch-driver`)) throw new Error("next owner boundary did not retry failed cleanup");
+
+const old = dispatch("signal: old generation held turn");
+const oldResult = old.settlement.then(() => null, (error) => error);
+await settle(() => started === 2, "old generation claim");
+await fire("session_shutdown", {});
+await fire("session_start", {}, defaultSessionCtx);
+if (existsSync(`${home}/state/.lease-branch-driver`)) throw new Error("replacement activation retained the abandoned lease");
+claim("replacement-turn");
+finishPrompt();
+await oldResult;
+if (!existsSync(`${home}/state/.lease-replacement-turn`)) throw new Error("old generation's late settlement cleared replacement work");
+// A reload creates a fresh extension closure, hence a fresh delivery queue.
+// Shutdown must drain an already-running cleanup before that closure can start.
+const closing = dispatch("signal: cleanup held across reload");
+const closingResult = closing.settlement.then(() => null, (error) => error);
+await settle(() => started === 3, "closing turn claim");
+writeFileSync(`${process.env.FM_TEST_FAIL_MARKER}.pause`, "hold cleanup\n");
+finishPrompt();
+await settle(() => existsSync(`${process.env.FM_TEST_FAIL_MARKER}.entered`), "in-flight cleanup");
+let shutdownFinished = false;
+const shutdown = fire("session_shutdown", {}).then(() => { shutdownFinished = true; });
+// The event loop remains live while the child is held.
+await new Promise((resolve) => setTimeout(resolve, 100));
+const finishedTooEarly = shutdownFinished;
+unlinkSync(`${process.env.FM_TEST_FAIL_MARKER}.pause`);
+await shutdown;
+await closingResult;
+if (finishedTooEarly) throw new Error("reload shutdown returned while old cleanup could still remove successor leases");
+await fire("session_start", {}, defaultSessionCtx);
+claim("post-reload-turn");
+if (!existsSync(`${home}/state/.lease-post-reload-turn`)) throw new Error("reload lost successor lease");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "cleanup failure and replacement must preserve ownership: $out"
+  pass "failed turn cleanup rejects delivery and retries at the next owner boundary; late old-generation cleanup preserves replacement leases and reload drains in-flight cleanup"
+}
+
 test_settled_branch_prompt_releases_unacknowledged_grant() {
   local repo home out status
   repo="$TMP_ROOT/settled-grant-root"
@@ -5971,6 +6177,8 @@ test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
+test_branch_turn_settlement_releases_leases_without_stealing_active_work
+test_branch_lease_cleanup_retries_failure_and_skips_replaced_generations
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown
 test_selection_change_does_not_corrupt_inflight_provider_state

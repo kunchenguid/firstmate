@@ -1228,6 +1228,34 @@ test_release_actor_drops_only_that_actors_leases() {
   pass "release commands authorize the caller and bulk release drops only that actor's leases"
 }
 
+test_release_actor_scopes_cleanup_to_the_expected_session_holder() {
+  local home out status successor
+  home="$TMP_ROOT/release-holder-home"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" claim old-turn || fail "old turn claim failed"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-lease.sh" claim main-turn || fail "main turn claim failed"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release-actor --actor branch --holder-pid "$$" \
+    || fail "current holder cleanup failed"
+  [ ! -e "$home/state/.lease-old-turn" ] || fail "current holder cleanup kept old turn"
+  [ -e "$home/state/.lease-main-turn" ] || fail "current holder cleanup removed main turn"
+
+  # A replacement can win the session lock after Pi's ownership read but
+  # before its asynchronous cleanup command acquires the lease-command lock.
+  sleep 60 &
+  successor=$!
+  printf '%s\n' "$successor" > "$home/state/.lock"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$successor" "$ROOT/bin/fm-lease.sh" claim next-turn \
+    || { kill "$successor"; fail "replacement claim failed"; }
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release-actor --actor branch --holder-pid "$$" 2>&1)
+  status=$?
+  kill "$successor"
+  wait "$successor" 2>/dev/null || true
+  expect_code 6 "$status" "replaced holder cleanup must refuse: $out"
+  [ -e "$home/state/.lease-next-turn" ] || fail "late cleanup stole the replacement's branch lease"
+  pass "holder-bound cleanup preserves main leases and refuses a replaced session before releasing branch leases"
+}
+
 # --- role-partition refinements ----------------------------------------------
 
 test_branch_cannot_force_teardown_or_directly_relaunch() {
@@ -1569,6 +1597,7 @@ test_guard_stale_clear_cannot_delete_a_new_claim
 test_guard_holds_exclusivity_through_mutation
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
+test_release_actor_scopes_cleanup_to_the_expected_session_holder
 test_branch_cannot_force_teardown_or_directly_relaunch
 test_away_record_relocates_main_owned_actions_to_the_branch
 test_away_branch_spawn_requires_queued_dispatchable_work

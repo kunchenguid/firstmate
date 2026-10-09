@@ -609,6 +609,9 @@ export default function (pi: ExtensionAPI) {
   // One-time per-generation activation work (marker write + stray branch
   // lease cleanup); ownership itself is re-read lazily at every boundary.
   let activatedGeneration = -1;
+  // Shutdown drains only the active lease subprocess, not unrelated outcome
+  // delivery that may still be waiting to observe the generation change.
+  let branchLeaseCleanup: Promise<boolean> | null = null;
   // Serializes branch work: mirror appends and wake turns run strictly in
   // dispatch order, one at a time (the branch runs drain -> handle -> ack
   // serially by design).
@@ -921,14 +924,22 @@ export default function (pi: ExtensionAPI) {
 
   // A replaced branch conversation must not leave its per-task leases behind
   // (the session-lock holder pid is still alive, so the sweep alone would
-  // keep them). One bulk release per generation, at activation.
+  // keep them). Release at activation and after each settled branch prompt.
   async function releaseBranchLeases(expectedGeneration: number): Promise<boolean> {
     if (!(await generationOwnsLock(expectedGeneration))) return false;
-    const result = await runCommandAsync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
+    // Shutdown may have run between the awaited ownership result and this
+    // continuation. No old cleanup may start after shutdown captured its wait.
+    if (shuttingDown || expectedGeneration !== generation) return false;
+    const cleanup = runCommandAsync("bash", [leaseScript, "release-actor", "--actor", "branch", "--holder-pid", ownedLockPid], {
       cwd: fmRoot,
       env: { ...scriptEnv, FM_SUPERVISION_ACTOR: "branch" },
-    });
-    return result.status === 0;
+    }).then((result) => result.status === 0);
+    branchLeaseCleanup = cleanup;
+    try {
+      return await cleanup;
+    } finally {
+      if (branchLeaseCleanup === cleanup) branchLeaseCleanup = null;
+    }
   }
 
   // Lazy, per-action ownership evaluation (see the header). Returns true only
@@ -1557,6 +1568,19 @@ ${context.command}
           await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail));
         } finally {
           wakeTaskScope = null;
+          // A report may precede more tools, and provider failures may settle
+          // without a report. Only prompt settlement ends the reservation.
+          // Keep cleanup on branchChain, before the next prompt, and serialize
+          // it with activation so an old generation cannot release new work.
+          await enqueueDelivery(async () => {
+            if (!(await generationOwnsLock(acceptedGeneration))) return;
+            if (!(await releaseBranchLeases(acceptedGeneration))) {
+              // Retry through the existing owner activation path; never call
+              // a wake handled while its reservations still block main.
+              if (acceptedGeneration === generation) activatedGeneration = -1;
+              throw new Error("could not release the settled branch turn's task leases");
+            }
+          });
         }
         const providerError = settledPromptProviderError(sessionManager, entryOffset);
         if (providerError) {
@@ -1887,6 +1911,10 @@ ${context.command}
       }
       branch = null;
     }
+    // Reload creates a new extension closure and delivery queue. Drain any
+    // cleanup subprocess already in flight before that replacement can claim
+    // leases under the same Pi pid; later old continuations are now inert.
+    await branchLeaseCleanup;
     await deactivateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(closingGeneration));
   });
 
