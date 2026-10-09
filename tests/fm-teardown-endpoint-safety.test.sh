@@ -1171,7 +1171,7 @@ test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3() {
 # The claim proves the stale record's teardown is records-only, so the record
 # scan must not refuse it; once it is gone, the claimant tears down normally.
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
-  local dir id=stale-task other=live-task rc
+  local dir id=stale-task other=live-task rc trust_home store
 
   dir=$(make_case slot-reassigned-both-records)
   mark_case_as_treehouse_pool "$dir"
@@ -1182,9 +1182,14 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other"
+  trust_home="$dir/user-home"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+  HOME="$trust_home" "$ROOT/bin/fm-droid-trust.sh" --receipt "$dir/home/state/$id.droid-trust" "$dir/worktree" "$dir/project" >/dev/null || fail 'pooled trust setup failed'
 
   set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  HOME="$trust_home" run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "records-only teardown of a stale record on a claimed slot failed: $(cat "$dir/stderr")"
@@ -1192,15 +1197,21 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   assert_present "$dir/worktree/sentinel" "records-only teardown reset the claimant's slot"
   assert_present "$dir/home/state/$other.meta" "records-only teardown removed the claimant's record"
 
+  assert_absent "$dir/home/state/$id.droid-trust" "retired task retained trust ownership"
+  assert_present "$dir/home/state/$other.droid-trust" "non-Droid successor did not inherit trust cleanup"
+  jq -e '.trustedFolders | length == 3' "$store" >/dev/null || fail 'successor lost exact-path trust'
+
   : > "$dir/runtime.log"
-  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
+  HOME="$trust_home" run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "claimant teardown failed after the stale record retired: $(cat "$dir/stderr")"
   assert_absent "$dir/home/state/$other.meta" "claimant teardown left its record"
   assert_absent "$dir/pool/1/.fm-slot-owner" "claimant teardown left its spent slot claim behind"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "claimant teardown did not return its pool slot: $(cat "$dir/runtime.log")"
 
-  pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
+  jq -e '.trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'final pooled teardown retained trust or lost unrelated grants'
+  assert_absent "$dir/home/state/$other.droid-trust" "successor retained cleanup receipt"
+  pass "fm-teardown: a stale record transfers trust cleanup to a non-Droid claimant, which retires it"
 }
 
 # The two states that must never become a false refusal: the task's own claim,

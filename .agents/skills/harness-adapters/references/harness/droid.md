@@ -22,8 +22,9 @@ Current empirical evidence lives in [`docs/verification/runtime-backends.md`](..
 
 ## Settings and discovery
 
-`../../../../../bin/fm-spawn.sh` owns settings construction, custom-model reference resolution, supported effort omission, atomic publication, rollback, and relaunch replacement.
-Only the model registry id is copied from global settings; credentials are never written to task settings.
-`../../../../../bin/fm-teardown.sh` removes task settings and exact-worktree trust, including after a harness switch, and the control-plane wiring table retires them during a harness switch.
+`../../../../../bin/fm-spawn.sh` owns settings construction, literal native-model selection, supported effort omission, atomic publication, rollback, and relaunch replacement.
+The requested native catalog id or custom registry id is passed unchanged; no provider-facing alias is inferred from global settings.
+`../../../../../bin/fm-teardown.sh` removes task settings and retires the trust receipt, including after a harness switch; the control plane retires process-local settings during a harness switch.
+`../../../../../bin/fm-droid-trust.sh` owns serialized settings updates, acquired-entry rollback, and cleanup transfer when another recorded task uses the same pooled path.
 Model availability depends on the installed CLI and account: inspect `droid --help`, the interactive `/model` catalog, and the user's `~/.factory/settings.json` custom-model registry without exposing credentials.
 Cross-harness provider and credential identity is owned by `references/common/model-and-effort.md`.

@@ -34,7 +34,7 @@ unset _FM_SESSION_LOCK_LIB_DIR
 # (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
 # comp. omp's own daemon workers share that name and are excluded by
 # fm_omp_daemon_worker below.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$|^droid$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
 
 # True when full argument string $1 is one of omp's daemon worker processes
 # (`omp __omp_worker_daemon_broker`, `omp __omp_worker_mnemopi_embed`, ...):
@@ -65,7 +65,7 @@ fm_omp_daemon_worker() {  # <args>
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy droid)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.

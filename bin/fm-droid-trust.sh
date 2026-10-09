@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Register or retire Droid folder trust for exactly an isolated task worktree.
-# Usage: fm-droid-trust.sh [--remove] <worktree> <project>
+# Usage: fm-droid-trust.sh [--receipt <file>] [--remove] <worktree> <project>
+#        fm-droid-trust.sh --rollback <receipt>
+#        fm-droid-trust.sh --retire <receipt> <state> <task-id>
+# Receipts retain exact paths across relaunch and worktree removal. Rollback
+# removes only unchanged entries acquired by registration. Retirement transfers
+# cleanup to another recorded task using the path, or removes only those paths.
+# All Firstmate mutations serialize at the resolved Factory settings store.
 # --remove retires only those exact paths before teardown returns the worktree.
 # The worktree must be a linked worktree of that project, never its primary
 # checkout, a parent, or the user's home. Only the exact logical and physical
@@ -16,10 +22,19 @@ unset CDPATH \
   GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
 
 ACTION=register
-if [ "${1:-}" = --remove ]; then ACTION=remove; shift; fi
-[ "$#" -eq 2 ] || { echo "usage: fm-droid-trust.sh [--remove] <worktree> <project>" >&2; exit 2; }
-WT_ARG=$1
-PROJ_ARG=$2
+RECEIPT=
+TASK_STATE=
+TASK_ID=
+if [ "${1:-}" = --receipt ]; then RECEIPT=${2:-}; shift 2; fi
+case "${1:-}" in
+  --remove) ACTION=remove; shift ;;
+  --rollback) ACTION=rollback; RECEIPT=${2:-}; shift 2 ;;
+  --retire) ACTION=retire; RECEIPT=${2:-}; TASK_STATE=${3:-}; TASK_ID=${4:-}; shift 4 ;;
+esac
+case "$ACTION" in
+  rollback|retire) [ "$#" -eq 0 ] && [ -n "$RECEIPT" ] || exit 2; WT_ARG=; PROJ_ARG= ;;
+  *) [ "$#" -eq 2 ] || { echo "usage: fm-droid-trust.sh [--receipt <file>] [--remove] <worktree> <project>" >&2; exit 2; }; WT_ARG=$1; PROJ_ARG=$2 ;;
+esac
 
 refuse() { echo "error: refusing to change Droid trust: $1" >&2; exit 1; }
 
@@ -33,6 +48,12 @@ common_dir_of() {
   (cd -P -- "$dir" && real_dir "$common")
 }
 
+[ -n "${HOME:-}" ] || refuse "HOME is not set"
+HOME_REAL=$(real_dir "$HOME") || true
+[ -n "$HOME_REAL" ] || refuse "HOME is not an accessible directory"
+WT_REAL=
+WT_LOGICAL=
+if [ "$ACTION" = register ] || [ "$ACTION" = remove ]; then
 WT_REAL=$(real_dir "$WT_ARG") || true
 [ -n "$WT_REAL" ] || refuse "worktree '$WT_ARG' is not an accessible directory"
 WT_LOGICAL=$(logical_dir "$WT_ARG") || true
@@ -40,9 +61,6 @@ WT_LOGICAL=$(logical_dir "$WT_ARG") || true
 PROJ_REAL=$(real_dir "$PROJ_ARG") || true
 [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 
-[ -n "${HOME:-}" ] || refuse "HOME is not set, so Droid's settings store cannot be located"
-HOME_REAL=$(real_dir "$HOME") || true
-[ -n "$HOME_REAL" ] || refuse "HOME '$HOME' is not an accessible directory"
 [ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a task worktree"
 
 WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
@@ -62,10 +80,11 @@ PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
 [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
 [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
 
+fi
+
 command -v node >/dev/null 2>&1 || refuse "node is required to change workspace trust and was not found on PATH"
 
 STORE_DIR="$HOME_REAL/.factory"
-[ "$ACTION" != remove ] || [ -e "$STORE_DIR/settings.json" ] || [ -L "$STORE_DIR/settings.json" ] || exit 0
 mkdir -p "$STORE_DIR" 2>/dev/null || true
 STORE_DIR_REAL=$(real_dir "$STORE_DIR") || true
 [ -n "$STORE_DIR_REAL" ] || refuse "Droid settings directory '$STORE_DIR' does not exist and could not be created"
@@ -81,107 +100,120 @@ if [ -e "$STORE" ]; then
   [ -w "$STORE" ] || refuse "'$STORE' is not writable"
 fi
 
-# Read-modify-write with a fingerprint check before rename and readback:
-# Droid itself rewrites this file
-# when a worker answers a dialog or changes a setting, so a store that moved
-# under us is retried once and then refused rather than clobbered.
-if ! node - "$STORE" "$ACTION" "$WT_LOGICAL" "$WT_REAL" <<'NODE'
+# The lock covers reading settings, receipt publication, and atomic rename.
+# Keep the wake library's source-time directory creation inside the store.
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+STATE=$STORE_DIR_REAL
+FM_STATE_OVERRIDE=$STORE_DIR_REAL
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+STORE_LOCK="$STORE.fm-trust.lock"
+fm_lock_acquire_wait_max "$STORE_LOCK" 10 || refuse "settings lock is busy: $STORE_LOCK"
+trap 'fm_lock_release "$STORE_LOCK"' EXIT
+trap 'exit 1' HUP INT TERM
+if ! node - "$STORE" "$ACTION" "$RECEIPT" "$TASK_STATE" "$TASK_ID" "$WT_LOGICAL" "$WT_REAL" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [store, action, ...wanted] = process.argv.slice(2);
-const paths = [...new Set(wanted)];
-const readStore = () => {
-  try {
-    return fs.readFileSync(store);
-  } catch (err) {
-    if (err.code === "ENOENT") return null;
-    throw err;
-  }
+const [store, action, receiptFile, state, id, logical, physical] = process.argv.slice(2);
+const read = (file) => {
+  try { return fs.readFileSync(file, "utf8"); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
 };
-const parseSettings = (raw) => {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    throw new Error(`${store} contains invalid JSON`);
-  }
+const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const parse = (raw, file) => {
+  try { const root = JSON.parse(raw); if (!object(root)) throw new Error(); return root; }
+  catch { throw new Error(`${file} is not a valid JSON object`); }
 };
-const fingerprint = (buf) =>
-  buf === null ? "absent" : crypto.createHash("sha256").update(buf).digest("hex");
-const validEntry = (entry) =>
-  entry !== null && typeof entry === "object" && !Array.isArray(entry) && typeof entry.trustedAt === "string" && entry.trustedAt.length > 0;
-const listed = (root) =>
-  root.trustedFolders !== null && typeof root.trustedFolders === "object" && !Array.isArray(root.trustedFolders) && paths.every((p) => Object.prototype.hasOwnProperty.call(root.trustedFolders, p) && validEntry(root.trustedFolders[p]));
-const satisfied = (root) => action === "remove"
-  ? paths.every((p) => !Object.prototype.hasOwnProperty.call(root.trustedFolders || {}, p))
-  : listed(root);
-const attempt = () => {
-  const original = readStore();
-  const before = fingerprint(original);
-  let root = {};
-  if (original !== null) {
-    const raw = original.toString("utf8");
-    if (raw.trim() !== "") {
-      root = parseSettings(raw);
-      if (root === null || typeof root !== "object" || Array.isArray(root)) {
-        throw new Error(`${store} is not a JSON object`);
+const atomic = (file, value) => {
+  const tmp = `${file}.fm-trust.${process.pid}.${crypto.randomBytes(8).toString("hex")}`;
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, {mode:0o600, flag:"wx"});
+    fs.renameSync(tmp, file);
+  } finally { fs.rmSync(tmp, {force:true}); }
+};
+const receipt = (file) => {
+  try { if (!fs.lstatSync(file).isFile()) throw new Error(`${file} is not a regular receipt`); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  const raw = read(file);
+  const value = parse(raw, file);
+  if (value.schema !== "fm-droid-trust.v1" || value.store !== store || !Array.isArray(value.paths)
+      || !value.paths.every(p => typeof p === "string" && path.isAbsolute(p)) || !object(value.acquired)) {
+    throw new Error(`${file} is not a valid Droid trust receipt`);
+  }
+  return value;
+};
+const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
+const canonical = p => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+try {
+  let owned = receiptFile ? receipt(receiptFile) : null;
+  if ((action === "rollback" || action === "retire") && !owned) process.exit(0);
+  let paths = owned ? owned.paths : [...new Set([logical, physical])];
+  if (action === "retire") {
+    if (!/^[A-Za-z0-9._-]+$/.test(id) || path.resolve(receiptFile) !== path.join(path.resolve(state), `${id}.droid-trust`)) {
+      throw new Error("retirement receipt does not match its task");
+    }
+    // A recorded task still owns its copy until retirement. Conservatively
+    // transfer to it, including an exited or non-Droid successor, rather than
+    // revoking a grant while another task may still use the same pooled path.
+    for (const name of fs.readdirSync(state).sort()) {
+      if (!name.endsWith(".meta") || name === `${id}.meta`) continue;
+      const other = name.slice(0, -5);
+      if (!/^[A-Za-z0-9._-]+$/.test(other)) continue;
+      const meta = read(path.join(state, name));
+      if (meta === null) continue;
+      const wt = meta.split("\n").find(line => line.startsWith("worktree="))?.slice(9);
+      if (!wt || !paths.some(p => p === wt || canonical(p) === canonical(wt))) continue;
+      const nextFile = path.join(state, `${other}.droid-trust`);
+      const next = receipt(nextFile);
+      atomic(nextFile, {schema:"fm-droid-trust.v1", store,
+        paths:[...new Set([...paths, ...(next?.paths || [])])],
+        acquired:{...owned.acquired, ...(next?.acquired || {})}});
+      fs.unlinkSync(receiptFile);
+      process.exit(0);
+    }
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const original = read(store);
+    const root = original === null || original.trim() === "" ? {} : parse(original, store);
+    if (root.trustedFolders == null) root.trustedFolders = {};
+    if (!object(root.trustedFolders)) throw new Error(`${store} has a non-object trustedFolders value`);
+    const folders = root.trustedFolders;
+    if (action === "register") {
+      paths = [...new Set([...paths, logical, physical])];
+      const acquired = {...(owned?.acquired || {})};
+      for (const p of [logical, physical]) {
+        if (Object.hasOwn(folders, p)) {
+          if (!object(folders[p]) || typeof folders[p].trustedAt !== "string" || !folders[p].trustedAt) {
+            throw new Error(`${store} has an invalid trusted-folder entry for ${p}`);
+          }
+        } else {
+          folders[p] = {trustedAt:new Date().toISOString()};
+          acquired[p] = folders[p];
+        }
+      }
+      owned = {schema:"fm-droid-trust.v1", store, paths, acquired};
+      if (receiptFile) atomic(receiptFile, owned);
+    } else {
+      for (const p of paths) {
+        if (action !== "rollback" || (Object.hasOwn(owned.acquired, p) && same(folders[p], owned.acquired[p]))) delete folders[p];
       }
     }
+    if (read(store) !== original) continue;
+    const changed = original === null ? action === "register"
+      : !same(original.trim() ? parse(original, store) : {}, root);
+    if (changed) atomic(store, root);
+    const after = parse(read(store) || "{}", store).trustedFolders || {};
+    const retained = action === "register" ? [logical, physical].every(p => same(after[p], folders[p]))
+      : paths.every(p => action === "rollback" ? !same(after[p], owned.acquired[p]) || !Object.hasOwn(after,p) : !Object.hasOwn(after,p));
+    if (!retained) continue;
+    if (action !== "register" && receiptFile) fs.unlinkSync(receiptFile);
+    process.exit(0);
   }
-  if (root.trustedFolders === undefined || root.trustedFolders === null) root.trustedFolders = {};
-  if (typeof root.trustedFolders !== "object" || Array.isArray(root.trustedFolders)) {
-    throw new Error(`${store} has a non-object "trustedFolders" value`);
-  }
-  for (const p of paths) {
-    if (Object.prototype.hasOwnProperty.call(root.trustedFolders, p) && !validEntry(root.trustedFolders[p])) {
-      throw new Error(`${store} has an invalid trusted-folder entry for ${p}`);
-    }
-  }
-  if (satisfied(root)) return "recorded";
-  for (const p of paths) {
-    if (action === "remove") {
-      delete root.trustedFolders[p];
-    } else if (!Object.prototype.hasOwnProperty.call(root.trustedFolders, p)) {
-      root.trustedFolders[p] = { trustedAt: new Date().toISOString() };
-    }
-  }
-  const unique = `${process.pid}.${crypto.randomBytes(8).toString("hex")}`;
-  const tmp = path.join(path.dirname(store), `.settings.json.fm-trust.${unique}`);
-  fs.writeFileSync(tmp, `${JSON.stringify(root, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  let renamed = false;
-  try {
-    if (fingerprint(readStore()) !== before) return "moved";
-    fs.renameSync(tmp, store);
-    renamed = true;
-  } finally {
-    if (!renamed) fs.rmSync(tmp, { force: true });
-  }
-  return satisfied(parseSettings(fs.readFileSync(store, "utf8"))) ? "recorded" : "dropped";
-};
-try {
-  for (let i = 0; i < 3; i += 1) {
-    const result = attempt();
-    if (result === "recorded") process.exit(0);
-    if (result === "moved" && i >= 1) {
-      console.error(`error: ${store} was modified while trust was being changed; refusing to overwrite it`);
-      process.exit(1);
-    }
-  }
-} catch (err) {
-  console.error(`error: ${err.message}`);
-  process.exit(1);
-}
-console.error(`error: ${store} did not retain the requested trust ${action} for ${paths.join(", ")} after 3 attempts`);
-process.exit(1);
+  throw new Error(`${store} changed during the trust transaction`);
+} catch (error) { console.error(`error: ${error.message}`); process.exit(1); }
 NODE
 then
-  refuse "could not change trust for '$WT_LOGICAL' in '$STORE'"
+  refuse "could not complete $ACTION in $STORE; any receipt is retained for recovery"
 fi
-
-if [ "$ACTION" = remove ]; then
-  echo "untrusted: $WT_REAL"
-elif [ "$WT_LOGICAL" != "$WT_REAL" ]; then
-  echo "trusted: $WT_LOGICAL ($WT_REAL)"
-else
-  echo "trusted: $WT_REAL"
-fi
+printf '%s: %s\n' "$ACTION" "${WT_REAL:-$RECEIPT}"
