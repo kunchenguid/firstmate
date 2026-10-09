@@ -441,6 +441,10 @@ fm_send_resolve_target() { # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+# The recorded harness scopes the kiro-only composer rules for every composer
+# read this send makes (fm_composer_kiro_scope in bin/fm-composer-lib.sh).
+# shellcheck disable=SC2034
+FM_COMPOSER_HARNESS=$TARGET_HARNESS
 shift
 
 # Supervision lease guard: a steer is overlap territory between the two Pi

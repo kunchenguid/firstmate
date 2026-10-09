@@ -51,6 +51,12 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
     # claims an unrelated command.
     agy|devin) printf 'agent' ;;
+    # kiro (Kiro CLI) is anchored for the same reason as muse, omp, and agy: its
+    # live foreground process name is the bare word `kiro-cli` (verified,
+    # kiro-cli 2.21.4: a toolbox/aim-sandbox wrapper whose comm and tmux
+    # #{pane_current_command} both read kiro-cli), and a glob would claim
+    # unrelated commands containing that fragment.
+    kiro-cli) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then

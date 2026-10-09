@@ -366,6 +366,10 @@ HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
+# The recorded harness scopes the kiro-only composer rules for every composer
+# read this control action makes (fm_composer_kiro_scope in bin/fm-composer-lib.sh).
+# shellcheck disable=SC2034
+FM_COMPOSER_HARNESS=$HARNESS
 
 fm_backend_validate "$BACKEND" || exit 1
 

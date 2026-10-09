@@ -1011,6 +1011,130 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+# KIRO-ONLY near-gray ghost text: kiro draws its idle placeholder in a
+# NEAR-ACHROMATIC truecolor above the 128 ghost ceiling, so it survived the strip
+# and read as real typed content - a composer that never reports empty, which
+# makes every steer defer forever on the exact `pending` skip. The wider ceiling
+# applies only when the caller names the harness kiro (FM_COMPOSER_HARNESS);
+# test_composer_widening_is_kiro_only below proves every other read is unchanged.
+#   kiro ghost      38;2;158;158;158  luma 158.0  spread   0  -> must STRIP
+#   grey real text  38;2;206;207;210  luma 207.0  spread   4  -> must SURVIVE
+#   muse real glyph 38;2;90;160;255   luma 149.9  spread 165  -> must SURVIVE
+test_kiro_near_gray_ghost_is_stripped_and_real_text_survives() {
+  local out
+  out=$(printf '%s' "${ESC}[38;2;158;158;158mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "kiro's near-gray placeholder (luma 158.0, spread 0) must strip as ghost text, got '$out'"
+
+  # NON-REGRESSION: near-gray REAL typed text is separated from the placeholder
+  # by luminance alone (207.0 vs 158.0). Stripping it would delete input.
+  out=$(printf '%s' "${ESC}[38;2;206;207;210mdeploy the thing${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: near-gray real text (luma 207.0, spread 4) must survive the kiro strip, got '$out'"
+
+  # NON-REGRESSION: a strongly chromatic glyph (muse's, spread 165) is out of the
+  # near-gray ceiling's reach at any luminance.
+  out=$(printf '%s' "${ESC}[38;2;90;160;255m⟩${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = '⟩' ] \
+    || fail "NON-REGRESSION: a chromatic glyph (luma 149.9, spread 165) must survive the kiro strip, got '$out'"
+
+  # The gray ceiling raises the applicable ceiling and never lowers an
+  # operator-set one: luma 190 is above the 180 gray default but below a raised
+  # FM_COMPOSER_GHOST_LUMA_MAX, so the knob keeps applying to gray text.
+  out=$(printf '%s' "${ESC}[38;2;190;190;190mplaceholder text${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro FM_COMPOSER_GHOST_LUMA_MAX=200 fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "a near-gray run at luma 190 must strip under FM_COMPOSER_GHOST_LUMA_MAX=200, got '$out'"
+
+  pass "fm_composer_strip_ghost: on kiro, near-gray ghost strips while near-gray real text and a chromatic glyph survive"
+}
+
+# A kiro pane with no COLORTERM gets the SAME grey in the 256-colour encoding:
+# 38;5;247, xterm grey level 158, where a truecolor pane gets 38;2;158;158;158.
+# Only palette indices with a fixed grey RGB are tested, and only on kiro.
+test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive() {
+  local out
+  out=$(printf '%s' "${ESC}[38;5;247mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "kiro's 256-colour placeholder (38;5;247, grey level 158) must strip as ghost text, got '$out'"
+
+  out=$(printf '%s' "${ESC}[38:5:247mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "the colon form 38:5:247 must strip the same grey on kiro, got '$out'"
+
+  # SCOPE GUARD: only the 232-255 ramp is luminance-tested. The 6x6x6 cube's
+  # r==g==b diagonal is arithmetically grey (145 computes to level 175) and is
+  # deliberately NOT tested, because kiro has not been measured drawing ghost
+  # text there and widening the predicate reintroduces the palette-dependence
+  # problem the 38;5 carve-out exists for.
+  out=$(printf '%s' "${ESC}[38;5;145mplaceholder text${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'placeholder text' ] \
+    || fail "SCOPE GUARD: a cube-diagonal grey outside 232-255 (38;5;145) must be untouched, got '$out'"
+
+  # NON-REGRESSION: a grey above the ceiling is real input, and a CHROMATIC or
+  # theme-remapped (0-15) index carries no fixed grey to measure.
+  out=$(printf '%s' "${ESC}[38;5;253mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a bright palette grey (38;5;253, level 218) must survive, got '$out'"
+  out=$(printf '%s' "${ESC}[38;5;33mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a chromatic palette index (38;5;33) must survive, got '$out'"
+  out=$(printf '%s' "${ESC}[38;5;8mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a theme-remapped index (38;5;8) must survive, got '$out'"
+
+  pass "fm_composer_strip_ghost: on kiro, palette greys strip while bright, chromatic and theme-remapped indexes survive"
+}
+
+# The kiro widening must not reach any other harness, nor a read that names no
+# harness: Claude draws a typed slash command in grey 38;2;112;112;112, which the
+# herdr payload proof reads with FM_COMPOSER_GHOST_LUMA_MAX=0, and the wider gray
+# ceiling stripped it, so a typed /exit was judged unsent. Each case is first
+# shown to diverge under the kiro scope, so none of them can pass vacuously.
+test_composer_widening_is_kiro_only() {
+  local out h hinted screen
+  local saved=${FM_COMPOSER_HARNESS-__unset__}
+  unset FM_COMPOSER_HARNESS
+
+  out=$(printf '%s' "${ESC}[38;2;112;112;112m/exit${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "fixture drift: the kiro scope must strip grey 112 at FM_COMPOSER_GHOST_LUMA_MAX=0, or the Claude case is vacuous, got '$out'"
+  for h in '' claude codex rovo grok; do
+    out=$(printf '%s' "${ESC}[38;2;112;112;112m/exit${ESC}[0m" \
+      | FM_COMPOSER_HARNESS=$h FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_strip_ghost)
+    [ "$out" = '/exit' ] \
+      || fail "harness '${h:-none}': Claude's grey typed /exit must survive with FM_COMPOSER_GHOST_LUMA_MAX=0, got '$out'"
+    out=$(printf '%s' "${ESC}[38;2;158;158;158mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=$h fm_composer_strip_ghost)
+    [ "$out" = 'ask a question' ] \
+      || fail "harness '${h:-none}': a near-gray run above the shared ceiling must survive outside kiro, got '$out'"
+    out=$(printf '%s' "${ESC}[38;5;240mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=$h fm_composer_strip_ghost)
+    [ "$out" = 'ask a question' ] \
+      || fail "harness '${h:-none}': a dark palette grey must stay untested outside kiro, got '$out'"
+  done
+  out=$(printf '%s' "${ESC}[38;5;240mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "fixture drift: the kiro scope must strip a dark palette grey, got '$out'"
+
+  # The hinted idle row reads empty only on kiro; on every other read it is
+  # ordinary bare-composer text, exactly as before kiro existed.
+  hinted=$'transcript line\n'"${ESC}[39m›  ask a question or describe a task ↵"
+  screen="$hinted"$'\n /copy to clipboard'
+  FM_COMPOSER_HARNESS=kiro assert_screen "kiro hinted idle row on tmux" empty "$CAPS_TMUX" "$hinted" 1
+  FM_COMPOSER_HARNESS=kiro assert_screen "kiro hinted idle row cursorless" empty "$CAPS_STYLED" "$screen"
+  for h in '' claude codex; do
+    FM_COMPOSER_HARNESS=$h assert_screen "hinted row on tmux, harness '${h:-none}'" pending "$CAPS_TMUX" "$hinted" 1
+    FM_COMPOSER_HARNESS=$h assert_screen "hinted row cursorless, harness '${h:-none}'" pending "$CAPS_STYLED" "$screen"
+  done
+
+  [ "$saved" = __unset__ ] || FM_COMPOSER_HARNESS=$saved
+  pass "composer widening: the near-gray ceiling, palette greys, and hinted idle row apply on kiro only"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -1235,3 +1359,6 @@ test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
+test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
+test_composer_widening_is_kiro_only

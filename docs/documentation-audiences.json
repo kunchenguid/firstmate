@@ -209,6 +209,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/kiro.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/muse.md",
       "audience": "agent-runtime"
     },
@@ -482,6 +486,10 @@
     },
     {
       "path": "docs/verification/dispatch-resolve.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/kiro.md",
       "audience": "maintainer-verification"
     },
     {
