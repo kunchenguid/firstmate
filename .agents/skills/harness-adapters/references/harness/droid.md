@@ -16,7 +16,7 @@ Current empirical evidence lives in [`docs/verification/runtime-backends.md`](..
 | Interrupt and exit | One Escape and `/quit`, delivered through `../../../../../bin/fm-control.sh`. |
 | Recovery | Deterministic relaunch through the control plane; native resume is not part of this adapter's recovery contract. |
 | Skills | `/<skill>`. |
-| Trust | Droid 0.233.0 and 0.237.0 gate fresh folders; `../../../../../bin/fm-droid-trust.sh` registers only the exact isolated worktree in the persistent trust store before launch and removes those paths at teardown. |
+| Trust | Exact-worktree registration, receipt-only retirement, and pooled-path cleanup transfer are owned by [`fm-droid-trust.sh`](../../../../../bin/fm-droid-trust.sh). |
 | Model | `sessionDefaultSettings.model`; custom models use the user's registry id. |
 | Effort | `sessionDefaultSettings.reasoningEffort`; `low`, `medium`, `high`, `xhigh`, `max`, and `dynamic` are retained. |
 

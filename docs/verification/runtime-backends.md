@@ -2971,7 +2971,7 @@ with-cursor : unknown      cursorless : pending   (real typed text, not submitte
 with-cursor : unknown      cursorless : unknown   (agent exited to a shell)
 ```
 
-`bin/fm-tmux-lib.sh` therefore reclassifies cursorlessly only when the pane's foreground process group is provably Cursor, so every other harness keeps the strict blank-cursor-row posture.
+The current process-identity boundary for tmux's cursorless fallback is owned by [the tmux composer guide](../tmux-backend.md#composer-busy-state-and-delivery).
 That supplies the genuine composer-empty proof required for away-mode escalation delivery.
 A live injection through `bin/fm-supervise-daemon.sh`'s own `inject_msg` into a real Cursor pane returned 0 and the pane processed the typed `FIRSTMATE_OP: v1 away-supervisor:` escalation.
 
@@ -3790,8 +3790,8 @@ These scenarios require Treehouse, Fish, and compatible `tasks-axi` (0.2.6 in th
 The portable guards refresh with:
 
 ```sh
-bin/fm-test-run.sh tests/fm-droid-harness.test.sh tests/fm-harness-precedence.test.sh tests/fm-spawn-dispatch-profile.test.sh tests/fm-control-relaunch.test.sh
+bash bin/fm-test-run.sh tests/fm-droid-harness.test.sh tests/fm-harness-precedence.test.sh tests/fm-spawn-dispatch-profile.test.sh tests/fm-control-relaunch.test.sh tests/fm-backlog-atomicity.test.sh tests/fm-teardown.test.sh tests/fm-teardown-endpoint-safety.test.sh
 ```
 
-The portable cases cover exact-name process detection, foreign-marker precedence, adapter-scoped busy classification including cmux, timer-footer composer safety, scoped trust registration, exact-path cleanup, and malformed-store refusal, model/effort settings, hook quoting, collisions, failed-spawn cleanup, and dynamic-effort relaunch.
+The portable cases cover exact-name process detection, foreign-marker precedence, adapter-scoped busy classification including cmux, timer-footer composer safety, scoped trust registration, exact-path cleanup, and malformed-store refusal, model/effort settings, hook quoting, collisions, failed-spawn cleanup, preserved-task settings, dynamic-effort relaunch, receipt-only teardown retries, and cleanup transfer to a non-Droid successor, including concurrent retirement with a vanished pooled worktree.
 Herdr, Zellij, cmux, and Orca have no new credentialed Droid placement evidence in this record; they retain their existing backend delivery and control limitations.

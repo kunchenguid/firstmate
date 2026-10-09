@@ -1912,6 +1912,8 @@ spawn_abort_cleanup() {
     fi
   fi
   if [ -n "$DROID_SETTINGS_CLEANUP" ]; then
+    # A fresh task record retained after rollback still owns its launched
+    # worker's settings; deleting them would strip its profile and Stop hook.
     if [ "${RELAUNCH:-0}" -eq 1 ] ||
       { [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; }; then
       rm -f "$DROID_SETTINGS_CLEANUP" || true
