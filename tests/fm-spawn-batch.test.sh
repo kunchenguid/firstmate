@@ -221,6 +221,8 @@ for trigger in ('/goodnight', '"goodnight"', '"going to bed"', 'state/.goodnight
     assert trigger in entry, trigger
 assert 'user-invocable: true' in entry
 assert 'user-invocable: true' in index['goodmorning']
+assert 'user-invocable: true' in index['gm']
+assert '/gm' in index['gm'] and '/goodmorning' in index['gm']
 PY
   pass 'goodnight and goodmorning are discoverable with the required trigger metadata'
 }

@@ -300,7 +300,7 @@ Harness-aware turn-end guards are structural backstops, not permission to omit t
 Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
 Invoke the `/quiet` skill instead when the captain says `/quiet` or asks for quiet mode, or `state/.afk` already exists in quiet mode (`fm_afk_mode` in `bin/fm-wake-lib.sh`).
 Load `away-quiet-supervision` whenever either mode is invoked, either record exists, or a marked away-supervisor message arrives.
-Load `goodnight` when the captain says `/goodnight`, "goodnight", "going to bed", or `/goodmorning`, or `state/.goodnight` exists at session start or wake handling; that skill owns finishing current work while holding new dispatch and follow-up operations for the morning.
+Load `goodnight` when the captain says `/goodnight`, "goodnight", "going to bed", `/goodmorning`, or `/gm`, or `state/.goodnight` exists at session start or wake handling; that skill owns finishing current work while holding new dispatch and follow-up operations for the morning.
 
 ### Stuck-worker trigger
 

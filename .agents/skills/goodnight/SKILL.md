@@ -2,7 +2,7 @@
 name: goodnight
 description: >-
   Quiesce the fleet when the captain says /goodnight, "goodnight", or "going to bed", or state/.goodnight exists at session start or wake handling.
-  Finish work already in hand, hold new dispatch and follow-up operations, and maintain the morning list; /goodmorning lifts the hold.
+  Finish work already in hand, hold new dispatch and follow-up operations, and maintain the morning list; /goodmorning or /gm lifts the hold.
 user-invocable: true
 metadata:
   internal: true
@@ -75,7 +75,7 @@ At session start with the marker present, read the digest's morning-list path an
 Starting a session, ordinary chat, returning from `/afk`, and leaving `/quiet` do not lift it.
 Honor a lock-refused session's read-only boundary: it cannot enter, lift, or update the hold.
 
-An explicit `/goodmorning` or a plain request to lift goodnight authorizes lifting it immediately.
+An explicit `/goodmorning`, `/gm`, or a plain request to lift goodnight authorizes lifting it immediately.
 Read the active morning list before removing `state/.goodnight`, retain the list, and report that new dispatch can resume.
 Route the explicit lift to the secondmates that entered goodnight and reconcile their replies through the parent channel, retaining any undelivered lift in the list.
 If the list is missing or unreadable, disclose that gap and reconstruct checkpoints from task records before acting on deferred work; explicit lifting still permits removing the marker.
