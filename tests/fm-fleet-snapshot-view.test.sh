@@ -583,6 +583,52 @@ URLS
   pass 'snapshot displays full canonical GitLab/GitHub/Forgejo review links and rejects non-review links'
 }
 
+test_status_review_delivery_provenance() {
+  local home fakebin out provider prefix scenario id kind recorded
+  home=$(make_home delivery-provenance)
+  fakebin=$(make_fakebin "$home")
+  while IFS='|' read -r provider prefix; do
+    for scenario in latest meta scout scout-meta incidental resumed malformed; do
+      id="$provider-$scenario"
+      kind=ship
+      recorded=
+      case "$scenario" in
+        scout|scout-meta) kind=scout ;;
+      esac
+      case "$scenario" in
+        meta|scout-meta) recorded="${prefix}9" ;;
+      esac
+      fm_write_meta "$home/state/$id.meta" \
+        "window=firstmate:fm-$id" "kind=$kind" "mode=$kind" \
+        "harness=codex" "project=alpha" "pr=$recorded"
+      printf 'done: PR %s7\ndone [at=2026-07-09T12:00:00Z]: PR %s8 checks green\n' \
+        "$prefix" "$prefix" > "$home/state/$id.status"
+      case "$scenario" in
+        incidental) printf 'done: mentioned %s9 in documentation\n' "$prefix" >> "$home/state/$id.status" ;;
+        resumed) printf 'working: preparing another change\n' >> "$home/state/$id.status" ;;
+        malformed) printf 'done: PR %s0\n' "$prefix" >> "$home/state/$id.status" ;;
+      esac
+    done
+  done <<'URLS'
+gl|https://gitlab.example.test/group/sub/project/-/merge_requests/
+gh|https://github.com/owner/repo/pull/
+fj|https://forgejo.example.test/owner/repo/pulls/
+URLS
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) || fail 'delivery provenance snapshot failed'
+  printf '%s' "$out" | jq -e '
+    [.tasks[] |
+      if (.id | endswith("-latest")) then
+        (.pr.url | endswith("8")) and .pr.source == "status_event"
+      elif (.id | endswith("-scout-meta")) then
+        .pr.url == null and .pr.source == "absent"
+      elif (.id | endswith("-meta")) then
+        (.pr.url | endswith("9")) and .pr.source == "meta"
+      else .pr.url == null and .pr.source == "absent" end
+    ] | length == 21 and all
+  ' >/dev/null || fail 'snapshot claimed historical/scout/incidental links or lost metadata precedence'
+  pass 'snapshot review delivery uses latest ready event, excludes scouts, and prefers metadata'
+}
+
 test_backlog_tasks_axi_forms_and_overrides() {
   local home data projects fakebin out view
   home=$(make_home overrides)
@@ -1196,6 +1242,7 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_canonical_review_links
+test_status_review_delivery_provenance
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status

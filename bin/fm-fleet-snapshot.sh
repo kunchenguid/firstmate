@@ -389,16 +389,11 @@ review_urls_in_file() {  # <file>
   return 0
 }
 
-first_pr_url_in_file() {  # <status-file>
+preferred_pr_url_in_file() {  # <status-file>
   local url
-  [ -f "$1" ] || return 1
-  while IFS= read -r url; do
-    if fm_pf_pr_url_valid "$url"; then
-      printf '%s\n' "$url"
-      return 0
-    fi
-  done < <(sed -nE 's|^done( \[at=[^]]*\])?: PR (https://[^[:space:])"]+)( checks green)?$|\2|p' "$1")
-  return 1
+  url=$(last_status_line "$1" | sed -nE 's|^done( \[at=[^]]*\])?: PR (https://[^[:space:])"]+)( checks green)?$|\2|p')
+  fm_pf_pr_url_valid "$url" || return 1
+  printf '%s\n' "$url"
 }
 
 backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
@@ -796,12 +791,15 @@ task_json_lines() {
     fi
     status_log="$SNAPSHOT_TASK_DIR/$id.status"
     report_path="$SNAPSHOT_TASK_DIR/$id.report"
-    pr=$(meta_value "$meta" pr)
+    pr=
     pr_source=meta
-    if [ -z "$pr" ]; then
-      pr_from_status=$(first_pr_url_in_file "$status_log" || true)
-      pr=$pr_from_status
-      pr_source=status_event
+    if [ "$kind" != scout ]; then
+      pr=$(meta_value "$meta" pr)
+      if [ -z "$pr" ]; then
+        pr_from_status=$(preferred_pr_url_in_file "$status_log" || true)
+        pr=$pr_from_status
+        pr_source=status_event
+      fi
     fi
     if [ -z "$pr" ]; then
       pr_source=absent
