@@ -5,9 +5,12 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable,links}], options:[{text,links}], empty,
-//     more, error }
-// where links is [{text,href,target,rel}] for every anchor in a row's text.
+//     charted:[{title,sub,badges,pickable,links}], options:[{text,links}],
+//     cards:[{key,dossier,rows,freeform,context}], empty, more, error }
+// where links is [{text,href,target,rel}] for every anchor in a row's text, and
+// each Captain's Call card reports its context-row keys beside the question,
+// its free-text fields as [{name,placeholder}], and its Context box as
+// {age, sections:[{name,text}], links:[{kind,label,href,state}]} or null.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -132,6 +135,32 @@ const underway = rowsOf(uw);
 const deck = byId.get("bb-call") || new Node("div");
 const optionLabels = deck.querySelectorAll(".bb-opt__label").map((l) => ({ text: l.textContent, links: linksOf(l) }));
 
+const cards = deck.children
+  .filter((c) => c.className.split(/\s+/).includes("bb-decision"))
+  .map((card) => {
+    const box = card.querySelectorAll(".bb-dossier")[0];
+    return {
+      key: card.querySelectorAll(".bb-decision__pad")[0]?.children
+        .find((c) => c.tagName === "form")?.attributes["data-lavish-question"],
+      dossier: card.className.split(/\s+/).includes("bb-decision--dossier"),
+      rows: card.querySelectorAll(".bb-decision__pad")[0]
+        ?.querySelectorAll(".bb-ctx__k").map((k) => k.textContent) ?? [],
+      freeform: card.querySelectorAll(".bb-freeform").map((f) => ({ name: f.name, placeholder: f.placeholder })),
+      context: box ? {
+        age: box.querySelectorAll(".bb-dossier__age")[0]?.textContent ?? null,
+        sections: box.children
+          .filter((c) => c.className.includes("bb-dossier__sec"))
+          .map((sec) => ({ name: sec.className.replace(/.*bb-dossier__sec--(\S+).*/, "$1"), text: sec.textContent })),
+        links: box.querySelectorAll(".bb-links__item").map((li) => ({
+          kind: li.children[0].textContent,
+          label: li.children[1].textContent,
+          href: li.children[1].tagName === "a" ? li.children[1].href : null,
+          state: li.children[2]?.textContent ?? null,
+        })),
+      } : null,
+    };
+  });
+
 const ch = byId.get("bb-charted") || new Node("div");
 const charted = rowsOf(ch);
 // A fail-closed render replaces the page body instead of the board sections, so
@@ -144,4 +173,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, options: optionLabels, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, charted, options: optionLabels, cards, empty, more, error: errorText }) + "\n");

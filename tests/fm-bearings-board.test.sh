@@ -596,6 +596,54 @@ test_build_refuses_a_template_without_exactly_one_slot() {
   pass "build refuses a template without exactly one data slot"
 }
 
+test_call_context_fields_are_typed_and_optional() {
+  local home data board out rc mutation
+  home=$(make_home context)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '.captains_call[0] += {
+        background: "Main is ahead of develop.",
+        stakes: "The next release reintroduces the finding.",
+        opened: "2026-08-17",
+        links: [
+          {kind: "mr", label: "lambda !316", url: "http://gitlab.example.com/g/l/-/merge_requests/316", state: "open"},
+          {kind: "report", label: "sync report", path: "/home/me/firstmate/data/sync/report.md"}],
+        history: [{date: "2026-08-15", text: "Hotfix landed"}]}' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a card with every context field was refused"
+  extract_payload "$board" | jq -e '
+    .captains_call[0]
+    | .opened == "2026-08-17" and (.links | length) == 2 and .history[0].text == "Hotfix landed"
+      and .stakes == "The next release reintroduces the finding."
+  ' >/dev/null || fail "the built board did not carry the context fields it was given"
+
+  for mutation in \
+    '.background = 3' \
+    '.stakes = ["wait"]' \
+    '.opened = "2026-02-30"' \
+    '.opened = "17 Aug"' \
+    '.links = {kind: "mr"}' \
+    '.links = [{kind: "wiki", label: "page", url: "https://example.com/p"}]' \
+    '.links = [{kind: "mr", label: "", url: "https://example.com/p"}]' \
+    '.links = [{kind: "mr", label: "mr", url: "javascript:alert(1)"}]' \
+    '.links = [{kind: "report", label: "r", path: "data/sync/report.md"}]' \
+    '.links = [{kind: "report", label: "r", path: "/home/me/notes.txt"}]' \
+    '.links = [{kind: "report", label: "r", url: "https://example.com/r", path: "/home/me/r.md"}]' \
+    '.links = [{kind: "report", label: "r"}]' \
+    '.links = [{kind: "mr", label: "mr", url: "https://example.com/p", state: 1}]' \
+    '.links = [{kind: "mr", label: "mr", url: "https://example.com/p", href: "https://example.com/p"}]' \
+    '.history = [{date: "yesterday", text: "Hotfix landed"}]' \
+    '.history = [{date: "2026-08-15", text: ""}]' \
+    '.history = "Hotfix landed"'; do
+    write_valid_payload "$data"
+    jq ".captains_call[0] |= ($mutation)" "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "a malformed context field was accepted: $mutation"
+    assert_contains "$out" "fm-bearings-board.v1" "the context refusal did not name the contract: $out"
+  done
+  pass "Captain's Call context fields are optional, carried through, and refused when malformed"
+}
+
 test_charted_kind_is_optional_and_accepts_both_values() {
   local home data
   home=$(make_home chartedkind)
@@ -876,6 +924,7 @@ test_build_refuses_a_nondecision_reconcile_value() {
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
+test_call_context_fields_are_typed_and_optional
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails

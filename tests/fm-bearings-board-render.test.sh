@@ -387,6 +387,92 @@ MD
   pass "a report preview renders headings, inline marks, links, nested lists, tables, and code, with markup kept as text"
 }
 
+test_every_call_card_offers_free_text_whatever_allow_freeform_says() {
+  local home out
+  home=$(make_home freeform)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"sample-off","type":"decision","repo":"sample","title":"Freeform off","decide":"Which?",
+     "allow_freeform":false,"options":[{"value":"a","label":"A"}]},
+    {"key":"sample-hint","type":"decision","repo":"sample","title":"Hint only","decide":"Which?",
+     "freeform_hint":"name the vehicle","options":[{"value":"a","label":"A"}]},
+    {"key":"merge.sample-task","type":"merge","repo":"sample","title":"Merge it","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and ([.cards[] | .freeform] == [
+      [{name: "note", placeholder: "or answer in your own words…"}],
+      [{name: "note", placeholder: "name the vehicle"}],
+      [{name: "note", placeholder: "or answer in your own words…"}]])
+  ' >/dev/null || fail "a Captain's Call card rendered without its free-text answer field: $out"
+  pass "every Captain's Call card offers free text, with freeform_hint as its placeholder"
+}
+
+test_a_call_card_context_box_shows_its_dossier_fields_as_text() {
+  local home report out
+  home=$(make_home dossier)
+  report="$home/data/scout-4/report.md"
+  mkdir -p "${report%/*}"
+  printf '# Findings\n' > "$report"
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg report "$report" --arg missing "$home/data/gone/report.md" '[
+    {"key":"sample-dossier","type":"decision","repo":"sample","title":"CMS sync","about":"short line",
+     "decide":"How to sync?","options":[{"value":"a","label":"A"}],
+     "background":"<b>Main</b> is ahead, see https://gitlab.example.com/g/p/-/merge_requests/1",
+     "stakes":"The next release reintroduces the finding.","opened":"2026-08-23",
+     "links":[
+       {"kind":"mr","label":"lambda !316","url":"https://gitlab.example.com/g/l/-/merge_requests/316","state":"open"},
+       {"kind":"report","label":"sync report","path":$report},
+       {"kind":"report","label":"old report","path":$missing}],
+     "history":[{"date":"2026-08-20","text":"Hotfix landed"},{"date":"2026-08-24","text":"Conflict found"}]}
+  ]')")
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and (.cards[0]
+      | .dossier
+        and .rows == ["about", "decide"]
+        and .context.age == "open 3 days"
+        and ([.context.sections[] | .name] == ["background", "stakes", "links", "history"])
+        and .context.sections[0].text == "Background<b>Main</b> is ahead, see https://gitlab.example.com/g/p/-/merge_requests/1"
+        and .context.sections[1].text == "If this waitsThe next release reintroduces the finding."
+        and .context.sections[3].text == "History20 AugHotfix landed24 AugConflict found"
+        and (.context.links | length) == 3
+        and .context.links[0] == {kind: "MR", label: "lambda !316",
+          href: "https://gitlab.example.com/g/l/-/merge_requests/316", state: "open"}
+        and (.context.links[1] | .kind == "report" and .label == "sync report"
+          and (.href | test("^bearings-board-reports/[0-9a-f]{16}[.]html$")))
+        and .context.links[2] == {kind: "report", label: "old report", href: null, state: null})
+  ' >/dev/null || fail "the Context box did not show the card dossier as text: $out"
+  [ -f "$home/.lavish/$(printf '%s' "$out" | jq -r '.cards[0].context.links[1].href')" ] \
+    || fail "a context report link points at a preview page the build did not write: $out"
+  pass "a card's Context box shows background, stakes, typed links with state and previews, history, and its age"
+}
+
+test_a_call_card_without_dossier_fields_falls_back_or_collapses() {
+  local home out
+  home=$(make_home dossier-fallback)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"sample-about","type":"decision","repo":"sample","title":"About only","about":"Lambda already synced",
+     "decide":"Sync CMS?","options":[{"value":"a","label":"A"}]},
+    {"key":"merge.sample-task","type":"merge","repo":"sample","title":"Merge it","risk":"low",
+     "detail":"validation green","pr_url":"https://github.com/example/sample/pull/1",
+     "options":[{"value":"merge","label":"Merge now"}]},
+    {"key":"sample-bare","type":"decision","repo":"sample","title":"Bare","decide":"Go?",
+     "options":[{"value":"a","label":"A"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and (.cards[0] | .dossier and .rows == ["decide"]
+      and .context.sections == [{name: "background", text: "BackgroundLambda already synced"}])
+    and (.cards[1] | .dossier and .rows == []
+      and ([.context.sections[] | .name] == ["background", "links"])
+      and .context.sections[0].text == "Backgroundvalidation green"
+      and .context.links == [{kind: "PR", label: "https://github.com/example/sample/pull/1",
+        href: "https://github.com/example/sample/pull/1", state: null}])
+    and (.cards[2] | (.dossier | not) and .context == null and .rows == ["decide"])
+  ' >/dev/null || fail "a card without dossier fields did not fall back to its about, detail, and PR, or collapse: $out"
+  pass "a card without dossier fields shows its about, or merge detail and PR, in the Context box, and collapses with none"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
@@ -400,3 +486,6 @@ test_board_text_links_urls_and_previewed_reports_but_keeps_markup_as_text
 test_decision_option_labels_link_their_urls
 test_a_report_preview_keeps_balanced_parentheses_in_link_targets
 test_a_report_preview_renders_the_markdown_and_keeps_markup_as_text
+test_every_call_card_offers_free_text_whatever_allow_freeform_says
+test_a_call_card_context_box_shows_its_dossier_fields_as_text
+test_a_call_card_without_dossier_fields_falls_back_or_collapses

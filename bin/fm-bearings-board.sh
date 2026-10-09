@@ -79,10 +79,21 @@
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
 #
+# CONTEXT FIELDS. A Captain's Call item MAY carry optional Context box fields,
+# each type-checked here and rendered as text: `background` and `stakes`
+# (strings), `links` (array of {kind, label, url|path, state?}, where kind is
+# one of mr, pr, ticket, report, doc, board, exactly one of an http(s) `url` or
+# an absolute .md report `path` is present, and no other keys appear),
+# `history` (array of {date, text} with date YYYY-MM-DD), and `opened`
+# (YYYY-MM-DD, shown as "open N days" relative to `generated`). Payloads
+# without them stay valid. Every card renders a free-text answer field whether
+# or not it sets `allow_freeform`.
+#
 # LINKS. The template renders every http(s) URL in board text as a link that
 # opens in a new tab. An absolute markdown path in board text (for example
-# /home/me/firstmate/data/<id>/report.md) links to a rendered preview when the
-# file exists: build snapshots each such report into
+# /home/me/firstmate/data/<id>/report.md), and a context link's `path`, links
+# to a rendered preview when the file exists: build snapshots each such report
+# named anywhere in the payload into
 # $FM_HOME/.lavish/bearings-board-reports/<hash>.html, beside the board, from
 # the shipped report-preview-template.html, and records the path-to-page map
 # as the generated `report_previews` field of the injected payload (any
@@ -194,6 +205,30 @@ validate_payload() {  # <data.json>
           and (keys | sort) == ["artifact", "version"]
           and (.artifact | slug(128))
           and (.version | version));
+    def valid_day:
+      . as $day
+      | type == "string"
+      and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+      and (try (((. + "T00:00:00Z") | fromdateiso8601 | strftime("%Y-%m-%d")) == $day) catch false);
+    def optional_array($name; f):
+      (has($name) | not) or (.[$name] | type == "array" and ([.[] | f] | all));
+    def context_link:
+      type == "object"
+      and ((keys - ["kind", "label", "url", "path", "state"]) == [])
+      and (.kind as $kind | ["mr", "pr", "ticket", "report", "doc", "board"] | index($kind) != null)
+      and (.label | nonempty_string)
+      and (has("url") != has("path"))
+      and ((has("url") | not)
+        or (.url | type == "string"
+          and test("^https?://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$")))
+      and ((has("path") | not)
+        or (.path | type == "string" and test("^/[^\\s\"\u0027<>()\\[\\]`]+\\.md$")))
+      and optional_string("state");
+    def history_entry:
+      type == "object"
+      and ((keys - ["date", "text"]) == [])
+      and (.date | valid_day)
+      and (.text | nonempty_string);
     def call_item:
       type == "object"
       and (.key | slug(128))
@@ -214,6 +249,11 @@ validate_payload() {  # <data.json>
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
+      and optional_string("background")
+      and optional_string("stakes")
+      and optional_array("links"; context_link)
+      and optional_array("history"; history_entry)
+      and ((has("opened") | not) or (.opened | valid_day))
       and ((has("close") | not) or (.close == "done" or .close == "release"))
       and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
       and ((has("recommend_value") | not)
