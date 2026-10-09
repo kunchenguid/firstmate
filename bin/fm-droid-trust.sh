@@ -107,15 +107,39 @@ STATE=$STORE_DIR_REAL
 FM_STATE_OVERRIDE=$STORE_DIR_REAL
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+TRUST_LOCKS=()
+release_trust_locks() {
+  local status=$? i
+  for ((i=${#TRUST_LOCKS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${TRUST_LOCKS[$i]}" || true
+  done
+  return "$status"
+}
+acquire_trust_task_lock() {
+  local lock=$1 owner
+  owner=$(cat "$lock/pid" 2>/dev/null || true)
+  if [ "$owner" = "$PPID" ] && fm_pid_alive "$owner"; then
+    return 0
+  fi
+  fm_lock_try_acquire "$lock" || return 1
+  TRUST_LOCKS+=("$lock")
+}
+trap release_trust_locks EXIT
+trap 'exit 1' HUP INT TERM
+if [ "$ACTION" = retire ] && { [ -e "$RECEIPT" ] || [ -L "$RECEIPT" ]; }; then
+  TASK_SET_LOCK=$(fm_task_set_lock_path "$TASK_STATE") || refuse "invalid task state: $TASK_STATE"
+  acquire_trust_task_lock "$TASK_SET_LOCK" || refuse "task set is busy: $TASK_SET_LOCK"
+fi
 STORE_LOCK="$STORE.fm-trust.lock"
 fm_lock_acquire_wait_max "$STORE_LOCK" 10 || refuse "settings lock is busy: $STORE_LOCK"
-trap 'fm_lock_release "$STORE_LOCK"' EXIT
-trap 'exit 1' HUP INT TERM
-if ! node - "$STORE" "$ACTION" "$RECEIPT" "$TASK_STATE" "$TASK_ID" "$WT_LOGICAL" "$WT_REAL" <<'NODE'
+TRUST_LOCKS+=("$STORE_LOCK")
+RETIRE_SUCCESSOR=
+trust_transaction() {
+  node - "$STORE" "$ACTION" "$RECEIPT" "$TASK_STATE" "$TASK_ID" "$WT_LOGICAL" "$WT_REAL" "$RETIRE_SUCCESSOR" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [store, action, receiptFile, state, id, logical, physical] = process.argv.slice(2);
+const [store, action, receiptFile, state, id, logical, physical, retireSuccessor] = process.argv.slice(2);
 const read = (file) => {
   try { return fs.readFileSync(file, "utf8"); }
   catch (error) { if (error.code === "ENOENT") return null; throw error; }
@@ -164,6 +188,11 @@ try {
       if (meta === null) continue;
       const wt = meta.split("\n").find(line => line.startsWith("worktree="))?.slice(9);
       if (!wt || !paths.some(p => p === wt || canonical(p) === canonical(wt))) continue;
+      if (other !== retireSuccessor) {
+        if (retireSuccessor) throw new Error("successor changed while acquiring its metadata lock");
+        process.stdout.write(other);
+        process.exit(3);
+      }
       const nextFile = path.join(state, `${other}.droid-trust`);
       const next = receipt(nextFile);
       atomic(nextFile, {schema:"fm-droid-trust.v1", store,
@@ -213,7 +242,17 @@ try {
   throw new Error(`${store} changed during the trust transaction`);
 } catch (error) { console.error(`error: ${error.message}`); process.exit(1); }
 NODE
-then
+}
+TRANSACTION_OUTPUT=$(trust_transaction)
+TRANSACTION_STATUS=$?
+if [ "$TRANSACTION_STATUS" -eq 3 ]; then
+  RETIRE_SUCCESSOR=$TRANSACTION_OUTPUT
+  SUCCESSOR_META_LOCK=$(fm_meta_lock_path "$TASK_STATE/$RETIRE_SUCCESSOR.meta") || refuse "invalid successor: $RETIRE_SUCCESSOR"
+  acquire_trust_task_lock "$SUCCESSOR_META_LOCK" || refuse "successor metadata is busy: $SUCCESSOR_META_LOCK"
+  trust_transaction >/dev/null
+  TRANSACTION_STATUS=$?
+fi
+if [ "$TRANSACTION_STATUS" -ne 0 ]; then
   refuse "could not complete $ACTION in $STORE; any receipt is retained for recovery"
 fi
 printf '%s: %s\n' "$ACTION" "${WT_REAL:-$RECEIPT}"

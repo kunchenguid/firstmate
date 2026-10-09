@@ -791,6 +791,29 @@ test_forced_droid_child_cleanup_without_receipts() {
   pass 'forced Droid child cleanup is receipt-only for present and missing worktrees'
 }
 
+test_forced_droid_child_trust_transfer_uses_parent_locks() {
+  local case_dir trust_home store home
+  case_dir=$(make_case droid-child-trust-transfer)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf '%s\n' harness=droid >> "$home/state/child-a.meta"
+  fm_write_meta "$home/state/child-b.meta" \
+    'window=firstmate:fm-child-b' 'endpoint_task_id=child-b' 'harness=claude' \
+    "worktree=$case_dir/child-a-wt" "project=$case_dir/project" 'kind=ship' 'mode=local-only'
+  trust_home="$case_dir/user"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+  HOME="$trust_home" "$ROOT/bin/fm-droid-trust.sh" --receipt "$home/state/child-a.droid-trust" "$case_dir/child-a-wt" "$case_dir/project" >/dev/null || fail 'child transfer trust setup failed'
+  git -C "$case_dir/project" worktree remove --force "$case_dir/child-a-wt" || fail 'could not remove the shared child worktree'
+  HOME="$trust_home" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "locked child transfer failed: $(cat "$case_dir/stderr")"
+  assert_absent "$home" 'child transfer retained the retired home'
+  assert_absent "$case_dir/state/task-x1.meta" 'child transfer retained the parent record'
+  jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'locked child transfer leaked trust or changed unrelated settings'
+  pass 'forced child retirement reuses parent-held task-set and successor metadata locks'
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -6260,6 +6283,7 @@ test_local_only_fork_remote_allows
 test_droid_teardown_removes_task_trust
 test_droid_teardown_retry_after_trust_retirement
 test_forced_droid_child_cleanup_without_receipts
+test_forced_droid_child_trust_transfer_uses_parent_locks
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
