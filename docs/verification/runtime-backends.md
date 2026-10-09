@@ -3749,14 +3749,14 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 
 ## Droid
 
-Verified on 2026-10-09 with Droid 0.237.0 and tmux 3.7c on macOS in an isolated tmux server, linked task worktree, and private HOME.
+Verified on 2026-10-09 with Droid 0.237.0, tmux 3.7c, and Fish 4.9.3 on macOS in an isolated tmux server, linked task worktree, and private HOME.
 The [Droid adapter reference](../../.agents/skills/harness-adapters/references/harness/droid.md) owns current operations and restrictions.
 This evidence covers crewmate and scout support; primary and secondmate integration are unsupported.
 
 Refresh the credentialed guard with:
 
 ```sh
-FM_DROID_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-droid-signals-live-e2e.test.sh
+FM_DROID_SIGNALS_LIVE=1 FM_DROID_LIVE_MODEL=custom:GPT-5.6-Sol-0 bash bin/fm-test-run.sh --per-script-timeout-secs 600 tests/fm-droid-signals-live-e2e.test.sh
 ```
 
 Observed guard assertions:
@@ -3771,6 +3771,8 @@ ok - Droid 0.237.0 /quit exits the agent
 DROID_LIVE_RESULT version=0.237.0 detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass
 ok - Droid 0.237.0 exact-worktree trust is retired after exit
 ok - Droid 0.237.0 public scout relaunch completes a replacement turn with dynamic effort
+DROID_FISH_IDLE command=fish cursor=42
+ok - Droid 0.237.0 public Fish-backed ship exit preserves drafts and stops the idle agent
 ```
 
 Droid stores folder trust in the persistent `trustedFolders` object in `~/.factory/settings.json`; adding that field to a process-only `--settings` file did not suppress the fresh-folder dialog on 0.233.0.
@@ -3782,7 +3784,9 @@ The native `/settings` surface confirms the requested model and `Dynamic` reason
 The guard retains the configured session model unless `FM_DROID_LIVE_MODEL` selects another authenticated model.
 The tmux composer check uses the real cursor and exact foreground process identity, including Droid's cursor below the input box after Stop.
 The public scout scenario launches through `fm-spawn`, relaunches through `fm-control`, and requires a fresh computed report and Stop event from the replacement with recorded `dynamic` effort before exit and teardown.
-That scenario requires Treehouse and compatible `tasks-axi` (0.2.6 in this verification).
+The Fish-backed ship scenario also launches through `fm-spawn`, refuses exit with an unsent draft, and stops the idle agent through `fm-control` despite tmux reporting `fish` and cursor row 42.
+The portable composer case blinds tmux's command name while retaining exact kernel foreground identity, and refuses unrelated foreground processes and background Droid processes over an empty stale composer.
+These scenarios require Treehouse, Fish, and compatible `tasks-axi` (0.2.6 in this verification).
 The portable guards refresh with:
 
 ```sh
