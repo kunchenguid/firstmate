@@ -82,9 +82,7 @@
 # author (whatever their GitHub association) and from the review bots whose
 # author_association is NONE (the OpenCode reviewer and the Relay bots), plus
 # issue comments from maintainers and issue transitions to ready-for-pr,
-# persist as pending before any wake. A pull request whose head moves since the
-# last observation also persists one head-changed signal so the fleet can
-# request a fresh review for the new head. poll appends ordinary durable check
+# persist as pending before any wake. poll appends ordinary durable check
 # wakes through fm-wake-lib
 # and emits only newly durable signals for the authenticated check to surface.
 # ack removes
@@ -428,9 +426,6 @@ poll() {
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
-              else [] end)
-             + (if ($old.observation.head != null) and ($old.observation.head != $o.head) then
-              [{token:("head:" + ($o.head // "")),type:"head-changed",source:$old.url,head:$o.head,body:("pull request head moved from " + $old.observation.head + " to " + ($o.head // ""))}]
               else [] end)) as $events
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),

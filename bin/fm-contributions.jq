@@ -77,7 +77,7 @@ def projected($input; $saved; $now; $max_age):
        elif $hold != null then {actor:"captain",reason:$hold.hold_reason,hold:$hold.id}
        elif $fresh | not then {actor:"fleet",reason:($record.error // "contribution not recently checked")}
        elif $stale then {actor:"fleet",reason:"STALE maintainer verdict; reassess the current head"}
-       elif (($record.pending // []) | map(select(.type != "head-changed")) | length) > 0 then {actor:"fleet",reason:"incoming maintainer signal needs triage"}
+       elif ($record.pending | length) > 0 then {actor:"fleet",reason:"incoming maintainer signal needs triage"}
        elif $record.kind == "issue" then
          if $o.ready then {actor:"fleet",reason:"filed issue is ready-for-pr"}
          else {actor:"maintainer",reason:"awaiting issue triage"} end
@@ -102,7 +102,7 @@ def projected($input; $saved; $now; $max_age):
          distinct_checks:($checks | length),missing_verdicts:(($no_verdict | length) + (($o.absent_checks // []) | length)),
          pending_checks:($pending | length),failed_checks:($failed | length),
          stale_verdicts:((if $stale then 1 else 0 end) + ([$reviews[] | select(.freshness == "STALE")] | length)),
-         signals:(($record.pending // []) | map(select(.type != "head-changed")))} + $action]
+         signals:($record.pending // [])} + $action]
   # Multiple filed tasks may own the same URL. Retain every owner but count a
   # contribution once; any live arbitration wins over action-free duplicates.
   | group_by(.url)
