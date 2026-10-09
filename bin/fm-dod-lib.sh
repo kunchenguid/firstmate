@@ -10,7 +10,7 @@
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # `bin/fm-native-review.sh` is the executable owner of exact base/candidate and
-# task-intent delivery to the selected harness's native review command.
+# task-intent delivery to the independently configured native reviewer.
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # and a `## Captain's intent` line opening with a Captain label or address
@@ -251,13 +251,13 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=review-PR
-This task ships **review-PR**: implement and test, run the selected harness's native review, then push the feature branch, open a PR, and verify required forge checks.
+This task ships **review-PR**: implement, test, run configured native review, then push the branch, open a PR, and verify required forge checks.
 Review only after the acceptance evidence is satisfied and the result is committed.
-Run \`$FM_DOD_ROOT/bin/fm-native-review.sh\` with the exact task base, candidate commit, and an output path under the task data directory.
+Run \`$FM_DOD_ROOT/bin/fm-native-review.sh\` with the exact base/candidate; it reads \`config/native-review.json\` unless explicit selection is authorized.
 The helper supplies the immutable Captain intent and Firstmate acceptance, scope, and exclusions to the native reviewer and requires an explicit intent-conformance conclusion.
 At most two attempts belong to the task; candidate changes, retries, compaction, and renamed evidence do not reset them.
 After first findings, make authorized corrections, test, commit, and use attempt two on the full diff.
-After attempt two, record and ignore non-serious residuals. Ask-user findings are never yours to answer; use \`needs-decision\` only for serious or authority-bearing findings.
+After attempt two, ignore non-serious residuals. Ask-user findings are never yours to answer. Firstmate applies \`ask-user-authority\`; append \`needs-decision\` and stop for serious or authority-bearing findings.
 Never start a third review or call a non-clean result passing; identify any later corrected final head as unreviewed.
 After a pass or completed two-attempt disposition, push the feature branch, open or update its PR, and verify required forge checks.
 Task data directory: \`$task_data_dir\`.

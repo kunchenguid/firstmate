@@ -70,7 +70,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-task-progress-lib.sh` | Project MAIN-owned continuation from the canonical per-task record |
 | `fm-task-state.sh`       | Read provider-aware task state, compact per-task progress, and historical lifecycle recovery interfaces |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
-| `fm-native-review.sh`    | Bind exact committed base/candidate plus task intent to a supported harness-native review |
+| `fm-native-review.sh`    | Bind exact committed base/candidate plus task intent to the configured native reviewer |
 | `fm-nm-run-lib.sh`       | Historical validation run-attribution compatibility used by state and cleanup      |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-timeout-lib.sh`      | Single owner of hard-bounded command execution and its fallback watchdog |

@@ -369,7 +369,7 @@ STUB
     "promoted review-PR worker did not receive the native-review route"
   assert_contains "$(cat "$payload")" "Task data directory: \`$home/data/promote-dod-review-pr\`." \
     "promoted review-PR worker did not receive its exact absolute task data directory"
-  assert_grep 'exact task base, candidate commit' "$payload" \
+  assert_grep 'exact base/candidate' "$payload" \
     "promoted review-PR worker did not receive the immutable candidate contract"
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"

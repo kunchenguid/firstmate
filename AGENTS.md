@@ -224,7 +224,7 @@ Supervise all live work under section 8.
 ### Selected delivery path and merge authority
 
 The selected delivery path owns its own rigor, subject to the deployable ByteDance BITS/PPE lifecycle below.
-Outside that lifecycle, `review-PR` uses the selected worker harness's verified native review capability after the implementation commit; otherwise follow the faster path without adding an independent reviewer.
+Outside that lifecycle, `review-PR` uses the independently configured native reviewer after the implementation commit; otherwise follow the faster path without adding an independent reviewer.
 Never stack serial reviews or infer authority for an extra reviewer from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use `review-PR` instead of inventing a manual gate.
@@ -250,9 +250,9 @@ Shared IDL source or generated repositories and documentation-only, local-only, 
 
 ### Validate
 
-For an ordinary `review-PR` ship, the same worker runs `bin/fm-native-review.sh <task-id> --base <commit> --candidate <commit>` after its implementation commit and targeted behavioral checks. The script binds the clean committed candidate, exact ancestor base, and immutable `## Captain's intent` plus `## Firstmate spec` to the recorded harness's native review command and records its result under the task data directory.
+For an ordinary `review-PR` ship, the same worker runs `bin/fm-native-review.sh <task-id> --base <commit> --candidate <commit>` after its implementation commit and targeted behavioral checks. The script binds the clean committed candidate, exact ancestor base, and immutable `## Captain's intent` plus `## Firstmate spec` to the independently configured native reviewer and records its result under the task data directory.
 A deployable ByteDance BITS/PPE ship instead reaches final native review only at the point `bits-development` defines after the exact-candidate PPE API or end-to-end test.
-Codex and TraeX are supported native-review routes. Pi remains a supported worker harness, but it has no verified native review command; a `review-PR` task recorded with Pi must stop with the actionable unsupported-route error and be relaunched on Codex or TraeX rather than inventing a command or falling back to another review system.
+The coding worker's recorded harness does not select or change the native reviewer; `docs/configuration.md` owns the independent home configuration and invocation-local selection contract.
 When the captain adds or changes an ask mid-task, MAIN edits the original task's `brief.md` with the consolidated processed requirement, preserves the rest of the task contract, relays the change to the worker, and updates the original task's compact progress after the material change.
 The brief's initial `## Captain's intent` contains only the captain's words without added speaker labels or direct address.
 Later consolidated intent in that subsection is processed requirement text that preserves the intended scope without being represented as a verbatim quote.

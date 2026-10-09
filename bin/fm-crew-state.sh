@@ -524,7 +524,7 @@ HAVE_RUN=0
 RUN_SOURCE=full
 COARSE_STATUS=""
 # Only legacy task records can own a no-mistakes validation. Fresh review-PR
-# tasks use their harness-native review and never probe the retired dependency.
+# tasks use the configured native reviewer and never probe the retired dependency.
 if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = no-mistakes-prod-only ]; } \
   && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
