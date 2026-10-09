@@ -3,11 +3,11 @@
 # Prints the resolved executable path on stdout before running anything, so a
 # caller that only needs the path captures it with --resolve-only.
 #
-# Resolution order, most authoritative first:
+# A command containing a slash is taken as a path as written.
+# Otherwise resolution searches, in order:
 #   1. PATH.
-#   2. A command containing a slash, taken as a path as written.
-#   3. ~/.local/bin.
-#   4. The npm exec cache, ~/.npm/_npx/*/node_modules/.bin, where an `npx <cmd>`
+#   2. ~/.local/bin.
+#   3. The npm exec cache, ~/.npm/_npx/*/node_modules/.bin, where an `npx <cmd>`
 #      package that was never installed globally still keeps a runnable binary.
 # An unresolved command exits 127 with a diagnostic naming every location it
 # searched, because the alternative a caller otherwise takes - reading the
