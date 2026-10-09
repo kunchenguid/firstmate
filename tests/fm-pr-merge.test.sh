@@ -418,7 +418,9 @@ write_mr_json() {
 # --repo slug used. "login list" answers from a fixture logins file; a plain
 # read of /repos/.../pulls/<n> answers from pr.json (or pr-post.json once a
 # merge has been recorded, mirroring add_glab_mock's post-merge switch);
-# /repos/.../commits/<sha>/status answers from tea-status.json; a POST to
+# /repos/.../commits/<sha>/status answers its first page from tea-status.json
+# and page <n> from tea-status-page<n>.json, an empty page once that file is
+# absent, so a case can put a failing context past the first page; a POST to
 # .../pulls/<n>/merge is the one path that can actually record a merge.
 # Verified against a real Forgejo instance that "tea api" reports an
 # HTTP-level failure with exit status 0 and the error only in the body
@@ -458,9 +460,19 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$endpoint" in
-  */status)
+  */status|*/status\?*)
     [ ! -e "$log_dir/tea-status-fails" ] || exit 1
-    cat "$log_dir/tea-status.json"
+    page=1
+    case "$endpoint" in
+      *page=*) page=${endpoint##*page=}; page=${page%%&*} ;;
+    esac
+    if [ "$page" = 1 ]; then
+      cat "$log_dir/tea-status.json"
+    elif [ -e "$log_dir/tea-status-page$page.json" ]; then
+      cat "$log_dir/tea-status-page$page.json"
+    else
+      printf '{"state":"","total_count":0,"statuses":[]}\n'
+    fi
     ;;
   */merge)
     if [ -e "$log_dir/tea-merge-fails" ]; then
@@ -495,7 +507,7 @@ SH
 # with named fields overridden so one case drives exactly one condition.
 write_forgejo_pr_json() {
   local file=$1 kv key value
-  local state=open mergeable=true merged=false head=$FJ_HEAD
+  local state=open mergeable=true merged=false draft=false head=$FJ_HEAD
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -504,12 +516,13 @@ write_forgejo_pr_json() {
       state) state=$value ;;
       mergeable) mergeable=$value ;;
       merged) merged=$value ;;
+      draft) draft=$value ;;
       head) head=$value ;;
       *) fail "write_forgejo_pr_json: unknown field '$key'" ;;
     esac
   done
-  printf '{"state":"%s","mergeable":%s,"merged":%s,"head":{"sha":"%s"}}\n' \
-    "$state" "$mergeable" "$merged" "$head" > "$file"
+  printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"}}\n' \
+    "$state" "$mergeable" "$merged" "$draft" "$head" > "$file"
 }
 
 # write_forgejo_status_json <file> [state=<value>] [total_count=<n>]
@@ -530,9 +543,11 @@ write_forgejo_status_json() {
     esac
   done
   if [ "$total" = 0 ]; then
-    printf '{"state":"","total_count":0}\n' > "$file"
+    printf '{"state":"","total_count":0,"statuses":[]}\n' > "$file"
   else
-    printf '{"state":"%s","total_count":%s}\n' "$state" "$total" > "$file"
+    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" \
+      "$(seq "$total" | sed "s/.*/{\"context\":\"ci-&\",\"status\":\"$state\"}/" | paste -sd, -)" \
+      > "$file"
   fi
 }
 
@@ -2277,7 +2292,8 @@ test_forgejo_each_condition_refuses_independently() {
   local case_dir rc name expected spec
   set -- \
     "state|state=closed|state is \"closed\", not open" \
-    "mergeable|mergeable=false|mergeable is \"false\", not true"
+    "mergeable|mergeable=false|mergeable is \"false\", not true" \
+    "draft|draft=true|the pull request is a draft"
   for spec in "$@"; do
     name=${spec%%|*}
     expected=${spec##*|}
@@ -2322,6 +2338,41 @@ test_forgejo_unconfigured_ci_refuses_as_none() {
   [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
     || fail "forgejo-ci-none: a merge was attempted with no configured CI"
   pass "fm-pr-merge treats an unconfigured Forgejo combined status as none, refusing rather than skipping the check"
+}
+
+# The combined status endpoint computes its state from one page of contexts,
+# so a failing context on a later page must still refuse the merge, and a
+# head whose every page is green must still merge.
+test_forgejo_combined_status_reads_every_page() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-status-page2-red)
+  write_forgejo_status_json "$case_dir/tea-status-page2.json" state=failure
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-status-page2-red: a failing context on page 2 should refuse"
+  assert_grep 'the combined commit status is "failure", not success' "$case_dir/stderr" \
+    "forgejo-status-page2-red: the later page's failure was not reported"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-status-page2-red: a merge was attempted past a failing later page"
+
+  case_dir=$(make_forgejo_case forgejo-status-page2-green)
+  write_forgejo_status_json "$case_dir/tea-status-page2.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-status-page2-green: every green page should merge"
+  assert_grep 'page=2' "$case_dir/tea.log" \
+    "forgejo-status-page2-green: the second status page was never read"
+  pass "fm-pr-merge reads every Forgejo combined-status page before merging"
 }
 
 test_forgejo_stale_recorded_head_is_reported() {
@@ -2858,6 +2909,7 @@ test_forgejo_login_resolves_from_the_host
 test_forgejo_refuses_when_login_is_ambiguous
 test_forgejo_each_condition_refuses_independently
 test_forgejo_unconfigured_ci_refuses_as_none
+test_forgejo_combined_status_reads_every_page
 test_forgejo_stale_recorded_head_is_reported
 test_forgejo_invalid_head_refuses
 test_forgejo_missing_tool_refuses_before_recording

@@ -499,19 +499,7 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: merging a Forgejo pull request requires $FORGEJO_MISSING on PATH" >&2
     exit 1
   fi
-  FORGEJO_LOGIN=$(
-    tea login list --output json 2>/dev/null | awk -F'"' -v h="$PR_HOST" '
-      /"name":/ { name = $4 }
-      /"url":/ {
-        u = $4
-        sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
-        sub(/\/.*$/, "", u)
-        sub(/:[0-9]+$/, "", u)
-        if (u == h) { print name; n++ }
-      }
-      END { exit (n == 1) ? 0 : 1 }
-    '
-  ) || {
+  FORGEJO_LOGIN=$(fm_pr_forgejo_login "$PR_HOST") || {
     echo "error: merging a Forgejo pull request at $PR_HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
     exit 1
   }
@@ -642,7 +630,7 @@ FIELDS
 forgejo_verify_mergeable() {
   local pr_json status_json fields line
   local total=0 named=0 refusals=''
-  local state='' mergeable='' live_head='' ci_state='' ci_total=''
+  local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1
 
   if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
@@ -653,6 +641,7 @@ forgejo_verify_mergeable() {
       if type == "object" then
         "state=" + ((.state // "") | tostring),
         "mergeable=" + (.mergeable | tostring),
+        "draft=" + (.draft | tostring),
         "head=" + ((.head.sha // "") | tostring)
       else
         error("pull request payload is not an object")
@@ -665,6 +654,7 @@ forgejo_verify_mergeable() {
     case "$line" in
       state=*) state=${line#state=} ;;
       mergeable=*) mergeable=${line#mergeable=} ;;
+      draft=*) draft=${line#draft=} ;;
       head=*) live_head=${line#head=} ;;
       *) continue ;;
     esac
@@ -672,7 +662,7 @@ forgejo_verify_mergeable() {
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ]; then
+  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ]; then
     echo "error: could not read the Forgejo pull request state before merging" >&2
     return 1
   fi
@@ -686,24 +676,61 @@ FIELDS
       "$RECORDED_HEAD" "$live_head" >&2
   fi
 
-  # An absent combined status (total_count 0, as a repo with no configured
-  # Actions reports) is a real "none" here rather than nothing to check, the
-  # same reading GitLab's null head_pipeline gets above.
+  # An absent combined status (no statuses on any page, as a repo with no
+  # configured Actions reports) is a real "none" here rather than nothing to
+  # check, the same reading GitLab's null head_pipeline gets above. The
+  # endpoint computes its combined state from one page of the latest status
+  # per context, so every page is read until an empty one and the head is
+  # green only when each non-empty page is; the first page that is not
+  # success, or that cannot be read, decides the refusal.
   ci_state=none
-  if status_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
-      "/repos/{owner}/{repo}/commits/$live_head/status" 2>/dev/null) && [ -n "$status_json" ]; then
-    ci_total=$(printf '%s' "$status_json" | jq -r '(.total_count // 0) | tostring' 2>/dev/null || echo 0)
-    if [ "$ci_total" != 0 ] && [ -n "$ci_total" ]; then
-      ci_state=$(printf '%s' "$status_json" | jq -r '.state // ""' 2>/dev/null || true)
-      [ -n "$ci_state" ] || ci_state=none
+  while :; do
+    if ! status_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+        "/repos/{owner}/{repo}/commits/$live_head/status?limit=50&page=$page" 2>/dev/null) \
+      || ! fields=$(printf '%s' "$status_json" | jq -r '
+          if type == "object" and ((.statuses // []) | type) == "array" then
+            "count=" + ((.statuses // []) | length | tostring),
+            "state=" + ((.state // "") | tostring)
+          else
+            error("status payload is not a combined status")
+          end' 2>/dev/null); then
+      ci_state=unreadable
+      break
     fi
-  fi
+    page_count='' page_state=''
+    while IFS= read -r line; do
+      case "$line" in
+        count=*) page_count=${line#count=} ;;
+        state=*) page_state=${line#state=} ;;
+      esac
+    done <<FIELDS
+$fields
+FIELDS
+    [ "$page_count" != 0 ] || break
+    if [ "$page_state" != success ]; then
+      ci_state=${page_state:-unreadable}
+      break
+    fi
+    ci_state=success
+    page=$((page + 1))
+    # A server that ignores the page parameter would repeat a non-empty page
+    # forever, so an implausible page count is unreadable rather than green.
+    if [ "$page" -gt 100 ]; then
+      ci_state=unreadable
+      break
+    fi
+  done
 
   [ "$state" = open ] \
     || refusals="$refusals  - state is \"${state:-unreadable}\", not open
 "
   [ "$mergeable" = true ] \
     || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not true
+"
+  # Only a positive draft reading refuses: an instance too old to report the
+  # field still refuses a work-in-progress merge server side.
+  [ "$draft" != true ] \
+    || refusals="$refusals  - the pull request is a draft
 "
   [ "$ci_state" = success ] \
     || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
