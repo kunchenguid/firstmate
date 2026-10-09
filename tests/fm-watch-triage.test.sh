@@ -6452,15 +6452,14 @@ test_captain_held_rechecked_under_a_quiet_record() {
 # before the flag appeared hands its wake to the daemon and exits; the omp
 # extension's stand-down and re-arm are pinned in tests/fm-omp-harness.test.sh.
 test_quiet_mode_watcher_hands_status_off_to_quiet_daemon() {
-  local dir state fakebin out pid status_sig
+  local dir state fakebin out pid
   dir=$(make_case quiet-status-handoff); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   printf 'quiet\n' > "$state/.afk"
   write_quiet_record "$state"
+  printf 'window=%s\nkind=ship\n' "demo:1" > "$state/demo.meta"
   printf 'working [at=%s]: in flight\n' "$(date +%s)" > "$state/demo.status"
-  status_sig=$(seen_sig "$state/demo.status")
-  printf '%s' "$status_sig" > "$state/.seen-demo_status"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="demo:1" FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="demo:1" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" > "$out" 2>&1 &
@@ -6469,6 +6468,40 @@ test_quiet_mode_watcher_hands_status_off_to_quiet_daemon() {
   grep -F "signal: $state/demo.status" "$out" >/dev/null \
     || fail "quiet watcher did not hand the status wake to the daemon: $(cat "$out")"
   pass "quiet mode leaves the watcher one-shot and hands the wake to the daemon"
+}
+
+# A watcher armed before quiet mode began (the omp extension's long-running
+# cycle) exits one-shot at its next wake once state/.afk exists, and the wake
+# it queued must reach the daemon without waiting for a later wake: the fresh
+# one-shot the daemon starts next resurfaces it at once through the recovery
+# marker, and the drain the daemon runs on that resurface presents the row.
+test_quiet_entry_handoff_resurfaces_the_queued_wake_for_the_daemon() {
+  local dir state fakebin out1 out2 drain pid1 pid2
+  dir=$(make_case quiet-entry-handoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out1="$dir/pre-quiet.out"; out2="$dir/daemon-one-shot.out"; drain="$dir/drain.out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="demo:1" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out1" 2>&1 &
+  pid1=$!
+  wait_live "$pid1" 15 || fail "the pre-quiet watcher did not stay up before quiet mode began: $(cat "$out1")"
+  printf 'quiet\n' > "$state/.afk"
+  write_quiet_record "$state"
+  printf 'window=%s\nkind=ship\n' "demo:1" > "$state/demo.meta"
+  printf 'failed [at=%s]: pipeline broke\n' "$(date +%s)" > "$state/demo.status"
+  wait_for_exit "$pid1" 150 || { reap "$pid1"; fail "the pre-quiet watcher did not exit one-shot under state/.afk: $(cat "$out1")"; }
+  grep -F "signal: $state/demo.status" "$out1" >/dev/null \
+    || fail "the pre-quiet watcher did not hand its wake to the daemon: $(cat "$out1")"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="demo:1" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out2" 2>&1 &
+  pid2=$!
+  wait_for_exit "$pid2" 100 || { reap "$pid2"; fail "the daemon's fresh one-shot did not resurface the queued hand-off: $(cat "$out2")"; }
+  grep -Fx "check: rearm-resurface" "$out2" >/dev/null \
+    || fail "the daemon's fresh one-shot exited without the resurface wake: $(cat "$out2")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain" 2>&1 || true
+  grep -F "signal: $state/demo.status" "$drain" >/dev/null \
+    || fail "the daemon's drain on the resurface did not present the handed-off wake: $(cat "$drain")"
+  pass "quiet entry hands a queued wake to the daemon through the next one-shot's resurface, not a later wake"
 }
 
 test_live_captain_held_first_sight_silenced_by_away_record() {
@@ -6776,3 +6809,4 @@ test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
 test_quiet_mode_watcher_hands_status_off_to_quiet_daemon
+test_quiet_entry_handoff_resurfaces_the_queued_wake_for_the_daemon

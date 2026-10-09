@@ -1151,9 +1151,6 @@ export default function (pi: ExtensionAPI) {
     if (!message || message.role !== "user") return;
     consumeWake(generation, userMessageText(message.content));
   });
-  pi.on?.("turn_end", () => {
-    rearmAfterDaemonStandDown(generation);
-  });
 
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();

@@ -647,10 +647,10 @@ await waitFor(async () => daemonOwned.test((await tool.execute()).content[0].tex
 await new Promise((r) => setTimeout(r, 500));
 if (sent.length !== 0) throw new Error(`a daemon-owned wake reached main: ${JSON.stringify(sent)}`);
 if (arms() !== 1) throw new Error(`a successor was launched beside the daemon: ${arms()} arms`);
-// Quiet ends again: turn_end re-arms.
+// Quiet ends again: the assistant message after the return tool call re-arms.
 unlinkSync(`${state}/.afk`);
-await handlers.get("turn_end")({ type: "turn_end" }, {});
-await waitFor(() => arms() === 2, "removing state/.afk did not re-arm at turn_end");
+await handlers.get("message_start")({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "quiet mode is off" }] } }, {});
+await waitFor(() => arms() === 2, "removing state/.afk did not re-arm at message_start");
 await handlers.get("session_shutdown")({}, {});
 if (sent.length !== 0) throw new Error(`shutdown delivered a daemon-owned wake: ${JSON.stringify(sent)}`);
 if (existsSync(`${state}/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a daemon-owned wake must not ride the replacement handoff");
