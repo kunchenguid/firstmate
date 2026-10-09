@@ -137,9 +137,9 @@ while IFS='|' read -r id home _window meta; do
     fi
     remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
     remote_pending=0
-    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if fm_secondmate_remote_nudge_owed "$STATE" "$id"; then remote_pending=1; fi
     if ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
-      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "$remote_pending"; then
       echo "  config-reread: retry marker failed"
       errors=1
       fm_lock_release "$remote_lock" || true
@@ -149,7 +149,11 @@ while IFS='|' read -r id home _window meta; do
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       printf '%s\n' "$remote_out" | sed 's/^/  /'
       remote_nudge=0
-      if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
+      if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then
+        remote_nudge=1
+        [ "$remote_pending" -eq 1 ] || fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
+          "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || echo "  config-reread: retry marker update failed"
+      fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
       if [ "$remote_nudge" -eq 1 ]; then
         if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
