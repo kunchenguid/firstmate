@@ -753,6 +753,96 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+test_project_supervisors_digest_ship_contracts_across_harnesses() {
+  local rec root home fakebin repo authority repo_id harness source out child empty_root empty_home invalid_home
+  rec=$(new_world project-ship-contract)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$ROOT/bin" "$root/bin"
+  ln -s "$ROOT/docs" "$root/docs"
+  : > "$root/AGENTS.md"
+  repo="$home/projects/alpha"
+  mkdir -p "$repo/docs/architecture/adr"
+  : > "$repo/AGENTS.md"
+  : > "$repo/CLAUDE.md"
+  : > "$repo/CONTRIBUTING.md"
+  repo_id="sha256:$(printf '%064d' 0)"
+  authority="sha256:$(printf '%s' "$home"$'\n''alpha'$'\n'"$repo_id" | shasum -a 256 | awk '{print $1}')"
+  printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=sha256:%064d\nauthority_id=%s\nrepo_path=%s\n' \
+    0 "$authority" "$repo" > "$home/.fm-project-firstmate"
+
+  for harness in codex claude; do
+    for source in startup compact; do
+      out=$(printf '{"source":"%s"}\n' "$source" | FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+        FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+        env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT "$root/bin/fm-sessionstart-run.sh")
+      if [ "$source" = compact ]; then
+        assert_contains "$out" "SESSION START (CONTEXT RE-EMIT) - $home" "$harness compact did not use the re-emit path"
+      fi
+      assert_contains "$out" "PROJECT SHIP CONTRACT" "$harness $source omitted the ship-contract section"
+      assert_contains "$out" "$repo/AGENTS.md" "$harness $source omitted AGENTS.md pointer"
+      assert_contains "$out" "$repo/CLAUDE.md" "$harness $source omitted CLAUDE.md pointer"
+      assert_contains "$out" "$repo/CONTRIBUTING.md" "$harness $source omitted CONTRIBUTING.md pointer"
+      assert_contains "$out" "$repo/docs/architecture/adr/" "$harness $source omitted nested ADR pointer"
+    done
+  done
+
+  child="$TMP_ROOT/ship-contract-child"
+  mkdir -p "$child/state" "$child/data" "$child/config" "$child/projects"
+  ln -s "$ROOT/bin" "$child/bin"
+  ln -s "$ROOT/docs" "$child/docs"
+  printf '# child Firstmate\n' > "$child/AGENTS.md"
+  printf 'fmtest-child\n' > "$child/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nparent_role=project-firstmate\nrepo_authority_home=%s\nrepo_authority_id=%s\nrepo_identity=%s\n' \
+    "$home" "$home" "$authority" "$repo_id" > "$child/.fm-secondmate-parent"
+  : > "$child/data/captain.md"
+  for harness in codex claude; do
+    for source in startup compact; do
+      out=$(printf '{"source":"%s"}\n' "$source" | FM_HOME="$child" FM_ROOT_OVERRIDE="$child" \
+        FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+        env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT "$child/bin/fm-sessionstart-run.sh")
+      if [ "$source" = compact ]; then
+        assert_contains "$out" "SESSION START (CONTEXT RE-EMIT) - $child" "$harness child compact did not use the re-emit path"
+      fi
+      assert_contains "$out" "PROJECT SHIP CONTRACT" "$harness child $source omitted the ship-contract section"
+      assert_contains "$out" "$repo/AGENTS.md" "$harness child $source omitted AGENTS.md pointer"
+      assert_contains "$out" "$repo/CLAUDE.md" "$harness child $source omitted CLAUDE.md pointer"
+      assert_contains "$out" "$repo/CONTRIBUTING.md" "$harness child $source omitted CONTRIBUTING.md pointer"
+      assert_contains "$out" "$repo/docs/architecture/adr/" "$harness child $source omitted nested ADR pointer"
+    done
+  done
+
+  rec=$(new_world projectless-supervisor)
+  IFS='|' read -r empty_root empty_home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$empty_home/projects"
+  ln -s "$ROOT/bin" "$empty_root/bin"
+  ln -s "$ROOT/docs" "$empty_root/docs"
+  : > "$empty_root/AGENTS.md"
+  : > "$empty_home/data/projects.md"
+  : > "$empty_home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nparent_role=root\n' \
+    "$empty_root" > "$empty_home/.fm-secondmate-parent"
+  out=$(printf '{"source":"startup"}\n' | FM_HOME="$empty_home" FM_ROOT_OVERRIDE="$empty_root" \
+    FM_FAKE_HARNESS=claude FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT "$empty_root/bin/fm-sessionstart-run.sh")
+  assert_not_contains "$out" "PROJECT SHIP CONTRACT" "project-less secondmate received misleading ship pointers"
+
+  invalid_home="$TMP_ROOT/invalid-project-authority"
+  mkdir -p "$invalid_home/projects/alpha" "$invalid_home/state" "$invalid_home/data" "$invalid_home/config"
+  printf 'schema=invalid\n' > "$invalid_home/.fm-project-firstmate"
+  out=$(FM_HOME="$invalid_home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT "$SESSION_START")
+  assert_not_contains "$out" "PROJECT SHIP CONTRACT" "invalid project authority marker received ship pointers"
+  pass "project Firstmates and registered child secondmates emit ship pointers at supported startup and compact re-emits"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -2649,6 +2739,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_project_supervisors_digest_ship_contracts_across_harnesses
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

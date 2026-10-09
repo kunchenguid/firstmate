@@ -207,6 +207,7 @@ When that section reports its checks still in progress it names exactly what is 
 6. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
    A read-only session runs no network checks at all and says so.
 7. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
+   Project Firstmates and registered secondmates also get pointers to their repositories' shipping guidance here, so reload those files after startup and every context rebuild; consult [`docs/sessionstart-nudge.md`](docs/sessionstart-nudge.md) and [`docs/verification/supervision.md`](docs/verification/supervision.md) for version-scoped Codex TUI delivery support and limits.
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
    The closing reminder points back to the emitted supervision block and preserves only the lock, afk, Relay, and read-once reminders.
 

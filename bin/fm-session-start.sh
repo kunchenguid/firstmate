@@ -52,7 +52,8 @@
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
+#                       data/captain-shared.md, data/learnings.md, and
+#                       registered project ship-contract pointers: read-only,
 #                       always safe, always runs.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
@@ -948,6 +949,42 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+
+print_project_ship_contract() {  # <repository-path>
+  local project_repo=$1 contract_file contract_dir
+  [ -d "$project_repo" ] || return 0
+  subsection "PROJECT SHIP CONTRACT: $project_repo"
+  printf 'Before work on this repository, read its shipping guidance and re-read it after every context rebuild.\n'
+  for contract_file in AGENTS.md CLAUDE.md CONTRIBUTING.md; do
+    if [ -f "$project_repo/$contract_file" ]; then
+      printf '  %s\n' "$project_repo/$contract_file"
+    fi
+  done
+  for contract_dir in ADRs ADR docs/ADRs docs/adr docs/architecture/adr; do
+    if [ -d "$project_repo/$contract_dir" ]; then
+      printf '  %s/\n' "$project_repo/$contract_dir"
+    fi
+  done
+}
+
+if [ -e "$FM_HOME/.fm-project-firstmate" ] || [ -L "$FM_HOME/.fm-project-firstmate" ] \
+  || [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+  # shellcheck source=bin/fm-repo-concurrency-lib.sh
+  . "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
+  if fm_repo_scope_authority_for_home "$FM_HOME"; then
+    print_project_ship_contract "$FM_REPO_SCOPE_HOME/projects/$FM_REPO_SCOPE_PROJECT"
+  else
+    authority_status=$?
+    if [ "$authority_status" -eq 1 ] && [ -f "$FM_HOME/.fm-secondmate-home" ] \
+      && [ ! -L "$FM_HOME/.fm-secondmate-home" ] && [ -f "$DATA/projects.md" ] \
+      && [ ! -L "$DATA/projects.md" ]; then
+      while IFS= read -r registered_project; do
+        case "$registered_project" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+        print_project_ship_contract "$FM_HOME/projects/$registered_project"
+      done < <(awk '$1 == "-" && $2 != "" { print $2 }' "$DATA/projects.md")
+    fi
+  fi
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
