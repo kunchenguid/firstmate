@@ -109,6 +109,8 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - `charted_more` counts omitted queued rows only, while `charted_warning_more` counts omitted warning rows only; keep both counts separate whenever the board payload truncates Charted Next.
 - Every Underway row copies the task-identifying `in_flight.name` from the snapshot into an explicit `name` field, which the board leads with while keeping the run status on its second line.
   The snapshot command's header owns its durable-title-or-id normalization; never replace the projected label with run status or invent another label.
+- The board never truncates a Charted Next title or reason; it wraps them in full.
+  In lavish mode, gather the snapshot with `--fields gate-text`, copy each gate's untruncated `title_full` into the row's `title`, and compose the row's `reason` from `reason_full` without shortening it, while the chat digest keeps the gate's bounded `title` and `reason`.
 - Every Charted Next row copies the snapshot gate's durable filed date into `filed`, and the board orders the section by it, newest filed first.
   Follow `bin/fm-bearings-board.sh`'s payload contract for the accepted format.
   Omit it or pass null for a row with no durable filed date - the main-inventory or return-catchup warning, an unavailable secondmate home, or a queued row filed before dates were recorded - and the board keeps those rows in payload order after every dated row.
