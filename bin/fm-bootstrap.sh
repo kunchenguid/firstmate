@@ -138,7 +138,9 @@
 #          remote convergence workers run concurrently, because convergence
 #          consumes respawned ids. Worker output is captured separately and
 #          replayed in spawn order; failure to create that private capture
-#          directory selects the sequential fallback.
+#          directory selects the sequential fallback. Each remote convergence
+#          worker runs under its own FM_SECONDMATE_CONVERGENCE_TIMEOUT budget
+#          (secondmate_sync_remote_one owns it).
 #          A relaunch that the liveness sweep performs during an `only` run is
 #          always reported, because a digest composed before that run already
 #          printed the superseded endpoint record.
@@ -201,6 +203,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
 # drives the same library so session start and ordinary supervision recover
 # from identical evidence through an identical path.
@@ -597,9 +601,24 @@ secondmate_sync() {
   # One remote secondmate's convergence, split out of the loop so each host is
   # individually timed; every `return` here was a `continue` and still means
   # "move on to the next secondmate".
+  # Each mate has its own budget, FM_SECONDMATE_CONVERGENCE_TIMEOUT seconds
+  # (default 75), so one slow or hung host is reported as that mate's skip
+  # instead of running the whole deferred network stage into its bound. The
+  # tracked-file sync and the inheritance push run under what is left of it; a
+  # step that hits it, or finds nothing left, fails like any other failed step,
+  # which leaves the mate unconverged with its retry marker kept.
+  remote_convergence_budget() {
+    local budget=${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-75}
+    case "$budget" in ''|*[!0-9]*|0) budget=75 ;; esac
+    printf '%s' "$budget"
+  }
+
   secondmate_sync_remote_one() {  # <id> <home> <remote-host>
     local id=$1 _home=$2 remote_host=$3
-    local sync_out sync_rc inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local sync_out sync_rc inherit_out inherit_rc nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local budget deadline left
+    budget=$(remote_convergence_budget)
+    deadline=$(( $(date +%s) + budget ))
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
@@ -625,18 +644,37 @@ secondmate_sync() {
     fi
     nudge_needed=0
     converged=1
-    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
+    sync_rc=0
+    left=$(( deadline - $(date +%s) ))
+    if [ "$left" -lt 1 ]; then
+      sync_rc=124
+    elif sync_out=$(fm_run_timed "$left" "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
       "$primary_head" < /dev/null 2>&1); then
       case "$sync_out" in synced:*) nudge_needed=1 ;; esac
     else
       sync_rc=$?
+    fi
+    if fm_timed_out "$sync_rc"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: no answer within the ${budget}s per-mate convergence budget"
+      converged=0
+    elif [ "$sync_rc" -ne 0 ]; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
       converged=0
     fi
-    if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
+    inherit_rc=0
+    left=$(( deadline - $(date +%s) ))
+    if [ "$left" -lt 1 ]; then
+      inherit_rc=124
+    elif inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      fm_run_timed "$left" "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     else
+      inherit_rc=$?
+    fi
+    if fm_timed_out "$inherit_rc"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: no answer within the ${budget}s per-mate convergence budget"
+      converged=0
+    elif [ "$inherit_rc" -ne 0 ]; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(remote_inherit_failure_reason "$inherit_out")"
       converged=0
     fi
