@@ -1308,7 +1308,7 @@ test_handoff_idle_survives_a_replaced_status_log() {
 }
 
 test_handoff_idle_replay_keeps_later_completion_open() {
-  local home first second record first_record= second_record= fp8 key
+  local home first second record first_record='' second_record='' fp8 key
   make_world handoff-replay-order
   install_handoff_fakes
   home=$MAIN
