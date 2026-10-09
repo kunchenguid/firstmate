@@ -120,8 +120,9 @@ fi
 # A routine verdict must not retire a completion the supervisor still has to
 # continue. The dispatch owner reads the newly presented span. An open handoff
 # marker covers the same completion after that span has already been consumed.
-# An explicit working or paused continuation in the span wins over a stale
-# marker. Any failure to read the span upgrades, so a routine success cannot
+# continuationEvidence is the only continuation that wins over a stale marker.
+# A generic working or paused line does not.
+# Any failure to read the span upgrades, so a routine success cannot
 # be the outcome of an unreadable record. This holds in both postures: while
 # away the upgraded captain outcome stays in the store for the return, and
 # main stays parked.

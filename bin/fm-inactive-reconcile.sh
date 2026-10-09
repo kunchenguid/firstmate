@@ -93,7 +93,9 @@
 # sends the validation command. needs-validation is not a terminal ledger line,
 # so the ledger-first path does not publish it. A legacy no-mistakes done
 # handoff still publishes when the named-head gate accepts it, and the local
-# continuation record stays until the continuation itself is evident.
+# continuation record stays until continuationEvidence is true.
+# A generic working or paused line is not that evidence.
+# The predicate lives in .pi/extensions/lib/fm-branch-dispatch.ts.
 # A ship done note that already names a PR stays on that terminal path.
 # Kind and mode are required either way, so a missing PR is not itself the test.
 # FM_HANDOFF_IDLE_SECS (default 180, valid 1..1800) is the provisional bound.
@@ -664,22 +666,36 @@ handoff_is_completion() { # <verb> <line> <kind> <mode> <task-id> <meta>
   return 0
 }
 
-# 0 when this event is evidence the open handoff continued: working, paused,
-# an explicit hold, or a final done. A later note, or another completion, is
-# not that evidence.
-handoff_clears() { # <verb> <line> <kind> <mode> <task-id> <meta>
-  local verb=$1 line=$2
-  case "$verb" in
-    working|needs-decision|blocked|captain-held) return 0 ;;
+# 0 when continuationEvidence accepts this line. 1 when it does not.
+# 2 when the shared predicate cannot be read. A generic working or paused
+# line carries no proof. An explicit hold and a done that is not itself a
+# handoff (verified final delivery) do.
+handoff_continuation_evidence() { # <line> <proof>
+  local rc=0
+  printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" continuation-evidence --proof "$2" >/dev/null || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
   esac
-  if status_is_paused "$line"; then
-    return 0
-  fi
-  if [ "$verb" = "done" ]; then
-    handoff_is_completion "$verb" "$line" "$3" "$4" "$5" "$6" && return 1
-    return 0
-  fi
-  return 1
+}
+
+handoff_clears() { # <verb> <line> <kind> <mode> <task-id> <meta>
+  local verb=$1 line=$2 proof=none held rc
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-captain-held}
+  case "$verb" in
+    needs-decision|blocked|"$held") proof=hold ;;
+    done)
+      if ! handoff_is_completion "$verb" "$line" "$3" "$4" "$5" "$6"; then
+        proof='verified-delivery'
+      fi
+      ;;
+  esac
+  handoff_continuation_evidence "$line" "$proof"
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 1 ] && return 1
+  return 2
 }
 
 handoff_line_epoch() { # <line>
@@ -772,14 +788,17 @@ handoff_one() { # <id> <meta>
   local id=$1 meta=$2 status kind mode incarnation line verb fingerprint observed
   local -a open_fps=()
   local now age key alerted last_alert state_line state_rc path item fp
-  local clearer_epoch run_step=0 marker
+  local clearer_epoch marker proof='' reason='' evidence_rc=0
   status="$STATE/$id.status"
   [ -f "$status" ] && [ ! -L "$status" ] || return 0
   kind=$(meta_field "$meta" kind)
   mode=$(meta_field "$meta" mode)
   incarnation=$(meta_incarnation "$meta")
   valid_id "$incarnation" || incarnation=unknown
-  while IFS= read -r line || [ -n "$line" ]; do
+  # A line with no trailing newline is still being appended. Reading only
+  # newline-terminated lines keeps a partial needs-validation from becoming
+  # its own episode and then a second episode once the line is finished.
+  while IFS= read -r line; do
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     verb=$(status_line_verb "$line")
     _fm_status_verb_recognized "$verb" || continue
@@ -805,6 +824,8 @@ handoff_one() { # <id> <meta>
         handoff_clear_record "$fp" "status:$verb" "$clearer_epoch" || return 1
       done
       open_fps=()
+    else
+      [ "$?" -eq 1 ] || return 1
     fi
   done < "$status"
   if [ "${#open_fps[@]}" -eq 0 ]; then
@@ -816,7 +837,7 @@ handoff_one() { # <id> <meta>
   fi
   handoff_marker_write "$id" "${open_fps[${#open_fps[@]}-1]%%|*}" || return 1
   now=$(reconcile_now)
-  run_step=0
+  proof=
   state_rc=0
   for item in "${open_fps[@]}"; do
     observed=${item#*|}
@@ -824,19 +845,36 @@ handoff_one() { # <id> <meta>
     [ "$now" -ge "$observed" ] || continue
     age=$((now - observed))
     [ "$age" -ge "$FM_HANDOFF_IDLE_SECS" ] || continue
-    if [ "$run_step" -eq 0 ] && [ "$state_rc" -eq 0 ]; then
+    if [ -z "$proof" ] && [ "$state_rc" -eq 0 ]; then
       state_line=$(fm_run_timed 5 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
         "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
       case "$state_line" in
-        *'source: run-step'*) run_step=1 ;;
+        *'source: run-step'*)
+          case "$state_line" in
+            *'review ('*|*'fix_review'*) proof='review-started' ;;
+            *) proof='attributed-run' ;;
+          esac
+          ;;
       esac
     fi
     break
   done
-  if [ "$run_step" -eq 1 ]; then
-    for item in "${open_fps[@]}"; do
-      handoff_clear_record "${item%%|*}" run-step "" || return 1
-    done
+  if [ -n "$proof" ]; then
+    evidence_rc=0
+    handoff_continuation_evidence "source: $proof" "$proof" || evidence_rc=$?
+    if [ "$evidence_rc" -eq 0 ]; then
+      reason='run-step'
+      [ "$proof" = 'review-started' ] && reason='review-started'
+      for item in "${open_fps[@]}"; do
+        handoff_clear_record "${item%%|*}" "$reason" "" || return 1
+      done
+    elif [ "$evidence_rc" -ne 1 ]; then
+      return 1
+    else
+      proof=
+    fi
+  fi
+  if [ -n "$proof" ]; then
     rm -f -- "$HANDOFF_DIR/$id.open" || return 1
     return 0
   fi

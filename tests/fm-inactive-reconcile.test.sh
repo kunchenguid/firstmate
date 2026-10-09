@@ -1249,10 +1249,22 @@ test_handoff_idle_clears_only_on_continuation() {
     || fail "a note, resolve, inbox, receipt, or routine outcome cleared the handoff"
   [ -f "$home/state/handoff-continuations/intake.open" ] || fail "an open handoff lost its marker"
 
+  fp8=$(basename "$record" .record)
+  key="handoff-idle-intake-${fp8:0:8}"
   printf '%s\n' "working [at=$HANDOFF_CONT]: validation started" >> "$home/state/intake.status"
+  printf '%s\n' "paused [at=$HANDOFF_CONT]: waiting on a review" >> "$home/state/intake.status"
   scan_handoff "$home"
-  [ "$(handoff_field "$record" clear_reason)" = "status:working" ] \
-    || fail "working did not clear the handoff: $(cat "$record")"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "a generic working or paused line cleared the handoff: $(cat "$record")"
+  [ -f "$home/state/handoff-continuations/intake.open" ] \
+    || fail "a generic working or paused line retired the open marker"
+  grep -Fq "$key" "$home/state/.wake-queue" \
+    || fail "a generic working or paused line retired the idle alert"
+
+  printf '%s\n' "needs-decision [at=$HANDOFF_CONT] [key=hold]: an explicit hold" >> "$home/state/intake.status"
+  scan_handoff "$home"
+  [ "$(handoff_field "$record" clear_reason)" = "status:needs-decision" ] \
+    || fail "an explicit hold did not clear the handoff: $(cat "$record")"
   [ "$(handoff_field "$record" latency_secs)" = $((HANDOFF_CONT - HANDOFF_OLD)) ] \
     || fail "latency was not the continuation stamp minus the completion"
   [ "$(handoff_field "$record" cleared_epoch)" = "$HANDOFF_NOW" ] \
@@ -1267,7 +1279,16 @@ test_handoff_idle_clears_only_on_continuation() {
   [ ! -e "$home/state/handoff-continuations/intake.open" ] || fail "a cleared episode recreated its marker"
   [ "$(records_for_count "$home" intake)" = 1 ] || fail "a rescan minted a second episode for the same completion"
 
-  for verb in paused needs-decision blocked captain-held; do
+  write_child "$home" paused "$completion" inc-paused-1
+  printf '%s\n%s\n' "$completion" "paused [at=$HANDOFF_CONT]: waiting on a review" > "$home/state/paused.status"
+  scan_handoff "$home"
+  record=$(one_record "$home" paused) || fail "a paused follow-up dropped the handoff record"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "a generic paused line cleared the handoff: $(cat "$record")"
+  [ -f "$home/state/handoff-continuations/paused.open" ] \
+    || fail "a generic paused line retired the open marker"
+
+  for verb in needs-decision blocked captain-held; do
     write_child "$home" "$verb" "$completion" "inc-$verb-1"
     printf '%s\n%s\n' "$completion" "$verb [at=$HANDOFF_CONT]: continued" > "$home/state/$verb.status"
     scan_handoff "$home"
@@ -1304,6 +1325,14 @@ test_handoff_idle_clears_only_on_continuation() {
   [ "$uncleared" -eq 0 ] || fail "an active pipeline did not clear every open handoff for the task"
   [ ! -e "$home/state/handoff-continuations/pair.open" ] || fail "a pipeline clear left the marker"
 
+  write_child "$home" review "$completion" inc-review-1
+  printf '%s\n%s\n' "$completion" "working [at=$HANDOFF_CONT]: validation started" > "$home/state/review.status"
+  FM_FAKE_CREW_SOURCE=run-step FM_FAKE_CREW_STATE='working · review (running)' scan_handoff "$home"
+  record=$(one_record "$home" review) || fail "a started review dropped the handoff record"
+  [ "$(handoff_field "$record" clear_reason)" = review-started ] \
+    || fail "an acknowledged started review did not clear the handoff: $(cat "$record")"
+  [ ! -e "$home/state/handoff-continuations/review.open" ] || fail "a started review left the marker"
+
   write_child "$home" pane "$completion" inc-pane-1
   FM_FAKE_CREW_SOURCE=pane FM_FAKE_CREW_STATE=working scan_handoff "$home"
   record=$(one_record "$home" pane) || fail "pane evidence dropped the handoff record"
@@ -1320,7 +1349,30 @@ test_handoff_idle_clears_only_on_continuation() {
   after=$(cksum "$record")
   [ "$before" = "$after" ] || fail "a rescan changed the identity of the same unstamped handoff"
   [ ! -s "$WORLD/forge.log" ] || fail "a continuation scan invoked a forge or send command"
-  pass "a handoff clears on a continuation or an active pipeline, and the same completion line does not reopen it"
+  pass "a handoff clears on continuation evidence, and a generic working or paused line does not"
+}
+
+test_handoff_ignores_an_unterminated_completion_line() {
+  local home record
+  local completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  make_world handoff-partial
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" intake "$completion" inc-partial-1
+  printf '%s' "$completion" > "$home/state/intake.status"
+  scan_handoff "$home"
+  [ "$(records_for_count "$home" intake)" = 0 ] \
+    || fail "an unterminated needs-validation line opened a handoff episode"
+  printf '\n' >> "$home/state/intake.status"
+  scan_handoff "$home"
+  record=$(one_record "$home" intake) || fail "finishing the line did not record the handoff"
+  printf '%s' "needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests more" >> "$home/state/intake.status"
+  scan_handoff "$home"
+  [ "$(records_for_count "$home" intake)" = 1 ] \
+    || fail "a second unterminated line minted another episode"
+  [ "$(handoff_field "$record" completion_line)" = "$completion" ] \
+    || fail "the partial suffix changed the recorded completion"
+  pass "an unterminated status line is not a handoff, and finishing it records one episode"
 }
 
 test_handoff_idle_skips_final_deliveries_and_secondmates() {
@@ -1502,6 +1554,7 @@ test_handoff_idle_skips_final_deliveries_and_secondmates
 test_handoff_idle_rejects_a_bare_pr_as_final_delivery
 test_handoff_idle_rejects_an_unverified_green_followup
 test_handoff_idle_uses_only_positional_status_timestamps
+test_handoff_ignores_an_unterminated_completion_line
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan
 test_handoff_idle_bound_refuses_out_of_range

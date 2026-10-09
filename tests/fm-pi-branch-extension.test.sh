@@ -5062,7 +5062,11 @@ expectRoute("failure", "working: history\n",
   "failed [at=1791501800]: the build broke\n", false);
 expectRoute("note does not retire a handoff in the same span", "working: history\n",
   "needs-validation [at=1791534938]: committed c118078, 706 tests\nnote: still waiting on the supervisor\n", false);
-expectRoute("working after a consumed handoff is the continuation",
+expectRoute("generic working does not retire a handoff in the same span", "working: history\n",
+  "needs-validation [at=1791534938]: committed c118078, 706 tests\nworking [at=1791535000]: validation started\n", false);
+expectRoute("generic paused does not retire a handoff in the same span", "working: history\n",
+  "needs-validation [at=1791534938]: committed c118078, 706 tests\npaused [at=1791535000]: waiting on a review\n", false);
+expectRoute("working after a consumed handoff is ordinary progress",
   "needs-validation [at=1791534938]: committed c118078, 706 tests\n",
   "working [at=1791535000]: validation started\n", true);
 

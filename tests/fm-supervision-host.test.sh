@@ -3021,13 +3021,16 @@ test_completion_handoff_is_main_owned_while_attended() {
     out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task revision); rc=$?
     [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: scout revision classified as $out (exit $rc)"
     out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task progress); rc=$?
-    [ "$rc" -eq 1 ] && [ "$out" = continued ] || fail "$name: progress classified as $out (exit $rc)"
+    [ "$rc" -eq 1 ] && [ "$out" = none ] || fail "$name: progress classified as $out (exit $rc)"
     printf 'note: still waiting on the supervisor\n' >> "$state/intake.status"
     out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task intake); rc=$?
     [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a trailing note retired the handoff ($out exit $rc)"
     printf 'working [at=1791535400]: validation started\n' >> "$state/credential.status"
     out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task credential); rc=$?
-    [ "$rc" -eq 1 ] && [ "$out" = continued ] || fail "$name: a working continuation stayed owned ($out exit $rc)"
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a generic working line retired the handoff ($out exit $rc)"
+    printf 'paused [at=1791535450]: waiting on a review\n' >> "$state/revision.status"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task revision); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a generic paused line retired the handoff ($out exit $rc)"
     # A second process re-reads the same span. Nothing here is cached across restarts.
     out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task revision); rc=$?
     [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a restarted read lost the scout revision ($out exit $rc)"
@@ -3092,7 +3095,7 @@ test_completion_handoff_is_main_owned_while_attended() {
 }
 
 # A routine report cannot retire a completion the supervisor still has to
-# continue. An explicit working continuation wins over a stale handoff marker.
+# continue. A generic working or paused line does not. An explicit hold does.
 # While away the upgraded outcome stays in the store and main stays parked.
 test_routine_report_cannot_retire_a_pending_handoff() {
   local home state out rc real_node fake
@@ -3126,9 +3129,9 @@ test_routine_report_cannot_retire_a_pending_handoff() {
     > "$state/.supervision-host-turn"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t2 "$REPORT" \
     --task intake --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
-  [ "$rc" -eq 0 ] || fail "a continued handoff report was refused: $out"
-  assert_contains "$out" "[routine]" "a working continuation was upgraded: $out"
-  assert_contains "$out" "silent" "a continued routine outcome was not silent: $out"
+  [ "$rc" -eq 0 ] || fail "a generic working line on an owned handoff was refused: $out"
+  assert_contains "$out" "[captain]" "a generic working line retired a validation handoff: $out"
+  assert_not_contains "$out" "silent" "a generic working line stayed a silent routine outcome: $out"
 
   printf 'done [at=1791535311]: committed cc38b3d, 707 tests\n' > "$state/credential.status"
   FM_HOME="$home" bash -c '
@@ -3154,8 +3157,9 @@ test_routine_report_cannot_retire_a_pending_handoff() {
     > "$state/.supervision-host-turn"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t4 "$REPORT" \
     --task credential --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
-  [ "$rc" -eq 0 ] || fail "a continued span over a stale marker was refused: $out"
-  assert_contains "$out" "silent" "a stale marker upgraded a span that already continued: $out"
+  [ "$rc" -eq 0 ] || fail "a generic working line over an open handoff marker was refused: $out"
+  assert_contains "$out" "[captain]" "a generic working line let a routine report retire the open handoff: $out"
+  assert_not_contains "$out" "silent" "a generic working line over an open marker stayed silent: $out"
 
   printf 'note: nothing pending\n' > "$state/opaque.status"
   real_node=$(command -v node)

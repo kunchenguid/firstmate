@@ -434,19 +434,45 @@ function recognizedStatusVerb(line: string): string | null {
 }
 
 // owned: the span still ends on a completion the supervisor must continue.
-// continued: a later working or paused line in the same span started that
-// continuation. none: the span has no such completion and no continuation
-// (empty, prose, or a note that does not retire a handoff).
+// continued: later continuation evidence cleared that completion.
+// none: the span has no such completion and no continuation
+// (empty, prose, a generic working or paused line, or a note).
 export type PresentedCompletion = "owned" | "continued" | "none" | "unreadable";
 
+// Proof a caller has already established. This function does not infer it
+// from a working or paused line.
+export type ContinuationProof =
+  | "none"
+  | "attributed-run"
+  | "review-started"
+  | "verified-delivery"
+  | "hold";
+
+// The one continuation-evidence predicate for a pending handoff.
+// True only for an attributed no-mistakes run for this task incarnation,
+// an acknowledged and started follow-up review, verified final delivery,
+// or an explicit legitimate hold.
+// A generic working or paused status is not that evidence.
+export function continuationEvidence(line: string, proof: ContinuationProof): boolean {
+  if (proof === "attributed-run" || proof === "review-started") return true;
+  const verb = recognizedStatusVerb(line);
+  if (!verb) return false;
+  const held = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
+  if (proof === "hold" && (verb === "needs-decision" || verb === "blocked" || verb === held)) return true;
+  if (proof === "verified-delivery" && verb === "done") return true;
+  return false;
+}
+
 function classifySpanCompletion(lines: readonly string[]): Exclude<PresentedCompletion, "unreadable"> {
-  const paused = process.env.FM_CLASSIFY_PAUSED_VERB || "paused";
+  const held = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
   let pending = false;
   let continued = false;
   for (const line of lines) {
     const verb = recognizedStatusVerb(line);
     if (!verb) continue;
-    if (verb === "working" || verb === paused) {
+    const proof: ContinuationProof =
+      verb === "needs-decision" || verb === "blocked" || verb === held ? "hold" : "none";
+    if (continuationEvidence(line, proof)) {
       pending = false;
       continued = true;
     } else if (verb === "done" || verb === "needs-validation" || verb === "failed") {
