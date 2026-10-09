@@ -44,16 +44,39 @@ subprocess.run(["git", "init", "-q", str(home / "projects" / "alpha")], check=Tr
 subprocess.run(["git", "-C", str(home / "projects" / "alpha"), "config", "remote.origin.url", "git@github.com:example/alpha.git"], check=True)
 issue_url = "https://github.com/example/alpha/issues/7"
 pr_url = "https://github.com/example/alpha/pull/8"
+decision = {"schema": "fm-captain-decision.v1", "question": "Which route should guests use?",
+            "context": "Guests need a route that works on older phones.", "user_impact": "This determines whether guests can join without extra setup.",
+            "options": [{"label": "A", "title": "Keep the current route", "pros": ["Works with existing links."], "cons": ["Older phones may load slowly."]},
+                        {"label": "B", "title": "Use the lighter route", "pros": ["Loads faster for guests."], "cons": ["Needs a short migration."]}],
+            "recommended_option": "B", "recommendation": "Choose B because faster loading helps more guests join."}
+decision_line = "Captain decision record v1: " + json.dumps(decision, separators=(",", ":"), sort_keys=True)
+decision_input = tmp / "decision-input.json"
+decision_input.write_text(json.dumps(decision))
+event_env = {**os.environ, "FM_ROOT_OVERRIDE": str(repo), "FM_HOME": str(home), "FM_STATE_OVERRIDE": str(home / "state")}
+event = subprocess.run([str(repo / "bin" / "fm-captain-hold.sh"), "decision-event", "worker", "--key", "route", "--input-file", str(decision_input)], env=event_env, capture_output=True, text=True)
+assert event.returncode == 0, event.stderr
+event_line = (home / "state" / "worker.status").read_text().strip()
+assert event_line.startswith("needs-decision [key=route]: ") and json.loads(event_line.split(": ", 1)[1]) == decision
+invalid_input = tmp / "invalid-decision.json"
+invalid_input.write_text(json.dumps({"schema": "fm-captain-decision.v1", "question": "Pick one"}))
+refused = subprocess.run([str(repo / "bin" / "fm-captain-hold.sh"), "decision-event", "worker", "--key", "invalid", "--input-file", str(invalid_input)], env=event_env, capture_output=True, text=True)
+assert refused.returncode != 0 and not (home / "state" / "worker.status").read_text().endswith("\nneeds-decision [key=invalid]:"), refused.stderr
 snapshot = {
     "schema": "fm-fleet-snapshot.v1",
     "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "tasks": [
         {"id": "worker", "issue": issue_url, "project": "alpha", "decision_keys": [], "endpoint": {"exists": True}, "backlog": {"repo": "alpha", "state": "in_flight", "links": [], "pr_url": pr_url}, "current_state": {"state": "working"}},
+        {"id": "unknown-worker", "project": "alpha", "backlog": {"repo": "alpha", "state": "queued"}, "current_state": {"state": "unknown"}},
         {"id": "unlinked", "project": "alpha", "backlog": {"repo": "alpha", "state": "in_flight"}, "current_state": {"state": "working"}},
     ],
     "backlog": {"records": [
-        {"id": "next", "title": "Waiting task", "repo": "alpha", "state": "queued", "blocked_by_ids": ["worker"], "unresolved_blocker_ids": ["worker"]},
-        {"id": "held-call", "title": "Pick a route", "repo": "alpha", "state": "queued", "captain_actionable": True, "hold_reason": "Choose a route", "target_task_id": "worker"},
+        {"id": "next", "title": "Waiting task", "repo": "alpha", "state": "queued", "links": [issue_url], "blocked_by_ids": ["worker"], "unresolved_blocker_ids": ["worker"]},
+        {"id": "held-call", "title": "Pick a route", "repo": "alpha", "state": "queued", "captain_actionable": True, "hold_reason": "Choose a route", "target_task_id": "worker", "body_lines": [decision_line]},
+        {"id": "ready", "title": "Ready task", "repo": "alpha", "state": "queued", "links": [], "blocked_by_ids": [], "unresolved_blocker_ids": []},
+        {"id": "linked-shortcut", "title": "Complete issue #7", "repo": "alpha", "state": "queued", "links": [], "blocked_by_ids": [], "unresolved_blocker_ids": []},
+        {"id": "missing-reference", "title": "Imported task from #99", "repo": "alpha", "state": "queued", "links": [], "blocked_by_ids": [], "unresolved_blocker_ids": []},
+        {"id": "unknown-worker", "title": "Queued prerequisite", "repo": "alpha", "state": "queued", "links": [], "blocked_by_ids": [], "unresolved_blocker_ids": []},
+        {"id": "waiting-on-queued", "title": "Wait for queued prerequisite", "repo": "alpha", "state": "queued", "links": [], "blocked_by_ids": ["unknown-worker"], "unresolved_blocker_ids": ["unknown-worker"]},
         {"id": "closed-pr", "title": "Closed pull request", "repo": "alpha", "state": "in_flight", "links": [issue_url], "pr_url": "https://github.com/example/alpha/pull/9"},
     ]},
     "main_inventory": {"valid": True, "reason": None},
@@ -62,9 +85,9 @@ snapshot = {
          "current": {"state": "captain_decision", "reason": None}, "freshness": {"status": "fresh", "age_seconds": 0},
          "active_children": [{"id": "mate-child", "state": "working", "repo": "alpha", "issue": issue_url, "pr_url": pr_url, "decision_keys": ["mate-held"]}],
          "decisions_open": [
-             {"id": "mate-child", "key": "mate-choice", "verb": "needs-decision", "summary": "Choose A", "target_task_id": "mate-child"},
-             {"id": "mate-held", "key": "mate-held", "verb": "captain-hold", "summary": "Choose B", "target_task_id": "mate-child"},
-             {"id": "mate-orphan-hold", "key": "mate-orphan-hold", "verb": "captain-hold", "summary": "Choose C"},
+             {"id": "mate-child", "key": "mate-choice", "verb": "needs-decision", "summary": json.dumps(decision), "target_task_id": "mate-child"},
+             {"id": "mate-held", "key": "mate-held", "verb": "captain-hold", "summary": json.dumps(decision), "target_task_id": "mate-child"},
+             {"id": "mate-orphan-hold", "key": "mate-orphan-hold", "verb": "captain-hold", "summary": json.dumps(decision)},
          ],
          "queued": [{"id": "mate-next", "title": "Secondmate queued", "repo": "alpha", "blocked_by_ids": ["mate-child"], "unresolved_blocker_ids": ["mate-child"]}],
          "omitted": []},
@@ -91,9 +114,20 @@ import json, sys
 args = sys.argv[1:]
 path = next((arg for arg in args if arg.startswith("repos/")), "")
 if "/issues/7" in path:
-    out = {"number": 7, "title": "Exact issue title", "state": "open", "html_url": "https://github.com/example/alpha/issues/7"}
+    out = {"number": 7, "title": "Exact issue title", "state": "open", "html_url": "https://github.com/example/alpha/issues/7", "milestone": {"title": "Spring release"}}
 elif "graphql" in args:
     query = next(arg.split("=", 1)[1] for arg in args if arg.startswith("query="))
+    if "issue(number:" in query:
+        import re
+        if re.search(r'issue\(number:99\)', query):
+            sys.exit("issue 99 is unavailable")
+        match = re.search(r'(issue\d+):repository\(owner:"([^"]+)",name:"([^"]+)"\)\{issue\(number:(\d+)\)', query)
+        if not match:
+            sys.exit("invalid issue GraphQL query")
+        alias, owner, repo, number = match.groups()
+        out = {"data": {alias: {"issue": {"number": int(number), "url": f"https://github.com/{owner}/{repo}/issues/{number}", "title": "Exact issue title", "milestone": {"title": "Spring release"}}}}}
+        print(json.dumps(out))
+        sys.exit(0)
     depth = 0
     for char in query:
         if char == "{":
@@ -124,7 +158,7 @@ print(json.dumps(out))
 fake_gh.chmod(0o755)
 capture = tmp / "send.txt"
 decisions_path = tmp / "decisions.tsv"
-decisions_path.write_text("worker\tdecision-a\tneeds-decision\tShould we ship?\n")
+decisions_path.write_text("worker\tdecision-a\tneeds-decision\t" + json.dumps(decision, separators=(",", ":")) + "\nworker\tlegacy\tneeds-decision\tChoose one\n")
 hold_capture = tmp / "hold-capture.txt"
 env = {**os.environ, "PATH": f"{tmp / 'fake-bin'}:{os.environ['PATH']}", "FM_CONSOLE_FIXTURE": str(snapshot_path), "FM_CONSOLE_SEND_CAPTURE": str(capture), "FM_CONSOLE_HOLD_CAPTURE": str(hold_capture), "FM_CONSOLE_DECISIONS_FILE": str(decisions_path), "BROWSER": "/usr/bin/true"}
 snapshot_count = tmp / "snapshot-count"
@@ -153,19 +187,38 @@ try:
     decisions = data["decisions"]
     assert {(item["owner"], item["task"], item["key"], item["verb"]) for item in decisions} == {
         ("main", "worker", "decision-a", "needs-decision"),
+        ("main", "worker", "legacy", "needs-decision"),
         ("main", "worker", "held-call", "captain-hold"),
         ("mate", "mate-child", "mate-choice", "needs-decision"),
         ("mate", "mate-child", "mate-held", "captain-hold"),
         ("mate", None, "mate-orphan-hold", "captain-hold"),
     }, decisions
+    structured = next(item for item in decisions if item["key"] == "decision-a")
+    legacy = next(item for item in decisions if item["key"] == "legacy")
+    assert structured["answerable"] is True and structured["decision"]["question"] == decision["question"]
+    assert legacy["answerable"] is False and legacy["decision"] is None
     orphan_mate = next(item for item in decisions if item["key"] == "mate-orphan-hold")
     assert orphan_mate["answerable"] is True and orphan_mate["direct_hold"] is True
     queue = data["queue"]
-    assert next(row for row in queue if row["id"] == "next")["unresolved_blocker_ids"] == ["worker"]
+    next_row = next(row for row in queue if row["id"] == "next")
+    assert next_row["unresolved_blocker_ids"] == ["worker"]
+    assert next_row["start_reason"] == "Waiting for dependencies: worker (working)"
+    assert next(row for row in queue if row["id"] == "waiting-on-queued")["start_reason"] == "Waiting for dependencies: unknown-worker (queued)"
+    shortcut = next(row for row in queue if row["id"] == "linked-shortcut")
+    assert shortcut["issues"][0]["html_url"] == issue_url and shortcut["issues"][0]["title"] == "Exact issue title"
+    missing = next(row for row in queue if row["id"] == "missing-reference")
+    assert missing["issues"][0]["html_url"].endswith("/issues/99")
+    assert next_row["issues"][0]["title"] == "Exact issue title"
+    assert next_row["issues"][0]["title"] == "Exact issue title"
+    assert next_row["issues"][0]["milestone"]["title"] == "Spring release"
+    assert queue[0]["start_reason"] == "Ready to start now"
+    first_blocked = next(index for index, row in enumerate(queue) if row["start_reason"] != "Ready to start now")
+    assert all(row["start_reason"] == "Ready to start now" for row in queue[:first_blocked])
     assert any(row["id"] == "mate/mate-child" for row in queue)
     assert any(row["id"] == "mate/mate-next" and row["unresolved_blocker_ids"] == ["mate-child"] for row in queue)
-    assert next(row for row in queue if row["id"] == "next")["admission_state"] == "unknown"
-    assert "admission state " in page
+    assert "admission state" not in page
+    assert "Home operations" in page
+    assert "Needs rewrite" in page
     assert data["status"]["generated_epoch"] == int(datetime.datetime.fromisoformat(snapshot["generated"]).timestamp()), (data["status"]["generated_epoch"], snapshot["generated"])
     assert snapshot_count.read_text() == "x", "one refresh should use one shared fleet snapshot"
     json.load(urllib.request.urlopen(base + "/api/data", timeout=3))
@@ -183,20 +236,30 @@ try:
     except urllib.error.HTTPError as exc:
         assert exc.code == 403
     match = re.search(r"const token=(\"[^\"]+\")", page)
-    assert match, "page token was not found"
+    assert match, f"page token was not found in {page[:500]!r}"
     request.add_header("X-FM-Token", json.loads(match.group(1)))
-    result = json.load(urllib.request.urlopen(request, timeout=3))
+    try:
+        result = json.load(urllib.request.urlopen(request, timeout=3))
+    except urllib.error.HTTPError as exc:
+        raise AssertionError(exc.read().decode()) from exc
     assert result["ok"] is True, result
     assert capture.read_text().strip() == f"{home.resolve()}\tworker --resolve-key decision-a -- --resolve-key is answer text"
-    assert len([line for line in gh_log.read_text().splitlines() if "graphql" in line]) == 2
+    graphql_calls = [line for line in gh_log.read_text().splitlines() if "graphql" in line]
+    assert len(graphql_calls) >= 3 and any("issue(number:99)" in line for line in graphql_calls), graphql_calls
     mate_body = json.dumps({"owner": "mate", "task": "mate-child", "key": "mate-choice", "answer": "Choose A"}).encode()
     mate_request = urllib.request.Request(base + "/api/answer", data=mate_body, method="POST", headers={"Content-Type": "application/json", "Origin": base, "X-FM-Token": json.loads(match.group(1))})
-    mate_result = json.load(urllib.request.urlopen(mate_request, timeout=3))
+    try:
+        mate_result = json.load(urllib.request.urlopen(mate_request, timeout=3))
+    except urllib.error.HTTPError as exc:
+        raise AssertionError("mate answer failed: " + exc.read().decode()) from exc
     assert mate_result["ok"] is True, mate_result
     assert f"{mate_home.resolve()}\tmate-child --resolve-key mate-choice -- Choose A" in capture.read_text()
     orphan_mate_body = json.dumps({"owner": "mate", "task": None, "key": "mate-orphan-hold", "answer": "Choose C"}).encode()
     orphan_mate_request = urllib.request.Request(base + "/api/answer", data=orphan_mate_body, method="POST", headers={"Content-Type": "application/json", "Origin": base, "X-FM-Token": json.loads(match.group(1))})
-    orphan_mate_result = json.load(urllib.request.urlopen(orphan_mate_request, timeout=3))
+    try:
+        orphan_mate_result = json.load(urllib.request.urlopen(orphan_mate_request, timeout=3))
+    except urllib.error.HTTPError as exc:
+        raise AssertionError("orphan mate answer failed: " + exc.read().decode()) from exc
     assert orphan_mate_result["ok"] is True, orphan_mate_result
     mate_hold = hold_capture.read_text()
     assert mate_hold.startswith(f"{mate_home.resolve()}\tanswer mate-orphan-hold --decision-file ") and mate_hold.endswith("\tChoose C"), mate_hold
@@ -224,11 +287,21 @@ if command -v tasks-axi >/dev/null 2>&1; then
     "$real_home" > "$real_home/state/worker.meta"
   printf 'needs-decision [key=route]: choose north or south\n' > "$real_home/state/worker.status"
   printf '# Worker report\n\nTwo routes remain open.\n' > "$real_home/data/worker/report.md"
+  cat > "$real_home/decision-input.json" <<'JSON'
+{"schema":"fm-captain-decision.v1","question":"Which route should the guests use?","context":"Guests need a route that works on older phones.","user_impact":"This affects how quickly guests can join.","options":[{"label":"A","title":"Keep the current route","pros":["Existing links keep working."],"cons":["Older phones may load slowly."]},{"label":"B","title":"Use the lighter route","pros":["More guests can join quickly."],"cons":["The update needs a short migration."]}],"recommended_option":"B","recommendation":"Choose B because faster loading helps more guests join."}
+JSON
+  if env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$real_home" \
+    FM_STATE_OVERRIDE="$real_home/state" FM_DATA_OVERRIDE="$real_home/data" \
+    FM_CONFIG_OVERRIDE="$real_home/config" "$ROOT/bin/fm-captain-hold.sh" hold missing-decision \
+      --title 'Missing decision' --reason 'missing decision' >/dev/null 2>&1; then
+    printf '%s\n' 'not ok - active captain hold accepted a missing structured decision' >&2
+    exit 1
+  fi
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$real_home" \
     FM_STATE_OVERRIDE="$real_home/state" FM_DATA_OVERRIDE="$real_home/data" \
     FM_CONFIG_OVERRIDE="$real_home/config" "$ROOT/bin/fm-captain-hold.sh" hold \
-      sample-route-call --title 'Choose a route' --reason 'route selection' \
-      --repo alpha --origin worker >/dev/null
+    sample-route-call --title 'Choose a route' --reason 'route selection' \
+      --repo alpha --origin worker --decision-file "$real_home/decision-input.json" >/dev/null
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$real_home" \
     FM_STATE_OVERRIDE="$real_home/state" FM_DATA_OVERRIDE="$real_home/data" \
     FM_CONFIG_OVERRIDE="$real_home/config" "$ROOT/bin/fm-captain-hold.sh" complete \
@@ -236,8 +309,8 @@ if command -v tasks-axi >/dev/null 2>&1; then
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$real_home" \
     FM_STATE_OVERRIDE="$real_home/state" FM_DATA_OVERRIDE="$real_home/data" \
     FM_CONFIG_OVERRIDE="$real_home/config" "$ROOT/bin/fm-captain-hold.sh" hold \
-      orphan-call --title 'Standalone route choice' --reason 'no worker remains' \
-      --repo alpha >/dev/null
+    orphan-call --title 'Standalone route choice' --reason 'no worker remains' \
+      --repo alpha --decision-file "$real_home/decision-input.json" >/dev/null
   cat > "$real_home/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0

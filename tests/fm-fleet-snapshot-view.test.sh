@@ -1095,17 +1095,23 @@ EOF
 }
 
 test_home_summary_projects_issue_bindings_and_hold_owners() {
-  local home fakebin out fixture_gen
+  local home fakebin out fixture_gen decision_file decision_json
   home=$(make_home summary-issue-bindings)
   mkdir -p "$home/projects/child"
-  cat > "$home/data/backlog.md" <<'EOF'
+  decision_file="$home/captain-decision.json"
+  fm_test_captain_decision "$decision_file" 'Which API should the team support?'
+  decision_json=$(jq -cS . "$decision_file")
+  cat > "$home/data/backlog.md" <<EOF
 ## In flight
 - [ ] child-worker - Child worker (repo: alpha) (kind: ship) (since 2026-07-11)
 
 ## Queued
 - [ ] held-choice - Pick an API (repo: alpha) (kind: captain) (hold: choose an API) (hold-kind: captain)
+  Captain decision record v1: $decision_json
+- [ ] waiting-child - Wait for completed work (repo: alpha) (kind: ship) blocked-by: finished-child
 
 ## Done
+- [x] finished-child - Completed prerequisite (repo: alpha) (kind: ship)
 EOF
   fm_write_meta "$home/state/child-worker.meta" \
     "window=firstmate:fm-child-worker" "worktree=$home/projects/child" \
@@ -1123,7 +1129,9 @@ EOF
       and .active_children[0].issue == "https://github.com/example/alpha/issues/36"
       and .active_children[0].decision_keys == ["held-choice"]
       and ([.decisions_open[] | select(.key == "held-choice")][0].target_task_id == "child-worker")
+      and ([.decisions_open[] | select(.key == "held-choice")][0].decision.question == "Which API should the team support?")
       and ([.queued[] | select(.id == "held-choice")][0].captain_actionable == true)
+      and ([.queued[] | select(.id == "waiting-child")][0].dependencies == [{id:"finished-child",state:"done"}])
   ' >/dev/null || fail "secondmate summary lost issue or held-decision ownership: $out"
   pass "secondmate summary projects issue bindings and captain-hold answer owners"
 }

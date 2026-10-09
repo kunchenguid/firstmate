@@ -19,6 +19,8 @@ CHILD="$TMP_ROOT/steward"
 PROJECT="$PFA/projects/alpha"
 ORIGIN="$TMP_ROOT/alpha.origin.git"
 PID_SCRIPT="$ROOT/bin/fm-product-decision.sh"
+CAPTAIN_DECISION="$TMP_ROOT/captain-decision.json"
+fm_test_captain_decision "$CAPTAIN_DECISION" 'Which recovery experience should users receive?'
 
 make_home() {
   local home=$1
@@ -62,7 +64,7 @@ printf -- '- product-decision-steward - Own product implementation decisions (ho
 FM_HOME="$CHILD" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-tasks-axi.sh" add pid-origin "Implement account recovery" \
   --kind ship --repo alpha --start >/dev/null || fail 'could not create originating work item'
 FM_HOME="$CHILD" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-captain-hold.sh" hold pid-origin \
-  --reason 'Captain needs to choose the account recovery experience' >/dev/null || fail 'could not captain-hold originating work'
+  --reason 'Captain needs to choose the account recovery experience' --decision-file "$CAPTAIN_DECISION" >/dev/null || fail 'could not captain-hold originating work'
 
 write_input() {
   local request_key=$1 title=${2:-"Email confirmation"} task=${3:-pid-origin} supersedes=${4:-}
@@ -140,7 +142,7 @@ for task in pid-origin-a pid-origin-b; do
     "Implement recovery path $task" --kind ship --repo alpha --start >/dev/null \
     || fail "could not create the independent source task $task"
   FM_HOME="$CHILD" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-captain-hold.sh" hold "$task" \
-    --reason "Captain needs to choose the recovery product behavior for $task" >/dev/null \
+    --reason "Captain needs to choose the recovery product behavior for $task" --decision-file "$CAPTAIN_DECISION" >/dev/null \
     || fail "could not hold the independent source task $task"
 done
 write_input pid-concurrent-a 'Use the existing account settings page' pid-origin-a
@@ -191,7 +193,7 @@ pass 'a later answer survives process restart, resolves through captain-hold, qu
 FM_HOME="$CHILD" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-tasks-axi.sh" add pid-origin-recovery "Confirm recovery copy" \
   --kind docs --repo alpha --start >/dev/null || fail 'could not create recovery fixture task'
 FM_HOME="$CHILD" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-captain-hold.sh" hold pid-origin-recovery \
-  --reason 'Captain needs to choose the recovery wording' >/dev/null || fail 'could not captain-hold recovery fixture task'
+  --reason 'Captain needs to choose the recovery wording' --decision-file "$CAPTAIN_DECISION" >/dev/null || fail 'could not captain-hold recovery fixture task'
 write_input pid-recovery 'Email confirmation' pid-origin-recovery
 recovery_hash=$(printf pid-recovery | shasum -a 256 | awk '{print $1}')
 mkdir -p "$PFA/data/product-decisions"

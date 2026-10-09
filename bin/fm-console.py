@@ -126,13 +126,23 @@ def snapshot(home: Path, root: Path) -> dict:
     return value
 
 
-def issue_urls(record: dict) -> list[str]:
+def issue_urls(record: dict, project_home: Path | None = None) -> list[str]:
     backlog = record.get("backlog") or {}
     values = [record.get("issue"), *(backlog.get("links") or record.get("links") or [])]
     urls = []
     for value in values:
         if isinstance(value, str) and re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*", value):
             urls.append(value)
+    text = "\n".join(str(line) for line in (record.get("body_lines") or backlog.get("body_lines") or []))
+    text += "\n" + str(backlog.get("body_excerpt") or record.get("body_excerpt") or "")
+    urls.extend(re.findall(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*", text))
+    if project_home is not None:
+        project = record.get("repo") or record.get("project") or backlog.get("repo")
+        repository = repository_identity(project_home, project) if isinstance(project, str) else None
+        if repository:
+            references = str(record.get("title") or backlog.get("title") or "")
+            urls.extend(f"https://github.com/{repository}/issues/{number}"
+                        for number in re.findall(r"(?<![A-Za-z0-9])#([1-9][0-9]*)", references))
     return sorted(set(urls))
 
 
@@ -229,6 +239,120 @@ def fetch_issue(root: Path, home: Path, url: str) -> dict:
     if issue.get("number") != int(number) or str(issue.get("html_url", "")).lower() != url.lower():
         raise RuntimeError("GitHub returned a different issue identity")
     return issue
+
+
+def fetch_issues(root: Path, home: Path, urls: list[str]) -> dict[str, dict]:
+    if not urls:
+        return {}
+    if len(urls) > 8:
+        found = {}
+        for offset in range(0, len(urls), 8):
+            found.update(fetch_issues(root, home, urls[offset:offset + 8]))
+        return found
+    aliases = {}
+    selections = []
+    for index, url in enumerate(urls):
+        owner, repo, _, number = url.removeprefix("https://github.com/").split("/")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+            continue
+        alias = f"issue{index}"
+        aliases[alias] = (url, int(number))
+        selections.append(f'{alias}:repository(owner:"{owner}",name:"{repo}"){{issue(number:{number}){{number url title milestone{{title}}}}}}')
+    if not selections:
+        return {}
+    query = "query { " + " ".join(selections) + " }"
+    env = {**os.environ, "FM_HOME": str(home)}
+    result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=root, env=env, timeout=30)
+    try:
+        response = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        response = None
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, dict):
+        data = {}
+    if result.returncode and not data and len(urls) > 1:
+        midpoint = len(urls) // 2
+        found = fetch_issues(root, home, urls[:midpoint])
+        found.update(fetch_issues(root, home, urls[midpoint:]))
+        return found
+    found = {}
+    for alias, (url, number) in aliases.items():
+        repository = data.get(alias) if isinstance(data, dict) else None
+        issue = repository.get("issue") if isinstance(repository, dict) else None
+        if (isinstance(issue, dict) and issue.get("number") == number
+                and str(issue.get("url", "")).lower() == url.lower()):
+            found[url] = issue
+        else:
+            try:
+                found[url] = fetch_issue(root, home, url)
+            except (RuntimeError, ValueError, subprocess.SubprocessError):
+                found[url] = {"html_url": url, "title": "Issue details unavailable", "milestone": None}
+    return found
+
+
+def repo_concurrency_limit(home: Path) -> int | str | None:
+    config = home / "config"
+    path = config / "repo-concurrency"
+    if config.is_symlink() or path.is_symlink():
+        return None
+    try:
+        if not config.exists():
+            return "unlimited"
+        if not config.is_dir():
+            return None
+        if not path.exists():
+            return "unlimited"
+        if not path.is_file() or path.stat().st_nlink != 1:
+            return None
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not re.fullmatch(r"[1-9][0-9]*\n", raw):
+        return None
+    limit = int(raw[:-1])
+    return limit if limit <= 256 else None
+
+
+def repo_concurrency_lease_count(home: Path) -> int | None:
+    state = home / "state"
+    root = state / ".repo-concurrency"
+    directory = root / "leases"
+    if state.is_symlink() or root.is_symlink() or directory.is_symlink():
+        return None
+    try:
+        if not directory.exists():
+            return 0
+        if not directory.is_dir():
+            return None
+        files = list(directory.glob("*.lease"))
+    except OSError:
+        return None
+    count = 0
+    for path in files:
+        if path.is_symlink():
+            return None
+        try:
+            fields = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        parsed = {}
+        for field in fields:
+            if "=" not in field:
+                return None
+            key, value = field.split("=", 1)
+            if key in parsed:
+                return None
+            parsed[key] = value
+        if (set(parsed) - {"schema", "authority_id", "repo_identity", "task_home", "task_id", "claim_pid", "claim_identity"}
+                or ("claim_pid" in parsed) != ("claim_identity" in parsed)
+                or parsed.get("schema") != "fm-repo-concurrency-lease.v1"
+                or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", parsed.get("authority_id", ""))
+                or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", parsed.get("repo_identity", ""))
+                or not parsed.get("task_home", "").startswith("/")
+                or not ID_RE.fullmatch(parsed.get("task_id", ""))):
+            return None
+        count += 1
+    return count
 
 
 def fetch_pr(root: Path, home: Path, url: str) -> dict:
@@ -420,7 +544,9 @@ def decisions(home: Path, root: Path, value: dict) -> list[dict]:
             continue
         task, key, verb, note = parts
         if ID_RE.fullmatch(task) and key and verb in ("needs-decision", "blocked"):
-            out.append({"owner": "main", "task": task, "key": key, "verb": verb, "note": note, "answerable": True})
+            decision = parse_decision(note)
+            out.append({"owner": "main", "task": task, "key": key, "verb": verb, "note": note,
+                        "decision": decision, "answerable": decision is not None})
             seen.add(("main", task, key))
     main_tasks = [item for item in value.get("tasks", []) if isinstance(item, dict)]
     targets_by_key = {}
@@ -440,9 +566,11 @@ def decisions(home: Path, root: Path, value: dict) -> list[dict]:
         worker = target if target_live else None
         identity = ("main", worker, key)
         if isinstance(key, str) and ID_RE.fullmatch(key) and identity not in seen:
+            decision = decision_from_body(row.get("body_lines"))
             out.append({"owner": "main", "task": worker, "key": key, "verb": "captain-hold",
                         "note": row.get("hold_reason") or row.get("title") or "Captain-held task",
-                        "answerable": True, "direct_hold": worker is None})
+                        "decision": decision, "answerable": decision is not None,
+                        "direct_hold": worker is None})
             seen.add(identity)
     for home_record in ((value.get("secondmate_current") or {}).get("records") or []):
         if not isinstance(home_record, dict):
@@ -466,20 +594,81 @@ def decisions(home: Path, root: Path, value: dict) -> list[dict]:
             if not isinstance(owner, str) or not ID_RE.fullmatch(owner) or not isinstance(key, str) or not key:
                 continue
             if identity not in seen:
+                queued_row = next((row for row in home_record.get("queued", [])
+                                   if isinstance(row, dict) and row.get("id") == (item.get("id") or task)), {})
+                decision = parse_decision(item.get("decision")) or parse_decision(item.get("summary") or item.get("reason")) or decision_from_body(queued_row.get("body_lines"))
                 out.append({"owner": owner, "remote": remote, "task": task, "key": key,
                             "verb": item["verb"], "note": item.get("summary") or item.get("reason") or "Open decision",
-                            "answerable": direct_hold or isinstance(task, str) and ID_RE.fullmatch(task) is not None,
+                            "decision": decision,
+                            "answerable": decision is not None and (direct_hold or isinstance(task, str) and ID_RE.fullmatch(task) is not None),
                             "direct_hold": direct_hold})
                 seen.add(identity)
+    for item in out:
+        item["card_id"] = decision_card_id(item)
     return sorted(out, key=lambda item: (item.get("owner") or "", item.get("task") or "", item.get("key") or ""))
 
 
-def queue_data(snap: dict) -> list[dict]:
+def parse_decision(raw: object) -> dict | None:
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    else:
+        value = raw
+    if not isinstance(value, dict) or value.get("schema") != "fm-captain-decision.v1":
+        return None
+    options = value.get("options")
+    if (not isinstance(value.get("question"), str) or not value["question"].strip()
+            or not isinstance(value.get("context"), str) or not value["context"].strip()
+            or not isinstance(value.get("user_impact"), str) or not value["user_impact"].strip()
+            or not isinstance(options, list) or not 2 <= len(options) <= 8
+            or not isinstance(value.get("recommendation"), str) or not value["recommendation"].strip()
+            or value.get("recommended_option") not in [chr(ord("A") + index) for index in range(len(options))]):
+        return None
+    for index, option in enumerate(options):
+        if (not isinstance(option, dict) or option.get("label") != chr(ord("A") + index)
+                or not isinstance(option.get("title"), str) or not option["title"].strip()
+                or not isinstance(option.get("pros"), list) or not option["pros"]
+                or not all(isinstance(value, str) and value.strip() for value in option["pros"])
+                or not isinstance(option.get("cons"), list) or not option["cons"]
+                or not all(isinstance(value, str) and value.strip() for value in option["cons"])):
+            return None
+    return value
+
+
+def decision_from_body(lines: object) -> dict | None:
+    if not isinstance(lines, list):
+        return None
+    prefix = "Captain decision record v1: "
+    for line in lines:
+        if isinstance(line, str) and line.startswith(prefix):
+            return parse_decision(line[len(prefix):])
+    return None
+
+
+def decision_card_id(item: dict) -> str:
+    safe = lambda value: re.sub(r"[^A-Za-z0-9_-]", "_", str(value or ""))
+    return "decision-" + "-".join(safe(item.get(field)) for field in ("owner", "task", "key"))
+
+
+def queue_data(snap: dict, home: Path, root: Path) -> list[dict]:
     out = []
+    dependency_states = {}
+    for row in (snap.get("backlog") or {}).get("records", []):
+        if isinstance(row, dict) and isinstance(row.get("id"), str):
+            dependency_states[row["id"]] = row.get("state") or "unknown"
+    for task in snap.get("tasks", []):
+        if isinstance(task, dict) and isinstance(task.get("id"), str):
+            state = (task.get("current_state") or {}).get("state")
+            if state in (None, "unknown", "unavailable"):
+                backlog = task.get("backlog") if isinstance(task.get("backlog"), dict) else {}
+                state = backlog.get("state") or task.get("state") or state
+            dependency_states[task["id"]] = state or "unknown"
     for row in (snap.get("backlog") or {}).get("records", []):
         if isinstance(row, dict) and row.get("state") in ("queued", "in_flight"):
-            item = {key: row.get(key) for key in ("id", "title", "state", "repo", "blocked_by_ids", "unresolved_blocker_ids", "blocked_reason", "captain_actionable")}
-            item["admission_state"] = row.get("admission_state") or ("unknown" if row.get("state") == "queued" else "admitted")
+            item = {key: row.get(key) for key in ("id", "title", "state", "repo", "blocked_by_ids", "unresolved_blocker_ids", "blocked_reason", "captain_actionable", "hold_until", "hold_kind", "links", "body_lines")}
+            item["owner"] = "main"
             out.append(item)
     for home_record in ((snap.get("secondmate_current") or {}).get("records") or []):
         if not isinstance(home_record, dict):
@@ -490,7 +679,8 @@ def queue_data(snap: dict) -> list[dict]:
                 out.append({"id": f"{owner}/{child.get('id', '')}", "title": child.get("name") or child.get("id"),
                             "state": child.get("state") or "working", "repo": child.get("repo"), "blocked_by_ids": [],
                             "unresolved_blocker_ids": [], "blocked_reason": None, "captain_actionable": False,
-                            "admission_state": "admitted"})
+                            "hold_until": None, "hold_kind": None, "links": [child.get("issue")] if child.get("issue") else [],
+                            "body_lines": child.get("body_lines") or [], "owner": owner})
         for row in home_record.get("queued", []):
             if isinstance(row, dict):
                 out.append({"id": f"{owner}/{row.get('id', '')}", "title": row.get("title"), "state": "queued",
@@ -498,8 +688,88 @@ def queue_data(snap: dict) -> list[dict]:
                             "unresolved_blocker_ids": row.get("unresolved_blocker_ids") or [],
                             "blocked_reason": row.get("blocked_reason") or row.get("hold_reason"),
                             "captain_actionable": row.get("captain_actionable") is True,
-                            "admission_state": row.get("admission_state") or "unknown"})
-    out.sort(key=lambda row: (row.get("repo") or "", row.get("id") or ""))
+                            "hold_until": row.get("hold_until"), "hold_kind": row.get("hold_kind"),
+                            "links": row.get("issue_urls") or row.get("links") or [], "body_lines": row.get("body_lines") or [],
+                            "dependency_states": row.get("dependencies") or [], "owner": owner,
+                            "owner_home_path": home_record.get("home"), "owner_remote": home_record.get("remote") is True})
+    decisions_by_key = {(item.get("owner"), item.get("key")): item for item in decisions(home, root, snap)}
+    today = datetime.date.today().isoformat()
+    local_homes = {record.get("id"): record for record in ((snap.get("secondmate_current") or {}).get("records") or [])
+                   if isinstance(record, dict) and isinstance(record.get("id"), str)}
+    def item_project_home(item: dict) -> Path | None:
+        owner = item.get("owner")
+        if not item.get("owner_home_path"):
+            return home
+        record = local_homes.get(owner)
+        if not record or record.get("remote") is True:
+            return None
+        try:
+            return validated_local_secondmate_home(record, owner)
+        except (ValueError, OSError):
+            return None
+    issue_urls_all = sorted({url for item in out for url in issue_urls(item, item_project_home(item))})
+    try:
+        issue_cache = fetch_issues(root, home, issue_urls_all)
+    except (RuntimeError, ValueError, subprocess.SubprocessError):
+        issue_cache = {}
+    for item in out:
+        blockers = item.get("unresolved_blocker_ids") or []
+        known_dependencies = {entry.get("id"): entry.get("state") for entry in item.get("dependency_states", [])
+                              if isinstance(entry, dict) and isinstance(entry.get("id"), str)}
+        if item.get("state") != "queued":
+            item["start_reason"] = "Already in progress"
+        elif blockers:
+            item["start_reason"] = "Waiting for dependencies: " + "; ".join(
+                f"{dependency} ({known_dependencies.get(dependency, dependency_states.get(dependency, 'not found'))})"
+                for dependency in blockers)
+        elif item.get("hold_kind") == "captain":
+            decision = decisions_by_key.get((item.get("owner"), item.get("id").split("/", 1)[-1]))
+            item["decision_card_id"] = decision.get("card_id") if decision else None
+            label = decision.get("decision", {}).get("question") if decision and decision.get("decision") else item.get("title")
+            item["start_reason"] = "Waiting for a captain decision: " + str(label or "Open decision")
+        elif isinstance(item.get("hold_until"), str) and item["hold_until"] > today:
+            item["start_reason"] = "Deferred until " + item["hold_until"]
+        elif item.get("owner_remote") is True:
+            item["start_reason"] = "Cannot confirm repository lane availability"
+        else:
+            if item.get("owner_home_path"):
+                try:
+                    record = next(entry for entry in ((snap.get("secondmate_current") or {}).get("records") or [])
+                                  if isinstance(entry, dict) and entry.get("id") == item.get("owner"))
+                    item_home = validated_local_secondmate_home(record, item["owner"])
+                except (StopIteration, ValueError, OSError):
+                    item_home = None
+            else:
+                item_home = home
+            limit = repo_concurrency_limit(item_home) if item_home else None
+            lease_count = repo_concurrency_lease_count(item_home) if item_home else None
+            if limit is None or (isinstance(limit, int) and lease_count is None):
+                item["start_reason"] = "Cannot confirm repository lane availability"
+            elif isinstance(limit, int) and lease_count is not None and lease_count >= limit:
+                item["start_reason"] = f"Waiting for a free lane (limit {limit}; {lease_count} in use)"
+            elif item.get("blocked_reason"):
+                item["start_reason"] = str(item["blocked_reason"])
+            else:
+                item["start_reason"] = "Ready to start now"
+        item["issue_urls"] = issue_urls(item, item_project_home(item))
+        item["issue_missing"] = not item["issue_urls"]
+        item["issues"] = []
+        for url in item["issue_urls"]:
+            try:
+                issue = issue_cache.get(url)
+                if issue is None:
+                    raise RuntimeError("GitHub issue details are unavailable")
+                milestone = issue.get("milestone")
+                item["issues"].append({"html_url": url, "title": issue.get("title"),
+                                       "milestone": {"title": milestone.get("title")} if isinstance(milestone, dict) else None})
+            except (RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                item["issues"].append({"html_url": url, "title": "Issue details unavailable", "milestone": None,
+                                       "error": str(exc)})
+        item.pop("body_lines", None)
+        item.pop("owner_home_path", None)
+        item.pop("owner_remote", None)
+    out.sort(key=lambda row: (0 if row["start_reason"] == "Ready to start now" else 1,
+                              row.get("state") != "queued", row.get("repo") or "", row.get("id") or ""))
     return out
 
 
@@ -507,7 +777,7 @@ def page(token: str, port: int) -> bytes:
     token_json = json.dumps(token)
     html_page = r"""<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Firstmate Console</title>
 <style>
-:root{font:16px system-ui,sans-serif;color-scheme:light dark}body{max-width:1200px;margin:2rem auto;padding:0 1rem}header{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}h1{margin-right:auto}nav{display:flex;gap:.5rem;border-bottom:1px solid #888;padding:.5rem 0}button{font:inherit;padding:.55rem .8rem;border:1px solid #888;border-radius:.35rem;background:Canvas;color:CanvasText;cursor:pointer}button[aria-selected=true]{border-bottom:3px solid #3978db}.muted{color:GrayText}.error{color:#b42318}.tab{padding-top:1rem}table{border-collapse:collapse;width:100%;margin-top:1rem}th,td{text-align:left;vertical-align:top;padding:.65rem;border-bottom:1px solid #8885}a{color:LinkText}textarea{display:block;width:min(48rem,100%);min-height:5rem;margin:.5rem 0;font:inherit}#status{white-space:pre-wrap}label{display:block;margin:.4rem 0}
+:root{font:16px system-ui,sans-serif;color-scheme:light dark}body{max-width:1200px;margin:2rem auto;padding:0 1rem}header{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}h1{margin-right:auto}nav{display:flex;gap:.5rem;border-bottom:1px solid #888;padding:.5rem 0}button{font:inherit;padding:.55rem .8rem;border:1px solid #888;border-radius:.35rem;background:Canvas;color:CanvasText;cursor:pointer}button[aria-selected=true]{border-bottom:3px solid #3978db}.muted{color:GrayText}.error{color:#b42318}.tab{padding-top:1rem}table{border-collapse:collapse;width:100%;margin-top:1rem}th,td{text-align:left;vertical-align:top;padding:.65rem;border-bottom:1px solid #8885}a{color:LinkText}textarea{display:block;width:min(48rem,100%);min-height:5rem;margin:.5rem 0;font:inherit}#status{white-space:pre-wrap}label{display:block;margin:.4rem 0}.decision-card{border:1px solid #8885;border-radius:.65rem;padding:1.2rem;margin:1rem 0;box-shadow:0 1px 3px #0002}.decision-card h2{margin:.1rem 0 .65rem}.decision-context{max-width:75ch;line-height:1.55}.decision-option{border-top:1px solid #8885;padding:.65rem 0}.decision-option h3{margin:.1rem 0 .4rem}.decision-option ul{margin:.35rem 0}.recommendation{border-left:4px solid #39825a;background:color-mix(in srgb,Canvas 92%,#39825a);padding:.8rem 1rem;margin:.8rem 0}.rewrite{color:#8a4b00;font-weight:650}.issue-link{display:block;margin:.2rem 0}
 </style><header><h1>Firstmate Console</h1><button id="refresh">Refresh</button></header><p id="status" class="muted" role="status">Loading…</p><nav role="tablist" aria-label="Console sections"><button role="tab" aria-selected="true" aria-controls="status-tab" id="status-button">Status</button><button role="tab" aria-selected="false" aria-controls="decisions-tab" id="decisions-button">Open decisions</button><button role="tab" aria-selected="false" aria-controls="queue-tab" id="queue-button">Queue</button></nav>
 <section class="tab" role="tabpanel" id="status-tab" aria-labelledby="status-button"><label>Project <select id="project"></select></label><div id="status-content"></div></section>
 <section class="tab" role="tabpanel" id="decisions-tab" aria-labelledby="decisions-button" hidden><div id="decisions-content"></div></section>
@@ -521,8 +791,8 @@ function link(url,label){const a=document.createElement('a');a.href=url;a.target
 function prCell(prs){const root=document.createElement('div');for(const pr of prs||[]){const state=pr.merged?'merged':pr.state==='closed'?'closed unmerged':pr.draft?'draft PR':pr.state;root.append(link(pr.url,`PR · ${state}`),node(` · review ${pr.review}; checks ${pr.checks}`),document.createElement('br'))}if(!prs?.length)root.textContent='No linked PR';return root}
 function table(parent,headers,rows){const t=document.createElement('table'),head=document.createElement('thead'),hr=document.createElement('tr');headers.forEach(h=>{const th=document.createElement('th');th.textContent=h;hr.append(th)});head.append(hr);const body=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach(value=>{const td=document.createElement('td');if(value instanceof Node)td.append(value);else td.append(node(value));tr.append(td)});body.append(tr)});t.append(head,body);parent.replaceChildren(t)}
 const drafts=new Map();let latestData=null;
-function queueBlocker(item){const dependencies=item.blocked_reason||item.unresolved_blocker_ids?.join(', ')||item.blocked_by_ids?.join(', ');if(item.state==='queued')return (dependencies?'Dependencies: '+dependencies+'; ':'')+'admission state '+(item.admission_state||'unknown');return dependencies||item.admission_state||'Admitted'}
-function render(data){if(data.unavailable){status.className='error';status.textContent='Unavailable: '+data.error;return}const s=data.status||{},d=data.decisions||[],q=data.queue||[];const select=el('project'),prior=select.value;select.replaceChildren(...(s.projects||[]).map(name=>{const o=document.createElement('option');o.value=name;o.textContent=name;return o}));if((s.projects||[]).includes(prior))select.value=prior;const rows=(s.rows||[]).filter(row=>!select.value||row.project===select.value).map(row=>[row.project,row.issue_missing?row.title:link(row.url,`#${row.number} ${row.title||'(title unavailable)'}`),row.issue_state,row.tasks.map(task=>`${task.owner||'main'}/${task.id}: ${task.stage} (${task.state})`).join('\n'),prCell(row.prs)]);if(rows.length)table(el('status-content'),['Project','Issue','Issue state','Lane stage','PR status'],rows);else el('status-content').textContent=select.value?'No admitted issues or unlinked work are recorded for this project.':'No registered projects are available.';const notices=[...(s.failures||[]),...(data.warnings||[])];status.className=s.stale||notices.length?'error':'muted';status.textContent=`${s.stale?'Stale cached':'Updated'} ${new Date(data.generated_epoch*1000).toLocaleString()} · snapshot age ${data.age_seconds}s${data.error?' · '+data.error:''}${notices.length?'\n'+notices.join('\n'):''}`;const decisionRows=d.map(item=>{const label=document.createElement('strong'),content=document.createElement('div');label.textContent=`${item.owner==='main'?'Main':item.owner} · ${item.task||(item.direct_hold?'captain-held call':'owner unavailable')} · ${item.key} · ${item.verb}: ${item.note}`;content.append(label);if(!item.answerable){const notice=document.createElement('p');notice.textContent='Answer unavailable: owning task could not be resolved.';content.append(notice);return [content]}const identity=JSON.stringify([item.owner,item.task,item.key]),form=document.createElement('form'),area=document.createElement('textarea'),send=document.createElement('button');area.name='answer';area.maxLength=8192;area.required=true;area.setAttribute('aria-label',`Answer ${item.key}`);area.value=drafts.get(identity)||'';area.oninput=()=>drafts.set(identity,area.value);send.textContent='Answer and send';form.append(area,send);form.onsubmit=async event=>{event.preventDefault();send.disabled=true;try{const result=await fetch('/api/answer',{method:'POST',headers:{'Content-Type':'application/json','X-FM-Token':token},body:JSON.stringify({owner:item.owner,task:item.task,key:item.key,answer:area.value})}).then(x=>x.json());if(!result.ok)throw Error(result.error||'answer was not delivered');drafts.delete(identity);await load(true)}catch(error){status.className='error';status.textContent='Answer failed: '+error.message;send.disabled=false}};content.append(form);return [content]});table(el('decisions-content'),['Open decision'],decisionRows);if(!d.length)el('decisions-content').textContent='No open decisions.';if(q.length)table(el('queue-content'),['Task','Project','State','Dependencies / admission blocker'],q.map(item=>[`${item.id||''} ${item.title||''}`,item.repo||'Unassigned',item.state,queueBlocker(item)]));else el('queue-content').textContent='No queued or in-flight work.'}
+function renderDecision(item){const card=document.createElement('article');card.className='decision-card';card.id=item.card_id;const title=document.createElement('h2');title.textContent=item.decision?.question||'Decision needs rewrite';card.append(title);if(!item.decision){const rewrite=document.createElement('p');rewrite.className='rewrite';rewrite.textContent='Needs rewrite: add a plain-language context, user impact, lettered options with pros and cons, and a recommendation before this can be answered.';card.append(rewrite);return card}const context=document.createElement('p');context.className='decision-context';context.textContent=`${item.decision.context} User impact: ${item.decision.user_impact}`;card.append(context);const options=document.createElement('div');for(const option of item.decision.options){const section=document.createElement('section');section.className='decision-option';const heading=document.createElement('h3');heading.textContent=`${option.label}. ${option.title}`;section.append(heading);for(const [label,values] of [['Pros',option.pros],['Cons',option.cons]]){const strong=document.createElement('strong');strong.textContent=label;const list=document.createElement('ul');values.forEach(value=>{const li=document.createElement('li');li.textContent=value;list.append(li)});section.append(strong,list)}options.append(section)}card.append(options);const recommendation=document.createElement('p');recommendation.className='recommendation';recommendation.textContent=`Recommended: ${item.decision.recommended_option}. ${item.decision.recommendation}`;card.append(recommendation);if(!item.answerable){const notice=document.createElement('p');notice.textContent='Answer unavailable: owning task could not be resolved.';card.append(notice);return card}const identity=JSON.stringify([item.owner,item.task,item.key]),form=document.createElement('form'),label=document.createElement('label'),area=document.createElement('textarea'),send=document.createElement('button');label.textContent='Reply with an option letter or your own answer';area.name='answer';area.maxLength=8192;area.required=true;area.setAttribute('aria-label',`Answer ${item.decision.question}`);area.placeholder=`For example: ${item.decision.recommended_option} or describe another choice`;area.value=drafts.get(identity)||'';area.oninput=()=>drafts.set(identity,area.value);send.textContent='Answer and send';form.append(label,area,send);form.onsubmit=async event=>{event.preventDefault();send.disabled=true;try{const result=await fetch('/api/answer',{method:'POST',headers:{'Content-Type':'application/json','X-FM-Token':token},body:JSON.stringify({owner:item.owner,task:item.task,key:item.key,answer:area.value})}).then(x=>x.json());if(!result.ok)throw Error(result.error||'answer was not delivered');drafts.delete(identity);await load(true)}catch(error){status.className='error';status.textContent='Answer failed: '+error.message;send.disabled=false}};card.append(form);return card}
+function render(data){if(data.unavailable){status.className='error';status.textContent='Unavailable: '+data.error;return}const s=data.status||{},d=data.decisions||[],q=data.queue||[];const select=el('project'),prior=select.value;select.replaceChildren(...(s.projects||[]).map(name=>{const o=document.createElement('option');o.value=name;o.textContent=name;return o}));if((s.projects||[]).includes(prior))select.value=prior;const rows=(s.rows||[]).filter(row=>!select.value||row.project===select.value).map(row=>[row.project,row.issue_missing?row.title:link(row.url,`#${row.number} ${row.title||'(title unavailable)'}`),row.issue_state,row.tasks.map(task=>`${task.owner||'main'}/${task.id}: ${task.stage} (${task.state})`).join('\n'),prCell(row.prs)]);if(rows.length)table(el('status-content'),['Project','Issue','Issue state','Lane stage','PR status'],rows);else el('status-content').textContent=select.value?'No admitted issues or unlinked work are recorded for this project.':'No registered projects are available.';const notices=[...(s.failures||[]),...(data.warnings||[])];status.className=s.stale||notices.length?'error':'muted';status.textContent=`${s.stale?'Stale cached':'Updated'} ${new Date(data.generated_epoch*1000).toLocaleString()} · snapshot age ${data.age_seconds}s${data.error?' · '+data.error:''}${notices.length?'\n'+notices.join('\n'):''}`;el('decisions-content').replaceChildren(...d.map(renderDecision));if(!d.length)el('decisions-content').textContent='No open decisions.';const issueCell=item=>{const root=document.createElement('div');if(item.issue_missing){root.textContent='No linked GitHub issue';return root}for(const issue of item.issues||[]){const a=link(issue.html_url,issue.title||issue.html_url);a.className='issue-link';root.append(a);if(issue.milestone?.title)root.append(node(`Milestone: ${issue.milestone.title}`));else root.append(node(issue.title==='Issue details unavailable'?'Milestone unavailable':'No milestone'));root.append(document.createElement('br'))}return root};const reasonCell=item=>{const root=document.createElement('div');root.append(node(item.start_reason));if(item.decision_card_id){root.append(document.createElement('br'));const a=document.createElement('a');a.href=`#${item.decision_card_id}`;a.textContent='View decision';root.append(a)}return root};if(q.length)table(el('queue-content'),['Task','Project','GitHub issue','State','Why it has not started'],q.map(item=>[`${item.id||''} ${item.title||''}`,item.repo||'Home operations',issueCell(item),item.state,reasonCell(item)]));else el('queue-content').textContent='No queued or in-flight work.'}
 async function load(force=false){try{const query=force?'?refresh=1':'';const response=await fetch('/api/data'+query),data=await response.json();if(!response.ok&&!data.status)throw Error(data.error||'console data unavailable');latestData=data;render(data)}catch(error){status.className='error';status.textContent='Unavailable: '+error.message}}
 el('project').onchange=()=>{if(latestData)render(latestData)};el('refresh').onclick=()=>load(true);load();setInterval(()=>{if(!document.hidden)load()},30000);
 </script></html>"""
@@ -534,7 +804,7 @@ def compose_data(home: Path, root: Path, value: dict) -> dict:
     generated = snapshot_epoch(value)
     warnings = list(status.get("warnings") or [])
     return {"generated_epoch": generated, "age_seconds": max(0, int(time.time()) - generated),
-            "status": status, "decisions": decisions(home, root, value), "queue": queue_data(value),
+            "status": status, "decisions": decisions(home, root, value), "queue": queue_data(value, home, root),
             "warnings": warnings, "stale": False, "unavailable": False}
 
 

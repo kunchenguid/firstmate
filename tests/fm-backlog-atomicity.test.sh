@@ -34,6 +34,8 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-backlog-atomicity)
+DECISION_FILE="$TMP_ROOT/captain-decision.json"
+fm_test_captain_decision "$DECISION_FILE" 'Which backlog behavior should continue?'
 
 command -v tasks-axi >/dev/null 2>&1 || {
   printf 'ok - skipped (tasks-axi is not installed; the fused transitions are inert without it)\n'
@@ -753,7 +755,7 @@ test_captain_hold_preserves_relocated_backlog_on_backend_error() {
     rc=0
     out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" FM_HOME="$home" \
       FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
-      --title "Hold regression" --reason "Captain must choose" 2>&1) || rc=$?
+      --title "Hold regression" --reason "Captain must choose" --decision-file "$DECISION_FILE" 2>&1) || rc=$?
     if [ "$config_state" = dangling ]; then
       [ "$rc" -ne 0 ] || fail "captain hold accepted an unresolved backend and changed the wrong backlog"
       assert_contains "$out" "tasks-axi backend configuration cannot be read at $home/.tasks.toml" \

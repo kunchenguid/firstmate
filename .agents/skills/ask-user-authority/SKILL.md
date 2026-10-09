@@ -45,6 +45,10 @@ State all five of these elements in one concise, evidence-first escalation:
 4. The concrete consequences of accepting and declining the expansion.
 5. A recommendation with the reason it best serves the accepted intent.
 
+For a captain-facing decision, record a plain-language question and context, at least two lettered options with pros and cons, and a recommendation that names one available letter and explains why.
+Use `bin/fm-captain-hold.sh decision-event` for keyed `needs-decision` events and `bin/fm-captain-hold.sh hold --decision-file` for active captain holds; the script owns the accepted JSON fields and rejects incomplete records.
+Write user impact in terms the product manager can act on, omit internal IDs and code words from the question, context, and options, and use full GitHub issue or pull request links when they are relevant.
+
 Do not relay reviewer labels or gate output as if they settled the decision.
 
 ## Classification examples

@@ -409,7 +409,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+   create the structured plain-language input required by \`bin/fm-captain-hold.sh --help\`, then use \`decision-event\` for a keyed \`needs-decision\` or \`hold --decision-file\` for an active captain hold; include context, lettered options with pros and cons, and a recommendation naming one letter with its reason.
+   Use user impact language and full GitHub issue or pull request links where relevant, then stop for Firstmate's reply.
 $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
@@ -474,7 +475,8 @@ $RULE1
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+   create the structured plain-language input required by \`bin/fm-captain-hold.sh --help\`, then use \`decision-event\` for a keyed \`needs-decision\` or \`hold --decision-file\` for an active captain hold; include context, lettered options with pros and cons, and a recommendation naming one letter with its reason.
+   Use user impact language and full GitHub issue or pull request links where relevant, then stop for Firstmate's reply.
 $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.

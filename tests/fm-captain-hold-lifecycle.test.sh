@@ -14,10 +14,12 @@ set -u
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-captain-hold)
+DECISION_FILE="$TMP_ROOT/decision.json"
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+fm_test_captain_decision "$DECISION_FILE" 'Which approach should continue?'
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
@@ -81,8 +83,21 @@ tasks_in() {  # <home> <tasks-axi args...>
 }
 
 run_captain() {  # <home> <command args...>
-  local home=$1
+  local home=$1 command=${2:-} arg needs_decision=1
   shift
+  shift || :
+  if [ "$command" = hold ]; then
+    for arg in "$@"; do
+      case "$arg" in --until|--decision-file) needs_decision=0 ;; esac
+    done
+    if [ "$needs_decision" = 1 ]; then
+      set -- "$command" "$@" --decision-file "$DECISION_FILE"
+    else
+      set -- "$command" "$@"
+    fi
+  else
+    set -- "$command" "$@"
+  fi
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
@@ -183,8 +198,17 @@ SH
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
-  local home=$1
+  local home=$1 command=${2:-} arg needs_decision=1
   shift
+  shift || :
+  if [ "$command" = hold ]; then
+    for arg in "$@"; do
+      case "$arg" in --until|--decision-file) needs_decision=0 ;; esac
+    done
+    if [ "$needs_decision" = 1 ]; then set -- "$command" "$@" --decision-file "$DECISION_FILE"; else set -- "$command" "$@"; fi
+  else
+    set -- "$command" "$@"
+  fi
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
@@ -608,7 +632,7 @@ SH
   PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "captain must decide" >/dev/null \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "captain must decide" --decision-file "$DECISION_FILE" >/dev/null \
     || fail "holding on a beads-configured home failed without a markdown backlog"
   assert_grep "hold $id" "$log" \
     "the captain-hold mutation never reached the configured backend"
@@ -3052,7 +3076,7 @@ EOF
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
-    --reason "captain must choose after relocated interrupted cleanup" >/dev/null \
+    --reason "captain must choose after relocated interrupted cleanup" --decision-file "$DECISION_FILE" >/dev/null \
     || fail "could not hold the relocated answer-before-replay fixture"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
@@ -3129,7 +3153,7 @@ EOF
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
-    --reason "captain must choose the relocated sample outcome" >/dev/null \
+    --reason "captain must choose the relocated sample outcome" --decision-file "$DECISION_FILE" >/dev/null \
     || fail "could not hold the relocated work item"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \

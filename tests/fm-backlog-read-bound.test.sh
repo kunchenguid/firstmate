@@ -23,6 +23,8 @@ set -u
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-backlog-read-bound-tests)
+DECISION_FILE="$TMP_ROOT/captain-decision.json"
+fm_test_captain_decision "$DECISION_FILE" 'Should the held task proceed?'
 trap fm_test_cleanup EXIT
 
 BOUND_SECS=2
@@ -199,7 +201,7 @@ PATH="$CAPTAIN_FAKEBIN:$BASE_PATH" FM_HOME="$CAPTAIN" \
   FM_STATE_OVERRIDE="$CAPTAIN/state" FM_DATA_OVERRIDE="$CAPTAIN/data" \
   FM_CONFIG_OVERRIDE="$CAPTAIN/config" FM_BACKLOG_ROW_TIMEOUT_SECS="$BOUND_SECS" \
   FM_TEST_TASKS_AXI_ADD_LOG="$ADD_LOG" \
-  "$ROOT/bin/fm-captain-hold.sh" hold wedged-hold --title 'Wedged hold' --reason 'backend wedged' \
+  "$ROOT/bin/fm-captain-hold.sh" hold wedged-hold --title 'Wedged hold' --reason 'backend wedged' --decision-file "$DECISION_FILE" \
   > "$HOLD_OUT" 2>&1 || HOLD_STATUS=$?
 
 [ "$HOLD_STATUS" -ne 0 ] \

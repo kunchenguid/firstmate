@@ -61,6 +61,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- reporters --------------------------------------------------------------
 
+fm_test_captain_decision() {  # <path> <question>
+  jq -n --arg question "$2" '{schema:"fm-captain-decision.v1",question:$question,
+    context:"The user needs a choice that keeps the intended work moving.",
+    user_impact:"This choice affects what the user can do and when they can do it.",
+    options:[{label:"A",title:"Keep the current behavior",pros:["Current users keep working."],cons:["The reported issue remains."]},
+      {label:"B",title:"Make the proposed change",pros:["The reported user impact is addressed."],cons:["The change needs implementation and review."]}],
+    recommended_option:"B",recommendation:"Choose B because it addresses the reported user impact."}' > "$1"
+}
+
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1

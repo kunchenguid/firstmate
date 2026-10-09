@@ -983,6 +983,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file> <produ
       | sort_by((.value | filed_epoch) as $epoch
           | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
       | map(.value);
+    def issue_links:
+      ([.links[]?] + [.body_lines[]? | scan("https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*")])
+      | map(select(type == "string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*$")))
+      | unique;
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -995,6 +999,9 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file> <produ
     | ([ $queued_all[] as $hold
          | select($hold.captain_actionable == true)
          | {id:$hold.id,key:$hold.id,verb:"captain-hold",summary:($hold.title | trunc(160)),
+            decision:([$backlog.records[] | select(.id == $hold.id) | .body_lines[]?
+              | select(startswith("Captain decision record v1: "))
+              | (sub("^Captain decision record v1: "; "") | try fromjson catch null)][0] // null),
             reason:($hold.hold_reason | trunc(160)),
             hold_until:($hold.hold_until // null),
             hold_bucket:($hold.hold_bucket // null),
@@ -1054,10 +1061,13 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file> <produ
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status",target_task_id:$t.id} ])) as $decisions_all
+            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),
+               decision:(.summary | try fromjson catch null),
+               reason:null,source:"status",target_task_id:$t.id} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),
+            issue_urls:(issue_links | map(trunc(500))),
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
@@ -1124,7 +1134,12 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file> <produ
           repo:(($row.repo // null) | if . == null then null else trunc(120) end),
           kind:(($row.kind // null) | if . == null then null else trunc(40) end),
           since:(($row.since // null) | if . == null then null else trunc(40) end),
+          dependencies:([$row.blocked_by_ids[]? as $dependency
+            | {id:$dependency,state:([$backlog.records[]? | select(.id == $dependency)][0].state // "not found")}]),
           issue:($task.issue // $row.issue // null),
+          issue_urls:([issue_links[], $task.issue // $row.issue // null]
+            | map(select(type == "string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*$")))
+            | unique | map(trunc(500))),
           pr_url:($task.pr.url // $row.pr_url // null),
           decision_keys:($task.decision_keys // [])}]
           | ((map(select(.captain_actionable != true)) | newest_filed_first)
