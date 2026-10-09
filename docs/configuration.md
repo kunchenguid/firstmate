@@ -38,7 +38,7 @@ It is a regular non-symlinked JSON file in the effective Firstmate home with exa
 
 The supported harness is `codex`; the model and effort must both appear together in the current Codex model capability cache, and effort is one of `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` when that model advertises it.
 Before reserving a task attempt, `bin/fm-native-review.sh` verifies the installed command surface, model cache, `codex login status`, and live Codex quota through `bin/fm-quota.mjs`.
-The invocation pins both the Codex session model and review-local `review_model`, then accepts evidence only when the vendor trace reports the requested model and effort.
+The invocation pins both the Codex session model and review-local `review_model`, then accepts evidence only when the newly created `source.subagent=review` child session's turn context reports the requested model and effort. The parent command banner is retained as runtime trace but is not treated as proof of the review delegate's identity.
 Missing, unsafe, malformed, unsupported, unauthenticated, or quota-blocked selection fails closed without using the coding worker's harness or a default model.
 A brief may authorize one complete invocation-local selection with `--review-harness codex --model <name> --effort <level>`; partial explicit selection is refused, and omission uses only the home file.
 Review evidence records coding harness, reviewer harness, explicit model, and effective effort separately, while historical evidence remains unchanged.

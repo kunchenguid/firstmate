@@ -12,9 +12,11 @@
 # never selects the reviewer. The worktree must be clean and its HEAD must
 # equal the candidate, so the vendor cannot silently review a moving or
 # uncommitted target. The output is accepted only when the reviewer states an
-# explicit intent-conformance conclusion. Each original task may launch at
-# most two native-review attempts; task-local attempt records make retries and
-# candidate changes consume the same bounded history.
+# explicit intent-conformance conclusion. The selected model and effort are
+# verified from the new Codex review-subagent turn rather than the parent CLI
+# banner. Each original task may launch at most two native-review attempts;
+# task-local attempt records make retries and candidate changes consume the
+# same bounded history.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -295,7 +297,16 @@ done
 PROMPT_CONFIG=$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' <<<"$PROMPT")
 RESULT=$(mktemp "$(dirname "$OUTPUT")/.native-review-result.XXXXXX")
 TRACE=$(mktemp "$(dirname "$OUTPUT")/.native-review-trace.XXXXXX")
-trap 'rm -f "$TMP" "$RESULT" "$TRACE"' EXIT HUP INT TERM
+SESSIONS_BEFORE=$(mktemp "$(dirname "$OUTPUT")/.native-review-sessions-before.XXXXXX")
+SESSIONS_AFTER=$(mktemp "$(dirname "$OUTPUT")/.native-review-sessions-after.XXXXXX")
+DELEGATE_META=$(mktemp "$(dirname "$OUTPUT")/.native-review-delegate.XXXXXX")
+trap 'rm -f "$TMP" "$RESULT" "$TRACE" "$SESSIONS_BEFORE" "$SESSIONS_AFTER" "$DELEGATE_META"' EXIT HUP INT TERM
+CODEX_SESSION_ROOT=${CODEX_HOME:-$HOME/.codex}/sessions
+if [ -d "$CODEX_SESSION_ROOT" ]; then
+  find "$CODEX_SESSION_ROOT" -type f -name 'rollout-*.jsonl' -print | LC_ALL=C sort >"$SESSIONS_BEFORE"
+else
+  : >"$SESSIONS_BEFORE"
+fi
 # The current Codex review CLI makes the target selector and positional prompt
 # mutually exclusive. Pass the immutable contract through the supported
 # invocation-local developer-instructions setting while retaining --base as the
@@ -313,12 +324,89 @@ if [ "$REVIEW_RC" -ne 0 ]; then
   echo "error: $REVIEW_HARNESS native review failed for $BASE_FULL..$CANDIDATE_FULL" >&2
   exit 1
 fi
-ACTUAL_MODEL=$(sed -n 's/^model: //p' "$TRACE" | head -1)
-ACTUAL_EFFORT=$(sed -n 's/^reasoning effort: //p' "$TRACE" | head -1)
-[ "$ACTUAL_MODEL" = "$MODEL" ] && [ "$ACTUAL_EFFORT" = "$EFFORT" ] || {
+if [ -d "$CODEX_SESSION_ROOT" ]; then
+  find "$CODEX_SESSION_ROOT" -type f -name 'rollout-*.jsonl' -print | LC_ALL=C sort >"$SESSIONS_AFTER"
+else
+  : >"$SESSIONS_AFTER"
+fi
+PARENT_SESSION_ID=$(sed -n 's/^session id: //p' "$TRACE" | head -1)
+DELEGATE_RC=0
+if [ -n "$PARENT_SESSION_ID" ]; then
+  python3 - "$SESSIONS_BEFORE" "$SESSIONS_AFTER" "$PARENT_SESSION_ID" "$DELEGATE_META" <<'PY' \
+    || DELEGATE_RC=$?
+import json
+from pathlib import Path
+import sys
+
+before_path, after_path, parent_id, output_path = sys.argv[1:]
+before = set(Path(before_path).read_text().splitlines())
+after = set(Path(after_path).read_text().splitlines())
+parent = []
+delegates = []
+
+for raw_path in sorted(after - before):
+    path = Path(raw_path)
+    session_meta = None
+    turn_context = None
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                record = json.loads(line)
+                if record.get("type") == "session_meta" and session_meta is None:
+                    session_meta = record.get("payload", {})
+                elif record.get("type") == "turn_context" and turn_context is None:
+                    turn_context = record.get("payload", {})
+                if session_meta is not None and turn_context is not None:
+                    break
+    except (OSError, ValueError):
+        continue
+    if not isinstance(session_meta, dict):
+        continue
+    if session_meta.get("id") == parent_id:
+        parent.append(session_meta)
+    source = session_meta.get("source")
+    if (
+        session_meta.get("parent_thread_id") == parent_id
+        and isinstance(source, dict)
+        and source.get("subagent") == "review"
+        and session_meta.get("thread_source") == "subagent"
+        and isinstance(turn_context, dict)
+    ):
+        delegates.append((session_meta, turn_context))
+
+if len(parent) != 1 or len(delegates) != 1:
+    raise SystemExit(1)
+
+delegate, context = delegates[0]
+sanitized = {
+    "schema": "fm-native-review-delegate.v1",
+    "parent_session_id": parent_id,
+    "delegate_thread_id": delegate.get("id"),
+    "parent_thread_id": delegate.get("parent_thread_id"),
+    "source": {"subagent": "review"},
+    "thread_source": "subagent",
+    "model": context.get("model"),
+    "effort": context.get("effort"),
+}
+if not all(sanitized.get(key) for key in ("delegate_thread_id", "model", "effort")):
+    raise SystemExit(1)
+Path(output_path).write_text(json.dumps(sanitized, sort_keys=True) + "\n")
+PY
+else
+  DELEGATE_RC=1
+fi
+if [ "$DELEGATE_RC" -ne 0 ]; then
   cat "$RESULT" >&2
   cat "$TRACE" >&2
-  echo "error: Codex native review identity mismatch: requested model=$MODEL effort=$EFFORT, actual model=${ACTUAL_MODEL:-unknown} effort=${ACTUAL_EFFORT:-unknown}" >&2
+  echo "error: Codex review delegate metadata is missing or ambiguous for parent session ${PARENT_SESSION_ID:-unknown}" >&2
+  exit 1
+fi
+DELEGATE_MODEL=$(jq -r '.model' "$DELEGATE_META")
+DELEGATE_EFFORT=$(jq -r '.effort' "$DELEGATE_META")
+[ "$DELEGATE_MODEL" = "$MODEL" ] && [ "$DELEGATE_EFFORT" = "$EFFORT" ] || {
+  cat "$RESULT" >&2
+  cat "$TRACE" >&2
+  echo "error: Codex review delegate identity mismatch: requested model=$MODEL effort=$EFFORT, actual model=${DELEGATE_MODEL:-unknown} effort=${DELEGATE_EFFORT:-unknown}" >&2
   exit 1
 }
 POST_HEAD=$(git -C "$WORKTREE" rev-parse HEAD)
@@ -351,13 +439,16 @@ CONTRACT_SHA=$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')
   printf -- "- Task: \`%s\`\n" "$ID"
   printf -- "- Coding harness: \`%s\`\n" "$HARNESS"
   printf -- "- Reviewer harness: \`%s\`\n" "$REVIEW_HARNESS"
-  printf -- "- Reviewer model: \`%s\`\n" "$ACTUAL_MODEL"
-  printf -- "- Reviewer effort: \`%s\`\n" "$ACTUAL_EFFORT"
+  printf -- "- Reviewer model: \`%s\`\n" "$DELEGATE_MODEL"
+  printf -- "- Reviewer effort: \`%s\`\n" "$DELEGATE_EFFORT"
   printf -- "- Runtime: \`%s\`\n" "$VERSION"
   printf -- "- Base: \`%s\`\n" "$BASE_FULL"
   printf -- "- Candidate: \`%s\`\n" "$CANDIDATE_FULL"
   printf -- "- Contract source: \`%s\`\n" "$REVIEW_CONTRACT"
   printf -- "- Intent snapshot SHA-256: \`%s\`\n\n" "$CONTRACT_SHA"
+  printf '## Reviewer delegate identity\n\n```json\n'
+  cat "$DELEGATE_META"
+  printf '%s\n\n' '```'
   printf '## Immutable review contract\n\n%s\n\n' "$PROMPT"
   printf '## Native review result\n\n```text\n'
   cat "$RESULT"
@@ -366,7 +457,7 @@ CONTRACT_SHA=$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')
   printf '\n```\n'
 } >"$TMP"
 mv "$TMP" "$OUTPUT"
-trap 'rm -f "$RESULT" "$TRACE"' EXIT HUP INT TERM
+trap 'rm -f "$RESULT" "$TRACE" "$SESSIONS_BEFORE" "$SESSIONS_AFTER" "$DELEGATE_META"' EXIT HUP INT TERM
 printf 'native review evidence: %s\n' "$OUTPUT"
 [ "$CONCLUSIONS" = 'INTENT_CONFORMANCE: pass' ] || {
   echo "error: native review found the candidate does not conform to the accepted intent; preserve $OUTPUT and resolve or escalate its findings" >&2

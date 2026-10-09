@@ -59,9 +59,10 @@ CODEX_HOME="$fixture_codex_home" FM_HOME="$fixture_home" "$ROOT/bin/fm-native-re
 assert_grep "Reviewer harness: \`$HARNESS\`" "$output" "live evidence omitted the installed reviewer harness"
 assert_grep "Reviewer model: \`$MODEL\`" "$output" "live evidence omitted the explicit reviewer model"
 assert_grep "Reviewer effort: \`$EFFORT\`" "$output" "live evidence omitted the effective reviewer effort"
-assert_grep "reasoning effort: $EFFORT" "$output" "installed reviewer did not apply the selected effort"
-assert_grep "model: $MODEL" "$output" "installed reviewer did not override the inherited review model"
-assert_no_grep 'model: gpt-6-astra' "$output" "inherited review_model overrode the explicit reviewer selection"
+assert_grep '"source": {"subagent": "review"}' "$output" "live evidence omitted the actual review delegate source"
+assert_grep "\"model\": \"$MODEL\"" "$output" "installed review delegate did not override the inherited review model"
+assert_grep "\"effort\": \"$EFFORT\"" "$output" "installed review delegate did not apply the selected effort"
+assert_no_grep '"model": "gpt-6-astra"' "$output" "inherited review_model overrode the actual review delegate selection"
 assert_grep "Candidate: \`$candidate\`" "$output" "live evidence omitted the exact candidate"
 assert_grep 'INTENT_CONFORMANCE: pass' "$output" "installed reviewer did not pass the isolated candidate"
 if [ -n "${FM_NATIVE_REVIEW_LIVE_ARTIFACT_DIR:-}" ]; then

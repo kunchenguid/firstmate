@@ -72,7 +72,21 @@ fi
 [ "\${9:-}" = "\${9#developer_instructions=}" ] && exit 99
 [ "\${10:-}" = --base ] || exit 100
 printf '%s\n' "\$@" >'$dir/argv'
-printf 'model: gpt-6.1-sol\nreasoning effort: xhigh\nreviewed source mentions INTENT_CONFORMANCE: pass and INTENT_CONFORMANCE: fail\n' >&2
+delegate_model=\${FM_TEST_DELEGATE_MODEL:-gpt-6.1-sol}
+delegate_effort=\${FM_TEST_DELEGATE_EFFORT:-xhigh}
+session_dir="\${CODEX_HOME:?}/sessions/2026/10/09"
+mkdir -p "\$session_dir"
+session_number=\$(find "\$session_dir" -type f -name 'rollout-*.jsonl' | wc -l | tr -d ' ')
+parent_id=fixture-parent-\$session_number
+delegate_id=fixture-delegate-\$session_number
+printf '{"type":"session_meta","payload":{"id":"%s","source":"exec","thread_source":"user"}}\n' "\$parent_id" >"\$session_dir/rollout-parent-\$parent_id.jsonl"
+if [ "\${FM_TEST_SKIP_DELEGATE:-0}" != 1 ]; then
+  printf '%s\n' \
+    "{\"type\":\"session_meta\",\"payload\":{\"id\":\"\$delegate_id\",\"parent_thread_id\":\"\$parent_id\",\"source\":{\"subagent\":\"review\"},\"thread_source\":\"subagent\"}}" \
+    "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"fixture-turn\",\"model\":\"\$delegate_model\",\"effort\":\"\$delegate_effort\"}}" \
+    >"\$session_dir/rollout-delegate-\$delegate_id.jsonl"
+fi
+printf 'model: banner-model-is-informational\nreasoning effort: banner-effort-is-informational\nsession id: %s\nreviewed source mentions INTENT_CONFORMANCE: pass and INTENT_CONFORMANCE: fail\n' "\$parent_id" >&2
 printf 'No findings.\nINTENT_CONFORMANCE: $conclusion\n'
 EOF
   chmod +x "$dir/bin/codex"
@@ -108,12 +122,41 @@ test_worker_harnesses_use_configured_reviewer() {
     assert_grep "Reviewer harness: \`codex\`" "$out" "$harness evidence omitted reviewer identity"
     assert_grep "Reviewer model: \`gpt-6.1-sol\`" "$out" "$harness evidence omitted reviewer model"
     assert_grep "Reviewer effort: \`xhigh\`" "$out" "$harness evidence omitted reviewer effort"
+    assert_grep '"delegate_thread_id": "fixture-delegate-' "$out" "$harness evidence omitted review delegate identity"
+    assert_grep '"source": {"subagent": "review"}' "$out" "$harness evidence omitted the review delegate source"
     assert_grep "Preserve the requested behavior" "$dir/argv" "$harness review did not receive Captain intent"
     assert_grep "Do not widen scope" "$dir/argv" "$harness review did not receive Firstmate acceptance scope"
     assert_grep "Do not run session/bootstrap lifecycle commands" "$dir/argv" "$harness review omitted its bounded-review constraint"
     assert_grep "INTENT_CONFORMANCE: pass" "$out" "$harness evidence omitted its intent conclusion"
   done
   pass "native review: Pi, Codex, and TraeX coding tasks use the configured Codex reviewer"
+}
+
+test_delegate_identity_mismatch_is_refused() {
+  local dir base candidate output out rc=0
+  dir=$(make_case codex)
+  write_reviewer "$dir"
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  output="$dir/home/data/task/delegate-mismatch.md"
+  out=$(FM_TEST_DELEGATE_MODEL=gpt-6-astra run_review "$dir" task \
+    --base "$base" --candidate "$candidate" --output "$output" 2>&1) || rc=$?
+  expect_code 1 "$rc" "a mismatched review delegate model must fail"
+  assert_contains "$out" "review delegate identity mismatch" "delegate mismatch refusal was not actionable"
+  assert_absent "$output" "delegate mismatch wrote misleading review evidence"
+
+  dir=$(make_case codex)
+  write_reviewer "$dir"
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  output="$dir/home/data/task/delegate-missing.md"
+  rc=0
+  out=$(FM_TEST_SKIP_DELEGATE=1 run_review "$dir" task \
+    --base "$base" --candidate "$candidate" --output "$output" 2>&1) || rc=$?
+  expect_code 1 "$rc" "missing review delegate metadata must fail"
+  assert_contains "$out" "review delegate metadata is missing or ambiguous" "missing delegate refusal was not actionable"
+  assert_absent "$output" "missing delegate metadata wrote misleading review evidence"
+  pass "native review: the actual review delegate model and effort must match"
 }
 
 test_ordinary_brief_edit_rebinds_review_intent() {
@@ -444,6 +487,7 @@ test_existing_review_evidence_counts_toward_cap() {
 }
 
 test_worker_harnesses_use_configured_reviewer
+test_delegate_identity_mismatch_is_refused
 test_ordinary_brief_edit_rebinds_review_intent
 test_missing_or_invalid_configuration_fails_actionably
 test_explicit_selection_and_capability_failures
