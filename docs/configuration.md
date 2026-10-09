@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [Claude worker MCP server denylist](#claude-worker-mcp-server-denylist-configclaude-denied-mcp-servers), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -905,6 +905,24 @@ Names present in the registry produce no report; unknown or unverified names do 
 Each relaunch installs a fresh worker extension with the home's current list, so the replacement performs the same check.
 
 [`bin/fm-exclude-tools-lib.sh`](../bin/fm-exclude-tools-lib.sh) implements parsing and pre-launch validation for this contract; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch-flag mechanics.
+
+## Claude worker MCP server denylist (config/claude-denied-mcp-servers)
+
+The optional local, gitignored `config/claude-denied-mcp-servers` stops named MCP servers from starting in this home's Claude ship and scout workers, for example a plugin's copy of a server that the user scope already runs, so each worker does not pay for two resident copies.
+With no file, or a file with no entries, every launch is unchanged.
+
+Create the file with one MCP server name per line, as Claude Code names it: a user, project, or local server by its configured name, and a plugin's server as `plugin:<plugin>:<server>`.
+Blank lines and lines beginning with `#` are allowed, and surrounding whitespace on a line is trimmed; a trailing comment on an entry line is not allowed.
+Firstmate adds the entries to the worker launch's own `--settings` JSON as `deniedMcpServers` `serverName` entries, which Claude Code merges with every other settings source, so the captain's own sessions and `~/.claude` are unchanged.
+A plugin's skills and agents stay available when only its server is denied.
+The file is read from this home's own configuration directory on every launch, so a change reaches the next worker or relaunch without a restart.
+It is not in the inherited configuration set, so no other home, including a secondmate home, receives it, and it does not apply to a secondmate's own agent or to any other runtime.
+
+An entry may use only `A-Z`, `a-z`, `0-9`, `_`, `.`, `:`, and `-`.
+An entry with any other character, or an unreadable or nonregular file, refuses the launch and names the configuration file; for a new worker this happens before its endpoint, local copy, or task record is created, and a relaunch refuses before the running worker stops.
+Firstmate never connects to servers to validate names, so a name that matches no server denies nothing.
+
+[`bin/fm-claude-mcp-deny-lib.sh`](../bin/fm-claude-mcp-deny-lib.sh) implements parsing and validation for this contract; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch substitution, and [Claude worker MCP servers](verification/runtime-backends.md#claude-worker-mcp-servers) records the live evidence.
 
 ## Worker account pin (config/claude-account, config/pi-account)
 

@@ -1688,6 +1688,112 @@ test_claude_secondmate_launch_carries_the_attribution_policy() {
   pass "a claude secondmate launch carries the attribution-off policy too"
 }
 
+# config/claude-denied-mcp-servers (docs/configuration.md "Claude worker MCP
+# server denylist"): Claude ship and scout launches carry the listed names as
+# deniedMcpServers in their own settings JSON; an absent file, a secondmate
+# launch, and another runtime stay unchanged; a malformed entry refuses before
+# any task record exists.
+write_mcp_denylist() {  # <home>
+  printf '%s\n' '# duplicated servers' '' '  plugin:example-plugin:example-server  ' 'project-server' \
+    > "$1/config/claude-denied-mcp-servers"
+}
+
+assert_mcp_denylist() {  # <launch-command> <what>
+  local settings
+  settings=$(claude_settings_json_arg "$1")
+  printf '%s' "$settings" | jq -e \
+    '.feedbackDrafts == "off" and .deniedMcpServers == [{"serverName":"plugin:example-plugin:example-server"},{"serverName":"project-server"}]' >/dev/null \
+    || fail "$2 launch settings JSON does not carry the configured MCP server denylist: $settings"
+}
+
+assert_no_mcp_denylist() {  # <launch-command> <what>
+  local settings
+  settings=$(claude_settings_json_arg "$1")
+  printf '%s' "$settings" | jq -e '.feedbackDrafts == "off" and (has("deniedMcpServers") | not)' >/dev/null \
+    || fail "$2 launch settings JSON denies an MCP server: $settings"
+}
+
+test_claude_task_launches_carry_the_mcp_denylist() {
+  local rec id out status
+  id=profile-claude-mcp-deny-absent-z28
+  rec=$(make_spawn_case profile-claude-mcp-deny-absent claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude crewmate spawn without a denylist should succeed"$'\n'"$out"
+  assert_no_mcp_denylist "$(cat "$LAUNCH_LOG")" "claude crewmate without a denylist"
+
+  id=profile-claude-mcp-deny-ship-z29
+  rec=$(make_spawn_case profile-claude-mcp-deny-ship claude "$id")
+  read_case_record "$rec"
+  write_mcp_denylist "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude crewmate spawn with a denylist should succeed"$'\n'"$out"
+  assert_mcp_denylist "$(cat "$LAUNCH_LOG")" "claude crewmate"
+
+  id=profile-claude-mcp-deny-scout-z30
+  rec=$(make_spawn_case profile-claude-mcp-deny-scout claude "$id")
+  read_case_record "$rec"
+  write_mcp_denylist "$HOME_DIR"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with a denylist should succeed"$'\n'"$out"
+  assert_mcp_denylist "$(cat "$LAUNCH_LOG")" "claude scout"
+  pass "claude ship and scout launches carry config/claude-denied-mcp-servers, and an absent file changes nothing"
+}
+
+test_claude_mcp_denylist_skips_secondmates_and_other_runtimes() {
+  local rec id sm out status launch
+  id=profile-secondmate-mcp-deny-z31
+  rec=$(make_spawn_case profile-secondmate-mcp-deny claude "$id")
+  read_case_record "$rec"
+  write_mcp_denylist "$HOME_DIR"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate claude spawn with a denylist should succeed"$'\n'"$out"
+  assert_no_mcp_denylist "$(cat "$LAUNCH_LOG")" "claude secondmate"
+
+  id=profile-codex-mcp-deny-z32
+  rec=$(make_spawn_case profile-codex-mcp-deny codex "$id")
+  read_case_record "$rec"
+  write_mcp_denylist "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with a Claude denylist should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "deniedMcpServers" "a non-Claude launch must not receive the Claude MCP server denylist"
+  pass "the Claude MCP server denylist leaves secondmate and non-Claude launches unchanged"
+}
+
+test_malformed_claude_mcp_denylist_refuses_before_records() {
+  local rec id out status
+  id=profile-claude-mcp-deny-bad-z33
+  rec=$(make_spawn_case profile-claude-mcp-deny-bad claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'good-server' 'bad,server' > "$HOME_DIR/config/claude-denied-mcp-servers"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a malformed denylist entry should refuse the spawn"
+  assert_contains "$out" "config/claude-denied-mcp-servers has a malformed entry 'bad,server'" \
+    "the refusal did not name the configuration file and the offending entry"
+  assert_absent "$HOME_DIR/state/$id.meta" "a malformed denylist must refuse before the task record is written"
+
+  id=profile-claude-mcp-deny-dir-z34
+  rec=$(make_spawn_case profile-claude-mcp-deny-dir claude "$id")
+  read_case_record "$rec"
+  mkdir "$HOME_DIR/config/claude-denied-mcp-servers"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a nonregular denylist should refuse the spawn"
+  assert_contains "$out" "config/claude-denied-mcp-servers must be a readable regular file" \
+    "the nonregular-file refusal did not name the configuration file"
+  assert_absent "$HOME_DIR/state/$id.meta" "a nonregular denylist must refuse before the task record is written"
+  pass "a malformed or nonregular Claude MCP server denylist refuses before any task record"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -2255,6 +2361,9 @@ test_claude_crewmate_launch_carries_the_attribution_policy
 test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks
 test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
+test_claude_task_launches_carry_the_mcp_denylist
+test_claude_mcp_denylist_skips_secondmates_and_other_runtimes
+test_malformed_claude_mcp_denylist_refuses_before_records
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

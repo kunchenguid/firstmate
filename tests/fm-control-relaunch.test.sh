@@ -862,6 +862,27 @@ test_exclude_tools_refusals_happen_before_the_agent_stops() {
   pass "fm-control relaunch: exclusion-list refusals happen before the running agent stops"
 }
 
+test_claude_mcp_denylist_follows_the_relaunch_and_refuses_before_the_agent_stops() {
+  local dir out rc id=rl-claude-mcp-deny
+  dir=$(new_case claude-mcp-deny "$id")
+  add_ship_task "$dir" "$id" claude
+  mkdir -p "$dir/home/config"
+  printf '%s\n' 'plugin:example-plugin:example-server' > "$dir/home/config/claude-denied-mcp-servers"
+  out=$(run_control "$dir" "$id" relaunch --note "keep the denylist"); rc=$?
+  expect_code 0 "$rc" "a Claude relaunch with a denylist should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" '"deniedMcpServers":[{"serverName":"plugin:example-plugin:example-server"}]' \
+    "the relaunched Claude worker must keep the home's MCP server denylist"
+  : > "$dir/fake/literal"
+  printf claude > "$dir/fake/command"
+  printf '%s\n' 'two words' > "$dir/home/config/claude-denied-mcp-servers"
+  out=$(run_control "$dir" "$id" relaunch --note "bad denylist"); rc=$?
+  expect_code 1 "$rc" "a malformed denylist must refuse the relaunch"
+  assert_contains "$out" "config/claude-denied-mcp-servers has a malformed entry" "refusal must name the entry"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a malformed denylist stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch sent lifecycle input"
+  pass "fm-control relaunch: a Claude replacement keeps the MCP server denylist, and a malformed one refuses before the agent stops"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -2507,6 +2528,7 @@ test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
+test_claude_mcp_denylist_follows_the_relaunch_and_refuses_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

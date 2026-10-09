@@ -393,6 +393,24 @@ Removing the `--force` arm makes the forced generic case refuse; honoring `--for
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
 Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
 
+## Claude worker MCP servers
+
+Verified 2026-10-07 on Claude Code 2.1.288.
+A `deniedMcpServers` `serverName` entry carried in a launch's own `--settings` JSON stops the named MCP server for that session only, and a plugin's server is matched by the name `plugin:<plugin>:<server>`, so it can be denied while a same-named server from another scope keeps running.
+`config/claude-denied-mcp-servers` relies on both facts.
+The live guard builds a throwaway plugin and an `--mcp-config` file that each declare a stdio server named `probe`, runs a baseline session and a session carrying the fragment `bin/fm-claude-mcp-deny-lib.sh` builds from a denylist naming `plugin:fm-deny-probe:probe`, and compares the server processes each session starts.
+
+```sh
+FM_CLAUDE_LIVE_E2E=1 bash tests/fm-claude-mcp-deny-live-e2e.test.sh
+```
+
+```
+ok - claude 2.1.288: a config/claude-denied-mcp-servers entry stops only the named plugin server
+```
+
+The baseline session started both copies, and the denied session started only the `--mcp-config` copy.
+`tests/fm-spawn-dispatch-profile.test.sh` owns the portable assertions that Claude ship and scout launches carry the fragment, that a secondmate launch and an absent file leave the launch unchanged, and that a malformed entry refuses before any task record exists.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
