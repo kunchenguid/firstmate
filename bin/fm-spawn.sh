@@ -216,6 +216,8 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
+#   Ship and scout launches seed state/<id>.started and state/<id>.heartbeat;
+#   generated briefs carry the separate worker heartbeat command.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
@@ -4790,6 +4792,27 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # syntax of its own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  started_file="$STATE/$ID.started"
+  if [ -L "$started_file" ] || { [ -e "$started_file" ] && [ ! -f "$started_file" ]; }; then
+    echo "error: the start record for task $ID is unsafe" >&2
+    exit 1
+  fi
+  if [ ! -e "$started_file" ] && [ ! -L "$started_file" ]; then
+    started_tmp=$(mktemp "$STATE/.$ID.started.XXXXXX") || {
+      echo "error: could not prepare the start record for task $ID" >&2
+      exit 1
+    }
+    if ! printf '%s\n' "$(date +%s)" > "$started_tmp" || ! chmod 0600 "$started_tmp" \
+      || ! mv -f -- "$started_tmp" "$started_file"; then
+      rm -f -- "$started_tmp"
+      echo "error: could not publish the start record for task $ID" >&2
+      exit 1
+    fi
+  fi
+  if ! "$FM_ROOT/bin/fm-task-heartbeat.sh" "$ID" "$STATE" "worker launched"; then
+    echo "error: could not seed the heartbeat for task $ID" >&2
+    exit 1
+  fi
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped

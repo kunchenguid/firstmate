@@ -15,6 +15,33 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
 
+## Worker stuck board (config/stuck-board)
+
+The watcher checks ship and scout lanes for deterministic stuck signals and wakes the home that owns each lane.
+Each breach is surfaced once while that condition remains true, and the marker clears when the condition clears.
+Ship and scout briefs include the exact `bin/fm-task-heartbeat.sh` command and require workers to record a one-line activity note at least every 15 minutes.
+The heartbeat is a separate state record and does not append a status-log wake.
+The watcher also checks for no progress, a long-running child command, a missing draft pull request, a review wait, repeated identical failures, and a ready pull request that has waited too long.
+The check runs on the existing watcher slow-check cadence and makes no model calls.
+
+Each home can override the defaults in its gitignored `config/stuck-board` file.
+Use one positive whole-number `key=value` entry per line; omitted keys keep their defaults.
+
+```text
+heartbeat_seconds=900
+progress_seconds=3600
+command_seconds=2700
+draft_pr_seconds=14400
+review_seconds=7200
+failure_repeats=2
+ready_pr_seconds=86400
+```
+
+`progress_seconds` measures time since the latest status-log update, local commit, or recorded pull-request update.
+The child-command threshold uses the recorded tmux pane process tree.
+Pull-request rules read the URL recorded in task metadata and require the GitHub CLI to be authenticated for GitHub pull requests.
+`bin/fm-stuck-board.sh` owns the signal rules, config parsing, and breach episodes, while the helper headers own exact commands and output.
+
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.

@@ -93,13 +93,19 @@ if [ "${1:-}" = "capture-pane" ]; then
       _prev=$_arg
     done
   fi
-  if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+  if [ -n "${FM_FAKE_TMUX_TICKS:-}" ]; then
+    _tick=$(cat "$FM_FAKE_TMUX_TICKS" 2>/dev/null || echo 0)
+    _tick=$((_tick + 1))
+    printf '%s\n' "$_tick" > "$FM_FAKE_TMUX_TICKS"
+    printf 'Working... elapsed=%s\n' "$_tick"
+  elif [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi
   exit 0
 fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
+    *pane_pid*) printf '%s\n' "${FM_FAKE_TMUX_PANE_PID:-}"; exit 0 ;;
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
   esac
 fi

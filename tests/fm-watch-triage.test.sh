@@ -3601,6 +3601,8 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   record_pi_busy "$state" busy-stable
   printf 'working: setup complete\n' > "$state/busy-stable.status"
   sig=$(seen_sig "$state/busy-stable.status"); printf '%s' "$sig" > "$state/.seen-busy-stable_status"
+  printf '%s\tlaunched\n' "$(date +%s)" > "$state/busy-stable.heartbeat"
+  date +%s > "$state/busy-stable.started"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "Working...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -3646,6 +3648,8 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   record_pi_busy "$state" busy-ticking
   printf 'working: setup complete\n' > "$state/busy-ticking.status"
   sig=$(seen_sig "$state/busy-ticking.status"); printf '%s' "$sig" > "$state/.seen-busy-ticking_status"
+  printf '%s\ttest worker\n' "$(date +%s)" > "$state/busy-ticking.heartbeat"
+  date +%s > "$state/busy-ticking.started"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/busy-ticking.meta"
   # No pre-seeded .hash-<key>: with a real ticking elapsed footer, every poll
@@ -3679,6 +3683,101 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   pass "a busy worker whose pane hash changes every poll still escalates once its completed-turn age reaches the bound"
 }
 
+test_ticking_live_worker_with_missing_heartbeat_and_long_child_wakes_stuck_board() {
+  local dir state fakebin out ticks window id statusf sig gen pid child_sleep_pid queue output before hb_ts hb_note
+  dir=$(make_case stuck-board-ticking-long-command); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; ticks="$dir/ticks"; id=stuck-ticking; window="test:fm-$id"
+  statusf="$state/$id.status"
+  printf 'window=%s\nkind=ship\nharness=claude\nworktree=%s/worktree\n' "$window" "$dir" \
+    > "$state/$id.meta"
+  mkdir -p "$dir/worktree"
+  printf 'working: running the local test suite\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${id}_status"
+  echo $(( $(date +%s) - 5 )) > "$state/$id.started"
+  child_sleep_pid=0
+  sleep 20 &
+  child_sleep_pid=$!
+  sleep 2
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event turn-start
+  touch "$state/.last-stuck-board"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_TICKS="$ticks" \
+    FM_FAKE_TMUX_PANE_PID="$$" FM_STATE_OVERRIDE="$state" FM_CHECK_INTERVAL=5 \
+    FM_STUCK_HEARTBEAT_SECS=1 FM_STUCK_PROGRESS_SECS=9999 FM_STUCK_COMMAND_SECS=1 \
+    FM_STUCK_DRAFT_PR_SECS=99999 FM_STUCK_REVIEW_SECS=99999 FM_STUCK_READY_PR_SECS=99999 \
+    FM_CHECK_TIMEOUT=20 FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_HEARTBEAT=999999 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || {
+    reap "$pid"
+    kill "$child_sleep_pid" 2>/dev/null || true
+    fail "the ticking busy worker with a long child command did not wake the stuck board (watcher=$(cat "$out" 2>/dev/null); state=$(find "$state" -maxdepth 1 -type f -print 2>/dev/null | tr '\n' ' '); triage=$(cat "$state/.watch-triage.log" 2>/dev/null))"
+  }
+  grep -F "stuck: $id heartbeat" "$out" >/dev/null \
+    || { kill "$child_sleep_pid" 2>/dev/null || true; fail "the missing worker heartbeat breach was not named: $(cat "$out")"; }
+  grep -F "stuck: $id long-command" "$out" >/dev/null \
+    || { kill "$child_sleep_pid" 2>/dev/null || true; fail "the long child command breach was not named: $(cat "$out")"; }
+  [ "$(cat "$ticks" 2>/dev/null || echo 0)" -gt 0 ] \
+    || { kill "$child_sleep_pid" 2>/dev/null || true; fail "the fake terminal did not change while the worker was busy"; }
+  queue=$(cat "$state/.wake-queue" 2>/dev/null || true)
+  [ "$(printf '%s\n' "$queue" | grep -c 'stuck: stuck-ticking ' || true)" -ge 2 ] \
+    || { kill "$child_sleep_pid" 2>/dev/null || true; fail "each stuck rule was not durably queued once: $queue"; }
+  reap "$pid"
+  kill "$child_sleep_pid" 2>/dev/null || true
+  wait "$child_sleep_pid" 2>/dev/null || true
+
+  before=$(cat "$statusf")
+  "$ROOT/bin/fm-task-heartbeat.sh" "$id" "$state" "reviewing the test failure"
+  [ "$(cat "$statusf")" = "$before" ] || fail "a worker heartbeat appended a status-log event"
+  IFS=$'\t' read -r hb_ts hb_note < "$state/$id.heartbeat"
+  case "$hb_ts" in ''|*[!0-9]*) fail "the heartbeat record has no numeric timestamp" ;; esac
+  [ "$hb_note" = "reviewing the test failure" ] || fail "the heartbeat record lost its one-line note"
+  output=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_STUCK_HEARTBEAT_SECS=1 \
+    FM_STUCK_PROGRESS_SECS=9999 FM_STUCK_COMMAND_SECS=1 FM_STUCK_DRAFT_PR_SECS=99999 \
+    FM_STUCK_REVIEW_SECS=99999 FM_STUCK_READY_PR_SECS=99999 \
+    "$ROOT/bin/fm-stuck-board.sh" scan)
+  [ -z "$output" ] || fail "an active breach episode was reported more than once: $output"
+  pass "a live Claude worker with a ticking terminal, missing heartbeat, and long child command wakes its supervisor once per rule"
+}
+
+test_repeated_identical_failure_breaches_once_per_episode() {
+  local dir state config id output
+  dir=$(make_case stuck-board-repeated-failure); state="$dir/state"; config="$dir/config"; id=stuck-failure
+  mkdir -p "$config"
+  printf 'kind=scout\nharness=codex\n' > "$state/$id.meta"
+  printf '%s\tlaunched\n' "$(date +%s)" > "$state/$id.heartbeat"
+  date +%s > "$state/$id.started"
+  printf 'failed: test command timed out\nworking: retrying\nfailed: test command timed out\n' \
+    > "$state/$id.status"
+  output=$(FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    FM_STUCK_HEARTBEAT_SECS=9999 FM_STUCK_PROGRESS_SECS=9999 FM_STUCK_COMMAND_SECS=9999 \
+    FM_STUCK_DRAFT_PR_SECS=99999 FM_STUCK_REVIEW_SECS=99999 FM_STUCK_READY_PR_SECS=99999 \
+    "$ROOT/bin/fm-stuck-board.sh" scan)
+  [ "$output" = "stuck: $id repeated-failure" ] \
+    || fail "two identical failures separated by progress did not breach: $output"
+  output=$(FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    FM_STUCK_HEARTBEAT_SECS=9999 FM_STUCK_PROGRESS_SECS=9999 FM_STUCK_COMMAND_SECS=9999 \
+    FM_STUCK_DRAFT_PR_SECS=99999 FM_STUCK_REVIEW_SECS=99999 FM_STUCK_READY_PR_SECS=99999 \
+    "$ROOT/bin/fm-stuck-board.sh" scan)
+  [ -z "$output" ] || fail "a repeated failure episode was reported again: $output"
+  printf 'working: retry underway\n' >> "$state/$id.status"
+  output=$(FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    FM_STUCK_HEARTBEAT_SECS=9999 FM_STUCK_PROGRESS_SECS=9999 FM_STUCK_COMMAND_SECS=9999 \
+    FM_STUCK_DRAFT_PR_SECS=99999 FM_STUCK_REVIEW_SECS=99999 FM_STUCK_READY_PR_SECS=99999 \
+    "$ROOT/bin/fm-stuck-board.sh" scan)
+  [ -z "$output" ] || fail "clearing the failure episode emitted an unexpected breach: $output"
+  printf 'failed: test command timed out\n' >> "$state/$id.status"
+  output=$(FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    FM_STUCK_HEARTBEAT_SECS=9999 FM_STUCK_PROGRESS_SECS=9999 FM_STUCK_COMMAND_SECS=9999 \
+    FM_STUCK_DRAFT_PR_SECS=99999 FM_STUCK_REVIEW_SECS=99999 FM_STUCK_READY_PR_SECS=99999 \
+    "$ROOT/bin/fm-stuck-board.sh" scan)
+  [ "$output" = "stuck: $id repeated-failure" ] \
+    || fail "a re-formed repeated failure episode did not breach once: $output"
+  pass "the same failure across intervening progress breaches once per episode"
+}
+
 test_busy_pane_turn_end_touch_resets_age() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-turn-end-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3688,6 +3787,8 @@ test_busy_pane_turn_end_touch_resets_age() {
   record_pi_busy "$state" busy-reset
   printf 'working: setup complete\n' > "$state/busy-reset.status"
   sig=$(seen_sig "$state/busy-reset.status"); printf '%s' "$sig" > "$state/.seen-busy-reset_status"
+  printf '%s\tlaunched\n' "$(date +%s)" > "$state/busy-reset.heartbeat"
+  date +%s > "$state/busy-reset.started"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "Working...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -3722,6 +3823,8 @@ test_busy_pane_native_progress_resets_age() {
   record_pi_busy "$state" busy-reset
   printf 'working: setup complete\n' > "$state/busy-reset.status"
   sig=$(seen_sig "$state/busy-reset.status"); printf '%s' "$sig" > "$state/.seen-busy-reset_status"
+  printf '%s\tlaunched\n' "$(date +%s)" > "$state/busy-reset.heartbeat"
+  date +%s > "$state/busy-reset.started"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "Working...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -3818,6 +3921,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   record_pi_busy "$state" review-scout
   printf 'paused: hosting the Lavish review, awaiting captain feedback\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  printf '%s\tlaunched\n' "$(date +%s)" > "$state/review-scout.heartbeat"
+  date +%s > "$state/review-scout.started"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   # No completed turn for hours (the single blocking poll call): age the spawn
   # record itself, exactly as the never-completed-a-turn fixtures above do.
@@ -3925,6 +4030,8 @@ test_afk_busy_declared_pause_hands_off_plain_stale() {
   record_pi_busy "$state" afk-review-scout
   printf 'paused: hosting the Lavish review, awaiting captain feedback\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-review-scout_status"
+  printf '%s\tlaunched\n' "$(date +%s)" > "$state/afk-review-scout.heartbeat"
+  date +%s > "$state/afk-review-scout.started"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/afk-review-scout.meta"
   date '+%s' > "$state/.afk"
@@ -4030,6 +4137,8 @@ SH
   record_pi_busy "$state" afk-ticking-scout
   printf 'paused: hosting the Lavish review, awaiting captain feedback\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-ticking-scout_status"
+  printf '%s\tlaunched\n' "$(date +%s)" > "$state/afk-ticking-scout.heartbeat"
+  date +%s > "$state/afk-ticking-scout.started"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/afk-ticking-scout.meta"
   date '+%s' > "$state/.afk"
@@ -4335,6 +4444,8 @@ test_secondmate_home_supervision_churn_is_not_write_evidence() {
   # it into the wedge timer.
   printf 'working: implementing\n' > "$state/mate.status"
   sig=$(seen_sig "$state/mate.status"); printf '%s' "$sig" > "$state/.seen-mate_status"
+  printf '%s\tlaunched\n' "$(date +%s)" > "$state/mate.heartbeat"
+  date +%s > "$state/mate.started"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   set_mtime "$(( $(date +%s) - 4000 ))" "$state/mate.meta"
   back=$(( $(date +%s) - 500 ))
@@ -5336,6 +5447,13 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+# The full suite is intentionally long because it drives many bounded watcher
+# recovery cycles; FM_TEST_ONLY keeps a new regression case independently runnable.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  case "$FM_TEST_ONLY" in test_*) "$FM_TEST_ONLY" ;; *) fail "invalid FM_TEST_ONLY function: $FM_TEST_ONLY" ;; esac
+  exit 0
+fi
+
 test_status_span_actionable_classifier
 test_status_span_is_all_receipts_classifier
 test_status_span_survives_a_later_routine_append
@@ -5405,6 +5523,8 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
+test_ticking_live_worker_with_missing_heartbeat_and_long_child_wakes_stuck_board
+test_repeated_identical_failure_breaches_once_per_episode
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection

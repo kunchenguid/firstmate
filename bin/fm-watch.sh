@@ -1607,6 +1607,7 @@ FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
+FM_CHECK_EXIT=0
 FM_CHECK_SIGNAL_PENDING=
 
 fm_check_output_cleanup() {
@@ -1643,6 +1644,7 @@ run_check_capture() {
   local pgid
   fm_check_output_cleanup
   FM_CHECK_RESULT=
+  FM_CHECK_EXIT=0
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
@@ -1660,7 +1662,7 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || FM_CHECK_EXIT=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
@@ -2193,6 +2195,34 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  # Stuck-board rules are deterministic and additive to the pane-stale path.
+  # The separate worker heartbeat and progress/PR records are scanned on the
+  # existing bounded slow-check cadence so a busy, changing terminal cannot
+  # hide a long-running child command.
+  if [ "$(age_of "$STATE/.last-stuck-board")" -ge "$CHECK_INTERVAL" ]; then
+    stuck_output=
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      run_check_capture "$SCRIPT_DIR/fm-stuck-board.sh" scan
+    stuck_rc=$FM_CHECK_EXIT
+    stuck_output=$FM_CHECK_RESULT
+    touch "$STATE/.last-stuck-board"
+    if [ "$stuck_rc" -ne 0 ] || [[ "$stuck_output" == stuck-board-error:* ]]; then
+      reason="check: stuck-board: ${stuck_output:-evaluation failed (exit $stuck_rc)}"
+      fm_wake_append check stuck-board-error "$reason" || exit 1
+      wake "$reason"
+    elif [ -n "$stuck_output" ]; then
+      stuck_reason=
+      while IFS= read -r stuck_line; do
+        [ -n "$stuck_line" ] || continue
+        fm_wake_append check "stuck-board:$stuck_line" "$stuck_line" || exit 1
+        stuck_reason="${stuck_reason}${stuck_line}"$'\n'
+      done <<EOF_STUCK
+$stuck_output
+EOF_STUCK
+      wake "${stuck_reason%$'\n'}"
+    fi
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).

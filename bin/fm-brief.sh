@@ -367,6 +367,16 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 {FIRSTMATE_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
+HEARTBEAT_SCRIPT=$(shell_quote "$FM_ROOT/bin/fm-task-heartbeat.sh")
+HEARTBEAT_ID=$(shell_quote "$ID")
+HEARTBEAT_STATE=$(shell_quote "$STATE")
+IFS= read -r -d '' HEARTBEAT_SECTION <<EOF || true
+## Worker heartbeat
+At least every 15 minutes while working, record a one-line note describing what you are doing or waiting on.
+Run this exact command, replacing the note with your current activity: \`$HEARTBEAT_SCRIPT $HEARTBEAT_ID $HEARTBEAT_STATE "what I am doing or waiting on"\`.
+This writes the separate per-task heartbeat record and does not append to the status log.
+EOF
+HEARTBEAT_SECTION=${HEARTBEAT_SECTION%$'\n'}
 ASK_USER_BLOCK=$(fm_ask_user_authority_rule)
 
 if [ "$KIND" = scout ]; then
@@ -379,6 +389,8 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
+
+$HEARTBEAT_SECTION
 
 $HERDR_SECTION
 
@@ -440,6 +452,8 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
+
+$HEARTBEAT_SECTION
 
 $HERDR_SECTION
 
