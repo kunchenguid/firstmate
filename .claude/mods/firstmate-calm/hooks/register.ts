@@ -4,9 +4,10 @@
 // may load this module through its rollout flag or `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`,
 // but every handler requires that environment variable to equal `1`, so rollout-only
 // loading remains a complete no-op.
-// The plugin carries no command, skill, agent, or classic hook of its own; the `/calm`
-// command below exists only once this module has registered it. docs/calm.md owns the
-// captain-facing contract and docs/calm-mode-feasibility.md the version-scoped evidence.
+// The plugin carries no command, skill, agent, or classic hook of its own; the `/calm` and
+// `/effort-cycle` commands below exist only once this module has registered them.
+// docs/calm.md owns the captain-facing Calm contract, docs/effort-cue.md the effort cue's,
+// and docs/calm-mode-feasibility.md the version-scoped evidence.
 //
 // This file is the only place the engine interface `$` is touched: the geometry lives
 // in ../lib/fm-calm-working-ship-sprite.ts (shared with the Pi extension), the Raster
@@ -76,9 +77,33 @@ import {
   sessionShownThrough,
   type HostHealth,
 } from "../lib/fm-branch-notes.ts";
+import {
+  confirmedEffortLevel,
+  cycleEffortLevel,
+  effortCueLabel,
+  effortLevelColor,
+  effortRuleColumns,
+  normalizeEffortLevel,
+  parseEffortSelection,
+  savedEffortLevel,
+  selectionAfterModelSwitch,
+  type EffortLevel,
+} from "../lib/fm-effort-level.ts";
 
 /** The slash command the mod serves, the same name as Pi's `/calm`. */
 const CALM_COMMAND = "calm";
+
+/** The slash command that advances the effort level, what a captain's chord binds to. */
+const EFFORT_COMMAND = "effort-cycle";
+
+/** Claude Code's own command for the effort level, which this mod reads and drives. */
+const CLAUDE_EFFORT_COMMAND = "effort";
+
+/** Claude Code's own command for the model, after which no level is proven any more. */
+const CLAUDE_MODEL_COMMAND = "model";
+
+/** The cue Button's address inside the `AbovePrompt` drawing, what `ui.press` names. */
+const EFFORT_CUE_KEY = "firstmate-effort-cue";
 
 // One module environment holds one Calm state; a hot reload starts a fresh one, the
 // same as a new Pi extension lifetime.
@@ -94,6 +119,21 @@ const finalReplies = new Set<string>();
 const doorbellVerdicts = new Map<string, Promise<boolean>>();
 const sprite = createCalmWorkingShipSprite();
 let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
+// What the cue draws: the level a main-loop request proved the engine is asking for, or
+// undefined while nothing proves one. A main-loop `turn.step` is the only source that says
+// what effort actually went out, so it is the only thing that puts a level on screen; a
+// command that selects one, a model switch, and the level Claude Code saved as a default all
+// leave the cue unestablished until the next request settles it.
+let effortLevel: EffortLevel | undefined;
+// The level one cycle step steps from: the last level a command selected, the last one a
+// request proved, or, before either has happened, the level Claude Code has saved for this
+// session's model. It is never drawn, so it claims nothing; it only keeps the ramp climbing
+// while the cue itself waits for proof. It is deliberately independent of Calm: the cue
+// draws with Calm on and off alike, and no effort path reads or writes `calm`.
+let effortSelected: EffortLevel | undefined;
+// The model the last main-loop request named, so a request for another model, which the model
+// picker makes without raising any event, can be told apart from one for the same model.
+let effortModel: string | undefined;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
@@ -157,6 +197,41 @@ async function readTheme($: EngineInterface): Promise<unknown> {
   }
 }
 
+/**
+ * The level Claude Code has saved for this session's model, or undefined when none is saved
+ * or the settings cannot be read.
+ *
+ * Nothing drawn comes from here: a saved level is where a session starts, not proof of what
+ * it is running. It answers only where a first cycle step steps up from.
+ */
+async function readSavedEffort($: EngineInterface): Promise<EffortLevel | undefined> {
+  try {
+    const [settings, model] = await Promise.all([$.settings.read(), $.session.model()]);
+    return savedEffortLevel(settings as never, model);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Draw `level` in the cue, or the unestablished cue when nothing proves a level. */
+function showEffort($: EngineInterface, level: EffortLevel | undefined): void {
+  if (level === effortLevel) return;
+  effortLevel = level;
+  $.ui.invalidate("ui.render");
+}
+
+/**
+ * Record `level` as the level the next cycle step steps from, and stop naming a level.
+ *
+ * Selecting a level is not proof the session took it: `/effort` can decline one this plan or
+ * model does not offer, and it reports that in its own output rather than by failing. The
+ * cue therefore claims nothing from here until a request proves what went out.
+ */
+function selectedEffort($: EngineInterface, level: EffortLevel | undefined): void {
+  effortSelected = level;
+  showEffort($, undefined);
+}
+
 async function load($: EngineInterface): Promise<void> {
   preferencePath = calmPreferencePath(
     {
@@ -199,6 +274,9 @@ async function resetSession($: EngineInterface): Promise<void> {
   sites.clear();
   sprite.reset();
   palette = CALM_SHIP_RASTER_PALETTES.light;
+  effortLevel = undefined;
+  effortSelected = undefined;
+  effortModel = undefined;
   await ensureLoaded($);
 }
 
@@ -206,6 +284,57 @@ async function resetSession($: EngineInterface): Promise<void> {
 function invalidateDrawings($: EngineInterface): void {
   doorbellVerdicts.clear();
   $.ui.invalidate("ui.render");
+}
+
+/**
+ * One cycle step: run Claude Code's own `/effort` for the next level up the ramp, the one
+ * command that moves the session's level and the footer badge together.
+ *
+ * The step starts from the level last selected or proved, and before a session has either,
+ * from the level Claude Code has saved for its model, so a first keystroke steps up from
+ * where the session is rather than down to the bottom of the ramp. When even that is
+ * unknown the step is not taken at all and says so, because guessing would move a setting
+ * the captain did not ask to move.
+ *
+ * Claude Code declines a level this plan or model does not offer, or sets the highest level
+ * allowed instead, by saying so in its own output rather than by failing, and no event
+ * carries that output. A request that later shows the session where it was proves nothing
+ * either: a change turned down at Claude Code's own confirmation, and one made back through
+ * the effort slider or the model picker, look exactly the same. So the cycle learns nothing
+ * from a step and every level stays on the ramp: a press before the next request steps on
+ * from the level this one asked for, and once a request proves the session stayed, the next
+ * press asks for that level again.
+ *
+ * The selection is recorded before the command is run, so a second keystroke during the run
+ * steps from the level this one is selecting rather than repeating it; a run the host
+ * refuses to make at all throws, and that puts the selection back and is reported. The
+ * selection is recorded here rather than left to the `/effort` observer below, because a
+ * chain this mod raises does not reliably reach that mod's own hook; the observer is for the
+ * runs the captain and other plugins make.
+ */
+async function cycleEffort($: EngineInterface): Promise<void> {
+  if (effortSelected === undefined) {
+    const saved = await readSavedEffort($);
+    if (effortSelected === undefined) effortSelected = saved;
+  }
+  const from = effortSelected;
+  if (from === undefined) {
+    $.ui.toast("Effort unchanged: the level this session is running is not known until its first turn.");
+    return;
+  }
+  const wanted = cycleEffortLevel(from);
+  const shown = effortLevel;
+  selectedEffort($, wanted);
+  try {
+    await $.command.run({ command: CLAUDE_EFFORT_COMMAND, args: wanted });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (effortSelected === wanted) {
+      effortSelected = from;
+      showEffort($, shown);
+    }
+    $.ui.toast(`Effort unchanged: ${reason}`);
+  }
 }
 
 /** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
@@ -378,6 +507,10 @@ export const register: Register = (on) => {
       name: CALM_COMMAND,
       description: "Toggle Firstmate's Calm transcript presentation and working ship.",
     });
+    await $.command.register({
+      name: EFFORT_COMMAND,
+      description: "Step Claude Code's effort level up one, wrapping at the top.",
+    });
     return next(e);
   });
 
@@ -402,6 +535,42 @@ export const register: Register = (on) => {
     return {};
   });
 
+  // One cycle step, the command a captain's chord binds to as `command:effort-cycle`.
+  // `$.command.run` is refused from inside a `command.run` hook, which would wait on the
+  // turn this hook holds, so the selection is made from a timer once this hook has answered.
+  on("command.run", { command: EFFORT_COMMAND }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
+    await ensureLoaded($);
+    $.clock.after(0, () => {
+      void cycleEffort($);
+    });
+    // No `text`: `/effort` draws its own confirmation row, so a second one would only repeat it.
+    return {};
+  });
+
+  // The captain's own `/effort <level>`, and any other plugin's, is the mod's read path for
+  // a change it did not make; a bare `/effort` opens the slider and names no level.
+  on("command.run", { command: CLAUDE_EFFORT_COMMAND }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
+    await ensureLoaded($);
+    const result = await next(e);
+    // `auto` names no point on the ramp, so it selects none: the next step starts the ramp at
+    // its first entry, and the cue names whatever level the next request resolves to.
+    const selection = parseEffortSelection(e.args);
+    if (selection !== undefined) selectedEffort($, selection.level);
+    return result;
+  });
+
+  // A model switch can change both the level and which levels exist, and nothing here says
+  // what the new one is, so the cue stops naming a level until the next request proves one.
+  on("command.run", { command: CLAUDE_MODEL_COMMAND }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
+    await ensureLoaded($);
+    const result = await next(e);
+    selectedEffort($, selectionAfterModelSwitch(effortSelected));
+    return result;
+  });
+
   // Follow a theme change: the next drawing and every later blit use the new family.
   on("config.set", { key: "theme" }, async ($, e, next) => {
     if (!(await isActivated($))) return next(e);
@@ -423,6 +592,26 @@ export const register: Register = (on) => {
       const untouched = next(e);
       for await (const chunk of untouched) yield chunk;
       return await untouched.result;
+    }
+    // The one source that proves what effort went out: the level the request the engine is
+    // about to send actually asks for, after any downgrade for this model. It catches a
+    // change made through the slider or the model picker, neither of which runs a command the
+    // mod can observe. A request that asks for no level the ramp knows - a model without an
+    // effort parameter, a token budget, or any request made while a command selected a level
+    // no request can report - proves nothing, and the cue names none. A subagent's step
+    // carries its own effort, not the session's, so only the main loop's is read.
+    if (e.agentId === undefined) {
+      // A request for another model settles nothing about the one before it: where a step
+      // would start is its own. Before the first request no model has been learned, and the
+      // level selected so far was selected in this session under its own model, so only a
+      // model that differs from a learned one reconsiders it.
+      if (effortModel !== undefined && e.model !== effortModel) {
+        effortSelected = selectionAfterModelSwitch(effortSelected);
+      }
+      effortModel = e.model;
+      const confirmed = confirmedEffortLevel(effortSelected, normalizeEffortLevel(e.effort));
+      if (confirmed !== undefined) effortSelected = confirmed;
+      showEffort($, confirmed);
     }
     const stream = next(e);
     const blocks = new Map<number, string>();
@@ -484,6 +673,44 @@ export const register: Register = (on) => {
     if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     return calm ? hiddenRow($, e) : next(e);
+  });
+
+  // The effort cue: one row flush above the composer, drawn in the level's own theme color.
+  // The engine draws nothing here itself while the band is free, so this adds a row rather
+  // than replacing one, and it is independent of Calm. A survey holding the band is the
+  // engine's own row and is left alone. The label is a Button so the band's own keyboard path
+  // (`abovePrompt:focus`, then press) cycles the level without leaving the prompt.
+  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
+    await ensureLoaded($);
+    if (e.surface !== "terminal" || e.props.hasSurvey) return next(e);
+    const { Box, Button, Text } = $.ui.resolve(e);
+    const label = effortCueLabel(effortLevel);
+    const color = effortLevelColor(effortLevel);
+    const rule = "─".repeat(effortRuleColumns(e.props.bodyColumns, label.length + 1));
+    return Box({
+      flexDirection: "row",
+      children: [
+        Button({
+          key: EFFORT_CUE_KEY,
+          label,
+          plain: true,
+          // The press is answered by the `ui.press` hook below, beneath which this runs.
+          onPress: () => {},
+        }),
+        Text({ color, children: ` ${rule}` }),
+      ],
+    });
+  });
+
+  // The chain runs first: selecting a level redraws the band, which retires the handle the
+  // pressed Button was drawn with, and `next(e)` after that redraw has no handler to reach.
+  on("ui.press", { element: EFFORT_CUE_KEY }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
+    await ensureLoaded($);
+    const result = await next(e);
+    await cycleEffort($);
+    return result;
   });
 
   on("ui.render", { component: "UserMessage" }, async ($, e, next) => {
