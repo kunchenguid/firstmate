@@ -43,6 +43,34 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+# Issue-linked tasks may be marked PR-ready only when GitHub's own closing
+# keyword syntax will close the recorded issue on merge.
+TASK_ISSUE=$(grep '^issue=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$TASK_ISSUE" ]; then
+  case "$TASK_ISSUE" in
+    https://github.com/*/*/issues/[1-9]*) ;;
+    *) echo "error: task issue metadata is invalid" >&2; exit 1 ;;
+  esac
+  ISSUE_PART=${TASK_ISSUE#https://github.com/}
+  ISSUE_REPO=${ISSUE_PART%%/issues/*}
+  ISSUE_NUMBER=${ISSUE_PART##*/}
+  case "$ISSUE_PART" in */issues/[1-9]*) ;; *) echo "error: task issue metadata is invalid" >&2; exit 1 ;; esac
+  case "$ISSUE_NUMBER" in *[!0-9]*|'') echo "error: task issue metadata is invalid" >&2; exit 1 ;; esac
+  if [ "$PROVIDER" != github ] || [ "$PROJECT_PATH" != "$ISSUE_REPO" ]; then
+    echo "error: task issue and pull request must belong to the same GitHub repository" >&2
+    exit 1
+  fi
+  command -v gh >/dev/null 2>&1 || { echo "error: verifying the PR closing reference requires gh on PATH" >&2; exit 1; }
+  PR_BODY=$(gh pr view "$URL" --json body -q .body 2>/dev/null) || {
+    echo "error: could not read pull request body to verify its issue closing reference" >&2
+    exit 1
+  }
+  if ! printf '%s\n' "$PR_BODY" | grep -Eiq "(^|[^[:alnum:]_])closes[[:space:]]+#${ISSUE_NUMBER}([^0-9]|$)"; then
+    echo "error: PR body must contain Closes #${ISSUE_NUMBER} for task issue ${TASK_ISSUE}" >&2
+    exit 1
+  fi
+fi
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.

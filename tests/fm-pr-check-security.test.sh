@@ -146,6 +146,7 @@ case "${1:-} ${2:-}" in
     ;;
   "pr view")
     case " $* " in
+      *"--json body"*) printf '%s\n' "${FM_TEST_PR_BODY:-}"; exit 0 ;;
       *statusCheckRollup*)
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
@@ -212,6 +213,26 @@ SH
   : > "$dir/glab.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
+}
+
+test_issue_linked_pr_requires_closing_reference() {
+  local dir rc
+  dir=$(make_case issue-closing-reference)
+  write_task_meta "$dir"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR" \
+    "issue=https://github.com/o/r/issues/43"
+  set +e
+  FM_TEST_PR_BODY='This PR improves the workflow.' run_check_entry "$dir" task-a https://github.com/o/r/pull/11 > "$dir/out" 2> "$dir/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "issue-linked PR without a closing keyword was accepted"
+  assert_grep 'must contain Closes #43' "$dir/err" "missing closing reference did not explain the refusal"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "rejected PR readiness published a merge poll"
+  FM_TEST_PR_BODY='Implements the request. Closes #43' run_check_entry "$dir" task-a https://github.com/o/r/pull/11 >/dev/null \
+    || fail "issue-linked PR with Closes #43 was refused"
+  pass "issue-linked PR readiness requires and accepts the recorded closing reference"
 }
 
 write_task_meta() {
@@ -2774,6 +2795,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_issue_linked_pr_requires_closing_reference
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

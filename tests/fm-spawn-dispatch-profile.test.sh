@@ -1108,6 +1108,29 @@ test_malformed_project_memory_registry_refuses_spawn() {
   pass "malformed project-memory registry is reported before launch or task publication"
 }
 
+test_issue_linked_ship_is_assigned_and_recorded() {
+  local rec id out status issue_url
+  id=issue-pickup-r1
+  issue_url=https://github.com/example/project/issues/43
+  rec=$(make_spawn_case issue-pickup codex "$id")
+  read_case_record "$rec"
+  printf 'morecoffeyplease\n' > "$HOME_DIR/config/github-operator-login"
+  cat > "$FAKEBIN_DIR/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_ASSIGN_LOG"
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/gh"
+  out=$(FM_TEST_ASSIGN_LOG="$CASE_DIR/assign.log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --issue "$issue_url")
+  status=$?
+  expect_code 0 "$status" "issue-linked ship spawn should succeed: $out"
+  assert_grep 'issue edit https://github.com/example/project/issues/43 --add-assignee morecoffeyplease' "$CASE_DIR/assign.log" \
+    "issue pickup did not assign the configured GitHub login"
+  assert_grep 'issue=https://github.com/example/project/issues/43' "$HOME_DIR/state/$id.meta" \
+    "spawn task record omitted its GitHub issue URL"
+  pass "issue-linked ship pickup assigns the configured login and records the issue URL"
+}
+
 # Execute the actual emitted command in a synthetic pane environment: the
 # fake backend records delivery, while real shells exercise the env boundary.
 # No developer environment or credential values are inspected by these probes.
@@ -1550,5 +1573,6 @@ test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_project_memory_claude_settings_and_codex_brief
 test_malformed_project_memory_registry_refuses_spawn
+test_issue_linked_ship_is_assigned_and_recorded
 
 echo "# all fm-spawn-dispatch-profile tests passed"
