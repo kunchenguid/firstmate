@@ -25,6 +25,8 @@ MR_PROJECT_URL="https://$MR_HOST/$MR_PATH"
 MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+MR_TARGET=71e54e99e947c7753b69b3fed8a8692f623e234c
+MR_RESULT=1439d08a0b20e3750b3c39b1af409280dc12473b
 
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
@@ -358,8 +360,36 @@ case "${1:-} ${2:-}" in
     : > "$case_dir/glab-merge-called"
     exit 0
     ;;
+  "api "*)
+    [ "$3" = --hostname ] && [ "$4" = gitlab.example ] || exit 2
+    case "$2" in
+      projects/group%2Fsubgroup%2Fproject/pipelines/2932234686) resource=pipeline ;;
+      projects/group%2Fsubgroup%2Fproject/repository/commits/1439d08a0b20e3750b3c39b1af409280dc12473b) resource=commit ;;
+      projects/group%2Fsubgroup%2Fproject/repository/branches/main|projects/group%2Fsubgroup%2Fproject/repository/branches/release%2Fnext) resource=target ;;
+      *) exit 2 ;;
+    esac
+    [ ! -e "$case_dir/$resource-fails" ] || exit 1
+    if [ "$resource" = target ] && [ -e "$case_dir/target-read" ]; then
+      [ ! -e "$case_dir/target-final-fails" ] || exit 1
+      if [ -e "$case_dir/target-final.json" ]; then
+        cat "$case_dir/target-final.json"
+        exit 0
+      fi
+    fi
+    cat "$case_dir/$resource.json" || exit 1
+    if [ "$resource" = target ]; then
+      : > "$case_dir/target-read"
+      if [ -e "$case_dir/mr-next.json" ]; then
+        cp "$case_dir/mr-next.json" "$FM_TEST_GLAB_JSON"
+      fi
+      if [ -e "$case_dir/view-final-fails" ]; then
+        : > "$case_dir/glab-view-fails"
+      fi
+    fi
+    exit 0
+    ;;
 esac
-exit 0
+exit 2
 SH
   chmod +x "$case_dir/fakebin/glab"
   ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
@@ -417,6 +447,133 @@ make_gitlab_case() {
   write_mr_json "$case_dir/mr.json" "$@"
   write_mr_json "$case_dir/mr-post.json" state=merged
   printf '%s\n' "$case_dir"
+}
+
+# Real-shaped merged-result evidence, reduced from read-only GitLab REST
+# payloads. Only the host, project identity and MR iid are fixture identities.
+make_gitlab_merged_result_case() {
+  local case_dir
+  case_dir=$(make_gitlab_case "$1" "pipeline_sha=$MR_RESULT")
+  jq --arg url "$MR_URL" '
+    . + {project_id:82130472, target_project_id:82130472,
+      source_project_id:82130472, source_branch:"feature", target_branch:"main", web_url:$url}
+    | .head_pipeline += {id:2932234686, project_id:82130472,
+      ref:"refs/merge-requests/7/merge", source:"merge_request_event", tag:false}
+  ' "$case_dir/mr.json" > "$case_dir/new.json"
+  mv "$case_dir/new.json" "$case_dir/mr.json"
+  jq '.head_pipeline' "$case_dir/mr.json" > "$case_dir/pipeline.json"
+  jq -n --arg sha "$MR_RESULT" --arg target "$MR_TARGET" --arg head "$MR_HEAD" \
+    '{id:$sha, parent_ids:[$target,$head]}' > "$case_dir/commit.json"
+  jq -n --arg target "$MR_TARGET" '{name:"main",commit:{id:$target}}' > "$case_dir/target.json"
+  printf '%s\n' "$case_dir"
+}
+
+test_gitlab_merged_result_pipeline() {
+  local case_dir rc
+  case_dir=$(make_gitlab_merged_result_case gitlab-merged-result)
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "merged-result: successful exact source/target integration should merge: $(cat "$case_dir/stderr")"
+  [ "$(glab_merge_line "$case_dir/glab.log")" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+    || fail "merged-result: merge must pin the source SHA, not the synthetic SHA"
+  pass "fm-pr-merge accepts a successful MR merged-result pipeline and pins its source"
+}
+
+test_gitlab_merged_result_refusals() {
+  local spec name resource filter case_dir rc
+  # Each case starts with complete passing evidence and changes one boundary.
+  # The final-* cases change data between the first target read and the merge.
+  while IFS='|' read -r name resource filter; do
+    case_dir=$(make_gitlab_merged_result_case "gitlab-result-$name")
+    case "$resource" in
+      fail) : > "$case_dir/$filter-fails" ;;
+      malformed) printf '{bad json\n' > "$case_dir/$filter.json" ;;
+      multiple) cat "$case_dir/$filter.json" "$case_dir/$filter.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/$filter.json" ;;
+      mr-next) jq "$filter" "$case_dir/mr.json" > "$case_dir/mr-next.json" ;;
+      target-final) jq "$filter" "$case_dir/target.json" > "$case_dir/target-final.json" ;;
+      *)
+        jq "$filter" "$case_dir/$resource.json" > "$case_dir/new.json"
+        mv "$case_dir/new.json" "$case_dir/$resource.json"
+        ;;
+    esac
+    rc=0
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 1 "$rc" "merged-result-$name: must refuse unproved integration"
+    [ -z "$(glab_merge_line "$case_dir/glab.log")" ] || fail "merged-result-$name: attempted merge"
+    assert_present "$case_dir/state/task-x1.check.sh" "merged-result-$name: merge poll should remain armed"
+  done <<'CASES'
+wrong-mr|mr|.iid=8
+wrong-url|mr|.web_url="https://gitlab.example/other/project/-/merge_requests/7"
+wrong-project|mr|.target_project_id=999
+missing-project|mr|del(.project_id)
+string-project|mr|.project_id="82130472"
+missing-source-project|mr|del(.source_project_id)
+pipeline-project|mr|.head_pipeline.project_id=999
+pipeline-id|mr|.head_pipeline.id="2932234686"
+pipeline-source|mr|.head_pipeline.source="push"
+pipeline-ref|mr|.head_pipeline.ref="refs/merge-requests/8/merge"
+detached-ref|mr|.head_pipeline.ref="refs/merge-requests/7/head"
+train-ref|mr|.head_pipeline.ref="refs/merge-requests/7/train"
+pipeline-tag|mr|.head_pipeline.tag=true
+pipeline-missing|mr|.head_pipeline=null
+pipeline-red|mr|.head_pipeline.status="failed"
+pipeline-running|mr|.head_pipeline.status="running"
+closed|mr|.state="closed"
+conflict|mr|.has_conflicts=true
+discussion|mr|.blocking_discussions_resolved=false
+unmergeable|mr|.detailed_merge_status="not_approved"
+malformed-conflicts|mr|.has_conflicts="false"
+missing-branch|mr|del(.target_branch)
+newline-branch|mr|.target_branch="main\n"
+stale-source|commit|.parent_ids[1]="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+stale-target|target|.commit.id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+swapped-parents|commit|.parent_ids |= reverse
+descendant|commit|.parent_ids=[.parent_ids[1]]
+extra-parent|commit|.parent_ids += ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+missing-parents|commit|del(.parent_ids)
+wrong-commit|commit|.id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+wrong-branch|target|.name="other"
+invalid-target|target|.commit.id="not-a-sha"
+read-pipeline-id|pipeline|.id=2932234687
+read-pipeline-project|pipeline|.project_id=999
+read-pipeline-sha|pipeline|.sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+read-pipeline-source|pipeline|.source="push"
+read-pipeline-ref|pipeline|.ref="refs/merge-requests/8/merge"
+read-pipeline-red|pipeline|.status="failed"
+read-pipeline-fails|fail|pipeline
+read-commit-fails|fail|commit
+read-target-fails|fail|target
+malformed-pipeline|malformed|pipeline
+malformed-commit|malformed|commit
+malformed-target|malformed|target
+multiple-pipeline|multiple|pipeline
+multiple-commit|multiple|commit
+multiple-target|multiple|target
+final-target-change|target-final|.commit.id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+final-source-change|mr-next|.sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+final-retarget|mr-next|.target_branch="other"
+final-pipeline-change|mr-next|.head_pipeline.id=2932234687
+final-conflict|mr-next|.has_conflicts=true
+final-discussion|mr-next|.blocking_discussions_resolved=false
+final-auto-merge|mr-next|.merge_when_pipeline_succeeds=true
+final-mr-read-fails|fail|view-final
+final-target-read-fails|fail|target-final
+CASES
+  pass "fm-pr-merge rejects stale, unrelated, malformed, unreadable and racing merged-result evidence"
+}
+
+test_gitlab_merged_result_fork_and_encoded_target() {
+  local case_dir rc
+  case_dir=$(make_gitlab_merged_result_case gitlab-result-fork)
+  jq '.source_project_id=999 | .target_branch="release/next"' "$case_dir/mr.json" > "$case_dir/new.json"
+  mv "$case_dir/new.json" "$case_dir/mr.json"
+  jq '.name="release/next"' "$case_dir/target.json" > "$case_dir/new.json"
+  mv "$case_dir/new.json" "$case_dir/target.json"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "merged-result: fork source and slash target should merge with target-project evidence"
+  assert_grep 'repository/branches/release%2Fnext' "$case_dir/glab.log" "merged-result: target was not URL encoded"
+  pass "fm-pr-merge validates fork merged results in the target project and encodes branch names"
 }
 
 # mirror_path_without <dir> <tool> [<bindir> ...]: the whole search path
@@ -2402,6 +2559,9 @@ test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_github_still_forwards_sha_arg
 test_gitlab_url_resolves_and_merges
+test_gitlab_merged_result_pipeline
+test_gitlab_merged_result_refusals
+test_gitlab_merged_result_fork_and_encoded_target
 test_gitlab_host_comes_from_the_url
 test_gitlab_imposes_no_merge_method
 test_gitlab_extra_args_forwarded
