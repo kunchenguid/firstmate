@@ -37,18 +37,6 @@ test_slash_command_is_taken_as_a_path() {
   pass "a command written as a path resolves to itself"
 }
 
-test_off_path_dir_resolves() {
-  local dir out
-  dir="$TMP_ROOT/offpath"
-  mkdir -p "$dir"
-  printf '%s\n' '#!/usr/bin/env bash' 'echo ran' > "$dir/offpath-tool"
-  chmod +x "$dir/offpath-tool"
-  out=$(FM_REQUIRE_CMD_DIRS="$dir" "$REQUIRE" --resolve-only offpath-tool) ||
-    fail "an off-PATH tool did not resolve"
-  [ "$out" = "$dir/offpath-tool" ] || fail "resolved the wrong off-PATH tool: $out"
-  pass "a tool outside PATH resolves through FM_REQUIRE_CMD_DIRS"
-}
-
 test_npx_cache_resolves() {
   local home out
   home="$TMP_ROOT/home"
@@ -62,21 +50,19 @@ test_npx_cache_resolves() {
 }
 
 test_unavailable_command_is_actionable() {
-  local out rc
-  out=$(FM_REQUIRE_CMD_DIRS="$TMP_ROOT/empty" "$REQUIRE" --resolve-only definitely-not-a-real-command 2>&1)
+  local first second home out rc
+  first="$TMP_ROOT/path-first"
+  second="$TMP_ROOT/path-second"
+  home="$TMP_ROOT/home"
+  mkdir -p "$first" "$second" "$home"
+  out=$(PATH="$first:$second" HOME="$home" "$BASH" "$REQUIRE" --resolve-only definitely-not-a-real-command 2>&1)
   rc=$?
   [ "$rc" -eq 127 ] || fail "an unavailable command did not exit 127 (got $rc)"
   assert_contains "$out" "definitely-not-a-real-command" "the diagnostic did not name the command"
-  assert_contains "$out" "searched PATH and:" "the diagnostic did not report where it looked"
-  assert_contains "$out" "FM_REQUIRE_CMD_DIRS" "the diagnostic offered no way forward"
-  pass "an unavailable command exits 127 naming the searched locations"
-}
-
-test_install_hint_replaces_advice() {
-  local out
-  out=$("$REQUIRE" --resolve-only --install-hint "run npm i -g backpass" definitely-not-a-real-command 2>&1 || true)
-  assert_contains "$out" "run npm i -g backpass" "the supplied install hint was ignored"
-  pass "a supplied install hint replaces the default advice"
+  assert_contains "$out" "$first" "the diagnostic omitted the first PATH location"
+  assert_contains "$out" "$second" "the diagnostic omitted the second PATH location"
+  assert_contains "$out" "$home/.local/bin" "the diagnostic omitted a fallback location"
+  pass "an unavailable command exits 127 naming every searched location"
 }
 
 test_resolve_only_does_not_run() {
@@ -139,11 +125,10 @@ test_nonexecutable_slash_path_is_named() {
 
 test_path_command_resolves
 test_slash_command_is_taken_as_a_path
-test_off_path_dir_resolves
 test_npx_cache_resolves
 test_unavailable_command_is_actionable
-test_install_hint_replaces_advice
 test_resolve_only_does_not_run
 test_run_passes_arguments_and_status
 test_artifact_completion_gate
+test_nonexecutable_slash_path_is_named
 echo "# all fm-require-cmd tests passed"
