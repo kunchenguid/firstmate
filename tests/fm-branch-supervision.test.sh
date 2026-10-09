@@ -72,6 +72,35 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
+test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
+  local prompt skill
+  prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
+
+  # The emitted system prompt is the contract, not the generator's source or
+  # proof that a model will obey it. No live agent or endpoint is involved.
+  case "$prompt" in
+    *"For a completed scout, follow the scout-completion and captain-hold-lifecycle policies included below in both postures."*"After their completion gate passes, retain the report, claim the task's lease, and run \`bin/fm-teardown.sh <task>\` with no flags."*"Report the findings and cleanup result in that event's outcome; a refusal is reported with its exact reason and never forced, worked around, or repaired by hand."*) ;;
+    *) fail "branch prompt omits the completed-scout cleanup sequence or refusal reporting" ;;
+  esac
+  assert_contains "$prompt" \
+    "Reporting a scout as finished and idle is not a substitute for that cleanup." \
+    "branch prompt permits stopping after an idle assessment of a completed scout"
+  assert_contains "$prompt" \
+    "Missing or incomplete reports, an unreviewed decision inventory or unrecorded captain calls, WIP ships, deliberate external waits, and idle or exited agents are not proof of task completion." \
+    "branch prompt lost the incomplete-work and agent-lifetime boundaries"
+  assert_contains "$prompt" \
+    "Ordinary teardown of a confirmed-landed ship or a completed scout, steering, lifecycle control, PR checks, and backlog status moves are yours, under the task's lease." \
+    "branch role limits still exclude completed-scout cleanup"
+
+  # Verbatim policy inclusion is an owned output contract. These owners must
+  # reach hosts that disable automatic skill loading, without a policy copy.
+  for skill in scout-completion captain-hold-lifecycle; do
+    assert_contains "$prompt" "$(cat "$ROOT/.agents/skills/$skill/SKILL.md")" \
+      "branch prompt does not include the complete $skill policy"
+  done
+  pass "emitted branch prompt routes completed scouts through existing policies and leased cleanup, preserving unfinished work"
+}
+
 # --- append-only outcome store ------------------------------------------------
 
 test_outcome_store_is_append_only_with_cursor_reads() {
@@ -1541,6 +1570,7 @@ WRAPPER
 }
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
+test_branch_prompt_routes_completed_scouts_through_guarded_cleanup
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget
